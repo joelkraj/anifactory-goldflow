@@ -1,0 +1,16 @@
+{
+  "name": "anifactory-goldflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "goldflow": "./bin/goldflow.mjs"
+  },
+  "scripts": {
+    "check": "node --check bin/goldflow.mjs && node --check scripts/voice-direction-gate.mjs && node --check scripts/modelslab-qwen-episode-audio.mjs && node --check scripts/local-whisper-word-timing.mjs && node --check scripts/audio-sfx-score-enrichment.mjs && node --check scripts/modelslab-longform-audio-bed.mjs",
+    "status": "git status --short"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

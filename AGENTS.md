@@ -21,9 +21,10 @@ Production moves through one artifact chain:
 13. Manual agent/operator review and optimization of reference prompts. Character state refs become the definitive visual identity/wardrobe/state contract.
 14. Reference generation in dependency order: style ref first, then character/location/action anchors.
 15. Visual prompt planning consumes approved references and current-scene facts.
-16. Image generation and render.
+16. Visual prompt review/fix pass checks the authored prompts against scene facts and approved refs.
+17. Image generation and render.
 
-Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, current-scene-only visual prompt planning, strict ModelsLab image generation, and a durable continuous-audio render.
+Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, visual reference planning, current-scene-only visual prompt planning, LLM visual prompt review, strict ModelsLab image generation, and a durable continuous-audio render.
 
 ## Hard Rules
 
@@ -46,6 +47,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - For ambiguous wardrobe states, avoid terms that trigger unwanted default garments. Use manually curated state-ref wording that describes the exact garment construction, neckline, fabric, silhouette, and production context in positive language.
 - For multi-character scenes, references attach only from validated character_state_refs. Single-character shots should not attach another character's ref.
 - Visual prompt planning must not create definitive character anchors. It may consume approved `character_state_refs`, select which refs are visible/style-critical for a cut, and report missing reference coverage as warnings or blockers.
+- Visual prompt review is the only LLM prompt-fix stage before imagegen. It may revise prompt wording, but must preserve scene IDs, image IDs, timing, and source hashes. Code gates validate only structure, hashes, missing references, and unresolved blockers.
 
 ## Commands
 
@@ -61,6 +63,7 @@ node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <serie
 node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01
 ```

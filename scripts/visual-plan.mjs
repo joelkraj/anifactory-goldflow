@@ -73,6 +73,35 @@ function extractJson(text) {
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
 }
 
+function negativeLanguageMatches(value) {
+  const text = String(value ?? "").toLowerCase();
+  const patterns = [
+    /\bno\b/,
+    /\bnot\b/,
+    /\bwithout\b/,
+    /\bavoid\b/,
+    /\bexclude\b/,
+    /\binstead\s+of\b/,
+    /\brather\s+than\b/,
+    /\bdo\s+not\b/,
+    /\bdon't\b/,
+    /--no\b/,
+    /\bnegative\s+prompt\b/,
+  ];
+  return patterns.filter((pattern) => pattern.test(text)).map(String);
+}
+
+function assertPositivePromptLanguage(prompts) {
+  const failures = [];
+  for (const prompt of prompts) {
+    const matches = negativeLanguageMatches(prompt.modelslab_image_prompt ?? prompt.image_prompt);
+    if (matches.length) failures.push(`${prompt.image_id} contains negative visual language: ${matches.join(", ")}`);
+  }
+  if (failures.length) {
+    throw new Error(`Visual prompt plan violates positive-language-only contract:\n${failures.slice(0, 20).join("\n")}`);
+  }
+}
+
 function normalizeLabel(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -182,7 +211,10 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
 
 Rules:
 - Use current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
-- Prompt positively. Do not use negative prompt wording.
+- Positive visual language is mandatory. Describe only what should appear.
+- Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
+- Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Identify exact subject roles by name and action, especially in multi-character scenes.
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.prompt_anchor, copy that prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
@@ -242,7 +274,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner." },
+          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner. Use positive visual language only: describe what should appear, never what should be avoided." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -391,6 +423,7 @@ async function main() {
   const prompts = parsedPrompts.map((row, index) => normalizePrompt(row, index, episode));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
+  assertPositivePromptLanguage(prompts);
   if (prompts.length !== timedPlan.scenes.length) throw new Error(`Visual planner returned ${prompts.length} prompts for ${timedPlan.scenes.length} timed scenes.`);
   const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
   if (duplicateImageIds.length) throw new Error(`Visual planner produced duplicate image ids: ${duplicateImageIds.slice(0, 20).join(", ")}`);

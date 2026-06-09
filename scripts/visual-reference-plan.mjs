@@ -102,7 +102,10 @@ Rules:
 - Identify recurring characters, character states, major locations, important props, UI motifs, and high-risk repeated action states.
 - Decide whether each target needs a standalone reference, should be derived from a generated cut, needs no reference, or needs operator/manual review.
 - Use generic production logic. Do not hardcode story-specific rules.
-- Prompt anchors must be positive, concrete, and specific enough for image generation, but they are draft anchors requiring manual review before reference generation.
+- Positive visual language is mandatory. Prompt anchors must describe what should appear, never what should be avoided.
+- Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than" in prompt_anchor fields.
+- Convert risks into positive construction. Example: write "single visible protagonist centered in frame, plain institutional detainee jacket with open collar and flat fabric panels" rather than saying what clothing or extra characters to avoid.
+- Prompt anchors must be concrete and specific enough for image generation, but they are draft anchors requiring manual review before reference generation.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
@@ -157,7 +160,7 @@ async function callLocal(prompt, stageName) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a visual reference strategy planner for longform anime/manhwa production." },
+          { role: "system", content: "Return only valid JSON. You are a visual reference strategy planner for longform anime/manhwa production. Use positive visual language only: describe what should appear, never what should be avoided." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -229,6 +232,39 @@ function normalizeStateRef(ref, index) {
   };
 }
 
+function negativeLanguageMatches(value) {
+  const text = String(value ?? "").toLowerCase();
+  const patterns = [
+    /\bno\b/,
+    /\bnot\b/,
+    /\bwithout\b/,
+    /\bavoid\b/,
+    /\bexclude\b/,
+    /\binstead\s+of\b/,
+    /\brather\s+than\b/,
+    /\bdo\s+not\b/,
+    /\bdon't\b/,
+    /--no\b/,
+    /\bnegative\s+prompt\b/,
+  ];
+  return patterns.filter((pattern) => pattern.test(text)).map(String);
+}
+
+function assertPositiveAnchors(referenceTargets, characterStateRefs) {
+  const failures = [];
+  for (const target of referenceTargets) {
+    const matches = negativeLanguageMatches(target.prompt_anchor);
+    if (matches.length) failures.push(`reference_targets.${target.ref_id}.prompt_anchor contains negative visual language: ${matches.join(", ")}`);
+  }
+  for (const ref of characterStateRefs) {
+    const matches = negativeLanguageMatches(ref.prompt_anchor);
+    if (matches.length) failures.push(`character_state_refs.${ref.state_ref_id}.prompt_anchor contains negative visual language: ${matches.join(", ")}`);
+  }
+  if (failures.length) {
+    throw new Error(`Visual reference plan violates positive-language-only contract:\n${failures.slice(0, 20).join("\n")}`);
+  }
+}
+
 async function main() {
   const semanticPlan = await readJson(semanticPlanPath, null);
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
@@ -237,6 +273,8 @@ async function main() {
   const llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
   const referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
+  const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
+  assertPositiveAnchors(referenceTargets, characterStateRefs);
   const report = {
     schema: "goldflow_visual_reference_plan_v1",
     status: "passed",
@@ -250,7 +288,7 @@ async function main() {
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null },
     policy: "Reference strategy only. Manual review must approve prompt anchors before reference generation or production imagegen.",
     reference_targets: referenceTargets,
-    character_state_refs: (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef),
+    character_state_refs: characterStateRefs,
     warnings: llm.parsed.warnings ?? [],
     updated_at: new Date().toISOString(),
   };

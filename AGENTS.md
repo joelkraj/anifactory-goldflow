@@ -41,6 +41,8 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
+- Positive visual language is mandatory from inception. Reference anchors, character state refs, scene prompts, prompt reviews, and imagegen payloads must describe what should appear, never what should be avoided. Do not use clauses such as "no...", "not...", "without...", "avoid...", "exclude...", "rather than...", or "instead of..." in production prompts.
+- When a visual risk needs mitigation, convert it into a positive construction: write the exact garment, subject count, role, pose, frame composition, and visible action wanted.
 - Required references must exist before image generation. Style ref comes first, then character/location/action anchors as needed; do not bypass missing reference requirements for production.
 - Character state references are produced before visual planning and are definitive for visual identity, wardrobe, and character state. Do not let visual planners infer wardrobe from ambiguous prose such as "gray suit"; use curated state-ref prompt anchors.
 - Before image generation, the agent must manually review and optimize style, character, and key action reference prompts. Main character refs should specify identity, body type, hair, face, wardrobe state, and common model misread risks in positive production language.

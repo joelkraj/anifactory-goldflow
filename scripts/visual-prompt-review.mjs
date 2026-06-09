@@ -78,6 +78,42 @@ function extractJson(text) {
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
 }
 
+function negativeLanguageMatches(value) {
+  const text = String(value ?? "").toLowerCase();
+  const patterns = [
+    /\bno\b/,
+    /\bnot\b/,
+    /\bwithout\b/,
+    /\bavoid\b/,
+    /\bexclude\b/,
+    /\binstead\s+of\b/,
+    /\brather\s+than\b/,
+    /\bdo\s+not\b/,
+    /\bdon't\b/,
+    /--no\b/,
+    /\bnegative\s+prompt\b/,
+  ];
+  return patterns.filter((pattern) => pattern.test(text)).map(String);
+}
+
+function positiveLanguageFindings(prompts) {
+  const findings = [];
+  for (const prompt of prompts) {
+    const matches = negativeLanguageMatches(prompt.modelslab_image_prompt ?? prompt.image_prompt);
+    if (matches.length) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "negative_prompt",
+        message: `Prompt contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
+        resolved: false,
+      });
+    }
+  }
+  return findings;
+}
+
 function compactScene(scene) {
   return {
     scene_id: scene.scene_id,
@@ -176,7 +212,10 @@ Review for:
 
 Rules:
 - Use current scene facts only.
-- Positive prompting only. Do not write negative prompt clauses.
+- Positive visual language is mandatory. Describe only what should appear.
+- Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
+- Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Preserve each image_id, scene_id, start_sec, and duration_sec exactly.
 - Preserve one reviewed prompt for every input prompt.
 - If a prompt is already good, keep it materially unchanged.
@@ -250,7 +289,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You review and fix image prompts using current-scene facts and approved visual refs." },
+          { role: "system", content: "Return only valid JSON. You review and fix image prompts using current-scene facts and approved visual refs. Use positive visual language only: describe what should appear, never what should be avoided." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.08) : 0,
@@ -396,6 +435,7 @@ async function main() {
 
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));
   assertReviewedPrompts(promptPlan.prompts, reviewedPrompts, timedPlan);
+  findings.push(...positiveLanguageFindings(reviewedPrompts));
   findings.push(...await validateReferencePaths(reviewedPrompts));
   const unresolvedBlockers = findings.filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
   const status = unresolvedBlockers.length ? "blocked" : "passed";

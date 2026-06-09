@@ -71,11 +71,12 @@ function phraseTokens(value) {
   return normalize(value).split(/\s+/).filter(Boolean);
 }
 
-function findPhrase(words, phrase) {
+function findPhrase(words, phrase, minStartSec = 0) {
   const tokens = phraseTokens(phrase);
   if (!tokens.length) return null;
   const wordTokens = words.map((word) => normalize(word.word));
-  for (let index = 0; index <= wordTokens.length - tokens.length; index += 1) {
+  const firstIndex = words.findIndex((word) => Number(word.end_sec ?? word.start_sec ?? 0) >= Number(minStartSec ?? 0));
+  for (let index = Math.max(0, firstIndex); index <= wordTokens.length - tokens.length; index += 1) {
     let ok = true;
     for (let offset = 0; offset < tokens.length; offset += 1) {
       if (wordTokens[index + offset] !== tokens[offset]) {
@@ -93,9 +94,9 @@ function findPhrase(words, phrase) {
 }
 
 function sceneBounds(scene, words, fallbackStart) {
-  const startMatch = findPhrase(words, scene.script_excerpt_start);
-  const endMatch = findPhrase(words, scene.script_excerpt_end);
+  const startMatch = findPhrase(words, scene.script_excerpt_start, Math.max(0, Number(fallbackStart ?? 0) - 0.5));
   const start = Number(startMatch?.start_sec ?? fallbackStart ?? 0);
+  const endMatch = findPhrase(words, scene.script_excerpt_end, start);
   const end = Number(endMatch?.end_sec ?? Math.max(start + 6, start));
   return {
     start_sec: Number(start.toFixed(3)),

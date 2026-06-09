@@ -6,16 +6,18 @@ This repo is the clean longform production lane. It intentionally excludes legac
 
 Production moves through one artifact chain:
 
-1. Raw narration script in `script_clean.md`.
-2. Optional LLM enhancement before approval only.
-3. Manual review and operator approval for the exact script hash.
-4. Semantic scene annotation from the locked script and bibles.
-5. Narrator-only voice plan by default.
-6. ModelsLab Qwen TTS and stitch.
-7. Local Whisper word timing on the final stitched narration.
-8. Timing-bound SFX and score planning from Whisper timing.
-9. Longform audio bed mix.
-10. Reference generation, visual planning, image generation, and render.
+1. Ingest a polished narration story into `script_clean.md`.
+2. Optional script polish/enhancement only when the operator explicitly asks for it, before approval, with the resulting script treated as a new candidate for review.
+3. Production-readiness and speakability QA from the candidate script. These passes may suggest fixes, pronunciation mappings, and risk notes, but must not silently rewrite the story.
+4. Manual review and operator approval for the exact final script hash.
+5. Semantic scene annotation from the locked script and bibles.
+6. Narrator-only voice plan by default.
+7. ModelsLab Qwen TTS and stitch.
+8. Local Whisper word timing on the final stitched narration.
+9. Review TTS and timing artifacts before downstream production.
+10. Timing-bound SFX and score planning from Whisper timing.
+11. Longform audio bed mix.
+12. Reference generation, visual planning, image generation, and render.
 
 Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, current-scene-only visual prompt planning, strict ModelsLab image generation, and a durable continuous-audio render.
 
@@ -23,12 +25,18 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 
 - Do not use source-seed scene annotations. Final semantic truth comes from the locked script.
 - Do not creatively rewrite approved scripts with deterministic code.
+- Treat the chatbot/operator-approved story as production truth. Qwen may analyze, extract, and flag issues, but it must not be trusted to improve story prose by default.
+- Generic script enhancement is optional and pre-lock only. If enhancement changes the script, every downstream artifact must be regenerated from the new exact hash.
+- Keep caption text, spoken TTS text, and semantic visual facts as separate layers. Captions preserve the approved script; TTS may use approved speakable equivalents; visuals use extracted scene facts.
+- Protected terms need explicit speakability handling before TTS, especially ranks, UI labels, odds, decimals, currencies, acronyms, and system messages.
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
 - Narrator-only is the default voice route. Character voice casting requires an explicit operator request and flag.
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
+- Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
+- Required references must exist before image generation. Style ref comes first, then character/location/action anchors as needed; do not bypass missing reference requirements for production.
 
 ## Commands
 
@@ -63,6 +71,15 @@ Optional local Qwen overrides:
 ANIFACTORY_LOCAL_LLM_URL=http://localhost:8000/v1
 ANIFACTORY_LOCAL_LLM_MODEL=Qwen3-30B-A3B-MLX-4bit
 ```
+
+## Current Test Policy
+
+Return 7 Seconds v3 is a local-Qwen pipeline test using a final approved story. Continue it to evaluate artifact behavior, especially semantic and visual planning, but keep the quality notes attached:
+
+- The story is treated as final.
+- This test intentionally does not run a new enhancement pass.
+- Existing TTS output is acceptable for pipeline timing tests, not final production quality, because rank/odds/UI pronunciation and quote-attribution normalization need hardening.
+- Before a final production rerun, run speakability/readiness QA and repair protected-term spoken text before TTS.
 
 ## Worktree Discipline
 

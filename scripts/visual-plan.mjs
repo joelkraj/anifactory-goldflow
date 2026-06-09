@@ -149,25 +149,40 @@ Return JSON only:
 }`;
 }
 
-async function callLocal(prompt, stageName) {
-  const response = await fetch(localLLMChatCompletionURL(stageName), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...localLLMAuthHeaders() },
-    body: JSON.stringify({
-      model: getLLMModel(stageName),
-      messages: [
-        { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner." },
-        { role: "user", content: prompt },
-      ],
-      temperature: Number(flags["llm-temperature"] ?? 0.12),
-      max_tokens: Number(flags["llm-max-tokens"] ?? 18000),
-    }),
-    signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_VISUAL_PLAN_TIMEOUT_MS ?? 1_200_000)),
-  });
-  const raw = await response.text();
-  if (!response.ok) throw new Error(`local-qwen visual plan HTTP ${response.status}: ${raw.slice(0, 1000)}`);
-  const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
-  return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content) };
+async function callLocal(prompt, stageName, maxTokens = null) {
+  const attempts = Number(flags["visual-json-attempts"] ?? 3);
+  let lastError = null;
+  let lastContent = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const retryPrompt = attempt === 1
+      ? prompt
+      : `${prompt}\n\nYour previous response was invalid or incomplete JSON. Return one complete JSON object only. Escape quotes inside strings. Do not include markdown fences, commentary, trailing commas, or partial objects.`;
+    const response = await fetch(localLLMChatCompletionURL(stageName), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...localLLMAuthHeaders() },
+      body: JSON.stringify({
+        model: getLLMModel(stageName),
+        messages: [
+          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner." },
+          { role: "user", content: retryPrompt },
+        ],
+        temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
+        max_tokens: Number(maxTokens ?? flags["llm-max-tokens"] ?? 18000),
+      }),
+      signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_VISUAL_PLAN_TIMEOUT_MS ?? 1_200_000)),
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`local-qwen visual plan HTTP ${response.status}: ${raw.slice(0, 1000)}`);
+    const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
+    lastContent = content;
+    try {
+      return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content), json_attempt: attempt };
+    } catch (error) {
+      lastError = error;
+      console.error(`visual ${stageName}: invalid JSON attempt ${attempt}/${attempts}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`local-qwen visual plan returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
 }
 
 async function callCodex(prompt, stageName) {
@@ -187,7 +202,7 @@ async function callCodex(prompt, stageName) {
 }
 
 function normalizePrompt(row, index, episodeId) {
-  const imageId = row.image_id ?? `${episodeId}-cut-${String(index + 1).padStart(3, "0")}`;
+  const imageId = `${episodeId}-cut-${String(index + 1).padStart(3, "0")}`;
   const prompt = String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim();
   return {
     image_id: imageId,
@@ -209,18 +224,54 @@ function normalizePrompt(row, index, episodeId) {
   };
 }
 
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
+}
+
 async function main() {
   const [timedPlan, semanticPlan] = await Promise.all([readJson(timedPlanPath, null), readJson(semanticPlanPath, null)]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (semanticPlan?.status !== "passed") throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   if (semanticPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("semantic_scene_plan and timed_scene_plan script hashes do not match.");
   const stageName = `${episode}_visual_plan`;
-  const prompt = buildPrompt(timedPlan, semanticPlan);
-  const llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
-  const prompts = (Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : []).map((row, index) => normalizePrompt(row, index, episode));
+  let llm;
+  let parsedPrompts = [];
+  let styleSummary = "";
+  const useChunking = isLocalLLMRoute(stageName)
+    && flags["visual-chunking"] !== "false"
+    && timedPlan.scenes.length > Number(flags["visual-single-call-max-scenes"] ?? 12);
+  if (useChunking) {
+    const sceneChunks = chunkArray(timedPlan.scenes, Number(flags["visual-chunk-scenes"] ?? 8));
+    const styleSummaries = [];
+    for (let index = 0; index < sceneChunks.length; index += 1) {
+      const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
+      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan);
+      const chunkLlm = await callLocal(chunkPrompt, `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`, Number(flags["visual-chunk-max-tokens"] ?? 7000));
+      const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
+      if (chunkPrompts.length !== sceneChunks[index].length) {
+        throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunks[index].length} scenes.`);
+      }
+      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${chunkPrompts.length} prompts`);
+      parsedPrompts.push(...chunkPrompts);
+      if (chunkLlm.parsed.style_summary) styleSummaries.push(chunkLlm.parsed.style_summary);
+    }
+    styleSummary = styleSummaries.filter(Boolean)[0] ?? "";
+    llm = { provider: "local-qwen", model: getLLMModel(stageName), chunked: true, chunk_count: sceneChunks.length, parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] } };
+  } else {
+    const prompt = buildPrompt(timedPlan, semanticPlan);
+    llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+    parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
+    styleSummary = llm.parsed.style_summary ?? "";
+  }
+  const prompts = parsedPrompts.map((row, index) => normalizePrompt(row, index, episode));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
   if (prompts.length !== timedPlan.scenes.length) throw new Error(`Visual planner returned ${prompts.length} prompts for ${timedPlan.scenes.length} timed scenes.`);
+  const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
+  if (duplicateImageIds.length) throw new Error(`Visual planner produced duplicate image ids: ${duplicateImageIds.slice(0, 20).join(", ")}`);
   const timedSceneIds = new Set(timedPlan.scenes.map((scene) => scene.scene_id));
   const missingSceneIds = [...timedSceneIds].filter((sceneId) => !prompts.some((prompt) => prompt.scene_id === sceneId));
   if (missingSceneIds.length) throw new Error(`Visual planner missed timed scene ids: ${missingSceneIds.slice(0, 20).join(", ")}`);
@@ -234,8 +285,8 @@ async function main() {
     source_script_hash: timedPlan.source_script_hash,
     source_artifact_paths: [timedPlanPath, semanticPlanPath],
     source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, semanticPlanPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
-    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null },
-    style_summary: llm.parsed.style_summary ?? "",
+    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
+    style_summary: styleSummary,
     prompt_policy: "current-scene-only positive prompting; no negative prompt text; references selected only when visible/style-critical",
     prompts,
     warnings: llm.parsed.warnings ?? [],

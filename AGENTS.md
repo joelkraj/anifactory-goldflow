@@ -37,6 +37,10 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Render must consume one continuous final mixed audio track.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
 - Required references must exist before image generation. Style ref comes first, then character/location/action anchors as needed; do not bypass missing reference requirements for production.
+- Character state references are definitive for visual identity, wardrobe, and character state. Do not let visual planners infer wardrobe from ambiguous prose such as "gray suit"; use curated state-ref prompt anchors.
+- Before image generation, the agent must manually review and optimize style, character, and key action reference prompts. Main character refs should specify identity, body type, hair, face, wardrobe state, and common model misread risks in positive production language.
+- For ambiguous wardrobe states, avoid terms that trigger unwanted default garments. Use manually curated state-ref wording that describes the exact garment construction, neckline, fabric, silhouette, and production context in positive language.
+- For multi-character scenes, references attach only from validated character_state_refs. Single-character shots should not attach another character's ref.
 
 ## Commands
 

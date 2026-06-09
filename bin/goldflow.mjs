@@ -34,6 +34,7 @@ Commands:
   goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
   goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
   goldflow timing bind             Bind semantic scenes to Whisper timing
+  goldflow visual refs             Plan visual references, state refs, and anchor strategy
   goldflow visual plan             Author current-scene-only image prompts
   goldflow imagegen start          Generate images from approved prompt plan
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
@@ -47,7 +48,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  ingest source -> script approve -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual plan -> imagegen start -> render start
+  ingest source -> script approve -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual refs -> visual plan -> imagegen start -> render start
 `);
 }
 
@@ -69,6 +70,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("timing-bind.mjs", flags);
 } else if (command === "visual" && subcommand === "plan") {
   run("visual-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "refs") {
+  run("visual-reference-plan.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
 } else if (command === "render" && subcommand === "start") {

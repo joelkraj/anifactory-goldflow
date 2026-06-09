@@ -59,6 +59,7 @@ node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series>
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01

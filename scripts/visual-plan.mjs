@@ -18,6 +18,7 @@ const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
+const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
 
@@ -122,12 +123,54 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
   };
 }
 
-function buildPrompt(timedPlan, semanticPlan, stateRefIndex = new Map()) {
+function relevantReferenceTargets(scene, visualReferencePlan) {
+  const sceneId = scene.scene_id;
+  return (visualReferencePlan?.reference_targets ?? []).filter((target) => {
+    if (!Array.isArray(target.scene_ids) || !target.scene_ids.length) return false;
+    return target.scene_ids.includes(sceneId);
+  });
+}
+
+function resolvedReferencePath(rawPath) {
+  if (!rawPath) return null;
+  return path.isAbsolute(rawPath) ? rawPath : path.join(episodeDir, rawPath);
+}
+
+async function fileExists(filePath) {
+  if (!filePath) return false;
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function enrichVisualReferencePlan(visualReferencePlan) {
+  if (!visualReferencePlan) return null;
+  const targets = await Promise.all((visualReferencePlan.reference_targets ?? []).map(async (target) => {
+    const referencePath = target.reference_image_path ?? target.required_reference_path ?? target.path ?? null;
+    const resolvedPath = resolvedReferencePath(referencePath);
+    return {
+      ...target,
+      reference_image_path: referencePath,
+      resolved_reference_image_path: resolvedPath,
+      reference_exists: await fileExists(resolvedPath),
+    };
+  }));
+  return { ...visualReferencePlan, reference_targets: targets };
+}
+
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map()) {
   const compactTimedPlan = {
     source_script_hash: timedPlan.source_script_hash,
     scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
-    scenes: (timedPlan.scenes ?? []).map((scene) => compactSceneForPrompt(scene, stateRefIndex)),
+    visual_reference_plan_status: visualReferencePlan?.status ?? null,
+    scenes: (timedPlan.scenes ?? []).map((scene) => ({
+      ...compactSceneForPrompt(scene, stateRefIndex),
+      reference_targets: relevantReferenceTargets(scene, visualReferencePlan),
+    })),
   };
   const compactSemanticPlan = {
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -146,6 +189,10 @@ Rules:
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
 - For each cut, include only references that are visible or style-critical.
+- Use visual reference targets to decide reference_usage and anchor_roles.
+- For standalone_ref targets, mark reference_usage as attach_existing_ref only when a required reference path exists; otherwise report missing_reference_coverage.
+- For derive_from_first_clean_cut, derive_from_best_cut, and derive_from_first_clean_wide_cut targets, nominate suitable source-anchor cuts with anchor_roles.
+- For no_ref_needed targets, do not attach a reference.
 - Output exactly one prompt per timed scene.
 - Return ${compactTimedPlan.scene_count} prompts, one for every scene_id in the timed plan.
 
@@ -168,6 +215,8 @@ Return JSON only:
       "modelslab_image_prompt": "same positive prompt optimized for flux-klein",
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"reason":"..."}],
       "required_reference_paths": [],
+      "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
+      "anchor_roles": [{"ref_id":"...","kind":"character_state|location|prop|ui|action","anchor_role":"source_anchor","reason":"..."}],
       "visible_subjects": ["..."],
       "character_state_refs_used": ["state_ref_id"],
       "primary_subject": "...",
@@ -246,6 +295,8 @@ function normalizePrompt(row, index, episodeId) {
     image_model_route: "flux-klein",
     reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : [],
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : [],
+    reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : [],
+    anchor_roles: Array.isArray(row.anchor_roles) ? row.anchor_roles : [],
     visible_subjects: row.visible_subjects ?? [],
     character_state_refs_used: Array.isArray(row.character_state_refs_used) ? row.character_state_refs_used : [],
     primary_subject: row.primary_subject ?? null,
@@ -290,14 +341,21 @@ function indexCharacterStateRefs(artifact) {
 }
 
 async function main() {
-  const [timedPlan, semanticPlan, characterStateRefs] = await Promise.all([
+  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs] = await Promise.all([
     readJson(timedPlanPath, null),
     readJson(semanticPlanPath, null),
+    readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
   ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (semanticPlan?.status !== "passed") throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   if (semanticPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("semantic_scene_plan and timed_scene_plan script hashes do not match.");
+  if (!visualReferencePlan || visualReferencePlan.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
+  const allowDraftRefs = flags["allow-draft-refs"] === "true";
+  if (!["approved", "passed"].includes(characterStateRefs?.status) && !allowDraftRefs) {
+    throw new Error(`character_state_refs must be approved before visual planning. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
+  }
+  const enrichedVisualReferencePlan = await enrichVisualReferencePlan(visualReferencePlan);
   const stateRefIndex = indexCharacterStateRefs(characterStateRefs);
   const stageName = `${episode}_visual_plan`;
   let llm;
@@ -312,7 +370,7 @@ async function main() {
     for (let index = 0; index < sceneChunks.length; index += 1) {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, stateRefIndex);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex);
       const chunkLlm = await callLocal(chunkPrompt, `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`, Number(flags["visual-chunk-max-tokens"] ?? 7000));
       const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
       if (chunkPrompts.length !== sceneChunks[index].length) {
@@ -325,7 +383,7 @@ async function main() {
     styleSummary = styleSummaries.filter(Boolean)[0] ?? "";
     llm = { provider: "local-qwen", model: getLLMModel(stageName), chunked: true, chunk_count: sceneChunks.length, parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] } };
   } else {
-    const prompt = buildPrompt(timedPlan, semanticPlan, stateRefIndex);
+    const prompt = buildPrompt(timedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
@@ -347,8 +405,8 @@ async function main() {
     week,
     episode,
     source_script_hash: timedPlan.source_script_hash,
-    source_artifact_paths: [timedPlanPath, semanticPlanPath, characterStateRefsPath],
-    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, semanticPlanPath, characterStateRefsPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath],
+    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     style_summary: styleSummary,
     prompt_policy: "current-scene-only positive prompting; no negative prompt text; references selected only when visible/style-critical",

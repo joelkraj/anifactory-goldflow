@@ -475,6 +475,20 @@ async function buildVoiceLock() {
     if (existingIndex >= 0) voices[existingIndex] = bankVoice;
     else voices.push(bankVoice);
   }
+  if (!byId.joel_narrator) {
+    const narratorClone = Object.values(globalVoices).find((voice) => voice.narrator_locked && voice.owned_clone)
+      ?? Object.values(globalVoices).find((voice) => voice.narrator_locked);
+    if (narratorClone) {
+      byId.joel_narrator = {
+        ...narratorClone,
+        id: "joel_narrator",
+        bank_voice_id: narratorClone.id,
+        role: "primary narrator",
+        voice_source_policy: narratorClone.voice_source_policy ?? "joel_owned_narrator_clone_alias",
+      };
+      voices.push(byId.joel_narrator);
+    }
+  }
   if (joelNarratorRequest?.initAudio) {
     byId.joel_narrator = {
       id: "joel_narrator",
@@ -514,7 +528,7 @@ async function buildVoiceLock() {
     }
   }
   const lock = {
-    status: activeVoices.every((voice) => voice.status === "passed" && voice.init_audio) ? "passed" : "warning",
+    status: activeVoices.length && activeVoices.every((voice) => voice.status === "passed" && voice.init_audio) ? "passed" : "warning",
     production_ready: activeVoices.some((voice) => voice.id === "joel_narrator" && voice.status === "passed" && voice.init_audio),
     created_at: new Date().toISOString(),
     tts_provider: "modelslab_qwen",

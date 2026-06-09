@@ -141,7 +141,6 @@ export async function generateModelslabImage({
   outputPath,
   referenceImagePaths = [],
   model = process.env.ANIFACTORY_REFERENCE_MODEL || process.env.ANIFACTORY_IMAGE_MODEL || "flux-klein",
-  negativePrompt = model === "flux-klein" ? "" : "low quality, blurry, distorted, wrong character identity, extra limbs, watermark, logo",
   width: requestedWidth = width,
   height: requestedHeight = height,
 }) {
@@ -173,7 +172,6 @@ export async function generateModelslabImage({
         enhance_prompt: false,
       }
     : { ...commonPayload };
-  if (model !== "flux-klein" && negativePrompt) payload.negative_prompt = negativePrompt;
   const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2);
   const resolved = await resolveModelslabImage(initial, "/api/v6/images/fetch", `${model} image`);
   const imageUrl = await download(modelslabOutputs(resolved), outputPath);

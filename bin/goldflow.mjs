@@ -35,6 +35,7 @@ Commands:
   goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
   goldflow timing bind             Bind semantic scenes to Whisper timing
   goldflow visual plan             Author current-scene-only image prompts
+  goldflow imagegen start          Generate images from approved prompt plan
   goldflow audio enrich-sfx-score  Plan/generate Whisper-timed SFX and score
   goldflow audio longform-bed      Mix narration + SFX + score
 
@@ -45,7 +46,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  ingest source -> script approve -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual plan
+  ingest source -> script approve -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual plan -> imagegen start
 `);
 }
 
@@ -67,6 +68,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("timing-bind.mjs", flags);
 } else if (command === "visual" && subcommand === "plan") {
   run("visual-plan.mjs", flags);
+} else if (command === "imagegen" && subcommand === "start") {
+  run("imagegen.mjs", flags);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {
   run("audio-sfx-score-enrichment.mjs", flags);
 } else if (command === "audio" && subcommand === "longform-bed") {

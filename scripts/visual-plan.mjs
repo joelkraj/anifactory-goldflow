@@ -161,7 +161,6 @@ function normalizePrompt(row, index, episodeId) {
     prompt_hash: sha256(prompt),
     image_provider_route: "modelslab",
     image_model_route: "flux-klein",
-    negative_prompt: "",
     reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : [],
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : [],
     visible_subjects: row.visible_subjects ?? [],

@@ -17,7 +17,7 @@ Production moves through one artifact chain:
 9. Longform audio bed mix.
 10. Reference generation, visual planning, image generation, and render.
 
-Current migrated scope is the audio spine: voice plan, Qwen TTS, Whisper timing, SFX/score enrichment, and longform audio mix.
+Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, and longform audio mix.
 
 ## Hard Rules
 
@@ -33,9 +33,13 @@ Current migrated scope is the audio spine: voice plan, Qwen TTS, Whisper timing,
 ## Commands
 
 ```bash
+node bin/goldflow.mjs ingest source --channel <channel> --series <series> --week <week> --episode ep_01 --source <chatbot-output.md>
+node bin/goldflow.mjs script approve --channel <channel> --series <series> --week <week> --episode ep_01 --hash <script_clean_sha256>
+node bin/goldflow.mjs semantic plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
 ```

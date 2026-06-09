@@ -2,8 +2,9 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(new URL("..", import.meta.url).pathname, "..");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const command = args[0] ?? "help";
 const subcommand = args[1] ?? "";
@@ -26,9 +27,13 @@ function help() {
 One production path. No legacy fallbacks.
 
 Commands:
+  goldflow ingest source           Copy raw chatbot/script source into script_clean.md
+  goldflow script approve          Write exact-hash review/approval lock artifacts
+  goldflow semantic plan           Extract semantic scene plan from locked script
   goldflow voice plan              Build narrator-first Qwen generation plan
   goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
   goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
+  goldflow timing bind             Bind semantic scenes to Whisper timing
   goldflow audio enrich-sfx-score  Plan/generate Whisper-timed SFX and score
   goldflow audio longform-bed      Mix narration + SFX + score
 
@@ -39,18 +44,26 @@ Common flags:
   --episode ep_01
 
 Production order:
-  voice plan -> tts qwen -> audio whisper-timing -> audio enrich-sfx-score -> audio longform-bed
+  ingest source -> script approve -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed
 `);
 }
 
 if (command === "help" || command === "--help" || command === "-h") {
   help();
+} else if (command === "ingest" && subcommand === "source") {
+  run("source-ingest.mjs", flags);
+} else if (command === "script" && subcommand === "approve") {
+  run("script-approve.mjs", flags);
+} else if (command === "semantic" && subcommand === "plan") {
+  run("semantic-scene-plan.mjs", flags);
 } else if (command === "voice" && subcommand === "plan") {
   run("voice-direction-gate.mjs", flags);
 } else if (command === "tts" && subcommand === "qwen") {
   run("modelslab-qwen-episode-audio.mjs", flags);
 } else if (command === "audio" && subcommand === "whisper-timing") {
   run("local-whisper-word-timing.mjs", flags);
+} else if (command === "timing" && subcommand === "bind") {
+  run("timing-bind.mjs", flags);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {
   run("audio-sfx-score-enrichment.mjs", flags);
 } else if (command === "audio" && subcommand === "longform-bed") {

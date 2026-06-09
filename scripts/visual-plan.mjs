@@ -143,8 +143,8 @@ Rules:
 - Identify exact subject roles by name and action, especially in multi-character scenes.
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.prompt_anchor, copy that prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
-- If no character_state_refs are provided for a visible character, keep wardrobe wording conservative and avoid adding formal garments, weapons, powers, or styling not present in current-scene facts.
-- If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist.
+- If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
+- If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
 - For each cut, include only references that are visible or style-critical.
 - Output exactly one prompt per timed scene.
 - Return ${compactTimedPlan.scene_count} prompts, one for every scene_id in the timed plan.
@@ -175,7 +175,7 @@ Return JSON only:
       "ui_text_on_screen": ["..."]
     }
   ],
-  "warnings": []
+  "warnings": [{"scene_id":"...","code":"missing_character_state_ref","message":"..."}]
 }`;
 }
 

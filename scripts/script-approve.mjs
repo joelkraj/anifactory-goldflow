@@ -50,6 +50,8 @@ async function main() {
     episode,
     script_clean_path: scriptPath,
     script_clean_hash: scriptHash,
+    script_hash: scriptHash,
+    source_hash: scriptHash,
     source_script_hash: scriptHash,
     approved: true,
     operator_approved: true,

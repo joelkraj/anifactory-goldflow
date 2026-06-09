@@ -97,8 +97,59 @@ async function biblePacket() {
   return packet;
 }
 
-function buildPrompt(script, bibles) {
+function wordCount(text) {
+  return String(text ?? "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function sceneCountTargets(script) {
+  const words = wordCount(script);
+  const target = Math.min(70, Math.max(12, Math.round(words / 200)));
+  const minimum = Math.min(target, Math.max(8, Math.floor(words / 320)));
+  const maximum = Math.max(target + 12, Math.ceil(words / 120));
+  return { words, target, minimum, maximum };
+}
+
+function chunkSceneCountTargets(script) {
+  const words = wordCount(script);
+  const target = Math.max(2, Math.round(words / 200));
+  const minimum = Math.max(1, Math.floor(words / 360));
+  const maximum = Math.max(target + 3, Math.ceil(words / 110));
+  return { words, target, minimum, maximum };
+}
+
+function scriptChunks(script, targetWords = Number(flags["semantic-chunk-words"] ?? 1000)) {
+  const paragraphs = String(script ?? "").split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  const chunks = [];
+  let current = [];
+  let currentWords = 0;
+  for (const paragraph of paragraphs) {
+    const count = wordCount(paragraph);
+    if (current.length && currentWords + count > targetWords) {
+      chunks.push(current.join("\n\n"));
+      current = [];
+      currentWords = 0;
+    }
+    current.push(paragraph);
+    currentWords += count;
+  }
+  if (current.length) chunks.push(current.join("\n\n"));
+  return chunks.map((text, index) => ({ chunk_index: index + 1, chunk_count: chunks.length, text, words: wordCount(text) }));
+}
+
+function normalizeScenes(scenes) {
+  return scenes.map((scene, index) => ({
+    ...scene,
+    scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
+  }));
+}
+
+function buildPrompt(script, bibles, targets, chunk = null) {
+  const scopeLine = chunk
+    ? `This is chunk ${chunk.chunk_index} of ${chunk.chunk_count} from the locked script. Extract semantic scenes only for this chunk, preserving local order.`
+    : "Extract a semantic scene plan from the locked narration script.";
+  const bibleLimit = chunk ? Number(flags["semantic-chunk-bible-chars"] ?? 8000) : 30_000;
   return `Extract a semantic scene plan from the locked narration script.
+${scopeLine}
 
 Rules:
 - Use only the locked script and bibles below.
@@ -106,10 +157,15 @@ Rules:
 - Do not rewrite the script.
 - Scene boundaries should support visual planning, SFX planning, and continuity.
 - No timestamps. This is semantic only.
+- This script is ${targets.words} words. Return about ${targets.target} scenes.
+- Hard scene-count range: minimum ${targets.minimum}, maximum ${targets.maximum}.
+- Do not collapse acts, montages, flashbacks, locations, or major emotional beats into broad summaries.
+- Prefer visual-production units of roughly 120-260 spoken words each; shorter is fine for fast action, reveals, UI inserts, or emotional turns.
 - Include production facts needed by visual prompts: location, visible_subjects, primary_subject, visual_intent, ui_text_on_screen, sfx_cues, character_states, wardrobe, props, ref_requirements, action_staging.
+- script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later.
 
 BIBLES:
-${JSON.stringify(bibles, null, 2).slice(0, 30_000)}
+${JSON.stringify(bibles, null, 2).slice(0, bibleLimit)}
 
 SCRIPT:
 ${script}
@@ -144,25 +200,40 @@ Return one valid JSON object:
 }`;
 }
 
-async function callLocal(prompt, stageName) {
-  const response = await fetch(localLLMChatCompletionURL(stageName), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...localLLMAuthHeaders() },
-    body: JSON.stringify({
-      model: getLLMModel(stageName),
-      messages: [
-        { role: "system", content: "Return only valid JSON. You are a production semantic planner for longform anime/manhwa recap videos." },
-        { role: "user", content: prompt },
-      ],
-      temperature: Number(flags["llm-temperature"] ?? 0.15),
-      max_tokens: Number(flags["llm-max-tokens"] ?? 18000),
-    }),
-    signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000)),
-  });
-  const raw = await response.text();
-  if (!response.ok) throw new Error(`local-qwen semantic plan HTTP ${response.status}: ${raw.slice(0, 1000)}`);
-  const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
-  return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content) };
+async function callLocal(prompt, stageName, maxTokens = null) {
+  const attempts = Number(flags["semantic-json-attempts"] ?? 3);
+  let lastError = null;
+  let lastContent = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const retryPrompt = attempt === 1
+      ? prompt
+      : `${prompt}\n\nYour previous response was invalid JSON. Return one complete JSON object only. Escape all quotation marks inside string values. Do not include markdown fences, commentary, trailing commas, or partial objects.`;
+    const response = await fetch(localLLMChatCompletionURL(stageName), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...localLLMAuthHeaders() },
+      body: JSON.stringify({
+        model: getLLMModel(stageName),
+        messages: [
+          { role: "system", content: "Return only valid JSON. You are a production semantic planner for longform anime/manhwa recap videos." },
+          { role: "user", content: retryPrompt },
+        ],
+        temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.15) : 0,
+        max_tokens: Number(maxTokens ?? flags["llm-max-tokens"] ?? 18000),
+      }),
+      signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000)),
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`local-qwen semantic plan HTTP ${response.status}: ${raw.slice(0, 1000)}`);
+    const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
+    lastContent = content;
+    try {
+      return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content), json_attempt: attempt };
+    } catch (error) {
+      lastError = error;
+      console.error(`semantic ${stageName}: invalid JSON attempt ${attempt}/${attempts}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`local-qwen semantic plan returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
 }
 
 async function callCodex(prompt, stageName) {
@@ -192,11 +263,52 @@ async function main() {
   const scriptHash = sha256(script);
   await requireApproval(scriptHash);
   const bibles = await biblePacket();
-  const prompt = buildPrompt(script, bibles);
+  const targets = sceneCountTargets(script);
   const stageName = `${episode}_semantic_scene_plan`;
-  const llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
-  const scenes = Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [];
+  let llm;
+  let scenes = [];
+  let semanticParsed = {};
+  const useChunking = isLocalLLMRoute(stageName) && flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
+  if (useChunking) {
+    const chunks = scriptChunks(script);
+    const parsedChunks = [];
+    for (const chunk of chunks) {
+      const chunkTargets = chunkSceneCountTargets(chunk.text);
+      const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
+      console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: ${chunk.words} words, target ${chunkTargets.target} scenes`);
+      const chunkLlm = await callLocal(chunkPrompt, `${stageName}_chunk_${String(chunk.chunk_index).padStart(2, "0")}`, Number(flags["semantic-chunk-max-tokens"] ?? 4500));
+      const chunkScenes = Array.isArray(chunkLlm.parsed.scenes) ? chunkLlm.parsed.scenes : [];
+      if (chunkScenes.length < chunkTargets.minimum) {
+        throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} under-segmented: returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words.`);
+      }
+      console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
+      parsedChunks.push({ chunk, targets: chunkTargets, llm: chunkLlm, scenes: chunkScenes });
+      scenes.push(...chunkScenes.map((scene) => ({ ...scene, source_chunk_index: chunk.chunk_index })));
+    }
+    semanticParsed = {
+      episode_summary: parsedChunks.map((item) => item.llm.parsed.episode_summary).filter(Boolean).join(" "),
+      global_reference_requirements: parsedChunks.flatMap((item) => item.llm.parsed.global_reference_requirements ?? []),
+      warnings: parsedChunks.flatMap((item) => item.llm.parsed.warnings ?? []),
+    };
+    llm = {
+      provider: "local-qwen",
+      model: getLLMModel(stageName),
+      chunked: true,
+      chunk_count: chunks.length,
+    };
+  } else {
+    const prompt = buildPrompt(script, bibles, targets);
+    llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+    semanticParsed = llm.parsed;
+    scenes = Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [];
+  }
   if (!scenes.length) throw new Error("Semantic scene planner returned no scenes.");
+  if (scenes.length < targets.minimum) {
+    throw new Error(`Semantic scene planner under-segmented locked script: returned ${scenes.length} scenes, minimum is ${targets.minimum} for ${targets.words} words.`);
+  }
+  if (scenes.length > targets.maximum) {
+    throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
+  }
   const report = {
     schema: "goldflow_semantic_scene_plan_v1",
     status: "passed",
@@ -207,9 +319,10 @@ async function main() {
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
     timing_dependency: "none_semantic_only",
-    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null },
-    ...llm.parsed,
-    scenes,
+    scene_count_policy: targets,
+    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
+    ...semanticParsed,
+    scenes: normalizeScenes(scenes),
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

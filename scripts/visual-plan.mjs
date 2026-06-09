@@ -71,7 +71,44 @@ function extractJson(text) {
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
 }
 
+function compactSceneForPrompt(scene) {
+  return {
+    scene_id: scene.scene_id,
+    title: scene.title,
+    start_sec: scene.start_sec,
+    end_sec: scene.end_sec,
+    duration_sec: scene.duration_sec,
+    location: scene.location,
+    time: scene.time,
+    visible_subjects: scene.visible_subjects ?? [],
+    primary_subject: scene.primary_subject ?? null,
+    visual_intent: scene.visual_intent ?? "",
+    ui_text_on_screen: scene.ui_text_on_screen ?? [],
+    sfx_cues: scene.sfx_cues ?? [],
+    character_states: scene.character_states ?? [],
+    wardrobe: scene.wardrobe ?? null,
+    props: scene.props ?? [],
+    ref_requirements: scene.ref_requirements ?? [],
+    action_staging: scene.action_staging ?? "",
+    continuity_notes: scene.continuity_notes ?? [],
+    script_excerpt_start: scene.script_excerpt_start,
+    script_excerpt_end: scene.script_excerpt_end,
+  };
+}
+
 function buildPrompt(timedPlan, semanticPlan) {
+  const compactTimedPlan = {
+    source_script_hash: timedPlan.source_script_hash,
+    scene_count: timedPlan.scenes?.length ?? 0,
+    timing_source: timedPlan.timing_source,
+    scenes: (timedPlan.scenes ?? []).map(compactSceneForPrompt),
+  };
+  const compactSemanticPlan = {
+    episode_summary: semanticPlan.episode_summary ?? "",
+    global_reference_requirements: semanticPlan.global_reference_requirements ?? [],
+    style_summary: semanticPlan.style_summary ?? "",
+    warnings: semanticPlan.warnings ?? [],
+  };
   return `Author production image prompts from the timed semantic scene plan.
 
 Rules:
@@ -80,13 +117,14 @@ Rules:
 - Identify exact subject roles by name and action, especially in multi-character scenes.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist.
 - For each cut, include only references that are visible or style-critical.
-- Output one prompt per timed scene for now.
+- Output exactly one prompt per timed scene.
+- Return ${compactTimedPlan.scene_count} prompts, one for every scene_id in the timed plan.
 
 TIMED SCENE PLAN:
-${JSON.stringify(timedPlan, null, 2).slice(0, 45_000)}
+${JSON.stringify(compactTimedPlan, null, 2)}
 
 SEMANTIC PLAN:
-${JSON.stringify(semanticPlan, null, 2).slice(0, 20_000)}
+${JSON.stringify(compactSemanticPlan, null, 2)}
 
 Return JSON only:
 {
@@ -182,6 +220,10 @@ async function main() {
   const prompts = (Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : []).map((row, index) => normalizePrompt(row, index, episode));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
+  if (prompts.length !== timedPlan.scenes.length) throw new Error(`Visual planner returned ${prompts.length} prompts for ${timedPlan.scenes.length} timed scenes.`);
+  const timedSceneIds = new Set(timedPlan.scenes.map((scene) => scene.scene_id));
+  const missingSceneIds = [...timedSceneIds].filter((sceneId) => !prompts.some((prompt) => prompt.scene_id === sceneId));
+  if (missingSceneIds.length) throw new Error(`Visual planner missed timed scene ids: ${missingSceneIds.slice(0, 20).join(", ")}`);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
     status: "passed",

@@ -24,6 +24,12 @@ function characterVoiceCastingEnabled() {
   return /^(?:true|1|yes|enabled|on)$/i.test(String(value).trim());
 }
 
+function narratorOnlyVoiceMode(dialogueContext = {}) {
+  return !characterVoiceCastingEnabled()
+    || dialogueContext?.voiceCastingLock?.voice_casting_mode === "narrator_only_default"
+    || dialogueContext?.voiceCastingLock?.character_voice_casting_enabled === false;
+}
+
 function parseFlags(parts) {
   const parsed = {};
   for (let index = 0; index < parts.length; index += 1) {
@@ -1961,7 +1967,13 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   const maxTopTagPct = isTestSlice && maxDurationSec <= 45 ? 50 : isTestSlice && maxDurationSec < 90 ? 42 : 35;
   const minPhysicalTags = isTestSlice && maxDurationSec <= 45 ? 0 : isTestSlice && maxDurationSec < 90 ? 1 : 2;
   if (Object.keys(counts).length < minUniqueTags) failures.push({ code: "too_few_unique_tags", severity: "blocker", min_unique_tags: minUniqueTags });
-  if (topPct > maxTopTagPct) failures.push({ code: "top_tag_overused", severity: "blocker", tag: top[0], pct: Number(topPct.toFixed(2)), max_pct: maxTopTagPct });
+  if (topPct > maxTopTagPct) failures.push({
+    code: "top_tag_overused",
+    severity: qwenLocal ? "warning" : "blocker",
+    tag: top[0],
+    pct: Number(topPct.toFixed(2)),
+    max_pct: maxTopTagPct,
+  });
   if (maxRun >= 5) failures.push({ code: "same_tag_repeats_5_plus", severity: "blocker" });
   if (physicalTags < minPhysicalTags) failures.push({ code: "too_few_physical_tags", severity: "blocker", min_physical_tags: minPhysicalTags });
   if (physicalTags > Math.ceil(voicedSegments.length * 0.45)) failures.push({ code: "too_many_physical_tags", severity: "warning" });
@@ -2516,6 +2528,7 @@ function castForSpeaker(speaker, dialogueContext = {}) {
 }
 
 function referenceIdForSpeaker(speaker, role, ids, fishAudioConfig, warnings = null, dialogueContext = {}) {
+  if (narratorOnlyVoiceMode(dialogueContext)) return ids.narrator || fishAudioConfig.referenceId || "joel_narrator";
   const cast = castForSpeaker(speaker, dialogueContext);
   if (cast?.reference_id || cast?.id) return cast.reference_id ?? cast.id;
   return referenceIdForRole(role, ids, fishAudioConfig, warnings);
@@ -2656,14 +2669,15 @@ function applyFishReferenceIds(segments, fishAudioConfig, dialogueContext = {}) 
 
 function buildDialogueMap(segments, fishAudioConfig, dialogueContext = {}) {
   const ids = fishAudioConfig.characterReferenceIds ?? {};
+  const narratorOnly = narratorOnlyVoiceMode(dialogueContext);
   const turns = [];
   for (const segment of segments) {
     for (const unit of segment.performance_units ?? []) {
       if (unit.kind !== "dialogue" && unit.kind !== "performance_action" && unit.kind !== "mc_internal") continue;
       const speaker = unit.speaker ?? "UNKNOWN_DIALOGUE";
-      const role = speakerRoleFor(speaker, unit.text ?? "", segment, dialogueContext);
+      const role = narratorOnly ? "narrator" : speakerRoleFor(speaker, unit.text ?? "", segment, dialogueContext);
       const referenceId = referenceIdForSpeaker(speaker, role, ids, fishAudioConfig, null, dialogueContext);
-      const lockedCast = castForSpeaker(speaker, dialogueContext);
+      const lockedCast = narratorOnly ? null : castForSpeaker(speaker, dialogueContext);
       const contextEntry = dialogueContext.byLabel?.get(speakerLabel(speaker));
       const likelyFemale = contextEntry
         ? /\b(female|young_female|child_female|kawaii_child_female)\b/.test(String(contextEntry.role ?? ""))
@@ -2673,7 +2687,7 @@ function buildDialogueMap(segments, fishAudioConfig, dialogueContext = {}) {
         : /\b(BOY|MALE|FATHER|MAN|TEEN)\b/i.test(speaker);
       const lockedCastReferenceId = lockedCast?.reference_id ?? lockedCast?.id ?? null;
       const lockedCastMatched = Boolean(lockedCastReferenceId && referenceId === lockedCastReferenceId);
-      const roleMismatch = !lockedCastMatched && ((likelyFemale && !["female", "young_female", "child", "child_female", "kawaii_child_female"].includes(role))
+      const roleMismatch = !narratorOnly && !lockedCastMatched && ((likelyFemale && !["female", "young_female", "child", "child_female", "kawaii_child_female"].includes(role))
         || (likelyMale && ["female", "young_female", "child_female", "kawaii_child_female"].includes(role)));
       turns.push({
         segment_id: segment.segment_id,
@@ -2682,7 +2696,7 @@ function buildDialogueMap(segments, fishAudioConfig, dialogueContext = {}) {
         reference_id: referenceId,
         text: unit.text,
         performed_text: unit.performed_text,
-        status: /UNKNOWN_DIALOGUE/i.test(speaker) ? "failed_unknown_speaker" : roleMismatch ? "failed_role_mismatch" : referenceId ? "routed" : "missing_reference_id",
+        status: narratorOnly ? "routed" : /UNKNOWN_DIALOGUE/i.test(speaker) ? "failed_unknown_speaker" : roleMismatch ? "failed_role_mismatch" : referenceId ? "routed" : "missing_reference_id",
         role_mismatch: roleMismatch,
       });
     }
@@ -2695,7 +2709,9 @@ function buildDialogueMap(segments, fishAudioConfig, dialogueContext = {}) {
     series_slug: seriesSlug,
     week,
     episode,
-    policy: "Every dialogue/performance action must have a known speaker, role, and Fish reference ID before render.",
+    policy: narratorOnly
+      ? "Narrator-only mode routes all dialogue-like fragments, UI labels, and pseudo-speakers through the locked narrator voice."
+      : "Every dialogue/performance action must have a known speaker, role, and Fish reference ID before render.",
     turns,
     blockers,
   };

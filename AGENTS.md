@@ -17,7 +17,7 @@ Production moves through one artifact chain:
 9. Longform audio bed mix.
 10. Reference generation, visual planning, image generation, and render.
 
-Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, and longform audio mix.
+Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, and current-scene-only visual prompt planning.
 
 ## Hard Rules
 
@@ -42,6 +42,7 @@ node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series>
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 ```
 
 ## LLM Routing

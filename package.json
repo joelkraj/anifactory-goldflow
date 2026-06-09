@@ -7,7 +7,7 @@
     "goldflow": "./bin/goldflow.mjs"
   },
   "scripts": {
-    "check": "node --check bin/goldflow.mjs && node --check scripts/source-ingest.mjs && node --check scripts/script-approve.mjs && node --check scripts/semantic-scene-plan.mjs && node --check scripts/voice-direction-gate.mjs && node --check scripts/modelslab-qwen-episode-audio.mjs && node --check scripts/local-whisper-word-timing.mjs && node --check scripts/timing-bind.mjs && node --check scripts/audio-sfx-score-enrichment.mjs && node --check scripts/modelslab-longform-audio-bed.mjs",
+    "check": "node --check bin/goldflow.mjs && node --check scripts/source-ingest.mjs && node --check scripts/script-approve.mjs && node --check scripts/semantic-scene-plan.mjs && node --check scripts/voice-direction-gate.mjs && node --check scripts/modelslab-qwen-episode-audio.mjs && node --check scripts/local-whisper-word-timing.mjs && node --check scripts/timing-bind.mjs && node --check scripts/audio-sfx-score-enrichment.mjs && node --check scripts/modelslab-longform-audio-bed.mjs && node --check scripts/modelslab-image-helper.mjs && node --check scripts/visual-plan.mjs",
     "status": "git status --short"
   },
   "engines": {

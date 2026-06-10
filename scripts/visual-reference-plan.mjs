@@ -87,7 +87,7 @@ function compactScene(scene) {
   };
 }
 
-function buildPrompt(semanticPlan) {
+function buildPrompt(semanticPlan, { chunkLabel = null } = {}) {
   const compact = {
     source_script_hash: semanticPlan.source_script_hash,
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -96,6 +96,7 @@ function buildPrompt(semanticPlan) {
     scenes: (semanticPlan.scenes ?? []).map(compactScene),
   };
   return `Create a visual reference strategy from this semantic scene plan.
+${chunkLabel ? `\nThis is ${chunkLabel}. Identify reference needs visible in this chunk. A later LLM merge pass will combine duplicate targets across chunks.\n` : ""}
 
 Rules:
 - This stage decides reference strategy only. It does not write final image prompts.
@@ -148,7 +149,94 @@ Return:
 }`;
 }
 
-async function callLocal(prompt, stageName) {
+function buildMergePrompt(semanticPlan, chunkPlans) {
+  const compact = {
+    source_script_hash: semanticPlan.source_script_hash,
+    episode_summary: semanticPlan.episode_summary ?? "",
+    global_reference_requirements: semanticPlan.global_reference_requirements ?? [],
+    scene_count: semanticPlan.scenes?.length ?? 0,
+    scene_ids: (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
+  };
+  const compactChunkPlans = chunkPlans.map((plan, index) => ({
+    chunk: index + 1,
+    reference_targets: (plan.reference_targets ?? []).map((target) => ({
+      ref_id: target.ref_id,
+      kind: target.kind,
+      subject: target.subject,
+      scene_ids: target.scene_ids ?? [],
+      priority: target.priority,
+      generation_mode: target.generation_mode,
+      required_before_imagegen: target.required_before_imagegen,
+      prompt_anchor: String(target.prompt_anchor ?? "").slice(0, 280),
+      anchor_cut_policy: target.anchor_cut_policy,
+      appearance_count: target.appearance_count,
+      risk_notes: (target.risk_notes ?? []).slice(0, 2).map((note) => String(note).slice(0, 120)),
+      manual_review_required: target.manual_review_required,
+    })),
+    character_state_refs: (plan.character_state_refs ?? []).map((ref) => ({
+      state_ref_id: ref.state_ref_id,
+      character: ref.character,
+      scene_ids: ref.scene_ids ?? [],
+      prompt_anchor: String(ref.prompt_anchor ?? "").slice(0, 280),
+      source_ref_id: ref.source_ref_id,
+    })),
+    warnings: (plan.warnings ?? []).slice(0, 5),
+  }));
+  return `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
+
+Rules:
+- Qwen authors the merged plan. Code will only validate schema and blockers.
+- Merge duplicate character/location/prop/UI/action targets across chunks.
+- Preserve all relevant scene_ids from the chunk plans.
+- Keep generation_mode decisions coherent at episode level.
+- Positive visual language is mandatory. Prompt anchors must describe what should appear, never what should be avoided.
+- Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than" in prompt_anchor fields.
+- Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
+- Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
+- Return only valid JSON.
+
+EPISODE SUMMARY:
+${JSON.stringify(compact, null, 2)}
+
+CHUNK PLANS:
+${JSON.stringify(compactChunkPlans, null, 2)}
+
+Return:
+{
+  "reference_targets": [
+    {
+      "ref_id": "stable_snake_case_id",
+      "kind": "style|character_state|location|prop|ui|action",
+      "subject": "human readable subject",
+      "scene_ids": ["scene_001"],
+      "priority": "required|high|medium|low",
+      "generation_mode": "standalone_ref|derive_from_first_clean_cut|derive_from_best_cut|derive_from_first_clean_wide_cut|no_ref_needed|manual_review",
+      "required_before_imagegen": true,
+      "reference_image_path": null,
+      "prompt_anchor": "positive draft reference prompt anchor",
+      "anchor_cut_policy": "none|first_clean_visible_cut|best_clean_visible_cut|first_clean_wide_cut",
+      "appearance_count": 1,
+      "risk_notes": ["identity blend risk, wardrobe ambiguity, scale ambiguity, etc."],
+      "manual_review_required": true
+    }
+  ],
+  "character_state_refs": [
+    {
+      "state_ref_id": "stable_snake_case_id",
+      "character": "character name",
+      "scene_ids": ["scene_001"],
+      "prompt_anchor": "definitive draft character/state prompt anchor for manual review",
+      "definitive": false,
+      "reference_image_path": null,
+      "source_ref_id": "matching reference_targets ref_id"
+    }
+  ],
+  "warnings": []
+}`;
+}
+
+async function callLocal(prompt, stageName, maxTokens = null) {
   const attempts = Number(flags["visual-ref-json-attempts"] ?? 3);
   let lastError = null;
   let lastContent = "";
@@ -164,7 +252,7 @@ async function callLocal(prompt, stageName) {
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
-        max_tokens: Number(flags["llm-max-tokens"] ?? 14000),
+        max_tokens: Number(maxTokens ?? flags["llm-max-tokens"] ?? 14000),
       }),
       signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_VISUAL_REF_PLAN_TIMEOUT_MS ?? 1_200_000)),
     });
@@ -265,12 +353,56 @@ function assertPositiveAnchors(referenceTargets, characterStateRefs) {
   }
 }
 
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
+}
+
+async function createReferencePlan(semanticPlan, stageName) {
+  const useChunking = isLocalLLMRoute(stageName)
+    && flags["visual-ref-chunking"] !== "false"
+    && semanticPlan.scenes.length > Number(flags["visual-ref-single-call-max-scenes"] ?? 12);
+  if (!useChunking) {
+    const prompt = buildPrompt(semanticPlan);
+    return isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+  }
+
+  const sceneChunks = chunkArray(semanticPlan.scenes, Number(flags["visual-ref-chunk-scenes"] ?? 8));
+  const chunkPlans = [];
+  for (let index = 0; index < sceneChunks.length; index += 1) {
+    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
+    const chunkSemanticPlan = {
+      ...semanticPlan,
+      scenes: sceneChunks[index],
+      scene_count: sceneChunks[index].length,
+    };
+    const prompt = buildPrompt(chunkSemanticPlan, { chunkLabel: `chunk ${index + 1} of ${sceneChunks.length}` });
+    const llm = await callLocal(prompt, `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000));
+    if (!Array.isArray(llm.parsed.reference_targets) || !llm.parsed.reference_targets.length) {
+      throw new Error(`Visual reference chunk ${index + 1}/${sceneChunks.length} returned no reference_targets.`);
+    }
+    chunkPlans.push(llm.parsed);
+    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: accepted ${llm.parsed.reference_targets.length} targets`);
+  }
+  console.error(`visual refs merge: ${chunkPlans.length} chunk plans`);
+  const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans);
+  const merged = await callLocal(mergePrompt, `${stageName}_merge`, Number(flags["visual-ref-merge-max-tokens"] ?? 8000));
+  return {
+    provider: "local-qwen",
+    model: getLLMModel(stageName),
+    chunked: true,
+    chunk_count: sceneChunks.length,
+    parsed: merged.parsed,
+    json_attempt: merged.json_attempt,
+  };
+}
+
 async function main() {
   const semanticPlan = await readJson(semanticPlanPath, null);
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   const stageName = `${episode}_visual_reference_plan`;
-  const prompt = buildPrompt(semanticPlan);
-  const llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+  const llm = await createReferencePlan(semanticPlan, stageName);
   const referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
@@ -285,7 +417,7 @@ async function main() {
     source_script_hash: semanticPlan.source_script_hash,
     source_artifact_paths: [semanticPlanPath],
     source_hashes: Object.fromEntries((await Promise.all([semanticPlanPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
-    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null },
+    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     policy: "Reference strategy only. Manual review must approve prompt anchors before reference generation or production imagegen.",
     reference_targets: referenceTargets,
     character_state_refs: characterStateRefs,

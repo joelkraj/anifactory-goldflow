@@ -18,6 +18,9 @@ const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
 const outputPath = flags.output ?? path.join(episodeDir, "visual_reference_plan.json");
+const characterStateRefsOutputPath = flags.characterStateRefs
+  ?? flags["character-state-refs"]
+  ?? path.join(path.dirname(outputPath), "character_state_refs.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -427,7 +430,7 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
-  await writeJson(path.join(episodeDir, "character_state_refs.json"), {
+  await writeJson(characterStateRefsOutputPath, {
     schema: "goldflow_character_state_refs_v1",
     status: "draft_needs_manual_review",
     source_visual_reference_plan_path: outputPath,
@@ -435,7 +438,7 @@ async function main() {
     character_state_refs: report.character_state_refs,
     updated_at: report.updated_at,
   });
-  console.log(JSON.stringify({ status: "passed", output_path: outputPath, reference_target_count: referenceTargets.length, character_state_ref_count: report.character_state_refs.length }, null, 2));
+  console.log(JSON.stringify({ status: "passed", output_path: outputPath, character_state_refs_output_path: characterStateRefsOutputPath, reference_target_count: referenceTargets.length, character_state_ref_count: report.character_state_refs.length }, null, 2));
 }
 
 main().catch(async (error) => {

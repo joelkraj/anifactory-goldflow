@@ -105,6 +105,7 @@ Rules:
 - Use generic production logic. Do not hardcode story-specific rules.
 - Positive visual language is mandatory. Prompt anchors must describe what should appear, never what should be avoided.
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than" in prompt_anchor fields.
+- Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction. Example: write "single visible protagonist centered in frame, plain institutional detainee jacket with open collar and flat fabric panels" rather than saying what clothing or extra characters to avoid.
 - Prompt anchors must be concrete and specific enough for image generation, but they are draft anchors requiring manual review before reference generation.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
@@ -191,6 +192,7 @@ Rules:
 - Keep generation_mode decisions coherent at episode level.
 - Positive visual language is mandatory. Prompt anchors must describe what should appear, never what should be avoided.
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than" in prompt_anchor fields.
+- Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.

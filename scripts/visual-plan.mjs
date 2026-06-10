@@ -213,6 +213,7 @@ Rules:
 - Use current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
 - Positive visual language is mandatory. Describe only what should appear.
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
+- Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Identify exact subject roles by name and action, especially in multi-character scenes.

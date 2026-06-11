@@ -13,10 +13,16 @@ const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
+const visualReferencePlanPath = flags.referencePlan ?? flags["reference-plan"] ?? path.join(episodeDir, "visual_reference_plan.json");
+const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const imageDir = path.join(episodeDir, "assets", "images");
+const referenceDir = path.join(imageDir, "references");
 const reportPath = flags.output ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const concurrency = Math.max(1, Math.min(24, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? 8)));
+const referenceConcurrency = Math.max(1, Math.min(8, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 3)));
 const force = flags.force === "true";
+const skipReferenceGeneration = flags["skip-reference-generation"] === "true";
+const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -68,6 +74,24 @@ function imagePathFor(prompt) {
   return path.join(imageDir, `${prompt.image_id}-modelslab-image.png`);
 }
 
+function referencePathFor(target) {
+  return path.join(referenceDir, `${target.ref_id}-modelslab-reference.png`);
+}
+
+function referencePrompt(target) {
+  const parts = [
+    target.prompt_anchor,
+    target.kind ? `${target.kind} reference sheet` : "production reference image",
+    target.subject ? `subject: ${target.subject}` : "",
+    "clean single production reference, stable identity and materials, cinematic longform frame",
+  ].filter(Boolean);
+  return parts.join(", ");
+}
+
+function referenceFresh(target, outputPath) {
+  return promptFresh({ image_id: target.ref_id, prompt_hash: sha256(referencePrompt(target)), modelslab_image_prompt: referencePrompt(target) }, outputPath);
+}
+
 async function validateReferences(prompt) {
   const paths = [...new Set((prompt.required_reference_paths ?? []).filter(Boolean))];
   const missing = [];
@@ -78,6 +102,61 @@ async function validateReferences(prompt) {
     throw new Error(`Missing required reference(s) for ${prompt.image_id}: ${missing.join(", ")}`);
   }
   return paths;
+}
+
+function referenceRank(refId, requirement = {}) {
+  if (refId === "style_ref") return 0;
+  if (/jiwoo|dohyun|han_sol|baek_mun|hwang|cheol|taemin|yuna|vanguard|tyrant|demon/i.test(refId)) return 1;
+  if (requirement.kind === "character") return 1;
+  if (/location|hall|arena|street|office|room|den|chamber|gate/i.test(refId)) return 2;
+  if (/ui|orb|file|door|core|domain|redemption/i.test(refId)) return 3;
+  return 4;
+}
+
+function attachReferencePathsToPrompts(plan, referenceById) {
+  const prompts = (plan.prompts ?? []).map((prompt) => {
+    const requirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+    const selected = requirements
+      .map((requirement, index) => ({
+        requirement,
+        index,
+        path: referenceById.get(requirement.ref_id),
+        rank: referenceRank(requirement.ref_id, requirement),
+      }))
+      .filter((row) => row.path)
+      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .slice(0, maxSceneReferences);
+    const selectedIds = new Set(selected.map((row) => row.requirement.ref_id));
+    return {
+      ...prompt,
+      required_reference_paths: selected.map((row) => row.path),
+      reference_usage: requirements.map((requirement) => {
+        const refPath = referenceById.get(requirement.ref_id) ?? null;
+        if (!refPath) {
+          return {
+            ref_id: requirement.ref_id,
+            usage: requirement.required ? "missing_reference_coverage" : "not_attached_missing_optional_reference",
+            reason: "Reference image path is not available.",
+          };
+        }
+        if (!selectedIds.has(requirement.ref_id)) {
+          return {
+            ref_id: requirement.ref_id,
+            usage: "available_not_attached_reference_limit",
+            reference_image_path: refPath,
+            reason: `Scene already uses the maximum ${maxSceneReferences} reference images for model stability.`,
+          };
+        }
+        return {
+          ref_id: requirement.ref_id,
+          usage: "attached_reference",
+          reference_image_path: refPath,
+          reason: requirement.reason ?? "Referenced by reviewed scene prompt.",
+        };
+      }),
+    };
+  });
+  return { ...plan, prompts, reference_paths_attached_at: new Date().toISOString(), max_scene_references: maxSceneReferences };
 }
 
 async function promptFresh(prompt, outputPath) {
@@ -127,9 +206,86 @@ async function generateOne(prompt) {
   return { image_id: prompt.image_id, status: "generated", image_path: outputPath, prompt_hash: promptHash, generated };
 }
 
+async function generateReference(target, styleRefPath = null) {
+  const outputPath = referencePathFor(target);
+  const prompt = referencePrompt(target);
+  const promptHash = sha256(prompt);
+  if (!force && await referenceFresh(target, outputPath)) {
+    return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
+  }
+  const referenceImagePaths = target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : [];
+  const generated = await generateModelslabImage({
+    prompt,
+    outputPath,
+    referenceImagePaths,
+    model: target.image_model_route ?? "flux-klein",
+  });
+  await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
+  await writeJson(`${outputPath}.metadata.json`, {
+    ref_id: target.ref_id,
+    kind: target.kind,
+    subject: target.subject,
+    prompt_hash: promptHash,
+    source_reference_plan_path: visualReferencePlanPath,
+    reference_image_paths: referenceImagePaths,
+    model: target.image_model_route ?? "flux-klein",
+    generated,
+    updated_at: new Date().toISOString(),
+  });
+  return { ref_id: target.ref_id, status: "generated", image_path: outputPath, prompt_hash: promptHash, generated };
+}
+
+async function generateReferences() {
+  const referencePlan = await readJson(visualReferencePlanPath, null);
+  const characterRefs = await readJson(characterStateRefsPath, null);
+  if (!referencePlan?.reference_targets?.length || skipReferenceGeneration) {
+    return { referencePlan, characterRefs, results: [], referenceById: new Map(Object.entries(Object.fromEntries((referencePlan?.reference_targets ?? []).filter((target) => target.reference_image_path).map((target) => [target.ref_id, target.reference_image_path])))) };
+  }
+  await fs.mkdir(referenceDir, { recursive: true });
+  const targets = referencePlan.reference_targets
+    .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true);
+  const styleTarget = targets.find((target) => target.ref_id === "style_ref");
+  const results = [];
+  let styleRefPath = null;
+  if (styleTarget) {
+    const result = await generateReference(styleTarget, null);
+    results.push(result);
+    styleRefPath = result.image_path;
+  }
+  const remaining = targets.filter((target) => target.ref_id !== "style_ref");
+  results.push(...await runPool(remaining, (target) => generateReference(target, styleRefPath), referenceConcurrency));
+  const referenceById = new Map(results.map((row) => [row.ref_id, row.image_path]));
+  const updatedReferencePlan = {
+    ...referencePlan,
+    reference_targets: referencePlan.reference_targets.map((target) => ({
+      ...target,
+      reference_image_path: referenceById.get(target.ref_id) ?? target.reference_image_path ?? null,
+    })),
+    reference_generation_updated_at: new Date().toISOString(),
+  };
+  await writeJson(visualReferencePlanPath, updatedReferencePlan);
+  if (characterRefs?.character_state_refs) {
+    const updatedCharacterRefs = {
+      ...characterRefs,
+      character_state_refs: characterRefs.character_state_refs.map((ref) => ({
+        ...ref,
+        reference_image_path: referenceById.get(ref.source_ref_id) ?? ref.reference_image_path ?? null,
+      })),
+      reference_generation_updated_at: new Date().toISOString(),
+    };
+    await writeJson(characterStateRefsPath, updatedCharacterRefs);
+  }
+  return { referencePlan: updatedReferencePlan, characterRefs, results, referenceById };
+}
+
 async function main() {
-  const plan = await readJson(promptPath, null);
+  const referenceRun = await generateReferences();
+  let plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !plan.prompts.length) throw new Error(`Missing passed section image prompt plan: ${promptPath}`);
+  if (referenceRun.referenceById?.size) {
+    plan = attachReferencePathsToPrompts(plan, referenceRun.referenceById);
+    await writeJson(promptPath, plan);
+  }
   const scope = requestedIds();
   const prompts = plan.prompts
     .filter((prompt) => prompt.image_generation_required !== false)
@@ -149,6 +305,8 @@ async function main() {
     image_dir: imageDir,
     concurrency,
     image_count: results.length,
+    reference_count: referenceRun.results.length,
+    reference_results: referenceRun.results,
     results,
     updated_at: new Date().toISOString(),
   };

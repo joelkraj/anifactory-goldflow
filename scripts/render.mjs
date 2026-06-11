@@ -23,9 +23,14 @@ const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? p
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const audioBedReportPath = flags.audioBedReport ?? flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
 const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-goldflow.mp4`);
+const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.join(episodeDir, `render_report_${episode}.json`);
 const width = Number(flags.width ?? 1920);
 const height = Number(flags.height ?? 1080);
 const fps = Number(flags.fps ?? 30);
+const motionMode = flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "blurred_ken_burns";
+const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTORY_RENDER_FOREGROUND_SCALE ?? 0.93);
+const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.0);
+const visualFadeSec = Number(flags["visual-fade-sec"] ?? process.env.ANIFACTORY_RENDER_VISUAL_FADE_SEC ?? 0.16);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -236,25 +241,66 @@ async function writeSubtitleOverlayVideo(filePath, events, audioDuration) {
   return { path: filePath, frame_count: frameIndex };
 }
 
-async function buildImageConcat(promptPlan, imagegenReport, audioDuration) {
+function imageDuration(prompt, scale = 1) {
+  return Math.max(1, Number(prompt.duration_sec ?? 6) * scale);
+}
+
+function motionPhase(index) {
+  return Number(((index * 0.73) % (Math.PI * 2)).toFixed(3));
+}
+
+function motionClipFilter(duration, index) {
+  const fgW = Math.round(width * Math.max(0.45, Math.min(1, foregroundScale)));
+  const fgH = Math.round(height * Math.max(0.45, Math.min(1, foregroundScale)));
+  const phase = motionPhase(index);
+  const xDrift = Math.round(width * 0.035 * motionStrength);
+  const yDrift = Math.round(height * 0.032 * motionStrength);
+  const fadeOutStart = Math.max(0, duration - visualFadeSec);
+  if (motionMode === "fill_ken_burns") {
+    const zoomMax = 1 + 0.11 * motionStrength;
+    const xExpr = index % 2 === 0 ? "iw/2-(iw/zoom/2)" : "iw/2-(iw/zoom/2)+sin(on/45)*iw*0.04";
+    const yExpr = index % 3 === 0 ? "ih/2-(ih/zoom/2)+cos(on/50)*ih*0.035" : "ih/2-(ih/zoom/2)";
+    return `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase,crop=${width * 2}:${height * 2},zoompan=z='min(${zoomMax.toFixed(3)},1+on*0.00085*${motionStrength.toFixed(3)})':x='${xExpr}':y='${yExpr}':d=${Math.max(1, Math.ceil(duration * fps))}:s=${width}x${height}:fps=${fps},fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},format=yuv420p`;
+  }
+  return `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=34,eq=brightness=-0.055:saturation=0.92[bg];[0:v]scale=${fgW}:${fgH}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=x='(W-w)/2+sin(t*0.62+${phase})*${xDrift}':y='(H-h)/2+cos(t*0.47+${phase})*${yDrift}',fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},fps=${fps},format=yuv420p`;
+}
+
+async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
   const imageById = new Map((imagegenReport.results ?? []).map((row) => [row.image_id, row.image_path]));
   const prompts = (promptPlan.prompts ?? []).filter((prompt) => imageById.has(prompt.image_id));
   if (!prompts.length) throw new Error("No generated images found for prompt plan.");
   const totalPromptDuration = prompts.reduce((sum, prompt) => sum + Math.max(1, Number(prompt.duration_sec ?? 6)), 0);
   const scale = audioDuration > 0 && totalPromptDuration > 0 ? audioDuration / totalPromptDuration : 1;
+  const clipDir = path.join(workDir, "motion-clips");
+  await fs.rm(clipDir, { recursive: true, force: true });
+  await fs.mkdir(clipDir, { recursive: true });
   const lines = [];
-  for (const prompt of prompts) {
+  for (let index = 0; index < prompts.length; index += 1) {
+    const prompt = prompts[index];
     const imagePath = imageById.get(prompt.image_id);
     if (!(await exists(imagePath))) throw new Error(`Missing generated image for ${prompt.image_id}: ${imagePath}`);
-    const duration = Math.max(1, Number(prompt.duration_sec ?? 6) * scale);
-    lines.push(`file '${concatEscape(imagePath)}'`);
-    lines.push(`duration ${duration.toFixed(3)}`);
+    const duration = imageDuration(prompt, scale);
+    const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
+    await execFile("ffmpeg", [
+      "-y",
+      "-loop", "1",
+      "-t", duration.toFixed(3),
+      "-i", imagePath,
+      "-filter_complex", motionClipFilter(duration, index),
+      "-an",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "20",
+      "-pix_fmt", "yuv420p",
+      "-r", String(fps),
+      clipPath,
+    ], { maxBuffer: 1024 * 1024 * 32 });
+    lines.push(`file '${concatEscape(clipPath)}'`);
   }
-  lines.push(`file '${concatEscape(imageById.get(prompts.at(-1).image_id))}'`);
-  const concatPath = path.join(workDir, "images.concat.txt");
+  const concatPath = path.join(workDir, "motion-clips.concat.txt");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
-  return { concatPath, prompt_count: prompts.length, duration_scale: scale };
+  return { concatPath, prompt_count: prompts.length, duration_scale: scale, clip_dir: clipDir, motion_mode: motionMode };
 }
 
 async function main() {
@@ -271,7 +317,7 @@ async function main() {
   if (!audioPath || !(await exists(audioPath))) throw new Error(`Missing final mixed audio from ${audioBedReportPath}`);
   await fs.mkdir(renderDir, { recursive: true });
   const audioDuration = await mediaDuration(audioPath);
-  const concat = await buildImageConcat(promptPlan, imagegenReport, audioDuration);
+  const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration);
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), wordTiming);
   const videoPath = path.join(workDir, "silent_video.mp4");
   await execFile("ffmpeg", [
@@ -279,18 +325,26 @@ async function main() {
     "-f", "concat",
     "-safe", "0",
     "-i", concat.concatPath,
-    "-vf", `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,fps=${fps}`,
-    "-pix_fmt", "yuv420p",
-    "-r", String(fps),
+    "-c", "copy",
+    "-movflags", "+faststart",
     videoPath,
   ], { maxBuffer: 1024 * 1024 * 32 });
+  await execFile("ffmpeg", [
+    "-y",
+    "-i", videoPath,
+    "-vf", `setsar=1,fps=${fps}`,
+    "-pix_fmt", "yuv420p",
+    "-r", String(fps),
+    path.join(workDir, "silent_video_normalized.mp4"),
+  ], { maxBuffer: 1024 * 1024 * 32 });
+  const normalizedVideoPath = path.join(workDir, "silent_video_normalized.mp4");
   const hasAssFilter = await ffmpegHasFilter("ass");
   let subtitleRenderer = "ffmpeg_ass_filter";
   let subtitleOverlay = null;
   if (hasAssFilter) {
     await execFile("ffmpeg", [
       "-y",
-      "-i", videoPath,
+      "-i", normalizedVideoPath,
       "-i", audioPath,
       "-vf", `ass=filename=${ffmpegFilterFilename(ass.path)}`,
       "-map", "0:v:0",
@@ -308,7 +362,7 @@ async function main() {
     subtitleOverlay = await writeSubtitleOverlayVideo(path.join(workDir, "subtitle_overlay.mov"), subtitleEvents(wordTiming.words ?? []), audioDuration);
     await execFile("ffmpeg", [
       "-y",
-      "-i", videoPath,
+      "-i", normalizedVideoPath,
       "-i", subtitleOverlay.path,
       "-i", audioPath,
       "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto[v]",
@@ -344,16 +398,21 @@ async function main() {
     subtitle_overlay_frame_count: subtitleOverlay?.frame_count ?? null,
     subtitle_count: ass.subtitle_count,
     image_count: concat.prompt_count,
+    render_motion: {
+      mode: concat.motion_mode,
+      clip_dir: concat.clip_dir,
+      foreground_scale: foregroundScale,
+      motion_strength: motionStrength,
+      visual_fade_sec: visualFadeSec,
+    },
     updated_at: new Date().toISOString(),
   };
-  const reportPath = path.join(episodeDir, `render_report_${episode}.json`);
-  await writeJson(reportPath, report);
-  console.log(JSON.stringify({ status: "passed", output_path: outputPath, report_path: reportPath, duration_sec: report.output_duration_sec }, null, 2));
+  await writeJson(renderReportPath, report);
+  console.log(JSON.stringify({ status: "passed", output_path: outputPath, report_path: renderReportPath, duration_sec: report.output_duration_sec }, null, 2));
 }
 
 main().catch(async (error) => {
-  const reportPath = path.join(episodeDir, `render_report_${episode}.json`);
-  await writeJson(reportPath, { schema: "goldflow_render_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+  await writeJson(renderReportPath, { schema: "goldflow_render_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

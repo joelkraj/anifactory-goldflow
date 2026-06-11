@@ -71,6 +71,36 @@ function phraseTokens(value) {
   return normalize(value).split(/\s+/).filter(Boolean);
 }
 
+function levenshteinDistance(a, b) {
+  const left = String(a ?? "");
+  const right = String(b ?? "");
+  if (left === right) return 0;
+  if (!left.length) return right.length;
+  if (!right.length) return left.length;
+  let previous = Array.from({ length: right.length + 1 }, (_item, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost,
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+function similarityRatio(a, b) {
+  const left = normalize(a);
+  const right = normalize(b);
+  const maxLength = Math.max(left.length, right.length);
+  if (!maxLength) return 1;
+  return 1 - (levenshteinDistance(left, right) / maxLength);
+}
+
 function findPhrase(words, phrase, minStartSec = 0) {
   const tokens = phraseTokens(phrase);
   if (!tokens.length) return null;
@@ -90,6 +120,34 @@ function findPhrase(words, phrase, minStartSec = 0) {
       return { start_sec: start.start_sec, end_sec: end.end_sec, matched_words: words.slice(index, index + tokens.length).map((word) => word.word).join(" ") };
     }
   }
+  const target = tokens.join(" ");
+  const minWindow = Math.max(1, tokens.length - 3);
+  const maxWindow = Math.min(tokens.length + 3, tokens.length < 4 ? tokens.length + 2 : tokens.length + 4);
+  let best = null;
+  for (let index = Math.max(0, firstIndex); index < wordTokens.length; index += 1) {
+    for (let windowSize = minWindow; windowSize <= maxWindow && index + windowSize <= wordTokens.length; windowSize += 1) {
+      const candidate = wordTokens.slice(index, index + windowSize).join(" ");
+      const score = similarityRatio(target, candidate);
+      const threshold = target.length < 32 ? 0.78 : 0.84;
+      if (score < threshold || (best && score <= best.score)) continue;
+      const start = words[index];
+      const end = words[index + windowSize - 1] ?? start;
+      best = {
+        start_sec: start.start_sec,
+        end_sec: end.end_sec,
+        matched_words: words.slice(index, index + windowSize).map((word) => word.word).join(" "),
+        score,
+      };
+    }
+  }
+  if (best) {
+    return {
+      start_sec: best.start_sec,
+      end_sec: best.end_sec,
+      matched_words: best.matched_words,
+      fuzzy_score: Number(best.score.toFixed(4)),
+    };
+  }
   return null;
 }
 
@@ -101,10 +159,12 @@ function sceneBounds(scene, words, fallbackStart) {
   return {
     start_sec: Number(start.toFixed(3)),
     end_sec: Number(Math.max(start + 1, end).toFixed(3)),
-    start_resolution: startMatch ? "whisper_phrase_match" : "fallback_previous_scene_end",
-    end_resolution: endMatch ? "whisper_phrase_match" : "fallback_min_duration",
+    start_resolution: startMatch ? (startMatch.fuzzy_score ? "whisper_fuzzy_phrase_match" : "whisper_phrase_match") : "fallback_previous_scene_end",
+    end_resolution: endMatch ? (endMatch.fuzzy_score ? "whisper_fuzzy_phrase_match" : "whisper_phrase_match") : "fallback_min_duration",
     matched_start_words: startMatch?.matched_words ?? null,
     matched_end_words: endMatch?.matched_words ?? null,
+    start_fuzzy_score: startMatch?.fuzzy_score ?? null,
+    end_fuzzy_score: endMatch?.fuzzy_score ?? null,
   };
 }
 

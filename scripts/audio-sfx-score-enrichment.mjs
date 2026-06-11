@@ -23,7 +23,8 @@ const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const audioDir = path.join(episodeDir, "assets", "audio");
 const sfxAssetDir = path.join(dataRoot, "sfx_bank", "assets", "llm_enriched");
-const scoreAssetDir = path.join(audioDir, "modelslab_score_beds");
+const scoreProvider = flags["score-provider"] ?? process.env.ANIFACTORY_SCORE_PROVIDER ?? "modelslab";
+const scoreAssetDir = path.join(audioDir, scoreProvider === "local_ace_step" ? "ace_step_score_beds" : "modelslab_score_beds");
 const sfxManifestPath = path.join(dataRoot, "sfx_bank", "sfx_manifest.json");
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const audioPlanPath = path.join(episodeDir, "audio_performance_plan.json");
@@ -68,6 +69,22 @@ function clampInt(value, min, max) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function scoreProviderMeta() {
+  if (scoreProvider === "local_ace_step") {
+    return {
+      provider: "local_ace_step",
+      model_id: process.env.ANIFACTORY_ACE_STEP_CONFIG_PATH ?? "acestep-v15-turbo",
+      lm_model_id: process.env.ANIFACTORY_ACE_STEP_LM_MODEL ?? "acestep-5Hz-lm-1.7B",
+      endpoint: "local:ace-step-1.5",
+    };
+  }
+  return {
+    provider: "modelslab",
+    model_id: "ai-music-generator",
+    endpoint: "/api/v6/voice/music_gen",
+  };
 }
 
 function sha256(value) {
@@ -583,6 +600,27 @@ async function generateScoreAsset(chapter) {
   const prompt = `${chapter.ace_step_prompt ?? chapter.music_prompt ?? chapter.score_intent}. Instrumental only, no vocals, no lyrics, no speech, no crowd noise. Loopable longform anime recap background score.`;
   await fs.mkdir(scoreAssetDir, { recursive: true });
   const outPath = path.join(scoreAssetDir, `${chapter.chapter_id}-${sha256(prompt).slice(0, 12)}.wav`);
+  if (scoreProvider === "local_ace_step") {
+    if (!dryRun && !(await exists(outPath))) {
+      const { stdout } = await execFile(process.env.ANIFACTORY_ACE_STEP_PYTHON ?? "/Users/joel/AniFactoryTools/ACE-Step-1.5/.venv/bin/python", [
+        path.join(repoRoot, "scripts", "ace-step-score-generate.py"),
+        "--output", outPath,
+        "--caption", prompt,
+        "--duration", String(Math.ceil(duration)),
+      ], {
+        cwd: process.env.ANIFACTORY_ACE_STEP_ROOT ?? "/Users/joel/AniFactoryTools/ACE-Step-1.5",
+        maxBuffer: 1024 * 1024 * 10,
+        env: { ...process.env },
+      });
+      const localResult = JSON.parse(stdout.trim().split(/\n/).at(-1));
+      const validation = await validateAudioAsset(outPath, duration, "score");
+      return { outPath, prompt, duration, request_id: null, url: null, validation, local_result: localResult };
+    }
+    const validation = dryRun
+      ? { status: "dry_run", issues: [], target_duration_sec: duration, technical_gate: "dry run; asset not generated" }
+      : await validateAudioAsset(outPath, duration, "score");
+    return { outPath, prompt, duration, request_id: null, url: null, validation };
+  }
   if (!dryRun && !(await exists(outPath))) {
     const initial = await postModelslab("/api/v6/voice/music_gen", {
       model_id: "ai-music-generator",
@@ -1055,6 +1093,7 @@ async function main() {
 
   const scoreRows = [];
   const scoreChapters = [];
+  const scoreMeta = scoreProviderMeta();
   for (const chapter of normalizedChapters) {
     if (generateScoreAssets) {
       const generation = await generateScoreAsset(chapter);
@@ -1062,10 +1101,12 @@ async function main() {
       scoreChapters.push({
         ...chapter,
         asset_path: generation.outPath,
-        asset_provider: "modelslab",
-        asset_model_id: "ai-music-generator",
-        asset_endpoint: "/api/v6/voice/music_gen",
+        asset_provider: scoreMeta.provider,
+        asset_model_id: scoreMeta.model_id,
+        asset_lm_model_id: scoreMeta.lm_model_id ?? null,
+        asset_endpoint: scoreMeta.endpoint,
         asset_validation: generation.validation,
+        local_generation: generation.local_result ?? null,
         sourcing_decision: {
           decision: "generated_new_bed",
           reason: "LLM beat-mapped chapter generated as a vetted bed before final mix.",
@@ -1128,7 +1169,9 @@ async function main() {
     ok: scoreChapters.every((chapter) => chapter.asset_path && (chapter.asset_validation?.status ?? "passed") !== "failed"),
     planner: plannerName,
     planner_version: plannerVersion,
-    purpose: "LLM beat-mapped score plan for ModelsLab music_gen; chapters follow story beats, not fixed clock windows.",
+    purpose: scoreProvider === "local_ace_step"
+      ? "LLM beat-mapped score plan for local ACE-Step 1.5 generation; chapters follow story beats, not fixed clock windows."
+      : "LLM beat-mapped score plan for ModelsLab music_gen; chapters follow story beats, not fixed clock windows.",
     channel,
     series_slug: series,
     week,
@@ -1146,7 +1189,13 @@ async function main() {
       chapter_count: scoreChapters.length,
       publish_requirement: "Generated beds are vetted before final mix; final mix remains separate.",
     },
-    engine_hint: "ModelsLab /api/v6/voice/music_gen model_id ai-music-generator",
+    engine_hint: scoreProvider === "local_ace_step"
+      ? "Local ACE-Step 1.5 score generation through scripts/ace-step-score-generate.py"
+      : "ModelsLab /api/v6/voice/music_gen model_id ai-music-generator",
+    score_provider: scoreMeta.provider,
+    score_model_id: scoreMeta.model_id,
+    score_lm_model_id: scoreMeta.lm_model_id ?? null,
+    score_endpoint: scoreMeta.endpoint,
     global_rules: [
       "Palette derives from this episode's world and bible.",
       "Instrumental only: no vocals, lyrics, speech, or crowd noise.",

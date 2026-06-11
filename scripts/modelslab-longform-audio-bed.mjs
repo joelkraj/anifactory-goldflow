@@ -20,7 +20,8 @@ const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const episodeDir = flags.episodeDir ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const audioDir = path.join(episodeDir, "assets", "audio");
-const scoreDir = path.join(audioDir, "modelslab_score_beds");
+const scoreProvider = flags["score-provider"] ?? process.env.ANIFACTORY_SCORE_PROVIDER ?? "modelslab";
+const scoreDir = path.join(audioDir, scoreProvider === "local_ace_step" ? "ace_step_score_beds" : "modelslab_score_beds");
 const mixDir = path.join(audioDir, "longform_mix");
 const sfxBankManifestPath = path.join(dataRoot, "sfx_bank", "sfx_manifest.json");
 const scorePlanPath = flags.scorePlan ?? path.join(episodeDir, "score_chapter_plan.json");
@@ -74,6 +75,22 @@ function hashText(value) {
 
 function slug(value) {
   return String(value ?? "item").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "item";
+}
+
+function scoreProviderMeta() {
+  if (scoreProvider === "local_ace_step") {
+    return {
+      provider: "local_ace_step",
+      model_id: process.env.ANIFACTORY_ACE_STEP_CONFIG_PATH ?? "acestep-v15-turbo",
+      lm_model_id: process.env.ANIFACTORY_ACE_STEP_LM_MODEL ?? "acestep-5Hz-lm-1.7B",
+      endpoint: "local:ace-step-1.5",
+    };
+  }
+  return {
+    provider: "modelslab",
+    model_id: "ai-music-generator",
+    endpoint: "/api/v6/voice/music_gen",
+  };
 }
 
 function firstFiniteNumber(values) {
@@ -185,12 +202,14 @@ async function generateScoreChapter(chapter, durationSec) {
   await fs.mkdir(scoreDir, { recursive: true });
   const prompt = `${chapter.ace_step_prompt ?? chapter.score_intent ?? "anime recap cinematic score bed"}. Instrumental only, no vocals, no lyrics, no speech, no crowd noise. Loopable longform anime recap background score.`;
   const promptHash = hashText(prompt).slice(0, 12);
+  const scoreMeta = scoreProviderMeta();
   if (!forceScore && chapter.asset_path && await exists(chapter.asset_path)) {
     return {
       chapter_id: chapter.chapter_id,
-      provider: chapter.asset_provider ?? "modelslab",
-      model_id: chapter.asset_model_id ?? "ai-music-generator",
-      endpoint: chapter.asset_endpoint ?? "/api/v6/voice/music_gen",
+      provider: chapter.asset_provider ?? scoreMeta.provider,
+      model_id: chapter.asset_model_id ?? scoreMeta.model_id,
+      lm_model_id: chapter.asset_lm_model_id ?? scoreMeta.lm_model_id ?? null,
+      endpoint: chapter.asset_endpoint ?? scoreMeta.endpoint,
       asset_path: chapter.asset_path,
       status: "reused_planned_asset",
       prompt,
@@ -201,10 +220,27 @@ async function generateScoreChapter(chapter, durationSec) {
   const outPath = path.join(scoreDir, `${chapter.chapter_id}-${promptHash}.wav`);
   const metaPath = outPath.replace(/\.wav$/, ".json");
   if (!forceScore && await exists(outPath)) {
-    return { ...await readJson(metaPath, {}), chapter_id: chapter.chapter_id, provider: "modelslab", model_id: "ai-music-generator", endpoint: "/api/v6/voice/music_gen", asset_path: outPath, status: "reused" };
+    return { ...await readJson(metaPath, {}), chapter_id: chapter.chapter_id, provider: scoreMeta.provider, model_id: scoreMeta.model_id, lm_model_id: scoreMeta.lm_model_id ?? null, endpoint: scoreMeta.endpoint, asset_path: outPath, status: "reused" };
   }
   if (dryRun) {
-    return { chapter_id: chapter.chapter_id, provider: "modelslab", model_id: "ai-music-generator", endpoint: "/api/v6/voice/music_gen", asset_path: outPath, status: "dry_run", prompt, duration_sec: durationSec };
+    return { chapter_id: chapter.chapter_id, provider: scoreMeta.provider, model_id: scoreMeta.model_id, lm_model_id: scoreMeta.lm_model_id ?? null, endpoint: scoreMeta.endpoint, asset_path: outPath, status: "dry_run", prompt, duration_sec: durationSec };
+  }
+  if (scoreProvider === "local_ace_step") {
+    console.error(`[longform-audio] ACE-Step score ${chapter.chapter_id} ${durationSec}s`);
+    const { stdout } = await execFile(process.env.ANIFACTORY_ACE_STEP_PYTHON ?? "/Users/joel/AniFactoryTools/ACE-Step-1.5/.venv/bin/python", [
+      path.join(repoRoot, "scripts", "ace-step-score-generate.py"),
+      "--output", outPath,
+      "--caption", prompt,
+      "--duration", String(Math.max(30, Math.min(480, Math.ceil(durationSec)))),
+    ], {
+      cwd: process.env.ANIFACTORY_ACE_STEP_ROOT ?? "/Users/joel/AniFactoryTools/ACE-Step-1.5",
+      maxBuffer: 1024 * 1024 * 10,
+      env: { ...process.env },
+    });
+    const localResult = JSON.parse(stdout.trim().split(/\n/).at(-1));
+    const result = { chapter_id: chapter.chapter_id, provider: scoreMeta.provider, model_id: scoreMeta.model_id, lm_model_id: scoreMeta.lm_model_id ?? null, endpoint: scoreMeta.endpoint, asset_path: outPath, duration_sec: await mediaDuration(outPath), prompt, prompt_hash: promptHash, status: "generated", local_generation: localResult };
+    await writeJson(metaPath, result);
+    return result;
   }
   console.error(`[longform-audio] score ${chapter.chapter_id} ${durationSec}s`);
   const initial = await postModelslab("/api/v6/voice/music_gen", {
@@ -418,6 +454,7 @@ async function start() {
   }
   const sfxEnsured = await ensureSfxEvents(sfxPlan);
   const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan, sfxPlan, durationSec, qwenReport });
+  const scoreMeta = scoreProviderMeta();
   const report = {
     status: dryRun ? "dry_run" : "completed",
     created_at: new Date().toISOString(),
@@ -425,9 +462,11 @@ async function start() {
     series,
     week,
     episode,
-    provider: "modelslab-inhouse",
-    score_model_id: "ai-music-generator",
-    score_endpoint: "/api/v6/voice/music_gen",
+    provider: scoreMeta.provider === "local_ace_step" ? "local-ace-step-plus-modelslab-sfx" : "modelslab-inhouse",
+    score_provider: scoreMeta.provider,
+    score_model_id: scoreMeta.model_id,
+    score_lm_model_id: scoreMeta.lm_model_id ?? null,
+    score_endpoint: scoreMeta.endpoint,
     sfx_model_id: "sfx",
     sfx_endpoint: "/api/v6/voice/sfx",
     narration_path: narrationPath,

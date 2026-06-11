@@ -37,6 +37,8 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
+- Score/music generation can use local ACE-Step 1.5 by setting `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or passing `--score-provider local_ace_step`. This feeds each beat-mapped chapter `ace_step_prompt` to `/Users/joel/AniFactoryTools/ACE-Step-1.5` and writes beds under `assets/audio/ace_step_score_beds`. Default local model selection is DiT `acestep-v15-turbo` with LM `acestep-5Hz-lm-1.7B`; override with `ANIFACTORY_ACE_STEP_CONFIG_PATH` and `ANIFACTORY_ACE_STEP_LM_MODEL`.
+- ModelsLab score generation remains available with `ANIFACTORY_SCORE_PROVIDER=modelslab` and uses `/api/v6/voice/music_gen` model_id `ai-music-generator`.
 - Narrator-only is the default voice route. Character voice casting requires an explicit operator request and flag.
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
@@ -63,6 +65,8 @@ node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series>
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01

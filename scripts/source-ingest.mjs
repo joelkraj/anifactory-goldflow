@@ -45,7 +45,17 @@ function normalizeNewlines(value) {
 function stripSceneAnnotations(value) {
   return normalizeNewlines(value)
     .split("\n")
-    .filter((line) => !/^SC\d{3}\s*[—-]/.test(line.trim()))
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      if (/^SC\d{3}\s*[—-]/.test(trimmed)) return false;
+      if (/^#{1,6}\s+/.test(trimmed)) return false;
+      if (/^\*\*.*(?:raw narration script|target:|pov:|ledger-verified).*?\*\*$/i.test(trimmed)) return false;
+      if (/^-{3,}$/.test(trimmed)) return false;
+      if (/^BLOCK\s+\d+\s*[—-]/i.test(trimmed)) return false;
+      if (/^\[(?:SCENE|END\s+OF\s+EPISODE)\b[^\]]*\]$/i.test(trimmed)) return false;
+      return true;
+    })
     .map((line) => line.trim() === "NARRATOR:" ? "" : line)
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")

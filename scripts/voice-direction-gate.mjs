@@ -603,7 +603,7 @@ function requestedTtsProvider(providerRouting, voiceCastingLock = {}) {
 }
 
 function isQwenLocalProvider(ttsProvider) {
-  return String(ttsProvider ?? "").toLowerCase() === "qwen_local";
+  return /^(?:qwen_local|modelslab_qwen|qwen)$/i.test(String(ttsProvider ?? "").trim());
 }
 
 async function loadUniversalFishTags() {
@@ -679,6 +679,16 @@ function applySpokenOverrideRules(text, rules = []) {
       ? new RegExp(rule.from, flagsValue)
       : new RegExp(rule.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flagsValue);
     next = next.replace(pattern, rule.to);
+  }
+  return next;
+}
+
+function applyPronunciationMap(text, pronunciationMap = []) {
+  let next = String(text ?? "");
+  for (const entry of pronunciationMap ?? []) {
+    if (!entry?.term || typeof entry.spoken !== "string") continue;
+    const pattern = new RegExp(entry.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+    next = next.replace(pattern, entry.spoken);
   }
   return next;
 }
@@ -979,6 +989,7 @@ function splitIntoSentences(text) {
     return key;
   };
   const protectedValue = value
+    .replace(/\[[^\]\n]+\]/g, protect)
     .replace(/\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St)\./g, protect)
     .replace(/\b(?:a\.m\.|p\.m\.)/gi, protect)
     .replace(/\b[A-Z]\./g, protect);
@@ -987,7 +998,7 @@ function splitIntoSentences(text) {
     for (const [key, original] of placeholders) next = next.replaceAll(key, original);
     return next.trim();
   };
-  return protectedValue.match(/[^.!?]+[.!?]+(?:["”])?|[^.!?]+$/g)?.map(restore).filter(Boolean) ?? [value];
+  return protectedValue.match(/[^.!?]+[.!?]+(?:[\]"”’)]*)?|[^.!?]+$/g)?.map(restore).filter(Boolean) ?? [value];
 }
 
 function soundDesignUnit(text) {
@@ -2253,10 +2264,6 @@ function qwenPronunciationText(value) {
     .replace(/\bLevel\s*[-:]\s*-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/\bLevel\s+-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/:\s*-\s*(\d{1,2})\b/g, (_match, value) => `, negative ${numberWord(value)}`)
-    .replace(/\bunconfirmed\b/gi, preserveInitialCase("not verified"))
-    .replace(/\bconfirmation\b/gi, preserveInitialCase("verification"))
-    .replace(/\bconfirmed\b/gi, preserveInitialCase("verified"))
-    .replace(/\bconfirm\b/gi, preserveInitialCase("verify"))
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -2265,7 +2272,6 @@ function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
   const isInterfaceSpeaker = /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(speaker ?? ""));
   let clean = String(value ?? "")
     .replace(/<\|speaker:\d+\|>/g, " ")
-    .replace(/\[[^\]]+\]/g, " ")
     .replace(/^["“]|["”]$/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -2275,7 +2281,10 @@ function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
       .replace(/^:\s*/, "")
       .trim();
   }
-  const overridden = applySpokenOverrideRules(clean, ttsOverrides.replacements ?? []);
+  const overridden = applyPronunciationMap(
+    applySpokenOverrideRules(clean, ttsOverrides.replacements ?? []),
+    ttsOverrides.pronunciation_map ?? [],
+  ).replace(/\[[^\]]+\]/g, " ").replace(/\s+/g, " ").trim();
   const normalized = qwenPronunciationText(overridden);
   if (isInterfaceSpeaker) {
     const protectedTokens = [];

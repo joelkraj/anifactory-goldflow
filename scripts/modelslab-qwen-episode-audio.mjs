@@ -353,13 +353,11 @@ function ttsSafeText(value) {
     .replace(/\bKneel now\b/g, "Get on your knees now")
     .replace(/\bSSS(?:\s*[- ]\s*rank)?\b/gi, (match) => /rank/i.test(match) ? "S S S rank" : "S S S")
     .replace(/\bSS(?:\s*[- ]\s*rank)?\b/gi, (match) => /rank/i.test(match) ? "S S rank" : "S S")
-    .replace(/\bF\s*[- ]\s*rank(?:ed)?\b/gi, "F class")
+    .replace(/\bF\s*[- ]\s*rank(?:ed)?\b/gi, "F rank")
     .replace(/\b([A-Z])\s*[- ]\s*rank\b/g, "$1 rank")
     .replace(/\bUI\b/g, "U I")
     .replace(/\bID\b/g, "I D")
     .replace(/\bLevel\s*[-:]\s*-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
-    .replace(/\bunconfirmed\b/gi, "not verified")
-    .replace(/\bconfirmed\b/gi, "verified")
     .replace(/\s+/g, " ")
     .trim();
   return normalizeTtsDisfluencies(normalized);

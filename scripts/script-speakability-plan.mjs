@@ -104,6 +104,19 @@ function addMatches(script, rows, code, pattern, reason, suggestion = null) {
   }
 }
 
+function metaNarratorSuggestion(match) {
+  const text = String(match[0] ?? "");
+  if (/wants you to understand/i.test(text)) return "what they saw was";
+  if (/will tell you/i.test(text)) return "the truth is";
+  if (/will share/i.test(text)) return "the record shows";
+  if (/will describe/i.test(text)) return "the footage showed";
+  if (/will give it to you/i.test(text)) return "it happened";
+  if (/will move fast/i.test(text)) return "the clips moved fast";
+  if (/confirms?/i.test(text)) return "the record confirms";
+  if (/swears this is true/i.test(text)) return "the footage proves this";
+  return null;
+}
+
 function decimalSpoken(match) {
   const [left, right] = String(match[0]).split(".");
   if (/00$/.test(right ?? "")) return `${left} point zero zero`;
@@ -119,6 +132,14 @@ function deterministicScan(script) {
   addMatches(script, rows, "all_caps_ui", /\b[A-Z][A-Z0-9' -]{8,}\b/g, "All-caps UI text may be spelled or shouted unless normalized.", null);
   addMatches(script, rows, "percent_token", /\b\d+(?:\.\d+)?%/g, "Percent symbols need explicit spoken wording.", (match) => match[0].replace("%", " percent"));
   addMatches(script, rows, "ratio_or_odds", /\b\d+(?:\.\d+)?\s*(?:to|:)\s*1\b/gi, "Odds/ratios need context-aware spoken wording.", null);
+  addMatches(
+    script,
+    rows,
+    "meta_narrator_self_reference",
+    /\b(?:the\s+)?narrator\s+(?:wants\s+you\s+to\s+understand|will\s+(?:tell|share|describe|give|move)|confirms?|swears\s+this\s+is\s+true)[^.!?\n]*(?:[.!?])?/gi,
+    "Explicit narrator self-reference can sound artificial in TTS narration and should be reviewed before approval.",
+    metaNarratorSuggestion,
+  );
   const dedup = new Map();
   for (const row of rows) {
     const key = `${row.code}:${row.line}:${row.token}`;
@@ -245,6 +266,19 @@ function artifactStatus(parsed) {
   return blockers.length ? "blocked" : "passed";
 }
 
+function deterministicWarnings(detectedTerms) {
+  return detectedTerms
+    .filter((row) => row.code === "meta_narrator_self_reference")
+    .map((row) => ({
+      severity: "warning",
+      code: row.code,
+      line: row.line,
+      source_text: row.token,
+      reason: row.reason,
+      suggested_spoken_text: row.suggested_spoken_form,
+    }));
+}
+
 async function main() {
   if (!existsSync(scriptPath)) throw new Error(`Missing script_clean.md: ${scriptPath}`);
   const script = await fs.readFile(scriptPath, "utf8");
@@ -259,6 +293,7 @@ async function main() {
     : isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
   const parsed = llm.parsed ?? {};
   const replacements = (parsed.replacements ?? []).map(normalizeReplacement).filter(Boolean);
+  const warnings = [...deterministicWarnings(detectedTerms), ...(parsed.warnings ?? [])];
   const report = {
     schema: "goldflow_script_speakability_report_v1",
     status: artifactStatus(parsed),
@@ -273,7 +308,7 @@ async function main() {
     deterministic_risk_count: detectedTerms.length,
     deterministic_risks: detectedTerms,
     summary: parsed.summary ?? "",
-    warnings: parsed.warnings ?? [],
+    warnings,
     pronunciation_map: parsed.pronunciation_map ?? [],
     pacing_notes: parsed.pacing_notes ?? [],
     blocked_story_rewrite_requests: parsed.blocked_story_rewrite_requests ?? [],

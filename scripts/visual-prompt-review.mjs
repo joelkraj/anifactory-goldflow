@@ -117,6 +117,11 @@ function positiveLanguageFindings(prompts) {
 function compactScene(scene) {
   return {
     scene_id: scene.scene_id,
+    visual_beat_id: scene.visual_beat_id ?? null,
+    parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
+    beat_index: scene.beat_index ?? null,
+    beat_count: scene.beat_count ?? null,
+    visual_beat_focus: scene.visual_beat_focus ?? null,
     title: scene.title,
     start_sec: scene.start_sec,
     duration_sec: scene.duration_sec,
@@ -136,6 +141,7 @@ function compactPrompt(prompt) {
   return {
     image_id: prompt.image_id,
     scene_id: prompt.scene_id,
+    visual_beat_id: prompt.visual_beat_id ?? null,
     start_sec: prompt.start_sec,
     duration_sec: prompt.duration_sec,
     modelslab_image_prompt: prompt.modelslab_image_prompt ?? prompt.image_prompt,
@@ -209,6 +215,8 @@ Review for:
 - negative prompt wording
 - vague multi-character action staging
 - prompt contradiction against current scene facts
+- reference-pose lock, where the prompt lets a character preserve a neutral reference pose during an action scene
+- contaminated action/effect references, where a power/effect ref brings its own room, screens, soldiers, or unrelated scene into the prompt
 
 Rules:
 - Use current scene facts only.
@@ -217,10 +225,17 @@ Rules:
 - Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
+- Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
+- Location references provide architecture, environment, lighting, and materials only.
+- Action/effect references provide effect shape, color, and interaction pattern only. Current scene location and current visible subjects stay authoritative.
+- When references are attached, include positive slot mapping in modelslab_image_prompt: "Image 1 provides character identity for ...; image 2 provides location ...; image 3 provides effect style ..."
+- For action scenes, use active pose language with direction and changed body position.
 - Preserve each image_id, scene_id, start_sec, and duration_sec exactly.
 - Preserve one reviewed prompt for every input prompt.
 - If a prompt is already good, keep it materially unchanged.
 - If a reference is not visible or style-critical for this cut, remove it from reference_usage and required_reference_paths.
+- Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
+- Preserve clear reference slot mapping in the prompt so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
 - If a required existing reference is missing, add a finding with severity "blocker".
 - If a problem is fixed in revised prompt text, mark resolved true.
 - Do not invent new canonical character anchors. Use character_state_refs and visual_reference_plan only.
@@ -249,11 +264,12 @@ Return JSON only:
     {
       "image_id": "same",
       "scene_id": "same",
+      "visual_beat_id": "same",
       "start_sec": 0,
       "duration_sec": 6,
       "image_prompt": "reviewed positive prompt",
       "modelslab_image_prompt": "reviewed positive prompt optimized for image model",
-      "reference_requirements": [],
+      "reference_requirements": [{"ref_id":"...","kind":"character_state|location|style|ui|prop|action","required":true,"slot_order":1,"slot_purpose":"character identity and wardrobe for ...","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [],
       "anchor_roles": [],
@@ -269,7 +285,7 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|contaminated_action_ref|other",
       "message": "specific issue",
       "resolved": true
     }
@@ -340,6 +356,7 @@ function normalizeReviewedPrompt(row, original) {
     ...original,
     image_id: original.image_id,
     scene_id: original.scene_id,
+    visual_beat_id: original.visual_beat_id ?? row.visual_beat_id ?? null,
     start_sec: Number(original.start_sec ?? 0),
     duration_sec: Math.max(1, Number(original.duration_sec ?? 6)),
     image_prompt: prompt,
@@ -356,6 +373,46 @@ function normalizeReviewedPrompt(row, original) {
     ui_text_on_screen: Array.isArray(row.ui_text_on_screen) ? row.ui_text_on_screen : (original.ui_text_on_screen ?? []),
     image_generation_required: original.image_generation_required !== false,
   };
+}
+
+function staticPoseFindings(prompts) {
+  const findings = [];
+  const staticPose = /\b(?:standing|stands)\s+(?:still|straight|centered|calmly|front-facing|facing camera|with hands in pockets)\b/i;
+  const actionWords = /\b(?:fight|combat|attack|horde|swarm|wolf|monster|gate|battle|rescue|lunge|strike|impact|corridor|tide|boss|collapse)\b/i;
+  for (const prompt of prompts) {
+    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+    if (staticPose.test(text) && actionWords.test(text)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "reference_pose_lock",
+        message: "Action-scene prompt may preserve a neutral standing reference pose; use active pose, camera angle, and changed body position in review.",
+        resolved: false,
+      });
+    }
+  }
+  return findings;
+}
+
+function contaminatedReferenceFindings(visualReferencePlan) {
+  const findings = [];
+  const contaminants = /\b(?:office|monitor|screen|control room|laboratory|soldier|operator|desk|hallway|room|camera feed)\b/i;
+  for (const target of visualReferencePlan?.reference_targets ?? []) {
+    if (!["action", "ui", "prop"].includes(String(target.kind ?? ""))) continue;
+    const anchor = String(target.prompt_anchor ?? "");
+    if (String(target.kind) === "action" && contaminants.test(anchor)) {
+      findings.push({
+        image_id: null,
+        scene_id: (target.scene_ids ?? [null])[0],
+        severity: "warning",
+        code: "contaminated_action_ref",
+        message: `Action/effect reference ${target.ref_id} includes full-scene/location language; action refs should isolate effect shape, color, and interaction pattern.`,
+        resolved: false,
+      });
+    }
+  }
+  return findings;
 }
 
 async function validateReferencePaths(prompts) {
@@ -385,6 +442,7 @@ function assertReviewedPrompts(originalPrompts, reviewedPrompts, timedPlan) {
     const reviewed = reviewedPrompts[index];
     if (reviewed.image_id !== original.image_id) throw new Error(`Visual review changed image_id at index ${index}: ${original.image_id} -> ${reviewed.image_id}`);
     if (reviewed.scene_id !== original.scene_id) throw new Error(`Visual review changed scene_id for ${original.image_id}: ${original.scene_id} -> ${reviewed.scene_id}`);
+    if ((original.visual_beat_id ?? null) !== (reviewed.visual_beat_id ?? null)) throw new Error(`Visual review changed visual_beat_id for ${original.image_id}: ${original.visual_beat_id} -> ${reviewed.visual_beat_id}`);
     if (!timedSceneIds.has(reviewed.scene_id)) throw new Error(`Visual review produced unknown scene_id ${reviewed.scene_id} for ${reviewed.image_id}`);
     if (!reviewed.modelslab_image_prompt) throw new Error(`Visual review produced empty prompt for ${reviewed.image_id}`);
   }
@@ -437,6 +495,8 @@ async function main() {
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));
   assertReviewedPrompts(promptPlan.prompts, reviewedPrompts, timedPlan);
   findings.push(...positiveLanguageFindings(reviewedPrompts));
+  findings.push(...staticPoseFindings(reviewedPrompts));
+  findings.push(...contaminatedReferenceFindings(visualReferencePlan));
   findings.push(...await validateReferencePaths(reviewedPrompts));
   const unresolvedBlockers = findings.filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
   const status = unresolvedBlockers.length ? "blocked" : "passed";

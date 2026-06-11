@@ -35,8 +35,9 @@ Commands:
   goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
   goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
   goldflow timing bind             Bind semantic scenes to Whisper timing
+  goldflow visual beats            Split timed semantic scenes into visual image beats
   goldflow visual refs             Plan visual references, state refs, and anchor strategy
-  goldflow visual plan             Author current-scene-only image prompts
+  goldflow visual plan             Author current-scene-only image prompts from visual beats
   goldflow visual review           Review/fix image prompts with LLM, then validate blockers
   goldflow imagegen start          Generate images from approved prompt plan
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
@@ -50,7 +51,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  ingest source -> script approve -> script speakability -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual refs -> visual plan -> visual review -> imagegen start -> render start
+  ingest source -> script approve -> script speakability -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual beats -> visual refs -> visual plan -> visual review -> imagegen start -> render start
 `);
 }
 
@@ -72,6 +73,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("local-whisper-word-timing.mjs", flags);
 } else if (command === "timing" && subcommand === "bind") {
   run("timing-bind.mjs", flags);
+} else if (command === "visual" && subcommand === "beats") {
+  run("visual-beat-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "plan") {
   run("visual-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {

@@ -17,12 +17,13 @@ Production moves through one artifact chain:
 9. Review TTS and timing artifacts before downstream production.
 10. Timing-bound SFX and score planning from Whisper timing.
 11. Longform audio bed mix.
-12. Visual reference planning: create `character_state_refs.json` and any style/location/action reference specs from locked script, bibles, and semantic scenes.
-13. Manual agent/operator review and optimization of reference prompts. Character state refs become the definitive visual identity/wardrobe/state contract.
-14. Reference generation in dependency order: style ref first, then character/location/action anchors.
-15. Visual prompt planning consumes approved references and current-scene facts.
-16. Visual prompt review/fix pass checks the authored prompts against scene facts and approved refs.
-17. Image generation and render.
+12. Visual beat planning: split timing-bound semantic scenes into shorter image beats before prompt authoring.
+13. Visual reference planning: create `character_state_refs.json` and any style/location/action reference specs from locked script, bibles, and semantic scenes.
+14. Manual agent/operator review and optimization of reference prompts. Character state refs become the definitive visual identity/wardrobe/state contract.
+15. Reference generation in dependency order: style ref first, then character/location/action anchors.
+16. Visual prompt planning consumes approved references, current-scene facts, and visual beats.
+17. Visual prompt review/fix pass checks the authored prompts against scene facts and approved refs.
+18. Image generation and render.
 
 Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, visual reference planning, current-scene-only visual prompt planning, LLM visual prompt review, strict ModelsLab image generation, and a durable continuous-audio render.
 
@@ -34,7 +35,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Generic script enhancement is optional and pre-lock only. If enhancement changes the script, every downstream artifact must be regenerated from the new exact hash.
 - Keep caption text, spoken TTS text, and semantic visual facts as separate layers. Captions preserve the approved script; TTS may use approved speakable equivalents; visuals use extracted scene facts.
 - Protected terms need explicit speakability handling before TTS, especially ranks, UI labels, odds, decimals, currencies, acronyms, and system messages.
-- Script speakability is a TTS guidance stage, not script enhancement. It must not mutate `script_clean.md`; it writes `script_speakability_report.json`, `tts_spoken_overrides.json`, and `protected_terms_report.json`.
+- Script speakability is a TTS guidance stage, not script enhancement. It must not mutate `script_clean.md`; it writes `script_speakability_report.json`, `tts_spoken_overrides.json`, and `protected_terms_report.json`. It must flag explicit narrator self-reference such as "the narrator wants you to understand" because that prose can sound artificial when spoken.
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
@@ -44,14 +45,17 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
+- Visual prompt planning must consume `visual_beat_plan.json` when present. Semantic scenes are not image cuts; long scenes must be split into multiple visual beats before imagegen.
 - Positive visual language is mandatory from inception. Reference anchors, character state refs, scene prompts, prompt reviews, and imagegen payloads must describe what should appear, never what should be avoided. Do not use clauses such as "no...", "not...", "without...", "avoid...", "exclude...", "rather than...", or "instead of..." in production prompts.
 - When a visual risk needs mitigation, convert it into a positive construction: write the exact garment, subject count, role, pose, frame composition, and visible action wanted.
 - Required references must exist before image generation. Style ref comes first, then character/location/action anchors as needed; do not bypass missing reference requirements for production.
+- Reference kinds have strict boundaries: character refs provide identity and wardrobe; location refs provide environment; UI refs provide interface design; action/effect refs provide effect shape, color, movement path, and interaction logic. Scene prompts provide the actual pose, camera angle, and current location.
 - Character state references are produced before visual planning and are definitive for visual identity, wardrobe, and character state. Do not let visual planners infer wardrobe from ambiguous prose such as "gray suit"; use curated state-ref prompt anchors.
 - Before image generation, the agent must manually review and optimize style, character, and key action reference prompts. Main character refs should specify identity, body type, hair, face, wardrobe state, and common model misread risks in positive production language.
 - For ambiguous wardrobe states, avoid terms that trigger unwanted default garments. Use manually curated state-ref wording that describes the exact garment construction, neckline, fabric, silhouette, and production context in positive language.
 - For multi-character scenes, references attach only from validated character_state_refs. Single-character shots should not attach another character's ref.
 - Visual prompt planning must not create definitive character anchors. It may consume approved `character_state_refs`, select which refs are visible/style-critical for a cut, and report missing reference coverage as warnings or blockers.
+- Image prompts that attach references must include positive reference slot mapping in prompt text, such as "Image 1 provides character identity for Kang Jiwoo; image 2 provides the dungeon location; image 3 provides the blue attention-thread effect." Attachment order must be intentional, not incidental.
 - Visual prompt review is the only LLM prompt-fix stage before imagegen. It may revise prompt wording, but must preserve scene IDs, image IDs, timing, and source hashes. Code gates validate only structure, hashes, missing references, and unresolved blockers.
 
 ## Commands
@@ -69,6 +73,7 @@ node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <serie
 node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
 ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
 ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01

@@ -10,6 +10,7 @@ const timeoutMs = Number(process.env.ANIFACTORY_MODELSLAB_IMAGEGEN_TIMEOUT_MS ??
 const width = Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_WIDTH ?? 1024);
 const height = Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_HEIGHT ?? 576);
 const fluxKleinStrength = Number(process.env.ANIFACTORY_FLUX_KLEIN_IMG2IMG_STRENGTH ?? 0.72);
+const fluxKleinGuidanceScale = Number(process.env.ANIFACTORY_FLUX_KLEIN_GUIDANCE_SCALE ?? 3.5);
 const modelslabImageSamples = Math.min(2, Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_SAMPLES ?? 1) || 1));
 
 export function nowIso() {
@@ -162,6 +163,8 @@ export async function generateModelslabImage({
     height: requestedHeight,
     samples: modelslabImageSamples,
     base64: false,
+    enhance_prompt: false,
+    guidance_scale: model === "flux-klein" ? fluxKleinGuidanceScale : Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_GUIDANCE_SCALE ?? 3.5),
     track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
   };
   const payload = referenceUrls.length
@@ -169,7 +172,6 @@ export async function generateModelslabImage({
         ...commonPayload,
         init_image: referenceUrls,
         strength: model === "flux-klein" ? fluxKleinStrength : 0.72,
-        enhance_prompt: false,
       }
     : { ...commonPayload };
   const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2);

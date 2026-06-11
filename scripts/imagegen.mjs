@@ -79,11 +79,20 @@ function referencePathFor(target) {
 }
 
 function referencePrompt(target) {
+  const kind = String(target.kind ?? "");
+  const kindInstruction = {
+    style: "style reference sheet: anime/manhwa rendering language, line quality, color palette, lighting, and polished production finish",
+    character_state: "character identity reference sheet: face, hair, age, body type, wardrobe, expression range, and material details; scene prompts will provide action pose",
+    location: "location reference sheet: environment, architecture, scale, lighting, materials, and readable geography",
+    prop: "prop reference sheet: object shape, surface, markings, scale, and material details",
+    ui: "UI reference sheet: interface layout, typography, color, glow, panels, and exact display motif",
+    action: "action and effect reference sheet: movement path, energy color, effect shape, interaction pattern, and spatial logic on a clean neutral staging field",
+  }[kind] ?? "production reference image";
   const parts = [
     target.prompt_anchor,
-    target.kind ? `${target.kind} reference sheet` : "production reference image",
+    kindInstruction,
     target.subject ? `subject: ${target.subject}` : "",
-    "clean single production reference, stable identity and materials, cinematic longform frame",
+    "clean production reference, stable visual design, cinematic anime manhwa longform frame",
   ].filter(Boolean);
   return parts.join(", ");
 }
@@ -104,13 +113,31 @@ async function validateReferences(prompt) {
   return paths;
 }
 
-function referenceRank(refId, requirement = {}) {
-  if (refId === "style_ref") return 0;
-  if (/jiwoo|dohyun|han_sol|baek_mun|hwang|cheol|taemin|yuna|vanguard|tyrant|demon/i.test(refId)) return 1;
-  if (requirement.kind === "character") return 1;
-  if (/location|hall|arena|street|office|room|den|chamber|gate/i.test(refId)) return 2;
-  if (/ui|orb|file|door|core|domain|redemption/i.test(refId)) return 3;
-  return 4;
+function referenceSortKey(requirement, index) {
+  const explicitOrder = Number(requirement.slot_order ?? requirement.order ?? requirement.image_slot ?? NaN);
+  const requiredRank = requirement.required === true ? 0 : 1;
+  return {
+    requiredRank,
+    explicitOrder: Number.isFinite(explicitOrder) ? explicitOrder : 999,
+    index,
+  };
+}
+
+function referenceSlotPurpose(requirement) {
+  const kind = String(requirement.kind ?? "").toLowerCase();
+  const subject = requirement.subject ?? requirement.ref_id;
+  if (kind.includes("character")) return `character identity and wardrobe for ${subject}`;
+  if (kind.includes("location")) return `location environment for ${subject}`;
+  if (kind.includes("style")) return "anime manhwa style language";
+  if (kind.includes("action")) return `action or effect design for ${subject}`;
+  if (kind.includes("ui")) return `UI design for ${subject}`;
+  if (kind.includes("prop")) return `prop design for ${subject}`;
+  return `visual reference for ${subject}`;
+}
+
+function referenceSlotInstruction(slots) {
+  if (!slots.length) return "";
+  return slots.map((slot) => `Image ${slot.slot} provides ${slot.purpose}.`).join(" ");
 }
 
 function attachReferencePathsToPrompts(plan, referenceById) {
@@ -121,15 +148,24 @@ function attachReferencePathsToPrompts(plan, referenceById) {
         requirement,
         index,
         path: referenceById.get(requirement.ref_id),
-        rank: referenceRank(requirement.ref_id, requirement),
+        sortKey: referenceSortKey(requirement, index),
       }))
       .filter((row) => row.path)
-      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .sort((a, b) => a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index)
       .slice(0, maxSceneReferences);
     const selectedIds = new Set(selected.map((row) => row.requirement.ref_id));
+    const referenceSlots = selected.map((row, index) => ({
+      slot: index + 1,
+      ref_id: row.requirement.ref_id,
+      kind: row.requirement.kind ?? null,
+      path: row.path,
+      purpose: row.requirement.slot_purpose ?? referenceSlotPurpose(row.requirement),
+      reason: row.requirement.reason ?? null,
+    }));
     return {
       ...prompt,
       required_reference_paths: selected.map((row) => row.path),
+      reference_slots: referenceSlots,
       reference_usage: requirements.map((requirement) => {
         const refPath = referenceById.get(requirement.ref_id) ?? null;
         if (!refPath) {
@@ -159,6 +195,12 @@ function attachReferencePathsToPrompts(plan, referenceById) {
   return { ...plan, prompts, reference_paths_attached_at: new Date().toISOString(), max_scene_references: maxSceneReferences };
 }
 
+function promptWithReferenceSlots(prompt) {
+  const basePrompt = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "").trim();
+  const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? []);
+  return [slotInstruction, basePrompt].filter(Boolean).join(" ");
+}
+
 async function promptFresh(prompt, outputPath) {
   if (!(await exists(outputPath))) return false;
   const sidecar = `${outputPath}.prompt.sha256`;
@@ -182,13 +224,14 @@ async function runPool(items, worker, limit) {
 
 async function generateOne(prompt) {
   const outputPath = imagePathFor(prompt);
-  const promptHash = prompt.prompt_hash ?? sha256(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
-  if (!force && await promptFresh(prompt, outputPath)) {
+  const referenceImagePaths = await validateReferences(prompt);
+  const modelPrompt = promptWithReferenceSlots(prompt);
+  const promptHash = sha256(modelPrompt);
+  if (!force && await promptFresh({ ...prompt, prompt_hash: promptHash, modelslab_image_prompt: modelPrompt }, outputPath)) {
     return { image_id: prompt.image_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
   }
-  const referenceImagePaths = await validateReferences(prompt);
   const generated = await generateModelslabImage({
-    prompt: prompt.modelslab_image_prompt ?? prompt.image_prompt,
+    prompt: modelPrompt,
     outputPath,
     referenceImagePaths,
     model: prompt.image_model_route ?? "flux-klein",
@@ -199,6 +242,8 @@ async function generateOne(prompt) {
     prompt_hash: promptHash,
     source_prompt_path: promptPath,
     reference_image_paths: referenceImagePaths,
+    reference_slots: prompt.reference_slots ?? [],
+    modelslab_prompt: modelPrompt,
     model: prompt.image_model_route ?? "flux-klein",
     generated,
     updated_at: new Date().toISOString(),

@@ -17,6 +17,7 @@ const episode = flags.episode ?? "ep_01";
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
+const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
@@ -129,6 +130,11 @@ function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
 function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
   return {
     scene_id: scene.scene_id,
+    visual_beat_id: scene.visual_beat_id ?? null,
+    parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
+    beat_index: scene.beat_index ?? null,
+    beat_count: scene.beat_count ?? null,
+    visual_beat_focus: scene.visual_beat_focus ?? null,
     title: scene.title,
     start_sec: scene.start_sec,
     end_sec: scene.end_sec,
@@ -153,7 +159,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
 }
 
 function relevantReferenceTargets(scene, visualReferencePlan) {
-  const sceneId = scene.scene_id;
+  const sceneId = scene.parent_scene_id ?? scene.scene_id;
   return (visualReferencePlan?.reference_targets ?? []).filter((target) => {
     if (!Array.isArray(target.scene_ids) || !target.scene_ids.length) return false;
     return target.scene_ids.includes(sceneId);
@@ -190,13 +196,18 @@ async function enrichVisualReferencePlan(visualReferencePlan) {
   return { ...visualReferencePlan, reference_targets: targets };
 }
 
-function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map()) {
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null) {
+  const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
+    ? visualBeatPlan.beats
+    : timedPlan.scenes;
   const compactTimedPlan = {
     source_script_hash: timedPlan.source_script_hash,
-    scene_count: timedPlan.scenes?.length ?? 0,
+    scene_count: sourceRows?.length ?? 0,
+    source_unit: visualBeatPlan ? "visual_beats" : "timed_scenes",
+    parent_scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
-    scenes: (timedPlan.scenes ?? []).map((scene) => ({
+    scenes: (sourceRows ?? []).map((scene) => ({
       ...compactSceneForPrompt(scene, stateRefIndex),
       reference_targets: relevantReferenceTargets(scene, visualReferencePlan),
     })),
@@ -217,17 +228,25 @@ Rules:
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Identify exact subject roles by name and action, especially in multi-character scenes.
+- For visual beats, use visual_beat_focus to change camera angle, pose, action moment, and composition across beats in the same parent scene.
+- Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
+- Location references are environment evidence. Use them for setting, architecture, lighting, and materials.
+- Action/effect references are visual language evidence. Use them for power shape, energy color, and interaction pattern while keeping the beat's current location and subjects.
+- In modelslab_image_prompt, include explicit reference slot mapping when references are needed, phrased like: "Image 1 provides character identity for Kang Jiwoo; image 2 provides the dungeon location; image 3 provides the blue attention-thread effect."
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.prompt_anchor, copy that prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
 - For each cut, include only references that are visible or style-critical.
 - Use visual reference targets to decide reference_usage and anchor_roles.
+- Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1.
+- Put character identity refs before location refs when the main risk is character identity. Put location refs before character refs when the main risk is the environment. Put action/effect refs after identity and location refs unless the effect is the primary subject.
+- Each reference requirement should include slot_purpose, such as "character identity and wardrobe for Kang Jiwoo" or "dungeon location environment".
 - For standalone_ref targets, mark reference_usage as attach_existing_ref only when a required reference path exists; otherwise report missing_reference_coverage.
 - For derive_from_first_clean_cut, derive_from_best_cut, and derive_from_first_clean_wide_cut targets, nominate suitable source-anchor cuts with anchor_roles.
 - For no_ref_needed targets, do not attach a reference.
-- Output exactly one prompt per timed scene.
-- Return ${compactTimedPlan.scene_count} prompts, one for every scene_id in the timed plan.
+- Output exactly one prompt per ${compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene"}.
+- Return ${compactTimedPlan.scene_count} prompts, one for every unit in the plan.
 
 TIMED SCENE PLAN:
 ${JSON.stringify(compactTimedPlan, null, 2)}
@@ -242,11 +261,12 @@ Return JSON only:
     {
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
+      "visual_beat_id": "scene_001_beat_01",
       "start_sec": 0,
       "duration_sec": 6,
       "image_prompt": "positive visual prompt only",
       "modelslab_image_prompt": "same positive prompt optimized for flux-klein",
-      "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"reason":"..."}],
+      "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
       "anchor_roles": [{"ref_id":"...","kind":"character_state|location|prop|ui|action","anchor_role":"source_anchor","reason":"..."}],
@@ -319,6 +339,7 @@ function normalizePrompt(row, index, episodeId) {
   return {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
+    visual_beat_id: row.visual_beat_id ?? null,
     start_sec: Number(row.start_sec ?? 0),
     duration_sec: Math.max(1, Number(row.duration_sec ?? 6)),
     image_prompt: prompt,
@@ -374,11 +395,12 @@ function indexCharacterStateRefs(artifact) {
 }
 
 async function main() {
-  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs] = await Promise.all([
+  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs, visualBeatPlan] = await Promise.all([
     readJson(timedPlanPath, null),
     readJson(semanticPlanPath, null),
     readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
+    readJson(visualBeatPlanPath, null),
   ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (semanticPlan?.status !== "passed") throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
@@ -390,20 +412,24 @@ async function main() {
   }
   const enrichedVisualReferencePlan = await enrichVisualReferencePlan(visualReferencePlan);
   const stateRefIndex = indexCharacterStateRefs(characterStateRefs);
+  const visualSourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
+    ? visualBeatPlan.beats
+    : timedPlan.scenes;
   const stageName = `${episode}_visual_plan`;
   let llm;
   let parsedPrompts = [];
   let styleSummary = "";
   const useChunking = isLocalLLMRoute(stageName)
     && flags["visual-chunking"] !== "false"
-    && timedPlan.scenes.length > Number(flags["visual-single-call-max-scenes"] ?? 12);
+    && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 12);
   if (useChunking) {
-    const sceneChunks = chunkArray(timedPlan.scenes, Number(flags["visual-chunk-scenes"] ?? 8));
+    const sceneChunks = chunkArray(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 8));
     const styleSummaries = [];
     for (let index = 0; index < sceneChunks.length; index += 1) {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex);
+      const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
       const chunkLlm = await callLocal(chunkPrompt, `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`, Number(flags["visual-chunk-max-tokens"] ?? 7000));
       const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
       if (chunkPrompts.length !== sceneChunks[index].length) {
@@ -416,7 +442,7 @@ async function main() {
     styleSummary = styleSummaries.filter(Boolean)[0] ?? "";
     llm = { provider: "local-qwen", model: getLLMModel(stageName), chunked: true, chunk_count: sceneChunks.length, parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] } };
   } else {
-    const prompt = buildPrompt(timedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex);
+    const prompt = buildPrompt(timedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, visualBeatPlan?.status === "passed" ? visualBeatPlan : null);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
@@ -425,12 +451,21 @@ async function main() {
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
   assertPositivePromptLanguage(prompts);
-  if (prompts.length !== timedPlan.scenes.length) throw new Error(`Visual planner returned ${prompts.length} prompts for ${timedPlan.scenes.length} timed scenes.`);
+  const expectedPromptCount = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
+    ? visualBeatPlan.beats.length
+    : timedPlan.scenes.length;
+  if (prompts.length !== expectedPromptCount) throw new Error(`Visual planner returned ${prompts.length} prompts for ${expectedPromptCount} visual units.`);
   const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
   if (duplicateImageIds.length) throw new Error(`Visual planner produced duplicate image ids: ${duplicateImageIds.slice(0, 20).join(", ")}`);
   const timedSceneIds = new Set(timedPlan.scenes.map((scene) => scene.scene_id));
   const missingSceneIds = [...timedSceneIds].filter((sceneId) => !prompts.some((prompt) => prompt.scene_id === sceneId));
   if (missingSceneIds.length) throw new Error(`Visual planner missed timed scene ids: ${missingSceneIds.slice(0, 20).join(", ")}`);
+  const missingBeatIds = visualBeatPlan?.status === "passed"
+    ? visualBeatPlan.beats.map((beat) => beat.visual_beat_id).filter((beatId) => beatId && !prompts.some((prompt) => prompt.visual_beat_id === beatId))
+    : [];
+  if (missingBeatIds.length) throw new Error(`Visual planner missed visual beat ids: ${missingBeatIds.slice(0, 20).join(", ")}`);
+  const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
+  if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
     status: "passed",
@@ -439,11 +474,11 @@ async function main() {
     week,
     episode,
     source_script_hash: timedPlan.source_script_hash,
-    source_artifact_paths: [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath],
-    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: sourcePaths,
+    source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     style_summary: styleSummary,
-    prompt_policy: "current-scene-only positive prompting; no negative prompt text; references selected only when visible/style-critical",
+    prompt_policy: "current-scene-only positive prompting; visual-beat-aware when visual_beat_plan exists; references selected only when visible/style-critical and described by explicit image slot roles",
     prompts,
     warnings: llm.parsed.warnings ?? [],
     updated_at: new Date().toISOString(),

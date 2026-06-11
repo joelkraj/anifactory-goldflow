@@ -111,6 +111,15 @@ Rules:
 - Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction. Example: write "single visible protagonist centered in frame, plain institutional detainee jacket with open collar and flat fabric panels" rather than saying what clothing or extra characters to avoid.
 - Prompt anchors must be concrete and specific enough for image generation, but they are draft anchors requiring manual review before reference generation.
+- Reference kind taxonomy is strict:
+  - style refs define anime/manhwa rendering language, line quality, color, lighting, and shot polish.
+  - character_state refs define face, hair, age, body type, wardrobe, and state; they are identity/wardrobe evidence, not reusable pose instructions.
+  - location refs define environment, architecture, materials, lighting, and scale; include wide empty or lightly populated staging.
+  - prop refs define object shape, surface, markings, and scale.
+  - ui refs define interface design, typography, color, layout, and exact display motif.
+  - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
+- Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
+- Character reference anchors should include a simple reference-sheet stance and stable identity details; final scene poses come from the visual prompt stage.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
@@ -197,6 +206,15 @@ Rules:
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than" in prompt_anchor fields.
 - Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- Reference kind taxonomy is strict:
+  - style refs define anime/manhwa rendering language, line quality, color, lighting, and shot polish.
+  - character_state refs define face, hair, age, body type, wardrobe, and state; they are identity/wardrobe evidence, not reusable pose instructions.
+  - location refs define environment, architecture, materials, lighting, and scale; include wide empty or lightly populated staging.
+  - prop refs define object shape, surface, markings, and scale.
+  - ui refs define interface design, typography, color, layout, and exact display motif.
+  - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
+- Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
+- Character reference anchors should include a simple reference-sheet stance and stable identity details; final scene poses come from the visual prompt stage.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Return only valid JSON.

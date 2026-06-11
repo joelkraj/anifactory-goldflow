@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import sharp from "sharp";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -73,6 +74,15 @@ async function mediaDuration(filePath) {
   return Number(stdout.trim());
 }
 
+async function ffmpegHasFilter(filterName) {
+  try {
+    const { stdout } = await execFile("ffmpeg", ["-hide_banner", "-filters"]);
+    return new RegExp(`\\s${filterName}\\s`).test(stdout);
+  } catch {
+    return false;
+  }
+}
+
 function assTime(seconds) {
   const centis = Math.max(0, Math.round(Number(seconds) * 100));
   const cs = centis % 100;
@@ -85,6 +95,14 @@ function assTime(seconds) {
 
 function assEscape(value) {
   return String(value ?? "").replace(/[{}]/g, "").replace(/\r?\n/g, " ").trim();
+}
+
+function svgEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function subtitleEvents(words) {
@@ -130,6 +148,92 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 function concatEscape(filePath) {
   return filePath.replace(/'/g, "'\\''");
+}
+
+function ffmpegFilterFilename(filePath) {
+  return `'${String(filePath).replace(/\\/g, "\\\\").replace(/'/g, "'\\''")}'`;
+}
+
+function wrapSubtitleText(text, maxChars = 42) {
+  const words = String(text ?? "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 3);
+}
+
+function subtitleSvg(text) {
+  const fontSize = Math.round(Math.max(42, Math.min(66, height * 0.057)));
+  const lineHeight = Math.round(fontSize * 1.18);
+  const lines = wrapSubtitleText(text);
+  const firstY = height - 92 - Math.max(0, lines.length - 1) * lineHeight;
+  const tspans = lines.map((line, index) => `<tspan x="${Math.round(width / 2)}" y="${firstY + index * lineHeight}">${svgEscape(line)}</tspan>`).join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <rect width="100%" height="100%" fill="none"/>
+  <text text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" font-weight="700" fill="#ffff00" stroke="#000000" stroke-width="6" paint-order="stroke fill" stroke-linejoin="round">${tspans}</text>
+</svg>`;
+}
+
+function blankSubtitleSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="none"/></svg>`;
+}
+
+async function writeSubtitlePng(filePath, svg) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await sharp(Buffer.from(svg)).png().toFile(filePath);
+}
+
+async function writeSubtitleOverlayVideo(filePath, events, audioDuration) {
+  const frameDir = path.join(workDir, "subtitle-frames");
+  await fs.rm(frameDir, { recursive: true, force: true });
+  await fs.mkdir(frameDir, { recursive: true });
+  const blankPath = path.join(frameDir, "blank.png");
+  await writeSubtitlePng(blankPath, blankSubtitleSvg());
+  const rows = [];
+  let cursor = 0;
+  let frameIndex = 0;
+  for (const event of events) {
+    const start = Math.max(0, Number(event.start_sec));
+    const end = Math.min(Number(audioDuration), Number(event.end_sec));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    if (start > cursor + 0.03) {
+      rows.push({ filePath: blankPath, duration: start - cursor });
+    }
+    const framePath = path.join(frameDir, `${String(frameIndex).padStart(5, "0")}.png`);
+    await writeSubtitlePng(framePath, subtitleSvg(event.text));
+    rows.push({ filePath: framePath, duration: end - start });
+    cursor = Math.max(cursor, end);
+    frameIndex += 1;
+  }
+  if (audioDuration > cursor + 0.03) rows.push({ filePath: blankPath, duration: audioDuration - cursor });
+  if (!rows.length) rows.push({ filePath: blankPath, duration: Math.max(1, audioDuration) });
+  const concatPath = path.join(workDir, "subtitles.concat.txt");
+  const lines = [];
+  for (const row of rows) {
+    lines.push(`file '${concatEscape(row.filePath)}'`);
+    lines.push(`duration ${Math.max(0.05, row.duration).toFixed(3)}`);
+  }
+  lines.push(`file '${concatEscape(rows.at(-1).filePath)}'`);
+  await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
+  await execFile("ffmpeg", [
+    "-y",
+    "-f", "concat",
+    "-safe", "0",
+    "-i", concatPath,
+    "-vf", "fps=10,format=argb",
+    "-c:v", "qtrle",
+    filePath,
+  ], { maxBuffer: 1024 * 1024 * 32 });
+  return { path: filePath, frame_count: frameIndex };
 }
 
 async function buildImageConcat(promptPlan, imagegenReport, audioDuration) {
@@ -180,21 +284,45 @@ async function main() {
     "-r", String(fps),
     videoPath,
   ], { maxBuffer: 1024 * 1024 * 32 });
-  await execFile("ffmpeg", [
-    "-y",
-    "-i", videoPath,
-    "-i", audioPath,
-    "-vf", `ass=${ass.path}`,
-    "-map", "0:v:0",
-    "-map", "1:a:0",
-    "-c:v", "libx264",
-    "-preset", "medium",
-    "-crf", "18",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-shortest",
-    outputPath,
-  ], { maxBuffer: 1024 * 1024 * 32 });
+  const hasAssFilter = await ffmpegHasFilter("ass");
+  let subtitleRenderer = "ffmpeg_ass_filter";
+  let subtitleOverlay = null;
+  if (hasAssFilter) {
+    await execFile("ffmpeg", [
+      "-y",
+      "-i", videoPath,
+      "-i", audioPath,
+      "-vf", `ass=filename=${ffmpegFilterFilename(ass.path)}`,
+      "-map", "0:v:0",
+      "-map", "1:a:0",
+      "-c:v", "libx264",
+      "-preset", "medium",
+      "-crf", "18",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-shortest",
+      outputPath,
+    ], { maxBuffer: 1024 * 1024 * 32 });
+  } else {
+    subtitleRenderer = "sharp_png_overlay_video";
+    subtitleOverlay = await writeSubtitleOverlayVideo(path.join(workDir, "subtitle_overlay.mov"), subtitleEvents(wordTiming.words ?? []), audioDuration);
+    await execFile("ffmpeg", [
+      "-y",
+      "-i", videoPath,
+      "-i", subtitleOverlay.path,
+      "-i", audioPath,
+      "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto[v]",
+      "-map", "[v]",
+      "-map", "2:a:0",
+      "-c:v", "libx264",
+      "-preset", "medium",
+      "-crf", "18",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-shortest",
+      outputPath,
+    ], { maxBuffer: 1024 * 1024 * 32 });
+  }
   const report = {
     schema: "goldflow_render_report_v1",
     status: "passed",
@@ -211,6 +339,9 @@ async function main() {
     word_timing_path: wordTimingPath,
     audio_bed_report_path: audioBedReportPath,
     subtitle_style: "yellow text, black outline, no background box",
+    subtitle_renderer: subtitleRenderer,
+    subtitle_overlay_path: subtitleOverlay?.path ?? null,
+    subtitle_overlay_frame_count: subtitleOverlay?.frame_count ?? null,
     subtitle_count: ass.subtitle_count,
     image_count: concat.prompt_count,
     updated_at: new Date().toISOString(),

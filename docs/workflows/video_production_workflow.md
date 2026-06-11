@@ -70,6 +70,7 @@ The approved narration script is production truth. The pipeline should extract, 
 14. Visual beat planning.
    - Splits timed semantic scenes into image beats.
    - Current target: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
+   - Each visual beat carries a local script excerpt or concrete beat action so the prompt LLM authors the specific cut moment.
 
 15. Visual reference planning.
    - Plans style, character state, location, UI, action, and effect refs.
@@ -90,14 +91,16 @@ The approved narration script is production truth. The pipeline should extract, 
 18. Visual prompt planning.
    - Consumes approved refs, current-scene facts, and visual beats.
    - Uses current-scene context only.
-   - Prompts must name attached reference slots in order, for example: "Use image one as character identity for Kang Jiwoo; use image two as the dungeon location."
-   - When the imagegen wrapper injects reference slot mapping, the authored prompt body should not duplicate the same "Use image..." sentences.
+   - Prompts must preserve attached reference slots in structured order through `reference_requirements.slot_order` and `slot_purpose`.
+   - The imagegen wrapper injects reference slot mapping, so the authored prompt body should not duplicate the same "Use image..." sentences.
    - Prompt bodies should describe one continuous full-frame scene where the current environment fills the image; references are design guides, not visible panels or backgrounds.
    - Prompts must use positive visual language only.
+   - Run prompt authoring in small parent-scene-preserving chunks for both Codex and local Qwen; large whole-episode batches tend to collapse into repeated hero tableaux.
 
 19. Visual prompt review/fix.
    - One LLM review/fix pass before imagegen.
    - Checks subject focus, identity blending risk, unnecessary refs, missing refs, action direction, literalized metaphors, wardrobe ambiguity, and contradictions with semantic facts.
+   - Blocks metadata-style prompts, duplicated reference-slot text, sheet/panel scene prompts, and repeated tableaux across visual beats.
    - Code gates validate structure and blockers; they do not creatively author.
 
 20. Image generation.

@@ -122,6 +122,8 @@ function compactScene(scene) {
     beat_index: scene.beat_index ?? null,
     beat_count: scene.beat_count ?? null,
     visual_beat_focus: scene.visual_beat_focus ?? null,
+    visual_beat_action: scene.visual_beat_action ?? null,
+    visual_beat_script_excerpt: scene.visual_beat_script_excerpt ?? null,
     title: scene.title,
     start_sec: scene.start_sec,
     duration_sec: scene.duration_sec,
@@ -142,6 +144,8 @@ function compactPrompt(prompt) {
     image_id: prompt.image_id,
     scene_id: prompt.scene_id,
     visual_beat_id: prompt.visual_beat_id ?? null,
+    visual_beat_action: prompt.visual_beat_action ?? null,
+    visual_beat_script_excerpt: prompt.visual_beat_script_excerpt ?? null,
     start_sec: prompt.start_sec,
     duration_sec: prompt.duration_sec,
     modelslab_image_prompt: prompt.modelslab_image_prompt ?? prompt.image_prompt,
@@ -216,6 +220,7 @@ Review for:
 - vague multi-character action staging
 - prompt contradiction against current scene facts
 - reference-pose lock, where the prompt lets a character preserve a neutral reference pose during an action scene
+- repeated tableau, where several beats in one scene show the same hero pose or same summary image with only camera labels changed
 - contaminated action/effect references, where a power/effect ref brings its own room, screens, soldiers, or unrelated scene into the prompt
 
 Rules:
@@ -226,16 +231,24 @@ Rules:
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
+- visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
+- Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
+- Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
+- modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
+- Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
+- Every prompt in the same scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
+- If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
+- Scene cuts should be one continuous full-frame composition, not contact sheets, comic panels, reference panels, turnarounds, UI mockups, or split-screen layouts.
 - Location references provide architecture, environment, lighting, and materials only.
 - Action/effect references provide effect shape, color, and interaction pattern only. Current scene location and current visible subjects stay authoritative.
-- When references are attached, include positive Flux-style slot mapping in modelslab_image_prompt: "Use image one as character identity for ...; use image two as location ...; use image three as effect style ..."
+- When references are attached, preserve positive Flux-style slot mapping through reference_requirements.slot_order and slot_purpose. The imagegen wrapper adds the "Use image one as..." text at generation time.
 - For action scenes, use active pose language with direction and changed body position.
 - Preserve each image_id, scene_id, start_sec, and duration_sec exactly.
 - Preserve one reviewed prompt for every input prompt.
 - If a prompt is already good, keep it materially unchanged.
 - If a reference is not visible or style-critical for this cut, remove it from reference_usage and required_reference_paths.
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
-- Preserve clear reference slot mapping in the prompt so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
+- Preserve clear reference slot mapping in reference_requirements so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
 - If a required existing reference is missing, add a finding with severity "blocker".
 - If a problem is fixed in revised prompt text, mark resolved true.
 - Do not invent new canonical character anchors. Use character_state_refs and visual_reference_plan only.
@@ -267,8 +280,8 @@ Return JSON only:
       "visual_beat_id": "same",
       "start_sec": 0,
       "duration_sec": 6,
-      "image_prompt": "reviewed positive prompt",
-      "modelslab_image_prompt": "reviewed positive prompt optimized for image model",
+      "image_prompt": "reviewed positive full-frame scene prompt",
+      "modelslab_image_prompt": "reviewed positive full-frame scene prompt optimized for image model",
       "reference_requirements": [{"ref_id":"...","kind":"character_state|location|style|ui|prop|action","required":true,"slot_order":1,"slot_purpose":"character identity and wardrobe for ...","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [],
@@ -285,7 +298,7 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|contaminated_action_ref|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|panel_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|other",
       "message": "specific issue",
       "resolved": true
     }
@@ -350,6 +363,24 @@ function chunkArray(items, size) {
   return chunks;
 }
 
+function chunkByScene(items, targetSize) {
+  const chunks = [];
+  let current = [];
+  let currentSceneId = null;
+  for (const item of items) {
+    const sceneId = item.scene_id ?? null;
+    const startsNewScene = current.length && sceneId !== currentSceneId;
+    if (startsNewScene && current.length >= targetSize) {
+      chunks.push(current);
+      current = [];
+    }
+    current.push(item);
+    currentSceneId = sceneId;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
 function normalizeReviewedPrompt(row, original) {
   const prompt = String(row.modelslab_image_prompt ?? row.image_prompt ?? original.modelslab_image_prompt ?? original.image_prompt ?? "").trim();
   return {
@@ -357,6 +388,8 @@ function normalizeReviewedPrompt(row, original) {
     image_id: original.image_id,
     scene_id: original.scene_id,
     visual_beat_id: original.visual_beat_id ?? row.visual_beat_id ?? null,
+    visual_beat_action: original.visual_beat_action ?? row.visual_beat_action ?? null,
+    visual_beat_script_excerpt: original.visual_beat_script_excerpt ?? row.visual_beat_script_excerpt ?? null,
     start_sec: Number(original.start_sec ?? 0),
     duration_sec: Math.max(1, Number(original.duration_sec ?? 6)),
     image_prompt: prompt,
@@ -388,6 +421,89 @@ function staticPoseFindings(prompts) {
         severity: "warning",
         code: "reference_pose_lock",
         message: "Action-scene prompt may preserve a neutral standing reference pose; use active pose, camera angle, and changed body position in review.",
+        resolved: false,
+      });
+    }
+  }
+  return findings;
+}
+
+function promptSimilarityKey(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/\bcut\s+\d+\s+of\s+\d+\b/g, "")
+    .replace(/\b(?:low angle close action frame|wide establishing composition|over shoulder perspective|dynamic diagonal action composition|tight emotional close frame|high angle surveillance style frame|side profile cinematic frame|foreground subject with deep background layers)\b/g, "")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "")
+    .replace(/[^a-z0-9가-힣]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 420);
+}
+
+function repeatedTableauFindings(prompts) {
+  const findings = [];
+  const byScene = new Map();
+  for (const prompt of prompts) {
+    const sceneId = prompt.scene_id ?? "unknown";
+    if (!byScene.has(sceneId)) byScene.set(sceneId, []);
+    byScene.get(sceneId).push(prompt);
+  }
+  for (const [sceneId, rows] of byScene.entries()) {
+    if (rows.length < 4) continue;
+    const counts = new Map();
+    for (const row of rows) {
+      const key = promptSimilarityKey(row.modelslab_image_prompt ?? row.image_prompt);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const repeated = [...counts.values()].filter((count) => count >= Math.min(4, rows.length));
+    if (repeated.length) {
+      findings.push({
+        image_id: null,
+        scene_id: sceneId,
+        severity: "blocker",
+        code: "repeated_tableau",
+        message: `Several visual beats in ${sceneId} share the same prompt body after camera-label normalization. Rewrite prompts around each visual_beat_script_excerpt action.`,
+        resolved: false,
+      });
+    }
+  }
+  return findings;
+}
+
+function scenePromptShapeFindings(prompts) {
+  const findings = [];
+  const badLayout = /\b(?:contact sheet|reference sheet|turnaround|split[- ]screen|comic panel|multi[- ]panel|panel layout|character sheet)\b/i;
+  const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
+  const duplicateSlotText = /\buse image (?:one|two|three|four|five|six|seven|eight) as\b/i;
+  for (const prompt of prompts) {
+    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+    if (metadataStart.test(text)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "metadata_prompt",
+        message: "Scene prompt starts with cut/scene/beat metadata instead of the visible action moment.",
+        resolved: false,
+      });
+    }
+    if (badLayout.test(text)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "panel_layout_prompt",
+        message: "Scene prompt requests a sheet, panel layout, turnaround, or split-screen composition for a production cut.",
+        resolved: false,
+      });
+    }
+    if (duplicateSlotText.test(text)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "duplicated_reference_slot_text",
+        message: "Scene prompt body contains reference slot mapping text that the imagegen wrapper injects separately.",
         resolved: false,
       });
     }
@@ -473,10 +589,9 @@ async function main() {
     throw new Error(`character_state_refs must be approved before visual review. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
   }
 
-  const useChunking = isLocalLLMRoute(`${episode}_visual_review`)
-    && flags["visual-review-chunking"] !== "false"
+  const useChunking = flags["visual-review-chunking"] !== "false"
     && promptPlan.prompts.length > Number(flags["visual-review-single-call-max-scenes"] ?? 10);
-  const chunks = useChunking ? chunkArray(promptPlan.prompts, Number(flags["visual-review-chunk-scenes"] ?? 6)) : [promptPlan.prompts];
+  const chunks = useChunking ? chunkByScene(promptPlan.prompts, Number(flags["visual-review-chunk-scenes"] ?? 6)) : [promptPlan.prompts];
   const reviewedRows = [];
   const findings = [];
   const warnings = [];
@@ -495,7 +610,9 @@ async function main() {
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));
   assertReviewedPrompts(promptPlan.prompts, reviewedPrompts, timedPlan);
   findings.push(...positiveLanguageFindings(reviewedPrompts));
+  findings.push(...scenePromptShapeFindings(reviewedPrompts));
   findings.push(...staticPoseFindings(reviewedPrompts));
+  findings.push(...repeatedTableauFindings(reviewedPrompts));
   findings.push(...contaminatedReferenceFindings(visualReferencePlan));
   findings.push(...await validateReferencePaths(reviewedPrompts));
   const unresolvedBlockers = findings.filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);

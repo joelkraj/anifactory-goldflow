@@ -119,7 +119,7 @@ Rules:
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should include a simple reference-sheet stance and stable identity details; final scene poses come from the visual prompt stage.
+- Character reference anchors should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; final scene poses and locations come from the visual prompt stage.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
@@ -214,7 +214,7 @@ Rules:
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should include a simple reference-sheet stance and stable identity details; final scene poses come from the visual prompt stage.
+- Character reference anchors should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; final scene poses and locations come from the visual prompt stage.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Return only valid JSON.

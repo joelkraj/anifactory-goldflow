@@ -12,6 +12,7 @@ const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
+const scriptPath = flags.script ?? path.join(episodeDir, "script_clean.md");
 const outputPath = flags.output ?? path.join(episodeDir, "visual_beat_plan.json");
 const targetBeatSec = Number(flags["target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_TARGET_BEAT_SEC ?? 8.5);
 const maxBeatSec = Number(flags["max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_BEAT_SEC ?? 15);
@@ -76,11 +77,48 @@ function beatFocusLabel(index, count) {
   return "late action beat with consequence, reaction, or UI/story reveal";
 }
 
-function splitScene(scene) {
+function splitSentences(text) {
+  return String(text ?? "")
+    .replace(/\s+/g, " ")
+    .match(/[^.!?]+[.!?]+|[^.!?]+$/g)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) ?? [];
+}
+
+function sceneTextFromAnchors(scriptText, scene) {
+  const startAnchor = String(scene.script_excerpt_start ?? "").trim();
+  const endAnchor = String(scene.script_excerpt_end ?? "").trim();
+  if (!scriptText || !startAnchor || !endAnchor) return "";
+  const start = scriptText.indexOf(startAnchor);
+  if (start < 0) return "";
+  const end = scriptText.indexOf(endAnchor, start);
+  if (end < 0) return "";
+  return scriptText.slice(start, end + endAnchor.length).trim();
+}
+
+function splitSceneText(sceneText, count) {
+  const sentences = splitSentences(sceneText);
+  if (!sentences.length) return Array.from({ length: count }, () => "");
+  return Array.from({ length: count }, (_, index) => {
+    const start = Math.floor(index * sentences.length / count);
+    const end = Math.max(start + 1, Math.floor((index + 1) * sentences.length / count));
+    return sentences.slice(start, end).join(" ");
+  });
+}
+
+function compactBeatAction(text, fallback) {
+  const cleaned = String(text || fallback || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return fallback;
+  return cleaned.length > 360 ? `${cleaned.slice(0, 357).trim()}...` : cleaned;
+}
+
+function splitScene(scene, scriptText) {
   const count = visualBeatCount(scene);
   const duration = Math.max(1, Number(scene.duration_sec ?? 0));
   const start = Number(scene.start_sec ?? 0);
   const base = duration / count;
+  const sceneText = sceneTextFromAnchors(scriptText, scene);
+  const beatTexts = splitSceneText(sceneText, count);
   const beats = [];
   for (let index = 0; index < count; index += 1) {
     const beatStart = start + base * index;
@@ -96,6 +134,8 @@ function splitScene(scene) {
       end_sec: Number(beatEnd.toFixed(3)),
       duration_sec: Number(Math.max(1, beatEnd - beatStart).toFixed(3)),
       visual_beat_focus: beatFocusLabel(index, count),
+      visual_beat_script_excerpt: beatTexts[index] ?? "",
+      visual_beat_action: compactBeatAction(beatTexts[index], beatFocusLabel(index, count)),
       image_id_hint: `${episode}-cut-${String(beats.length + 1).padStart(3, "0")}`,
     });
   }
@@ -103,9 +143,12 @@ function splitScene(scene) {
 }
 
 async function main() {
-  const timedPlan = await readJson(timedPlanPath, null);
+  const [timedPlan, scriptText] = await Promise.all([
+    readJson(timedPlanPath, null),
+    fs.readFile(scriptPath, "utf8").catch(() => ""),
+  ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
-  const beats = timedPlan.scenes.flatMap(splitScene).map((beat, index) => ({
+  const beats = timedPlan.scenes.flatMap((scene) => splitScene(scene, scriptText)).map((beat, index) => ({
     ...beat,
     image_id_hint: `${episode}-cut-${String(index + 1).padStart(3, "0")}`,
   }));
@@ -117,13 +160,13 @@ async function main() {
     week,
     episode,
     source_script_hash: timedPlan.source_script_hash,
-    source_artifact_paths: [timedPlanPath],
-    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: [timedPlanPath, scriptPath],
+    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, scriptPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: timedPlan.timing_source,
     audio_duration_sec: timedPlan.audio_duration_sec,
     scene_count: timedPlan.scenes.length,
     visual_beat_count: beats.length,
-    policy: "Split timed semantic scenes into visual beats before image prompt authoring. Beats preserve scene facts and Whisper timing; LLM still authors the final prompt.",
+    policy: "Split timed semantic scenes into visual beats before image prompt authoring. Beats preserve scene facts, Whisper timing, and a local script excerpt for each beat; LLM still authors the final prompt.",
     beat_settings: { target_beat_sec: targetBeatSec, max_beat_sec: maxBeatSec, min_beat_sec: minBeatSec },
     beats,
     updated_at: new Date().toISOString(),

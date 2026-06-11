@@ -135,9 +135,13 @@ function referenceSlotPurpose(requirement) {
   return `visual reference for ${subject}`;
 }
 
+function slotWord(value) {
+  return ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"][Number(value)] ?? String(value);
+}
+
 function referenceSlotInstruction(slots) {
   if (!slots.length) return "";
-  return slots.map((slot) => `Image ${slot.slot} provides ${slot.purpose}.`).join(" ");
+  return slots.map((slot) => `Use image ${slotWord(slot.slot)} as ${slot.purpose}.`).join(" ");
 }
 
 function attachReferencePathsToPrompts(plan, referenceById) {

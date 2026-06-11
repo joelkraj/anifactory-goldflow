@@ -45,7 +45,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
-- Visual prompt planning must consume `visual_beat_plan.json` when present. Semantic scenes are not image cuts; long scenes must be split into multiple visual beats before imagegen.
+- Visual prompt planning must consume `visual_beat_plan.json` when present. Semantic scenes are not image cuts; long scenes must be split into multiple visual beats before imagegen. Default beat pacing aims for an average near 8 seconds, minimum 3 seconds, maximum 15 seconds.
 - Positive visual language is mandatory from inception. Reference anchors, character state refs, scene prompts, prompt reviews, and imagegen payloads must describe what should appear, never what should be avoided. Do not use clauses such as "no...", "not...", "without...", "avoid...", "exclude...", "rather than...", or "instead of..." in production prompts.
 - When a visual risk needs mitigation, convert it into a positive construction: write the exact garment, subject count, role, pose, frame composition, and visible action wanted.
 - Required references must exist before image generation. Style ref comes first, then character/location/action anchors as needed; do not bypass missing reference requirements for production.
@@ -55,7 +55,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - For ambiguous wardrobe states, avoid terms that trigger unwanted default garments. Use manually curated state-ref wording that describes the exact garment construction, neckline, fabric, silhouette, and production context in positive language.
 - For multi-character scenes, references attach only from validated character_state_refs. Single-character shots should not attach another character's ref.
 - Visual prompt planning must not create definitive character anchors. It may consume approved `character_state_refs`, select which refs are visible/style-critical for a cut, and report missing reference coverage as warnings or blockers.
-- Image prompts that attach references must include positive reference slot mapping in prompt text, such as "Image 1 provides character identity for Kang Jiwoo; image 2 provides the dungeon location; image 3 provides the blue attention-thread effect." Attachment order must be intentional, not incidental.
+- Image prompts that attach references must include positive Flux-style reference slot mapping in prompt text, such as "Use image one as character identity for Kang Jiwoo; use image two as the dungeon location; use image three as the blue attention-thread effect." Attachment order must be intentional, not incidental.
 - Visual prompt review is the only LLM prompt-fix stage before imagegen. It may revise prompt wording, but must preserve scene IDs, image IDs, timing, and source hashes. Code gates validate only structure, hashes, missing references, and unresolved blockers.
 
 ## Commands

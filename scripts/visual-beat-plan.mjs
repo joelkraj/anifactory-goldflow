@@ -13,9 +13,9 @@ const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
 const outputPath = flags.output ?? path.join(episodeDir, "visual_beat_plan.json");
-const targetBeatSec = Number(flags["target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_TARGET_BEAT_SEC ?? 18);
-const maxBeatSec = Number(flags["max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_BEAT_SEC ?? 28);
-const minBeatSec = Number(flags["min-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MIN_BEAT_SEC ?? 6);
+const targetBeatSec = Number(flags["target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_TARGET_BEAT_SEC ?? 8.5);
+const maxBeatSec = Number(flags["max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_BEAT_SEC ?? 15);
+const minBeatSec = Number(flags["min-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MIN_BEAT_SEC ?? 3);
 
 function parseFlags(parts) {
   const parsed = {};

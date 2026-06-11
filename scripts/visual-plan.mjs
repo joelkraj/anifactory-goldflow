@@ -232,7 +232,7 @@ Rules:
 - Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
 - Location references are environment evidence. Use them for setting, architecture, lighting, and materials.
 - Action/effect references are visual language evidence. Use them for power shape, energy color, and interaction pattern while keeping the beat's current location and subjects.
-- In modelslab_image_prompt, include explicit reference slot mapping when references are needed, phrased like: "Image 1 provides character identity for Kang Jiwoo; image 2 provides the dungeon location; image 3 provides the blue attention-thread effect."
+- In modelslab_image_prompt, include explicit reference slot mapping when references are needed, phrased like Flux context instructions: "Use image one as character identity for Kang Jiwoo; use image two as the dungeon location; use image three as the blue attention-thread effect."
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.prompt_anchor, copy that prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.

@@ -228,7 +228,7 @@ Rules:
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
 - Location references provide architecture, environment, lighting, and materials only.
 - Action/effect references provide effect shape, color, and interaction pattern only. Current scene location and current visible subjects stay authoritative.
-- When references are attached, include positive slot mapping in modelslab_image_prompt: "Image 1 provides character identity for ...; image 2 provides location ...; image 3 provides effect style ..."
+- When references are attached, include positive Flux-style slot mapping in modelslab_image_prompt: "Use image one as character identity for ...; use image two as location ...; use image three as effect style ..."
 - For action scenes, use active pose language with direction and changed body position.
 - Preserve each image_id, scene_id, start_sec, and duration_sec exactly.
 - Preserve one reviewed prompt for every input prompt.

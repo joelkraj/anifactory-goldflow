@@ -639,6 +639,50 @@ async function loadSpeakabilityRules() {
   return merged;
 }
 
+async function loadTtsSpokenOverrides(sourceScriptHash) {
+  const filePath = path.join(episodeDir, "tts_spoken_overrides.json");
+  const artifact = await readJsonIfExists(filePath, null);
+  if (!artifact) return { artifact: null, replacements: [], pronunciation_map: [] };
+  if (artifact.source_script_hash !== sourceScriptHash) {
+    throw new Error(`Stale TTS spoken overrides: ${filePath} is for ${artifact.source_script_hash}, current script is ${sourceScriptHash}. Rerun script speakability.`);
+  }
+  if (!/^(passed|approved)$/i.test(String(artifact.status ?? ""))) {
+    throw new Error(`TTS spoken overrides are not passed/approved: ${artifact.status ?? "missing_status"}. Review ${filePath}.`);
+  }
+  return {
+    artifact,
+    replacements: artifact.replacements ?? [],
+    pronunciation_map: artifact.pronunciation_map ?? [],
+  };
+}
+
+async function requireSpeakabilityReport(sourceScriptHash) {
+  if (flags["allow-missing-speakability"] === "true") return { status: "diagnostic_bypass" };
+  const filePath = path.join(episodeDir, "script_speakability_report.json");
+  const report = await readJsonIfExists(filePath, null);
+  if (!report) throw new Error(`Missing script_speakability_report.json. Run: node bin/goldflow.mjs script speakability --channel ${channel} --series ${seriesSlug} --week ${week} --episode ${episode}`);
+  if (report.source_script_hash !== sourceScriptHash) {
+    throw new Error(`Stale script_speakability_report.json: report is for ${report.source_script_hash}, current script is ${sourceScriptHash}. Rerun script speakability.`);
+  }
+  if (!/^(passed|approved)$/i.test(String(report.status ?? ""))) {
+    throw new Error(`Script speakability status is ${report.status ?? "missing_status"}. Resolve blockers before voice-plan.`);
+  }
+  return report;
+}
+
+function applySpokenOverrideRules(text, rules = []) {
+  let next = String(text ?? "");
+  for (const rule of rules ?? []) {
+    if (!rule?.from || typeof rule.to !== "string") continue;
+    const flagsValue = rule.flags ?? "g";
+    const pattern = rule.regex === true
+      ? new RegExp(rule.from, flagsValue)
+      : new RegExp(rule.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flagsValue);
+    next = next.replace(pattern, rule.to);
+  }
+  return next;
+}
+
 function stripTitle(text) {
   return String(text ?? "")
     .split(/\n/)
@@ -2217,7 +2261,7 @@ function qwenPronunciationText(value) {
     .trim();
 }
 
-function qwenSpokenText(value, speaker = "") {
+function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
   const isInterfaceSpeaker = /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(speaker ?? ""));
   let clean = String(value ?? "")
     .replace(/<\|speaker:\d+\|>/g, " ")
@@ -2231,7 +2275,8 @@ function qwenSpokenText(value, speaker = "") {
       .replace(/^:\s*/, "")
       .trim();
   }
-  const normalized = qwenPronunciationText(clean);
+  const overridden = applySpokenOverrideRules(clean, ttsOverrides.replacements ?? []);
+  const normalized = qwenPronunciationText(overridden);
   if (isInterfaceSpeaker) {
     const protectedTokens = [];
     const text = normalized.replace(/\b(?:[A-Z]\s+){1,}[A-Z]\b/g, (match) => {
@@ -2299,7 +2344,7 @@ function qwenInstructForUnit({ segment, unit, role, cast }) {
   ].join(" ");
 }
 
-function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}, ttsProvider = "qwen_local") {
+function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}, ttsProvider = "qwen_local", ttsOverrides = {}) {
   const unitRows = [];
   const segmentRows = [];
   for (const segment of segments) {
@@ -2317,7 +2362,7 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       const role = characterVoiceCastingEnabled()
         ? cast?.role ?? speakerRoleFor(speaker, unit.text ?? "", segment, dialogueContext)
         : "narrator";
-      const spokenText = qwenSpokenText(unit.performed_text ?? unit.text ?? unit.caption_text, sourceSpeaker);
+      const spokenText = qwenSpokenText(unit.performed_text ?? unit.text ?? unit.caption_text, sourceSpeaker, ttsOverrides);
       const row = {
         segment_id: segment.segment_id,
         unit_index: index + 1,
@@ -2356,6 +2401,7 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
     pronunciation_protocol: {
       letter_ranks_are_spelled: true,
       examples: ["SSS -> S S S", "SS-rank -> S S rank", "XP -> X P", "UI -> U I", "Level -1 -> Level negative one", "confirmed -> verified"],
+      tts_spoken_overrides_loaded: (ttsOverrides.replacements ?? []).length,
     },
     segment_count: segmentRows.length,
     unit_count: unitRows.length,
@@ -2724,6 +2770,8 @@ async function main() {
   await assertScriptApprovedForVoicePlan(scriptPath);
   const script = await fs.readFile(scriptPath, "utf8");
   const sourceScriptHash = sha256Text(script);
+  const scriptSpeakabilityReport = await requireSpeakabilityReport(sourceScriptHash);
+  const ttsSpokenOverrides = await loadTtsSpokenOverrides(sourceScriptHash);
   const seriesTags = palette();
   const universalTags = await loadUniversalFishTags();
   const speakabilityRules = await loadSpeakabilityRules();
@@ -2742,9 +2790,11 @@ async function main() {
   const applied = applyFishReferenceIds(voiceQualityAdjustedSegments, fishAudioConfig, dialogueContext);
   const baseSegments = applied.segments ?? applied;
   const missingRefRoles = applied.missingRefRoles ?? [];
-  const qwenGenerationPlan = buildQwenGenerationPlan(baseSegments, qwenConfig, dialogueContext, ttsProvider);
+  const qwenGenerationPlan = buildQwenGenerationPlan(baseSegments, qwenConfig, dialogueContext, ttsProvider, ttsSpokenOverrides);
   qwenGenerationPlan.source_script_hash = sourceScriptHash;
   qwenGenerationPlan.source_script_path = scriptPath;
+  qwenGenerationPlan.script_speakability_report_path = path.join(episodeDir, "script_speakability_report.json");
+  qwenGenerationPlan.tts_spoken_overrides_path = path.join(episodeDir, "tts_spoken_overrides.json");
   const qwenUnitsBySegment = new Map((qwenGenerationPlan.segments ?? []).map((segment) => [segment.segment_id, segment.qwen_generation_units ?? []]));
   const segments = baseSegments.map((segment) => ({
     ...segment,
@@ -2784,6 +2834,8 @@ async function main() {
       instruct_policy: "Each Qwen unit carries voice identity, character, scene beat, emotion, intensity, pacing, exact-word preservation, accent limits, and pronunciation normalization.",
       pronunciation_protocol: qwenGenerationPlan.pronunciation_protocol,
       generation_plan_path: path.join(episodeDir, "qwen_generation_plan.json"),
+      script_speakability_status: scriptSpeakabilityReport.status ?? null,
+      tts_spoken_overrides_loaded: ttsSpokenOverrides.replacements.length,
     },
     fish_s2_pro_policy: {
       model: fishAudioConfig.model ?? "s2-pro",
@@ -2836,9 +2888,10 @@ async function main() {
         "Spoken text must be clean: no bracketed emotion, breath, laugh, or stage tags.",
         "Use per-speaker/per-beat qwen_generation_units and stitch locally.",
         "Put voice identity, scene beat, emotion, intensity, pacing, accent limits, and exact-word preservation in --instruct.",
-        "Spell ambiguous rank/acronym tokens in spoken text when needed, e.g. SSS -> S S S.",
-        "Preserve captions/story text separately from Qwen pronunciation-normalized spoken text.",
-      ]
+      "Spell ambiguous rank/acronym tokens in spoken text when needed, e.g. SSS -> S S S.",
+      "Preserve captions/story text separately from Qwen pronunciation-normalized spoken text.",
+      "Apply approved tts_spoken_overrides.json only to qwen_spoken_text, never to script_clean.md or captions.",
+    ]
       : [
         "One dominant emotion per phrase.",
         "Tags apply to the following phrase.",

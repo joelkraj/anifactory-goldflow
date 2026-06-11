@@ -11,7 +11,7 @@ Production moves through one artifact chain:
 3. Production-readiness and speakability QA from the candidate script. These passes may suggest fixes, pronunciation mappings, and risk notes, but must not silently rewrite the story.
 4. Manual review and operator approval for the exact final script hash.
 5. Semantic scene annotation from the locked script and bibles.
-6. Narrator-only voice plan by default.
+6. Narrator-only voice plan by default. Voice planning requires current `script_speakability_report.json` and `tts_spoken_overrides.json` unless explicitly run in diagnostic bypass mode.
 7. ModelsLab Qwen TTS and stitch.
 8. Local Whisper word timing on the final stitched narration.
 9. Review TTS and timing artifacts before downstream production.
@@ -34,6 +34,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Generic script enhancement is optional and pre-lock only. If enhancement changes the script, every downstream artifact must be regenerated from the new exact hash.
 - Keep caption text, spoken TTS text, and semantic visual facts as separate layers. Captions preserve the approved script; TTS may use approved speakable equivalents; visuals use extracted scene facts.
 - Protected terms need explicit speakability handling before TTS, especially ranks, UI labels, odds, decimals, currencies, acronyms, and system messages.
+- Script speakability is a TTS guidance stage, not script enhancement. It must not mutate `script_clean.md`; it writes `script_speakability_report.json`, `tts_spoken_overrides.json`, and `protected_terms_report.json`.
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
@@ -58,6 +59,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 ```bash
 node bin/goldflow.mjs ingest source --channel <channel> --series <series> --week <week> --episode ep_01 --source <chatbot-output.md>
 node bin/goldflow.mjs script approve --channel <channel> --series <series> --week <week> --episode ep_01 --hash <script_clean_sha256>
+node bin/goldflow.mjs script speakability --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs semantic plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen

@@ -29,6 +29,7 @@ One production path. No legacy fallbacks.
 Commands:
   goldflow ingest source           Copy raw chatbot/script source into script_clean.md
   goldflow script approve          Write exact-hash review/approval lock artifacts
+  goldflow script speakability     Review approved script for TTS speakability and spoken overrides
   goldflow semantic plan           Extract semantic scene plan from locked script
   goldflow voice plan              Build narrator-first Qwen generation plan
   goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
@@ -49,7 +50,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  ingest source -> script approve -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual refs -> visual plan -> visual review -> imagegen start -> render start
+  ingest source -> script approve -> script speakability -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual refs -> visual plan -> visual review -> imagegen start -> render start
 `);
 }
 
@@ -59,6 +60,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("source-ingest.mjs", flags);
 } else if (command === "script" && subcommand === "approve") {
   run("script-approve.mjs", flags);
+} else if (command === "script" && subcommand === "speakability") {
+  run("script-speakability-plan.mjs", flags);
 } else if (command === "semantic" && subcommand === "plan") {
   run("semantic-scene-plan.mjs", flags);
 } else if (command === "voice" && subcommand === "plan") {

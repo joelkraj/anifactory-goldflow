@@ -62,6 +62,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - SFX should be noticeable but controlled.
    - Score should sit below SFX and narration.
    - Local ACE-Step can be selected with `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
+   - Planning backends are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for planning; ModelsLab is used for media generation.
 
 13. Longform audio bed mix.
    - Mixes narration, SFX, and score into one final continuous audio track.
@@ -98,11 +99,24 @@ The approved narration script is production truth. The pipeline should extract, 
 20. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
+   - Generate required references first: style reference, then character, location, UI, action, and prop references.
+   - If ModelsLab returns a queue or rate-limit error, rerun imagegen with lower concurrency and leave `--force` unset so existing references and completed cuts are reused.
 
 21. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
    - Current render style uses sharper foreground image over a blurred full-frame background with more aggressive Ken Burns motion.
    - Subtitles should be yellow text with small black outline and no box/background.
+
+## Current Model And Provider Choices
+
+- Narration TTS: ModelsLab Qwen TTS with the operator-locked Joel narrator clone.
+- Voice route: narrator-only unless the operator explicitly requests character voice casting.
+- Timing: local Whisper word timing on the final stitched narration.
+- SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
+- Score beds: local ACE-Step 1.5 is preferred for production score generation. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`.
+- Image model: ModelsLab Flux Klein.
+- Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
+- Render audio: one continuous longform mix containing narration, SFX, and score.
 
 ## Command Order
 

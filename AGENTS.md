@@ -42,6 +42,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
+- Planning LLM routes are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for semantic, audio, visual reference, visual prompt, or prompt review planning. ModelsLab is a media generation provider in this workflow, not a planning backend.
 - Score/music generation can use local ACE-Step 1.5 by setting `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or passing `--score-provider local_ace_step`. This feeds each beat-mapped chapter `ace_step_prompt` to `/Users/joel/AniFactoryTools/ACE-Step-1.5` and writes beds under `assets/audio/ace_step_score_beds`. Default local model selection is DiT `acestep-v15-turbo` with LM `acestep-5Hz-lm-1.7B`; override with `ANIFACTORY_ACE_STEP_CONFIG_PATH` and `ANIFACTORY_ACE_STEP_LM_MODEL`.
 - ModelsLab score generation remains available with `ANIFACTORY_SCORE_PROVIDER=modelslab` and uses `/api/v6/voice/music_gen` model_id `ai-music-generator`.
 - Narrator-only is the default voice route. Character voice casting requires an explicit operator request and flag.
@@ -60,6 +61,19 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Visual prompt planning must not create definitive character anchors. It may consume approved `character_state_refs`, select which refs are visible/style-critical for a cut, and report missing reference coverage as warnings or blockers.
 - Image prompts that attach references must include positive Flux-style reference slot mapping in prompt text, such as "Use image one as character identity for Kang Jiwoo; use image two as the dungeon location; use image three as the blue attention-thread effect." Attachment order must be intentional, not incidental.
 - Visual prompt review is the only LLM prompt-fix stage before imagegen. It may revise prompt wording, but must preserve scene IDs, image IDs, timing, and source hashes. Code gates validate only structure, hashes, missing references, and unresolved blockers.
+- Image generation uses ModelsLab Flux Klein by default. References are generated first and stored under `assets/images/references`; image cuts are stored under `assets/images`. When ModelsLab returns a queue/rate-limit error, resume with lower `--concurrency` and keep `--force` unset so fresh refs and completed cuts are reused.
+
+## Current Production Models And Methods
+
+- Source: polished narration prose from the operator/chatbot, with exact-hash script approval.
+- Speakability: targeted-only by default; broad speakability is opt-in.
+- Voice: narrator-only default through ModelsLab Qwen TTS using the locked Joel narrator clone.
+- Timing: local Whisper word timing is production truth for subtitles, SFX, score, visual beats, and render.
+- Audio planning: Codex or local Qwen only. If automated planner calls are unavailable, a Codex-agent manual plan may be written with explicit provenance, current source hashes, and Whisper timing.
+- SFX generation: ModelsLab `/api/v7/voice/sound-generation` assets are allowed after a Codex/local-Qwen/agent-authored plan. SFX events must use locked asset paths before mix.
+- Score generation: prefer local ACE-Step 1.5 for score beds; current default local model pair is `acestep-v15-turbo` plus `acestep-5Hz-lm-1.7B`.
+- Image generation: ModelsLab Flux Klein, with positive-only prompts and explicit reference slot mapping.
+- Render: one continuous mixed audio track, Whisper-timed subtitles, yellow subtitle text with a small black outline and no background box.
 
 ## Commands
 

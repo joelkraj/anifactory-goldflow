@@ -1152,7 +1152,11 @@ async function main() {
     generated_asset_count: generatedSfxAssets.length,
     reused_asset_count: reusedSfxAssets.length,
     explicit_sound_design_resolutions: [],
-    events: normalizedEvents.map((row) => ({ ...row.event, placement_resolution: row.placement_resolution })),
+    events: eventResolutions.map((event) => ({
+      ...event,
+      locked_asset_path: event.locked_asset_path ?? event.asset_path ?? null,
+      asset_resolution_mode: event.asset_path ? "locked_event_asset" : "missing_locked_event_asset",
+    })),
     resolved_events: eventResolutions,
     unresolved: eventResolutions.filter((event) => !event.asset_path || event.validation?.status === "failed").map((event) => ({
       event_id: event.event_id,

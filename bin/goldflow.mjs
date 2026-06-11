@@ -52,7 +52,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  ingest source -> script approve -> script speakability -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual beats -> visual refs -> visual plan -> visual review -> imagegen start -> render start
+  source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual beats -> visual refs -> visual plan -> visual review -> imagegen start -> render start
 `);
 }
 

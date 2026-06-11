@@ -9,8 +9,8 @@ Production moves through one artifact chain:
 0. Generate or obtain a polished narration story using the source-script workflow in `docs/workflows/source_script_generation_workflow.md`.
 1. Ingest a polished narration story into `script_clean.md`.
 2. Optional script polish/enhancement only when the operator explicitly asks for it, before approval, with the resulting script treated as a new candidate for review.
-3. Targeted production-readiness and speakability QA from the candidate script. These passes may suggest TTS-only fixes for known problem areas, pronunciation mappings, and risk notes, but must not silently rewrite the story. Broad speakability is optional and must be explicitly requested.
-4. Manual review and operator approval for the exact final script hash.
+3. Manual review and operator approval for the exact final script hash.
+4. Targeted production-readiness and speakability QA from the approved script. These passes may suggest TTS-only fixes for known problem areas, pronunciation mappings, and risk notes, but must not silently rewrite the story. Broad speakability is optional and must be explicitly requested.
 5. Semantic scene annotation from the locked script and bibles.
 6. Narrator-only voice plan by default. Voice planning requires current `script_speakability_report.json` and `tts_spoken_overrides.json` unless explicitly run in diagnostic bypass mode.
 7. ModelsLab Qwen TTS and stitch.
@@ -26,7 +26,7 @@ Production moves through one artifact chain:
 17. Visual prompt review/fix pass checks the authored prompts against scene facts and approved refs.
 18. Image generation and render.
 
-Current migrated scope is source ingest, script approval, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, visual reference planning, current-scene-only visual prompt planning, LLM visual prompt review, strict ModelsLab image generation, and a durable continuous-audio render.
+Current migrated scope is source ingest, script approval, targeted speakability, semantic scene planning, the audio spine, Whisper timing, timing binding, SFX/score enrichment, longform audio mix, visual beat planning, visual reference planning, current-scene-only visual prompt planning, LLM visual prompt review, strict ModelsLab image generation, and a durable continuous-audio render. The full production workflow is documented in `docs/workflows/video_production_workflow.md`.
 
 ## Hard Rules
 

@@ -6,6 +6,7 @@ This repo is the clean longform production lane. It intentionally excludes legac
 
 Production moves through one artifact chain:
 
+0. Generate or obtain a polished narration story using the source-script workflow in `docs/workflows/source_script_generation_workflow.md`.
 1. Ingest a polished narration story into `script_clean.md`.
 2. Optional script polish/enhancement only when the operator explicitly asks for it, before approval, with the resulting script treated as a new candidate for review.
 3. Targeted production-readiness and speakability QA from the candidate script. These passes may suggest TTS-only fixes for known problem areas, pronunciation mappings, and risk notes, but must not silently rewrite the story. Broad speakability is optional and must be explicitly requested.
@@ -30,6 +31,8 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 ## Hard Rules
 
 - Do not use source-seed scene annotations. Final semantic truth comes from the locked script.
+- Source scripts should arrive as spoken narration prose only. Use `docs/prompts/manhwa_recap_chatbot_prompt_v1.md` for manhwa recap chatbot generation unless a newer documented template is selected.
+- Chatbot prompts are versioned in `docs/prompts/`; improve those templates before adding deterministic source-prose repair to the pipeline.
 - Do not creatively rewrite approved scripts with deterministic code.
 - Treat the chatbot/operator-approved story as production truth. Qwen may analyze, extract, and flag issues, but it must not be trusted to improve story prose by default.
 - Generic script enhancement is optional and pre-lock only. If enhancement changes the script, every downstream artifact must be regenerated from the new exact hash.

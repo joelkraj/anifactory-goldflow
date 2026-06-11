@@ -323,6 +323,19 @@ function normalizeTtsDisfluencies(value) {
     .trim();
 }
 
+function normalizeAllCapsForTts(value) {
+  const keep = new Set(["UI", "ID", "SSS", "SS", "S", "A", "B", "C", "D", "E", "F"]);
+  return String(value ?? "").replace(/\b[A-Z][A-Z0-9' -]{2,}\b/g, (match) => match
+    .split(/(\s+|-)/)
+    .map((part) => {
+      if (/^\s+$|^-$/u.test(part)) return part;
+      if (keep.has(part)) return part;
+      if (!/[A-Z]/.test(part)) return part;
+      return part.charAt(0) + part.slice(1).toLowerCase();
+    })
+    .join(""));
+}
+
 function applyTextOverrides(units, overrides) {
   const rows = Array.isArray(overrides?.overrides) ? overrides.overrides : [];
   if (!rows.length) return units;
@@ -361,7 +374,7 @@ function ttsSafeText(value) {
     .replace(/\bLevel\s*[-:]\s*-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/\s+/g, " ")
     .trim();
-  return normalizeTtsDisfluencies(normalized);
+  return normalizeTtsDisfluencies(normalizeAllCapsForTts(normalized));
 }
 
 function slug(value) {
@@ -436,6 +449,7 @@ function chunkTextBySentence(text, limit) {
 
 function inlineSpeakerUnit(rawText, fallbackSpeaker) {
   const text = String(rawText ?? "").trim();
+  if (!characterVoiceCasting) return { speaker: fallbackSpeaker ?? "NARRATOR", text };
   const match = text.match(/^([A-Z][A-Z0-9 _.'-]{1,40}?)(?:\s*\([^)]+\))?\s*:\s*(.+)$/);
   if (!match) return { speaker: fallbackSpeaker ?? "NARRATOR", text };
   const speaker = match[1].replace(/\s+/g, " ").trim();

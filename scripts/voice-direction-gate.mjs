@@ -716,7 +716,7 @@ function colonDialogueLine(line) {
   const spoken = match[2].trim();
   if (!spoken) return null;
   if (/[.!?]/.test(rawSpeaker) && !/^(?:MR|MS|MRS|DR)\./i.test(rawSpeaker)) return null;
-  if (/^(CHAPTER|EPISODE|SCENE|ACT|NOTE|VISUAL|EMOTION|SFX)$/i.test(rawSpeaker)) return null;
+  if (/^(CHAPTER|EPISODE|SCENE|ACT|NOTE|VISUAL|EMOTION|SFX|ROLE|REQUIREMENTS?|STATUS|TARGET|SYSTEM|NOTICE|WARNING|WAGER|BALANCE|COST|ALLOCATION|VERDICT|METHOD|DURATION|PARTY SIZE|CASUALTIES|DEBTORS?|FINAL BALANCE)$/i.test(rawSpeaker)) return null;
   if (/\d/.test(rawSpeaker)) return null;
   if (/^(?:SIMPLE VERSION|PUBLIC FILE|PUBLIC STATUS|WORK VALUE|BLANK STATUS|CIVILIAN COUNT|DISTANCE TO\b.*|JAE\b.*STATUS|LEVEL\b.*|MOTHER['’]S DOSE)$/i.test(rawSpeaker)) return null;
   if (/^(?:EVERY|THE|THEN|THAT)\b/i.test(rawSpeaker) && rawSpeaker.split(/\s+/).length >= 3) return null;
@@ -2275,14 +2275,15 @@ function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
     .replace(/^["“]|["”]$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!isInterfaceSpeaker) {
+  const replacementCandidate = applySpokenOverrideRules(clean, ttsOverrides.replacements ?? []);
+  if (!isInterfaceSpeaker && replacementCandidate === clean) {
     clean = clean
       .replace(/^\s*[A-Z][A-Z0-9 _'’. -]{1,40}:\s*/, "")
       .replace(/^:\s*/, "")
       .trim();
   }
   const overridden = applyPronunciationMap(
-    applySpokenOverrideRules(clean, ttsOverrides.replacements ?? []),
+    replacementCandidate === clean ? clean : replacementCandidate,
     ttsOverrides.pronunciation_map ?? [],
   ).replace(/\[[^\]]+\]/g, " ").replace(/\s+/g, " ").trim();
   const normalized = qwenPronunciationText(overridden);

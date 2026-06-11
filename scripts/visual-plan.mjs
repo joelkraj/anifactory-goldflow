@@ -238,12 +238,13 @@ Rules:
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
-- Use one continuous full-frame composition. Do not request contact sheets, comic panels, reference panels, turnarounds, UI mockups, or split-screen layouts for scene cuts.
+- Use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
+- Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
 - Location references are environment evidence. Use them for setting, architecture, lighting, and materials.
 - Action/effect references are visual language evidence. Use them for power shape, energy color, and interaction pattern while keeping the beat's current location and subjects.
 - Put reference slot roles in reference_requirements.slot_purpose and slot_order. The imagegen wrapper will prepend Flux context instructions such as "Use image one as character identity for Kang Jiwoo" at generation time.
-- Keep modelslab_image_prompt as one continuous full-frame scene description. Reference images guide identity, wardrobe, style, UI, props, and effects; they are design evidence for the final cut.
+- Keep modelslab_image_prompt as a production scene description. Reference images guide identity, wardrobe, style, UI, props, and effects; they are design evidence for the final cut, not visible reference panels.
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.prompt_anchor, copy that prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
@@ -275,8 +276,8 @@ Return JSON only:
       "visual_beat_id": "scene_001_beat_01",
       "start_sec": 0,
       "duration_sec": 6,
-      "image_prompt": "positive full-frame scene prompt only",
-      "modelslab_image_prompt": "positive full-frame scene prompt optimized for flux-klein",
+      "image_prompt": "positive production scene prompt only",
+      "modelslab_image_prompt": "positive production scene prompt optimized for flux-klein",
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
@@ -410,13 +411,13 @@ function assertPromptVariety(prompts) {
 
 function assertScenePromptShape(prompts) {
   const failures = [];
-  const badLayout = /\b(?:contact sheet|reference sheet|turnaround|split[- ]screen|comic panel|multi[- ]panel|panel layout|character sheet)\b/i;
+  const badLayout = /\b(?:contact sheet|reference sheet|turnaround|character sheet|visible reference panel|reference panel layout)\b/i;
   const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
   const duplicateSlotText = /\buse image (?:one|two|three|four|five|six|seven|eight) as\b/i;
   for (const prompt of prompts) {
     const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
     if (metadataStart.test(text)) failures.push(`${prompt.image_id} starts with metadata instead of visible action`);
-    if (badLayout.test(text)) failures.push(`${prompt.image_id} requests sheet/panel layout in a scene cut`);
+    if (badLayout.test(text)) failures.push(`${prompt.image_id} requests a reference/sheet layout in a scene cut`);
     if (duplicateSlotText.test(text)) failures.push(`${prompt.image_id} duplicates reference slot text inside prompt body`);
   }
   if (failures.length) {

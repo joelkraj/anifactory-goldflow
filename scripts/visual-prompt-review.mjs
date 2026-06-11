@@ -238,7 +238,8 @@ Rules:
 - Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
-- Scene cuts should be one continuous full-frame composition, not contact sheets, comic panels, reference panels, turnarounds, UI mockups, or split-screen layouts.
+- Scene cuts should use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
+- Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Location references provide architecture, environment, lighting, and materials only.
 - Action/effect references provide effect shape, color, and interaction pattern only. Current scene location and current visible subjects stay authoritative.
 - When references are attached, preserve positive Flux-style slot mapping through reference_requirements.slot_order and slot_purpose. The imagegen wrapper adds the "Use image one as..." text at generation time.
@@ -280,8 +281,8 @@ Return JSON only:
       "visual_beat_id": "same",
       "start_sec": 0,
       "duration_sec": 6,
-      "image_prompt": "reviewed positive full-frame scene prompt",
-      "modelslab_image_prompt": "reviewed positive full-frame scene prompt optimized for image model",
+      "image_prompt": "reviewed positive production scene prompt",
+      "modelslab_image_prompt": "reviewed positive production scene prompt optimized for image model",
       "reference_requirements": [{"ref_id":"...","kind":"character_state|location|style|ui|prop|action","required":true,"slot_order":1,"slot_purpose":"character identity and wardrobe for ...","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [],
@@ -298,7 +299,7 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|panel_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|other",
       "message": "specific issue",
       "resolved": true
     }
@@ -472,7 +473,7 @@ function repeatedTableauFindings(prompts) {
 
 function scenePromptShapeFindings(prompts) {
   const findings = [];
-  const badLayout = /\b(?:contact sheet|reference sheet|turnaround|split[- ]screen|comic panel|multi[- ]panel|panel layout|character sheet)\b/i;
+  const badLayout = /\b(?:contact sheet|reference sheet|turnaround|character sheet|visible reference panel|reference panel layout)\b/i;
   const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
   const duplicateSlotText = /\buse image (?:one|two|three|four|five|six|seven|eight) as\b/i;
   for (const prompt of prompts) {
@@ -492,8 +493,8 @@ function scenePromptShapeFindings(prompts) {
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
         severity: "blocker",
-        code: "panel_layout_prompt",
-        message: "Scene prompt requests a sheet, panel layout, turnaround, or split-screen composition for a production cut.",
+        code: "reference_layout_prompt",
+        message: "Scene prompt requests a reference/sheet/turnaround layout for a production cut.",
         resolved: false,
       });
     }

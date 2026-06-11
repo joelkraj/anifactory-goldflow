@@ -8,7 +8,7 @@ Production moves through one artifact chain:
 
 1. Ingest a polished narration story into `script_clean.md`.
 2. Optional script polish/enhancement only when the operator explicitly asks for it, before approval, with the resulting script treated as a new candidate for review.
-3. Production-readiness and speakability QA from the candidate script. These passes may suggest fixes, pronunciation mappings, and risk notes, but must not silently rewrite the story.
+3. Targeted production-readiness and speakability QA from the candidate script. These passes may suggest TTS-only fixes for known problem areas, pronunciation mappings, and risk notes, but must not silently rewrite the story. Broad speakability is optional and must be explicitly requested.
 4. Manual review and operator approval for the exact final script hash.
 5. Semantic scene annotation from the locked script and bibles.
 6. Narrator-only voice plan by default. Voice planning requires current `script_speakability_report.json` and `tts_spoken_overrides.json` unless explicitly run in diagnostic bypass mode.
@@ -35,7 +35,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 - Generic script enhancement is optional and pre-lock only. If enhancement changes the script, every downstream artifact must be regenerated from the new exact hash.
 - Keep caption text, spoken TTS text, and semantic visual facts as separate layers. Captions preserve the approved script; TTS may use approved speakable equivalents; visuals use extracted scene facts.
 - Protected terms need explicit speakability handling before TTS, especially ranks, UI labels, odds, decimals, currencies, acronyms, and system messages.
-- Script speakability is a TTS guidance stage, not script enhancement. It must not mutate `script_clean.md`; it writes `script_speakability_report.json`, `tts_spoken_overrides.json`, and `protected_terms_report.json`. It must flag explicit narrator self-reference such as "the narrator wants you to understand" because that prose can sound artificial when spoken.
+- Targeted script speakability is the preferred TTS guidance stage. It must not mutate `script_clean.md`; it writes `script_speakability_report.json`, `tts_spoken_overrides.json`, and `script_speakability_problem_areas_report.json`. It should fix known problem areas only, such as explicit narrator self-reference ("the narrator wants you to understand") that sounds artificial when spoken. Broad speakability can introduce unnatural rewrites and should only run on explicit operator request.
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
@@ -63,7 +63,7 @@ Current migrated scope is source ingest, script approval, semantic scene plannin
 ```bash
 node bin/goldflow.mjs ingest source --channel <channel> --series <series> --week <week> --episode ep_01 --source <chatbot-output.md>
 node bin/goldflow.mjs script approve --channel <channel> --series <series> --week <week> --episode ep_01 --hash <script_clean_sha256>
-node bin/goldflow.mjs script speakability --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs script targeted --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs semantic plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen

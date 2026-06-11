@@ -29,7 +29,8 @@ One production path. No legacy fallbacks.
 Commands:
   goldflow ingest source           Copy raw chatbot/script source into script_clean.md
   goldflow script approve          Write exact-hash review/approval lock artifacts
-  goldflow script speakability     Review approved script for TTS speakability and spoken overrides
+  goldflow script speakability     Review approved script for broad TTS speakability and spoken overrides
+  goldflow script targeted         Write targeted problem-area TTS overrides only
   goldflow semantic plan           Extract semantic scene plan from locked script
   goldflow voice plan              Build narrator-first Qwen generation plan
   goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
@@ -63,6 +64,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("script-approve.mjs", flags);
 } else if (command === "script" && subcommand === "speakability") {
   run("script-speakability-plan.mjs", flags);
+} else if (command === "script" && subcommand === "targeted") {
+  run("script-targeted-speakability.mjs", flags);
 } else if (command === "semantic" && subcommand === "plan") {
   run("semantic-scene-plan.mjs", flags);
 } else if (command === "voice" && subcommand === "plan") {

@@ -317,8 +317,8 @@ function normalizeTtsDisfluencies(value) {
     if (uniqueClauses.length === 1) text = clauses[0];
   }
   return text
-    .replace(/\b([A-Za-z])-\1?([A-Za-z]{2,})\b/g, (_match, _lead, rest) => rest)
-    .replace(/\b([A-Za-z])-\s*([A-Za-z]{2,})\b/g, (_match, _lead, rest) => rest)
+    .replace(/\b([a-z])-\1([A-Za-z]{2,})\b/g, (_match, lead, rest) => `${lead}${rest}`)
+    .replace(/\b([a-z])-\s*([A-Za-z]{2,})\b/g, (_match, _lead, rest) => rest)
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -351,6 +351,7 @@ function ttsSafeText(value) {
     .replace(/,\s*arriving late\b/gi, "")
     .replace(/,\s*late arrival\b/gi, "")
     .replace(/\bKneel now\b/g, "Get on your knees now")
+    .replace(/\bF-meat\b/gi, "F meat")
     .replace(/\bSSS(?:\s*[- ]\s*rank)?\b/gi, (match) => /rank/i.test(match) ? "S S S rank" : "S S S")
     .replace(/\bSS(?:\s*[- ]\s*rank)?\b/gi, (match) => /rank/i.test(match) ? "S S rank" : "S S")
     .replace(/\bF\s*[- ]\s*rank(?:ed)?\b/gi, "F rank")

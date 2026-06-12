@@ -648,8 +648,17 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
   const basename = `${String(index + 1).padStart(4, "0")}-${slug(unit.segment_id)}-${slug(unit.speaker)}-${slug(unit.voice_id)}`;
   const wav = path.join(outDir, `${basename}.wav`);
   const meta = path.join(outDir, `${basename}.json`);
+  const cachedMeta = await readJson(meta, null);
+  const cacheMatchesUnit = cachedMeta
+    && cachedMeta.unit?.text === unit.text
+    && String(cachedMeta.unit?.speaker ?? "").toUpperCase() === normalizedSpeaker
+    && cachedMeta.unit?.voice_id === unit.voice_id
+    && cachedMeta.voice?.init_audio === voice.init_audio;
   if (!force && !targetedRegeneration && await exists(wav)) {
-    return { ...unit, status: "reused", wav, duration_sec: await mediaDuration(wav), meta };
+    if (cacheMatchesUnit) {
+      return { ...unit, status: "reused", wav, duration_sec: await mediaDuration(wav), meta };
+    }
+    await fs.rm(wav, { force: true });
   }
   if (dryRun) {
     return { ...unit, status: "dry_run", wav, meta };
@@ -661,7 +670,7 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
       language: "english",
       track_id: 12000 + index,
     });
-  const previous = force ? null : await readJson(meta, null);
+  const previous = force || !cacheMatchesUnit ? null : cachedMeta;
   let initial = previous?.request?.id ? previous.request : await makeRequest();
   let resolved;
   let lastError = null;

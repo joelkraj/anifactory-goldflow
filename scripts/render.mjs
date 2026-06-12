@@ -22,6 +22,7 @@ const promptPlanPath = flags.prompts ?? path.join(episodeDir, "section_image_pro
 const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const audioBedReportPath = flags.audioBedReport ?? flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
+const audioStitchReportPath = flags.audioStitchReport ?? flags["audio-stitch-report"] ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
 const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-goldflow.mp4`);
 const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.join(episodeDir, `render_report_${episode}.json`);
 const width = Number(flags.width ?? 1920);
@@ -110,7 +111,28 @@ function svgEscape(value) {
     .replace(/"/g, "&quot;");
 }
 
-function subtitleEvents(words) {
+function captionTokens(value) {
+  return String(value ?? "").match(/\S+/g) ?? [];
+}
+
+function timedCaptionSegments(stitchReport) {
+  const segments = Array.isArray(stitchReport?.segments) ? stitchReport.segments : [];
+  let cursor = 0;
+  return segments.map((segment) => {
+    const duration = Math.max(0, Number(segment.duration_sec ?? segment.raw_audio_duration_sec ?? 0));
+    const start = cursor;
+    const end = cursor + duration;
+    cursor = end;
+    return {
+      segment_id: segment.segment_id,
+      start_sec: start,
+      end_sec: end,
+      caption_text: String(segment.caption_text ?? segment.stripped_text ?? segment.text ?? "").trim(),
+    };
+  }).filter((segment) => segment.segment_id && segment.caption_text && segment.end_sec > segment.start_sec);
+}
+
+function whisperSubtitleGroups(words) {
   const events = [];
   let row = [];
   for (const word of words) {
@@ -123,15 +145,77 @@ function subtitleEvents(words) {
     }
   }
   if (row.length) events.push(row);
-  return events.map((items) => ({
+  return events;
+}
+
+function subtitleEventsFromScript(words, stitchReport) {
+  const segments = timedCaptionSegments(stitchReport);
+  if (!segments.length) return null;
+  const wordsBySegment = new Map();
+  for (const word of words) {
+    const segmentId = word.segment_id_guess;
+    if (!segmentId) continue;
+    if (!wordsBySegment.has(segmentId)) wordsBySegment.set(segmentId, []);
+    wordsBySegment.get(segmentId).push(word);
+  }
+  const events = [];
+  for (const segment of segments) {
+    const segmentWords = wordsBySegment.get(segment.segment_id) ?? [];
+    const groups = whisperSubtitleGroups(segmentWords);
+    const tokens = captionTokens(segment.caption_text);
+    if (!tokens.length) continue;
+    if (!groups.length) {
+      events.push({ start_sec: segment.start_sec, end_sec: segment.end_sec, text: segment.caption_text });
+      continue;
+    }
+    let tokenCursor = 0;
+    let wordCursor = 0;
+    const totalWords = Math.max(1, segmentWords.length);
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = groups[index];
+      wordCursor += group.length;
+      const targetTokenEnd = index === groups.length - 1
+        ? tokens.length
+        : Math.max(tokenCursor + 1, Math.round((wordCursor / totalWords) * tokens.length));
+      const text = tokens.slice(tokenCursor, Math.min(tokens.length, targetTokenEnd)).join(" ").replace(/\s+/g, " ").trim();
+      tokenCursor = Math.min(tokens.length, targetTokenEnd);
+      if (text) {
+        events.push({
+          start_sec: Number(group[0].start_sec),
+          end_sec: Number(group.at(-1).end_sec),
+          text,
+        });
+      }
+    }
+  }
+  return events.filter((row) => row.text && row.end_sec > row.start_sec);
+}
+
+function subtitleEvents(words, stitchReport = null) {
+  const scriptEvents = subtitleEventsFromScript(words, stitchReport);
+  if (scriptEvents?.length) return scriptEvents;
+  return whisperSubtitleGroups(words).map((items) => ({
     start_sec: Number(items[0].start_sec),
     end_sec: Number(items.at(-1).end_sec),
     text: items.map((item) => item.word).join(" ").replace(/\s+/g, " ").trim(),
   })).filter((row) => row.text && row.end_sec > row.start_sec);
 }
 
-async function writeAss(filePath, wordTiming) {
-  const events = subtitleEvents(wordTiming.words ?? []);
+function buildSubtitleEvents(wordTiming, audioStitchReport = null) {
+  const scriptEvents = subtitleEventsFromScript(wordTiming.words ?? [], audioStitchReport);
+  if (scriptEvents?.length) {
+    return {
+      events: scriptEvents,
+      source: "audio_stitch_caption_text_timed_by_whisper",
+    };
+  }
+  return {
+    events: subtitleEvents(wordTiming.words ?? []),
+    source: "whisper_recognized_words_fallback",
+  };
+}
+
+async function writeAss(filePath, events) {
   const header = `[Script Info]
 ScriptType: v4.00+
 ScaledBorderAndShadow: yes
@@ -304,11 +388,12 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, wordTiming, audioBedReport] = await Promise.all([
+  const [promptPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport] = await Promise.all([
     readJson(promptPlanPath, null),
     readJson(imagegenReportPath, null),
     readJson(wordTimingPath, null),
     readJson(audioBedReportPath, null),
+    readJson(audioStitchReportPath, null),
   ]);
   if (promptPlan?.status !== "passed") throw new Error(`Missing passed prompt plan: ${promptPlanPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
@@ -318,7 +403,8 @@ async function main() {
   await fs.mkdir(renderDir, { recursive: true });
   const audioDuration = await mediaDuration(audioPath);
   const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration);
-  const ass = await writeAss(path.join(workDir, "subtitles.ass"), wordTiming);
+  const subtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport);
+  const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
   const videoPath = path.join(workDir, "silent_video.mp4");
   await execFile("ffmpeg", [
     "-y",
@@ -359,7 +445,7 @@ async function main() {
     ], { maxBuffer: 1024 * 1024 * 32 });
   } else {
     subtitleRenderer = "sharp_png_overlay_video";
-    subtitleOverlay = await writeSubtitleOverlayVideo(path.join(workDir, "subtitle_overlay.mov"), subtitleEvents(wordTiming.words ?? []), audioDuration);
+    subtitleOverlay = await writeSubtitleOverlayVideo(path.join(workDir, "subtitle_overlay.mov"), subtitleRows.events, audioDuration);
     await execFile("ffmpeg", [
       "-y",
       "-i", normalizedVideoPath,
@@ -392,6 +478,8 @@ async function main() {
     imagegen_report_path: imagegenReportPath,
     word_timing_path: wordTimingPath,
     audio_bed_report_path: audioBedReportPath,
+    audio_stitch_report_path: audioStitchReportPath,
+    subtitle_text_source: subtitleRows.source,
     subtitle_style: "yellow text, black outline, no background box",
     subtitle_renderer: subtitleRenderer,
     subtitle_overlay_path: subtitleOverlay?.path ?? null,

@@ -79,6 +79,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Character state refs are the definitive identity/wardrobe/state contract.
    - Style ref comes first, then character/location/action anchors.
    - Lower-priority anchors can be generated as standalone refs or derived from selected generated cuts when appropriate.
+   - Named human characters in physical contact or close confrontation with the protagonist should use standalone refs before imagegen, even for one-scene appearances.
 
 16. Manual reference prompt review.
    - Agent/operator reviews and optimizes style, character, and key action reference prompts before image generation.
@@ -110,6 +111,8 @@ The approved narration script is production truth. The pipeline should extract, 
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
+   - Scene attachment prioritizes visible character refs first, then location, style, UI, props, and effects.
+   - If an approved character_state_ref exists for a visible named character, imagegen may attach it even when the prompt planner omitted it.
    - If ModelsLab returns a queue or rate-limit error, rerun imagegen with lower concurrency and leave `--force` unset so existing references and completed cuts are reused.
 
 21. Render.

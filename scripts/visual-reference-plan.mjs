@@ -122,6 +122,8 @@ Rules:
 - Character reference anchors should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; final scene poses and locations come from the visual prompt stage.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
+- Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
+- Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
 - Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
 - Return only valid JSON.
 
@@ -218,6 +220,8 @@ Rules:
 - Character reference anchors should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; final scene poses and locations come from the visual prompt stage.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
+- Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
+- Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
 - Return only valid JSON.
 
 EPISODE SUMMARY:

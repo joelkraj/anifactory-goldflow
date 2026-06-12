@@ -116,8 +116,17 @@ async function validateReferences(prompt) {
 function referenceSortKey(requirement, index) {
   const explicitOrder = Number(requirement.slot_order ?? requirement.order ?? requirement.image_slot ?? NaN);
   const requiredRank = requirement.required === true ? 0 : 1;
+  const kind = String(requirement.kind ?? "").toLowerCase();
+  const kindRank = kind.includes("character") ? 0
+    : kind.includes("location") ? 1
+      : kind.includes("style") ? 2
+        : kind.includes("ui") ? 3
+          : kind.includes("prop") ? 4
+            : kind.includes("action") ? 5
+              : 6;
   return {
     requiredRank,
+    kindRank,
     explicitOrder: Number.isFinite(explicitOrder) ? explicitOrder : 999,
     index,
   };
@@ -144,9 +153,42 @@ function referenceSlotInstruction(slots) {
   return slots.map((slot) => `Use image ${slotWord(slot.slot)} as ${slot.purpose}.`).join(" ");
 }
 
-function attachReferencePathsToPrompts(plan, referenceById) {
+function normalizeName(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function characterReferenceRequirements(prompt, characterRefs, existingIds) {
+  const visibleText = [
+    ...(Array.isArray(prompt.visible_subjects) ? prompt.visible_subjects : []),
+    prompt.primary_subject,
+  ].map(normalizeName).filter(Boolean).join(" | ");
+  const inferred = [];
+  for (const ref of characterRefs ?? []) {
+    const character = normalizeName(ref.character ?? ref.subject ?? "");
+    const sourceRefId = ref.source_ref_id ?? ref.ref_id ?? null;
+    if (!character || !sourceRefId || existingIds.has(sourceRefId) || !ref.reference_image_path) continue;
+    if (!visibleText.includes(character)) continue;
+    inferred.push({
+      ref_id: sourceRefId,
+      kind: "character_state",
+      required: true,
+      slot_order: 0,
+      slot_purpose: `character identity and wardrobe for ${ref.character ?? ref.subject ?? sourceRefId}`,
+      reason: "Visible named character has an approved character_state_ref; attached to reduce multi-character identity bleed.",
+      inferred_from_visible_subject: true,
+    });
+  }
+  return inferred;
+}
+
+function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) {
   const prompts = (plan.prompts ?? []).map((prompt) => {
-    const requirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+    const authoredRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+    const existingIds = new Set(authoredRequirements.map((requirement) => requirement.ref_id).filter(Boolean));
+    const requirements = [
+      ...authoredRequirements,
+      ...characterReferenceRequirements(prompt, characterRefs, existingIds),
+    ];
     const selected = requirements
       .map((requirement, index) => ({
         requirement,
@@ -155,7 +197,7 @@ function attachReferencePathsToPrompts(plan, referenceById) {
         sortKey: referenceSortKey(requirement, index),
       }))
       .filter((row) => row.path)
-      .sort((a, b) => a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index)
+      .sort((a, b) => a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.kindRank - b.sortKey.kindRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index)
       .slice(0, maxSceneReferences);
     const selectedIds = new Set(selected.map((row) => row.requirement.ref_id));
     const referenceSlots = selected.map((row, index) => ({
@@ -168,6 +210,7 @@ function attachReferencePathsToPrompts(plan, referenceById) {
     }));
     return {
       ...prompt,
+      reference_requirements: requirements,
       required_reference_paths: selected.map((row) => row.path),
       reference_slots: referenceSlots,
       reference_usage: requirements.map((requirement) => {
@@ -288,7 +331,15 @@ async function generateReferences() {
   const referencePlan = await readJson(visualReferencePlanPath, null);
   const characterRefs = await readJson(characterStateRefsPath, null);
   if (!referencePlan?.reference_targets?.length || skipReferenceGeneration) {
-    return { referencePlan, characterRefs, results: [], referenceById: new Map(Object.entries(Object.fromEntries((referencePlan?.reference_targets ?? []).filter((target) => target.reference_image_path).map((target) => [target.ref_id, target.reference_image_path])))) };
+    return {
+      referencePlan,
+      characterRefs,
+      results: [],
+      referenceById: new Map([
+        ...(referencePlan?.reference_targets ?? []).filter((target) => target.reference_image_path).map((target) => [target.ref_id, target.reference_image_path]),
+        ...(characterRefs?.character_state_refs ?? []).filter((ref) => ref.source_ref_id && ref.reference_image_path).map((ref) => [ref.source_ref_id, ref.reference_image_path]),
+      ]),
+    };
   }
   await fs.mkdir(referenceDir, { recursive: true });
   const targets = referencePlan.reference_targets
@@ -303,7 +354,10 @@ async function generateReferences() {
   }
   const remaining = targets.filter((target) => target.ref_id !== "style_ref");
   results.push(...await runPool(remaining, (target) => generateReference(target, styleRefPath), referenceConcurrency));
-  const referenceById = new Map(results.map((row) => [row.ref_id, row.image_path]));
+  const referenceById = new Map([
+    ...results.map((row) => [row.ref_id, row.image_path]),
+    ...(characterRefs?.character_state_refs ?? []).filter((ref) => ref.source_ref_id && ref.reference_image_path).map((ref) => [ref.source_ref_id, ref.reference_image_path]),
+  ]);
   const updatedReferencePlan = {
     ...referencePlan,
     reference_targets: referencePlan.reference_targets.map((target) => ({
@@ -332,7 +386,7 @@ async function main() {
   let plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !plan.prompts.length) throw new Error(`Missing passed section image prompt plan: ${promptPath}`);
   if (referenceRun.referenceById?.size) {
-    plan = attachReferencePathsToPrompts(plan, referenceRun.referenceById);
+    plan = attachReferencePathsToPrompts(plan, referenceRun.referenceById, referenceRun.characterRefs?.character_state_refs ?? []);
     await writeJson(promptPath, plan);
   }
   const scope = requestedIds();

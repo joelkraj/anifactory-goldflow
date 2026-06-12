@@ -97,10 +97,8 @@ node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <w
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
 ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
@@ -126,14 +124,15 @@ ANIFACTORY_LOCAL_LLM_URL=http://localhost:8000/v1
 ANIFACTORY_LOCAL_LLM_MODEL=Qwen3-30B-A3B-MLX-4bit
 ```
 
-## Current Test Policy
+## Next Run Policy
 
-Return 7 Seconds v3 is a local-Qwen pipeline test using a final approved story. Continue it to evaluate artifact behavior, especially semantic and visual planning, but keep the quality notes attached:
-
-- The story is treated as final.
-- This test intentionally does not run a new enhancement pass.
-- Existing TTS output is acceptable for pipeline timing tests, not final production quality, because rank/odds/UI pronunciation and quote-attribution normalization need hardening.
-- Before a final production rerun, run speakability/readiness QA and repair protected-term spoken text before TTS.
+- Treat the operator/chatbot-provided polished narration story as the candidate source of truth.
+- Do not run broad enhancement by default. Use targeted speakability and readiness checks after approval, and only apply TTS-only overrides or explicitly approved script edits.
+- Use narrator-only voice unless the operator explicitly requests character casting.
+- Use local Whisper word timing before SFX, score, visual beats, subtitles, or render.
+- Use local ACE-Step for production score beds. ModelsLab music generation is a fallback only when explicitly requested.
+- Keep the score-drop layer as a planned upgrade until implemented: twenty to thirty-five Whisper-timed ACE-Step riser/hit accents mixed by replacing or ducking the base score bed.
+- For imagegen, prioritize reference quality and spot checks over raw throughput. Start concurrency around 6-12 on the next full run, then raise only after references and prompt quality look stable.
 
 ## Worktree Discipline
 

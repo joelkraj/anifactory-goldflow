@@ -63,7 +63,10 @@ The approved narration script is production truth. The pipeline should extract, 
    - Must run after Whisper timing.
    - SFX should be noticeable but controlled.
    - Score should sit below SFX and narration.
-   - Local ACE-Step can be selected with `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
+   - Local ACE-Step is the preferred production score provider. Use `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or pass `--score-provider local_ace_step`.
+   - Do not use ModelsLab music generation for production score unless the operator explicitly asks for a fallback.
+   - Current score implementation creates chapter score beds as the base emotional floor.
+   - Planned score-drop upgrade: add twenty to thirty-five short ACE-Step riser/hit accents on Whisper-timed drama, hype, reversal, reveal, and payoff beats. These accents should briefly replace or strongly duck the normal score bed so they blend into the music instead of stacking uncontrolled volume.
    - Planning backends are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for planning; ModelsLab is used for media generation.
 
 13. Longform audio bed mix.
@@ -129,7 +132,8 @@ The approved narration script is production truth. The pipeline should extract, 
 - Voice route: narrator-only unless the operator explicitly requests character voice casting.
 - Timing: local Whisper word timing on the final stitched narration.
 - SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
-- Score beds: local ACE-Step 1.5 is preferred for production score generation. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`.
+- Score beds: local ACE-Step 1.5 is preferred for production score generation. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`. ModelsLab music generation is not the preferred production score path.
+- Score drops: planned second layer of twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper and mixed by replacing or ducking the base bed at focal beats.
 - Image model: ModelsLab Flux Klein.
 - Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
 - Render audio: one continuous longform mix containing narration, SFX, and score.
@@ -146,8 +150,8 @@ node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <w
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
@@ -155,6 +159,51 @@ node bin/goldflow.mjs visual review --channel <channel> --series <series> --week
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01
 ```
+
+## Next Production Run Checklist
+
+Use this checklist before spending generation time:
+
+1. Source script
+   - Start from polished spoken narration prose.
+   - Remove production labels, narrator self-reference, bracketed notes, and screenplay metadata before ingest.
+   - Ingest, manually review `script_clean.md`, then approve the exact hash.
+
+2. Speakability
+   - Run targeted speakability only by default.
+   - Fix known TTS hazards before full TTS: dangling ellipses, clipped sentence endings, dense UI text, ranks, currencies, acronyms, and number pronunciation.
+   - Do not let speakability rewrite the story broadly unless explicitly requested.
+
+3. Audio spine
+   - Generate narrator-only Qwen TTS.
+   - Review a few risk windows before committing downstream.
+   - Run local Whisper timing after final stitched audio.
+   - If any TTS unit is regenerated or the stitch changes, rerun Whisper and all timing-dependent stages.
+
+4. SFX and scoring
+   - Run SFX/score planning only after Whisper timing.
+   - Use local ACE-Step for score beds:
+     `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
+   - Keep SFX audible but controlled. Current mix starting point:
+     `--sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0`.
+   - Do not generate production score beds with ModelsLab music unless explicitly requested.
+   - Future score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on focal beats, mixed by replacing or ducking the base score bed.
+
+5. Visuals
+   - Run visual beats before prompt authoring.
+   - Target beat duration: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
+   - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
+   - Character state refs are definitive for identity and wardrobe.
+   - Use positive-only scene prompts. Do not use negative prompt wording.
+   - Reference priority: visible characters, location, prop/UI, action/effects, style only when no concrete refs are available.
+   - For multi-character scenes, spot check attached refs before bulk imagegen.
+   - Start imagegen concurrency around 6-12 on a fresh production run; raise only after quality and queue stability are confirmed.
+
+6. Render
+   - Render from the continuous mixed audio track.
+   - Use final-script subtitles timed to Whisper, not Whisper-recognized text.
+   - Subtitle style: yellow text, small black outline, no background box.
+   - Motion style: fast transitions and intentional profile-based Ken Burns, not random movement.
 
 ## Change Policy
 

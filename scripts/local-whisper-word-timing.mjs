@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -126,9 +126,24 @@ with open(output_path, "w", encoding="utf-8") as handle:
 
 print(json.dumps({"status": "ok", "word_count": len(rows)}, ensure_ascii=False))
 `;
-  await execFile("python3", ["-c", py, audioPath, model, device, computeType, language, tmpPath], {
-    maxBuffer: 1024 * 1024 * 200,
-    timeout: Number(process.env.ANIFACTORY_WHISPER_TIMEOUT_MS ?? 7_200_000),
+  await new Promise((resolve, reject) => {
+    const timeoutMs = Number(process.env.ANIFACTORY_WHISPER_TIMEOUT_MS ?? 7_200_000);
+    const child = spawn("python3", ["-c", py, audioPath, model, device, computeType, language, tmpPath], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`Whisper transcription timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`Whisper transcription failed with code ${code ?? "null"} signal ${signal ?? "null"}`));
+    });
   });
   const result = JSON.parse(await fs.readFile(tmpPath, "utf8"));
   await fs.rm(tmpPath, { force: true });

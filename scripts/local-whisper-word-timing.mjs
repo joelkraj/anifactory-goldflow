@@ -3,6 +3,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -81,6 +82,7 @@ async function runFasterWhisper(audioPath) {
   const device = flags.device ?? process.env.ANIFACTORY_WHISPER_DEVICE ?? "auto";
   const computeType = flags.computeType ?? flags["compute-type"] ?? process.env.ANIFACTORY_WHISPER_COMPUTE_TYPE ?? "auto";
   const language = flags.language ?? process.env.ANIFACTORY_WHISPER_LANGUAGE ?? "en";
+  const tmpPath = path.join(os.tmpdir(), `goldflow-whisper-${process.pid}-${Date.now()}.json`);
   const py = String.raw`
 import json, sys
 from faster_whisper import WhisperModel
@@ -90,6 +92,7 @@ model_name = sys.argv[2]
 device = sys.argv[3]
 compute_type = sys.argv[4]
 language = sys.argv[5]
+output_path = sys.argv[6]
 
 model = WhisperModel(model_name, device=device, compute_type=compute_type)
 segments, info = model.transcribe(
@@ -113,24 +116,23 @@ for seg in segments:
         rows.append(item)
         seg_words.append(item)
 
-print(json.dumps({
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump({
     "language": info.language,
     "language_probability": info.language_probability,
     "duration_sec": info.duration,
     "words": rows,
-}, ensure_ascii=False))
+    }, handle, ensure_ascii=False)
+
+print(json.dumps({"status": "ok", "word_count": len(rows)}, ensure_ascii=False))
 `;
-  const { stdout } = await execFile("python3", ["-c", py, audioPath, model, device, computeType, language], {
+  await execFile("python3", ["-c", py, audioPath, model, device, computeType, language, tmpPath], {
     maxBuffer: 1024 * 1024 * 200,
     timeout: Number(process.env.ANIFACTORY_WHISPER_TIMEOUT_MS ?? 7_200_000),
   });
-  return {
-    model,
-    device,
-    compute_type: computeType,
-    language,
-    ...(JSON.parse(stdout)),
-  };
+  const result = JSON.parse(await fs.readFile(tmpPath, "utf8"));
+  await fs.rm(tmpPath, { force: true });
+  return { model, device, compute_type: computeType, language, ...result };
 }
 
 function normalizeWord(value) {

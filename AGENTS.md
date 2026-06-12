@@ -48,6 +48,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Narrator-only is the default voice route. Character voice casting requires an explicit operator request and flag.
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
+- Qwen TTS stitch must include a small inter-segment safety gap by default so unit boundaries do not clip final phonemes or smash narration beats together. Current default is `ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC=0.22`; rerun Whisper after any stitch change.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
 - Visual prompt planning must consume `visual_beat_plan.json` when present. Semantic scenes are not image cuts; long scenes must be split into multiple visual beats before imagegen. Default beat pacing aims for an average near 8 seconds, minimum 3 seconds, maximum 15 seconds.
 - Visual beats must carry local script excerpts or concrete beat actions. The LLM should author each image prompt from the beat excerpt, not from a repeated parent-scene summary.
@@ -79,7 +80,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - SFX generation: ModelsLab `/api/v7/voice/sound-generation` assets are allowed after a Codex/local-Qwen/agent-authored plan. SFX events must use locked asset paths before mix.
 - Score generation: prefer local ACE-Step 1.5 for score beds; current default local model pair is `acestep-v15-turbo` plus `acestep-5Hz-lm-1.7B`.
 - Image generation: ModelsLab Flux Klein, with positive-only prompts and explicit reference slot mapping.
-- Render: one continuous mixed audio track, Whisper-timed subtitles, yellow subtitle text with a small black outline and no background box.
+- Render: one continuous mixed audio track, final-script subtitle text timed by Whisper, yellow subtitle text with a small black outline and no background box. Ken Burns motion is profile-based and intentional: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes.
 
 ## Commands
 

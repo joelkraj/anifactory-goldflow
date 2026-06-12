@@ -48,6 +48,8 @@ The approved narration script is production truth. The pipeline should extract, 
 9. TTS generation and stitch.
    - Uses ModelsLab Qwen TTS.
    - Generates one continuous narration track and generation metadata.
+   - Stitching includes a small inter-segment safety gap by default to protect clipped final phonemes and preserve narration beat separation.
+   - If the stitched audio changes, rerun Whisper timing and every timing-dependent downstream artifact.
 
 10. Whisper timing.
    - Run local Whisper word timing on the final stitched narration.
@@ -112,8 +114,10 @@ The approved narration script is production truth. The pipeline should extract, 
 
 21. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
-   - Current render style uses sharper foreground image over a blurred full-frame background with more aggressive Ken Burns motion.
+   - Current render style uses sharper foreground image over a blurred full-frame background with intentional profile-based Ken Burns motion.
+   - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Aggressive motion should not mean constant random movement.
    - Subtitles should be yellow text with small black outline and no box/background.
+   - Subtitle text should come from the final approved/stitch script; Whisper provides timing anchors only.
 
 ## Current Model And Provider Choices
 
@@ -125,6 +129,7 @@ The approved narration script is production truth. The pipeline should extract, 
 - Image model: ModelsLab Flux Klein.
 - Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
 - Render audio: one continuous longform mix containing narration, SFX, and score.
+- Render subtitles: final approved/stitch script text timed by Whisper, not Whisper recognition text.
 
 ## Command Order
 

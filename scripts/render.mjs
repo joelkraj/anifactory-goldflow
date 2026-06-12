@@ -329,24 +329,57 @@ function imageDuration(prompt, scale = 1) {
   return Math.max(1, Number(prompt.duration_sec ?? 6) * scale);
 }
 
-function motionPhase(index) {
-  return Number(((index * 0.73) % (Math.PI * 2)).toFixed(3));
+function motionProfile(prompt, index) {
+  const haystack = [
+    prompt.visual_beat_focus,
+    prompt.visual_beat_action,
+    prompt.primary_subject,
+    prompt.location,
+    prompt.modelslab_image_prompt,
+    prompt.image_prompt,
+  ].filter(Boolean).join(" ");
+  const hasAction = /\b(?:fight|combat|attack|horde|swarm|monster|gate break|strike|kill|collapse|rescue|chase|battle|explosion|impact|fall|lunge|crater|tyrant|boss|detonated|shattered)\b/i.test(haystack);
+  const hasReveal = /\b(?:system|interface|window|counter|stored kills|redeem|verdict|settlement|rank|orb|file|liability|debtors|audit|record|screen|monitor|broadcast|forum)\b/i.test(haystack);
+  const isWide = /\b(?:wide|establish|city|street|arena|hall|office|tower|rooftop|district|crowd|environment)\b/i.test(haystack);
+  const isEmotional = /\b(?:quiet|silence|alone|stares|tears|smile|afraid|cold|patient|threshold|memory|decision|reaction)\b/i.test(haystack);
+  const direction = index % 4;
+  if (hasAction) return { name: "action_push", zoom: 1.055, driftX: 0.034, driftY: 0.026, direction };
+  if (hasReveal) return { name: "reveal_push", zoom: 1.038, driftX: 0.018, driftY: 0.014, direction };
+  if (isWide) return { name: "wide_drift", zoom: 1.025, driftX: 0.025, driftY: 0.015, direction };
+  if (isEmotional) return { name: "emotional_hold", zoom: 1.012, driftX: 0.008, driftY: 0.006, direction };
+  return { name: "steady_push", zoom: 1.022, driftX: 0.014, driftY: 0.01, direction };
 }
 
-function motionClipFilter(duration, index) {
+function motionProfileOffsets(profile) {
+  const x = Math.round(width * profile.driftX * motionStrength);
+  const y = Math.round(height * profile.driftY * motionStrength);
+  const variants = [
+    { startX: -x, endX: x, startY: -Math.round(y / 2), endY: Math.round(y / 2) },
+    { startX: x, endX: -x, startY: Math.round(y / 2), endY: -Math.round(y / 2) },
+    { startX: -Math.round(x / 2), endX: Math.round(x / 2), startY: y, endY: -y },
+    { startX: Math.round(x / 2), endX: -Math.round(x / 2), startY: -y, endY: y },
+  ];
+  return variants[profile.direction % variants.length];
+}
+
+function motionClipFilter(duration, index, prompt = {}) {
   const fgW = Math.round(width * Math.max(0.45, Math.min(1, foregroundScale)));
   const fgH = Math.round(height * Math.max(0.45, Math.min(1, foregroundScale)));
-  const phase = motionPhase(index);
-  const xDrift = Math.round(width * 0.035 * motionStrength);
-  const yDrift = Math.round(height * 0.032 * motionStrength);
+  const profile = motionProfile(prompt, index);
+  const offsets = motionProfileOffsets(profile);
   const fadeOutStart = Math.max(0, duration - visualFadeSec);
   if (motionMode === "fill_ken_burns") {
-    const zoomMax = 1 + 0.11 * motionStrength;
-    const xExpr = index % 2 === 0 ? "iw/2-(iw/zoom/2)" : "iw/2-(iw/zoom/2)+sin(on/45)*iw*0.04";
-    const yExpr = index % 3 === 0 ? "ih/2-(ih/zoom/2)+cos(on/50)*ih*0.035" : "ih/2-(ih/zoom/2)";
+    const zoomMax = 1 + (profile.zoom - 1) * Math.max(1, motionStrength);
+    const xBias = offsets.startX / width;
+    const yBias = offsets.startY / height;
+    const xExpr = `iw/2-(iw/zoom/2)+${xBias.toFixed(4)}*iw*(1-on/${Math.max(1, Math.ceil(duration * fps))})`;
+    const yExpr = `ih/2-(ih/zoom/2)+${yBias.toFixed(4)}*ih*(1-on/${Math.max(1, Math.ceil(duration * fps))})`;
     return `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase,crop=${width * 2}:${height * 2},zoompan=z='min(${zoomMax.toFixed(3)},1+on*0.00085*${motionStrength.toFixed(3)})':x='${xExpr}':y='${yExpr}':d=${Math.max(1, Math.ceil(duration * fps))}:s=${width}x${height}:fps=${fps},fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},format=yuv420p`;
   }
-  return `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=34,eq=brightness=-0.055:saturation=0.92[bg];[0:v]scale=${fgW}:${fgH}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=x='(W-w)/2+sin(t*0.62+${phase})*${xDrift}':y='(H-h)/2+cos(t*0.47+${phase})*${yDrift}',fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},fps=${fps},format=yuv420p`;
+  const progress = `min(1,t/${Math.max(0.1, duration).toFixed(3)})`;
+  const xExpr = `(W-w)/2+${offsets.startX}+(${offsets.endX - offsets.startX})*${progress}`;
+  const yExpr = `(H-h)/2+${offsets.startY}+(${offsets.endY - offsets.startY})*${progress}`;
+  return `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=34,eq=brightness=-0.055:saturation=0.92[bg];[0:v]scale=${fgW}:${fgH}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=x='${xExpr}':y='${yExpr}',fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},fps=${fps},format=yuv420p`;
 }
 
 async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
@@ -359,18 +392,21 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
   await fs.rm(clipDir, { recursive: true, force: true });
   await fs.mkdir(clipDir, { recursive: true });
   const lines = [];
+  const motionProfiles = {};
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const imagePath = imageById.get(prompt.image_id);
     if (!(await exists(imagePath))) throw new Error(`Missing generated image for ${prompt.image_id}: ${imagePath}`);
     const duration = imageDuration(prompt, scale);
+    const profile = motionProfile(prompt, index);
+    motionProfiles[profile.name] = (motionProfiles[profile.name] ?? 0) + 1;
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
     await execFile("ffmpeg", [
       "-y",
       "-loop", "1",
       "-t", duration.toFixed(3),
       "-i", imagePath,
-      "-filter_complex", motionClipFilter(duration, index),
+      "-filter_complex", motionClipFilter(duration, index, prompt),
       "-an",
       "-c:v", "libx264",
       "-preset", "veryfast",
@@ -384,7 +420,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
   const concatPath = path.join(workDir, "motion-clips.concat.txt");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
-  return { concatPath, prompt_count: prompts.length, duration_scale: scale, clip_dir: clipDir, motion_mode: motionMode };
+  return { concatPath, prompt_count: prompts.length, duration_scale: scale, clip_dir: clipDir, motion_mode: motionMode, motion_profiles: motionProfiles };
 }
 
 async function main() {
@@ -492,6 +528,7 @@ async function main() {
       foreground_scale: foregroundScale,
       motion_strength: motionStrength,
       visual_fade_sec: visualFadeSec,
+      motion_profiles: concat.motion_profiles,
     },
     updated_at: new Date().toISOString(),
   };

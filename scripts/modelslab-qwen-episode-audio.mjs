@@ -35,6 +35,7 @@ const regenerateSpeakers = new Set(String(flags["regenerate-speakers"] ?? "")
   .filter(Boolean));
 const maxChars = Number(flags["max-chars"] ?? 850);
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 8)));
+const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.22)));
 const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REFRESH_VOICES ?? "")
   .split(",")
   .map((value) => value.trim())
@@ -703,6 +704,45 @@ function concatLine(filePath) {
   return `file '${filePath.replaceAll("'", "'\\''")}'`;
 }
 
+async function writeSilenceWav(filePath, durationSec) {
+  if (durationSec <= 0) return null;
+  if (await exists(filePath)) return filePath;
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await run("ffmpeg", [
+    "-y",
+    "-f", "lavfi",
+    "-i", "anullsrc=r=44100:cl=mono",
+    "-t", durationSec.toFixed(3),
+    "-acodec", "pcm_s16le",
+    filePath,
+  ]);
+  return filePath;
+}
+
+async function stitchWavs(results, finalWav) {
+  const usable = results.filter((row) => row.wav);
+  if (!usable.length) return null;
+  const concatPath = path.join(outDir, "concat.txt");
+  const gapPath = segmentGapSec > 0 ? await writeSilenceWav(path.join(outDir, `segment-gap-${Math.round(segmentGapSec * 1000)}ms.wav`), segmentGapSec) : null;
+  const lines = [];
+  for (let index = 0; index < usable.length; index += 1) {
+    lines.push(concatLine(usable[index].wav));
+    if (gapPath && index < usable.length - 1) lines.push(concatLine(gapPath));
+  }
+  await fs.writeFile(concatPath, lines.join("\n"));
+  await run("ffmpeg", [
+    "-y",
+    "-f", "concat",
+    "-safe", "0",
+    "-i", concatPath,
+    "-ar", "44100",
+    "-ac", "1",
+    "-acodec", "pcm_s16le",
+    finalWav,
+  ]);
+  return concatPath;
+}
+
 async function main() {
   await fs.mkdir(outDir, { recursive: true });
   const lock = await buildVoiceLock();
@@ -744,12 +784,11 @@ async function main() {
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, units.length) }, (_item, index) => worker(index + 1)));
 
-  const concatPath = path.join(outDir, "concat.txt");
-  await fs.writeFile(concatPath, results.filter((row) => row.wav).map((row) => concatLine(row.wav)).join("\n"));
   const finalWav = path.join(path.dirname(outDir), `${episode}-${channel}-pilot-qwen-modelslab${suffix}.wav`);
   const finalM4a = finalWav.replace(/\.wav$/, ".m4a");
+  let concatPath = null;
   if (!dryRun && results.some((row) => row.wav)) {
-    await run("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", concatPath, "-c", "copy", finalWav]);
+    concatPath = await stitchWavs(results, finalWav);
     await run("ffmpeg", ["-y", "-i", finalWav, "-acodec", "aac", "-b:a", "160k", finalM4a]);
     await fs.writeFile(finalWav.replace(/\.wav$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
     await fs.writeFile(finalM4a.replace(/\.m4a$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
@@ -767,8 +806,10 @@ async function main() {
     previous_report_path: previousReportPath,
     final_wav: dryRun ? null : finalWav,
     final_m4a: dryRun ? null : finalM4a,
+    concat_path: concatPath,
+    segment_gap_sec: segmentGapSec,
     unit_count: results.length,
-    duration_sec: dryRun ? null : results.reduce((sum, row) => sum + Number(row.duration_sec ?? 0), 0),
+    duration_sec: dryRun ? null : await mediaDuration(finalWav).catch(() => results.reduce((sum, row) => sum + Number(row.duration_sec ?? 0), 0) + Math.max(0, results.length - 1) * segmentGapSec),
     results,
   };
   const reportPath = path.join(episodeRoot, `modelslab_qwen_tts_report_${episode}${reportSuffix ? `-${reportSuffix}` : ""}.json`);
@@ -782,7 +823,7 @@ async function main() {
     output_path: report.final_wav,
     sound_design_mix_path: null,
     final_duration_sec: report.duration_sec,
-    segments: results.map((row) => ({
+    segments: results.map((row, index) => ({
       segment_id: row.segment_id,
       text: row.text,
       stripped_text: row.text,
@@ -791,7 +832,8 @@ async function main() {
       speaker_context: [row.speaker],
       delivery_mode: "modelslab_qwen_tts",
       raw_audio_duration_sec: row.duration_sec,
-      duration_sec: row.duration_sec,
+      segment_gap_sec: index < results.length - 1 ? segmentGapSec : 0,
+      duration_sec: Number((Number(row.duration_sec ?? 0) + (index < results.length - 1 ? segmentGapSec : 0)).toFixed(6)),
       audio_path: row.wav,
       tts_provider: "modelslab_qwen",
       voice_id: row.voice_id,

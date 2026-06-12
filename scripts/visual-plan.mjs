@@ -478,19 +478,23 @@ function indexCharacterStateRefs(artifact) {
   const index = new Map();
   for (const ref of refs.filter(Boolean)) {
     const character = ref.character ?? ref.character_name ?? ref.name;
-    const sceneId = ref.scene_id ?? ref.scene ?? "*";
     if (!character || !(ref.scene_prompt_anchor || ref.prompt_anchor)) continue;
+    const sceneIds = Array.isArray(ref.scene_ids) && ref.scene_ids.length
+      ? ref.scene_ids
+      : [ref.scene_id ?? ref.scene ?? "*"];
     const normalized = {
       ...ref,
       character,
-      scene_id: sceneId === "*" ? null : sceneId,
-      state_ref_id: ref.state_ref_id ?? ref.ref_id ?? `${normalizeLabel(character).replace(/\s+/g, "_")}_${sceneId}`,
+      scene_id: sceneIds[0] === "*" ? null : sceneIds[0],
+      state_ref_id: ref.state_ref_id ?? ref.ref_id ?? `${normalizeLabel(character).replace(/\s+/g, "_")}_${sceneIds[0] ?? "global"}`,
       definitive: ref.definitive !== false,
       scene_prompt_anchor: scenePromptAnchorFromRef(ref),
       source: ref.source ?? "character_state_ref_artifact",
     };
-    index.set(`${sceneId}:${normalizeLabel(character)}`, normalized);
-    if (sceneId === "*") index.set(normalizeLabel(character), normalized);
+    for (const sceneId of sceneIds) {
+      index.set(`${sceneId}:${normalizeLabel(character)}`, { ...normalized, scene_id: sceneId === "*" ? null : sceneId });
+      if (sceneId === "*") index.set(normalizeLabel(character), normalized);
+    }
   }
   return index;
 }

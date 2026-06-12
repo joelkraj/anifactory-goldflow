@@ -119,9 +119,9 @@ function referenceSortKey(requirement, index) {
   const kind = String(requirement.kind ?? "").toLowerCase();
   const kindRank = kind.includes("character") ? 0
     : kind.includes("location") ? 1
-      : kind.includes("style") ? 2
-        : kind.includes("ui") ? 3
-          : kind.includes("prop") ? 4
+      : kind.includes("prop") ? 2
+        : kind.includes("style") ? 3
+          : kind.includes("ui") ? 4
             : kind.includes("action") ? 5
               : 6;
   return {

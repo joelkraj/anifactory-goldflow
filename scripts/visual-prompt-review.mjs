@@ -371,10 +371,12 @@ function chunkByScene(items, targetSize) {
   const chunks = [];
   let current = [];
   let currentSceneId = null;
+  const splitLongScenes = flags["visual-review-chunk-split-long-scenes"] !== "false";
   for (const item of items) {
     const sceneId = item.scene_id ?? null;
     const startsNewScene = current.length && sceneId !== currentSceneId;
-    if (startsNewScene && current.length >= targetSize) {
+    const reachedTarget = current.length >= targetSize;
+    if (current.length && ((startsNewScene && reachedTarget) || (!startsNewScene && splitLongScenes && reachedTarget))) {
       chunks.push(current);
       current = [];
     }

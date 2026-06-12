@@ -66,6 +66,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Run visual prompt authoring and review in small parent-scene-preserving chunks for both Codex and local Qwen. Large whole-episode prompt batches tend to collapse into repeated hero tableaux; arbitrary chunks that split a scene hide the progression the LLM needs.
 - Visual prompt review is the only LLM prompt-fix stage before imagegen. It may revise prompt wording, but must preserve scene IDs, image IDs, timing, and source hashes. Code gates validate only structure, hashes, missing references, and unresolved blockers.
 - Image generation uses ModelsLab Flux Klein by default. References are generated first and stored under `assets/images/references`; image cuts are stored under `assets/images`. When ModelsLab returns a queue/rate-limit error, resume with lower `--concurrency` and keep `--force` unset so fresh refs and completed cuts are reused.
+- Next throughput test: try higher concurrency on a fresh production run after prompt/ref quality is stable. Start at 6-12 workers, monitor queue/rate-limit behavior and output quality, then consider returning to 24 only if the provider remains stable.
 
 ## Current Production Models And Methods
 

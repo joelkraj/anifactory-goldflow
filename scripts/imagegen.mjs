@@ -216,7 +216,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
         sortKey: referenceSortKey(requirement, index),
       }))
       .filter((row) => row.path)
-      .sort((a, b) => a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.kindRank - b.sortKey.kindRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index);
+      .sort((a, b) => a.sortKey.kindRank - b.sortKey.kindRank || a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index);
     const nonStyleRows = availableRows.filter((row) => !isStyleReferenceRequirement(row.requirement));
     const styleRows = availableRows.filter((row) => isStyleReferenceRequirement(row.requirement));
     const selected = (nonStyleRows.length ? nonStyleRows : styleRows).slice(0, maxSceneReferences);

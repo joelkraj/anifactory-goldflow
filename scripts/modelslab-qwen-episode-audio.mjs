@@ -36,6 +36,7 @@ const regenerateSpeakers = new Set(String(flags["regenerate-speakers"] ?? "")
 const maxChars = Number(flags["max-chars"] ?? 850);
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 8)));
 const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.22)));
+const stitchSampleRate = Math.max(8000, Math.min(96000, Number(flags["stitch-sample-rate"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_SAMPLE_RATE ?? 24000)));
 const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REFRESH_VOICES ?? "")
   .split(",")
   .map((value) => value.trim())
@@ -711,7 +712,7 @@ async function writeSilenceWav(filePath, durationSec) {
   await run("ffmpeg", [
     "-y",
     "-f", "lavfi",
-    "-i", "anullsrc=r=44100:cl=mono",
+    "-i", `anullsrc=r=${stitchSampleRate}:cl=mono`,
     "-t", durationSec.toFixed(3),
     "-acodec", "pcm_s16le",
     filePath,
@@ -735,7 +736,7 @@ async function stitchWavs(results, finalWav) {
     "-f", "concat",
     "-safe", "0",
     "-i", concatPath,
-    "-ar", "44100",
+    "-ar", String(stitchSampleRate),
     "-ac", "1",
     "-acodec", "pcm_s16le",
     finalWav,
@@ -808,6 +809,7 @@ async function main() {
     final_m4a: dryRun ? null : finalM4a,
     concat_path: concatPath,
     segment_gap_sec: segmentGapSec,
+    stitch_sample_rate: stitchSampleRate,
     unit_count: results.length,
     duration_sec: dryRun ? null : await mediaDuration(finalWav).catch(() => results.reduce((sum, row) => sum + Number(row.duration_sec ?? 0), 0) + Math.max(0, results.length - 1) * segmentGapSec),
     results,

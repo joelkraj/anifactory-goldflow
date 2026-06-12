@@ -158,16 +158,30 @@ function normalizeName(value) {
 }
 
 function characterReferenceRequirements(prompt, characterRefs, existingIds) {
+  const sceneId = String(prompt.scene_id ?? "");
   const visibleText = [
     ...(Array.isArray(prompt.visible_subjects) ? prompt.visible_subjects : []),
     prompt.primary_subject,
   ].map(normalizeName).filter(Boolean).join(" | ");
+  const characterBySourceRef = new Map(
+    (characterRefs ?? [])
+      .filter((ref) => ref.source_ref_id && (ref.character || ref.subject))
+      .map((ref) => [ref.source_ref_id, normalizeName(ref.character ?? ref.subject)])
+  );
+  const coveredCharacters = new Set(
+    [...existingIds]
+      .map((refId) => characterBySourceRef.get(refId))
+      .filter(Boolean)
+  );
   const inferred = [];
   for (const ref of characterRefs ?? []) {
     const character = normalizeName(ref.character ?? ref.subject ?? "");
     const sourceRefId = ref.source_ref_id ?? ref.ref_id ?? null;
     if (!character || !sourceRefId || existingIds.has(sourceRefId) || !ref.reference_image_path) continue;
+    if (coveredCharacters.has(character)) continue;
+    if (Array.isArray(ref.scene_ids) && ref.scene_ids.length && sceneId && !ref.scene_ids.includes(sceneId)) continue;
     if (!visibleText.includes(character)) continue;
+    coveredCharacters.add(character);
     inferred.push({
       ref_id: sourceRefId,
       kind: "character_state",
@@ -183,7 +197,9 @@ function characterReferenceRequirements(prompt, characterRefs, existingIds) {
 
 function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) {
   const prompts = (plan.prompts ?? []).map((prompt) => {
-    const authoredRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+    const authoredRequirements = Array.isArray(prompt.reference_requirements)
+      ? prompt.reference_requirements.filter((requirement) => requirement.inferred_from_visible_subject !== true)
+      : [];
     const existingIds = new Set(authoredRequirements.map((requirement) => requirement.ref_id).filter(Boolean));
     const requirements = [
       ...authoredRequirements,

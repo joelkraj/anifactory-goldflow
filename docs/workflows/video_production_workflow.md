@@ -112,7 +112,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Flux Klein is the preferred image model when available.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
    - Scene attachment prioritizes visible character refs first, then location, props, style, UI, and effects.
-   - If an approved character_state_ref exists for a visible named character, imagegen may attach it even when the prompt planner omitted it.
+   - If an approved character_state_ref exists for a visible named character in that scene, imagegen may attach it even when the prompt planner omitted it. It should not attach multiple state refs for the same character in one cut.
    - If ModelsLab returns a queue or rate-limit error, rerun imagegen with lower concurrency and leave `--force` unset so existing references and completed cuts are reused.
 
 21. Render.

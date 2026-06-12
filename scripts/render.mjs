@@ -330,23 +330,34 @@ function imageDuration(prompt, scale = 1) {
 }
 
 function motionProfile(prompt, index) {
-  const haystack = [
+  const structured = [
     prompt.visual_beat_focus,
     prompt.visual_beat_action,
+    prompt.visual_beat_script_excerpt,
     prompt.primary_subject,
     prompt.location,
+    ...(prompt.visible_subjects ?? []),
+    ...(prompt.ui_text_on_screen ?? []),
+  ].filter(Boolean).join(" ");
+  const promptText = [
     prompt.modelslab_image_prompt,
     prompt.image_prompt,
   ].filter(Boolean).join(" ");
-  const hasAction = /\b(?:fight|combat|attack|horde|swarm|monster|gate break|strike|kill|collapse|rescue|chase|battle|explosion|impact|fall|lunge|crater|tyrant|boss|detonated|shattered)\b/i.test(haystack);
-  const hasReveal = /\b(?:system|interface|window|counter|stored kills|redeem|verdict|settlement|rank|orb|file|liability|debtors|audit|record|screen|monitor|broadcast|forum)\b/i.test(haystack);
-  const isWide = /\b(?:wide|establish|city|street|arena|hall|office|tower|rooftop|district|crowd|environment)\b/i.test(haystack);
-  const isEmotional = /\b(?:quiet|silence|alone|stares|tears|smile|afraid|cold|patient|threshold|memory|decision|reaction)\b/i.test(haystack);
+  const uiFocus = [
+    prompt.primary_subject,
+    ...(prompt.visible_subjects ?? []),
+  ].filter(Boolean).join(" ");
+  const hasUi = /\b(?:system|interface|window|counter|stored kills|redeem|verdict|settlement|rank|orb|file|liability|debtors|audit|record|screen|monitor|broadcast|forum|tablet|license|stamp)\b/i.test(uiFocus);
+  const hasAction = /\b(?:fight|combat|attack|horde|swarm|monster|gate break|strike|kill|collapse|rescue|chase|battle|explosion|impact|fall|lunge|crater|tyrant|boss|detonated|shattered|charge|wave|barricade|tide)\b/i.test(structured);
+  const isWide = /\b(?:wide|establish|city|street|arena|hall|office|tower|rooftop|district|crowd|environment|skyline|gate|den|dungeon)\b/i.test(structured);
+  const isEmotional = /\b(?:quiet|silence|alone|stares|tears|smile|afraid|cold|patient|threshold|memory|decision|reaction|watched|looked|remembered|hesitated|waiting|doorstep|river|dawn)\b/i.test(structured);
+  const promptWide = /\b(?:wide composition|establishing|panoramic|city|street|arena|crowd)\b/i.test(promptText);
+  const promptClose = /\b(?:close-up|closeup|portrait|face|eyes|expression|hand|phone|tablet|file|orb|license)\b/i.test(promptText);
   const direction = index % 4;
-  if (hasAction) return { name: "action_push", zoom: 1.055, driftX: 0.034, driftY: 0.026, direction };
-  if (hasReveal) return { name: "reveal_push", zoom: 1.038, driftX: 0.018, driftY: 0.014, direction };
-  if (isWide) return { name: "wide_drift", zoom: 1.025, driftX: 0.025, driftY: 0.015, direction };
-  if (isEmotional) return { name: "emotional_hold", zoom: 1.012, driftX: 0.008, driftY: 0.006, direction };
+  if (hasAction) return { name: "action_push", zoom: 1.058, driftX: 0.036, driftY: 0.028, direction };
+  if (hasUi) return { name: "ui_reveal", zoom: 1.026, driftX: 0.01, driftY: 0.008, direction };
+  if (isWide || promptWide) return { name: "wide_drift", zoom: 1.024, driftX: 0.026, driftY: 0.016, direction };
+  if (isEmotional || promptClose) return { name: "emotional_hold", zoom: 1.014, driftX: 0.008, driftY: 0.006, direction };
   return { name: "steady_push", zoom: 1.022, driftX: 0.014, driftY: 0.01, direction };
 }
 

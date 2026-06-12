@@ -152,7 +152,8 @@ Return:
       "state_ref_id": "stable_snake_case_id",
       "character": "character name",
       "scene_ids": ["scene_001"],
-      "prompt_anchor": "definitive draft character/state prompt anchor for manual review",
+      "prompt_anchor": "definitive draft character/state reference-generation anchor for manual review",
+      "scene_prompt_anchor": "definitive character identity, wardrobe, and state wording for use inside scene image prompts",
       "definitive": false,
       "reference_image_path": null,
       "source_ref_id": "matching reference_targets ref_id"
@@ -249,7 +250,8 @@ Return:
       "state_ref_id": "stable_snake_case_id",
       "character": "character name",
       "scene_ids": ["scene_001"],
-      "prompt_anchor": "definitive draft character/state prompt anchor for manual review",
+      "prompt_anchor": "definitive draft character/state reference-generation anchor for manual review",
+      "scene_prompt_anchor": "definitive character identity, wardrobe, and state wording for use inside scene image prompts",
       "definitive": false,
       "reference_image_path": null,
       "source_ref_id": "matching reference_targets ref_id"
@@ -337,6 +339,7 @@ function normalizeStateRef(ref, index) {
     character,
     scene_ids: Array.isArray(ref.scene_ids) ? ref.scene_ids : [],
     prompt_anchor: String(ref.prompt_anchor ?? "").trim(),
+    scene_prompt_anchor: String(ref.scene_prompt_anchor ?? ref.scene_anchor ?? ref.prompt_anchor ?? "").trim(),
     definitive: false,
     reference_image_path: ref.reference_image_path ?? null,
     source_ref_id: ref.source_ref_id ?? ref.ref_id ?? null,
@@ -370,6 +373,8 @@ function assertPositiveAnchors(referenceTargets, characterStateRefs) {
   for (const ref of characterStateRefs) {
     const matches = negativeLanguageMatches(ref.prompt_anchor);
     if (matches.length) failures.push(`character_state_refs.${ref.state_ref_id}.prompt_anchor contains negative visual language: ${matches.join(", ")}`);
+    const sceneMatches = negativeLanguageMatches(ref.scene_prompt_anchor);
+    if (sceneMatches.length) failures.push(`character_state_refs.${ref.state_ref_id}.scene_prompt_anchor contains negative visual language: ${sceneMatches.join(", ")}`);
   }
   if (failures.length) {
     throw new Error(`Visual reference plan violates positive-language-only contract:\n${failures.slice(0, 20).join("\n")}`);

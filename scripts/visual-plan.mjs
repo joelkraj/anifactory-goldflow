@@ -127,6 +127,20 @@ function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
   return refs;
 }
 
+function scenePromptAnchorFromRef(ref) {
+  if (ref?.scene_prompt_anchor) return ref.scene_prompt_anchor;
+  return String(ref?.prompt_anchor ?? "")
+    .replace(/\bidentity sheet,\s*/gi, "")
+    .replace(/\bfront view,\s*three-quarter view,\s*side profile,\s*expression closeups,\s*/gi, "")
+    .replace(/\bplain white studio background,\s*/gi, "")
+    .replace(/\bcharacter design turnaround only\b/gi, "")
+    .replace(/\bcharacter turnaround reference sheet composition\b/gi, "")
+    .replace(/\breference sheet composition\b/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*,\s*$/g, "")
+    .trim();
+}
+
 function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
   return {
     scene_id: scene.scene_id,
@@ -146,7 +160,10 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     visible_subjects: scene.visible_subjects ?? [],
     primary_subject: scene.primary_subject ?? null,
     visual_intent: scene.visual_intent ?? "",
-    character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex),
+    character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex).map((ref) => ({
+      ...ref,
+      scene_prompt_anchor: scenePromptAnchorFromRef(ref),
+    })),
     ui_text_on_screen: scene.ui_text_on_screen ?? [],
     sfx_cues: scene.sfx_cues ?? [],
     character_states: scene.character_states ?? [],
@@ -245,7 +262,7 @@ Rules:
 - Action/effect references are visual language evidence. Use them for power shape, energy color, and interaction pattern while keeping the beat's current location and subjects.
 - Put reference slot roles in reference_requirements.slot_purpose and slot_order. The imagegen wrapper will prepend Flux context instructions such as "Use image one as character identity for Kang Jiwoo" at generation time.
 - Keep modelslab_image_prompt as a production scene description. Reference images guide identity, wardrobe, style, UI, props, and effects; they are design evidence for the final cut, not visible reference panels.
-- Character state refs are definitive when present. For every visible named character with a character_state_refs.prompt_anchor, copy that prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe.
+- Character state refs are definitive when present. For every visible named character with a character_state_refs.scene_prompt_anchor, copy that scene_prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe. Use prompt_anchor only for generating reference images, not inside scene prompts.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
@@ -462,13 +479,14 @@ function indexCharacterStateRefs(artifact) {
   for (const ref of refs.filter(Boolean)) {
     const character = ref.character ?? ref.character_name ?? ref.name;
     const sceneId = ref.scene_id ?? ref.scene ?? "*";
-    if (!character || !ref.prompt_anchor) continue;
+    if (!character || !(ref.scene_prompt_anchor || ref.prompt_anchor)) continue;
     const normalized = {
       ...ref,
       character,
       scene_id: sceneId === "*" ? null : sceneId,
       state_ref_id: ref.state_ref_id ?? ref.ref_id ?? `${normalizeLabel(character).replace(/\s+/g, "_")}_${sceneId}`,
       definitive: ref.definitive !== false,
+      scene_prompt_anchor: scenePromptAnchorFromRef(ref),
       source: ref.source ?? "character_state_ref_artifact",
     };
     index.set(`${sceneId}:${normalizeLabel(character)}`, normalized);

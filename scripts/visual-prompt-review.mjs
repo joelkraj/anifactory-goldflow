@@ -187,6 +187,7 @@ function compactCharacterStateRefs(refs) {
       character: ref.character,
       scene_ids: ref.scene_ids ?? [],
       prompt_anchor: ref.prompt_anchor,
+      scene_prompt_anchor: ref.scene_prompt_anchor ?? ref.scene_anchor ?? ref.prompt_anchor,
       definitive: ref.definitive,
       reference_image_path: ref.reference_image_path ?? null,
       source_ref_id: ref.source_ref_id ?? null,
@@ -231,6 +232,7 @@ Rules:
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
+- Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
 - Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.

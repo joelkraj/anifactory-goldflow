@@ -453,10 +453,12 @@ function chunkByParentScene(items, targetSize) {
   const chunks = [];
   let current = [];
   let currentSceneId = null;
+  const splitLongScenes = flags["visual-chunk-split-long-scenes"] !== "false";
   for (const item of items) {
     const sceneId = item.parent_scene_id ?? item.scene_id ?? null;
     const startsNewScene = current.length && sceneId !== currentSceneId;
-    if (startsNewScene && current.length >= targetSize) {
+    const reachedTarget = current.length >= targetSize;
+    if (current.length && ((startsNewScene && reachedTarget) || (!startsNewScene && splitLongScenes && reachedTarget))) {
       chunks.push(current);
       current = [];
     }
@@ -532,7 +534,7 @@ async function main() {
     const styleSummaries = [];
     for (let index = 0; index < sceneChunks.length; index += 1) {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
-      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
+      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} visual units`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
       const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
@@ -541,7 +543,7 @@ async function main() {
         : await callCodex(chunkPrompt, chunkStageName);
       const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
       if (chunkPrompts.length !== sceneChunks[index].length) {
-        throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunks[index].length} scenes.`);
+        throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunks[index].length} visual units.`);
       }
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${chunkPrompts.length} prompts`);
       parsedPrompts.push(...chunkPrompts);

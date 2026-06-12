@@ -110,6 +110,7 @@ The approved narration script is production truth. The pipeline should extract, 
 20. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
+   - Flux Klein and Flux Kontext are both treated as four-reference models in this pipeline.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
    - Scene attachment prioritizes visible character refs first, then location, then prop/UI, then action/effects. Priority kind outranks required/optional flags. Style refs are only attached to scene cuts when no concrete refs are available.
    - If an approved character_state_ref exists for a visible named character in that scene, imagegen may attach it even when the prompt planner omitted it. It should not attach multiple state refs for the same character in one cut.

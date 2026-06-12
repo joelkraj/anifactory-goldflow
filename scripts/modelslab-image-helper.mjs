@@ -150,7 +150,7 @@ export async function generateModelslabImage({
   const uploadDir = path.join(outputDir, "uploads");
   await ensureDir(outputDir);
   const referenceUrls = [];
-  const maxReferences = model === "flux-klein" ? 4 : 8;
+  const maxReferences = 4;
   for (const refPath of referenceImagePaths.slice(0, maxReferences)) referenceUrls.push(await uploadModelslabReference(refPath, uploadDir));
   const endpoint = referenceUrls.length ? "/api/v6/images/img2img" : "/api/v6/images/text2img";
   if (model === "flux-klein" && referenceUrls.length && endpoint !== "/api/v6/images/img2img") {

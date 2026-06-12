@@ -119,10 +119,9 @@ function referenceSortKey(requirement, index) {
   const kind = String(requirement.kind ?? "").toLowerCase();
   const kindRank = kind.includes("character") ? 0
     : kind.includes("location") ? 1
-      : kind.includes("prop") ? 2
-        : kind.includes("style") ? 3
-          : kind.includes("ui") ? 4
-            : kind.includes("action") ? 5
+      : kind.includes("prop") || kind.includes("ui") ? 2
+        : kind.includes("action") || kind.includes("effect") ? 3
+          : kind.includes("style") ? 9
               : 6;
   return {
     requiredRank,
@@ -130,6 +129,10 @@ function referenceSortKey(requirement, index) {
     explicitOrder: Number.isFinite(explicitOrder) ? explicitOrder : 999,
     index,
   };
+}
+
+function isStyleReferenceRequirement(requirement) {
+  return String(requirement.kind ?? "").toLowerCase().includes("style") || requirement.ref_id === "style_ref";
 }
 
 function referenceSlotPurpose(requirement) {
@@ -205,7 +208,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
       ...authoredRequirements,
       ...characterReferenceRequirements(prompt, characterRefs, existingIds),
     ];
-    const selected = requirements
+    const availableRows = requirements
       .map((requirement, index) => ({
         requirement,
         index,
@@ -213,8 +216,10 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
         sortKey: referenceSortKey(requirement, index),
       }))
       .filter((row) => row.path)
-      .sort((a, b) => a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.kindRank - b.sortKey.kindRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index)
-      .slice(0, maxSceneReferences);
+      .sort((a, b) => a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.kindRank - b.sortKey.kindRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index);
+    const nonStyleRows = availableRows.filter((row) => !isStyleReferenceRequirement(row.requirement));
+    const styleRows = availableRows.filter((row) => isStyleReferenceRequirement(row.requirement));
+    const selected = (nonStyleRows.length ? nonStyleRows : styleRows).slice(0, maxSceneReferences);
     const selectedIds = new Set(selected.map((row) => row.requirement.ref_id));
     const referenceSlots = selected.map((row, index) => ({
       slot: index + 1,
@@ -243,7 +248,9 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
             ref_id: requirement.ref_id,
             usage: "available_not_attached_reference_limit",
             reference_image_path: refPath,
-            reason: `Scene already uses the maximum ${maxSceneReferences} reference images for model stability.`,
+            reason: isStyleReferenceRequirement(requirement) && selected.length && !selectedIds.has(requirement.ref_id)
+              ? "Style reference is only attached when no other scene references are available; concrete refs already carry style."
+              : `Scene already uses the maximum ${maxSceneReferences} reference images for model stability.`,
           };
         }
         return {

@@ -153,7 +153,7 @@ Return:
       "character": "character name",
       "scene_ids": ["scene_001"],
       "prompt_anchor": "definitive draft character/state reference-generation anchor for manual review",
-      "scene_prompt_anchor": "definitive character identity, wardrobe, and state wording for use inside scene image prompts",
+      "scene_prompt_anchor": "concise character identity, wardrobe, and state wording for use inside scene image prompts; no reference-sheet, camera, pose, location, or action-direction wording",
       "definitive": false,
       "reference_image_path": null,
       "source_ref_id": "matching reference_targets ref_id"
@@ -251,7 +251,7 @@ Return:
       "character": "character name",
       "scene_ids": ["scene_001"],
       "prompt_anchor": "definitive draft character/state reference-generation anchor for manual review",
-      "scene_prompt_anchor": "definitive character identity, wardrobe, and state wording for use inside scene image prompts",
+      "scene_prompt_anchor": "concise character identity, wardrobe, and state wording for use inside scene image prompts; no reference-sheet, camera, pose, location, or action-direction wording",
       "definitive": false,
       "reference_image_path": null,
       "source_ref_id": "matching reference_targets ref_id"

@@ -251,6 +251,10 @@ Rules:
 - Preserve one reviewed prompt for every input prompt.
 - If a prompt is already good, keep it materially unchanged.
 - If a reference is not visible or style-critical for this cut, remove it from reference_usage and required_reference_paths.
+- Keep at most four reference_requirements for any cut.
+- Reference priority is strict: visible character_state refs first, then location, then prop or UI, then action or effects, then style.
+- Attach style only when the cut has zero concrete character, location, prop, UI, or action references.
+- When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
 - Preserve clear reference slot mapping in reference_requirements so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
 - If a required existing reference is missing, add a finding with severity "blocker".

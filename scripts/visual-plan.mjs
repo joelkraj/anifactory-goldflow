@@ -267,7 +267,10 @@ Rules:
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
-- For each cut, include only references that are visible or style-critical.
+- For each cut, include only references that are visible or style-critical, with at most four reference_requirements total.
+- Reference priority is strict: visible character_state refs first, then location, then prop or UI, then action or effects, then style.
+- Attach style only when the cut has zero concrete character, location, prop, UI, or action references.
+- When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.
 - Use visual reference targets to decide reference_usage and anchor_roles.
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1.
 - Put character identity refs before location refs when the main risk is character identity. Put location refs before character refs when the main risk is the environment. Put action/effect refs after identity and location refs unless the effect is the primary subject.

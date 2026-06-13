@@ -132,7 +132,11 @@ function referenceSortKey(requirement, index) {
 }
 
 function isStyleReferenceRequirement(requirement) {
-  return String(requirement.kind ?? "").toLowerCase().includes("style") || requirement.ref_id === "style_ref";
+  return String(requirement.kind ?? "").toLowerCase().includes("style") || String(requirement.ref_id ?? "") === "style_ref";
+}
+
+function isStyleReferenceTarget(target) {
+  return String(target.kind ?? "").toLowerCase().includes("style") || String(target.ref_id ?? "") === "style_ref";
 }
 
 function referenceSlotPurpose(requirement) {
@@ -367,7 +371,7 @@ async function generateReferences() {
   await fs.mkdir(referenceDir, { recursive: true });
   const targets = referencePlan.reference_targets
     .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true);
-  const styleTarget = targets.find((target) => target.ref_id === "style_ref");
+  const styleTarget = targets.find((target) => isStyleReferenceTarget(target));
   const results = [];
   let styleRefPath = null;
   if (styleTarget) {
@@ -375,7 +379,7 @@ async function generateReferences() {
     results.push(result);
     styleRefPath = result.image_path;
   }
-  const remaining = targets.filter((target) => target.ref_id !== "style_ref");
+  const remaining = targets.filter((target) => target.ref_id !== styleTarget?.ref_id);
   results.push(...await runPool(remaining, (target) => generateReference(target, styleRefPath), referenceConcurrency));
   const referenceById = new Map([
     ...results.map((row) => [row.ref_id, row.image_path]),

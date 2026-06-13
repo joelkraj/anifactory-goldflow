@@ -90,15 +90,15 @@ The approved narration script is production truth. The pipeline should extract, 
 16. Manual reference prompt review.
    - Agent/operator reviews and optimizes style, character, and key action reference prompts before image generation.
    - Keep this positive-only and specific.
-   - Character refs should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views.
-   - Do not make character refs scene-like; backgrounds and dramatic poses can transfer into cuts.
+   - Character refs for scene conditioning must be single-person, single-pose, plain-background identity refs.
+   - Do not use multi-position sheets, turnaround boards, multiple face-angle grids, scene backgrounds, dramatic action poses, or composition language that can transfer into cuts.
 
 17. Reference generation and approval.
    - Generate required references before scene imagegen.
    - Do not bypass missing production refs.
    - Run references first with a reference-only imagegen pass.
    - Manually inspect generated refs before any scene cut generation.
-   - Reject refs with panel grids, speech bubbles, strong scene backgrounds, cinematic action poses, or pose/background elements likely to transfer into cuts.
+   - Reject refs with panel grids, speech bubbles, multi-position character layouts, strong scene backgrounds, cinematic action poses, or pose/background elements likely to transfer into cuts.
    - Regenerate failed refs selectively with `--reference-ids`; do not wipe approved refs.
 
 18. Visual prompt planning.

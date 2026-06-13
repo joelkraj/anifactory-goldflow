@@ -64,6 +64,8 @@ The approved narration script is production truth. The pipeline should extract, 
    - Must run after Whisper timing.
    - SFX should be noticeable but controlled.
    - Score should sit below SFX and narration.
+   - SFX-only is allowed when the story is stronger with clean narration and punctuation SFX instead of continuous music.
+   - For SFX-only, run audio enrichment with `--sfx-only true`; the score plan is deliberately empty and no score beds are generated.
    - Local ACE-Step is the preferred production score provider. Use `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or pass `--score-provider local_ace_step`.
    - Do not use ModelsLab music generation for production score unless the operator explicitly asks for a fallback.
    - Current score implementation creates chapter score beds as the base emotional floor.
@@ -74,6 +76,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Mixes narration, SFX, and score into one final continuous audio track.
    - Production narration loudness starts at `--narration-volume-db 2`, with the longform limiter enabled.
    - Use `--narration-volume-db 3` only after a loudness/clip check passes. If narration competes with music, lower score beds or drops before pushing narration harder.
+   - For SFX-only, pass `--skip-score true` so chapter beds and score drops are excluded from the final mix.
 
 14. Visual beat planning.
    - Splits timed semantic scenes into image beats.
@@ -145,6 +148,7 @@ The approved narration script is production truth. The pipeline should extract, 
 - Voice route: narrator-only unless the operator explicitly requests character voice casting.
 - Timing: local Whisper word timing on the final stitched narration.
 - SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
+- SFX prompting: concrete source/material/action/space prompts, short clean effects, no story-summary prompts, no melody, no speech, no crowd dialogue.
 - Score beds: local ACE-Step 1.5 is preferred for production score generation. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`. ModelsLab music generation is not the preferred production score path.
 - Score drops: optional second layer of twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper and mixed by ducking the base bed at focal beats.
 - Image model: ModelsLab Flux Klein.
@@ -175,6 +179,14 @@ node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --wee
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json
 ```
 
+SFX-only audio variant:
+
+```bash
+node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-only true --sfx-target-count 45
+node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --skip-score true --sfx-boost-db -4 --narration-volume-db 2 --outputBase ep_01-<channel>-qwen-sfx-only --reportSuffix -sfx-only
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --audio <episode-dir>/assets/audio/longform_mix/ep_01-<channel>-qwen-sfx-only.m4a --prompts <episode-dir>/section_image_prompts_reviewed.json --output <episode-dir>/assets/renders/<title>-sfx-only.mp4 --report-output <episode-dir>/render_report_ep_01-sfx-only.json
+```
+
 ## Next Production Run Checklist
 
 Use this checklist before spending generation time:
@@ -197,6 +209,8 @@ Use this checklist before spending generation time:
 
 4. SFX and scoring
    - Run SFX/score planning only after Whisper timing.
+   - For narration-led humiliation/system stories, test SFX-only first: narrator plus system pings, phone buzzes, paper/object sounds, room hushes, laugh ripples, applause turns, and wealth-reveal impacts.
+   - SFX prompts must name the source, material, action, space, and intensity. Example: `short cold crystalline digital transaction chime, quick attack, clean decay, subtle corporate interface texture`.
    - Use local ACE-Step for score beds:
      `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
    - Keep SFX audible but controlled. Current mix starting point:

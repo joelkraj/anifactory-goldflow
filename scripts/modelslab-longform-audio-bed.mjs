@@ -41,6 +41,7 @@ const scoreDropVolumeDb = Number(flags["score-drop-volume-db"] ?? -18);
 const scoreDropDuckDb = Number(flags["score-drop-duck-db"] ?? -8);
 const sfxVolumeBoostDb = Number(flags["sfx-boost-db"] ?? 0);
 const narrationVolumeDb = Number(flags["narration-volume-db"] ?? 0);
+const skipScore = flags["skip-score"] === "true";
 
 let cachedKey = null;
 
@@ -580,16 +581,18 @@ async function start() {
     readJson(sfxPlanPath, null),
     readJson(qwenReportPath, null),
   ]);
-  if (!scorePlan?.chapters?.length) throw new Error(`Missing score chapters: ${scorePlanPath}`);
+  if (!skipScore && !scorePlan?.chapters?.length) throw new Error(`Missing score chapters: ${scorePlanPath}`);
   if (!sfxPlan) throw new Error(`Missing SFX event plan: ${sfxPlanPath}`);
-  validateScorePlanForProduction(scorePlan);
-  validateScoreDropPlanForProduction(scoreDropPlan, scorePlan);
+  if (!skipScore) {
+    validateScorePlanForProduction(scorePlan);
+    validateScoreDropPlanForProduction(scoreDropPlan, scorePlan);
+  }
   validateSfxPlanForProduction(sfxPlan);
   const narrationPath = flags.narration ?? qwenReport?.output_path;
   if (!narrationPath || !(await exists(narrationPath))) throw new Error(`Missing narration audio. Pass --narration or create ${qwenReportPath}`);
   const narrationDuration = await mediaDuration(narrationPath);
   const durationSec = maxDurationSec > 0 ? Math.min(maxDurationSec, narrationDuration) : narrationDuration;
-  const chapters = activeChapters(scorePlan, durationSec);
+  const chapters = skipScore ? [] : activeChapters(scorePlan, durationSec);
   const scoreRows = [];
   for (const chapter of chapters) {
     const start = Number(chapter.start_sec ?? 0);
@@ -597,11 +600,11 @@ async function start() {
     scoreRows.push(await generateScoreChapter(chapter, Math.max(30, end - start)));
   }
   const scoreDropRows = [];
-  for (const drop of activeScoreDrops(scoreDropPlan, durationSec)) {
+  for (const drop of (skipScore ? [] : activeScoreDrops(scoreDropPlan, durationSec))) {
     scoreDropRows.push(await generateScoreDrop(drop));
   }
   const sfxEnsured = await ensureSfxEvents(sfxPlan);
-  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan, scoreDropRows, sfxPlan, durationSec, qwenReport });
+  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan: scorePlan ?? { chapters: [] }, scoreDropPlan: skipScore ? null : scoreDropPlan, scoreDropRows, sfxPlan, durationSec, qwenReport });
   const scoreMeta = scoreProviderMeta();
   const report = {
     status: dryRun ? "dry_run" : "completed",
@@ -611,6 +614,7 @@ async function start() {
     week,
     episode,
     provider: scoreMeta.provider === "local_ace_step" ? "local-ace-step-plus-modelslab-sfx" : "modelslab-inhouse",
+    skip_score: skipScore,
     score_provider: scoreMeta.provider,
     score_model_id: scoreMeta.model_id,
     score_lm_model_id: scoreMeta.lm_model_id ?? null,
@@ -620,8 +624,8 @@ async function start() {
     narration_path: narrationPath,
     narration_duration_sec: narrationDuration,
     mixed_duration_sec: mix?.duration_sec ?? durationSec,
-    score_chapter_plan_path: scorePlanPath,
-    score_drop_plan_path: scoreDropPlan ? scoreDropPlanPath : null,
+    score_chapter_plan_path: skipScore ? null : scorePlanPath,
+    score_drop_plan_path: !skipScore && scoreDropPlan ? scoreDropPlanPath : null,
     sfx_event_plan_path: sfxPlanPath,
     score_chapters: scoreRows,
     score_drops: scoreDropRows,

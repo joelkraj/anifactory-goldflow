@@ -40,8 +40,9 @@ const plannerVersion = 1;
 const plannerName = "llm_audio_enrichment_v1";
 const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 60, 24, 90);
 const scoreTargetChapters = clampInt(flags["score-target-chapters"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_CHAPTERS ?? 8, 5, 12);
+const sfxOnly = flags["sfx-only"] === "true";
 const generateAssets = flags["generate-assets"] !== "false";
-const generateScoreAssets = generateAssets && flags["generate-score-assets"] !== "false";
+const generateScoreAssets = !sfxOnly && generateAssets && flags["generate-score-assets"] !== "false";
 const generateSfxAssets = generateAssets && flags["generate-sfx-assets"] !== "false";
 const dryRun = flags["dry-run"] === "true";
 const allowNonWhisperTiming = flags["allow-non-whisper-timing"] === "true"
@@ -717,7 +718,19 @@ function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
     generation_prompt: cue.generation_prompt ?? null,
     has_available_asset: Boolean(preferredAsset(cue)?.path),
   }));
-  return `Build the PRIMARY SFX and score plan for this AniFactory longform episode.
+  const modeInstruction = sfxOnly
+    ? `SFX-ONLY MODE:
+- Build SFX events only.
+- Return "score_chapters": [].
+- Do not plan score beds, music chapters, risers, drones, or music drops.
+- Let silence and narration carry the emotional floor; SFX should punctuate only important system, object, crowd, phone, room, and reveal beats.`
+    : `SCORE REQUIREMENTS:
+- Emit ${scoreTargetChapters} or fewer/more as the story beats require; do not use fixed 3-minute windows.
+- Each chapter needs: chapter_id, start_sec, end_sec, target_duration_sec, score_intent, story_function, intensity_score 1-10, gain_db, ace_step_prompt, beat_reason, sourcing_intent.
+- start/end must be on the real ${Math.round(durationSec)} second timeline.
+- Prompts must be instrumental, no vocals/lyrics/speech, and palette-native to this episode.
+- Beat mapping matters: swells should sit on actual reversals, pressure under pressure, cold control under power beats.`;
+  return `Build the PRIMARY ${sfxOnly ? "SFX-only" : "SFX and score"} plan for this AniFactory longform episode.
 
 GUIDING PRINCIPLE:
 Effective SFX/score is about placement on the emotional beat, not quantity alone. Read the dopamine structure (insult/pressure -> MC signal -> visceral reversal -> witness reaction). Decide WHAT sound/music and WHERE in the story. Deterministic code will convert segment_id + offset_sec into exact timestamps and render.
@@ -737,12 +750,16 @@ SFX REQUIREMENTS:
 - Make deliberate sourcing possible: use cue_id consistently for signature recurring sounds that should share an asset; use more specific cue_id for one-off incidental sounds.
 - Descriptive narration remains narration; SFX events should layer under it, not replace spoken text.
 
-SCORE REQUIREMENTS:
-- Emit ${scoreTargetChapters} or fewer/more as the story beats require; do not use fixed 3-minute windows.
-- Each chapter needs: chapter_id, start_sec, end_sec, target_duration_sec, score_intent, story_function, intensity_score 1-10, gain_db, ace_step_prompt, beat_reason, sourcing_intent.
-- start/end must be on the real ${Math.round(durationSec)} second timeline.
-- Prompts must be instrumental, no vocals/lyrics/speech, and palette-native to this episode.
-- Beat mapping matters: swells should sit on actual reversals, pressure under pressure, cold control under power beats.
+SFX GENERATION PROMPT RULES:
+- Write concrete sound descriptions, not story summaries.
+- Name the sound source, material, action, space, and intensity.
+- Keep each generated effect short and clean; avoid music, melody, vocals, speech, narration, and crowd dialogue inside SFX prompts.
+- For UI/system sounds, specify tone shape and texture: short crystalline digital chime, cold corporate transaction ping, low confirmation pulse, subtle holographic shimmer.
+- For room/crowd sounds, specify nonverbal texture: brief wealthy-room laugh ripple, shocked gasp wave, applause swell, sudden room hush.
+- For object sounds, specify material and contact: cream paper card slid on polished table, phone vibration on fabric, glassware clink, wooden case set on metal dessert trolley.
+- Use dry, mixable sounds with clear attack and quick decay unless the cue is an intentional ambience.
+
+${modeInstruction}
 
 BANKED SFX SUMMARY FOR POSSIBLE TIGHT MATCHES ONLY:
 ${JSON.stringify(bankSummary, null, 2)}
@@ -1003,7 +1020,7 @@ async function main() {
   const llm = await callPlannerLlm(prompt, `${episode}_audio_sfx_score_enrichment`);
   const validSegments = new Map(segments.map((segment) => [String(segment.segment_id), segment]));
   const rawEvents = Array.isArray(llm.parsed.sfx_events) ? llm.parsed.sfx_events : [];
-  const rawChapters = Array.isArray(llm.parsed.score_chapters) ? llm.parsed.score_chapters : [];
+  const rawChapters = !sfxOnly && Array.isArray(llm.parsed.score_chapters) ? llm.parsed.score_chapters : [];
   const normalizedEvents = rawEvents
     .map((event, index) => normalizeEvent(event, index, validSegments))
     .filter((event) => event.segment_id)
@@ -1169,11 +1186,13 @@ async function main() {
   };
 
   const scorePlan = {
-    status: scoreChapters.every((chapter) => chapter.asset_path && (chapter.asset_validation?.status ?? "passed") !== "failed") ? "passed" : "failed",
-    ok: scoreChapters.every((chapter) => chapter.asset_path && (chapter.asset_validation?.status ?? "passed") !== "failed"),
+    status: sfxOnly || scoreChapters.every((chapter) => chapter.asset_path && (chapter.asset_validation?.status ?? "passed") !== "failed") ? "passed" : "failed",
+    ok: sfxOnly || scoreChapters.every((chapter) => chapter.asset_path && (chapter.asset_validation?.status ?? "passed") !== "failed"),
     planner: plannerName,
     planner_version: plannerVersion,
-    purpose: scoreProvider === "local_ace_step"
+    purpose: sfxOnly
+      ? "SFX-only run: score deliberately disabled. This passed empty score plan exists only so downstream reports can record the no-score decision."
+      : scoreProvider === "local_ace_step"
       ? "LLM beat-mapped score plan for local ACE-Step 1.5 generation; chapters follow story beats, not fixed clock windows."
       : "LLM beat-mapped score plan for ModelsLab music_gen; chapters follow story beats, not fixed clock windows.",
     channel,
@@ -1191,12 +1210,13 @@ async function main() {
     score_density_policy: {
       target: "Beat-aligned chapters mapped to emotional/dopamine structure; no mechanical 3-minute windows.",
       chapter_count: scoreChapters.length,
-      publish_requirement: "Generated beds are vetted before final mix; final mix remains separate.",
+      publish_requirement: sfxOnly ? "No score beds are generated or mixed for this run." : "Generated beds are vetted before final mix; final mix remains separate.",
     },
     engine_hint: scoreProvider === "local_ace_step"
       ? "Local ACE-Step 1.5 score generation through scripts/ace-step-score-generate.py"
       : "ModelsLab /api/v6/voice/music_gen model_id ai-music-generator",
     score_provider: scoreMeta.provider,
+    score_disabled: sfxOnly,
     score_model_id: scoreMeta.model_id,
     score_lm_model_id: scoreMeta.lm_model_id ?? null,
     score_endpoint: scoreMeta.endpoint,
@@ -1217,6 +1237,7 @@ async function main() {
     planner: plannerName,
     planner_version: plannerVersion,
     guiding_principle: "Effective SFX/score is about placement on the emotional beat. LLM decides what sound/music and where in the story; deterministic code decides exact timestamp and render.",
+    audio_mode: sfxOnly ? "sfx_only_no_score" : "sfx_plus_score",
     genre_neutrality_confirmation: "The prompt derives palette from script/bible and contains no hardcoded episode-only, genre-forbidden, or series-specific rules.",
     layer_0_root_cause: {
       score_contamination_root_cause: "Legacy deterministic score templates were removed from the clean production flow; SFX/score must come from locked script, bibles, and Whisper timing.",
@@ -1264,6 +1285,7 @@ async function main() {
     },
     score: {
       plan_path: scorePlanPath,
+      disabled: sfxOnly,
       chapter_count: scoreChapters.length,
       chapters: scoreChapters.map((chapter) => ({
         chapter_id: chapter.chapter_id,
@@ -1317,7 +1339,7 @@ async function main() {
   await writeJson(enrichmentReportPath, report);
   await appendManualLog([
     `Generated LLM-enriched SFX plan: ${sfxPlan.resolved_event_count} resolved cues, ${generatedSfxAssets.length} generated assets, ${reusedSfxAssets.length} reused assets.`,
-    `Generated LLM beat-mapped score plan: ${scoreChapters.length} chapters, final mix not produced.`,
+    sfxOnly ? "Generated SFX-only run: score disabled, final mix not produced." : `Generated LLM beat-mapped score plan: ${scoreChapters.length} chapters, final mix not produced.`,
     `Source script hash: ${sourceScriptHash}.`,
   ]);
   console.log(JSON.stringify(report, null, 2));

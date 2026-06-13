@@ -43,6 +43,9 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
 - Planning LLM routes are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for semantic, audio, visual reference, visual prompt, or prompt review planning. ModelsLab is a media generation provider in this workflow, not a planning backend.
+- SFX-only is an approved production route for narration-driven humiliation/system stories. Run audio enrichment with `--sfx-only true`, generate no score beds, and mix with `--skip-score true` so the final audio is narrator plus selected SFX only.
+- SFX generation prompts must describe the concrete sound source, material, action, space, duration feel, and intensity. Do not send story summaries as SFX prompts. Good prompt shape: "short cold crystalline digital transaction chime, quick attack, clean decay, subtle corporate interface texture, no melody, no speech." For crowd/room cues, request nonverbal texture such as a brief wealthy-room laugh ripple, shocked gasp wave, applause swell, or sudden room hush.
+- SFX should be selective and beat-anchored. Prioritize system pings, phone buzzes, paper/card handling, glass/banquet objects, room hushes, laugh ripples, applause turns, wealth-reveal impacts, and a few signature transaction confirmations. Avoid constant literal Foley under every sentence.
 - Score/music generation can use local ACE-Step 1.5 by setting `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or passing `--score-provider local_ace_step`. This feeds each beat-mapped chapter `ace_step_prompt` to `/Users/joel/AniFactoryTools/ACE-Step-1.5` and writes beds under `assets/audio/ace_step_score_beds`. Default local model selection is DiT `acestep-v15-turbo` with LM `acestep-5Hz-lm-1.7B`; override with `ANIFACTORY_ACE_STEP_CONFIG_PATH` and `ANIFACTORY_ACE_STEP_LM_MODEL`.
 - Score should be layered, not only windowed. Chapter beds are the base emotional floor; the optional `score_drop_plan_<episode>.json` layer places short Whisper-timed local ACE-Step riser/hit accents on focal drama, hype, reversal, reveal, and payoff beats. The longform mixer fades each drop in/out and ducks overlapping chapter beds, instead of stacking uncontrolled volume. Target roughly 20-35 score drops for a long episode, keep them separate from physical SFX, and use them sparingly enough that they feel intentional.
 - ModelsLab score generation remains available with `ANIFACTORY_SCORE_PROVIDER=modelslab` and uses `/api/v6/voice/music_gen` model_id `ai-music-generator`.
@@ -87,6 +90,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Audio planning: Codex or local Qwen only. If automated planner calls are unavailable, a Codex-agent manual plan may be written with explicit provenance, current source hashes, and Whisper timing.
 - SFX generation: ModelsLab `/api/v7/voice/sound-generation` assets are allowed after a Codex/local-Qwen/agent-authored plan. SFX events must use locked asset paths before mix.
 - Score generation: prefer local ACE-Step 1.5 for chapter score beds and optional score drops; current default local model pair is `acestep-v15-turbo` plus `acestep-5Hz-lm-1.7B`. Score drops are short Whisper-timed ACE-Step riser/hit accents for 20-35 drama, hype, reveal, and payoff beats, mixed by ducking the base score bed at those moments.
+- SFX-only mix: use `--sfx-only true` during audio enrichment and `--skip-score true` during longform-bed when the story is stronger with clean narration and punctuation SFX instead of score.
 - Image generation: ModelsLab Flux Klein, with positive-only prompts and explicit reference slot mapping.
 - Render: one continuous mixed audio track, final-script subtitle text timed by Whisper, yellow subtitle text with a small black outline and no background box. Ken Burns motion is profile-based and intentional: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Extract final QA frames and spot-check prompt/image/ref consistency before treating the render as publishable.
 
@@ -110,6 +114,14 @@ node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --concurrency 6 --reference-concurrency 6
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json
+```
+
+SFX-only audio variant:
+
+```bash
+node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-only true --sfx-target-count 45
+node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --skip-score true --sfx-boost-db -4 --narration-volume-db 2 --outputBase ep_01-<channel>-qwen-sfx-only --reportSuffix -sfx-only
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --audio <episode-dir>/assets/audio/longform_mix/ep_01-<channel>-qwen-sfx-only.m4a --prompts <episode-dir>/section_image_prompts_reviewed.json --output <episode-dir>/assets/renders/<title>-sfx-only.mp4 --report-output <episode-dir>/render_report_ep_01-sfx-only.json
 ```
 
 ## LLM Routing
@@ -137,6 +149,7 @@ ANIFACTORY_LOCAL_LLM_MODEL=Qwen3-30B-A3B-MLX-4bit
 - Use local Whisper word timing before SFX, score, visual beats, subtitles, or render.
 - Use local ACE-Step for production score beds. ModelsLab music generation is a fallback only when explicitly requested.
 - Use the optional score-drop layer when the run needs retention accents: twenty to thirty-five Whisper-timed local ACE-Step riser/hit accents mixed by ducking the base score bed.
+- For humiliation/system-finance stories, consider an SFX-only audio pass before committing to score. Clean narration plus selective SFX may retain better than continuous beds.
 - For imagegen, prioritize reference quality and spot checks over raw throughput. Start concurrency around 6-12 on the next full run, then raise only after references and prompt quality look stable.
 - If generation times out, count missing references/cuts and resume only those IDs with cache reuse. Do not force-regenerate completed good images.
 - Keep narration competitively loud from the longform mix using `--narration-volume-db 2`, then verify clipping and intelligibility against score beds and drops.

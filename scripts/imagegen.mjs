@@ -22,6 +22,7 @@ const concurrency = Math.max(1, Math.min(24, Number(flags.concurrency ?? process
 const referenceConcurrency = Math.max(1, Math.min(8, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 3)));
 const force = flags.force === "true";
 const skipReferenceGeneration = flags["skip-reference-generation"] === "true";
+const referencesOnly = flags["references-only"] === "true";
 const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
 
 function parseFlags(parts) {
@@ -410,6 +411,29 @@ async function generateReferences() {
 
 async function main() {
   const referenceRun = await generateReferences();
+  if (referencesOnly) {
+    const report = {
+      schema: "goldflow_imagegen_report_v1",
+      status: referenceRun.results.every((row) => row.status === "generated" || row.status === "reused_fresh") ? "passed" : "failed",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      prompt_plan_path: promptPath,
+      visual_reference_plan_path: visualReferencePlanPath,
+      character_state_refs_path: characterStateRefsPath,
+      image_dir: imageDir,
+      reference_only: true,
+      reference_concurrency: referenceConcurrency,
+      reference_count: referenceRun.results.length,
+      reference_results: referenceRun.results,
+      updated_at: new Date().toISOString(),
+    };
+    await writeJson(reportPath, report);
+    console.log(JSON.stringify({ status: report.status, report_path: reportPath, reference_count: report.reference_count }, null, 2));
+    if (report.status !== "passed") process.exitCode = 1;
+    return;
+  }
   let plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !plan.prompts.length) throw new Error(`Missing passed section image prompt plan: ${promptPath}`);
   if (referenceRun.referenceById?.size) {

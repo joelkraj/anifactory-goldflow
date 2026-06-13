@@ -71,6 +71,10 @@ function requestedIds() {
   return new Set(String(flags["cut-ids"] ?? flags["image-ids"] ?? flags["image-id"] ?? "").split(",").map((row) => row.trim()).filter(Boolean));
 }
 
+function requestedReferenceIds() {
+  return new Set(String(flags["reference-ids"] ?? flags["reference-id"] ?? "").split(",").map((row) => row.trim()).filter(Boolean));
+}
+
 function imagePathFor(prompt) {
   return path.join(imageDir, `${prompt.image_id}-modelslab-image.png`);
 }
@@ -370,8 +374,10 @@ async function generateReferences() {
     };
   }
   await fs.mkdir(referenceDir, { recursive: true });
+  const referenceScope = requestedReferenceIds();
   const targets = referencePlan.reference_targets
-    .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true);
+    .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true)
+    .filter((target) => !referenceScope.size || referenceScope.has(target.ref_id));
   const styleTarget = targets.find((target) => isStyleReferenceTarget(target));
   const results = [];
   let styleRefPath = null;

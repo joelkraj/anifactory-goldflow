@@ -50,6 +50,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Ambiguous dialogue routes to narrator.
 - Render must consume one continuous final mixed audio track.
 - Qwen TTS stitch must include a small inter-segment safety gap by default so unit boundaries do not clip final phonemes or smash narration beats together. Current default is `ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC=0.22`; rerun Whisper after any stitch change.
+- Narration loudness is controlled at longform mix, not by destructively editing cached TTS assets. Production starting point is `--narration-volume-db 2` with the final limiter enabled; use `3` only after a loudness/clip check passes. If narration still competes with music, lower score beds or drops before pushing narration harder.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
 - Visual prompt planning must consume `visual_beat_plan.json` when present. Semantic scenes are not image cuts; long scenes must be split into multiple visual beats before imagegen. Default beat pacing aims for an average near 8 seconds, minimum 3 seconds, maximum 15 seconds.
 - Visual beats must carry local script excerpts or concrete beat actions. The LLM should author each image prompt from the beat excerpt, not from a repeated parent-scene summary.
@@ -59,6 +60,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Reference kinds have strict boundaries: character refs provide identity and wardrobe; location refs provide environment; UI refs provide interface design; action/effect refs provide effect shape, color, movement path, and interaction logic. Scene prompts provide the actual pose, camera angle, and current location.
 - Character state references are produced before visual planning and are definitive for visual identity, wardrobe, and character state. Do not let visual planners infer wardrobe from ambiguous prose such as "gray suit"; use curated state-ref prompt anchors.
 - Before image generation, the agent must manually review and optimize style, character, and key action reference prompts. Main character refs should specify identity, body type, hair, face, wardrobe state, and common model misread risks in positive production language. Character refs should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; avoid scene backgrounds, dramatic action poses, or composition language that can transfer into cuts.
+- Generate references in a reference-only pass before scene imagegen, then inspect the files. Reject refs that contain panel grids, speech bubbles, strong scene backgrounds, cinematic poses, or any pose/background likely to carry into cuts. Regenerate failed refs selectively with `--reference-ids` instead of wiping the whole run.
 - For ambiguous wardrobe states, avoid terms that trigger unwanted default garments. Use manually curated state-ref wording that describes the exact garment construction, neckline, fabric, silhouette, and production context in positive language.
 - For multi-character scenes, references attach only from validated character_state_refs. Single-character shots should not attach another character's ref.
 - Named human characters who physically touch, fight, shove, restrain, rescue, carry, or closely confront the protagonist must get standalone character refs before imagegen. Do not derive these identities from generated cuts; a bad first cut can poison the anchor.
@@ -72,6 +74,8 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Run visual prompt authoring and review in small parent-scene-preserving chunks for both Codex and local Qwen. Large whole-episode prompt batches tend to collapse into repeated hero tableaux; arbitrary chunks that split a scene hide the progression the LLM needs.
 - Visual prompt review is the only LLM prompt-fix stage before imagegen. It may revise prompt wording, but must preserve scene IDs, image IDs, timing, and source hashes. Code gates validate only structure, hashes, missing references, and unresolved blockers.
 - Image generation uses ModelsLab Flux Klein by default. References are generated first and stored under `assets/images/references`; image cuts are stored under `assets/images`. When ModelsLab returns a queue/rate-limit error, resume with lower `--concurrency` and keep `--force` unset so fresh refs and completed cuts are reused.
+- Scene imagegen should consume the reviewed prompt artifact when available. For bad cuts, regenerate only the affected `--cut-ids` with cache reuse; after targeted regeneration, run one full no-force imagegen pass to refresh the complete image report and confirm all expected cuts exist.
+- Render should use the reviewed scene prompt artifact, the continuous mixed audio, and final-script subtitles timed to Whisper. Final MP4s must be upload-safe `yuv420p`; verify with `ffprobe` after render.
 - Next throughput test: try higher concurrency on a fresh production run after prompt/ref quality is stable. Start at 6-12 workers, monitor queue/rate-limit behavior and output quality, then consider returning to 24 only if the provider remains stable.
 
 ## Current Production Models And Methods
@@ -84,7 +88,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - SFX generation: ModelsLab `/api/v7/voice/sound-generation` assets are allowed after a Codex/local-Qwen/agent-authored plan. SFX events must use locked asset paths before mix.
 - Score generation: prefer local ACE-Step 1.5 for chapter score beds and optional score drops; current default local model pair is `acestep-v15-turbo` plus `acestep-5Hz-lm-1.7B`. Score drops are short Whisper-timed ACE-Step riser/hit accents for 20-35 drama, hype, reveal, and payoff beats, mixed by ducking the base score bed at those moments.
 - Image generation: ModelsLab Flux Klein, with positive-only prompts and explicit reference slot mapping.
-- Render: one continuous mixed audio track, final-script subtitle text timed by Whisper, yellow subtitle text with a small black outline and no background box. Ken Burns motion is profile-based and intentional: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes.
+- Render: one continuous mixed audio track, final-script subtitle text timed by Whisper, yellow subtitle text with a small black outline and no background box. Ken Burns motion is profile-based and intentional: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Extract final QA frames and spot-check prompt/image/ref consistency before treating the render as publishable.
 
 ## Commands
 
@@ -98,13 +102,14 @@ node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <wee
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
 ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --references-only true --reference-concurrency 6
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --concurrency 6 --reference-concurrency 6
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json
 ```
 
 ## LLM Routing
@@ -133,6 +138,8 @@ ANIFACTORY_LOCAL_LLM_MODEL=Qwen3-30B-A3B-MLX-4bit
 - Use local ACE-Step for production score beds. ModelsLab music generation is a fallback only when explicitly requested.
 - Use the optional score-drop layer when the run needs retention accents: twenty to thirty-five Whisper-timed local ACE-Step riser/hit accents mixed by ducking the base score bed.
 - For imagegen, prioritize reference quality and spot checks over raw throughput. Start concurrency around 6-12 on the next full run, then raise only after references and prompt quality look stable.
+- If generation times out, count missing references/cuts and resume only those IDs with cache reuse. Do not force-regenerate completed good images.
+- Keep narration competitively loud from the longform mix using `--narration-volume-db 2`, then verify clipping and intelligibility against score beds and drops.
 
 ## Worktree Discipline
 

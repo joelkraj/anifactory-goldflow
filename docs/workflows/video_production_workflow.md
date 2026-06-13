@@ -50,6 +50,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Generates one continuous narration track and generation metadata.
    - Stitching includes a small inter-segment safety gap by default to protect clipped final phonemes and preserve narration beat separation.
    - If the stitched audio changes, rerun Whisper timing and every timing-dependent downstream artifact.
+   - Do not destructively amplify cached TTS segments. Narration loudness is raised later in the longform mix.
 
 10. Whisper timing.
    - Run local Whisper word timing on the final stitched narration.
@@ -71,6 +72,8 @@ The approved narration script is production truth. The pipeline should extract, 
 
 13. Longform audio bed mix.
    - Mixes narration, SFX, and score into one final continuous audio track.
+   - Production narration loudness starts at `--narration-volume-db 2`, with the longform limiter enabled.
+   - Use `--narration-volume-db 3` only after a loudness/clip check passes. If narration competes with music, lower score beds or drops before pushing narration harder.
 
 14. Visual beat planning.
    - Splits timed semantic scenes into image beats.
@@ -93,6 +96,10 @@ The approved narration script is production truth. The pipeline should extract, 
 17. Reference generation and approval.
    - Generate required references before scene imagegen.
    - Do not bypass missing production refs.
+   - Run references first with a reference-only imagegen pass.
+   - Manually inspect generated refs before any scene cut generation.
+   - Reject refs with panel grids, speech bubbles, strong scene backgrounds, cinematic action poses, or pose/background elements likely to transfer into cuts.
+   - Regenerate failed refs selectively with `--reference-ids`; do not wipe approved refs.
 
 18. Visual prompt planning.
    - Consumes approved refs, current-scene facts, and visual beats.
@@ -118,6 +125,9 @@ The approved narration script is production truth. The pipeline should extract, 
    - Scene attachment prioritizes visible character refs first, then location, then prop/UI, then action/effects. Priority kind outranks required/optional flags. Style refs are only attached to scene cuts when no concrete refs are available.
    - If an approved character_state_ref exists for a visible named character in that scene, imagegen may attach it even when the prompt planner omitted it. It should not attach multiple state refs for the same character in one cut.
    - If ModelsLab returns a queue or rate-limit error, rerun imagegen with lower concurrency and leave `--force` unset so existing references and completed cuts are reused.
+   - Use the reviewed prompt artifact for production scene imagegen.
+   - For bad scene cuts, regenerate only affected `--cut-ids` with cache reuse.
+   - After targeted cut regeneration, run one full no-force imagegen pass to refresh the complete report and confirm all expected images exist.
 
 21. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
@@ -125,6 +135,9 @@ The approved narration script is production truth. The pipeline should extract, 
    - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Aggressive motion should not mean constant random movement.
    - Subtitles should be yellow text with small black outline and no box/background.
    - Subtitle text should come from the final approved/stitch script; Whisper provides timing anchors only.
+   - Use the reviewed prompt artifact so render image lookup matches approved scene prompts.
+   - Final MP4s must be upload-safe `yuv420p`; verify format, duration, fps, audio codec, and size after render.
+   - Extract QA frames and spot-check final prompt/image/ref consistency before treating the render as publishable.
 
 ## Current Model And Provider Choices
 
@@ -137,6 +150,7 @@ The approved narration script is production truth. The pipeline should extract, 
 - Image model: ModelsLab Flux Klein.
 - Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
 - Render audio: one continuous longform mix containing narration, SFX, and score.
+- Render loudness: narration raised at longform mix with `--narration-volume-db 2` as the production starting point.
 - Render subtitles: final approved/stitch script text timed by Whisper, not Whisper recognition text.
 
 ## Command Order
@@ -151,13 +165,14 @@ node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <wee
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
 ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --references-only true --reference-concurrency 6
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --concurrency 6 --reference-concurrency 6
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json
 ```
 
 ## Next Production Run Checklist
@@ -185,7 +200,8 @@ Use this checklist before spending generation time:
    - Use local ACE-Step for score beds:
      `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
    - Keep SFX audible but controlled. Current mix starting point:
-     `--sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0`.
+     `--sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2`.
+   - Check the final longform mix for clipping and intelligibility. Use `--narration-volume-db 3` only if the limiter/loudness check passes.
    - Do not generate production score beds with ModelsLab music unless explicitly requested.
    - Optional score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on focal beats, mixed by ducking the base score bed.
 
@@ -193,10 +209,12 @@ Use this checklist before spending generation time:
    - Run visual beats before prompt authoring.
    - Target beat duration: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
    - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
+   - Use reference-only generation first, then selectively regenerate failed refs with `--reference-ids`.
    - Character state refs are definitive for identity and wardrobe.
    - Use positive-only scene prompts. Do not use negative prompt wording.
    - Reference priority: visible characters, location, prop/UI, action/effects, style only when no concrete refs are available.
    - For multi-character scenes, spot check attached refs before bulk imagegen.
+   - If Flux times out or a sample fails, resume missing or rejected `--cut-ids` only. Keep completed good cuts cached.
    - Start imagegen concurrency around 6-12 on a fresh production run; raise only after quality and queue stability are confirmed.
 
 6. Render
@@ -204,6 +222,7 @@ Use this checklist before spending generation time:
    - Use final-script subtitles timed to Whisper, not Whisper-recognized text.
    - Subtitle style: yellow text, small black outline, no background box.
    - Motion style: fast transitions and intentional profile-based Ken Burns, not random movement.
+   - Verify final MP4 codec/pixel format with `ffprobe`, especially `yuv420p` for upload compatibility.
 
 ## Change Policy
 

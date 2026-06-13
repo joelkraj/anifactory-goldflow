@@ -22,18 +22,23 @@ const episodeDir = flags.episodeDir ?? path.join(dataRoot, "channels", channel, 
 const audioDir = path.join(episodeDir, "assets", "audio");
 const scoreProvider = flags["score-provider"] ?? process.env.ANIFACTORY_SCORE_PROVIDER ?? "modelslab";
 const scoreDir = path.join(audioDir, scoreProvider === "local_ace_step" ? "ace_step_score_beds" : "modelslab_score_beds");
+const scoreDropDir = path.join(audioDir, "ace_step_score_drops");
 const mixDir = path.join(audioDir, "longform_mix");
 const sfxBankManifestPath = path.join(dataRoot, "sfx_bank", "sfx_manifest.json");
 const scorePlanPath = flags.scorePlan ?? path.join(episodeDir, "score_chapter_plan.json");
+const scoreDropPlanPath = flags.scoreDropPlan ?? flags["score-drop-plan"] ?? path.join(episodeDir, `score_drop_plan_${episode}.json`);
 const sfxPlanPath = flags.sfxPlan ?? path.join(episodeDir, `sfx_event_plan_${episode}.json`);
 const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
 const outputBase = flags.outputBase ?? `${episode}-${channel}-modelslab-qwen-scored-sfx`;
 const forceScore = flags["force-score"] === "true";
+const forceScoreDrops = flags["force-score-drops"] === "true";
 const forceSfx = flags["force-sfx"] === "true";
 const dryRun = flags["dry-run"] === "true";
 const maxDurationSec = Number(flags["max-duration-sec"] ?? 0);
 const reportSuffix = flags.reportSuffix ?? (maxDurationSec > 0 ? `-test-${Math.round(maxDurationSec)}s` : "");
 const scoreVolumeDb = Number(flags["score-volume-db"] ?? -26);
+const scoreDropVolumeDb = Number(flags["score-drop-volume-db"] ?? -18);
+const scoreDropDuckDb = Number(flags["score-drop-duck-db"] ?? -8);
 const sfxVolumeBoostDb = Number(flags["sfx-boost-db"] ?? 0);
 const narrationVolumeDb = Number(flags["narration-volume-db"] ?? 0);
 
@@ -198,6 +203,39 @@ function activeChapters(scorePlan, durationSec) {
   });
 }
 
+function activeScoreDrops(scoreDropPlan, durationSec) {
+  return (scoreDropPlan?.drops ?? []).filter((drop) => {
+    const start = Number(drop.start_sec ?? 0);
+    return Number.isFinite(start) && (!durationSec || start < durationSec);
+  });
+}
+
+function dbToAmplitude(dbValue) {
+  return Number(Math.pow(10, Number(dbValue) / 20).toFixed(6));
+}
+
+function scoreVolumeFilter(gainDb, chapterStart, chapterEnd, scoreDrops) {
+  const overlapping = scoreDrops
+    .map((drop) => {
+      const start = Number(drop.start_sec ?? 0);
+      const duration = Number(drop.duration_sec ?? 6);
+      const end = start + Math.max(0.5, duration);
+      return { start: Math.max(chapterStart, start), end: Math.min(chapterEnd, end) };
+    })
+    .filter((drop) => drop.end > drop.start)
+    .map((drop) => ({
+      start: Number((drop.start - chapterStart).toFixed(3)),
+      end: Number((drop.end - chapterStart).toFixed(3)),
+    }));
+  if (!overlapping.length) return `volume=${gainDb}dB`;
+  const baseAmp = dbToAmplitude(gainDb);
+  const duckAmp = dbToAmplitude(gainDb + scoreDropDuckDb);
+  const conditions = overlapping
+    .map((drop) => `between(t\\,${drop.start.toFixed(3)}\\,${drop.end.toFixed(3)})`)
+    .join("+");
+  return `volume='if(${conditions}\\,${duckAmp}\\,${baseAmp})'`;
+}
+
 async function generateScoreChapter(chapter, durationSec) {
   await fs.mkdir(scoreDir, { recursive: true });
   const prompt = `${chapter.ace_step_prompt ?? chapter.score_intent ?? "anime recap cinematic score bed"}. Instrumental only, no vocals, no lyrics, no speech, no crowd noise. Loopable longform anime recap background score.`;
@@ -254,6 +292,73 @@ async function generateScoreChapter(chapter, durationSec) {
   const resolved = await resolveModelslabAudio(initial, "/api/v6/voice/fetch", `${chapter.chapter_id} score`);
   const url = await downloadAudio(audioLinks(resolved), outPath);
   const result = { chapter_id: chapter.chapter_id, provider: "modelslab", model_id: "ai-music-generator", endpoint: "/api/v6/voice/music_gen", asset_path: outPath, duration_sec: await mediaDuration(outPath), prompt, prompt_hash: promptHash, request_id: initial.id ?? resolved.id ?? null, url, status: "generated" };
+  await writeJson(metaPath, result);
+  return result;
+}
+
+async function generateScoreDrop(drop) {
+  await fs.mkdir(scoreDropDir, { recursive: true });
+  const prompt = `${drop.ace_step_prompt ?? drop.music_prompt ?? drop.score_intent ?? "short cinematic anime recap riser hit accent"}. Instrumental only, no vocals, no lyrics, no speech, no crowd noise. Short dramatic riser hit that blends into a background score bed.`;
+  const promptHash = hashText(prompt).slice(0, 12);
+  const dropId = slug(drop.drop_id ?? drop.event_id ?? `score_drop_${Math.round(Number(drop.start_sec ?? 0) * 1000)}`);
+  const outPath = path.join(scoreDropDir, `${dropId}-${promptHash}.wav`);
+  const metaPath = outPath.replace(/\.wav$/, ".json");
+  if (!forceScoreDrops && drop.asset_path && await exists(drop.asset_path)) {
+    return {
+      drop_id: dropId,
+      provider: drop.asset_provider ?? "local_ace_step",
+      model_id: drop.asset_model_id ?? process.env.ANIFACTORY_ACE_STEP_CONFIG_PATH ?? "acestep-v15-turbo",
+      lm_model_id: drop.asset_lm_model_id ?? process.env.ANIFACTORY_ACE_STEP_LM_MODEL ?? "acestep-5Hz-lm-1.7B",
+      endpoint: drop.asset_endpoint ?? "local:ace-step-1.5",
+      asset_path: drop.asset_path,
+      status: "reused_planned_asset",
+      prompt,
+      prompt_hash: promptHash,
+      duration_sec: await mediaDuration(drop.asset_path).catch(() => Number(drop.duration_sec ?? 6)),
+    };
+  }
+  if (!forceScoreDrops && await exists(outPath)) {
+    return { ...await readJson(metaPath, {}), drop_id: dropId, asset_path: outPath, status: "reused" };
+  }
+  if (dryRun) {
+    return {
+      drop_id: dropId,
+      provider: "local_ace_step",
+      model_id: process.env.ANIFACTORY_ACE_STEP_CONFIG_PATH ?? "acestep-v15-turbo",
+      lm_model_id: process.env.ANIFACTORY_ACE_STEP_LM_MODEL ?? "acestep-5Hz-lm-1.7B",
+      endpoint: "local:ace-step-1.5",
+      asset_path: outPath,
+      status: "dry_run",
+      prompt,
+      prompt_hash: promptHash,
+      duration_sec: Number(drop.duration_sec ?? 6),
+    };
+  }
+  console.error(`[longform-audio] ACE-Step score drop ${dropId} ${drop.duration_sec ?? 6}s`);
+  const { stdout } = await execFile(process.env.ANIFACTORY_ACE_STEP_PYTHON ?? "/Users/joel/AniFactoryTools/ACE-Step-1.5/.venv/bin/python", [
+    path.join(repoRoot, "scripts", "ace-step-score-generate.py"),
+    "--output", outPath,
+    "--caption", prompt,
+    "--duration", "30",
+  ], {
+    cwd: process.env.ANIFACTORY_ACE_STEP_ROOT ?? "/Users/joel/AniFactoryTools/ACE-Step-1.5",
+    maxBuffer: 1024 * 1024 * 10,
+    env: { ...process.env },
+  });
+  const localResult = JSON.parse(stdout.trim().split(/\n/).at(-1));
+  const result = {
+    drop_id: dropId,
+    provider: "local_ace_step",
+    model_id: process.env.ANIFACTORY_ACE_STEP_CONFIG_PATH ?? "acestep-v15-turbo",
+    lm_model_id: process.env.ANIFACTORY_ACE_STEP_LM_MODEL ?? "acestep-5Hz-lm-1.7B",
+    endpoint: "local:ace-step-1.5",
+    asset_path: outPath,
+    duration_sec: await mediaDuration(outPath),
+    prompt,
+    prompt_hash: promptHash,
+    status: "generated",
+    local_generation: localResult,
+  };
   await writeJson(metaPath, result);
   return result;
 }
@@ -371,12 +476,30 @@ function validateSfxPlanForProduction(sfxPlan) {
   }
 }
 
-async function mixLongform({ narrationPath, scoreRows, scorePlan, sfxPlan, durationSec, qwenReport }) {
+function validateScoreDropPlanForProduction(scoreDropPlan, scorePlan) {
+  if (!scoreDropPlan) return;
+  if (scoreDropPlan.status !== "passed") {
+    throw new Error(`Refusing longform audio mix: score drop plan is ${scoreDropPlan.status ?? "missing_status"}.`);
+  }
+  if (scoreDropPlan.source_script_hash && scoreDropPlan.source_script_hash !== scorePlan.source_script_hash) {
+    throw new Error("Refusing longform audio mix: score drop plan script hash does not match score_chapter_plan.json.");
+  }
+  if (scoreDropPlan.timing_source && scoreDropPlan.timing_source !== "local_whisper_word_timing") {
+    throw new Error("Refusing longform audio mix: score drop plan must use local Whisper timing.");
+  }
+  const missingTiming = (scoreDropPlan.drops ?? []).filter((drop) => !Number.isFinite(Number(drop.start_sec)) || !Number.isFinite(Number(drop.duration_sec)));
+  if (missingTiming.length) {
+    throw new Error(`Refusing longform audio mix: score drops missing absolute start_sec/duration_sec: ${missingTiming.slice(0, 12).map((drop) => drop.drop_id ?? "unknown").join(", ")}`);
+  }
+}
+
+async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan, scoreDropRows, sfxPlan, durationSec, qwenReport }) {
   await fs.mkdir(mixDir, { recursive: true });
   const wavPath = path.join(mixDir, `${outputBase}.wav`);
   const m4aPath = path.join(mixDir, `${outputBase}.m4a`);
   const starts = segmentStarts(qwenReport);
   const chapters = activeChapters(scorePlan, durationSec);
+  const scoreDrops = activeScoreDrops(scoreDropPlan, durationSec);
   const events = eventsWithLockedSfxAssets(sfxPlan);
   const existingEvents = [];
   const inputs = ["-i", narrationPath];
@@ -394,7 +517,23 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, sfxPlan, durat
     inputs.push("-stream_loop", "-1", "-i", score.asset_path);
     const label = `score${inputIndex}`;
     const delay = Math.max(0, Math.round(start * 1000));
-    filters.push(`[${inputIndex}:a]atrim=0:${chapterDuration.toFixed(3)},asetpts=PTS-STARTPTS,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
+    filters.push(`[${inputIndex}:a]atrim=0:${chapterDuration.toFixed(3)},asetpts=PTS-STARTPTS,${scoreVolumeFilter(gain, start, end, scoreDrops)},adelay=${delay}|${delay}[${label}]`);
+    labels.push(`[${label}]`);
+    inputIndex += 1;
+  }
+
+  for (const drop of scoreDrops) {
+    const scoreDrop = scoreDropRows.find((row) => row.drop_id === slug(drop.drop_id ?? drop.event_id ?? `score_drop_${Math.round(Number(drop.start_sec ?? 0) * 1000)}`));
+    if (!scoreDrop?.asset_path || !(await exists(scoreDrop.asset_path))) continue;
+    const start = Number(drop.start_sec ?? 0);
+    if (maxDurationSec && start >= maxDurationSec) continue;
+    const dropDuration = Math.max(0.5, Math.min(Number(drop.duration_sec ?? 6), durationSec - start));
+    const gain = Number.isFinite(Number(drop.gain_db)) ? Number(drop.gain_db) : scoreDropVolumeDb;
+    inputs.push("-i", scoreDrop.asset_path);
+    const label = `scoreDrop${inputIndex}`;
+    const delay = Math.max(0, Math.round(start * 1000));
+    const fadeOutStart = Math.max(0, dropDuration - 0.35);
+    filters.push(`[${inputIndex}:a]atrim=0:${dropDuration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.120,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=0.350,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
     labels.push(`[${label}]`);
     inputIndex += 1;
   }
@@ -423,6 +562,9 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, sfxPlan, durat
     m4a_path: m4aPath,
     duration_sec: await mediaDuration(wavPath),
     score_input_count: scoreRows.length,
+    score_drop_input_count: scoreDropRows.length,
+    score_drop_event_count: scoreDrops.length,
+    score_drop_mix_policy: "Short local ACE-Step accents are faded in/out and normal score beds are ducked during overlapping drop windows.",
     sfx_input_count: existingEvents.length,
     sfx_event_count: events.length,
     sfx_asset_resolution_policy: "locked_event_asset_path_only_no_bank_repick",
@@ -432,14 +574,16 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, sfxPlan, durat
 }
 
 async function start() {
-  const [scorePlan, sfxPlan, qwenReport] = await Promise.all([
+  const [scorePlan, scoreDropPlan, sfxPlan, qwenReport] = await Promise.all([
     readJson(scorePlanPath, null),
+    readJson(scoreDropPlanPath, null),
     readJson(sfxPlanPath, null),
     readJson(qwenReportPath, null),
   ]);
   if (!scorePlan?.chapters?.length) throw new Error(`Missing score chapters: ${scorePlanPath}`);
   if (!sfxPlan) throw new Error(`Missing SFX event plan: ${sfxPlanPath}`);
   validateScorePlanForProduction(scorePlan);
+  validateScoreDropPlanForProduction(scoreDropPlan, scorePlan);
   validateSfxPlanForProduction(sfxPlan);
   const narrationPath = flags.narration ?? qwenReport?.output_path;
   if (!narrationPath || !(await exists(narrationPath))) throw new Error(`Missing narration audio. Pass --narration or create ${qwenReportPath}`);
@@ -452,8 +596,12 @@ async function start() {
     const end = Math.min(durationSec, Number(chapter.end_sec ?? start + Number(chapter.target_duration_sec ?? 180)));
     scoreRows.push(await generateScoreChapter(chapter, Math.max(30, end - start)));
   }
+  const scoreDropRows = [];
+  for (const drop of activeScoreDrops(scoreDropPlan, durationSec)) {
+    scoreDropRows.push(await generateScoreDrop(drop));
+  }
   const sfxEnsured = await ensureSfxEvents(sfxPlan);
-  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan, sfxPlan, durationSec, qwenReport });
+  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan, scoreDropRows, sfxPlan, durationSec, qwenReport });
   const scoreMeta = scoreProviderMeta();
   const report = {
     status: dryRun ? "dry_run" : "completed",
@@ -473,8 +621,10 @@ async function start() {
     narration_duration_sec: narrationDuration,
     mixed_duration_sec: mix?.duration_sec ?? durationSec,
     score_chapter_plan_path: scorePlanPath,
+    score_drop_plan_path: scoreDropPlan ? scoreDropPlanPath : null,
     sfx_event_plan_path: sfxPlanPath,
     score_chapters: scoreRows,
+    score_drops: scoreDropRows,
     sfx_ensured: sfxEnsured,
     mix,
   };

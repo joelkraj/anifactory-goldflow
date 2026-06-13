@@ -66,7 +66,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Local ACE-Step is the preferred production score provider. Use `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or pass `--score-provider local_ace_step`.
    - Do not use ModelsLab music generation for production score unless the operator explicitly asks for a fallback.
    - Current score implementation creates chapter score beds as the base emotional floor.
-   - Planned score-drop upgrade: add twenty to thirty-five short ACE-Step riser/hit accents on Whisper-timed drama, hype, reversal, reveal, and payoff beats. These accents should briefly replace or strongly duck the normal score bed so they blend into the music instead of stacking uncontrolled volume.
+   - Optional score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on Whisper-timed drama, hype, reversal, reveal, and payoff beats. These accents are defined in `score_drop_plan_<episode>.json`; the longform mixer fades each accent in/out and ducks overlapping chapter score beds so they blend into the music instead of stacking uncontrolled volume.
    - Planning backends are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for planning; ModelsLab is used for media generation.
 
 13. Longform audio bed mix.
@@ -133,7 +133,7 @@ The approved narration script is production truth. The pipeline should extract, 
 - Timing: local Whisper word timing on the final stitched narration.
 - SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
 - Score beds: local ACE-Step 1.5 is preferred for production score generation. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`. ModelsLab music generation is not the preferred production score path.
-- Score drops: planned second layer of twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper and mixed by replacing or ducking the base bed at focal beats.
+- Score drops: optional second layer of twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper and mixed by ducking the base bed at focal beats.
 - Image model: ModelsLab Flux Klein.
 - Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
 - Render audio: one continuous longform mix containing narration, SFX, and score.
@@ -187,7 +187,7 @@ Use this checklist before spending generation time:
    - Keep SFX audible but controlled. Current mix starting point:
      `--sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 0`.
    - Do not generate production score beds with ModelsLab music unless explicitly requested.
-   - Future score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on focal beats, mixed by replacing or ducking the base score bed.
+   - Optional score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on focal beats, mixed by ducking the base score bed.
 
 5. Visuals
    - Run visual beats before prompt authoring.

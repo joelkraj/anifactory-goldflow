@@ -44,7 +44,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
 - Planning LLM routes are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for semantic, audio, visual reference, visual prompt, or prompt review planning. ModelsLab is a media generation provider in this workflow, not a planning backend.
 - Score/music generation can use local ACE-Step 1.5 by setting `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or passing `--score-provider local_ace_step`. This feeds each beat-mapped chapter `ace_step_prompt` to `/Users/joel/AniFactoryTools/ACE-Step-1.5` and writes beds under `assets/audio/ace_step_score_beds`. Default local model selection is DiT `acestep-v15-turbo` with LM `acestep-5Hz-lm-1.7B`; override with `ANIFACTORY_ACE_STEP_CONFIG_PATH` and `ANIFACTORY_ACE_STEP_LM_MODEL`.
-- Score should be layered, not only windowed. Chapter beds are the base emotional floor; a future score-drop layer should place short Whisper-timed ACE-Step riser/hit accents on focal drama, hype, reversal, reveal, and payoff beats. Score drops should blend into the current bed by briefly replacing or strongly ducking the normal score bed, not by stacking uncontrolled volume. Target roughly 20-35 score drops for a long episode, keep them separate from physical SFX, duck under narration, and use them sparingly enough that they feel intentional.
+- Score should be layered, not only windowed. Chapter beds are the base emotional floor; the optional `score_drop_plan_<episode>.json` layer places short Whisper-timed local ACE-Step riser/hit accents on focal drama, hype, reversal, reveal, and payoff beats. The longform mixer fades each drop in/out and ducks overlapping chapter beds, instead of stacking uncontrolled volume. Target roughly 20-35 score drops for a long episode, keep them separate from physical SFX, and use them sparingly enough that they feel intentional.
 - ModelsLab score generation remains available with `ANIFACTORY_SCORE_PROVIDER=modelslab` and uses `/api/v6/voice/music_gen` model_id `ai-music-generator`.
 - Narrator-only is the default voice route. Character voice casting requires an explicit operator request and flag.
 - Ambiguous dialogue routes to narrator.
@@ -82,7 +82,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Timing: local Whisper word timing is production truth for subtitles, SFX, score, visual beats, and render.
 - Audio planning: Codex or local Qwen only. If automated planner calls are unavailable, a Codex-agent manual plan may be written with explicit provenance, current source hashes, and Whisper timing.
 - SFX generation: ModelsLab `/api/v7/voice/sound-generation` assets are allowed after a Codex/local-Qwen/agent-authored plan. SFX events must use locked asset paths before mix.
-- Score generation: prefer local ACE-Step 1.5 for chapter score beds; current default local model pair is `acestep-v15-turbo` plus `acestep-5Hz-lm-1.7B`. Planned upgrade: add a separate Whisper-timed ACE-Step riser/hit layer for 20-35 drama, hype, reveal, and payoff beats, mixed by replacing or ducking the base score bed at those moments.
+- Score generation: prefer local ACE-Step 1.5 for chapter score beds and optional score drops; current default local model pair is `acestep-v15-turbo` plus `acestep-5Hz-lm-1.7B`. Score drops are short Whisper-timed ACE-Step riser/hit accents for 20-35 drama, hype, reveal, and payoff beats, mixed by ducking the base score bed at those moments.
 - Image generation: ModelsLab Flux Klein, with positive-only prompts and explicit reference slot mapping.
 - Render: one continuous mixed audio track, final-script subtitle text timed by Whisper, yellow subtitle text with a small black outline and no background box. Ken Burns motion is profile-based and intentional: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes.
 
@@ -131,7 +131,7 @@ ANIFACTORY_LOCAL_LLM_MODEL=Qwen3-30B-A3B-MLX-4bit
 - Use narrator-only voice unless the operator explicitly requests character casting.
 - Use local Whisper word timing before SFX, score, visual beats, subtitles, or render.
 - Use local ACE-Step for production score beds. ModelsLab music generation is a fallback only when explicitly requested.
-- Keep the score-drop layer as a planned upgrade until implemented: twenty to thirty-five Whisper-timed ACE-Step riser/hit accents mixed by replacing or ducking the base score bed.
+- Use the optional score-drop layer when the run needs retention accents: twenty to thirty-five Whisper-timed local ACE-Step riser/hit accents mixed by ducking the base score bed.
 - For imagegen, prioritize reference quality and spot checks over raw throughput. Start concurrency around 6-12 on the next full run, then raise only after references and prompt quality look stable.
 
 ## Worktree Discipline

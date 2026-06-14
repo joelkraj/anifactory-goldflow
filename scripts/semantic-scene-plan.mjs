@@ -268,7 +268,7 @@ async function main() {
   let llm;
   let scenes = [];
   let semanticParsed = {};
-  const useChunking = isLocalLLMRoute(stageName) && flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
+  const useChunking = flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
   if (useChunking) {
     const chunks = scriptChunks(script);
     const parsedChunks = [];
@@ -276,7 +276,10 @@ async function main() {
       const chunkTargets = chunkSceneCountTargets(chunk.text);
       const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
       console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: ${chunk.words} words, target ${chunkTargets.target} scenes`);
-      const chunkLlm = await callLocal(chunkPrompt, `${stageName}_chunk_${String(chunk.chunk_index).padStart(2, "0")}`, Number(flags["semantic-chunk-max-tokens"] ?? 4500));
+      const chunkStageName = `${stageName}_chunk_${String(chunk.chunk_index).padStart(2, "0")}`;
+      const chunkLlm = isLocalLLMRoute(chunkStageName)
+        ? await callLocal(chunkPrompt, chunkStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
+        : await callCodex(chunkPrompt, chunkStageName);
       const chunkScenes = Array.isArray(chunkLlm.parsed.scenes) ? chunkLlm.parsed.scenes : [];
       if (chunkScenes.length < chunkTargets.minimum) {
         throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} under-segmented: returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words.`);
@@ -291,8 +294,8 @@ async function main() {
       warnings: parsedChunks.flatMap((item) => item.llm.parsed.warnings ?? []),
     };
     llm = {
-      provider: "local-qwen",
-      model: getLLMModel(stageName),
+      provider: parsedChunks[0]?.llm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
+      model: parsedChunks[0]?.llm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : "codex_cli_default"),
       chunked: true,
       chunk_count: chunks.length,
     };

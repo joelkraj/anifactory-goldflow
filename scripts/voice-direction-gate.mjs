@@ -850,12 +850,14 @@ function inferQuoteSpeaker(paragraph, quote, dialogueContext = {}) {
 
 function cleanNarrationAttribution(text) {
   return text
-    .replace(/^,\s*(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied)\.?\s*/i, "")
-    .replace(/^(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied)\.?\s*/i, "")
-    .replace(/^\s*(said|asked|muttered|answered|called|laughed|whispered|warned|replied)\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\.?\s*/i, "")
-    .replace(/^,\s*(the teacher|the collector|the clerk)\s+(said|asked|muttered|answered|called|laughed|whispered)\.?\s*/i, "")
-    .replace(/^(the teacher|the collector|the clerk)\s+(said|asked|muttered|answered|called|laughed|whispered)\.?\s*/i, "")
-    .replace(/^\s*(said|asked)\s+(the teacher|the collector|the clerk)\.?\s*/i, "")
+    .replace(/^,\s*(?:he|she|they|it)\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
+    .replace(/^(?:he|she|they|it)\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
+    .replace(/^,\s*(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied)(?:\s+\w+ly)?\.?\s*/i, "")
+    .replace(/^(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied)(?:\s+\w+ly)?\.?\s*/i, "")
+    .replace(/^\s*(said|asked|muttered|answered|called|laughed|whispered|warned|replied)(?:\s+\w+ly)?\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\.?\s*/i, "")
+    .replace(/^,\s*(the teacher|the collector|the clerk)\s+(said|asked|muttered|answered|called|laughed|whispered)(?:\s+\w+ly)?\.?\s*/i, "")
+    .replace(/^(the teacher|the collector|the clerk)\s+(said|asked|muttered|answered|called|laughed|whispered)(?:\s+\w+ly)?\.?\s*/i, "")
+    .replace(/^\s*(said|asked)(?:\s+\w+ly)?\s+(the teacher|the collector|the clerk)\.?\s*/i, "")
     .trim();
 }
 
@@ -2305,6 +2307,10 @@ function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
   return normalized;
 }
 
+function isSpeakableQwenText(value) {
+  return /[\p{L}\p{N}]/u.test(String(value ?? ""));
+}
+
 function qwenBeatForUnit(segment, unit) {
   const text = `${unit?.text ?? ""} ${segment?.stripped_text ?? ""}`.toLowerCase();
   if (unit?.kind === "mc_internal" || /^MC_INTERNAL$/i.test(String(unit?.speaker ?? ""))) return "private tactical thought";
@@ -2365,7 +2371,8 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       performed_text: segment.stripped_text ?? segment.caption_text ?? segment.text,
       caption_text: segment.caption_text ?? segment.stripped_text ?? segment.text,
     }]).filter((unit) => unit.kind !== "sound_design" && !/^SFX$/i.test(String(unit.speaker ?? "")));
-    const qwenUnits = units.map((unit, index) => {
+    const qwenUnits = [];
+    for (const unit of units) {
       const sourceSpeaker = unit.speaker ?? "NARRATOR";
       const speaker = characterVoiceCastingEnabled() ? sourceSpeaker : "NARRATOR";
       const cast = castForSpeaker(speaker, dialogueContext);
@@ -2373,9 +2380,10 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
         ? cast?.role ?? speakerRoleFor(speaker, unit.text ?? "", segment, dialogueContext)
         : "narrator";
       const spokenText = qwenSpokenText(unit.performed_text ?? unit.text ?? unit.caption_text, sourceSpeaker, ttsOverrides);
+      if (!isSpeakableQwenText(spokenText)) continue;
       const row = {
         segment_id: segment.segment_id,
-        unit_index: index + 1,
+        unit_index: qwenUnits.length + 1,
         kind: unit.kind ?? "narration",
         speaker,
         source_speaker: sourceSpeaker,
@@ -2391,8 +2399,8 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
         reference_id: cast?.reference_id ?? null,
       };
       unitRows.push(row);
-      return row;
-    });
+      qwenUnits.push(row);
+    }
     segmentRows.push({
       segment_id: segment.segment_id,
       delivery_mode: segment.delivery_mode,

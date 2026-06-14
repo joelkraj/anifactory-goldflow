@@ -266,6 +266,16 @@ async function uploadAudioReference(filePath, voiceId) {
   return uploadedUrl;
 }
 
+async function reusableUploadedAudioReference(filePath, voiceId) {
+  if (!filePath) return null;
+  const uploadPath = path.join(uploadDir, `${slug(voiceId)}.upload.json`);
+  const previous = await readJson(uploadPath, null);
+  if (!previous?.uploaded_url) return null;
+  if (previous.source_audio_path && path.resolve(previous.source_audio_path) !== path.resolve(filePath)) return null;
+  if (!(await urlReachable(previous.uploaded_url))) return null;
+  return previous.uploaded_url;
+}
+
 function run(command, commandArgs) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, commandArgs, { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
@@ -563,9 +573,12 @@ async function buildVoiceLock() {
     if (!refreshVoiceIds.has(voice.id) && await urlReachable(voice.init_audio)) continue;
     const localSource = voice.source_audio_path ?? voice.sample_path ?? null;
     voice.init_audio_previous = voice.init_audio ?? null;
-    voice.init_audio = await uploadAudioReference(localSource, voice.id);
+    const reusableUpload = refreshVoiceIds.has(voice.id) ? null : await reusableUploadedAudioReference(localSource, voice.id);
+    voice.init_audio = reusableUpload ?? await uploadAudioReference(localSource, voice.id);
     voice.init_audio_refreshed_at = new Date().toISOString();
-    voice.init_audio_refresh_policy = refreshVoiceIds.has(voice.id)
+    voice.init_audio_refresh_policy = reusableUpload
+      ? "reused_existing_episode_voice_upload_because_cached_url_was_reachable"
+      : refreshVoiceIds.has(voice.id)
       ? "uploaded_local_approved_voice_source_because_voice_id_was_forced_refresh"
       : "uploaded_local_approved_voice_source_because_cached_url_missing_or_expired";
   }

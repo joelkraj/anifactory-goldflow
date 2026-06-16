@@ -21,9 +21,13 @@ const reportPath = flags.output ?? path.join(episodeDir, `imagegen_report_${epis
 const concurrency = Math.max(1, Math.min(24, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? 8)));
 const referenceConcurrency = Math.max(1, Math.min(8, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 3)));
 const force = flags.force === "true";
+const forceImages = force || flags["force-images"] === "true";
+const forceReferences = force || flags["force-references"] === "true";
 const skipReferenceGeneration = flags["skip-reference-generation"] === "true";
 const referencesOnly = flags["references-only"] === "true";
 const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
+const allowUnhardenedPrompts = flags["allow-unhardened-prompts"] === "true";
+const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ?? null;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -87,11 +91,11 @@ function referencePrompt(target) {
   const kind = String(target.kind ?? "");
   const kindInstruction = {
     style: "style reference sheet: anime/manhwa rendering language, line quality, color palette, lighting, and polished production finish",
-    character_state: "character identity reference sheet: face, hair, age, body type, wardrobe, expression range, and material details; scene prompts will provide action pose",
-    location: "location reference sheet: environment, architecture, scale, lighting, materials, and readable geography",
-    prop: "prop reference sheet: object shape, surface, markings, scale, and material details",
+    character_state: "single-character identity portrait: exactly one visible person, full-body or three-quarter view, plain neutral studio background, clear face, hair, age, body type, wardrobe, expression, and material details; scene prompts will provide action pose",
+    location: "unoccupied environment-only location plate: architecture, scale, lighting, materials, and readable geography, empty space ready for scene characters",
+    prop: "single prop object plate: one clear object or tightly grouped object set on a plain neutral surface, shape, surface, markings, scale, and material details",
     ui: "UI reference sheet: interface layout, typography, color, glow, panels, and exact display motif",
-    action: "action and effect reference sheet: movement path, energy color, effect shape, interaction pattern, and spatial logic on a clean neutral staging field",
+    action: "clean action and effect reference plate: one readable effect shape, movement path, energy color, interaction pattern, and spatial logic on a neutral staging field",
   }[kind] ?? "production reference image";
   const parts = [
     target.prompt_anchor,
@@ -207,7 +211,12 @@ function characterReferenceRequirements(prompt, characterRefs, existingIds) {
   return inferred;
 }
 
+function isHardenedPromptPlan(plan) {
+  return Boolean(plan?.visual_prompt_hardening_report_path || String(plan?.prompt_policy ?? "").includes("deterministic hardening"));
+}
+
 function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) {
+  const inferVisibleSubjectRefs = !isHardenedPromptPlan(plan);
   const prompts = (plan.prompts ?? []).map((prompt) => {
     const authoredRequirements = Array.isArray(prompt.reference_requirements)
       ? prompt.reference_requirements.filter((requirement) => requirement.inferred_from_visible_subject !== true)
@@ -215,7 +224,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
     const existingIds = new Set(authoredRequirements.map((requirement) => requirement.ref_id).filter(Boolean));
     const requirements = [
       ...authoredRequirements,
-      ...characterReferenceRequirements(prompt, characterRefs, existingIds),
+      ...(inferVisibleSubjectRefs ? characterReferenceRequirements(prompt, characterRefs, existingIds) : []),
     ];
     const availableRows = requirements
       .map((requirement, index) => ({
@@ -306,14 +315,14 @@ async function generateOne(prompt) {
   const referenceImagePaths = await validateReferences(prompt);
   const modelPrompt = promptWithReferenceSlots(prompt);
   const promptHash = sha256(modelPrompt);
-  if (!force && await promptFresh({ ...prompt, prompt_hash: promptHash, modelslab_image_prompt: modelPrompt }, outputPath)) {
+  if (!forceImages && await promptFresh({ ...prompt, prompt_hash: promptHash, modelslab_image_prompt: modelPrompt }, outputPath)) {
     return { image_id: prompt.image_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
   }
   const generated = await generateModelslabImage({
     prompt: modelPrompt,
     outputPath,
     referenceImagePaths,
-    model: prompt.image_model_route ?? "flux-klein",
+    model: imageModelOverride ?? prompt.image_model_route ?? "flux-klein",
   });
   await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
   await writeJson(`${outputPath}.metadata.json`, {
@@ -323,7 +332,7 @@ async function generateOne(prompt) {
     reference_image_paths: referenceImagePaths,
     reference_slots: prompt.reference_slots ?? [],
     modelslab_prompt: modelPrompt,
-    model: prompt.image_model_route ?? "flux-klein",
+    model: imageModelOverride ?? prompt.image_model_route ?? "flux-klein",
     generated,
     updated_at: new Date().toISOString(),
   });
@@ -334,7 +343,7 @@ async function generateReference(target, styleRefPath = null) {
   const outputPath = referencePathFor(target);
   const prompt = referencePrompt(target);
   const promptHash = sha256(prompt);
-  if (!force && await referenceFresh(target, outputPath)) {
+  if (!forceReferences && await referenceFresh(target, outputPath)) {
     return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
   }
   const referenceImagePaths = target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : [];
@@ -442,9 +451,11 @@ async function main() {
   }
   let plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !plan.prompts.length) throw new Error(`Missing passed section image prompt plan: ${promptPath}`);
+  if (!allowUnhardenedPrompts && !plan.visual_prompt_hardening_report_path && !String(plan.prompt_policy ?? "").includes("deterministic hardening")) {
+    throw new Error(`Imagegen requires a deterministic-hardened prompt plan. Run "goldflow visual harden" and pass section_image_prompts_hardened.json, or use --allow-unhardened-prompts true for diagnostics.`);
+  }
   if (referenceRun.referenceById?.size) {
     plan = attachReferencePathsToPrompts(plan, referenceRun.referenceById, referenceRun.characterRefs?.character_state_refs ?? []);
-    await writeJson(promptPath, plan);
   }
   const scope = requestedIds();
   const prompts = plan.prompts

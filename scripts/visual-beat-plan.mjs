@@ -85,11 +85,12 @@ function splitSentences(text) {
     .filter(Boolean) ?? [];
 }
 
-function sceneTextFromAnchors(scriptText, scene) {
+function sceneTextFromAnchors(scriptText, scene, searchFrom = 0) {
   const startAnchor = String(scene.script_excerpt_start ?? "").trim();
   const endAnchor = String(scene.script_excerpt_end ?? "").trim();
   if (!scriptText || !startAnchor || !endAnchor) return "";
-  const start = scriptText.indexOf(startAnchor);
+  let start = scriptText.indexOf(startAnchor, Math.max(0, searchFrom));
+  if (start < 0) start = scriptText.indexOf(startAnchor);
   if (start < 0) return "";
   const end = scriptText.indexOf(endAnchor, start);
   if (end < 0) return "";
@@ -112,12 +113,12 @@ function compactBeatAction(text, fallback) {
   return cleaned.length > 360 ? `${cleaned.slice(0, 357).trim()}...` : cleaned;
 }
 
-function splitScene(scene, scriptText) {
+function splitScene(scene, scriptText, searchFrom = 0) {
   const count = visualBeatCount(scene);
   const duration = Math.max(1, Number(scene.duration_sec ?? 0));
   const start = Number(scene.start_sec ?? 0);
   const base = duration / count;
-  const sceneText = sceneTextFromAnchors(scriptText, scene);
+  const sceneText = sceneTextFromAnchors(scriptText, scene, searchFrom);
   const beatTexts = splitSceneText(sceneText, count);
   const beats = [];
   for (let index = 0; index < count; index += 1) {
@@ -139,7 +140,7 @@ function splitScene(scene, scriptText) {
       image_id_hint: `${episode}-cut-${String(beats.length + 1).padStart(3, "0")}`,
     });
   }
-  return beats;
+  return { beats, sceneText };
 }
 
 async function main() {
@@ -148,7 +149,17 @@ async function main() {
     fs.readFile(scriptPath, "utf8").catch(() => ""),
   ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
-  const beats = timedPlan.scenes.flatMap((scene) => splitScene(scene, scriptText)).map((beat, index) => ({
+  const beats = [];
+  let scriptCursor = 0;
+  for (const scene of timedPlan.scenes) {
+    const result = splitScene(scene, scriptText, scriptCursor);
+    for (const beat of result.beats) beats.push(beat);
+    if (result.sceneText) {
+      const start = scriptText.indexOf(result.sceneText, scriptCursor);
+      if (start >= 0) scriptCursor = start + result.sceneText.length;
+    }
+  }
+  const numberedBeats = beats.map((beat, index) => ({
     ...beat,
     image_id_hint: `${episode}-cut-${String(index + 1).padStart(3, "0")}`,
   }));
@@ -165,10 +176,10 @@ async function main() {
     timing_source: timedPlan.timing_source,
     audio_duration_sec: timedPlan.audio_duration_sec,
     scene_count: timedPlan.scenes.length,
-    visual_beat_count: beats.length,
+    visual_beat_count: numberedBeats.length,
     policy: "Split timed semantic scenes into visual beats before image prompt authoring. Beats preserve scene facts, Whisper timing, and a local script excerpt for each beat; LLM still authors the final prompt.",
     beat_settings: { target_beat_sec: targetBeatSec, max_beat_sec: maxBeatSec, min_beat_sec: minBeatSec },
-    beats,
+    beats: numberedBeats,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

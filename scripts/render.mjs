@@ -28,10 +28,11 @@ const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.jo
 const width = Number(flags.width ?? 1920);
 const height = Number(flags.height ?? 1080);
 const fps = Number(flags.fps ?? 30);
-const motionMode = flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "blurred_ken_burns";
+const motionMode = flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "fill_ken_burns";
 const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTORY_RENDER_FOREGROUND_SCALE ?? 0.93);
-const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.0);
-const visualFadeSec = Number(flags["visual-fade-sec"] ?? process.env.ANIFACTORY_RENDER_VISUAL_FADE_SEC ?? 0.16);
+const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.55);
+const visualFadeSec = Number(flags["visual-fade-sec"] ?? process.env.ANIFACTORY_RENDER_VISUAL_FADE_SEC ?? 0);
+const hookTransitionSec = Number(flags["hook-transition-sec"] ?? process.env.ANIFACTORY_RENDER_HOOK_TRANSITION_SEC ?? 30);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -329,7 +330,7 @@ function imageDuration(prompt, scale = 1) {
   return Math.max(1, Number(prompt.duration_sec ?? 6) * scale);
 }
 
-function motionProfile(prompt, index) {
+function motionProfile(prompt, index, startSec = 0) {
   const structured = [
     prompt.visual_beat_focus,
     prompt.visual_beat_action,
@@ -354,11 +355,12 @@ function motionProfile(prompt, index) {
   const promptWide = /\b(?:wide composition|establishing|panoramic|city|street|arena|crowd)\b/i.test(promptText);
   const promptClose = /\b(?:close-up|closeup|portrait|face|eyes|expression|hand|phone|tablet|file|orb|license)\b/i.test(promptText);
   const direction = index % 4;
-  if (hasAction) return { name: "action_push", zoom: 1.058, driftX: 0.036, driftY: 0.028, direction };
-  if (hasUi) return { name: "ui_reveal", zoom: 1.026, driftX: 0.01, driftY: 0.008, direction };
-  if (isWide || promptWide) return { name: "wide_drift", zoom: 1.024, driftX: 0.026, driftY: 0.016, direction };
-  if (isEmotional || promptClose) return { name: "emotional_hold", zoom: 1.014, driftX: 0.008, driftY: 0.006, direction };
-  return { name: "steady_push", zoom: 1.022, driftX: 0.014, driftY: 0.01, direction };
+  if (Number(startSec) < hookTransitionSec) return { name: "hook_burst", zoom: 1.092, driftX: 0.052, driftY: 0.038, direction, hook: true };
+  if (hasAction) return { name: "action_push", zoom: 1.072, driftX: 0.042, driftY: 0.032, direction };
+  if (hasUi) return { name: "ui_reveal", zoom: 1.042, driftX: 0.018, driftY: 0.014, direction };
+  if (isWide || promptWide) return { name: "wide_drift", zoom: 1.04, driftX: 0.034, driftY: 0.022, direction };
+  if (isEmotional || promptClose) return { name: "emotional_hold", zoom: 1.028, driftX: 0.014, driftY: 0.01, direction };
+  return { name: "steady_push", zoom: 1.04, driftX: 0.022, driftY: 0.016, direction };
 }
 
 function motionProfileOffsets(profile) {
@@ -373,24 +375,65 @@ function motionProfileOffsets(profile) {
   return variants[profile.direction % variants.length];
 }
 
-function motionClipFilter(duration, index, prompt = {}) {
+function visualTransitionTreatment(duration, profile, prompt = {}, startSec = 0) {
+  const structured = [
+    prompt.visual_beat_focus,
+    prompt.visual_beat_action,
+    prompt.visual_beat_script_excerpt,
+    prompt.modelslab_image_prompt,
+    prompt.image_prompt,
+  ].filter(Boolean).join(" ");
+  const isHook = Number(startSec) < hookTransitionSec;
+  const isImpact = /\b(?:impact|strike|hit|crack|shatter|blast|thunder|explosion|blood|collapse|fall|launch|lunge|attack|counter|reveal|awaken|verdict|debt|ledger|system|gate|payoff|cliffhanger)\b/i.test(structured);
+  if (!isHook && !isImpact) return "";
+  const sweepWidth = Math.round(width * 0.16);
+  const sweepSpeed = Math.round(width * 1.32);
+  const sweepX = -sweepWidth;
+  const treatments = ["eq=contrast=1.055:saturation=1.06:brightness=0.006"];
+  if (isHook) {
+    treatments.push(
+      `drawbox=x=0:y=0:w=${width}:h=${height}:color=white@0.24:t=fill:enable='between(t\\,0\\,0.07)'`,
+      `drawbox=x='${sweepX}+t*${sweepSpeed}':y=0:w=${sweepWidth}:h=${height}:color=white@0.17:t=fill:enable='between(t\\,0.04\\,0.42)'`,
+      `drawbox=x='${width}-t*${sweepSpeed}':y=0:w=${Math.round(sweepWidth * 0.72)}:h=${height}:color=#99ccff@0.11:t=fill:enable='between(t\\,0.16\\,0.58)'`,
+    );
+  } else {
+    treatments.push(
+      `drawbox=x=0:y=0:w=${width}:h=${height}:color=white@0.11:t=fill:enable='between(t\\,0\\,0.045)'`,
+      `drawbox=x='${sweepX}+t*${Math.round(sweepSpeed * 0.8)}':y=0:w=${Math.round(sweepWidth * 0.68)}:h=${height}:color=white@0.08:t=fill:enable='between(t\\,0.03\\,0.30)'`,
+    );
+  }
+  return treatments.join(",");
+}
+
+function fadeFilters(duration) {
+  if (!(visualFadeSec > 0)) return "";
+  const fadeOutStart = Math.max(0, duration - visualFadeSec);
+  return `,fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec}`;
+}
+
+function motionClipFilter(duration, index, prompt = {}, startSec = 0) {
   const fgW = Math.round(width * Math.max(0.45, Math.min(1, foregroundScale)));
   const fgH = Math.round(height * Math.max(0.45, Math.min(1, foregroundScale)));
-  const profile = motionProfile(prompt, index);
+  const profile = motionProfile(prompt, index, startSec);
   const offsets = motionProfileOffsets(profile);
-  const fadeOutStart = Math.max(0, duration - visualFadeSec);
+  const transitionFilters = visualTransitionTreatment(duration, profile, prompt, startSec);
+  const transitionPrefix = transitionFilters ? `${transitionFilters},` : "";
+  const transitionSuffix = transitionFilters ? `,${transitionFilters}` : "";
+  const fades = fadeFilters(duration);
   if (motionMode === "fill_ken_burns") {
     const zoomMax = 1 + (profile.zoom - 1) * Math.max(1, motionStrength);
     const xBias = offsets.startX / width;
     const yBias = offsets.startY / height;
     const xExpr = `iw/2-(iw/zoom/2)+${xBias.toFixed(4)}*iw*(1-on/${Math.max(1, Math.ceil(duration * fps))})`;
     const yExpr = `ih/2-(ih/zoom/2)+${yBias.toFixed(4)}*ih*(1-on/${Math.max(1, Math.ceil(duration * fps))})`;
-    return `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase,crop=${width * 2}:${height * 2},zoompan=z='min(${zoomMax.toFixed(3)},1+on*0.00085*${motionStrength.toFixed(3)})':x='${xExpr}':y='${yExpr}':d=${Math.max(1, Math.ceil(duration * fps))}:s=${width}x${height}:fps=${fps},fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},format=yuv420p`;
+    const frameCount = Math.max(1, Math.ceil(duration * fps));
+    const zoomStep = ((zoomMax - 1) / frameCount).toFixed(7);
+    return `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase,crop=${width * 2}:${height * 2},zoompan=z='min(${zoomMax.toFixed(3)},1+on*${zoomStep})':x='${xExpr}':y='${yExpr}':d=${frameCount}:s=${width}x${height}:fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
   }
   const progress = `min(1,t/${Math.max(0.1, duration).toFixed(3)})`;
   const xExpr = `(W-w)/2+${offsets.startX}+(${offsets.endX - offsets.startX})*${progress}`;
   const yExpr = `(H-h)/2+${offsets.startY}+(${offsets.endY - offsets.startY})*${progress}`;
-  return `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=34,eq=brightness=-0.055:saturation=0.92[bg];[0:v]scale=${fgW}:${fgH}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=x='${xExpr}':y='${yExpr}',fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec},fps=${fps},format=yuv420p`;
+  return `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=34,eq=brightness=-0.055:saturation=0.92[bg];[0:v]scale=${fgW}:${fgH}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=x='${xExpr}':y='${yExpr}'${transitionSuffix}${fades},fps=${fps},format=yuv420p`;
 }
 
 async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
@@ -404,20 +447,24 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
   await fs.mkdir(clipDir, { recursive: true });
   const lines = [];
   const motionProfiles = {};
+  const hookClipIds = [];
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const imagePath = imageById.get(prompt.image_id);
     if (!(await exists(imagePath))) throw new Error(`Missing generated image for ${prompt.image_id}: ${imagePath}`);
     const duration = imageDuration(prompt, scale);
-    const profile = motionProfile(prompt, index);
+    const scaledStartSec = Number.isFinite(Number(prompt.start_sec)) ? Number(prompt.start_sec) * scale : lines.length ? null : 0;
+    const startSec = scaledStartSec ?? prompts.slice(0, index).reduce((sum, row) => sum + imageDuration(row, scale), 0);
+    const profile = motionProfile(prompt, index, startSec);
     motionProfiles[profile.name] = (motionProfiles[profile.name] ?? 0) + 1;
+    if (profile.hook) hookClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
     await execFile("ffmpeg", [
       "-y",
       "-loop", "1",
       "-t", duration.toFixed(3),
       "-i", imagePath,
-      "-filter_complex", motionClipFilter(duration, index, prompt),
+      "-filter_complex", motionClipFilter(duration, index, prompt, startSec),
       "-an",
       "-c:v", "libx264",
       "-preset", "veryfast",
@@ -431,7 +478,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
   const concatPath = path.join(workDir, "motion-clips.concat.txt");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
-  return { concatPath, prompt_count: prompts.length, duration_scale: scale, clip_dir: clipDir, motion_mode: motionMode, motion_profiles: motionProfiles };
+  return { concatPath, prompt_count: prompts.length, duration_scale: scale, clip_dir: clipDir, motion_mode: motionMode, motion_profiles: motionProfiles, hook_transition_sec: hookTransitionSec, hook_clip_ids: hookClipIds };
 }
 
 async function main() {
@@ -540,6 +587,8 @@ async function main() {
       foreground_scale: foregroundScale,
       motion_strength: motionStrength,
       visual_fade_sec: visualFadeSec,
+      hook_transition_sec: concat.hook_transition_sec,
+      hook_clip_ids: concat.hook_clip_ids,
       motion_profiles: concat.motion_profiles,
     },
     updated_at: new Date().toISOString(),

@@ -68,9 +68,13 @@ The approved narration script is production truth. The pipeline should extract, 
    - For SFX-only, run audio enrichment with `--sfx-only true`; the score plan is deliberately empty and no score beds are generated.
    - Local ACE-Step is the preferred production score provider. Use `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or pass `--score-provider local_ace_step`.
    - Do not use ModelsLab music generation for production score unless the operator explicitly asks for a fallback.
-   - Current score implementation creates chapter score beds as the base emotional floor.
-   - Optional score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on Whisper-timed drama, hype, reversal, reveal, and payoff beats. These accents are defined in `score_drop_plan_<episode>.json`; the longform mixer fades each accent in/out and ducks overlapping chapter score beds so they blend into the music instead of stacking uncontrolled volume.
+   - Opening hook SFX should be abundant. In the first thirty seconds, target at least ten and ideally ten to twelve audible SFX or transition cues when the narration supports them: swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, manga-panel slide, system or ledger pulse, room hush, blade/blood hit, or similar beat-native accents.
+   - After the opening, SFX should stay consistently present but selective. Hit scene transitions, ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals.
+   - Ambience should be generated as loopable SFX, not as score. Use ten to fourteen low nonmusical environmental beds between score drops: duel memory air, clan hall room tone, winter courtyard wind, punishment courtyard cold air, ancestral ritual hall, rooftop snow, east courtyard, hidden room, underwater tunnel, ravine forest, etc.
+   - Score should be moment-directed, not automatic. For stories that do not need continuous music, use drops-only scoring: `--score-mode drops_only` keeps `score_chapter_plan.json` empty and writes short dramatic accents to `score_drop_plan_<episode>.json`.
+   - Score drops should land only on earned dramatic, intense, reveal, reversal, payoff, escape, and cliffhanger moments. The longform mixer fades each accent in/out and ducks overlapping chapter score beds if any exist.
    - Planning backends are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for planning; ModelsLab is used for media generation.
+   - Next local LLM bakeoff candidate: `yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF`, stored at `/Users/joel/AniFactoryModels/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF`. Preferred first test file for the 64 GB MacBook Pro is `gemma4-coding-Q8_0.gguf`, downloaded at about 12 GB with SHA-256 prefix `5291d70fcffe05b3869de8f1f41aa89ca361913aa7b76af22867a798999672f7`; fall back to `gemma4-coding-Q6_K.gguf` only if Q8 is too slow or memory pressure is too high. Evaluate it against local Qwen for semantic planning, visual prompt authoring, visual prompt review, and code/pipeline patch suggestions before changing defaults. The earlier `mlx-community/gemma-4-12B-it-OptiQ-4bit` pull is a secondary comparison candidate only.
 
 13. Longform audio bed mix.
    - Mixes narration, SFX, and score into one final continuous audio track.
@@ -82,6 +86,8 @@ The approved narration script is production truth. The pipeline should extract, 
    - Splits timed semantic scenes into image beats.
    - Current target: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
    - Each visual beat carries a local script excerpt or concrete beat action so the prompt LLM authors the specific cut moment.
+   - Visual prompt authoring is manifest-first. Each cut must include a `shot_manifest` with physically visible characters, mentioned-only characters, active character-state refs, location ref, foreground action, shot job, props/UI, and forbidden refs before the prose prompt is trusted.
+   - The LLM receives previous/next beat summaries for sequencing and variety, but those summaries are context only. Current `visual_beat_script_excerpt` remains the authority for what appears in the frame.
 
 15. Visual reference planning.
    - Plans style, character state, location, UI, action, and effect refs.
@@ -116,29 +122,61 @@ The approved narration script is production truth. The pipeline should extract, 
 
 19. Visual prompt review/fix.
    - One LLM review/fix pass before imagegen.
+   - Review repairs `shot_manifest` first, then prompt prose and references. Mentioned-only characters stay out of the visible prompt and do not attach refs.
    - Checks subject focus, identity blending risk, unnecessary refs, missing refs, action direction, literalized metaphors, wardrobe ambiguity, and contradictions with semantic facts.
    - Blocks metadata-style prompts, duplicated reference-slot text, reference-sheet/turnaround scene prompts, and repeated tableaux across visual beats.
    - Code gates validate structure and blockers; they do not creatively author.
 
-20. Image generation.
+20. Visual prompt hardening.
+   - Run after LLM review and before any scene image generation.
+   - Writes `section_image_prompts_hardened.json`, `visual_prompt_hardening_<episode>.json`, and `visual_prompt_hardening_sample_<episode>.md`.
+   - Deterministically cleans the final scene prompt first, resolves character aliases from that cleaned prompt rather than stale `visible_subjects` or planner side fields, strips stale inferred refs, keeps continuous-location refs sticky across the whole location block, injects multi-character staging and primary-subject focus, trims to the four-reference model limit, validates `shot_manifest` ref/location contradictions, and blocks unresolved role/location risks.
+   - Mixed-location scenes must be resolved at beat level. If a parent scene contains "support workplace, then apartment kitchen table", each cut receives its own location contract from the beat excerpt. The workplace cut must attach or request the support-office location, while the debt cut must attach the apartment location.
+   - Beat-level location contracts override parent-scene location fallbacks. A current cut that says "went to work", "headset", "manager", or "support tickets" is a support-office shot even if the parent scene later returns to the apartment.
+   - Montage scenes must be hardened into one present-tense location per cut. If a parent scene mentions apartment kitchen, dumpster exterior, and bedroom sleep, the individual cuts should become kitchen cleanup, dumpster victory, system reward, or bedroom sleep frames, not panel grids or multi-time collages.
+   - Unattached character mentions are sanitized when they are phone, text, voicemail, document, profile, or memory mentions. A character reference is attached only when that character is physically staged in the current cut.
+   - Communication-heavy beats can use intentional manga-style split panels when useful. The hardener should assign strict panel roles: largest panel is the local protagonist in the real current location; smaller panels are device close-ups, contact avatar icons, email/envelope icons, call-flow cards, opportunity badges, or abstract system glyphs. Do not let a phone call, voicemail, cold email, or remote sales call become a physical remote-person scene unless the script places that person in the room.
+   - Dialogue-heavy beats are hardened into silent acting frames. Prompts should stage emotion through posture, eyelines, expressions, hand placement, prop action, and blocking rather than phrases like "spoken line", "says", or "says loudly", which can produce speech bubbles and caption artifacts.
+   - Every hardened cut gets a shot job from the beat excerpt, such as location establishment, object insert, interaction, physical action, or emotional reaction. This prevents adjacent cuts from collapsing into repeated hero portraits or repeated desk-and-UI tableaux.
+   - If four visible character refs consume all available slots, drop the location ref and report it as a resolved warning rather than a blocker. This is intentional because character consistency is more important than location anchoring when the model limit forces a choice.
+   - Hardening also handles known Flux failure classes: duplicate protagonist copies, foreground close-up plus tiny secondary overlays, reflected faces inside props, speech bubbles/dialogue lettering, readable UI labels, and ledger/UI panels covering faces or reading as solid censor blocks.
+   - UI, system, and ledger text accuracy is not a blocker by itself. Treat UI as a problem only when it becomes physically destructive, covers the subject/action, creates duplicate figures, or changes the shot into a prop/device shot. Exact story-critical words can still be added during render as overlays when intentionally needed.
+   - Supernatural UI and ledger panels should remain immaterial floating light panels with a visible air gap from hands. They must not become books, laptops, tablets, phones, monitors, keyboards, scrolls, boards, or other physical held objects.
+   - Abstract energy, memory, and aura effects should be phrased positively as ribbon-like light, empty glow, silhouettes, or abstract shapes. Avoid negative ghost/face/body wording in prompts because image models often render the forbidden subject named in the negative phrase.
+   - Review the markdown sample sheet before spending full imagegen budget. It must include risky examples such as the hook, one location-anchor cut, elder/patriarch/envoy aliases, crowded multi-character shots, action/combat, UI/prop/document, and a late-episode continuity cut.
+
+21. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
    - Flux Klein and Flux Kontext are both treated as four-reference models in this pipeline.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
    - Scene attachment prioritizes visible character refs first, then location, then prop/UI, then action/effects. Priority kind outranks required/optional flags. Style refs are only attached to scene cuts when no concrete refs are available.
-   - If an approved character_state_ref exists for a visible named character in that scene, imagegen may attach it even when the prompt planner omitted it. It should not attach multiple state refs for the same character in one cut.
-   - If ModelsLab returns a queue or rate-limit error, rerun imagegen with lower concurrency and leave `--force` unset so existing references and completed cuts are reused.
-   - Use the reviewed prompt artifact for production scene imagegen.
+   - When all four reference slots are needed for visible characters, keep those character refs and drop location first.
+   - For hardened prompt plans, `section_image_prompts_hardened.json` is authoritative. Imagegen must not infer extra character refs from stale `visible_subjects`, and it must not write runtime reference paths or inferred refs back into the hardened prompt plan.
+   - Continuous-location scenes keep the active location ref attached across the whole location block, not only on wide shots or scene starts. Hall, courtyard, rooftop, ravine, and similar sequences need the same location anchor on every continuity-sensitive cut.
+   - Explicit venue words in the cleaned scene prompt override contextual prop or action cues when selecting location refs. A banquet-hall restraint beat should keep the banquet hall ref even if it mentions spirit rope.
+   - Offscreen sound or light from another venue must not override the visible staging. If a courtyard or side-corridor shot mentions banquet hall glow, music, or sound cues, keep the visible courtyard/corridor location ref.
+   - Character aliases must be resolved before imagegen. Role labels such as "white-bearded elder," "patriarch," "envoy," "replacement heir," and "cousin attacker" attach the matching approved character_state_ref when visible.
+   - Possessive name phrases do not imply visible characters. Object inserts such as "Mu-gyeol's mother's sword" should attach prop and location refs, not Mu-gyeol's character ref, unless his body is actually visible.
+   - Memory/reflection beats should stage memories as separate translucent silhouettes near the prop, not as faces embedded in basins, mirrors, blades, documents, or bodies.
+   - Childhood flashbacks need child-specific refs or no adult character refs. If child refs are unavailable, stage the beat as child memory silhouettes with the current location ref only, because adult refs contaminate age, wardrobe, and body shape.
+   - Ritual/document close-ups should favor physical seal glow, ink, brush water, paper, and altar light. Add supernatural UI only when the beat explicitly calls for a ledger/interface reveal.
+   - Subject fusion, miniature heads, duplicate protagonist faces, or faces embedded in another body are generated-still failures. Regenerate those cuts with positive staging language: separate complete bodies, clear spacing, distinct face placement, visible robe and shoulder boundaries, one continuous manhwa frame.
+   - If ModelsLab returns a queue, rate-limit, fetch failure, or long stuck tail, rerun the affected `--cut-ids` with lower concurrency and leave `--force` unset unless intentionally replacing a bad cut. Completed good images should be reused.
+   - Use the hardened prompt artifact for production scene imagegen. Imagegen rejects non-hardened prompt plans by default; `--allow-unhardened-prompts true` is diagnostic only.
    - For bad scene cuts, regenerate only affected `--cut-ids` with cache reuse.
    - After targeted cut regeneration, run one full no-force imagegen pass to refresh the complete report and confirm all expected images exist.
+   - Babysit new productions through staged visual gates before trusting full automation: reference QA, hardened prompt sample QA, first small image batches, and periodic contact-sheet checks through high-risk sections. Promote to lower-touch runs only after several consecutive batches show no duplicate protagonist, subject fusion, destructive UI, wrong refs, or major location/style drift.
 
-21. Render.
+22. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
-   - Current render style uses sharper foreground image over a blurred full-frame background with intentional profile-based Ken Burns motion.
+   - Current render style uses full-frame profile-based Ken Burns motion by default. Use the blurred foreground mode only as a deliberate style override.
    - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Aggressive motion should not mean constant random movement.
+   - Transitions should be hand-picked by beat, not default fade-to-black. Use smooth FFmpeg transitions such as wipes, pushes, slides, flashes, and manga-panel swipes where they match the moment.
+   - Transition SFX should be bound to the actual transition timestamp on selected cuts. The opening thirty seconds should use frequent noticeable transition cues such as swipe-up flash, swipe-down whoosh, scene-card whoosh, impact flash, and manga-panel slide; after the hook, use them selectively so they feel intentional.
    - Subtitles should be yellow text with small black outline and no box/background.
    - Subtitle text should come from the final approved/stitch script; Whisper provides timing anchors only.
-   - Use the reviewed prompt artifact so render image lookup matches approved scene prompts.
+   - Use the hardened prompt artifact so render image lookup matches approved scene prompts.
    - Final MP4s must be upload-safe `yuv420p`; verify format, duration, fps, audio codec, and size after render.
    - Extract QA frames and spot-check final prompt/image/ref consistency before treating the render as publishable.
 
@@ -149,8 +187,9 @@ The approved narration script is production truth. The pipeline should extract, 
 - Timing: local Whisper word timing on the final stitched narration.
 - SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
 - SFX prompting: concrete source/material/action/space prompts, short clean effects, no story-summary prompts, no melody, no speech, no crowd dialogue.
-- Score beds: local ACE-Step 1.5 is preferred for production score generation. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`. ModelsLab music generation is not the preferred production score path.
-- Score drops: optional second layer of twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper and mixed by ducking the base bed at focal beats.
+- Ambience assets: generated with the SFX model as loopable nonmusical beds. Plans should mark them with `recurrence_class: "ambience"`, `loop: true`, short `asset_duration_sec`, longer timeline `duration_sec`, and low gain around -34 to -28 dB.
+- Score beds: local ACE-Step 1.5 is preferred when intentionally using chapter score beds. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`. ModelsLab music generation is not the preferred production score path.
+- Score drops: preferred scoring mode for narration-led recaps when music should be sparse. Use twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper, on focal drama, hype, reveal, reversal, payoff, escape, and cliffhanger beats.
 - Image model: ModelsLab Flux Klein.
 - Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
 - Render audio: one continuous longform mix containing narration, SFX, and score.
@@ -168,15 +207,16 @@ node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <w
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --score-mode drops_only --sfx-target-count 90 --score-target-drops 24
 ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --references-only true --reference-concurrency 6
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --concurrency 6 --reference-concurrency 6
-node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json
+node bin/goldflow.mjs visual harden --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --sample-count 14
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 6 --reference-concurrency 6
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json
 ```
 
 SFX-only audio variant:
@@ -211,8 +251,10 @@ Use this checklist before spending generation time:
    - Run SFX/score planning only after Whisper timing.
    - For narration-led humiliation/system stories, test SFX-only first: narrator plus system pings, phone buzzes, paper/object sounds, room hushes, laugh ripples, applause turns, and wealth-reveal impacts.
    - SFX prompts must name the source, material, action, space, and intensity. Example: `short cold crystalline digital transaction chime, quick attack, clean decay, subtle corporate interface texture`.
-   - Use local ACE-Step for score beds:
+   - Use local ACE-Step for score drops or any intentional score beds:
      `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
+   - Default for this style should be drops-only scoring:
+     `--score-mode drops_only --sfx-target-count 90 --score-target-drops 24`.
    - Keep SFX audible but controlled. Current mix starting point:
      `--sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2`.
    - Check the final longform mix for clipping and intelligibility. Use `--narration-volume-db 3` only if the limiter/loudness check passes.
@@ -225,11 +267,12 @@ Use this checklist before spending generation time:
    - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
    - Use reference-only generation first, then selectively regenerate failed refs with `--reference-ids`.
    - Character state refs are definitive for identity and wardrobe.
-   - Use positive-only scene prompts. Do not use negative prompt wording.
+   - LLM-authored scene prompts should be positive-only. Deterministic hardening may add narrow technical guardrails after review for known model failure classes; keep those guardrails in code, not in the creative prompt authoring task.
    - Reference priority: visible characters, location, prop/UI, action/effects, style only when no concrete refs are available.
-   - For multi-character scenes, spot check attached refs before bulk imagegen.
+   - For multi-character scenes, spot check attached refs before bulk imagegen. Check for wrong character refs, stale visible-subject refs, duplicate MC, face/body fusion, prop-embedded faces, speech bubbles, UI covering faces, and location drift.
    - If Flux times out or a sample fails, resume missing or rejected `--cut-ids` only. Keep completed good cuts cached.
    - Start imagegen concurrency around 6-12 on a fresh production run; raise only after quality and queue stability are confirmed.
+   - Babysit the next run through staged visual gates before trusting full automation: manually review references, review the hardened prompt sample, generate and contact-sheet the first small image batches, then keep periodic contact-sheet spot checks through high-risk sections.
 
 6. Render
    - Render from the continuous mixed audio track.

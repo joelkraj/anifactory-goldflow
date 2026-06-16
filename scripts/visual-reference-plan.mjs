@@ -119,7 +119,12 @@ Rules:
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; final scene poses and locations come from the visual prompt stage.
+- Character reference anchors should be single-person, single-pose, plain-background identity refs; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- For progressive transformation arcs where the same character changes body, grooming, hair, facial hair, clothing, wealth status, injury state, power level, or age presentation, separate identity from state:
+  - Create one base identity anchor for the character's face likeness and core recognizable identity.
+  - Later character_state refs and scene_prompt_anchor values must dictate the current state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status, and emotional bearing.
+  - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
+  - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
@@ -158,7 +163,9 @@ Return:
       "scene_prompt_anchor": "concise character identity, wardrobe, and state wording for use inside scene image prompts; no reference-sheet, camera, pose, location, or action-direction wording",
       "definitive": false,
       "reference_image_path": null,
-      "source_ref_id": "matching reference_targets ref_id"
+      "source_ref_id": "matching reference_targets ref_id",
+      "base_identity_ref_id": "optional base face identity reference id for progressive same-character states",
+      "identity_usage": "full_identity|face_only"
     }
   ],
   "warnings": []
@@ -195,6 +202,8 @@ function buildMergePrompt(semanticPlan, chunkPlans) {
       scene_ids: ref.scene_ids ?? [],
       prompt_anchor: String(ref.prompt_anchor ?? "").slice(0, 280),
       source_ref_id: ref.source_ref_id,
+      base_identity_ref_id: ref.base_identity_ref_id,
+      identity_usage: ref.identity_usage,
     })),
     warnings: (plan.warnings ?? []).slice(0, 5),
   }));
@@ -217,7 +226,12 @@ Rules:
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should be identity-only studio sheets on a plain background with multiple face angles or simple turnaround views; final scene poses and locations come from the visual prompt stage.
+- Character reference anchors should be single-person, single-pose, plain-background identity refs; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- For progressive transformation arcs where the same character changes body, grooming, hair, facial hair, clothing, wealth status, injury state, power level, or age presentation, separate identity from state:
+  - Create one base identity anchor for the character's face likeness and core recognizable identity.
+  - Later character_state refs and scene_prompt_anchor values must dictate the current state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status, and emotional bearing.
+  - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
+  - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
@@ -258,7 +272,9 @@ Return:
       "scene_prompt_anchor": "concise character identity, wardrobe, and state wording for use inside scene image prompts; no reference-sheet, camera, pose, location, or action-direction wording",
       "definitive": false,
       "reference_image_path": null,
-      "source_ref_id": "matching reference_targets ref_id"
+      "source_ref_id": "matching reference_targets ref_id",
+      "base_identity_ref_id": "optional base face identity reference id for progressive same-character states",
+      "identity_usage": "full_identity|face_only"
     }
   ],
   "warnings": []
@@ -335,6 +351,145 @@ function normalizeTarget(target, index) {
   };
 }
 
+function refIdFromSubject(subject, suffix = "ref") {
+  return String(subject ?? suffix)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_")
+    .concat(`_${suffix}`)
+    .replace(new RegExp(`_${suffix}_${suffix}$`), `_${suffix}`);
+}
+
+const locationSeedRules = [
+  {
+    key: "support_office",
+    subject: "dead-end customer support office",
+    patterns: [/\bsupport job\b/i, /\bcustomer support\b/i, /\bheadset\b/i, /\bunresolved support tickets\b/i, /\bmanager\b/i, /\bDarren\b/i],
+    anchor: "Dead-end customer support office with cubicle rows, headset stations, support ticket monitors, plastic office chairs, fluorescent ceiling lights, tired coworkers at desks, practical call-center layout, daytime workplace atmosphere, empty environment plate with clear office identity.",
+  },
+  {
+    key: "apartment",
+    subject: "modest apartment",
+    patterns: [/\bapartment\b/i, /\bkitchen table\b/i, /\bfridge\b/i, /\bbedroom\b/i, /\bcloset\b/i, /\bhome\b/i],
+    anchor: "Small modest apartment kitchen and workspace, basic table, laptop, cheap chair, half-empty closet glimpse, open refrigerator, lived-in working-class details, lonely domestic night lighting, empty environment plate with clear home identity.",
+  },
+  {
+    key: "gym",
+    subject: "twenty four hour gym",
+    patterns: [/\bgym\b/i, /\btreadmill\b/i, /\bdumbbell\b/i, /\bworkout\b/i, /\bpull-ups?\b/i],
+    anchor: "Twenty four hour gym interior with treadmill row, dumbbell rack, mirror wall, rubber floor, fluorescent early-morning lighting, practical equipment layout, empty environment plate with clear fitness-center identity.",
+  },
+  {
+    key: "dental_office",
+    subject: "dental practice office",
+    patterns: [/\bdental\b/i, /\bdentist\b/i, /\bSmiling Oaks\b/i, /\bpatient\b/i, /\bappointments?\b/i],
+    anchor: "Small dental practice office with reception counter, patient chairs, appointment calendar monitor, dental posters, clean clinical lighting, organized front desk, subtle dental equipment cues, empty environment plate with clear dental-office identity.",
+  },
+  {
+    key: "summit",
+    subject: "small business growth summit",
+    patterns: [/\bsummit\b/i, /\bstage\b/i, /\baudience\b/i, /\bspeaker\b/i, /\bpresentation\b/i],
+    anchor: "Hotel conference-room small business summit with low stage, projection screen, rows of seated business owners, podium, warm ceiling lights, event signage, note-taking audience, empty environment plate with clear public-speaking venue identity.",
+  },
+  {
+    key: "vending_route",
+    subject: "vending route locations",
+    patterns: [/\bvending\b/i, /\bmachines?\b/i, /\bsnacks?\b/i, /\bcard readers?\b/i, /\broute\b/i],
+    anchor: "Practical vending-machine route location with snack and drink machines, payment readers, service cart, inventory boxes, commercial hallway or gym corner, bright utility lighting, empty environment plate with clear vending-business identity.",
+  },
+  {
+    key: "startup_office",
+    subject: "growing startup office",
+    patterns: [/\bMercer Systems\b/i, /\bstartup office\b/i, /\bwhiteboards?\b/i, /\btitle company\b/i, /\bfirst client check\b/i],
+    anchor: "Small growing startup office above a title company, glass office walls, whiteboards full of diagrams, cheap desks, visible wires, coffee machine, framed first client check, practical founder workspace, empty environment plate with clear startup-office identity.",
+  },
+  {
+    key: "boardroom",
+    subject: "executive boardroom",
+    patterns: [/\bboardroom\b/i, /\bboard meeting\b/i, /\binvestors?\b/i, /\bboard members?\b/i, /\bconference table\b/i, /\brestructuring\b/i],
+    anchor: "High-floor executive boardroom with long dark conference table, glass walls, city view, investor packets, laptops, water glasses, premium chairs, dramatic corporate lighting, empty environment plate with clear boardroom power-center identity.",
+  },
+  {
+    key: "lobby_elevator",
+    subject: "corporate lobby and elevator",
+    patterns: [/\blobby\b/i, /\belevator\b/i, /\bsecurity desk\b/i, /\bmarble floors?\b/i, /\bBlackwell Tower\b/i],
+    anchor: "Modern corporate tower lobby with marble floors, security desk, polished steel elevator doors, reflective surfaces, tall glass entrance, upscale finance atmosphere, empty environment plate with clear lobby-and-elevator identity.",
+  },
+  {
+    key: "executive_lounge",
+    subject: "executive lounge",
+    patterns: [/\bexecutive lounge\b/i, /\bleather couch\b/i, /\bglass desk\b/i, /\bwine\b/i, /\bring\b/i],
+    anchor: "Luxury corporate executive lounge on a high floor with leather couch, glass desk, framed business magazine covers, wine glass, polished surfaces, city skyline through tall windows, cool elite office lighting, empty environment plate with clear executive-lounge identity.",
+  },
+  {
+    key: "coffee_courthouse",
+    subject: "coffee shop near courthouse",
+    patterns: [/\bcoffee shop\b/i, /\bcourthouse\b/i, /\bdivorce documents\b/i],
+    anchor: "Urban coffee shop exterior near courthouse, glass storefront, sidewalk tables, neutral daylight, people passing in business clothes, polished anime city detail, empty environment plate with clear coffee-and-courthouse identity.",
+  },
+];
+
+function sceneText(scene) {
+  return [
+    scene.title,
+    scene.location,
+    scene.time,
+    scene.visual_intent,
+    scene.action_staging,
+    ...(scene.props ?? []),
+    ...(scene.continuity_notes ?? []),
+    ...(scene.visible_subjects ?? []),
+    JSON.stringify(scene.character_states ?? []),
+  ].filter(Boolean).join(" ");
+}
+
+function ensureLocationReferenceTargets(referenceTargets, semanticScenes) {
+  const existing = new Map(referenceTargets.map((target) => [String(target.ref_id), target]));
+  const normalizedExistingText = normalizeTargetText(referenceTargets);
+  const additions = [];
+  for (const scene of semanticScenes ?? []) {
+    const text = sceneText(scene);
+    for (const rule of locationSeedRules) {
+      if (!rule.patterns.some((pattern) => pattern.test(text))) continue;
+      const alreadyCovered = normalizedExistingText.includes(rule.key.replace(/_/g, " "))
+        || normalizedExistingText.includes(rule.subject.toLowerCase())
+        || referenceTargets.some((target) => String(target.kind) === "location" && (target.scene_ids ?? []).includes(scene.scene_id) && rule.patterns.some((pattern) => pattern.test(`${target.subject} ${target.prompt_anchor}`)));
+      if (alreadyCovered) continue;
+      const refId = refIdFromSubject(rule.subject, "ref");
+      if (existing.has(refId)) {
+        const row = existing.get(refId);
+        row.scene_ids = [...new Set([...(row.scene_ids ?? []), scene.scene_id])];
+        continue;
+      }
+      const target = normalizeTarget({
+        ref_id: refId,
+        kind: "location",
+        subject: rule.subject,
+        scene_ids: [scene.scene_id],
+        priority: "high",
+        generation_mode: "standalone_ref",
+        required_before_imagegen: true,
+        prompt_anchor: rule.anchor,
+        anchor_cut_policy: "none",
+        appearance_count: 1,
+        risk_notes: ["deterministically added because scene text contains a distinct visual location that needs continuity anchoring"],
+        manual_review_required: true,
+      }, referenceTargets.length + additions.length);
+      existing.set(refId, target);
+      additions.push(target);
+    }
+  }
+  return [...referenceTargets, ...additions];
+}
+
+function normalizeTargetText(referenceTargets) {
+  return referenceTargets
+    .filter((target) => String(target.kind) === "location")
+    .map((target) => `${target.ref_id} ${target.subject} ${target.prompt_anchor}`.toLowerCase().replace(/[^a-z0-9]+/g, " "))
+    .join(" ");
+}
+
 function normalizeStateRef(ref, index) {
   const character = String(ref.character ?? ref.character_name ?? ref.name ?? `character_${index + 1}`).trim();
   const stateRefId = String(ref.state_ref_id ?? ref.ref_id ?? `${character}_${index + 1}`).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -347,6 +502,8 @@ function normalizeStateRef(ref, index) {
     definitive: false,
     reference_image_path: ref.reference_image_path ?? null,
     source_ref_id: ref.source_ref_id ?? ref.ref_id ?? null,
+    base_identity_ref_id: ref.base_identity_ref_id ?? ref.base_identity_ref ?? null,
+    identity_usage: ref.identity_usage ?? (ref.base_identity_ref_id || ref.base_identity_ref ? "face_only" : "full_identity"),
   };
 }
 
@@ -435,7 +592,8 @@ async function main() {
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   const stageName = `${episode}_visual_reference_plan`;
   const llm = await createReferencePlan(semanticPlan, stageName);
-  const referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
+  let referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
+  referenceTargets = ensureLocationReferenceTargets(referenceTargets, semanticPlan.scenes);
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
   assertPositiveAnchors(referenceTargets, characterStateRefs);

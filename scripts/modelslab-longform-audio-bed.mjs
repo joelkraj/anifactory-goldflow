@@ -544,7 +544,10 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     existingEvents.push(event);
     const start = eventStartSec(event, starts);
     if (maxDurationSec && start >= maxDurationSec) continue;
-    const eventDuration = event.loop ? Math.max(0.5, (Number(event.duration_sec) || durationSec) - start) : Math.max(0.25, Number(event.duration_sec ?? 3));
+    const eventEnd = Number(event.end_sec);
+    const eventDuration = event.loop
+      ? Math.max(0.5, Number.isFinite(eventEnd) ? eventEnd - start : Number(event.duration_sec ?? durationSec - start))
+      : Math.max(0.25, Number(event.duration_sec ?? 3));
     const gain = (Number.isFinite(Number(event.gain_db)) ? Number(event.gain_db) : -18) + sfxVolumeBoostDb;
     if (event.loop) inputs.push("-stream_loop", "-1");
     inputs.push("-i", event.asset_path);
@@ -581,7 +584,9 @@ async function start() {
     readJson(sfxPlanPath, null),
     readJson(qwenReportPath, null),
   ]);
-  if (!skipScore && !scorePlan?.chapters?.length) throw new Error(`Missing score chapters: ${scorePlanPath}`);
+  if (!skipScore && !scorePlan?.chapters?.length && !scoreDropPlan?.drops?.length) {
+    throw new Error(`Missing score chapters or score drops: ${scorePlanPath} / ${scoreDropPlanPath}`);
+  }
   if (!sfxPlan) throw new Error(`Missing SFX event plan: ${sfxPlanPath}`);
   if (!skipScore) {
     validateScorePlanForProduction(scorePlan);

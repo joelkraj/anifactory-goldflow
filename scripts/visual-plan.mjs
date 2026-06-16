@@ -177,6 +177,21 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
   };
 }
 
+function compactNeighborContext(scene) {
+  if (!scene) return null;
+  return {
+    visual_beat_id: scene.visual_beat_id ?? null,
+    parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
+    beat_index: scene.beat_index ?? null,
+    visual_beat_focus: scene.visual_beat_focus ?? null,
+    visual_beat_action: scene.visual_beat_action ?? null,
+    visual_beat_script_excerpt: scene.visual_beat_script_excerpt ?? null,
+    location: scene.location ?? null,
+    visible_subjects: scene.visible_subjects ?? [],
+    primary_subject: scene.primary_subject ?? null,
+  };
+}
+
 function relevantReferenceTargets(scene, visualReferencePlan) {
   const sceneId = scene.parent_scene_id ?? scene.scene_id;
   return (visualReferencePlan?.reference_targets ?? []).filter((target) => {
@@ -226,8 +241,10 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     parent_scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
-    scenes: (sourceRows ?? []).map((scene) => ({
+    scenes: (sourceRows ?? []).map((scene, index, rows) => ({
       ...compactSceneForPrompt(scene, stateRefIndex),
+      previous_beat_context: compactNeighborContext(rows[index - 1]),
+      next_beat_context: compactNeighborContext(rows[index + 1]),
       reference_targets: relevantReferenceTargets(scene, visualReferencePlan),
     })),
   };
@@ -251,6 +268,11 @@ Rules:
 - For visual beats, visual_beat_script_excerpt and visual_beat_action are the main source for the image. Each cut must show the specific moment in that beat excerpt, not a repeated hero portrait with the whole scene summarized behind the character.
 - Across beats in the same parent scene, vary the visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to the beat excerpt.
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
+- Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
+- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. If location_ref_id is set, the prose prompt must describe that visible location.
+- Parent scene context explains why the beat matters, but visual_beat_script_excerpt decides what appears. Do not include future reveals, earlier setup, or the whole confrontation unless the current beat excerpt physically shows them.
+- previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
+- For transformation arcs, use one base identity face anchor only when the approved reference metadata says identity_usage is face_only; current state wording controls body, hair, shave/facial hair, wardrobe, posture, cleanliness, and social status.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
@@ -303,6 +325,20 @@ Return JSON only:
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
       "anchor_roles": [{"ref_id":"...","kind":"character_state|location|prop|ui|action","anchor_role":"source_anchor","reason":"..."}],
+      "shot_manifest": {
+        "shot_job": "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition",
+        "visible_characters": ["Joey Mercer"],
+        "mentioned_only_characters": ["Vivian"],
+        "primary_character": "Joey Mercer",
+        "character_state_ref_ids": ["joey_overweight_ref"],
+        "protagonist_state_ref_id": "joey_overweight_ref",
+        "location_ref_id": "blackwell_lobby_elevator_ref",
+        "foreground_action": "Joey holds a Thai takeout bag alone in the elevator corridor",
+        "visible_props": ["Thai takeout bag"],
+        "ui_elements": [],
+        "forbidden_ref_ids": ["vivian_ref", "preston_ref"],
+        "continuity_notes": "one present-tense moment from the current beat excerpt"
+      },
       "visible_subjects": ["..."],
       "character_state_refs_used": ["state_ref_id"],
       "primary_subject": "...",
@@ -386,12 +422,32 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null) {
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : [],
     reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : [],
     anchor_roles: Array.isArray(row.anchor_roles) ? row.anchor_roles : [],
+    shot_manifest: sanitizeShotManifest(row.shot_manifest),
     visible_subjects: row.visible_subjects ?? [],
     character_state_refs_used: Array.isArray(row.character_state_refs_used) ? row.character_state_refs_used : [],
     primary_subject: row.primary_subject ?? null,
     location: row.location ?? null,
     ui_text_on_screen: row.ui_text_on_screen ?? [],
     image_generation_required: true,
+  };
+}
+
+function sanitizeShotManifest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const arrayOfStrings = (field) => Array.isArray(value[field]) ? value[field].map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+  return {
+    shot_job: value.shot_job ? String(value.shot_job) : null,
+    visible_characters: arrayOfStrings("visible_characters"),
+    mentioned_only_characters: arrayOfStrings("mentioned_only_characters"),
+    primary_character: value.primary_character ? String(value.primary_character) : null,
+    character_state_ref_ids: arrayOfStrings("character_state_ref_ids"),
+    protagonist_state_ref_id: value.protagonist_state_ref_id ? String(value.protagonist_state_ref_id) : null,
+    location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
+    foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    visible_props: arrayOfStrings("visible_props"),
+    ui_elements: arrayOfStrings("ui_elements"),
+    forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
+    continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
   };
 }
 

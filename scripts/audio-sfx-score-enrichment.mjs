@@ -31,6 +31,7 @@ const audioPlanPath = path.join(episodeDir, "audio_performance_plan.json");
 const dialogueMapPath = path.join(episodeDir, "dialogue_map.json");
 const qwenReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
 const scorePlanPath = path.join(episodeDir, "score_chapter_plan.json");
+const scoreDropPlanPath = path.join(episodeDir, `score_drop_plan_${episode}.json`);
 const sfxPlanPath = path.join(episodeDir, `sfx_event_plan_${episode}.json`);
 const sfxReportPath = path.join(episodeDir, "sfx_resolution_report.json");
 const enrichmentReportPath = path.join(episodeDir, `audio_enrichment_report_${episode}.json`);
@@ -40,9 +41,12 @@ const plannerVersion = 1;
 const plannerName = "llm_audio_enrichment_v1";
 const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 60, 24, 90);
 const scoreTargetChapters = clampInt(flags["score-target-chapters"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_CHAPTERS ?? 8, 5, 12);
+const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? 24, 0, 35);
+const scoreMode = String(flags["score-mode"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_MODE ?? "chapters").toLowerCase();
 const sfxOnly = flags["sfx-only"] === "true";
+const scoreDropsOnly = !sfxOnly && /^(drops|drops_only|moments|moment_only)$/.test(scoreMode);
 const generateAssets = flags["generate-assets"] !== "false";
-const generateScoreAssets = !sfxOnly && generateAssets && flags["generate-score-assets"] !== "false";
+const generateScoreAssets = !sfxOnly && !scoreDropsOnly && generateAssets && flags["generate-score-assets"] !== "false";
 const generateSfxAssets = generateAssets && flags["generate-sfx-assets"] !== "false";
 const dryRun = flags["dry-run"] === "true";
 const allowNonWhisperTiming = flags["allow-non-whisper-timing"] === "true"
@@ -457,7 +461,7 @@ async function validateAudioAsset(filePath, targetDurationSec, kind) {
   const stat = await fs.stat(filePath).catch(() => null);
   const duration = stat ? await mediaDuration(filePath).catch(() => null) : null;
   const minDuration = kind === "score" ? Math.min(20, Math.max(5, Number(targetDurationSec) * 0.25)) : 0.2;
-  const maxDuration = kind === "score" ? Math.max(30, Number(targetDurationSec) * 1.5) : Math.max(1.5, Number(targetDurationSec) * 2.5);
+  const maxDuration = kind === "score" ? Math.max(30, Number(targetDurationSec) * 1.5) : Math.max(3, Number(targetDurationSec) * 2.5);
   const issues = [];
   if (!stat || stat.size < 2048) issues.push("asset_missing_or_too_small");
   if (!Number.isFinite(duration) || duration <= 0) issues.push("duration_unreadable");
@@ -527,7 +531,8 @@ function findTightSfxBankMatch(manifest, event) {
 
 async function generateSfxAsset(event) {
   const cueId = slug(event.cue_id ?? event.sound_description, "llm_sfx");
-  const duration = Math.max(3, Math.min(12, Number(event.duration_sec ?? 3) || 3));
+  const assetDuration = Number(event.asset_duration_sec ?? event.generation_duration_sec);
+  const duration = Math.max(3, Math.min(12, Number.isFinite(assetDuration) ? assetDuration : (event.loop ? 10 : Number(event.duration_sec ?? 3) || 3)));
   const prompt = `${event.sound_description}. ${event.palette_note ?? ""} Clean isolated sound effect, no speech, no music.`;
   const outDir = path.join(sfxAssetDir, cueId);
   await fs.mkdir(outDir, { recursive: true });
@@ -722,8 +727,19 @@ function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
     ? `SFX-ONLY MODE:
 - Build SFX events only.
 - Return "score_chapters": [].
+- Return "score_drops": [].
 - Do not plan score beds, music chapters, risers, drones, or music drops.
 - Let silence and narration carry the emotional floor; SFX should punctuate only important system, object, crowd, phone, room, and reveal beats.`
+    : scoreDropsOnly
+    ? `SCORE REQUIREMENTS:
+- Score is DROPS-ONLY for this run. Return "score_chapters": [].
+- Emit about ${scoreTargetDrops} short score_drops only where the story earns music: dramatic pressure, intense attack, betrayal proof, reversal, reveal, escape, payoff, cliffhanger.
+- Do not create continuous chapter beds, generic music ambience beds, or mechanical time-window music.
+- Each score drop needs: drop_id, segment_id, target_phrase, start_sec, duration_sec, gain_db, score_intent, story_function, intensity_score 1-10, ace_step_prompt, beat_reason.
+- start_sec must be on the real ${Math.round(durationSec)} second timeline; target_phrase anchors the same moment for audit.
+- Drops should be short riser-hit accents that blend into silence or under narration, not full songs. Prefer ${Math.round(Math.max(3, Math.min(9, durationSec / 900)))} to 9 seconds per drop.
+- Prompts must be instrumental, no vocals/lyrics/speech/crowd noise, and palette-native to this episode.
+- Musical hits should feel earned and varied: low taiko pressure, bowed-metal dread, guqin scrape, dark cinematic rise, impact hit, cold trailing pulse.`
     : `SCORE REQUIREMENTS:
 - Emit ${scoreTargetChapters} or fewer/more as the story beats require; do not use fixed 3-minute windows.
 - Each chapter needs: chapter_id, start_sec, end_sec, target_duration_sec, score_intent, story_function, intensity_score 1-10, gain_db, ace_step_prompt, beat_reason, sourcing_intent.
@@ -740,7 +756,15 @@ Derive the sonic and musical palette from THIS story and bible. Do not use hardc
 
 SFX REQUIREMENTS:
 - Emit about ${sfxTargetCount} abundant, beat-anchored SFX events across the full runtime, not sparse literal keyword hits.
-- Every event needs: event_id, cue_id, segment_id, offset_sec, duration_sec, gain_db, priority, sound_description, beat_reason, recurrence_class ("signature" or "incidental"), palette_note.
+- The opening 30 seconds is a designed hook burst: place at least 10 and ideally 10-12 audible SFX/transition cues in the first 30 seconds. Use the short sentence rhythm of the hook; do not stop at only a few literal hits.
+- Opening hook cues should include noticeable edit-transition sounds when appropriate: swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, or fast manga-panel slide. Treat these as transition SFX anchored to nearby spoken phrases, not visible narration.
+- After the opening, keep SFX consistently present but selective: punctuate scene transitions, ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals.
+- Transitions should be noticeable but not random. Use swipe/flash/whoosh cues at real scene turns, memory cuts, ledger windows, combat beats, and cliffhanger shifts.
+- Generate ambience as SFX, not score. Add 10-14 loopable ambience events for major locations or atmosphere runs: duel memory air, clan hall room tone, winter courtyard wind, banquet/formal hall, punishment courtyard, ancestral ritual hall, rooftop snow, east courtyard, hidden room, underwater tunnel, ravine forest. These should be nonmusical environmental beds at low gain, loop true, duration_sec covering the scene span, and asset_duration_sec around 8-12 seconds for the generated loop clip.
+- Ambience should cover most non-score runtime by location zones; avoid leaving long stretches with no environmental floor unless the scene intentionally needs hard silence.
+- Ambience should sit elsewhere under the narration when there is no score drop. Use low gains around -34 to -28 dB, and avoid melody, rhythm, vocals, speech, or crowd dialogue.
+- Every event needs: event_id, cue_id, segment_id, offset_sec, duration_sec, gain_db, priority, sound_description, beat_reason, recurrence_class ("signature", "incidental", or "ambience"), palette_note.
+- Ambience events also need: loop true, asset_duration_sec, and optional end_sec when a location ambience should end at a specific timeline point.
 - Every event also needs target_phrase: exact spoken script words inside the segment where the sound should hit. Anchor to the emotional beat word/phrase: e.g. "card declined", "cracked against the marble", "money becoming more money", "Over two billion". Deterministic code will resolve target_phrase to a word-level Whisper timestamp and write absolute_start_sec.
 - segment_id must come from the provided segment list.
 - offset_sec is fallback only if target_phrase cannot be aligned.
@@ -788,12 +812,14 @@ Return one valid JSON object only:
       "segment_id": "voice_seg_01",
       "offset_sec": 1.2,
       "duration_sec": 1.5,
+      "asset_duration_sec": 1.5,
       "gain_db": -18,
       "priority": 1,
       "sound_description": "short cold digital contract ping",
       "target_phrase": "card declined",
       "beat_reason": "marks the mechanic signal landing before the reversal",
       "recurrence_class": "signature",
+      "loop": false,
       "palette_note": "system/finance/city derived from episode"
     }
   ],
@@ -811,6 +837,21 @@ Return one valid JSON object only:
       "beat_reason": "..."
     }
   ],
+  "score_drops": [
+    {
+      "drop_id": "score_drop_001",
+      "segment_id": "voice_seg_01",
+      "target_phrase": "the debt remains unpaid",
+      "start_sec": 120.4,
+      "duration_sec": 6.5,
+      "gain_db": -18,
+      "score_intent": "betrayal_reveal_riser_hit",
+      "story_function": "dramatic reveal",
+      "intensity_score": 8,
+      "ace_step_prompt": "short dark Murim revenge riser hit, low taiko pressure, bowed metal scrape, cold guqin accent, sharp impact then trailing pulse",
+      "beat_reason": "music enters only for the reveal payoff"
+    }
+  ],
   "warnings": []
 }`;
 }
@@ -818,21 +859,36 @@ Return one valid JSON object only:
 function normalizeEvent(event, index, validSegments) {
   const segmentId = String(event.segment_id ?? "");
   const segment = validSegments.get(segmentId) ?? [...validSegments.values()][Math.min(index, validSegments.size - 1)] ?? {};
-  const duration = Math.max(0.35, Math.min(12, Number(event.duration_sec ?? 2) || 2));
+  const recurrence = /ambience|ambient/i.test(String(event.recurrence_class ?? event.category ?? event.kind ?? ""))
+    ? "ambience"
+    : /signature/i.test(String(event.recurrence_class ?? ""))
+    ? "signature"
+    : "incidental";
+  const loop = event.loop === true || event.loop === "true" || recurrence === "ambience";
+  const durationMax = loop ? 600 : 12;
+  const durationDefault = loop ? Math.max(30, Number(segment.duration_sec ?? 60) || 60) : 2;
+  const duration = Math.max(0.35, Math.min(durationMax, Number(event.duration_sec ?? durationDefault) || durationDefault));
   const offset = Math.max(0, Math.min(Math.max(0, Number(segment.duration_sec ?? 0) - 0.1), Number(event.offset_sec ?? 0) || 0));
   const cueId = slug(event.cue_id ?? event.sound_description ?? `llm_sfx_${index + 1}`, `llm_sfx_${index + 1}`);
+  const gain = Number.isFinite(Number(event.gain_db)) ? Number(event.gain_db) : (recurrence === "ambience" ? -32 : -18);
   return {
     event_id: event.event_id ?? `llm_sfx_${String(index + 1).padStart(3, "0")}`,
     cue_id: cueId,
     segment_id: segment.segment_id ?? segmentId,
     offset_sec: Number(offset.toFixed(3)),
     duration_sec: Number(duration.toFixed(3)),
-    gain_db: Number.isFinite(Number(event.gain_db)) ? Number(event.gain_db) : -18,
+    end_sec: Number.isFinite(Number(event.end_sec)) ? Number(Number(event.end_sec).toFixed(3)) : null,
+    asset_duration_sec: Number.isFinite(Number(event.asset_duration_sec ?? event.generation_duration_sec))
+      ? Number(Math.max(3, Math.min(12, Number(event.asset_duration_sec ?? event.generation_duration_sec))).toFixed(3))
+      : (loop ? 10 : null),
+    gain_db: gain,
     priority: Number.isFinite(Number(event.priority)) ? Number(event.priority) : 2,
     sound_description: String(event.sound_description ?? cueId.replace(/_/g, " ")),
     target_phrase: String(event.target_phrase ?? event.anchor_phrase ?? event.anchor_text ?? "").trim(),
     beat_reason: String(event.beat_reason ?? "LLM-selected beat punctuation"),
-    recurrence_class: /signature/i.test(String(event.recurrence_class ?? "")) ? "signature" : "incidental",
+    recurrence_class: recurrence,
+    category: recurrence === "ambience" ? "ambience" : String(event.category ?? event.kind ?? "sfx"),
+    loop,
     palette_note: String(event.palette_note ?? ""),
     source: "llm_audio_enrichment",
     planner: plannerName,
@@ -958,6 +1014,70 @@ function normalizeChapter(chapter, index, durationSec) {
   };
 }
 
+function normalizeScoreDrop(drop, index, validSegments, durationSec) {
+  const segmentId = String(drop.segment_id ?? "");
+  const segment = validSegments.get(segmentId) ?? [...validSegments.values()][Math.min(index, validSegments.size - 1)] ?? {};
+  const start = Math.max(0, Math.min(durationSec, Number(drop.start_sec ?? segment.start_sec ?? 0) || 0));
+  const duration = Math.max(2, Math.min(12, Number(drop.duration_sec ?? 6) || 6));
+  const dropId = slug(drop.drop_id ?? drop.event_id ?? `score_drop_${String(index + 1).padStart(3, "0")}`, `score_drop_${String(index + 1).padStart(3, "0")}`);
+  return {
+    drop_id: dropId,
+    event_id: dropId,
+    segment_id: segment.segment_id ?? segmentId,
+    offset_sec: Math.max(0, Number(drop.offset_sec ?? 0) || 0),
+    start_sec: Number(start.toFixed(3)),
+    duration_sec: Number(duration.toFixed(3)),
+    gain_db: Number.isFinite(Number(drop.gain_db)) ? Number(drop.gain_db) : -18,
+    score_intent: String(drop.score_intent ?? "dramatic_score_drop"),
+    story_function: String(drop.story_function ?? "focal dramatic beat"),
+    intensity_score: Math.max(1, Math.min(10, Number(drop.intensity_score ?? 7) || 7)),
+    ace_step_prompt: String(drop.ace_step_prompt ?? drop.music_prompt ?? "short cinematic Murim revenge riser hit, instrumental, no vocals, no speech"),
+    target_phrase: String(drop.target_phrase ?? drop.anchor_phrase ?? drop.anchor_text ?? "").trim(),
+    beat_reason: String(drop.beat_reason ?? "LLM-selected dramatic score drop"),
+    planner: plannerName,
+  };
+}
+
+function eventTimelineStartSec(event, validSegments) {
+  if (Number.isFinite(Number(event.absolute_start_sec))) return Number(event.absolute_start_sec);
+  const segment = validSegments.get(String(event.segment_id));
+  return Number(segment?.start_sec ?? 0) + Number(event.offset_sec ?? 0);
+}
+
+function audioPlanQuality(events, scoreDrops, validSegments) {
+  const openingEvents = events
+    .map((event) => ({ ...event, timeline_start_sec: eventTimelineStartSec(event, validSegments) }))
+    .filter((event) => event.timeline_start_sec < 30);
+  const ambienceEvents = events.filter((event) => event.loop === true || event.recurrence_class === "ambience" || event.category === "ambience");
+  const issues = [];
+  if (openingEvents.length < 10) issues.push(`opening_hook_sfx_under_target:${openingEvents.length}<10`);
+  if (ambienceEvents.length < 10) issues.push(`ambience_beds_under_target:${ambienceEvents.length}<10`);
+  if (!sfxOnly && scoreDrops.length < Math.min(20, scoreTargetDrops)) issues.push(`score_drops_under_target:${scoreDrops.length}<${Math.min(20, scoreTargetDrops)}`);
+  return {
+    status: issues.length ? "needs_review" : "passed",
+    issues,
+    opening_30_sec_event_count: openingEvents.length,
+    opening_30_sec_events: openingEvents.map((event) => ({
+      event_id: event.event_id,
+      cue_id: event.cue_id,
+      timeline_start_sec: Number(event.timeline_start_sec.toFixed(3)),
+      target_phrase: event.target_phrase,
+      placement_status: event.placement_resolution?.status ?? null,
+    })),
+    ambience_event_count: ambienceEvents.length,
+    ambience_events: ambienceEvents.map((event) => ({
+      event_id: event.event_id,
+      cue_id: event.cue_id,
+      duration_sec: event.duration_sec,
+      asset_duration_sec: event.asset_duration_sec,
+      gain_db: event.gain_db,
+      loop: event.loop,
+      target_phrase: event.target_phrase,
+    })),
+    score_drop_count: scoreDrops.length,
+  };
+}
+
 async function validateWhisperTimingForProduction(wordTiming, qwenReport, sourceScriptHash) {
   const issues = [];
   if (wordTiming?.status !== "passed") issues.push("word_timing_status_not_passed");
@@ -1020,12 +1140,26 @@ async function main() {
   const llm = await callPlannerLlm(prompt, `${episode}_audio_sfx_score_enrichment`);
   const validSegments = new Map(segments.map((segment) => [String(segment.segment_id), segment]));
   const rawEvents = Array.isArray(llm.parsed.sfx_events) ? llm.parsed.sfx_events : [];
-  const rawChapters = !sfxOnly && Array.isArray(llm.parsed.score_chapters) ? llm.parsed.score_chapters : [];
+  const rawChapters = !sfxOnly && !scoreDropsOnly && Array.isArray(llm.parsed.score_chapters) ? llm.parsed.score_chapters : [];
+  const rawScoreDrops = !sfxOnly && Array.isArray(llm.parsed.score_drops) ? llm.parsed.score_drops : [];
   const normalizedEvents = rawEvents
     .map((event, index) => normalizeEvent(event, index, validSegments))
     .filter((event) => event.segment_id)
     .map((event) => resolveWordTiming(event, validSegments, wordTiming));
   const normalizedChapters = rawChapters.map((chapter, index) => normalizeChapter(chapter, index, durationSec))
+    .sort((left, right) => left.start_sec - right.start_sec);
+  const normalizedScoreDrops = rawScoreDrops
+    .map((drop, index) => normalizeScoreDrop(drop, index, validSegments, durationSec))
+    .filter((drop) => drop.segment_id || Number.isFinite(Number(drop.start_sec)))
+    .map((drop) => {
+      const resolved = resolveWordTiming(drop, validSegments, wordTiming);
+      const resolvedStart = resolved.event.absolute_start_sec ?? resolved.event.start_sec ?? drop.start_sec;
+      return {
+        ...resolved.event,
+        start_sec: Number(Number(resolvedStart).toFixed(3)),
+        placement_resolution: resolved.placement_resolution,
+      };
+    })
     .sort((left, right) => left.start_sec - right.start_sec);
 
   const eventResolutions = [];
@@ -1232,8 +1366,39 @@ async function main() {
     updated_at: nowIso(),
   };
 
+  const scoreDropPlan = {
+    status: sfxOnly || normalizedScoreDrops.every((drop) => Number.isFinite(Number(drop.start_sec)) && Number.isFinite(Number(drop.duration_sec))) ? "passed" : "failed",
+    planner: plannerName,
+    planner_version: plannerVersion,
+    purpose: sfxOnly
+      ? "SFX-only run: score drops deliberately disabled."
+      : scoreDropsOnly
+      ? "Drops-only score plan: short local ACE-Step riser/hit accents only on dramatic, intense, reveal, reversal, payoff, and cliffhanger beats."
+      : "Optional score-drop accent layer for focal story moments, mixed with ducking against chapter beds.",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    source_script_hash: sourceScriptHash,
+    source_script_path: scriptPath,
+    timing_source: "local_whisper_word_timing",
+    timing_gate: whisperTimingGate,
+    score_provider: "local_ace_step",
+    score_model_id: process.env.ANIFACTORY_ACE_STEP_CONFIG_PATH ?? "acestep-v15-turbo",
+    score_lm_model_id: process.env.ANIFACTORY_ACE_STEP_LM_MODEL ?? "acestep-5Hz-lm-1.7B",
+    endpoint: "local:ace-step-1.5",
+    density_policy: scoreDropsOnly
+      ? "No continuous score bed. Use short moment-directed accents only when the scene has dramatic pressure, intensity, reversal, reveal, payoff, or cliffhanger value."
+      : "Short accents may support chapter beds on focal beats; do not score every scene turn.",
+    mix_policy: "Longform mixer fades each drop in/out; if chapter beds exist, they are ducked during drop windows.",
+    drops: sfxOnly ? [] : normalizedScoreDrops,
+    warnings: llm.parsed.warnings ?? [],
+    updated_at: nowIso(),
+  };
+  const qualityGate = audioPlanQuality(sfxPlan.events, scoreDropPlan.drops, validSegments);
+
   const report = {
-    status: sfxPlan.status === "passed" && scorePlan.status === "passed" ? "passed" : "needs_review",
+    status: sfxPlan.status === "passed" && scorePlan.status === "passed" && scoreDropPlan.status === "passed" && qualityGate.status === "passed" ? "passed" : "needs_review",
     planner: plannerName,
     planner_version: plannerVersion,
     guiding_principle: "Effective SFX/score is about placement on the emotional beat. LLM decides what sound/music and where in the story; deterministic code decides exact timestamp and render.",
@@ -1259,6 +1424,7 @@ async function main() {
     sfx: {
       plan_path: sfxPlanPath,
       cue_count: sfxPlan.resolved_event_count,
+      quality_gate: qualityGate,
       generated_asset_count: generatedSfxAssets.length,
       reused_asset_count: reusedSfxAssets.length,
       sample_events: eventResolutions.slice(0, 15).map((event) => ({
@@ -1286,7 +1452,14 @@ async function main() {
     score: {
       plan_path: scorePlanPath,
       disabled: sfxOnly,
+      quality_gate: {
+        score_drop_count: qualityGate.score_drop_count,
+        issues: qualityGate.issues.filter((issue) => issue.startsWith("score_")),
+      },
       chapter_count: scoreChapters.length,
+      drops_only: scoreDropsOnly,
+      drop_plan_path: scoreDropPlanPath,
+      drop_count: scoreDropPlan.drops.length,
       chapters: scoreChapters.map((chapter) => ({
         chapter_id: chapter.chapter_id,
         start_sec: chapter.start_sec,
@@ -1299,6 +1472,20 @@ async function main() {
         prompt: chapter.ace_step_prompt,
         asset_path: chapter.asset_path,
         validation: chapter.asset_validation,
+      })),
+      drops: scoreDropPlan.drops.slice(0, 20).map((drop) => ({
+        drop_id: drop.drop_id,
+        segment_id: drop.segment_id,
+        start_sec: drop.start_sec,
+        duration_sec: drop.duration_sec,
+        score_intent: drop.score_intent,
+        story_function: drop.story_function,
+        intensity_score: drop.intensity_score,
+        gain_db: drop.gain_db,
+        target_phrase: drop.target_phrase,
+        beat_reason: drop.beat_reason,
+        prompt: drop.ace_step_prompt,
+        placement_resolution: drop.placement_resolution,
       })),
     },
     word_timing: {
@@ -1336,10 +1523,11 @@ async function main() {
     updated_at: nowIso(),
   });
   await writeJson(scorePlanPath, scorePlan);
+  await writeJson(scoreDropPlanPath, scoreDropPlan);
   await writeJson(enrichmentReportPath, report);
   await appendManualLog([
     `Generated LLM-enriched SFX plan: ${sfxPlan.resolved_event_count} resolved cues, ${generatedSfxAssets.length} generated assets, ${reusedSfxAssets.length} reused assets.`,
-    sfxOnly ? "Generated SFX-only run: score disabled, final mix not produced." : `Generated LLM beat-mapped score plan: ${scoreChapters.length} chapters, final mix not produced.`,
+    sfxOnly ? "Generated SFX-only run: score disabled, final mix not produced." : `Generated LLM beat-mapped score plan: ${scoreChapters.length} chapters and ${scoreDropPlan.drops.length} score drops, final mix not produced.`,
     `Source script hash: ${sourceScriptHash}.`,
   ]);
   console.log(JSON.stringify(report, null, 2));

@@ -153,6 +153,7 @@ function compactPrompt(prompt) {
     required_reference_paths: prompt.required_reference_paths ?? [],
     reference_usage: prompt.reference_usage ?? [],
     anchor_roles: prompt.anchor_roles ?? [],
+    shot_manifest: prompt.shot_manifest ?? null,
     visible_subjects: prompt.visible_subjects ?? [],
     character_state_refs_used: prompt.character_state_refs_used ?? [],
     primary_subject: prompt.primary_subject ?? null,
@@ -234,6 +235,9 @@ Rules:
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
 - Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
+- Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
+- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If location_ref_id is set, make the prompt and location reference match it.
+- Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
 - Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
@@ -294,6 +298,20 @@ Return JSON only:
       "required_reference_paths": [],
       "reference_usage": [],
       "anchor_roles": [],
+      "shot_manifest": {
+        "shot_job": "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition",
+        "visible_characters": ["..."],
+        "mentioned_only_characters": ["..."],
+        "primary_character": "...",
+        "character_state_ref_ids": ["..."],
+        "protagonist_state_ref_id": "...",
+        "location_ref_id": "...",
+        "foreground_action": "...",
+        "visible_props": ["..."],
+        "ui_elements": ["..."],
+        "forbidden_ref_ids": ["..."],
+        "continuity_notes": "..."
+      },
       "visible_subjects": [],
       "character_state_refs_used": [],
       "primary_subject": "...",
@@ -409,12 +427,32 @@ function normalizeReviewedPrompt(row, original) {
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : (original.required_reference_paths ?? []),
     reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : (original.reference_usage ?? []),
     anchor_roles: Array.isArray(row.anchor_roles) ? row.anchor_roles : (original.anchor_roles ?? []),
+    shot_manifest: sanitizeShotManifest(row.shot_manifest ?? original.shot_manifest),
     visible_subjects: Array.isArray(row.visible_subjects) ? row.visible_subjects : (original.visible_subjects ?? []),
     character_state_refs_used: Array.isArray(row.character_state_refs_used) ? row.character_state_refs_used : (original.character_state_refs_used ?? []),
     primary_subject: row.primary_subject ?? original.primary_subject ?? null,
     location: row.location ?? original.location ?? null,
     ui_text_on_screen: Array.isArray(row.ui_text_on_screen) ? row.ui_text_on_screen : (original.ui_text_on_screen ?? []),
     image_generation_required: original.image_generation_required !== false,
+  };
+}
+
+function sanitizeShotManifest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const arrayOfStrings = (field) => Array.isArray(value[field]) ? value[field].map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+  return {
+    shot_job: value.shot_job ? String(value.shot_job) : null,
+    visible_characters: arrayOfStrings("visible_characters"),
+    mentioned_only_characters: arrayOfStrings("mentioned_only_characters"),
+    primary_character: value.primary_character ? String(value.primary_character) : null,
+    character_state_ref_ids: arrayOfStrings("character_state_ref_ids"),
+    protagonist_state_ref_id: value.protagonist_state_ref_id ? String(value.protagonist_state_ref_id) : null,
+    location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
+    foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    visible_props: arrayOfStrings("visible_props"),
+    ui_elements: arrayOfStrings("ui_elements"),
+    forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
+    continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
   };
 }
 

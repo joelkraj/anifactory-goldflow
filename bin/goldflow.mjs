@@ -40,6 +40,7 @@ Commands:
   goldflow visual refs             Plan visual references, state refs, and anchor strategy
   goldflow visual plan             Author current-scene-only image prompts from visual beats
   goldflow visual review           Review/fix image prompts with LLM, then validate blockers
+  goldflow visual harden           Deterministically repair prompt refs and write pre-imagegen sample QA
   goldflow imagegen start          Generate images from approved prompt plan
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
   goldflow audio enrich-sfx-score  Plan/generate Whisper-timed SFX and score
@@ -52,7 +53,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual beats -> visual refs -> visual plan -> visual review -> imagegen start -> render start
+  source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual beats -> visual refs -> visual plan -> visual review -> visual harden -> imagegen start -> render start
 `);
 }
 
@@ -84,6 +85,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-reference-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "review") {
   run("visual-prompt-review.mjs", flags);
+} else if (command === "visual" && subcommand === "harden") {
+  run("visual-prompt-harden.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
 } else if (command === "render" && subcommand === "start") {

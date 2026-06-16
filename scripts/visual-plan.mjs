@@ -22,6 +22,7 @@ const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
+const promptMaxChars = Number(flags["visual-prompt-max-chars"] ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_CHARS ?? 900_000);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -197,7 +198,24 @@ function relevantReferenceTargets(scene, visualReferencePlan) {
   return (visualReferencePlan?.reference_targets ?? []).filter((target) => {
     if (!Array.isArray(target.scene_ids) || !target.scene_ids.length) return false;
     return target.scene_ids.includes(sceneId);
-  });
+  }).map(compactReferenceTarget);
+}
+
+function compactReferenceTarget(target) {
+  return {
+    ref_id: target.ref_id ?? null,
+    kind: target.kind ?? null,
+    subject: target.subject ?? null,
+    priority: target.priority ?? null,
+    generation_mode: target.generation_mode ?? null,
+    required_before_imagegen: target.required_before_imagegen ?? null,
+    reference_image_path: target.reference_image_path ?? null,
+    resolved_reference_image_path: target.resolved_reference_image_path ?? null,
+    reference_exists: target.reference_exists ?? null,
+    prompt_anchor: target.prompt_anchor ?? null,
+    anchor_cut_policy: target.anchor_cut_policy ?? null,
+    risk_notes: target.risk_notes ?? [],
+  };
 }
 
 function resolvedReferencePath(rawPath) {
@@ -351,6 +369,7 @@ Return JSON only:
 }
 
 async function callLocal(prompt, stageName, maxTokens = null) {
+  assertPromptSize(prompt, stageName);
   const attempts = Number(flags["visual-json-attempts"] ?? 3);
   let lastError = null;
   let lastContent = "";
@@ -387,6 +406,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
 }
 
 async function callCodex(prompt, stageName) {
+  assertPromptSize(prompt, stageName);
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
   const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-output.txt`);
@@ -400,6 +420,14 @@ async function callCodex(prompt, stageName) {
   });
   const content = await fs.readFile(outputPath, "utf8");
   return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+}
+
+function assertPromptSize(prompt, stageName) {
+  const length = String(prompt ?? "").length;
+  console.error(`visual ${stageName}: prompt chars ${length}`);
+  if (Number.isFinite(promptMaxChars) && promptMaxChars > 0 && length > promptMaxChars) {
+    throw new Error(`Visual planner prompt for ${stageName} is ${length} chars, above limit ${promptMaxChars}. Use a smaller batch or compact upstream artifacts.`);
+  }
 }
 
 function normalizePrompt(row, index, episodeId, sourceUnit = null) {
@@ -558,6 +586,23 @@ function filterVisualSourceRows(rows, episodeId) {
   return annotated;
 }
 
+function scopedPlanFromRows(plan, rows, countField = "scene_count") {
+  return {
+    ...plan,
+    scenes: rows,
+    [countField]: rows.length,
+  };
+}
+
+function scopedVisualBeatPlanFromRows(plan, rows) {
+  if (plan?.status !== "passed") return null;
+  return {
+    ...plan,
+    beats: rows,
+    visual_beat_count: rows.length,
+  };
+}
+
 function indexCharacterStateRefs(artifact) {
   const refs = [];
   if (Array.isArray(artifact?.character_state_refs)) refs.push(...artifact.character_state_refs);
@@ -614,7 +659,46 @@ async function main() {
     : timedPlan.scenes;
   const visualSourceRows = filterVisualSourceRows(allVisualSourceRows, episode);
   if (!visualSourceRows.length) throw new Error("Visual planner small-batch filters selected zero visual units.");
+  const scopedTimedPlan = scopedPlanFromRows(timedPlan, visualSourceRows);
+  const scopedVisualBeatPlan = visualBeatPlan?.status === "passed"
+    ? scopedVisualBeatPlanFromRows(visualBeatPlan, visualSourceRows)
+    : null;
   const stageName = `${episode}_visual_plan`;
+  if (flags["dry-run-prompt"] === "true") {
+    const useChunkingForDryRun = flags["visual-chunking"] !== "false"
+      && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 12);
+    const promptSizes = [];
+    if (useChunkingForDryRun) {
+      const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 8));
+      for (let index = 0; index < sceneChunks.length; index += 1) {
+        const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
+        const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
+        promptSizes.push({ chunk_index: index + 1, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
+      }
+    } else {
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan);
+      promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
+    }
+    await writeJson(outputPath, {
+      schema: "goldflow_section_image_prompts_v1",
+      status: "dry_run",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      visual_plan_scope: {
+        mode: visualSourceRows.length === allVisualSourceRows.length ? "full_episode" : "small_batch",
+        selected_visual_unit_count: visualSourceRows.length,
+        total_visual_unit_count: allVisualSourceRows.length,
+        cut_ids: visualSourceRows.map((row) => `${episode}-cut-${String(Number(row.__visual_plan_absolute_index ?? 0) + 1).padStart(3, "0")}`),
+      },
+      prompt_sizes: promptSizes,
+      updated_at: new Date().toISOString(),
+    });
+    console.log(JSON.stringify({ status: "dry_run", output_path: outputPath, prompt_sizes: promptSizes }, null, 2));
+    return;
+  }
   let llm;
   let parsedPrompts = [];
   let styleSummary = "";
@@ -649,7 +733,7 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
-    const prompt = buildPrompt(timedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, visualBeatPlan?.status === "passed" ? visualBeatPlan : null);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";

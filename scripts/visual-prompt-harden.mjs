@@ -328,9 +328,16 @@ function locationTargetForContract(contract, locationTargets) {
   }) ?? null;
 }
 
+function hasExecutiveLoungeSignal(value) {
+  return /\b(?:executive lounge|leather couch|glass desk|wine glass|wedding ring|returned ring|bare ring finger)\b/i.test(String(value ?? ""));
+}
+
 function locationContractForPrompt(prompt) {
   const beatText = beatContractText(prompt);
   const excerptText = String(prompt.visual_beat_script_excerpt ?? "");
+  if (hasExecutiveLoungeSignal(beatText)) {
+    return genericLocationContracts.find((contract) => contract.id === "executive_lounge") ?? null;
+  }
   if (/\bone hundred and eighty days later\b|\bnew body\b|\bclean suit\b|\btwo attorneys\b|\bdebt documents\b|\bwalked back into the same building\b/i.test(beatText)) {
     return genericLocationContracts.find((contract) => contract.id === "lobby_elevator") ?? null;
   }
@@ -1319,6 +1326,10 @@ function locationForPrompt(prompt, locationTargets) {
     ...(Array.isArray(prompt.visible_subjects) ? prompt.visible_subjects : []),
   ].filter(Boolean).join(" ");
   const excerptText = String(prompt.visual_beat_script_excerpt ?? "");
+  if (hasExecutiveLoungeSignal(beatSpecificText) || hasExecutiveLoungeSignal(promptText(prompt))) {
+    const exact = locationTargets.find((location) => location.ref_id === "blackwell_lounge_ref");
+    if (exact) return exact;
+  }
   if (
     /\b(?:brought dinner|paper bag with Thai food|holding a paper bag|stood in the elevator|elevator opened|remember we were married|remember I was still trying)\b/i.test(excerptText)
     && !/\b(?:found Vivian|Vivian in the executive lounge|sitting on a leather couch|wedding ring missing|Preston|looked at my stomach|everyone laughed)\b/i.test(excerptText)

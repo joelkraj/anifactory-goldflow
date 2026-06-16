@@ -222,6 +222,15 @@ const genericLocationContracts = [
     forbiddenClause: "Location guardrail: every visible environmental cue reinforces a modest home interior: domestic table, personal clutter, household lighting, and lived-in residential details.",
   },
   {
+    id: "rainy_street",
+    preferredRefId: "rainy_street_ref",
+    label: "RAINY STREET EXTERIOR",
+    patterns: [/\brain\b/i, /\brainy street\b/i, /\bpuddle\b/i, /\bpuddled street\b/i, /\bsidewalk\b/i, /\bstreetlights?\b/i, /\bparked car\b/i, /\bcorporate entrance\b/i, /\bout(?:side)? Blackwell\b/i, /\bwalking home\b/i, /\bwalk home\b/i],
+    targetPatterns: [/\brain\b/i, /\bstreet\b/i, /\bpuddle\b/i, /\bsidewalk\b/i, /\bexterior\b/i],
+    requiredClause: "Visible location: rainy city street exterior outside the corporate tower with wet pavement, puddles, streetlights, parked cars, reflective glass entrance, and silver rain.",
+    forbiddenClause: "Location guardrail: every visible environmental cue reinforces the exterior rain setting: wet pavement, puddles, streetlights, parked cars, reflective corporate entrance, and rain streaks.",
+  },
+  {
     id: "gym",
     preferredRefId: "twenty_four_hour_gym_ref",
     label: "TWENTY FOUR HOUR GYM",
@@ -332,11 +341,18 @@ function hasExecutiveLoungeSignal(value) {
   return /\b(?:executive lounge|leather couch|glass desk|wine glass|wedding ring|returned ring|bare ring finger)\b/i.test(String(value ?? ""));
 }
 
+function hasRainyStreetSignal(value) {
+  return /\b(?:rainy street|rain running|hard silver rain|silver rain|puddled street|puddles?|wet pavement|streetlights?|parked car|corporate entrance|outside Blackwell|sidewalk outside|walking home through the rain|walk home through the rain)\b/i.test(String(value ?? ""));
+}
+
 function locationContractForPrompt(prompt) {
   const beatText = beatContractText(prompt);
   const excerptText = String(prompt.visual_beat_script_excerpt ?? "");
   if (hasExecutiveLoungeSignal(beatText)) {
     return genericLocationContracts.find((contract) => contract.id === "executive_lounge") ?? null;
+  }
+  if (hasRainyStreetSignal(beatText)) {
+    return genericLocationContracts.find((contract) => contract.id === "rainy_street") ?? null;
   }
   if (/\bone hundred and eighty days later\b|\bnew body\b|\bclean suit\b|\btwo attorneys\b|\bdebt documents\b|\bwalked back into the same building\b/i.test(beatText)) {
     return genericLocationContracts.find((contract) => contract.id === "lobby_elevator") ?? null;
@@ -1328,6 +1344,10 @@ function locationForPrompt(prompt, locationTargets) {
   const excerptText = String(prompt.visual_beat_script_excerpt ?? "");
   if (hasExecutiveLoungeSignal(beatSpecificText) || hasExecutiveLoungeSignal(promptText(prompt))) {
     const exact = locationTargets.find((location) => location.ref_id === "blackwell_lounge_ref");
+    if (exact) return exact;
+  }
+  if (hasRainyStreetSignal(beatSpecificText) || hasRainyStreetSignal(promptText(prompt))) {
+    const exact = locationTargets.find((location) => location.ref_id === "rainy_street_ref");
     if (exact) return exact;
   }
   if (

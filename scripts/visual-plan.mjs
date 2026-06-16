@@ -403,7 +403,10 @@ async function callCodex(prompt, stageName) {
 }
 
 function normalizePrompt(row, index, episodeId, sourceUnit = null) {
-  const imageId = `${episodeId}-cut-${String(index + 1).padStart(3, "0")}`;
+  const absoluteIndex = Number.isFinite(Number(sourceUnit?.__visual_plan_absolute_index))
+    ? Number(sourceUnit.__visual_plan_absolute_index)
+    : index;
+  const imageId = `${episodeId}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`;
   const prompt = String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim();
   return {
     image_id: imageId,
@@ -528,6 +531,33 @@ function chunkByParentScene(items, targetSize) {
   return chunks;
 }
 
+function parseListFlag(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function filterVisualSourceRows(rows, episodeId) {
+  const annotated = rows.map((row, index) => ({ ...row, __visual_plan_absolute_index: index }));
+  const cutIds = parseListFlag(flags["cut-ids"] ?? flags.cutIds);
+  if (cutIds.length) {
+    const wanted = new Set(cutIds);
+    return annotated.filter((row, index) => wanted.has(`${episodeId}-cut-${String(index + 1).padStart(3, "0")}`));
+  }
+  const beatIds = parseListFlag(flags["beat-ids"] ?? flags.beatIds);
+  if (beatIds.length) {
+    const wanted = new Set(beatIds);
+    return annotated.filter((row) => wanted.has(row.visual_beat_id));
+  }
+  const offset = Math.max(0, Number(flags["visual-unit-offset"] ?? flags.offset ?? 0));
+  const limitRaw = flags["visual-unit-limit"] ?? flags.limit;
+  const limit = limitRaw == null ? null : Math.max(0, Number(limitRaw));
+  if (limit != null) return annotated.slice(offset, offset + limit);
+  if (offset > 0) return annotated.slice(offset);
+  return annotated;
+}
+
 function indexCharacterStateRefs(artifact) {
   const refs = [];
   if (Array.isArray(artifact?.character_state_refs)) refs.push(...artifact.character_state_refs);
@@ -579,9 +609,11 @@ async function main() {
   }
   const enrichedVisualReferencePlan = await enrichVisualReferencePlan(visualReferencePlan);
   const stateRefIndex = indexCharacterStateRefs(characterStateRefs);
-  const visualSourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
+  const allVisualSourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
+  const visualSourceRows = filterVisualSourceRows(allVisualSourceRows, episode);
+  if (!visualSourceRows.length) throw new Error("Visual planner small-batch filters selected zero visual units.");
   const stageName = `${episode}_visual_plan`;
   let llm;
   let parsedPrompts = [];
@@ -628,17 +660,15 @@ async function main() {
   assertPositivePromptLanguage(prompts);
   assertScenePromptShape(prompts);
   assertPromptVariety(prompts);
-  const expectedPromptCount = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
-    ? visualBeatPlan.beats.length
-    : timedPlan.scenes.length;
+  const expectedPromptCount = visualSourceRows.length;
   if (prompts.length !== expectedPromptCount) throw new Error(`Visual planner returned ${prompts.length} prompts for ${expectedPromptCount} visual units.`);
   const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
   if (duplicateImageIds.length) throw new Error(`Visual planner produced duplicate image ids: ${duplicateImageIds.slice(0, 20).join(", ")}`);
-  const timedSceneIds = new Set(timedPlan.scenes.map((scene) => scene.scene_id));
-  const missingSceneIds = [...timedSceneIds].filter((sceneId) => !prompts.some((prompt) => prompt.scene_id === sceneId));
+  const timedSceneIds = new Set(visualSourceRows.map((scene) => scene.scene_id));
+  const missingSceneIds = [...timedSceneIds].filter((sceneId) => sceneId && !prompts.some((prompt) => prompt.scene_id === sceneId));
   if (missingSceneIds.length) throw new Error(`Visual planner missed timed scene ids: ${missingSceneIds.slice(0, 20).join(", ")}`);
   const missingBeatIds = visualBeatPlan?.status === "passed"
-    ? visualBeatPlan.beats.map((beat) => beat.visual_beat_id).filter((beatId) => beatId && !prompts.some((prompt) => prompt.visual_beat_id === beatId))
+    ? visualSourceRows.map((beat) => beat.visual_beat_id).filter((beatId) => beatId && !prompts.some((prompt) => prompt.visual_beat_id === beatId))
     : [];
   if (missingBeatIds.length) throw new Error(`Visual planner missed visual beat ids: ${missingBeatIds.slice(0, 20).join(", ")}`);
   const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
@@ -656,6 +686,12 @@ async function main() {
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     style_summary: styleSummary,
     prompt_policy: "current-scene-only positive prompting; visual-beat-aware when visual_beat_plan exists; references selected only when visible/style-critical and described by explicit image slot roles",
+    visual_plan_scope: {
+      mode: visualSourceRows.length === allVisualSourceRows.length ? "full_episode" : "small_batch",
+      selected_visual_unit_count: visualSourceRows.length,
+      total_visual_unit_count: allVisualSourceRows.length,
+      cut_ids: prompts.map((prompt) => prompt.image_id),
+    },
     prompts,
     warnings: llm.parsed.warnings ?? [],
     updated_at: new Date().toISOString(),

@@ -219,6 +219,14 @@ node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --wee
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json
 ```
 
+Small-batch visual authoring test:
+
+```bash
+node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01 --limit 6 --output <episode-dir>/section_image_prompts_sample_001_006.json
+node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_sample_001_006.json --output <episode-dir>/section_image_prompts_sample_001_006_reviewed.json
+node bin/goldflow.mjs visual harden --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_sample_001_006_reviewed.json --output <episode-dir>/section_image_prompts_sample_001_006_hardened.json --report-output <episode-dir>/visual_prompt_hardening_sample_001_006.json --sample-output <episode-dir>/visual_prompt_hardening_sample_001_006.md
+```
+
 SFX-only audio variant:
 
 ```bash

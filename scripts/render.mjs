@@ -436,6 +436,20 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0) {
     const renderH = Math.ceil((height * renderScaleMultiplier) / 2) * 2;
     return `scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,crop=${renderW}:${renderH},zoompan=z='min(${zoomMax.toFixed(3)},1+on*${zoomStep})':x='${xExpr}':y='${yExpr}':d=${frameCount}:s=${width}x${height}:fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
   }
+  if (motionMode === "fill_pan") {
+    const renderW = Math.ceil((width * renderScaleMultiplier) / 2) * 2;
+    const renderH = Math.ceil((height * renderScaleMultiplier) / 2) * 2;
+    const maxX = Math.max(0, Math.floor((renderW - width) / 2));
+    const maxY = Math.max(0, Math.floor((renderH - height) / 2));
+    const startX = Math.max(-maxX, Math.min(maxX, offsets.startX));
+    const endX = Math.max(-maxX, Math.min(maxX, offsets.endX));
+    const startY = Math.max(-maxY, Math.min(maxY, offsets.startY));
+    const endY = Math.max(-maxY, Math.min(maxY, offsets.endY));
+    const progress = `min(1,t/${Math.max(0.1, duration).toFixed(3)})`;
+    const xExpr = `(in_w-out_w)/2+${startX}+(${endX - startX})*${progress}`;
+    const yExpr = `(in_h-out_h)/2+${startY}+(${endY - startY})*${progress}`;
+    return `scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,crop=${renderW}:${renderH},crop=${width}:${height}:x='${xExpr}':y='${yExpr}',fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
+  }
   const progress = `min(1,t/${Math.max(0.1, duration).toFixed(3)})`;
   const xExpr = `(W-w)/2+${offsets.startX}+(${offsets.endX - offsets.startX})*${progress}`;
   const yExpr = `(H-h)/2+${offsets.startY}+(${offsets.endY - offsets.startY})*${progress}`;

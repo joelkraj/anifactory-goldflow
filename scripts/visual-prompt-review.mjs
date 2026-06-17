@@ -281,6 +281,7 @@ Rules:
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
 - Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, make the prompt and location reference match it.
+- Do not import a named location/world/era/institution from a reference merely because it is visually convenient. If a location ref's named setting is absent from the current visual_beat_script_excerpt, visual_beat_action, and semantic scene location, remove that location ref and stage the generic current location from the beat text.
 - Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
 - Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
@@ -307,6 +308,7 @@ Rules:
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
 - Preserve clear reference slot mapping in reference_requirements so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
 - If a required existing reference is missing, add a finding with severity "blocker".
+- Reference image files are generated after this review pass. A null, unresolved, or not-yet-generated reference_image_path is not a blocker here when the ref_id exists in the approved reference plan or character_state_refs; keep the ref_id and let the image generation stage resolve the file.
 - If a problem is fixed in revised prompt text, mark resolved true.
 - Do not invent new canonical character anchors. Use character_state_refs and visual_reference_plan only.
 
@@ -624,6 +626,25 @@ function contaminatedReferenceFindings(visualReferencePlan) {
   return findings;
 }
 
+function normalizePreImagegenFindings(findings) {
+  return findings.map((finding) => {
+    if (!finding || finding.severity !== "blocker" || finding.resolved === true) return finding;
+    const code = String(finding.code ?? "");
+    const message = String(finding.message ?? "");
+    const isDeferredReferencePath =
+      code === "missing_ref"
+      && /(?:null|unresolved|not[- ]yet[- ]generated|no resolved|has no resolved|missing) reference(?:_|\s)image(?:_|\s)path|reference(?:_|\s)image(?:_|\s)path (?:is )?(?:null|unresolved|not generated)|image path (?:is )?(?:null|unresolved|not generated)/i.test(message);
+    if (!isDeferredReferencePath) return finding;
+    return {
+      ...finding,
+      severity: "warning",
+      resolved: true,
+      pre_imagegen_deferred: true,
+      message: `${message} Deferred to the reference-generation/imagegen stage because this review pass runs before reference image files are created.`,
+    };
+  });
+}
+
 async function validateReferencePaths(prompts) {
   const findings = [];
   for (const prompt of prompts) {
@@ -731,6 +752,9 @@ async function main() {
   findings.push(...repeatedTableauFindings(reviewedPrompts));
   findings.push(...contaminatedReferenceFindings(visualReferencePlan));
   findings.push(...await validateReferencePaths(reviewedPrompts));
+  const normalizedFindings = normalizePreImagegenFindings(findings);
+  findings.length = 0;
+  findings.push(...normalizedFindings);
   const unresolvedBlockers = findings.filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
   const status = unresolvedBlockers.length ? "blocked" : "passed";
   const sourcePaths = [promptPath, timedPlanPath, visualReferencePlanPath, characterStateRefsPath];

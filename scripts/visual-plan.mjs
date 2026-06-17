@@ -104,6 +104,13 @@ function assertPositivePromptLanguage(prompts) {
   }
 }
 
+function sanitizePromptLanguage(prompt) {
+  const next = { ...prompt };
+  next.modelslab_image_prompt = sanitizePositiveVisualPrompt(next.modelslab_image_prompt ?? next.image_prompt ?? "");
+  next.image_prompt = sanitizePositiveVisualPrompt(next.image_prompt ?? next.modelslab_image_prompt ?? "");
+  return next;
+}
+
 function normalizeLabel(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -506,7 +513,13 @@ function sanitizePositiveVisualPrompt(value) {
     .replace(/\bnot\s+return\b/gi, "return restraint")
     .replace(/\bnot\s+beg\b/gi, "stand firm")
     .replace(/\bnot\s+self[-\s]?deprecate\b/gi, "self-respect response")
+    .replace(/\bnot\s+performing\s+for\s+her\b/gi, "self-contained composure")
+    .replace(/\bnot\s+performing\b/gi, "self-contained composure")
+    .replace(/\bnot\s+chasing\b/gi, "controlled distance")
     .replace(/\bnot\s+confident\s+yet\b/gi, "cautiously building confidence")
+    .replace(/\bwithout\s+performing\s+for\s+her\b/gi, "with self-contained composure")
+    .replace(/\bwithout\s+performing\b/gi, "with self-contained composure")
+    .replace(/\bwithout\s+chasing\b/gi, "with controlled distance")
     .replace(/\bno\s+rain[-\s]?night\s+grime\b/gi, "cleaner than the rain-night version")
     .replace(/\bno\s+rain[-\s]?soaked\s+jacket\b/gi, "clean dry simple clothing")
     .replace(/\bno\s+food\s+stains\b/gi, "clean unstained clothing")
@@ -514,6 +527,17 @@ function sanitizePositiveVisualPrompt(value) {
     .replace(/\bno\s+dialogue balloons\b/gi, "silent clean illustration")
     .replace(/\bno\s+captions\b/gi, "clean image area")
     .replace(/\bno\s+comic lettering\b/gi, "clean image area")
+    .replace(/\brather\s+than\b/gi, "with")
+    .replace(/\binstead\s+of\b/gi, "with")
+    .replace(/\bnegative\s+prompt\b/gi, "visual prompt")
+    .replace(/--no\b/gi, "")
+    .replace(/\bdo\s+not\b/gi, "show restraint")
+    .replace(/\bdon't\b/gi, "show restraint")
+    .replace(/\bwithout\b/gi, "with")
+    .replace(/\bavoid\b/gi, "favor")
+    .replace(/\bexclude\b/gi, "favor")
+    .replace(/\bnot\b/gi, "restrained")
+    .replace(/\bno\b/gi, "clean")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -813,7 +837,9 @@ async function main() {
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
   }
-  const prompts = parsedPrompts.map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null));
+  const prompts = parsedPrompts
+    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null))
+    .map(sanitizePromptLanguage);
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
   assertPositivePromptLanguage(prompts);

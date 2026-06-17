@@ -441,12 +441,12 @@ async function callLocal(prompt, stageName, maxTokens = null) {
   throw new Error(`local-qwen visual plan returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
 }
 
-async function callCodex(prompt, stageName) {
+async function callCodex(prompt, stageName, expectedBeatIds = null) {
   assertPromptSize(prompt, stageName);
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
   if (flags["codex-reuse-latest"] === "true" || flags["codex-reuse-cache"] === "true") {
-    const cached = await findLatestCodexOutput(callDir, stageName);
+    const cached = await findLatestCodexOutput(callDir, stageName, expectedBeatIds);
     if (cached) return cached;
     console.error(`visual ${stageName}: no reusable cached Codex output found; calling Codex`);
   }
@@ -486,7 +486,7 @@ async function callCodex(prompt, stageName) {
   throw lastError ?? new Error(`codex visual plan failed for ${stageName}`);
 }
 
-async function findLatestCodexOutput(callDir, stageName) {
+async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null) {
   let entries = [];
   try {
     entries = await fs.readdir(callDir, { withFileTypes: true });
@@ -510,6 +510,11 @@ async function findLatestCodexOutput(callDir, stageName) {
       const content = await fs.readFile(candidate.outputPath, "utf8");
       const parsed = extractJson(content);
       if (Array.isArray(parsed.prompts) && parsed.prompts.length) {
+        if (Array.isArray(expectedBeatIds) && expectedBeatIds.length) {
+          const actualBeatIds = parsed.prompts.map((prompt) => String(prompt.visual_beat_id ?? "")).filter(Boolean);
+          if (actualBeatIds.length !== expectedBeatIds.length) continue;
+          if (!expectedBeatIds.every((beatId, index) => actualBeatIds[index] === beatId)) continue;
+        }
         console.error(`visual ${stageName}: reused cached Codex output ${candidate.outputPath}`);
         return { provider: "codex-cache", model: "codex_cli_default", output_path: candidate.outputPath, content, parsed };
       }
@@ -867,9 +872,10 @@ async function main() {
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
       const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
+      const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
       const chunkLlm = isLocalLLMRoute(chunkStageName)
         ? await callLocal(chunkPrompt, chunkStageName, Number(flags["visual-chunk-max-tokens"] ?? 7000))
-        : await callCodex(chunkPrompt, chunkStageName);
+        : await callCodex(chunkPrompt, chunkStageName, expectedBeatIds);
       const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
       if (chunkPrompts.length !== sceneChunk.length) {
         throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunk.length} visual units.`);

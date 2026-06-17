@@ -2069,6 +2069,7 @@ function hardenPrompt(prompt, indexes) {
 function sanitizePositiveVisualPrompt(value) {
   return String(value ?? "")
     .replace(/\bno[-\s]?contact\b/gi, "contact-silence")
+    .replace(/\bdo\s+not\s+self[-\s]?deprecate\b/gi, "self-respect response")
     .replace(/\bdo\s+not\s+beg\b/gi, "stand firm")
     .replace(/\bdo\s+not\s+call\b/gi, "call restraint")
     .replace(/\bdo\s+not\s+text\b/gi, "message restraint")
@@ -2078,6 +2079,8 @@ function sanitizePositiveVisualPrompt(value) {
     .replace(/\bnot\s+text\b/gi, "message restraint")
     .replace(/\bnot\s+return\b/gi, "return restraint")
     .replace(/\bnot\s+beg\b/gi, "stand firm")
+    .replace(/\bnot\s+self[-\s]?deprecate\b/gi, "self-respect response")
+    .replace(/\bnot\s+confident\s+yet\b/gi, "cautiously building confidence")
     .replace(/\s+/g, " ")
     .trim();
 }

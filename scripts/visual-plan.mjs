@@ -142,6 +142,30 @@ function scenePromptAnchorFromRef(ref) {
     .trim();
 }
 
+function truncateText(value, max = 900) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max).trim()}...` : text;
+}
+
+function compactList(values, maxItems = 6, maxChars = 180) {
+  return (Array.isArray(values) ? values : [])
+    .slice(0, maxItems)
+    .map((value) => typeof value === "string" ? truncateText(value, maxChars) : value);
+}
+
+function compactSceneCharacterRef(ref) {
+  return {
+    state_ref_id: ref.state_ref_id ?? null,
+    source_ref_id: ref.source_ref_id ?? null,
+    base_identity_ref_id: ref.base_identity_ref_id ?? null,
+    identity_usage: ref.identity_usage ?? null,
+    character: ref.character ?? null,
+    scene_ids: ref.scene_ids ?? [],
+    scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), 900),
+    reference_image_path: ref.reference_image_path ?? null,
+  };
+}
+
 function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
   return {
     scene_id: scene.scene_id,
@@ -160,21 +184,14 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     time: scene.time,
     visible_subjects: scene.visible_subjects ?? [],
     primary_subject: scene.primary_subject ?? null,
-    visual_intent: scene.visual_intent ?? "",
-    character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex).map((ref) => ({
-      ...ref,
-      scene_prompt_anchor: scenePromptAnchorFromRef(ref),
-    })),
+    visual_intent: truncateText(scene.visual_intent ?? "", 360),
+    character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex).map(compactSceneCharacterRef),
     ui_text_on_screen: scene.ui_text_on_screen ?? [],
-    sfx_cues: scene.sfx_cues ?? [],
-    character_states: scene.character_states ?? [],
+    character_states: compactList(scene.character_states ?? [], 4),
     wardrobe: scene.wardrobe ?? null,
-    props: scene.props ?? [],
-    ref_requirements: scene.ref_requirements ?? [],
-    action_staging: scene.action_staging ?? "",
-    continuity_notes: scene.continuity_notes ?? [],
-    script_excerpt_start: scene.script_excerpt_start,
-    script_excerpt_end: scene.script_excerpt_end,
+    props: compactList(scene.props ?? [], 8),
+    action_staging: truncateText(scene.action_staging ?? "", 500),
+    continuity_notes: compactList(scene.continuity_notes ?? [], 4, 220),
   };
 }
 
@@ -196,6 +213,8 @@ function compactNeighborContext(scene) {
 function relevantReferenceTargets(scene, visualReferencePlan) {
   const sceneId = scene.parent_scene_id ?? scene.scene_id;
   return (visualReferencePlan?.reference_targets ?? []).filter((target) => {
+    const kind = String(target.kind ?? "");
+    if (kind === "location") return true;
     if (!Array.isArray(target.scene_ids) || !target.scene_ids.length) return false;
     return target.scene_ids.includes(sceneId);
   }).map(compactReferenceTarget);
@@ -212,9 +231,9 @@ function compactReferenceTarget(target) {
     reference_image_path: target.reference_image_path ?? null,
     resolved_reference_image_path: target.resolved_reference_image_path ?? null,
     reference_exists: target.reference_exists ?? null,
-    prompt_anchor: target.prompt_anchor ?? null,
+    prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", 900),
     anchor_cut_policy: target.anchor_cut_policy ?? null,
-    risk_notes: target.risk_notes ?? [],
+    risk_notes: compactList(target.risk_notes ?? [], 4, 220),
   };
 }
 
@@ -252,6 +271,12 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
+  const referenceTargetsByScene = {};
+  for (const scene of sourceRows ?? []) {
+    const sceneId = scene.parent_scene_id ?? scene.scene_id;
+    if (!sceneId || referenceTargetsByScene[sceneId]) continue;
+    referenceTargetsByScene[sceneId] = relevantReferenceTargets(scene, visualReferencePlan);
+  }
   const compactTimedPlan = {
     source_script_hash: timedPlan.source_script_hash,
     scene_count: sourceRows?.length ?? 0,
@@ -263,8 +288,9 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
       ...compactSceneForPrompt(scene, stateRefIndex),
       previous_beat_context: compactNeighborContext(rows[index - 1]),
       next_beat_context: compactNeighborContext(rows[index + 1]),
-      reference_targets: relevantReferenceTargets(scene, visualReferencePlan),
+      reference_target_ids: (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []).map((target) => target.ref_id),
     })),
+    reference_targets_by_scene: referenceTargetsByScene,
   };
   const compactSemanticPlan = {
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -469,6 +495,7 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null) {
 function sanitizePositiveVisualPrompt(value) {
   return String(value ?? "")
     .replace(/\bno[-\s]?contact\b/gi, "contact-silence")
+    .replace(/\bdo\s+not\s+self[-\s]?deprecate\b/gi, "self-respect response")
     .replace(/\bdo\s+not\s+beg\b/gi, "stand firm")
     .replace(/\bdo\s+not\s+call\b/gi, "call restraint")
     .replace(/\bdo\s+not\s+text\b/gi, "message restraint")
@@ -478,6 +505,8 @@ function sanitizePositiveVisualPrompt(value) {
     .replace(/\bnot\s+text\b/gi, "message restraint")
     .replace(/\bnot\s+return\b/gi, "return restraint")
     .replace(/\bnot\s+beg\b/gi, "stand firm")
+    .replace(/\bnot\s+self[-\s]?deprecate\b/gi, "self-respect response")
+    .replace(/\bnot\s+confident\s+yet\b/gi, "cautiously building confidence")
     .replace(/\bno\s+speech bubbles\b/gi, "silent clean illustration")
     .replace(/\bno\s+dialogue balloons\b/gi, "silent clean illustration")
     .replace(/\bno\s+captions\b/gi, "clean image area")

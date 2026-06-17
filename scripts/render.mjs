@@ -33,6 +33,10 @@ const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTO
 const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.55);
 const visualFadeSec = Number(flags["visual-fade-sec"] ?? process.env.ANIFACTORY_RENDER_VISUAL_FADE_SEC ?? 0);
 const hookTransitionSec = Number(flags["hook-transition-sec"] ?? process.env.ANIFACTORY_RENDER_HOOK_TRANSITION_SEC ?? 30);
+const renderConcurrency = Math.max(1, Number(flags["render-concurrency"] ?? process.env.ANIFACTORY_RENDER_CONCURRENCY ?? 4));
+const renderScaleMultiplier = Math.max(1.05, Number(flags["render-scale-multiplier"] ?? process.env.ANIFACTORY_RENDER_SCALE_MULTIPLIER ?? 1.35));
+const clipPreset = flags["clip-preset"] ?? process.env.ANIFACTORY_RENDER_CLIP_PRESET ?? "veryfast";
+const finalPreset = flags["final-preset"] ?? process.env.ANIFACTORY_RENDER_FINAL_PRESET ?? "veryfast";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -428,7 +432,9 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0) {
     const yExpr = `ih/2-(ih/zoom/2)+${yBias.toFixed(4)}*ih*(1-on/${Math.max(1, Math.ceil(duration * fps))})`;
     const frameCount = Math.max(1, Math.ceil(duration * fps));
     const zoomStep = ((zoomMax - 1) / frameCount).toFixed(7);
-    return `scale=${width * 2}:${height * 2}:force_original_aspect_ratio=increase,crop=${width * 2}:${height * 2},zoompan=z='min(${zoomMax.toFixed(3)},1+on*${zoomStep})':x='${xExpr}':y='${yExpr}':d=${frameCount}:s=${width}x${height}:fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
+    const renderW = Math.ceil((width * renderScaleMultiplier) / 2) * 2;
+    const renderH = Math.ceil((height * renderScaleMultiplier) / 2) * 2;
+    return `scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,crop=${renderW}:${renderH},zoompan=z='min(${zoomMax.toFixed(3)},1+on*${zoomStep})':x='${xExpr}':y='${yExpr}':d=${frameCount}:s=${width}x${height}:fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
   }
   const progress = `min(1,t/${Math.max(0.1, duration).toFixed(3)})`;
   const xExpr = `(W-w)/2+${offsets.startX}+(${offsets.endX - offsets.startX})*${progress}`;
@@ -448,37 +454,55 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration) {
   const lines = [];
   const motionProfiles = {};
   const hookClipIds = [];
+  const clipJobs = [];
+  let cursorSec = 0;
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const imagePath = imageById.get(prompt.image_id);
     if (!(await exists(imagePath))) throw new Error(`Missing generated image for ${prompt.image_id}: ${imagePath}`);
     const duration = imageDuration(prompt, scale);
-    const scaledStartSec = Number.isFinite(Number(prompt.start_sec)) ? Number(prompt.start_sec) * scale : lines.length ? null : 0;
-    const startSec = scaledStartSec ?? prompts.slice(0, index).reduce((sum, row) => sum + imageDuration(row, scale), 0);
+    const scaledStartSec = Number.isFinite(Number(prompt.start_sec)) ? Number(prompt.start_sec) * scale : index ? null : 0;
+    const startSec = scaledStartSec ?? cursorSec;
+    cursorSec += duration;
     const profile = motionProfile(prompt, index, startSec);
     motionProfiles[profile.name] = (motionProfiles[profile.name] ?? 0) + 1;
     if (profile.hook) hookClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
-    await execFile("ffmpeg", [
-      "-y",
-      "-loop", "1",
-      "-t", duration.toFixed(3),
-      "-i", imagePath,
-      "-filter_complex", motionClipFilter(duration, index, prompt, startSec),
-      "-an",
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-crf", "20",
-      "-pix_fmt", "yuv420p",
-      "-r", String(fps),
-      clipPath,
-    ], { maxBuffer: 1024 * 1024 * 32 });
     lines.push(`file '${concatEscape(clipPath)}'`);
+    clipJobs.push(async () => {
+      await execFile("ffmpeg", [
+        "-y",
+        "-loop", "1",
+        "-t", duration.toFixed(3),
+        "-i", imagePath,
+        "-filter_complex", motionClipFilter(duration, index, prompt, startSec),
+        "-an",
+        "-c:v", "libx264",
+        "-preset", clipPreset,
+        "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-r", String(fps),
+        clipPath,
+      ], { maxBuffer: 1024 * 1024 * 32 });
+    });
   }
+  await runLimited(clipJobs, renderConcurrency);
   const concatPath = path.join(workDir, "motion-clips.concat.txt");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
   return { concatPath, prompt_count: prompts.length, duration_scale: scale, clip_dir: clipDir, motion_mode: motionMode, motion_profiles: motionProfiles, hook_transition_sec: hookTransitionSec, hook_clip_ids: hookClipIds };
+}
+
+async function runLimited(jobs, limit) {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, jobs.length) }, async () => {
+    while (cursor < jobs.length) {
+      const job = jobs[cursor];
+      cursor += 1;
+      await job();
+    }
+  });
+  await Promise.all(workers);
 }
 
 async function main() {
@@ -530,7 +554,7 @@ async function main() {
       "-map", "0:v:0",
       "-map", "1:a:0",
       "-c:v", "libx264",
-      "-preset", "medium",
+      "-preset", finalPreset,
       "-crf", "18",
       "-c:a", "aac",
       "-b:a", "192k",
@@ -549,7 +573,7 @@ async function main() {
       "-map", "[v]",
       "-map", "2:a:0",
       "-c:v", "libx264",
-      "-preset", "medium",
+      "-preset", finalPreset,
       "-crf", "18",
       "-pix_fmt", "yuv420p",
       "-c:a", "aac",
@@ -588,6 +612,10 @@ async function main() {
       motion_strength: motionStrength,
       visual_fade_sec: visualFadeSec,
       hook_transition_sec: concat.hook_transition_sec,
+      render_concurrency: renderConcurrency,
+      render_scale_multiplier: renderScaleMultiplier,
+      clip_preset: clipPreset,
+      final_preset: finalPreset,
       hook_clip_ids: concat.hook_clip_ids,
       motion_profiles: concat.motion_profiles,
     },

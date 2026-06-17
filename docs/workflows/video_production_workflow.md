@@ -175,6 +175,7 @@ The approved narration script is production truth. The pipeline should extract, 
 22. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
    - Current render style uses full-frame profile-based Ken Burns motion by default. Use the blurred foreground mode only as a deliberate style override.
+   - For longform episodes, render motion clips with bounded concurrency and a moderate Ken Burns overscale multiplier. Motion should stay visible and intentional without serial 4K intermediates becoming the bottleneck for 1080p delivery.
    - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Aggressive motion should not mean constant random movement.
    - Transitions should be hand-picked by beat, not default fade-to-black. Use smooth FFmpeg transitions such as wipes, pushes, slides, flashes, and manga-panel swipes where they match the moment.
    - Transition SFX should be bound to the actual transition timestamp on selected cuts. The opening thirty seconds should use frequent noticeable transition cues such as swipe-up flash, swipe-down whoosh, scene-card whoosh, impact flash, and manga-panel slide; after the hook, use them selectively so they feel intentional.

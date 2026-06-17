@@ -2201,7 +2201,7 @@ function applyNamedCharacterMultiplicityContract(text, shotManifest) {
   const baseClause = "Show exactly one visible body for each named character in this cut; do not duplicate any named character as extra bodies, back views, reflections, portraits, inset heads, miniature figures, or alternate poses.";
   const montageClause = explicitSplitPanel
     ? "Because this is an explicit split-panel composition, keep each panel clean and do not duplicate the same named character within any single panel."
-    : "For memory, flashback, collage, montage, retrospective, or overlapping-vignette beats, show memories through props, lighting, anonymous silhouettes, screens, and environment fragments instead of repeated copies of the named character.";
+    : "For memory, flashback, collage, montage, retrospective, or overlapping-vignette beats, the named character appears only once in the main composition; surrounding vignettes must contain only props, lighting, anonymous silhouettes, screens, environment fragments, hands, food, phones, bags, receipts, and city details, never the named character again.";
   const clauses = [baseClause, montageClause].filter((clause) => !value.includes(clause));
   return [value, ...clauses].join(" ").replace(/\s+/g, " ").trim();
 }

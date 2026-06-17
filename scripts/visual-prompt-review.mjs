@@ -21,7 +21,7 @@ const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.jso
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
-const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? path.join(episodeDir, `visual_prompt_review_${episode}.json`);
+const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `visual_prompt_review_${episode}.json`);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -38,6 +38,10 @@ function parseFlags(parts) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function normalize(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9가-힣]+/g, " ").trim();
 }
 
 async function readJson(filePath, fallback = null) {
@@ -162,10 +166,26 @@ function compactPrompt(prompt) {
   };
 }
 
-function compactReferencePlan(plan) {
+function compactReferencePlan(plan, prompts = []) {
+  const relevantRefIds = new Set();
+  const relevantSceneIds = new Set();
+  for (const prompt of prompts ?? []) {
+    if (prompt.scene_id) relevantSceneIds.add(prompt.scene_id);
+    if (prompt.shot_manifest?.location_ref_id) relevantRefIds.add(prompt.shot_manifest.location_ref_id);
+    for (const refId of prompt.shot_manifest?.character_state_ref_ids ?? []) relevantRefIds.add(refId);
+    if (prompt.shot_manifest?.protagonist_state_ref_id) relevantRefIds.add(prompt.shot_manifest.protagonist_state_ref_id);
+    for (const req of prompt.reference_requirements ?? []) if (req?.ref_id) relevantRefIds.add(req.ref_id);
+    for (const usage of prompt.reference_usage ?? []) if (usage?.ref_id) relevantRefIds.add(usage.ref_id);
+    for (const role of prompt.anchor_roles ?? []) if (role?.ref_id) relevantRefIds.add(role.ref_id);
+  }
+  const targetIsRelevant = (target) => {
+    if (relevantRefIds.has(target.ref_id)) return true;
+    const sceneIds = Array.isArray(target.scene_ids) ? target.scene_ids : [];
+    return sceneIds.some((sceneId) => relevantSceneIds.has(sceneId));
+  };
   return {
     status: plan?.status ?? null,
-    reference_targets: (plan?.reference_targets ?? []).map((target) => ({
+    reference_targets: (plan?.reference_targets ?? []).filter(targetIsRelevant).map((target) => ({
       ref_id: target.ref_id,
       kind: target.kind,
       subject: target.subject,
@@ -180,10 +200,33 @@ function compactReferencePlan(plan) {
   };
 }
 
-function compactCharacterStateRefs(refs) {
+function compactCharacterStateRefs(refs, prompts = []) {
+  const relevantRefIds = new Set();
+  const relevantSceneIds = new Set();
+  const relevantNames = new Set();
+  for (const prompt of prompts ?? []) {
+    if (prompt.scene_id) relevantSceneIds.add(prompt.scene_id);
+    for (const name of prompt.visible_subjects ?? []) relevantNames.add(normalize(name));
+    for (const name of prompt.shot_manifest?.visible_characters ?? []) relevantNames.add(normalize(name));
+    for (const name of prompt.shot_manifest?.mentioned_only_characters ?? []) relevantNames.add(normalize(name));
+    if (prompt.primary_subject) relevantNames.add(normalize(prompt.primary_subject));
+    if (prompt.shot_manifest?.primary_character) relevantNames.add(normalize(prompt.shot_manifest.primary_character));
+    if (prompt.shot_manifest?.protagonist_state_ref_id) relevantRefIds.add(prompt.shot_manifest.protagonist_state_ref_id);
+    for (const refId of prompt.shot_manifest?.character_state_ref_ids ?? []) relevantRefIds.add(refId);
+    for (const refId of prompt.character_state_refs_used ?? []) relevantRefIds.add(refId);
+    for (const req of prompt.reference_requirements ?? []) if (req?.ref_id) relevantRefIds.add(req.ref_id);
+  }
+  const refIsRelevant = (ref) => {
+    const ids = [ref.state_ref_id, ref.source_ref_id, ref.ref_id].filter(Boolean);
+    if (ids.some((id) => relevantRefIds.has(id))) return true;
+    const sceneIds = Array.isArray(ref.scene_ids) ? ref.scene_ids : [];
+    if (sceneIds.includes("*") || sceneIds.some((sceneId) => relevantSceneIds.has(sceneId))) return true;
+    const character = normalize(ref.character);
+    return character && [...relevantNames].some((name) => character.includes(name) || name.includes(character));
+  };
   return {
     status: refs?.status ?? null,
-    character_state_refs: (refs?.character_state_refs ?? []).map((ref) => ({
+    character_state_refs: (refs?.character_state_refs ?? []).filter(refIsRelevant).map((ref) => ({
       state_ref_id: ref.state_ref_id,
       character: ref.character,
       scene_ids: ref.scene_ids ?? [],
@@ -276,10 +319,10 @@ ${JSON.stringify({
 }, null, 2)}
 
 VISUAL REFERENCES:
-${JSON.stringify(compactReferencePlan(visualReferencePlan), null, 2)}
+${JSON.stringify(compactReferencePlan(visualReferencePlan, prompts), null, 2)}
 
 CHARACTER STATE REFS:
-${JSON.stringify(compactCharacterStateRefs(characterStateRefs), null, 2)}
+${JSON.stringify(compactCharacterStateRefs(characterStateRefs, prompts), null, 2)}
 
 SCENE PROMPTS TO REVIEW:
 ${JSON.stringify(rows, null, 2)}

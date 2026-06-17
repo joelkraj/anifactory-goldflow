@@ -198,9 +198,14 @@ function buildIndexes(visualReferencePlan, characterStateRefs) {
     ...(characterStateRefs?.character_state_refs ?? []),
     ...visualCharacterRefs,
   ].filter((ref) => sourceRefId(ref));
-  for (const ref of characterRefs) referenceById.set(sourceRefId(ref), { ...ref, kind: "character_state", ref_id: sourceRefId(ref), subject: ref.character });
+  const refIdByStateId = new Map();
+  for (const ref of characterRefs) {
+    const refId = sourceRefId(ref);
+    referenceById.set(refId, { ...ref, kind: "character_state", ref_id: refId, subject: ref.character });
+    if (ref.state_ref_id) refIdByStateId.set(String(ref.state_ref_id), refId);
+  }
   const locationTargets = referenceTargets.filter((target) => String(target.kind ?? "") === "location");
-  return { referenceById, characterRefs, locationTargets };
+  return { referenceById, refIdByStateId, characterRefs, locationTargets };
 }
 
 const genericLocationContracts = [
@@ -2106,6 +2111,7 @@ function targetReferencePath(target) {
 }
 
 function sanitizeRequirementFromRefId(refId, indexes, base = {}) {
+  refId = indexes.refIdByStateId?.get(refId) ?? refId;
   const target = indexes.referenceById.get(refId);
   if (!target) return null;
   const rawKind = String(base.kind ?? target.kind ?? "").toLowerCase();
@@ -2155,7 +2161,13 @@ function sanitizePrompt(prompt, indexes) {
   const mentionedOnly = manifestNameSet(shotManifest?.mentioned_only_characters);
   const visibleNames = manifestNameSet(shotManifest?.visible_characters);
   const requestedLocationRefId = shotManifest?.location_ref_id ? String(shotManifest.location_ref_id) : null;
-  const requestedCharacterRefIds = (shotManifest?.character_state_ref_ids ?? []).map(String);
+  const requestedCharacterRefIds = (shotManifest?.character_state_ref_ids ?? []).map((refId) => indexes.refIdByStateId?.get(String(refId)) ?? String(refId));
+  if (shotManifest) {
+    shotManifest.character_state_ref_ids = requestedCharacterRefIds;
+    if (shotManifest.protagonist_state_ref_id) {
+      shotManifest.protagonist_state_ref_id = indexes.refIdByStateId?.get(String(shotManifest.protagonist_state_ref_id)) ?? String(shotManifest.protagonist_state_ref_id);
+    }
+  }
   let promptTextValue = sanitizePositiveVisualPrompt(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];

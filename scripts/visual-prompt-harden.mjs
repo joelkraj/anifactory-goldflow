@@ -2081,6 +2081,9 @@ function sanitizePositiveVisualPrompt(value) {
     .replace(/\bnot\s+beg\b/gi, "stand firm")
     .replace(/\bnot\s+self[-\s]?deprecate\b/gi, "self-respect response")
     .replace(/\bnot\s+confident\s+yet\b/gi, "cautiously building confidence")
+    .replace(/\bno\s+rain[-\s]?night\s+grime\b/gi, "cleaner than the rain-night version")
+    .replace(/\bno\s+rain[-\s]?soaked\s+jacket\b/gi, "clean dry simple clothing")
+    .replace(/\bno\s+food\s+stains\b/gi, "clean unstained clothing")
     .replace(/\s+/g, " ")
     .trim();
 }

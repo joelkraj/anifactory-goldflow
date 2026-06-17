@@ -2212,6 +2212,20 @@ function applyNamedCharacterMultiplicityContract(text, shotManifest) {
   return [value, ...clauses].join(" ").replace(/\s+/g, " ").trim();
 }
 
+function sanitizeModelSafeBeautyLanguage(text) {
+  return String(text ?? "")
+    .replace(/\bbreathtaking\s+adult\s+campus\s+goddess\b/gi, "striking high-status campus woman")
+    .replace(/\bbreathtaking\s+adult\s+woman\b/gi, "striking elegant adult woman")
+    .replace(/\bcampus\s+goddess\b/gi, "high-status campus woman")
+    .replace(/\bgoddess\s+state\b/gi, "high-status campus state")
+    .replace(/\bhot\b/gi, "striking")
+    .replace(/\bsexy\b/gi, "glamorous")
+    .replace(/\bseductive\b/gi, "confident")
+    .replace(/\bsensual\b/gi, "elegant")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function sanitizePrompt(prompt, indexes) {
   const findings = [];
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
@@ -2227,6 +2241,7 @@ function sanitizePrompt(prompt, indexes) {
     }
   }
   let promptTextValue = sanitizePositiveVisualPrompt(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+  promptTextValue = sanitizeModelSafeBeautyLanguage(promptTextValue);
   promptTextValue = applyNamedCharacterMultiplicityContract(promptTextValue, shotManifest);
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];

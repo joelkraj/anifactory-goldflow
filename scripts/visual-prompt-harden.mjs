@@ -64,7 +64,7 @@ function normalize(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9가-힣]+/g, " ").trim();
 }
 
-function sceneNumber(sceneId) {
+function sceneIdNumber(sceneId) {
   const match = String(sceneId ?? "").match(/^scene_(\d+)$/);
   return match ? Number(match[1]) : null;
 }
@@ -72,8 +72,8 @@ function sceneNumber(sceneId) {
 function sceneIdsCover(sceneIds, sceneId) {
   if (!Array.isArray(sceneIds) || !sceneIds.length || sceneIds.includes("*")) return true;
   if (sceneIds.includes(sceneId)) return true;
-  const current = sceneNumber(sceneId);
-  const numeric = sceneIds.map(sceneNumber).filter((value) => Number.isFinite(value));
+  const current = sceneIdNumber(sceneId);
+  const numeric = sceneIds.map(sceneIdNumber).filter((value) => Number.isFinite(value));
   if (current !== null && numeric.length >= 2) {
     const low = Math.min(...numeric);
     const high = Math.max(...numeric);

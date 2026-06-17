@@ -226,6 +226,7 @@ Review for:
 - contaminated action/effect references, where a power/effect ref brings its own room, screens, soldiers, or unrelated scene into the prompt
 
 Rules:
+- You are the creative visual reviewer. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
 - Use current scene facts only.
 - Positive visual language is mandatory. Describe only what should appear.
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
@@ -236,7 +237,7 @@ Rules:
 - Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
 - Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
-- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If location_ref_id is set, make the prompt and location reference match it.
+- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If a relevant approved location ref matches the visible location, set shot_manifest.location_ref_id and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, make the prompt and location reference match it.
 - Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
 - Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
@@ -256,6 +257,7 @@ Rules:
 - If a prompt is already good, keep it materially unchanged.
 - If a reference is not visible or style-critical for this cut, remove it from reference_usage and required_reference_paths.
 - Keep at most four reference_requirements for any cut.
+- Attach only necessary references. Use no more than four refs; fewer is better when the cut remains clear. Do not attach refs for people, locations, props, or UI that are only mentioned, remembered, texted, called, or implied.
 - Reference priority is strict: visible character_state refs first, then location, then prop or UI, then action or effects, then style.
 - Attach style only when the cut has zero concrete character, location, prop, UI, or action references.
 - When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.

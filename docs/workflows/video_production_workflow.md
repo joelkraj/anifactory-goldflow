@@ -127,19 +127,21 @@ The approved narration script is production truth. The pipeline should extract, 
    - Blocks metadata-style prompts, duplicated reference-slot text, reference-sheet/turnaround scene prompts, and repeated tableaux across visual beats.
    - Code gates validate structure and blockers; they do not creatively author.
 
-20. Visual prompt hardening.
+20. Visual prompt sanitation.
    - Run after LLM review and before any scene image generation.
    - Writes `section_image_prompts_hardened.json`, `visual_prompt_hardening_<episode>.json`, and `visual_prompt_hardening_sample_<episode>.md`.
-   - Deterministically cleans the final scene prompt first, resolves character aliases from that cleaned prompt rather than stale `visible_subjects` or planner side fields, strips stale inferred refs, keeps continuous-location refs sticky across the whole location block, injects multi-character staging and primary-subject focus, trims to the four-reference model limit, validates `shot_manifest` ref/location contradictions, and blocks unresolved role/location risks.
-   - Mixed-location scenes must be resolved at beat level. If a parent scene contains "support workplace, then apartment kitchen table", each cut receives its own location contract from the beat excerpt. The workplace cut must attach or request the support-office location, while the debt cut must attach the apartment location.
-   - Beat-level location contracts override parent-scene location fallbacks. A current cut that says "went to work", "headset", "manager", or "support tickets" is a support-office shot even if the parent scene later returns to the apartment.
-   - Montage scenes must be hardened into one present-tense location per cut. If a parent scene mentions apartment kitchen, dumpster exterior, and bedroom sleep, the individual cuts should become kitchen cleanup, dumpster victory, system reward, or bedroom sleep frames, not panel grids or multi-time collages.
-   - Unattached character mentions are sanitized when they are phone, text, voicemail, document, profile, or memory mentions. A character reference is attached only when that character is physically staged in the current cut.
-   - Communication-heavy beats can use intentional manga-style split panels when useful. The hardener should assign strict panel roles: largest panel is the local protagonist in the real current location; smaller panels are device close-ups, contact avatar icons, email/envelope icons, call-flow cards, opportunity badges, or abstract system glyphs. Do not let a phone call, voicemail, cold email, or remote sales call become a physical remote-person scene unless the script places that person in the room.
-   - Dialogue-heavy beats are hardened into silent acting frames. Prompts should stage emotion through posture, eyelines, expressions, hand placement, prop action, and blocking rather than phrases like "spoken line", "says", or "says loudly", which can produce speech bubbles and caption artifacts.
-   - Every hardened cut gets a shot job from the beat excerpt, such as location establishment, object insert, interaction, physical action, or emotional reaction. This prevents adjacent cuts from collapsing into repeated hero portraits or repeated desk-and-UI tableaux.
-   - If four visible character refs consume all available slots, drop the location ref and report it as a resolved warning rather than a blocker. This is intentional because character consistency is more important than location anchoring when the model limit forces a choice.
-   - Hardening also handles known Flux failure classes: duplicate protagonist copies, foreground close-up plus tiny secondary overlays, reflected faces inside props, speech bubbles/dialogue lettering, readable UI labels, and ledger/UI panels covering faces or reading as solid censor blocks.
+   - The command remains `visual harden`, but production default mode is sanitation-only. It validates approved ref IDs and paths, strips unknown or forbidden refs, enforces the four-reference model limit, normalizes known non-creative unsafe UI label phrasing, validates `shot_manifest` ref/location contradictions, and blocks unresolved ref risks.
+   - The LLM is the creative visual author. It must receive the story chunk, premise/bible context, approved refs, state contracts, current beat excerpt, and neighboring beat summaries needed to choose visible characters, location, composition, shot job, and necessary refs. Deterministic production sanitation must not creatively infer missing locations, add characters, rewrite action, choose shot jobs, insert staging clauses, or repair narrative intent.
+   - The old deterministic creative repair behavior is diagnostic only with `--mode repair`. Do not use repair mode as the production default.
+   - Mixed-location scenes must be resolved at beat level by the author/reviewer. If a parent scene contains "support workplace, then apartment kitchen table", each cut receives its own location contract from the beat excerpt. The workplace cut must attach or request the support-office location, while the debt cut must attach the apartment location.
+   - Beat-level location contracts override parent-scene location fallbacks during LLM authoring/review. A current cut that says "went to work", "headset", "manager", or "support tickets" is a support-office shot even if the parent scene later returns to the apartment.
+   - Montage scenes must be authored as one present-tense location per cut. If a parent scene mentions apartment kitchen, dumpster exterior, and bedroom sleep, the individual cuts should become kitchen cleanup, dumpster victory, system reward, or bedroom sleep frames, not uncontrolled panel grids or multi-time collages.
+   - Unattached character mentions are sanitized when they are phone, text, voicemail, document, profile, or memory mentions. A character reference is attached only when the LLM physically stages that character in the current cut.
+   - Communication-heavy beats can use intentional manga-style split panels when useful. The LLM should assign strict panel roles: largest panel is the local protagonist in the real current location; smaller panels are device close-ups, contact avatar icons, email/envelope icons, call-flow cards, opportunity badges, or abstract system glyphs. Do not let a phone call, voicemail, cold email, or remote sales call become a physical remote-person scene unless the script places that person in the room.
+   - Dialogue-heavy beats are authored/reviewed as silent acting frames. Prompts should stage emotion through posture, eyelines, expressions, hand placement, prop action, and blocking rather than phrases like "spoken line", "says", or "says loudly", which can produce speech bubbles and caption artifacts.
+   - Every cut gets a shot job from the beat excerpt, such as location establishment, object insert, interaction, physical action, or emotional reaction. This prevents adjacent cuts from collapsing into repeated hero portraits or repeated desk-and-UI tableaux.
+   - If four visible character refs consume all available slots, the LLM should keep the four character refs and report the dropped location ref in `reference_usage`. Sanitation enforces the cap but should not creatively reprioritize content.
+   - The LLM author/reviewer handles known Flux failure classes with positive construction: duplicate protagonist copies, foreground close-up plus tiny secondary overlays, reflected faces inside props, speech bubbles/dialogue lettering, UI panels covering faces, or UI panels reading as solid censor blocks.
    - UI, system, and ledger text accuracy is not a blocker by itself. Treat UI as a problem only when it becomes physically destructive, covers the subject/action, creates duplicate figures, or changes the shot into a prop/device shot. Exact story-critical words can still be added during render as overlays when intentionally needed.
    - Supernatural UI and ledger panels should remain immaterial floating light panels with a visible air gap from hands. They must not become books, laptops, tablets, phones, monitors, keyboards, scrolls, boards, or other physical held objects.
    - Abstract energy, memory, and aura effects should be phrased positively as ribbon-like light, empty glow, silhouettes, or abstract shapes. Avoid negative ghost/face/body wording in prompts because image models often render the forbidden subject named in the negative phrase.
@@ -152,7 +154,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
    - Scene attachment prioritizes visible character refs first, then location, then prop/UI, then action/effects. Priority kind outranks required/optional flags. Style refs are only attached to scene cuts when no concrete refs are available.
    - When all four reference slots are needed for visible characters, keep those character refs and drop location first.
-   - For hardened prompt plans, `section_image_prompts_hardened.json` is authoritative. Imagegen must not infer extra character refs from stale `visible_subjects`, and it must not write runtime reference paths or inferred refs back into the hardened prompt plan.
+   - For sanitized prompt plans, `section_image_prompts_hardened.json` is authoritative. Imagegen must not infer extra character refs from stale `visible_subjects`, and it must not write runtime reference paths or inferred refs back into the hardened prompt plan.
    - Continuous-location scenes keep the active location ref attached across the whole location block, not only on wide shots or scene starts. Hall, courtyard, rooftop, ravine, and similar sequences need the same location anchor on every continuity-sensitive cut.
    - Explicit venue words in the cleaned scene prompt override contextual prop or action cues when selecting location refs. A banquet-hall restraint beat should keep the banquet hall ref even if it mentions spirit rope.
    - Offscreen sound or light from another venue must not override the visible staging. If a courtyard or side-corridor shot mentions banquet hall glow, music, or sound cues, keep the visible courtyard/corridor location ref.
@@ -166,7 +168,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Use the hardened prompt artifact for production scene imagegen. Imagegen rejects non-hardened prompt plans by default; `--allow-unhardened-prompts true` is diagnostic only.
    - For bad scene cuts, regenerate only affected `--cut-ids` with cache reuse.
    - After targeted cut regeneration, run one full no-force imagegen pass to refresh the complete report and confirm all expected images exist.
-   - Babysit new productions through staged visual gates before trusting full automation: reference QA, hardened prompt sample QA, first small image batches, and periodic contact-sheet checks through high-risk sections. Promote to lower-touch runs only after several consecutive batches show no duplicate protagonist, subject fusion, destructive UI, wrong refs, or major location/style drift.
+   - Babysit new productions through staged visual gates before trusting full automation: reference QA, sanitized prompt sample QA, first small image batches, and periodic contact-sheet checks through high-risk sections. Promote to lower-touch runs only after several consecutive batches show no duplicate protagonist, subject fusion, destructive UI, wrong refs, or major location/style drift.
 
 22. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
@@ -278,12 +280,12 @@ Use this checklist before spending generation time:
    - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
    - Use reference-only generation first, then selectively regenerate failed refs with `--reference-ids`.
    - Character state refs are definitive for identity and wardrobe.
-   - LLM-authored scene prompts should be positive-only. Deterministic hardening may add narrow technical guardrails after review for known model failure classes; keep those guardrails in code, not in the creative prompt authoring task.
+   - LLM-authored scene prompts should be positive-only. Creative visual decisions belong to LLM authoring/review. Deterministic production sanitation should only validate and sanitize approved refs, paths, max-count limits, forbidden refs, and non-creative unsafe UI label phrasing.
    - Reference priority: visible characters, location, prop/UI, action/effects, style only when no concrete refs are available.
    - For multi-character scenes, spot check attached refs before bulk imagegen. Check for wrong character refs, stale visible-subject refs, duplicate MC, face/body fusion, prop-embedded faces, speech bubbles, UI covering faces, and location drift.
    - If Flux times out or a sample fails, resume missing or rejected `--cut-ids` only. Keep completed good cuts cached.
    - Start imagegen concurrency around 6-12 on a fresh production run; raise only after quality and queue stability are confirmed.
-   - Babysit the next run through staged visual gates before trusting full automation: manually review references, review the hardened prompt sample, generate and contact-sheet the first small image batches, then keep periodic contact-sheet spot checks through high-risk sections.
+   - Babysit the next run through staged visual gates before trusting full automation: manually review references, review the sanitized prompt sample, generate and contact-sheet the first small image batches, then keep periodic contact-sheet spot checks through high-risk sections.
 
 6. Render
    - Render from the continuous mixed audio track.
@@ -298,5 +300,5 @@ When a better tactic is discovered:
 
 1. Document it here or in the relevant prompt/workflow doc.
 2. Keep the pipeline philosophy intact: LLM authors, agent/operator reviews, code validates.
-3. Prefer prompt/workflow improvements before deterministic creative repair.
+3. Prefer prompt/workflow improvements before deterministic creative repair. Production default is LLM authorship plus deterministic sanitation, not deterministic creative repair.
 4. Commit small, revertable changes.

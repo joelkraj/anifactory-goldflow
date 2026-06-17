@@ -275,6 +275,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
   return `Author production image prompts from the timed semantic scene plan.
 
 Rules:
+- You are the creative visual author. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
 - Use current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
 - Positive visual language is mandatory. Describe only what should appear.
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
@@ -287,7 +288,7 @@ Rules:
 - Across beats in the same parent scene, vary the visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to the beat excerpt.
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
 - Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
-- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. If location_ref_id is set, the prose prompt must describe that visible location.
+- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. If a relevant approved location ref matches the visible location, set shot_manifest.location_ref_id and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, the prose prompt must describe that visible location.
 - Parent scene context explains why the beat matters, but visual_beat_script_excerpt decides what appears. Do not include future reveals, earlier setup, or the whole confrontation unless the current beat excerpt physically shows them.
 - previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
 - For transformation arcs, use one base identity face anchor only when the approved reference metadata says identity_usage is face_only; current state wording controls body, hair, shave/facial hair, wardrobe, posture, cleanliness, and social status.
@@ -309,6 +310,7 @@ Rules:
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
 - For each cut, include only references that are visible or style-critical, with at most four reference_requirements total.
+- Attach only necessary references. Use no more than four refs; fewer is better when the cut remains clear. Do not attach refs for people, locations, props, or UI that are only mentioned, remembered, texted, called, or implied.
 - Reference priority is strict: visible character_state refs first, then location, then prop or UI, then action or effects, then style.
 - Attach style only when the cut has zero concrete character, location, prop, UI, or action references.
 - When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.

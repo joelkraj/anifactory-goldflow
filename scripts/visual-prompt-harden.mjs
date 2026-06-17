@@ -20,6 +20,7 @@ const reportPath = flags.report ?? flags["report-output"] ?? path.join(episodeDi
 const samplePath = flags.sample ?? flags["sample-output"] ?? path.join(episodeDir, `visual_prompt_hardening_sample_${episode}.md`);
 const sampleCount = Math.max(1, Number(flags["sample-count"] ?? 12));
 const maxRefs = Math.max(1, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
+const hardenMode = String(flags.mode ?? flags["harden-mode"] ?? "sanitize").toLowerCase();
 
 function parseFlags(parts) {
   const parsed = {};
@@ -2065,6 +2066,295 @@ function hardenPrompt(prompt, indexes) {
   };
 }
 
+function sanitizePositiveVisualPrompt(value) {
+  return String(value ?? "")
+    .replace(/\bno[-\s]?contact\b/gi, "contact-silence")
+    .replace(/\bdo\s+not\s+beg\b/gi, "stand firm")
+    .replace(/\bdo\s+not\s+call\b/gi, "call restraint")
+    .replace(/\bdo\s+not\s+text\b/gi, "message restraint")
+    .replace(/\bdo\s+not\s+return upstairs\b/gi, "upstairs restraint")
+    .replace(/\bdo\s+not\s+return\b/gi, "return restraint")
+    .replace(/\bnot\s+call\b/gi, "call restraint")
+    .replace(/\bnot\s+text\b/gi, "message restraint")
+    .replace(/\bnot\s+return\b/gi, "return restraint")
+    .replace(/\bnot\s+beg\b/gi, "stand firm")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function manifestNameSet(values) {
+  return new Set((Array.isArray(values) ? values : []).map(normalize).filter(Boolean));
+}
+
+function characterRefNameMatches(ref, names) {
+  const labels = [
+    ref?.character,
+    ref?.subject,
+    ...(ref ? characterAliases(ref) : []),
+  ].map(normalize).filter(Boolean);
+  return labels.some((label) => names.has(label) || [...names].some((name) => label.includes(name) || name.includes(label)));
+}
+
+function targetReferencePath(target) {
+  return target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
+}
+
+function sanitizeRequirementFromRefId(refId, indexes, base = {}) {
+  const target = indexes.referenceById.get(refId);
+  if (!target) return null;
+  const rawKind = String(base.kind ?? target.kind ?? "").toLowerCase();
+  const isCharacter = rawKind.includes("character");
+  const baseIdentityRefId = target.base_identity_ref_id ?? target.base_identity_ref ?? null;
+  const faceOnly = isCharacter && String(target.identity_usage ?? "").toLowerCase() === "face_only" && baseIdentityRefId;
+  const selectedRefId = faceOnly ? baseIdentityRefId : refId;
+  const selectedTarget = indexes.referenceById.get(selectedRefId) ?? target;
+  const kind = isCharacter ? "character_state" : (base.kind ?? target.kind ?? "source_anchor");
+  const subject = target.character ?? target.subject ?? refId;
+  return {
+    ...base,
+    ref_id: selectedRefId,
+    kind,
+    required: base.required !== false,
+    slot_order: Number(base.slot_order ?? 50),
+    slot_purpose: base.slot_purpose ?? (
+      isCharacter
+        ? (faceOnly ? `face-only identity anchor for ${subject}` : `character identity and wardrobe for ${subject}`)
+        : `${kind} reference for ${target.subject ?? selectedRefId}`
+    ),
+    reason: base.reason ?? "Sanitizer: LLM-selected or manifest-required reference validated against approved reference ledger.",
+    source_state_ref_id: faceOnly ? refId : base.source_state_ref_id,
+    identity_usage: faceOnly ? "face_only" : base.identity_usage,
+    state_contract: faceOnly ? (target.scene_prompt_anchor ?? target.prompt_anchor ?? "") : base.state_contract,
+    reference_image_path: targetReferencePath(selectedTarget),
+  };
+}
+
+function refSelectionIds(req) {
+  return [req?.ref_id, req?.source_state_ref_id].filter(Boolean).map(String);
+}
+
+function sanitizePrompt(prompt, indexes) {
+  const findings = [];
+  const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
+  const forbiddenRefs = new Set((shotManifest?.forbidden_ref_ids ?? []).map(String));
+  const mentionedOnly = manifestNameSet(shotManifest?.mentioned_only_characters);
+  const visibleNames = manifestNameSet(shotManifest?.visible_characters);
+  const requestedLocationRefId = shotManifest?.location_ref_id ? String(shotManifest.location_ref_id) : null;
+  const requestedCharacterRefIds = (shotManifest?.character_state_ref_ids ?? []).map(String);
+  let promptTextValue = sanitizePositiveVisualPrompt(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+
+  const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+  const accepted = [];
+  for (const req of inputRequirements) {
+    if (!req?.ref_id) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "reference_missing_ref_id",
+        message: "A reference requirement is missing ref_id.",
+        resolved: false,
+      });
+      continue;
+    }
+    const rawRefId = String(req.ref_id);
+    const target = indexes.referenceById.get(rawRefId);
+    if (!target) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "unknown_reference_id",
+        message: `Reference id ${rawRefId} is not present in approved reference artifacts.`,
+        resolved: false,
+      });
+      continue;
+    }
+    if (forbiddenRefs.has(rawRefId)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "shot_manifest_forbidden_ref_stripped",
+        message: `Shot manifest forbade ref stripped before imagegen: ${rawRefId}.`,
+        resolved: true,
+      });
+      continue;
+    }
+    const canonical = sanitizeRequirementFromRefId(rawRefId, indexes, req);
+    const selectedIds = refSelectionIds(canonical);
+    if (selectedIds.some((id) => forbiddenRefs.has(id))) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "shot_manifest_forbidden_ref_stripped",
+        message: `Shot manifest forbade ref stripped before imagegen: ${selectedIds.find((id) => forbiddenRefs.has(id))}.`,
+        resolved: true,
+      });
+      continue;
+    }
+    const canonicalTarget = indexes.referenceById.get(canonical.source_state_ref_id ?? canonical.ref_id) ?? target;
+    if (referenceKindRank(canonical.kind) === 0 && mentionedOnly.size && characterRefNameMatches(canonicalTarget, mentionedOnly) && !characterRefNameMatches(canonicalTarget, visibleNames)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "mentioned_only_character_ref_stripped",
+        message: `Character ref ${rawRefId} was stripped because the shot manifest marks that character as mentioned-only.`,
+        resolved: true,
+      });
+      continue;
+    }
+    accepted.push(canonical);
+  }
+
+  for (const refId of requestedCharacterRefIds) {
+    if (accepted.some((req) => refSelectionIds(req).includes(refId))) continue;
+    if (forbiddenRefs.has(refId)) continue;
+    const canonical = sanitizeRequirementFromRefId(refId, indexes, {
+      kind: "character_state",
+      required: true,
+      reason: "Sanitizer: character ref required by LLM shot_manifest.",
+    });
+    if (canonical) {
+      accepted.push(canonical);
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "manifest_character_ref_added",
+        message: `Added character ref ${refId} because it was declared in shot_manifest.character_state_ref_ids.`,
+        resolved: true,
+      });
+    } else {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "unknown_manifest_character_ref",
+        message: `Shot manifest requested unknown character ref ${refId}.`,
+        resolved: false,
+      });
+    }
+  }
+
+  if (requestedLocationRefId) {
+    const locationReqs = accepted.filter((req) => referenceKindRank(req.kind) === 1);
+    const mismatched = locationReqs.filter((req) => req.ref_id !== requestedLocationRefId);
+    if (mismatched.length) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "manifest_location_ref_replaced",
+        message: `Replaced location refs ${mismatched.map((req) => req.ref_id).join(", ")} with manifest location ${requestedLocationRefId}.`,
+        resolved: true,
+      });
+      for (const req of mismatched) accepted.splice(accepted.indexOf(req), 1);
+    }
+    if (!accepted.some((req) => req.ref_id === requestedLocationRefId)) {
+      const canonical = sanitizeRequirementFromRefId(requestedLocationRefId, indexes, {
+        kind: "location",
+        required: true,
+        reason: "Sanitizer: location ref required by LLM shot_manifest.",
+      });
+      if (canonical) {
+        accepted.push(canonical);
+        findings.push({
+          image_id: prompt.image_id,
+          scene_id: prompt.scene_id,
+          severity: "warning",
+          code: "manifest_location_ref_added",
+          message: `Added location ref ${requestedLocationRefId} because it was declared in shot_manifest.location_ref_id.`,
+          resolved: true,
+        });
+      } else {
+        findings.push({
+          image_id: prompt.image_id,
+          scene_id: prompt.scene_id,
+          severity: "blocker",
+          code: "unknown_manifest_location_ref",
+          message: `Shot manifest requested unknown location ref ${requestedLocationRefId}.`,
+          resolved: false,
+        });
+      }
+    }
+  }
+
+  const deduped = dedupeRequirements(accepted);
+  const selectedRequirements = trimRequirements(deduped);
+  if (deduped.length > selectedRequirements.length) {
+    const selectedIds = new Set(selectedRequirements.map((req) => req.ref_id));
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "warning",
+      code: "reference_limit_trimmed",
+      message: `Trimmed refs to max ${maxRefs}: ${deduped.filter((req) => !selectedIds.has(req.ref_id)).map((req) => req.ref_id).join(", ")}.`,
+      resolved: true,
+    });
+  }
+
+  const selectedIds = new Set(selectedRequirements.flatMap(refSelectionIds));
+  for (const refId of requestedCharacterRefIds) {
+    if (!selectedIds.has(refId)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "manifest_character_ref_missing_after_sanitize",
+        message: `Shot manifest expected character ref ${refId}, but it is not selected after sanitation.`,
+        resolved: false,
+      });
+    }
+  }
+  if (requestedLocationRefId && !selectedRequirements.some((req) => req.ref_id === requestedLocationRefId)) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "blocker",
+      code: "manifest_location_ref_missing_after_sanitize",
+      message: `Shot manifest expected location ref ${requestedLocationRefId}, but it is not selected after sanitation.`,
+      resolved: false,
+    });
+  }
+  for (const refId of forbiddenRefs) {
+    if (selectedIds.has(refId)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "shot_manifest_forbidden_ref_attached",
+        message: `Shot manifest forbids ref ${refId}, but it is still selected after sanitation.`,
+        resolved: false,
+      });
+    }
+  }
+
+  return {
+    prompt: {
+      ...prompt,
+      image_prompt: promptTextValue,
+      modelslab_image_prompt: promptTextValue,
+      prompt_hash: sha256(promptTextValue),
+      reference_requirements: selectedRequirements,
+      required_reference_paths: selectedRequirements.map((req) => req.reference_image_path).filter(Boolean),
+      reference_usage: selectedRequirements.map((req) => ({
+        ref_id: req.ref_id,
+        usage: "attach_existing_ref",
+        reason: req.reason ?? "Sanitizer: validated LLM-authored reference selection.",
+      })),
+      shot_manifest: shotManifest,
+      hardening_notes: [
+        ...(prompt.hardening_notes ?? []),
+        "visual-prompt-harden sanitize mode: validated LLM-authored refs, normalized approved ref IDs, stripped forbidden refs, enforced max ref count; no creative prompt rewrite.",
+      ],
+    },
+    findings,
+  };
+}
+
 function selectSamples(prompts) {
   const selected = [];
   const seen = new Set();
@@ -2098,10 +2388,12 @@ function selectSamples(prompts) {
 
 function sampleMarkdown(prompts, sampleRows, report) {
   const byId = new Map(prompts.map((prompt) => [prompt.image_id, prompt]));
+  const title = report.harden_mode === "repair" ? "Visual Prompt Repair Sample" : "Visual Prompt Sanitation Sample";
   const lines = [
-    "# Visual Prompt Hardening Sample",
+    `# ${title}`,
     "",
     `Status: ${report.status}`,
+    `Mode: ${report.harden_mode ?? "sanitize"}`,
     `Prompt count: ${prompts.length}`,
     `Unresolved blockers: ${report.unresolved_blocker_count}`,
     "",
@@ -2147,7 +2439,7 @@ async function main() {
   const prompts = [];
   const findings = [];
   for (const prompt of promptPlan.prompts) {
-    const result = hardenPrompt(prompt, indexes);
+    const result = hardenMode === "repair" ? hardenPrompt(prompt, indexes) : sanitizePrompt(prompt, indexes);
     prompts.push(result.prompt);
     findings.push(...result.findings);
   }
@@ -2168,6 +2460,7 @@ async function main() {
     source_hashes: sourceHashes,
     input_prompt_count: promptPlan.prompts.length,
     hardened_prompt_count: prompts.length,
+    harden_mode: hardenMode === "repair" ? "repair" : "sanitize",
     sample_prompt_count: sampleRows.length,
     sample_prompt_ids: sampleRows,
     findings,
@@ -2181,7 +2474,9 @@ async function main() {
     status,
     source_artifact_paths: sourcePaths,
     source_hashes: sourceHashes,
-    prompt_policy: "LLM-authored and reviewed prompts with deterministic hardening for aliases, sticky location refs, multi-character staging, and reference limits",
+    prompt_policy: hardenMode === "repair"
+      ? "LLM-authored prompts with opt-in deterministic repair for aliases, sticky location refs, staging clauses, and reference limits"
+      : "LLM-authored prompts with deterministic sanitation only: approved ref ID/path validation, forbidden-ref stripping, manifest enforcement, and max-reference trimming",
     prompts,
     visual_prompt_hardening_report_path: reportPath,
     visual_prompt_hardening_sample_path: samplePath,

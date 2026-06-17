@@ -64,6 +64,24 @@ function normalize(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9가-힣]+/g, " ").trim();
 }
 
+function sceneNumber(sceneId) {
+  const match = String(sceneId ?? "").match(/^scene_(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function sceneIdsCover(sceneIds, sceneId) {
+  if (!Array.isArray(sceneIds) || !sceneIds.length || sceneIds.includes("*")) return true;
+  if (sceneIds.includes(sceneId)) return true;
+  const current = sceneNumber(sceneId);
+  const numeric = sceneIds.map(sceneNumber).filter((value) => Number.isFinite(value));
+  if (current !== null && numeric.length >= 2) {
+    const low = Math.min(...numeric);
+    const high = Math.max(...numeric);
+    return current >= low && current <= high;
+  }
+  return false;
+}
+
 function compactWords(value) {
   return normalize(value).replace(/\s+/g, "");
 }
@@ -2389,13 +2407,17 @@ function sanitizePrompt(prompt, indexes) {
   if (!requestedLocationRefId
     && !selectedRequirements.some((req) => referenceKindRank(req.kind) === 1)
     && looksLikePhysicalLocation(prompt, promptTextValue)) {
+    const inScopeLocationRefs = indexes.locationTargets.filter((target) => sceneIdsCover(target.scene_ids, prompt.scene_id));
+    const hasInScopeLocationRef = inScopeLocationRefs.length > 0;
     findings.push({
       image_id: prompt.image_id,
       scene_id: prompt.scene_id,
-      severity: "blocker",
+      severity: hasInScopeLocationRef ? "blocker" : "warning",
       code: "physical_location_ref_missing",
-      message: "Prompt describes a real physical environment, but the LLM did not set shot_manifest.location_ref_id or attach a location ref.",
-      resolved: false,
+      message: hasInScopeLocationRef
+        ? `Prompt describes a real physical environment, but the LLM did not set shot_manifest.location_ref_id or attach an in-scope location ref. Available in-scope location refs: ${inScopeLocationRefs.map((target) => target.ref_id).join(", ")}.`
+        : "Prompt describes a real physical environment, but no approved in-scope location ref exists; proceeding with concrete generic location staging.",
+      resolved: !hasInScopeLocationRef,
     });
   }
   for (const refId of forbiddenRefs) {

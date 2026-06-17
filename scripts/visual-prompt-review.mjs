@@ -44,6 +44,24 @@ function normalize(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9가-힣]+/g, " ").trim();
 }
 
+function sceneNumber(sceneId) {
+  const match = String(sceneId ?? "").match(/^scene_(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function sceneIdsCover(sceneIds, sceneId) {
+  if (!Array.isArray(sceneIds) || !sceneIds.length || sceneIds.includes("*")) return true;
+  if (sceneIds.includes(sceneId)) return true;
+  const current = sceneNumber(sceneId);
+  const numeric = sceneIds.map(sceneNumber).filter((value) => Number.isFinite(value));
+  if (current !== null && numeric.length >= 2) {
+    const low = Math.min(...numeric);
+    const high = Math.max(...numeric);
+    return current >= low && current <= high;
+  }
+  return false;
+}
+
 async function readJson(filePath, fallback = null) {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
@@ -282,6 +300,7 @@ Rules:
 - Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, make the prompt and location reference match it.
 - Do not import a named location/world/era/institution from a reference merely because it is visually convenient. If a location ref's named setting is absent from the current visual_beat_script_excerpt, visual_beat_action, and semantic scene location, remove that location ref and stage the generic current location from the beat text.
+- Treat reference target scene_ids as usage contracts for location, prop, UI, and action/effect refs. If such a ref's scene_ids do not cover the current scene, remove it from shot_manifest and reference_requirements, and rewrite the prose location/action from the current beat. When a reference has two scene IDs like scene_009 and scene_039, treat that as an inclusive scene range.
 - Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
 - Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
@@ -626,6 +645,32 @@ function contaminatedReferenceFindings(visualReferencePlan) {
   return findings;
 }
 
+function outOfScopeReferenceFindings(prompts, visualReferencePlan) {
+  const findings = [];
+  const targetsById = new Map((visualReferencePlan?.reference_targets ?? []).map((target) => [target.ref_id, target]));
+  const scopedKinds = new Set(["location", "prop", "ui", "action"]);
+  for (const prompt of prompts) {
+    const refIds = new Set();
+    if (prompt.shot_manifest?.location_ref_id) refIds.add(prompt.shot_manifest.location_ref_id);
+    for (const req of prompt.reference_requirements ?? []) if (req?.ref_id) refIds.add(req.ref_id);
+    for (const usage of prompt.reference_usage ?? []) if (usage?.ref_id) refIds.add(usage.ref_id);
+    for (const refId of refIds) {
+      const target = targetsById.get(refId);
+      if (!target || !scopedKinds.has(String(target.kind ?? ""))) continue;
+      if (sceneIdsCover(target.scene_ids, prompt.scene_id)) continue;
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "out_of_scope_reference",
+        message: `Reference ${refId} is a ${target.kind} ref scoped to ${(target.scene_ids ?? []).join(", ") || "unscoped"} but is attached to ${prompt.scene_id}. Remove the ref and rewrite the visible moment from the current beat location/action.`,
+        resolved: false,
+      });
+    }
+  }
+  return findings;
+}
+
 function normalizePreImagegenFindings(findings) {
   return findings.map((finding) => {
     if (!finding || finding.severity !== "blocker" || finding.resolved === true) return finding;
@@ -751,6 +796,7 @@ async function main() {
   findings.push(...staticPoseFindings(reviewedPrompts));
   findings.push(...repeatedTableauFindings(reviewedPrompts));
   findings.push(...contaminatedReferenceFindings(visualReferencePlan));
+  findings.push(...outOfScopeReferenceFindings(reviewedPrompts, visualReferencePlan));
   findings.push(...await validateReferencePaths(reviewedPrompts));
   const normalizedFindings = normalizePreImagegenFindings(findings);
   findings.length = 0;

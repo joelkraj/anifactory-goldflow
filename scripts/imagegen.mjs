@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage } from "./modelslab-image-helper.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -28,6 +29,7 @@ const referencesOnly = flags["references-only"] === "true";
 const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
 const allowUnhardenedPrompts = flags["allow-unhardened-prompts"] === "true";
 const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ?? null;
+const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -44,6 +46,12 @@ function parseFlags(parts) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeImageProvider(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
+  return "modelslab";
 }
 
 async function readJson(filePath, fallback = null) {
@@ -80,11 +88,11 @@ function requestedReferenceIds() {
 }
 
 function imagePathFor(prompt) {
-  return path.join(imageDir, `${prompt.image_id}-modelslab-image.png`);
+  return path.join(imageDir, `${prompt.image_id}-${imageProvider === "codex_imagegen" ? "codex-imagegen" : "modelslab"}-image.png`);
 }
 
 function referencePathFor(target) {
-  return path.join(referenceDir, `${target.ref_id}-modelslab-reference.png`);
+  return path.join(referenceDir, `${target.ref_id}-${imageProvider === "codex_imagegen" ? "codex-imagegen" : "modelslab"}-reference.png`);
 }
 
 function referencePrompt(target) {
@@ -310,6 +318,18 @@ async function runPool(items, worker, limit) {
   return results;
 }
 
+async function generateProviderImage({ prompt, outputPath, referenceImagePaths = [], model = "flux-klein" }) {
+  if (imageProvider === "codex_imagegen") {
+    return generateCodexImage({
+      prompt,
+      outputPath,
+      referenceImagePaths,
+      allowGlobalFallback: concurrency <= 1 && referenceConcurrency <= 1,
+    });
+  }
+  return generateModelslabImage({ prompt, outputPath, referenceImagePaths, model });
+}
+
 async function generateOne(prompt) {
   const outputPath = imagePathFor(prompt);
   const referenceImagePaths = await validateReferences(prompt);
@@ -318,7 +338,7 @@ async function generateOne(prompt) {
   if (!forceImages && await promptFresh({ ...prompt, prompt_hash: promptHash, modelslab_image_prompt: modelPrompt }, outputPath)) {
     return { image_id: prompt.image_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
   }
-  const generated = await generateModelslabImage({
+  const generated = await generateProviderImage({
     prompt: modelPrompt,
     outputPath,
     referenceImagePaths,
@@ -331,12 +351,15 @@ async function generateOne(prompt) {
     source_prompt_path: promptPath,
     reference_image_paths: referenceImagePaths,
     reference_slots: prompt.reference_slots ?? [],
-    modelslab_prompt: modelPrompt,
-    model: imageModelOverride ?? prompt.image_model_route ?? "flux-klein",
+    image_prompt: modelPrompt,
+    modelslab_prompt: imageProvider === "modelslab" ? modelPrompt : null,
+    codex_prompt: imageProvider === "codex_imagegen" ? modelPrompt : null,
+    image_provider: imageProvider,
+    model: imageProvider === "codex_imagegen" ? generated.model : (imageModelOverride ?? prompt.image_model_route ?? "flux-klein"),
     generated,
     updated_at: new Date().toISOString(),
   });
-  return { image_id: prompt.image_id, status: "generated", image_path: outputPath, prompt_hash: promptHash, generated };
+  return { image_id: prompt.image_id, status: "generated", image_path: generated.downloaded_path ?? outputPath, prompt_hash: promptHash, image_provider: imageProvider, generated };
 }
 
 async function generateReference(target, styleRefPath = null) {
@@ -347,7 +370,7 @@ async function generateReference(target, styleRefPath = null) {
     return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
   }
   const referenceImagePaths = target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : [];
-  const generated = await generateModelslabImage({
+  const generated = await generateProviderImage({
     prompt,
     outputPath,
     referenceImagePaths,
@@ -361,11 +384,12 @@ async function generateReference(target, styleRefPath = null) {
     prompt_hash: promptHash,
     source_reference_plan_path: visualReferencePlanPath,
     reference_image_paths: referenceImagePaths,
-    model: target.image_model_route ?? "flux-klein",
+    image_provider: imageProvider,
+    model: imageProvider === "codex_imagegen" ? generated.model : (target.image_model_route ?? "flux-klein"),
     generated,
     updated_at: new Date().toISOString(),
   });
-  return { ref_id: target.ref_id, status: "generated", image_path: outputPath, prompt_hash: promptHash, generated };
+  return { ref_id: target.ref_id, status: "generated", image_path: generated.downloaded_path ?? outputPath, prompt_hash: promptHash, image_provider: imageProvider, generated };
 }
 
 async function generateReferences() {
@@ -434,6 +458,7 @@ async function main() {
       series_slug: series,
       week,
       episode,
+      image_provider: imageProvider,
       prompt_plan_path: promptPath,
       visual_reference_plan_path: visualReferencePlanPath,
       character_state_refs_path: characterStateRefsPath,
@@ -473,6 +498,7 @@ async function main() {
     episode,
     prompt_plan_path: promptPath,
     prompt_plan_hash: await hashFile(promptPath),
+    image_provider: imageProvider,
     image_dir: imageDir,
     concurrency,
     image_count: results.length,

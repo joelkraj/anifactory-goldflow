@@ -39,9 +39,13 @@ const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(epi
 
 const plannerVersion = 1;
 const plannerName = "llm_audio_enrichment_v1";
-const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 60, 24, 90);
+const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? 160, 90, 240);
+const scoreDropTargetMax = clampInt(flags["score-target-drops-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS_MAX ?? 60, 35, 90);
+const scoreDropMinDurationSec = Number(flags["score-drop-min-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MIN_DURATION_SEC ?? 2);
+const scoreDropMaxDurationSec = Number(flags["score-drop-max-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MAX_DURATION_SEC ?? 12);
+const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 60, 24, sfxTargetMax);
 const scoreTargetChapters = clampInt(flags["score-target-chapters"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_CHAPTERS ?? 8, 5, 12);
-const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? 24, 0, 35);
+const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? 24, 0, scoreDropTargetMax);
 const scoreMode = String(flags["score-mode"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_MODE ?? "chapters").toLowerCase();
 const sfxOnly = flags["sfx-only"] === "true";
 const scoreDropsOnly = !sfxOnly && /^(drops|drops_only|moments|moment_only)$/.test(scoreMode);
@@ -733,11 +737,11 @@ function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
     : scoreDropsOnly
     ? `SCORE REQUIREMENTS:
 - Score is DROPS-ONLY for this run. Return "score_chapters": [].
-- Emit about ${scoreTargetDrops} short score_drops only where the story earns music: dramatic pressure, intense attack, betrayal proof, reversal, reveal, escape, payoff, cliffhanger.
+- Emit about ${scoreTargetDrops} score_drops only where the story earns music: dramatic pressure, intense attack, betrayal proof, reversal, reveal, escape, payoff, cliffhanger.
 - Do not create continuous chapter beds, generic music ambience beds, or mechanical time-window music.
 - Each score drop needs: drop_id, segment_id, target_phrase, start_sec, duration_sec, gain_db, score_intent, story_function, intensity_score 1-10, ace_step_prompt, beat_reason.
 - start_sec must be on the real ${Math.round(durationSec)} second timeline; target_phrase anchors the same moment for audit.
-- Drops should be short riser-hit accents that blend into silence or under narration, not full songs. Prefer ${Math.round(Math.max(3, Math.min(9, durationSec / 900)))} to 9 seconds per drop.
+- Drops should be moment-directed scoring cues, not full songs or continuous background beds. Prefer ${Math.max(2, scoreDropMinDurationSec)} to ${Math.max(scoreDropMinDurationSec, scoreDropMaxDurationSec)} seconds per drop so major audience-feel moments can breathe.
 - Prompts must be instrumental, no vocals/lyrics/speech/crowd noise, and palette-native to this episode.
 - Musical hits should feel earned and varied: low taiko pressure, bowed-metal dread, guqin scrape, dark cinematic rise, impact hit, cold trailing pulse.`
     : `SCORE REQUIREMENTS:
@@ -1018,7 +1022,9 @@ function normalizeScoreDrop(drop, index, validSegments, durationSec) {
   const segmentId = String(drop.segment_id ?? "");
   const segment = validSegments.get(segmentId) ?? [...validSegments.values()][Math.min(index, validSegments.size - 1)] ?? {};
   const start = Math.max(0, Math.min(durationSec, Number(drop.start_sec ?? segment.start_sec ?? 0) || 0));
-  const duration = Math.max(2, Math.min(12, Number(drop.duration_sec ?? 6) || 6));
+  const minDuration = Math.max(0.5, Math.min(scoreDropMinDurationSec, scoreDropMaxDurationSec));
+  const maxDuration = Math.max(minDuration, scoreDropMaxDurationSec);
+  const duration = Math.max(minDuration, Math.min(maxDuration, Number(drop.duration_sec ?? Math.max(6, minDuration)) || Math.max(6, minDuration)));
   const dropId = slug(drop.drop_id ?? drop.event_id ?? `score_drop_${String(index + 1).padStart(3, "0")}`, `score_drop_${String(index + 1).padStart(3, "0")}`);
   return {
     drop_id: dropId,

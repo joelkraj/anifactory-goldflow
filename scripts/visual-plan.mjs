@@ -445,6 +445,11 @@ async function callCodex(prompt, stageName) {
   assertPromptSize(prompt, stageName);
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
+  if (flags["codex-reuse-latest"] === "true" || flags["codex-reuse-cache"] === "true") {
+    const cached = await findLatestCodexOutput(callDir, stageName);
+    if (cached) return cached;
+    console.error(`visual ${stageName}: no reusable cached Codex output found; calling Codex`);
+  }
   const attempts = Math.max(1, Number(flags["codex-call-attempts"] ?? 2));
   const timeoutMs = Math.max(30_000, Number(flags["codex-call-timeout-ms"] ?? 8 * 60_000));
   let lastError = null;
@@ -479,6 +484,38 @@ async function callCodex(prompt, stageName) {
     }
   }
   throw lastError ?? new Error(`codex visual plan failed for ${stageName}`);
+}
+
+async function findLatestCodexOutput(callDir, stageName) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(callDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const safeStageName = stageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`${safeStageName}(?:-attempt_\\d+)?-output\\.txt$`);
+  const candidates = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !pattern.test(entry.name)) continue;
+    const outputPath = path.join(callDir, entry.name);
+    try {
+      const stat = await fs.stat(outputPath);
+      candidates.push({ outputPath, mtimeMs: stat.mtimeMs });
+    } catch {}
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const candidate of candidates) {
+    try {
+      const content = await fs.readFile(candidate.outputPath, "utf8");
+      const parsed = extractJson(content);
+      if (Array.isArray(parsed.prompts) && parsed.prompts.length) {
+        console.error(`visual ${stageName}: reused cached Codex output ${candidate.outputPath}`);
+        return { provider: "codex-cache", model: "codex_cli_default", output_path: candidate.outputPath, content, parsed };
+      }
+    } catch {}
+  }
+  return null;
 }
 
 function assertPromptSize(prompt, stageName) {

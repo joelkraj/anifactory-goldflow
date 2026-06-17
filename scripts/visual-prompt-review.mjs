@@ -667,6 +667,20 @@ async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, charact
     : callCodex(prompt, stageName);
 }
 
+async function runPool(items, worker, limit) {
+  const results = [];
+  let cursor = 0;
+  async function next() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, next));
+  return results;
+}
+
 async function main() {
   const [promptPlan, timedPlan, visualReferencePlan, characterStateRefs] = await Promise.all([
     readJson(promptPath, null),
@@ -688,16 +702,25 @@ async function main() {
   const reviewedRows = [];
   const findings = [];
   const warnings = [];
-  const planner = { provider: isLocalLLMRoute(`${episode}_visual_review`) ? "local-qwen" : "codex", model: isLocalLLMRoute(`${episode}_visual_review`) ? getLLMModel(`${episode}_visual_review`) : "codex_cli_default", chunked: useChunking, chunk_count: chunks.length };
+  const reviewConcurrency = Math.max(1, Math.min(12, Number(flags["visual-review-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REVIEW_CONCURRENCY ?? 6)));
+  const planner = { provider: isLocalLLMRoute(`${episode}_visual_review`) ? "local-qwen" : "codex", model: isLocalLLMRoute(`${episode}_visual_review`) ? getLLMModel(`${episode}_visual_review`) : "codex_cli_default", chunked: useChunking, chunk_count: chunks.length, concurrency: reviewConcurrency };
 
-  for (let index = 0; index < chunks.length; index += 1) {
-    if (useChunking) console.error(`visual review chunk ${index + 1}/${chunks.length}: ${chunks[index].length} prompts`);
-    const llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunks[index], chunkIndex: useChunking ? index : null });
+  const chunkResults = await runPool(chunks, async (chunk, index) => {
+    if (useChunking) console.error(`visual review chunk ${index + 1}/${chunks.length}: ${chunk.length} prompts`);
+    const llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunk, chunkIndex: useChunking ? index : null });
     const chunkReviewed = Array.isArray(llm.parsed.reviewed_prompts) ? llm.parsed.reviewed_prompts : [];
-    if (chunkReviewed.length !== chunks[index].length) throw new Error(`Visual review chunk ${index + 1}/${chunks.length} returned ${chunkReviewed.length} prompts for ${chunks[index].length} inputs.`);
-    reviewedRows.push(...chunkReviewed);
-    if (Array.isArray(llm.parsed.findings)) findings.push(...llm.parsed.findings);
-    if (Array.isArray(llm.parsed.warnings)) warnings.push(...llm.parsed.warnings);
+    if (chunkReviewed.length !== chunk.length) throw new Error(`Visual review chunk ${index + 1}/${chunks.length} returned ${chunkReviewed.length} prompts for ${chunk.length} inputs.`);
+    return {
+      reviewed_prompts: chunkReviewed,
+      findings: Array.isArray(llm.parsed.findings) ? llm.parsed.findings : [],
+      warnings: Array.isArray(llm.parsed.warnings) ? llm.parsed.warnings : [],
+    };
+  }, reviewConcurrency);
+
+  for (const chunkResult of chunkResults) {
+    reviewedRows.push(...chunkResult.reviewed_prompts);
+    findings.push(...chunkResult.findings);
+    warnings.push(...chunkResult.warnings);
   }
 
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));

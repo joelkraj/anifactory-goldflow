@@ -118,7 +118,8 @@ The approved narration script is production truth. The pipeline should extract, 
    - Prompt bodies should describe one continuous full-frame scene by default, while intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals.
    - References are design guides, not visible reference panels, sheets, or backgrounds.
    - Prompts must use positive visual language only.
-   - Run prompt authoring in small parent-scene-preserving chunks for both Codex and local Qwen; large whole-episode batches tend to collapse into repeated hero tableaux.
+   - Run prompt authoring in small parent-scene-aware chunks for both Codex and local Qwen; large whole-episode batches tend to collapse into repeated hero tableaux or incomplete JSON.
+   - Codex visual authoring should scale by parallel four-cut chunks, not by large single prompts. Default target is four visual units per chunk with up to six chunk calls in parallel after sample gates pass.
 
 19. Visual prompt review/fix.
    - One LLM review/fix pass before imagegen.

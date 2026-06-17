@@ -611,6 +611,21 @@ function chunkByParentScene(items, targetSize) {
   return chunks;
 }
 
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(items.length, Number(concurrency) || 1));
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
 function parseListFlag(value) {
   return String(value ?? "")
     .split(",")
@@ -718,10 +733,10 @@ async function main() {
   const stageName = `${episode}_visual_plan`;
   if (flags["dry-run-prompt"] === "true") {
     const useChunkingForDryRun = flags["visual-chunking"] !== "false"
-      && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 12);
+      && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
     const promptSizes = [];
     if (useChunkingForDryRun) {
-      const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 8));
+      const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 4));
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
@@ -755,26 +770,30 @@ async function main() {
   let parsedPrompts = [];
   let styleSummary = "";
   const useChunking = flags["visual-chunking"] !== "false"
-    && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 12);
+    && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
   if (useChunking) {
-    const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 8));
-    const styleSummaries = [];
-    for (let index = 0; index < sceneChunks.length; index += 1) {
-      const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
-      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} visual units`);
-      const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
+    const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 4));
+    const chunkConcurrency = Math.max(1, Number(flags["visual-chunk-concurrency"] ?? 6));
+    const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
+      const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
+      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units`);
+      const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
       const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
       const chunkLlm = isLocalLLMRoute(chunkStageName)
         ? await callLocal(chunkPrompt, chunkStageName, Number(flags["visual-chunk-max-tokens"] ?? 7000))
         : await callCodex(chunkPrompt, chunkStageName);
       const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
-      if (chunkPrompts.length !== sceneChunks[index].length) {
-        throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunks[index].length} visual units.`);
+      if (chunkPrompts.length !== sceneChunk.length) {
+        throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunk.length} visual units.`);
       }
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${chunkPrompts.length} prompts`);
-      parsedPrompts.push(...chunkPrompts);
-      if (chunkLlm.parsed.style_summary) styleSummaries.push(chunkLlm.parsed.style_summary);
+      return { chunkLlm, chunkPrompts };
+    });
+    const styleSummaries = [];
+    for (const result of chunkResults) {
+      parsedPrompts.push(...result.chunkPrompts);
+      if (result.chunkLlm.parsed.style_summary) styleSummaries.push(result.chunkLlm.parsed.style_summary);
     }
     styleSummary = styleSummaries.filter(Boolean)[0] ?? "";
     llm = {
@@ -782,6 +801,7 @@ async function main() {
       model: isLocalLLMRoute(stageName) ? getLLMModel(stageName) : "codex_cli_default",
       chunked: true,
       chunk_count: sceneChunks.length,
+      chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {

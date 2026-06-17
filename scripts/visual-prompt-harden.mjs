@@ -1637,15 +1637,21 @@ function trimRequirements(requirements, options = {}) {
   const locs = pool.filter((req) => referenceKindRank(req.kind) === 1);
   const others = pool.filter((req) => referenceKindRank(req.kind) > 1).sort((a, b) => referenceKindRank(a.kind) - referenceKindRank(b.kind));
   const selected = [];
+  const selectedIds = new Set();
   const protectedRefIds = new Set((options.protectedRefIds ?? []).map(String).filter(Boolean));
+  const add = (req) => {
+    if (!req?.ref_id || selectedIds.has(req.ref_id) || selected.length >= maxRefs) return;
+    selected.push(req);
+    selectedIds.add(req.ref_id);
+  };
   for (const req of pool) {
     if (selected.length >= maxRefs) break;
-    if (protectedRefIds.has(req.ref_id)) selected.push(req);
+    if (protectedRefIds.has(req.ref_id)) add(req);
   }
-  for (const req of chars) if (selected.length < maxRefs) selected.push(req);
-  for (const req of locs) if (selected.length < maxRefs) selected.push(req);
-  for (const req of others) if (selected.length < maxRefs) selected.push(req);
-  return dedupeRequirements(selected).slice(0, maxRefs).map((req, index) => ({ ...req, slot_order: index + 1 }));
+  for (const req of chars) add(req);
+  for (const req of locs) add(req);
+  for (const req of others) add(req);
+  return selected.slice(0, maxRefs).map((req, index) => ({ ...req, slot_order: index + 1 }));
 }
 
 function ensurePromptClauses(prompt, characterCount) {

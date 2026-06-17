@@ -297,6 +297,7 @@ Rules:
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
 - Use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
+- If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen and use positive visual substitutes in modelslab_image_prompt, such as "contact-silence streak badge", "stand-firm mission card", "message restraint checklist", or "upstairs restraint icon".
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
 - Location references are environment evidence. Use them for setting, architecture, lighting, and materials.
@@ -435,7 +436,7 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null) {
     ? Number(sourceUnit.__visual_plan_absolute_index)
     : index;
   const imageId = `${episodeId}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`;
-  const prompt = String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim();
+  const prompt = sanitizePositiveVisualPrompt(String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim());
   return {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
@@ -461,6 +462,26 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null) {
     ui_text_on_screen: row.ui_text_on_screen ?? [],
     image_generation_required: true,
   };
+}
+
+function sanitizePositiveVisualPrompt(value) {
+  return String(value ?? "")
+    .replace(/\bno[-\s]?contact\b/gi, "contact-silence")
+    .replace(/\bdo\s+not\s+beg\b/gi, "stand firm")
+    .replace(/\bdo\s+not\s+call\b/gi, "call restraint")
+    .replace(/\bdo\s+not\s+text\b/gi, "message restraint")
+    .replace(/\bdo\s+not\s+return upstairs\b/gi, "upstairs restraint")
+    .replace(/\bdo\s+not\s+return\b/gi, "return restraint")
+    .replace(/\bnot\s+call\b/gi, "call restraint")
+    .replace(/\bnot\s+text\b/gi, "message restraint")
+    .replace(/\bnot\s+return\b/gi, "return restraint")
+    .replace(/\bnot\s+beg\b/gi, "stand firm")
+    .replace(/\bno\s+speech bubbles\b/gi, "silent clean illustration")
+    .replace(/\bno\s+dialogue balloons\b/gi, "silent clean illustration")
+    .replace(/\bno\s+captions\b/gi, "clean image area")
+    .replace(/\bno\s+comic lettering\b/gi, "clean image area")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function sanitizeShotManifest(value) {

@@ -1611,7 +1611,7 @@ function dedupeRequirements(requirements) {
   return out;
 }
 
-function trimRequirements(requirements) {
+function trimRequirements(requirements, options = {}) {
   const nonStyle = requirements.filter((req) => referenceKindRank(req.kind) < 9);
   const style = requirements.filter((req) => referenceKindRank(req.kind) >= 9);
   const pool = nonStyle.length ? nonStyle : style;
@@ -1619,10 +1619,15 @@ function trimRequirements(requirements) {
   const locs = pool.filter((req) => referenceKindRank(req.kind) === 1);
   const others = pool.filter((req) => referenceKindRank(req.kind) > 1).sort((a, b) => referenceKindRank(a.kind) - referenceKindRank(b.kind));
   const selected = [];
+  const protectedRefIds = new Set((options.protectedRefIds ?? []).map(String).filter(Boolean));
+  for (const req of pool) {
+    if (selected.length >= maxRefs) break;
+    if (protectedRefIds.has(req.ref_id)) selected.push(req);
+  }
   for (const req of chars) if (selected.length < maxRefs) selected.push(req);
   for (const req of locs) if (selected.length < maxRefs) selected.push(req);
   for (const req of others) if (selected.length < maxRefs) selected.push(req);
-  return selected.map((req, index) => ({ ...req, slot_order: index + 1 }));
+  return dedupeRequirements(selected).slice(0, maxRefs).map((req, index) => ({ ...req, slot_order: index + 1 }));
 }
 
 function ensurePromptClauses(prompt, characterCount) {
@@ -2327,7 +2332,11 @@ function sanitizePrompt(prompt, indexes) {
   }
 
   const deduped = dedupeRequirements(accepted);
-  const selectedRequirements = trimRequirements(deduped);
+  const protectedRefIds = [
+    shotManifest?.protagonist_state_ref_id,
+    requestedLocationRefId,
+  ].filter(Boolean);
+  const selectedRequirements = trimRequirements(deduped, { protectedRefIds });
   if (deduped.length > selectedRequirements.length) {
     const selectedIds = new Set(selectedRequirements.map((req) => req.ref_id));
     findings.push({
@@ -2341,8 +2350,22 @@ function sanitizePrompt(prompt, indexes) {
   }
 
   const selectedIds = new Set(selectedRequirements.flatMap(refSelectionIds));
+  const selectedAtRefLimit = deduped.length > selectedRequirements.length;
+  const locationPreservedForRefLimit = requestedLocationRefId && selectedRequirements.some((req) => req.ref_id === requestedLocationRefId);
+  const protectedCharacterRefIds = new Set([shotManifest?.protagonist_state_ref_id].filter(Boolean).map(String));
   for (const refId of requestedCharacterRefIds) {
     if (!selectedIds.has(refId)) {
+      if (selectedAtRefLimit && locationPreservedForRefLimit && !protectedCharacterRefIds.has(refId)) {
+        findings.push({
+          image_id: prompt.image_id,
+          scene_id: prompt.scene_id,
+          severity: "warning",
+          code: "manifest_character_ref_dropped_for_location_ref_limit",
+          message: `Shot manifest expected character ref ${refId}, but it was dropped to preserve manifest location ${requestedLocationRefId} within the max ${maxRefs} reference limit.`,
+          resolved: true,
+        });
+        continue;
+      }
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,

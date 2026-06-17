@@ -445,17 +445,40 @@ async function callCodex(prompt, stageName) {
   assertPromptSize(prompt, stageName);
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
-  const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-output.txt`);
-  await new Promise((resolve, reject) => {
-    const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", reject);
-    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`codex visual plan exited ${code}: ${stderr}`)));
-    child.stdin.end(prompt);
-  });
-  const content = await fs.readFile(outputPath, "utf8");
-  return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+  const attempts = Math.max(1, Number(flags["codex-call-attempts"] ?? 2));
+  const timeoutMs = Math.max(30_000, Number(flags["codex-call-timeout-ms"] ?? 8 * 60_000));
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-attempt_${attempt}-output.txt`);
+    try {
+      await new Promise((resolve, reject) => {
+        const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
+        let stderr = "";
+        const timer = setTimeout(() => {
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+          reject(new Error(`codex visual plan timed out after ${timeoutMs}ms for ${stageName} attempt ${attempt}`));
+        }, timeoutMs);
+        timer.unref();
+        child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+        child.on("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.on("exit", (code) => {
+          clearTimeout(timer);
+          code === 0 ? resolve() : reject(new Error(`codex visual plan exited ${code}: ${stderr}`));
+        });
+        child.stdin.end(prompt);
+      });
+      const content = await fs.readFile(outputPath, "utf8");
+      return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) console.error(`visual ${stageName}: retrying after ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw lastError ?? new Error(`codex visual plan failed for ${stageName}`);
 }
 
 function assertPromptSize(prompt, stageName) {

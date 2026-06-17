@@ -593,7 +593,9 @@ async function main() {
   const stageName = `${episode}_visual_reference_plan`;
   const llm = await createReferencePlan(semanticPlan, stageName);
   let referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
-  referenceTargets = ensureLocationReferenceTargets(referenceTargets, semanticPlan.scenes);
+  if (flags["deterministic-location-seeds"] === "true") {
+    referenceTargets = ensureLocationReferenceTargets(referenceTargets, semanticPlan.scenes);
+  }
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
   assertPositiveAnchors(referenceTargets, characterStateRefs);

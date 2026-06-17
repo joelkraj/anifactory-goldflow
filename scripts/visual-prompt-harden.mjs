@@ -2139,6 +2139,15 @@ function refSelectionIds(req) {
   return [req?.ref_id, req?.source_state_ref_id].filter(Boolean).map(String);
 }
 
+function looksLikePhysicalLocation(prompt, promptTextValue) {
+  const text = [
+    prompt.location,
+    prompt.shot_manifest?.foreground_action,
+    promptTextValue,
+  ].filter(Boolean).join(" ");
+  return /\b(?:apartment|kitchen|bedroom|bathroom|gym|treadmill|office|workplace|cubicle|support desk|street|sidewalk|lobby|elevator|coffee shop|courthouse|corridor|boardroom|conference|stage|hotel|tower|clinic|dental|warehouse|room|table)\b/i.test(text);
+}
+
 function sanitizePrompt(prompt, indexes) {
   const findings = [];
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
@@ -2322,6 +2331,18 @@ function sanitizePrompt(prompt, indexes) {
       severity: "blocker",
       code: "manifest_location_ref_missing_after_sanitize",
       message: `Shot manifest expected location ref ${requestedLocationRefId}, but it is not selected after sanitation.`,
+      resolved: false,
+    });
+  }
+  if (!requestedLocationRefId
+    && !selectedRequirements.some((req) => referenceKindRank(req.kind) === 1)
+    && looksLikePhysicalLocation(prompt, promptTextValue)) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "blocker",
+      code: "physical_location_ref_missing",
+      message: "Prompt describes a real physical environment, but the LLM did not set shot_manifest.location_ref_id or attach a location ref.",
       resolved: false,
     });
   }

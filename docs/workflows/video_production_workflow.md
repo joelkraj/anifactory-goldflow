@@ -115,6 +115,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Uses current-scene context only.
    - Prompts must preserve attached reference slots in structured order through `reference_requirements.slot_order` and `slot_purpose`.
    - The imagegen wrapper injects reference slot mapping, so the authored prompt body should not duplicate the same "Use image..." sentences.
+   - If a cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, the LLM must choose the closest approved location ref and set `shot_manifest.location_ref_id`. Sanitation blocks physical-location prompts that omit both `location_ref_id` and a location reference instead of guessing the location.
    - Prompt bodies should describe one continuous full-frame scene by default, while intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals.
    - References are design guides, not visible reference panels, sheets, or backgrounds.
    - Prompts must use positive visual language only.

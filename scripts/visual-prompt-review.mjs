@@ -653,7 +653,6 @@ function outOfScopeReferenceFindings(prompts, visualReferencePlan) {
     const refIds = new Set();
     if (prompt.shot_manifest?.location_ref_id) refIds.add(prompt.shot_manifest.location_ref_id);
     for (const req of prompt.reference_requirements ?? []) if (req?.ref_id) refIds.add(req.ref_id);
-    for (const usage of prompt.reference_usage ?? []) if (usage?.ref_id) refIds.add(usage.ref_id);
     for (const refId of refIds) {
       const target = targetsById.get(refId);
       if (!target || !scopedKinds.has(String(target.kind ?? ""))) continue;
@@ -676,6 +675,18 @@ function normalizePreImagegenFindings(findings) {
     if (!finding || finding.severity !== "blocker" || finding.resolved === true) return finding;
     const code = String(finding.code ?? "");
     const message = String(finding.message ?? "");
+    const isNoInScopeLocationRef =
+      code === "missing_ref"
+      && /no in[- ]scope .*location reference exists|no approved .*location ref(?:erence)? exists|only approved .*location reference is out of scope/i.test(message);
+    if (isNoInScopeLocationRef) {
+      return {
+        ...finding,
+        severity: "warning",
+        resolved: true,
+        no_in_scope_location_ref: true,
+        message: `${message} Proceeding with concrete generic location staging because no approved in-scope location reference exists for this beat.`,
+      };
+    }
     const isDeferredReferencePath =
       code === "missing_ref"
       && /(?:null|unresolved|not[- ]yet[- ]generated|no resolved|has no resolved|missing) reference(?:_|\s)image(?:_|\s)path|reference(?:_|\s)image(?:_|\s)path (?:is )?(?:null|unresolved|not generated)|image path (?:is )?(?:null|unresolved|not generated)/i.test(message);

@@ -2194,6 +2194,18 @@ function looksLikePhysicalLocation(prompt, promptTextValue) {
   return /\b(?:apartment|kitchen|bedroom|bathroom|gym|treadmill|office|workplace|cubicle|support desk|street|sidewalk|lobby|elevator|coffee shop|courthouse|corridor|boardroom|conference|stage|hotel|tower|clinic|dental|warehouse|room|table)\b/i.test(text);
 }
 
+function applyNamedCharacterMultiplicityContract(text, shotManifest) {
+  const value = String(text ?? "").trim();
+  const shotJob = String(shotManifest?.shot_job ?? "");
+  const explicitSplitPanel = /\b(?:split[- ]panel|comic[- ]panel|manga panel|multi[- ]panel|panel grid)\b/i.test(`${shotJob} ${value}`);
+  const baseClause = "Show exactly one visible body for each named character in this cut; do not duplicate any named character as extra bodies, back views, reflections, portraits, inset heads, miniature figures, or alternate poses.";
+  const montageClause = explicitSplitPanel
+    ? "Because this is an explicit split-panel composition, keep each panel clean and do not duplicate the same named character within any single panel."
+    : "For memory, flashback, collage, montage, retrospective, or overlapping-vignette beats, show memories through props, lighting, anonymous silhouettes, screens, and environment fragments instead of repeated copies of the named character.";
+  const clauses = [baseClause, montageClause].filter((clause) => !value.includes(clause));
+  return [value, ...clauses].join(" ").replace(/\s+/g, " ").trim();
+}
+
 function sanitizePrompt(prompt, indexes) {
   const findings = [];
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
@@ -2209,6 +2221,7 @@ function sanitizePrompt(prompt, indexes) {
     }
   }
   let promptTextValue = sanitizePositiveVisualPrompt(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+  promptTextValue = applyNamedCharacterMultiplicityContract(promptTextValue, shotManifest);
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
   const accepted = [];

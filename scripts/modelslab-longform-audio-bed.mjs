@@ -41,6 +41,9 @@ const scoreDropVolumeDb = Number(flags["score-drop-volume-db"] ?? -18);
 const scoreDropDuckDb = Number(flags["score-drop-duck-db"] ?? -8);
 const sfxVolumeBoostDb = Number(flags["sfx-boost-db"] ?? 0);
 const narrationVolumeDb = Number(flags["narration-volume-db"] ?? 0);
+const targetLufs = flags["target-lufs"] === undefined ? null : Number(flags["target-lufs"]);
+const truePeakDb = Number(flags["true-peak-db"] ?? -1.0);
+const loudnessRange = Number(flags["loudness-range"] ?? 11);
 const skipScore = flags["skip-score"] === "true";
 
 let cachedKey = null;
@@ -558,7 +561,10 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     inputIndex += 1;
   }
 
-  filters.push(`${labels.join("")}amix=inputs=${labels.length}:duration=longest:normalize=0,alimiter=limit=0.98[aout]`);
+  const loudnessFilter = Number.isFinite(targetLufs)
+    ? `,loudnorm=I=${targetLufs}:TP=${truePeakDb}:LRA=${loudnessRange}:print_format=summary`
+    : "";
+  filters.push(`${labels.join("")}amix=inputs=${labels.length}:duration=longest:normalize=0,alimiter=limit=0.98${loudnessFilter}[aout]`);
   await execFile("ffmpeg", ["-y", ...inputs, "-filter_complex", filters.join(";"), "-map", "[aout]", "-t", durationSec.toFixed(3), "-ar", "44100", "-ac", "2", "-acodec", "pcm_s16le", wavPath], { maxBuffer: 1024 * 1024 * 32 });
   await execFile("ffmpeg", ["-y", "-i", wavPath, "-c:a", "aac", "-b:a", "192k", m4aPath], { maxBuffer: 1024 * 1024 * 8 });
   return {
@@ -569,6 +575,11 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     score_drop_input_count: scoreDropRows.length,
     score_drop_event_count: scoreDrops.length,
     score_drop_mix_policy: "Short local ACE-Step accents are faded in/out and normal score beds are ducked during overlapping drop windows.",
+    narration_volume_db: narrationVolumeDb,
+    sfx_volume_boost_db: sfxVolumeBoostDb,
+    target_lufs: Number.isFinite(targetLufs) ? targetLufs : null,
+    true_peak_db: Number.isFinite(targetLufs) ? truePeakDb : null,
+    loudness_range: Number.isFinite(targetLufs) ? loudnessRange : null,
     sfx_input_count: existingEvents.length,
     sfx_event_count: events.length,
     sfx_asset_resolution_policy: "locked_event_asset_path_only_no_bank_repick",

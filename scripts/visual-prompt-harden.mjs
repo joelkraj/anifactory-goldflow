@@ -74,7 +74,7 @@ function sceneIdsCover(sceneIds, sceneId) {
   if (sceneIds.includes(sceneId)) return true;
   const current = sceneIdNumber(sceneId);
   const numeric = sceneIds.map(sceneIdNumber).filter((value) => Number.isFinite(value));
-  if (current !== null && numeric.length >= 2) {
+  if (current !== null && sceneIds.length === 2 && numeric.length === 2) {
     const low = Math.min(...numeric);
     const high = Math.max(...numeric);
     return current >= low && current <= high;

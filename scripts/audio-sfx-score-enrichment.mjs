@@ -39,11 +39,17 @@ const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(epi
 
 const plannerVersion = 1;
 const plannerName = "llm_audio_enrichment_v1";
-const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? 160, 90, 240);
+const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? 220, 90, 360);
 const scoreDropTargetMax = clampInt(flags["score-target-drops-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS_MAX ?? 60, 35, 90);
-const scoreDropMinDurationSec = Number(flags["score-drop-min-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MIN_DURATION_SEC ?? 2);
-const scoreDropMaxDurationSec = Number(flags["score-drop-max-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MAX_DURATION_SEC ?? 12);
-const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 60, 24, sfxTargetMax);
+const scoreDropMinDurationSec = Number(flags["score-drop-min-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MIN_DURATION_SEC ?? 5);
+const scoreDropMaxDurationSec = Number(flags["score-drop-max-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MAX_DURATION_SEC ?? 15);
+const openingSfxMinCount = clampInt(flags["opening-sfx-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_MIN_COUNT ?? 14, 8, 28);
+const openingSfxIdealMinCount = clampInt(flags["opening-sfx-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MIN_COUNT ?? 16, openingSfxMinCount, 32);
+const openingSfxIdealMaxCount = clampInt(flags["opening-sfx-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MAX_COUNT ?? 20, openingSfxIdealMinCount, 36);
+const ambienceMinCount = clampInt(flags["ambience-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_MIN_COUNT ?? 12, 6, 28);
+const ambienceIdealMinCount = clampInt(flags["ambience-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MIN_COUNT ?? 14, ambienceMinCount, 32);
+const ambienceIdealMaxCount = clampInt(flags["ambience-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MAX_COUNT ?? 20, ambienceIdealMinCount, 36);
+const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 90, 24, sfxTargetMax);
 const scoreTargetChapters = clampInt(flags["score-target-chapters"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_CHAPTERS ?? 8, 5, 12);
 const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? 24, 0, scoreDropTargetMax);
 const scoreMode = String(flags["score-mode"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_MODE ?? "chapters").toLowerCase();
@@ -737,11 +743,11 @@ function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
     : scoreDropsOnly
     ? `SCORE REQUIREMENTS:
 - Score is DROPS-ONLY for this run. Return "score_chapters": [].
-- Emit about ${scoreTargetDrops} score_drops only where the story earns music: dramatic pressure, intense attack, betrayal proof, reversal, reveal, escape, payoff, cliffhanger.
+- Emit about ${scoreTargetDrops} score_drops where the story earns music: dramatic pressure, intense attack, betrayal proof, reversal, reveal, escape, payoff, cliffhanger, and major retention turns. For high-retention narrated episodes, drops may happen often, but each must be justified by the moment.
 - Do not create continuous chapter beds, generic music ambience beds, or mechanical time-window music.
 - Each score drop needs: drop_id, segment_id, target_phrase, start_sec, duration_sec, gain_db, score_intent, story_function, intensity_score 1-10, ace_step_prompt, beat_reason.
 - start_sec must be on the real ${Math.round(durationSec)} second timeline; target_phrase anchors the same moment for audit.
-- Drops should be moment-directed scoring cues, not full songs or continuous background beds. Prefer ${Math.max(2, scoreDropMinDurationSec)} to ${Math.max(scoreDropMinDurationSec, scoreDropMaxDurationSec)} seconds per drop so major audience-feel moments can breathe.
+- Drops should be moment-directed scoring cues, not full songs or continuous background beds. Prefer ${Math.max(5, scoreDropMinDurationSec)} to ${Math.max(scoreDropMinDurationSec, scoreDropMaxDurationSec)} seconds per drop so major audience-feel moments can breathe, hang, and fade out easily. Use the longer end of the range for shame, silence, reversal, confession, system awakening, and payoff beats.
 - Prompts must be instrumental, no vocals/lyrics/speech/crowd noise, and palette-native to this episode.
 - Musical hits should feel earned and varied: low taiko pressure, bowed-metal dread, guqin scrape, dark cinematic rise, impact hit, cold trailing pulse.`
     : `SCORE REQUIREMENTS:
@@ -760,11 +766,11 @@ Derive the sonic and musical palette from THIS story and bible. Do not use hardc
 
 SFX REQUIREMENTS:
 - Emit about ${sfxTargetCount} abundant, beat-anchored SFX events across the full runtime, not sparse literal keyword hits.
-- The opening 30 seconds is a designed hook burst: place at least 10 and ideally 10-12 audible SFX/transition cues in the first 30 seconds. Use the short sentence rhythm of the hook; do not stop at only a few literal hits.
+- The opening 30 seconds is a designed hook burst: place at least ${openingSfxMinCount} and ideally ${openingSfxIdealMinCount}-${openingSfxIdealMaxCount} audible SFX/transition cues in the first 30 seconds. Use the short sentence rhythm of the hook; do not stop at only a few literal hits.
 - Opening hook cues should include noticeable edit-transition sounds when appropriate: swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, or fast manga-panel slide. Treat these as transition SFX anchored to nearby spoken phrases, not visible narration.
 - After the opening, keep SFX consistently present but selective: punctuate scene transitions, ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals.
 - Transitions should be noticeable but not random. Use swipe/flash/whoosh cues at real scene turns, memory cuts, ledger windows, combat beats, and cliffhanger shifts.
-- Generate ambience as SFX, not score. Add 10-14 loopable ambience events for major locations or atmosphere runs: duel memory air, clan hall room tone, winter courtyard wind, banquet/formal hall, punishment courtyard, ancestral ritual hall, rooftop snow, east courtyard, hidden room, underwater tunnel, ravine forest. These should be nonmusical environmental beds at low gain, loop true, duration_sec covering the scene span, and asset_duration_sec around 8-12 seconds for the generated loop clip.
+- Generate ambience as SFX, not score. Add at least ${ambienceMinCount} and ideally ${ambienceIdealMinCount}-${ambienceIdealMaxCount} loopable ambience events for major locations or atmosphere runs. Derive the actual locations from this story. These should be nonmusical environmental beds at low gain, loop true, duration_sec covering the scene span, and asset_duration_sec around 8-12 seconds for the generated loop clip.
 - Ambience should cover most non-score runtime by location zones; avoid leaving long stretches with no environmental floor unless the scene intentionally needs hard silence.
 - Ambience should sit elsewhere under the narration when there is no score drop. Use low gains around -34 to -28 dB, and avoid melody, rhythm, vocals, speech, or crowd dialogue.
 - Every event needs: event_id, cue_id, segment_id, offset_sec, duration_sec, gain_db, priority, sound_description, beat_reason, recurrence_class ("signature", "incidental", or "ambience"), palette_note.
@@ -1056,8 +1062,8 @@ function audioPlanQuality(events, scoreDrops, validSegments) {
     .filter((event) => event.timeline_start_sec < 30);
   const ambienceEvents = events.filter((event) => event.loop === true || event.recurrence_class === "ambience" || event.category === "ambience");
   const issues = [];
-  if (openingEvents.length < 10) issues.push(`opening_hook_sfx_under_target:${openingEvents.length}<10`);
-  if (ambienceEvents.length < 10) issues.push(`ambience_beds_under_target:${ambienceEvents.length}<10`);
+  if (openingEvents.length < openingSfxMinCount) issues.push(`opening_hook_sfx_under_target:${openingEvents.length}<${openingSfxMinCount}`);
+  if (ambienceEvents.length < ambienceMinCount) issues.push(`ambience_beds_under_target:${ambienceEvents.length}<${ambienceMinCount}`);
   if (!sfxOnly && scoreDrops.length < Math.min(20, scoreTargetDrops)) issues.push(`score_drops_under_target:${scoreDrops.length}<${Math.min(20, scoreTargetDrops)}`);
   return {
     status: issues.length ? "needs_review" : "passed",

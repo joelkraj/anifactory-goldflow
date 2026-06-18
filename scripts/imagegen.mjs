@@ -448,6 +448,27 @@ async function generateReferences() {
   return { referencePlan: updatedReferencePlan, characterRefs, results, referenceById };
 }
 
+async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash }) {
+  const priorReport = await readJson(reportPath, null);
+  const mergedById = new Map();
+  if (
+    priorReport?.schema === "goldflow_imagegen_report_v1"
+    && priorReport.prompt_plan_hash === promptPlanHash
+    && priorReport.image_provider === imageProvider
+    && Array.isArray(priorReport.results)
+  ) {
+    for (const row of priorReport.results) {
+      if (!row?.image_id || !promptIds.has(row.image_id)) continue;
+      if (!row.image_path || !(await exists(row.image_path))) continue;
+      mergedById.set(row.image_id, row);
+    }
+  }
+  for (const row of currentResults) {
+    if (row?.image_id) mergedById.set(row.image_id, row);
+  }
+  return [...mergedById.values()].sort((a, b) => String(a.image_id).localeCompare(String(b.image_id), undefined, { numeric: true }));
+}
+
 async function main() {
   const referenceRun = await generateReferences();
   if (referencesOnly) {
@@ -488,7 +509,10 @@ async function main() {
     .filter((prompt) => !scope.size || scope.has(prompt.image_id));
   if (!prompts.length) throw new Error("No image prompts selected for generation.");
   await fs.mkdir(imageDir, { recursive: true });
+  const promptPlanHash = await hashFile(promptPath);
+  const allPromptIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));
   const results = await runPool(prompts, generateOne, concurrency);
+  const mergedResults = await mergeImagegenResults({ currentResults: results, promptIds: allPromptIds, promptPlanHash });
   const report = {
     schema: "goldflow_imagegen_report_v1",
     status: results.every((row) => row.status === "generated" || row.status === "reused_fresh") ? "passed" : "failed",
@@ -497,18 +521,19 @@ async function main() {
     week,
     episode,
     prompt_plan_path: promptPath,
-    prompt_plan_hash: await hashFile(promptPath),
+    prompt_plan_hash: promptPlanHash,
     image_provider: imageProvider,
     image_dir: imageDir,
     concurrency,
-    image_count: results.length,
+    image_count: mergedResults.length,
+    current_batch_image_count: results.length,
     reference_count: referenceRun.results.length,
     reference_results: referenceRun.results,
-    results,
+    results: mergedResults,
     updated_at: new Date().toISOString(),
   };
   await writeJson(reportPath, report);
-  console.log(JSON.stringify({ status: report.status, report_path: reportPath, image_count: results.length }, null, 2));
+  console.log(JSON.stringify({ status: report.status, report_path: reportPath, image_count: report.image_count, current_batch_image_count: report.current_batch_image_count }, null, 2));
   if (report.status !== "passed") process.exitCode = 1;
 }
 

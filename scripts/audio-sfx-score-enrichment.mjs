@@ -182,6 +182,22 @@ function llmContent(json) {
 }
 
 async function callPlannerLlm(prompt, stageName) {
+  if (flags["planner-json"]) {
+    const outputPath = path.resolve(String(flags["planner-json"]));
+    const content = await readText(outputPath);
+    const parsed = await readJson(outputPath, null);
+    if (!parsed || typeof parsed !== "object") throw new Error(`Planner JSON is not a valid object: ${outputPath}`);
+    return {
+      provider: "file",
+      model: "planner_json",
+      promptPath: null,
+      outputPath,
+      contentPath: outputPath,
+      content,
+      parsed,
+      retry_attempt: 0,
+    };
+  }
   if (flags["planner-output"]) {
     const outputPath = path.resolve(String(flags["planner-output"]));
     const content = await readText(outputPath);
@@ -200,6 +216,27 @@ async function callPlannerLlm(prompt, stageName) {
   const provider = String(flags["planner-provider"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_PLANNER_PROVIDER ?? "codex").toLowerCase();
   if (provider !== "modelslab") return callCodexPlanner(prompt, stageName);
   return callModelslabPlanner(prompt, stageName);
+}
+
+async function resolvePlannerArtifact(parsed) {
+  if (!parsed?.artifact_path) return parsed;
+  const artifactPath = path.resolve(String(parsed.artifact_path));
+  const artifact = await readJson(artifactPath, null);
+  if (!artifact || typeof artifact !== "object") throw new Error(`Planner artifact is not valid JSON: ${artifactPath}`);
+  const artifactSha = await hashFile(artifactPath);
+  if (parsed.artifact_sha256 && artifactSha !== parsed.artifact_sha256) {
+    throw new Error(`Planner artifact SHA mismatch for ${artifactPath}: expected ${parsed.artifact_sha256}, got ${artifactSha}`);
+  }
+  return {
+    ...artifact,
+    artifact_path: artifactPath,
+    artifact_sha256: parsed.artifact_sha256 ?? artifactSha,
+    warnings: [
+      ...(Array.isArray(artifact.warnings) ? artifact.warnings : []),
+      ...(Array.isArray(parsed.warnings) ? parsed.warnings : []),
+      `Resolved large planner artifact from ${artifactPath}`,
+    ],
+  };
 }
 
 async function callLocalQwenPlanner(prompt, stageName) {
@@ -1150,6 +1187,7 @@ async function main() {
 
   const prompt = buildPrompt({ script, bibles, segments, durationSec, manifest });
   const llm = await callPlannerLlm(prompt, `${episode}_audio_sfx_score_enrichment`);
+  llm.parsed = await resolvePlannerArtifact(llm.parsed);
   const validSegments = new Map(segments.map((segment) => [String(segment.segment_id), segment]));
   const rawEvents = Array.isArray(llm.parsed.sfx_events) ? llm.parsed.sfx_events : [];
   const rawChapters = !sfxOnly && !scoreDropsOnly && Array.isArray(llm.parsed.score_chapters) ? llm.parsed.score_chapters : [];

@@ -63,11 +63,11 @@ function apiKey() {
     cachedKey = process.env.MODELSLAB_API_KEY;
     return cachedKey;
   }
-  const list = JSON.parse(execFileSync("modelslab", ["keys", "list", "-o", "json"], { cwd: repoRoot }));
+  const list = JSON.parse(execFileSync("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot }));
   const items = list?.data?.items || [];
   const selected = items.find((item) => item.is_default === 1 || item.is_default === true) || items[0];
   if (!selected) throw new Error("No ModelsLab API key is configured.");
-  const detail = JSON.parse(execFileSync("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json"], { cwd: repoRoot }));
+  const detail = JSON.parse(execFileSync("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot }));
   cachedKey = detail?.data?.key;
   if (!cachedKey) throw new Error(`Could not read ModelsLab API key ${selected.id}.`);
   return cachedKey;

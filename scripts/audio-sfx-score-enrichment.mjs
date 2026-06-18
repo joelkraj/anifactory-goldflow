@@ -158,11 +158,11 @@ function extractJson(text) {
 
 async function apiKey() {
   if (process.env.MODELSLAB_API_KEY || process.env.API_KEY) return process.env.MODELSLAB_API_KEY || process.env.API_KEY;
-  const { stdout: listStdout } = await execFile("modelslab", ["keys", "list", "-o", "json", "--no-color"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
+  const { stdout: listStdout } = await execFile("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
   const keys = JSON.parse(listStdout)?.data?.items ?? [];
   const selected = keys.find((key) => key.is_default === 1 || key.is_default === true) ?? keys[0];
   if (!selected?.id) throw new Error("No ModelsLab API key available.");
-  const { stdout: detailStdout } = await execFile("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
+  const { stdout: detailStdout } = await execFile("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
   const key = JSON.parse(detailStdout)?.data?.key;
   if (!key) throw new Error(`Could not read ModelsLab key ${selected.id}.`);
   return key;

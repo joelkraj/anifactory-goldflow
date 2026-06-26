@@ -6,6 +6,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import {
+  applyDeterministicLocationSceneIds,
+  locationCoverageFindings,
+} from "./lib/visual-scope-utils.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -634,13 +638,17 @@ async function main() {
   if (flags["deterministic-location-seeds"] === "true") {
     referenceTargets = ensureLocationReferenceTargets(referenceTargets, semanticPlan.scenes);
   }
+  const deterministicLocationScope = applyDeterministicLocationSceneIds(referenceTargets, semanticPlan.scenes);
+  referenceTargets = deterministicLocationScope.targets;
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
   assertPositiveAnchors(referenceTargets, characterStateRefs);
+  const coverageFindings = locationCoverageFindings(referenceTargets, semanticPlan.scenes);
+  const status = coverageFindings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const sourceArtifactPaths = [semanticPlanPath, visualStyleBiblePath, characterBiblePath, episodeVisualDirectionPath];
   const report = {
     schema: "goldflow_visual_reference_plan_v1",
-    status: "passed",
+    status,
     channel,
     series_slug: series,
     week,
@@ -657,7 +665,12 @@ async function main() {
     policy: "Reference strategy only. Manual review must approve prompt anchors before reference generation or production imagegen.",
     reference_targets: referenceTargets,
     character_state_refs: characterStateRefs,
-    warnings: llm.parsed.warnings ?? [],
+    findings: coverageFindings,
+    warnings: [
+      ...(llm.parsed.warnings ?? []),
+      ...deterministicLocationScope.warnings,
+      ...coverageFindings,
+    ],
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
@@ -669,7 +682,8 @@ async function main() {
     character_state_refs: report.character_state_refs,
     updated_at: report.updated_at,
   });
-  console.log(JSON.stringify({ status: "passed", output_path: outputPath, character_state_refs_output_path: characterStateRefsOutputPath, reference_target_count: referenceTargets.length, character_state_ref_count: report.character_state_refs.length }, null, 2));
+  console.log(JSON.stringify({ status, output_path: outputPath, character_state_refs_output_path: characterStateRefsOutputPath, reference_target_count: referenceTargets.length, character_state_ref_count: report.character_state_refs.length }, null, 2));
+  if (status !== "passed") process.exitCode = 1;
 }
 
 main().catch(async (error) => {

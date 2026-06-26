@@ -6,6 +6,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import {
+  allowedRefIdsForScene,
+  dropOutOfScopePromptRefs,
+  referenceTargetsForScene,
+} from "./lib/visual-scope-utils.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -222,13 +227,7 @@ function compactNeighborContext(scene) {
 }
 
 function relevantReferenceTargets(scene, visualReferencePlan) {
-  const sceneId = scene.parent_scene_id ?? scene.scene_id;
-  return (visualReferencePlan?.reference_targets ?? []).filter((target) => {
-    const kind = String(target.kind ?? "");
-    if (kind === "location") return true;
-    if (!Array.isArray(target.scene_ids) || !target.scene_ids.length) return false;
-    return target.scene_ids.includes(sceneId);
-  }).map(compactReferenceTarget);
+  return referenceTargetsForScene(scene, visualReferencePlan).map(compactReferenceTarget);
 }
 
 function compactReferenceTarget(target) {
@@ -236,6 +235,7 @@ function compactReferenceTarget(target) {
     ref_id: target.ref_id ?? null,
     kind: target.kind ?? null,
     subject: target.subject ?? null,
+    scene_ids: target.scene_ids ?? [],
     priority: target.priority ?? null,
     generation_mode: target.generation_mode ?? null,
     required_before_imagegen: target.required_before_imagegen ?? null,
@@ -565,10 +565,10 @@ function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label
   }
 }
 
-function normalizePrompt(row, index, episodeId, sourceUnit = null) {
+function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
   const prompt = sanitizePositiveVisualPrompt(String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim());
-  return {
+  const basePrompt = {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
     visual_beat_id: row.visual_beat_id ?? null,
@@ -593,6 +593,14 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null) {
     ui_text_on_screen: row.ui_text_on_screen ?? [],
     image_generation_required: true,
   };
+  const scene = sourceUnit ?? row;
+  const scopedCharacterRefs = sceneCharacterStateRefs(scene, scope.stateRefIndex ?? new Map());
+  const allowedRefIds = allowedRefIdsForScene({
+    scene,
+    visualReferencePlan: scope.visualReferencePlan,
+    characterStateRefs: scopedCharacterRefs,
+  });
+  return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
 }
 
 function sanitizePositiveVisualPrompt(value) {
@@ -936,7 +944,7 @@ async function main() {
     styleSummary = llm.parsed.style_summary ?? "";
   }
   const prompts = parsedPrompts
-    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null))
+    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, { visualReferencePlan: enrichedVisualReferencePlan, stateRefIndex }))
     .map(sanitizePromptLanguage);
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);

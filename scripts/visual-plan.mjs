@@ -11,6 +11,7 @@ import {
   dropOutOfScopePromptRefs,
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
+import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -355,6 +356,12 @@ Rules:
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.scene_prompt_anchor, copy that scene_prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe. Use prompt_anchor only for generating reference images, not inside scene prompts.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
 - If no character_state_refs are provided for a visible character, do not create a definitive anchor. Keep wording limited to current-scene facts and add a warning requesting missing character state ref coverage.
+- When two or more visible characters appear, shot_manifest.character_staging is required and must list every visible named character in visible_characters order.
+- shot_manifest.character_staging screen_position must use this fixed vocabulary only: ${CHARACTER_STAGING_POSITIONS.join(" | ")}.
+- When two or more characters are visible, write separate position-bound people clauses in character_staging order. Bind each clause as: screen position, character name, that character's copied scene_prompt_anchor wardrobe/state wording, then that character's pose.
+- Example multi-character clause shape: "Frame-left, Name A: [wardrobe/state anchor A], [pose A]. Frame-right, Name B: [wardrobe/state anchor B], [pose B]. Clear spatial separation between them."
+- Never merge two characters into one shared wardrobe or appearance clause, and never describe wardrobe without naming whose wardrobe it is.
+- Even when outfits are similar, state the distinguishing wardrobe detail for each staged character inside that character's own clause.
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
 - For each cut, include only references that are visible or style-critical, with at most four reference_requirements total.
 - Attach only necessary references. Use no more than four refs; fewer is better when the cut remains clear. Do not attach refs for people, locations, props, or UI that are only mentioned, remembered, texted, called, or implied.
@@ -379,6 +386,66 @@ ${JSON.stringify(compactSemanticPlan, null, 2)}
 
 SCENE CORRECTION DIRECTIVES:
 ${JSON.stringify(correctionDirectives, null, 2)}
+
+FEW-SHOT EXAMPLES:
+${JSON.stringify({
+  single_character_cut: {
+    shot_manifest: {
+      shot_job: "emotional_reaction",
+      visible_characters: ["Joey"],
+      mentioned_only_characters: ["Secondary Character"],
+      primary_character: "Joey",
+      character_state_ref_ids: ["joey_state_ref"],
+      protagonist_state_ref_id: "joey_state_ref",
+      location_ref_id: "hallway_location_ref",
+      foreground_action: "Joey freezes in the apartment hallway as the elevator doors part",
+      visible_props: ["delivery bag"],
+      ui_elements: [],
+      forbidden_ref_ids: ["secondary_character_state_ref"],
+      continuity_notes: "one present-tense beat",
+    },
+    modelslab_image_prompt: "Joey halts in the apartment hallway as the elevator doors part, Joey alone in frame, dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, one hand tightening around the delivery bag strap, stunned expression under cold ceiling lights, polished corridor walls and brushed metal elevator doors behind him.",
+  },
+  multi_character_cut: {
+    shot_manifest: {
+      shot_job: "interaction",
+      visible_characters: ["Joey", "Second Character"],
+      mentioned_only_characters: [],
+      primary_character: "Joey",
+      character_state_ref_ids: ["joey_state_ref", "second_character_state_ref"],
+      protagonist_state_ref_id: "joey_state_ref",
+      location_ref_id: "lobby_location_ref",
+      foreground_action: "Joey and the second character stop across from each other in the lobby",
+      visible_props: [],
+      ui_elements: [],
+      forbidden_ref_ids: [],
+      continuity_notes: "single confrontation beat",
+      character_staging: [
+        {
+          name: "Joey",
+          ref_id: "joey_state_ref",
+          screen_position: "frame-left",
+          wardrobe_from: "character_state_ref:joey_state_ref",
+          pose: "half-turned toward the other character with one shoulder forward and a tense grip on his bag strap",
+        },
+        {
+          name: "Second Character",
+          ref_id: "second_character_state_ref",
+          screen_position: "frame-right",
+          wardrobe_from: "character_state_ref:second_character_state_ref",
+          pose: "chin lifted, one hand on the phone, weight settled on the back foot",
+        },
+      ],
+    },
+    modelslab_image_prompt: "Lobby confrontation the instant both characters stop. Frame-left, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, half-turned toward the other character with one shoulder forward and a tense grip on his bag strap. Frame-right, Second Character: cream fitted coat over a black dress, gold phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them inside the polished stone lobby with warm sconces and reflective floor.",
+    codex_image_prompt: "Two-character lobby confrontation at the exact moment both stop. Frame-left, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, half-turned toward the other character with one shoulder forward and a tense grip on his bag strap. Frame-right, Second Character: cream fitted coat over a black dress, gold phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them in a polished stone lobby with warm sconces and reflective floor.",
+    reference_requirements: [
+      { ref_id: "joey_ref", kind: "character_state", required: true, slot_order: 1, slot_purpose: "character identity and wardrobe for Joey", reason: "Frame-left staged identity and wardrobe." },
+      { ref_id: "second_character_ref", kind: "character_state", required: true, slot_order: 2, slot_purpose: "character identity and wardrobe for Second Character", reason: "Frame-right staged identity and wardrobe." },
+      { ref_id: "lobby_location_ref", kind: "location", required: true, slot_order: 3, slot_purpose: "lobby location environment", reason: "Visible setting for the confrontation." },
+    ],
+  },
+}, null, 2)}
 
 Return JSON only:
 {
@@ -409,7 +476,16 @@ Return JSON only:
         "visible_props": ["delivery bag"],
         "ui_elements": [],
         "forbidden_ref_ids": ["secondary_character_ref", "antagonist_ref"],
-        "continuity_notes": "one present-tense moment from the current beat excerpt"
+        "continuity_notes": "one present-tense moment from the current beat excerpt",
+        "character_staging": [
+          {
+            "name": "Joey",
+            "ref_id": "state_ref_id",
+            "screen_position": "frame-left",
+            "wardrobe_from": "character_state_ref:state_ref_id",
+            "pose": "specific pose or action for this character"
+          }
+        ]
       },
       "visible_subjects": ["..."],
       "character_state_refs_used": ["state_ref_id"],
@@ -634,6 +710,7 @@ function sanitizeShotManifest(value) {
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
+    character_staging: sanitizeCharacterStaging(value.character_staging),
   };
 }
 

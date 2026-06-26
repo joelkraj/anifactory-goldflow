@@ -97,12 +97,19 @@ function referenceSlotsFromPrompt(prompt) {
   const paths = Array.isArray(prompt.required_reference_paths) ? prompt.required_reference_paths : [];
   return requirements
     .map((requirement, index) => ({
+      index,
+      explicitOrder: Number(requirement.slot_order ?? requirement.order ?? requirement.image_slot ?? Number.NaN),
       slot: index + 1,
       ref_id: requirement.ref_id,
       kind: requirement.kind ?? null,
       path: requirement.reference_image_path ?? paths[index] ?? null,
       purpose: requirement.slot_purpose ?? requirement.reason ?? requirement.ref_id ?? `reference ${index + 1}`,
       reason: requirement.reason ?? null,
+    }))
+    .sort((a, b) => (Number.isFinite(a.explicitOrder) ? a.explicitOrder : 999) - (Number.isFinite(b.explicitOrder) ? b.explicitOrder : 999) || a.index - b.index)
+    .map((slot, index) => ({
+      ...slot,
+      slot: index + 1,
     }))
     .filter((slot) => slot.path && paths.includes(slot.path))
     .slice(0, paths.length);

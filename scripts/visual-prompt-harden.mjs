@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { outOfScopeLocationRefMentions } from "./lib/visual-scope-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -103,6 +104,7 @@ function sanitizeShotManifest(value) {
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
+    character_staging: sanitizeCharacterStaging(value.character_staging),
   };
 }
 
@@ -2051,7 +2053,9 @@ function hardenPrompt(prompt, indexes) {
       resolved: false,
     });
   }
-  if (selectedRequirements.filter((req) => referenceKindRank(req.kind) === 0).length >= 2 && !/separate complete bod|distinct face placement|readable robe boundaries/i.test(text)) {
+  const multiCharacterRefCount = selectedRequirements.filter((req) => referenceKindRank(req.kind) === 0).length;
+  const stagedVisibleCount = Array.isArray(shotManifest?.character_staging) ? shotManifest.character_staging.length : 0;
+  if (multiCharacterRefCount >= 2 && (stagedVisibleCount < 2 || !/frame[-\s](?:left|right)|background[-\s](?:left|right)|foreground|center/i.test(text))) {
     findings.push({
       image_id: prompt.image_id,
       scene_id: prompt.scene_id,

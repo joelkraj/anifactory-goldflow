@@ -15,6 +15,7 @@ import {
   outOfScopeLocationRefMentions,
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
+import { multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
 import { voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
@@ -172,6 +173,71 @@ function testVoiceDirectionCharacterization() {
   const clean = voiceDirectionTransformForTests("The elevator doors opened with a soft chime.");
   assert.equal(clean.clean_narration_attribution, "The elevator doors opened with a soft chime.");
   assert.equal(clean.qwen_spoken_text, "The elevator doors opened with a soft chime.");
+}
+
+function testCharacterStagingSanitizerAndReviewBlockers() {
+  const characterStateRefs = [
+    {
+      state_ref_id: "joey_state_ref",
+      source_ref_id: "joey_ref",
+      character: "Joey",
+      scene_prompt_anchor: "dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers",
+    },
+    {
+      state_ref_id: "mira_state_ref",
+      source_ref_id: "mira_ref",
+      character: "Mira",
+      scene_prompt_anchor: "cream fitted coat over a black dress, gold phone in hand, sharp heels",
+    },
+  ];
+  const sanitized = sanitizeCharacterStaging([
+    { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira" },
+  ]);
+  assert.deepEqual(sanitized, [
+    { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira" },
+  ]);
+
+  const properPrompt = {
+    image_id: "ep_01-cut-010",
+    scene_id: "scene_010",
+    modelslab_image_prompt: "Lobby confrontation at the instant both stop. Frame-left, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, half-turned toward Mira with one shoulder forward. Frame-right, Mira: cream fitted coat over a black dress, gold phone in hand, sharp heels, chin lifted with her weight on the back foot. Clear spatial separation between them.",
+    shot_manifest: {
+      visible_characters: ["Joey", "Mira"],
+      character_staging: [
+        { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
+        { name: "Mira", ref_id: "mira_state_ref", screen_position: "frame-right", wardrobe_from: "character_state_ref:mira_state_ref", pose: "chin lifted with her weight on the back foot" },
+      ],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(properPrompt, characterStateRefs).length, 0);
+
+  const mergedWardrobePrompt = {
+    ...properPrompt,
+    modelslab_image_prompt: "Lobby confrontation. Frame-left, Joey and Mira: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, cream fitted coat over a black dress, gold phone in hand, facing each other in the lobby.",
+  };
+  const mergedFindings = multiCharacterBleedFindings(mergedWardrobePrompt, characterStateRefs);
+  assert.equal(mergedFindings.some((finding) => finding.code === "character_attribute_bleed_risk"), true);
+
+  const missingCoveragePrompt = {
+    ...properPrompt,
+    shot_manifest: {
+      visible_characters: ["Joey", "Mira"],
+      character_staging: [
+        { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
+      ],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(missingCoveragePrompt, characterStateRefs).some((finding) => /character_staging must cover every visible character/i.test(finding.message)), true);
+
+  const singleCharacterPrompt = {
+    image_id: "ep_01-cut-011",
+    scene_id: "scene_011",
+    modelslab_image_prompt: "Joey pauses alone in the lobby, dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, one hand tight on the bag strap.",
+    shot_manifest: {
+      visible_characters: ["Joey"],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(singleCharacterPrompt, characterStateRefs).length, 0);
 }
 
 async function testOnlyScenesDryRun() {
@@ -356,6 +422,7 @@ async function run() {
   testProviderAwarePromptSelection();
   testPositivePromptSanitizerDoesNotInvertNegation();
   testVoiceDirectionCharacterization();
+  testCharacterStagingSanitizerAndReviewBlockers();
   await testOnlyScenesDryRun();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();

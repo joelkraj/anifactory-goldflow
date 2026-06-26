@@ -135,8 +135,8 @@ Commands:
   goldflow visual beats            Split timed semantic scenes into visual image beats
   goldflow visual refs             Plan visual references, state refs, and anchor strategy
   goldflow visual plan             Author current-scene-only image prompts from visual beats
-  goldflow visual review           Review/fix image prompts with LLM, then validate blockers
-  goldflow visual harden           Deterministically repair prompt refs and write pre-imagegen sample QA
+  goldflow visual review           Review/fix prompts with LLM auto-resolve; span repair belongs here
+  goldflow visual harden           Generic-only prompt/ref sanitation and pre-imagegen sample QA
   goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
   goldflow visual transitions      Plan xfade transitions from hardened cuts; transition SFX is opt-in
   goldflow imagegen start          Generate images from approved prompt plan
@@ -156,6 +156,13 @@ Common flags:
 
 Production order:
   run preflight -> source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
+
+Prompt-repair migration guardrails:
+  Part F ships before Part G.
+  Part F: instrument visual-prompt-harden branch hits -> classify existing prompt plans in scratch outputs -> delete only provably-dead episode-prose branches -> promote live generic rules into data/bible-driven helpers -> add lint to block episode-specific .replace() prose.
+  Part G: add span-level repair inside visual review --auto-resolve. Span patches are LLM-authored from structured blocker codes, diff-guarded, revalidated, and escalated to cut re-plan/dead-letter on guard failure.
+  visual harden must stay sanitation/generic-only; do not add deterministic story-prose patching there.
+  canonical_entities.json is the recurring-cast allowlist; refer to recurring characters by stable ids, not embedded episode sentences.
 `);
 }
 

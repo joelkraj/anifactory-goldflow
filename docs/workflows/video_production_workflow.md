@@ -8,6 +8,17 @@ The approved narration script is production truth. The pipeline should extract, 
 
 ## Full Flow
 
+0. Run identity preflight.
+   - Before ingest, lock channel, stable series slug, stable run/week slug, episode id, title, source path, image provider intent, and proof-vs-production intent in `run_identity.json`.
+   - Episode numbers live in `--episode`, not in `--week`. A sequel title such as "Part Two" implies `ep_02` by default. Do not create `part-2/episodes/ep_01` unless the operator explicitly approves a standalone run.
+   - Required command shape:
+     `node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_02 --title <episode-title> --source <chatbot-output.md> --image-provider modelslab --audio-target narrator_forward_retention_mix --run-intent production`
+   - Ingest must refuse to run without a matching `run_identity.json` unless a diagnostic bypass is explicitly used.
+   - Before any resume or "continue" request, run the artifact-backed ledger:
+     `node bin/goldflow.mjs run status --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --format markdown`
+   - The agent must continue from the first missing stage in that ledger. If the next requested command would skip a missing upstream artifact or operator approval gate, stop and explain the missing gate.
+   - `bin/goldflow.mjs` enforces the ledger for normal production commands. A command that belongs to a later stage should fail before it spends media budget. Do not bypass the guard except for explicit diagnostic or recovery work approved by the operator.
+
 1. Generate or obtain a polished source narration script.
    - Use `docs/workflows/source_script_generation_workflow.md`.
    - Use `docs/prompts/manhwa_recap_chatbot_prompt_v1.md` for manhwa recap source generation unless a newer template is selected.
@@ -68,10 +79,11 @@ The approved narration script is production truth. The pipeline should extract, 
    - For SFX-only, run audio enrichment with `--sfx-only true`; the score plan is deliberately empty and no score beds are generated.
    - Local ACE-Step is the preferred production score provider. Use `ANIFACTORY_SCORE_PROVIDER=local_ace_step` or pass `--score-provider local_ace_step`.
    - Do not use ModelsLab music generation for production score unless the operator explicitly asks for a fallback.
-   - Opening hook SFX should be abundant. In the first thirty seconds, target at least ten and ideally ten to twelve audible SFX or transition cues when the narration supports them: swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, manga-panel slide, system or ledger pulse, room hush, blade/blood hit, or similar beat-native accents.
-   - After the opening, SFX should stay consistently present but selective. Hit scene transitions, ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals.
+   - Opening hook SFX should be abundant. In the first thirty seconds, target at least fourteen and ideally eighteen to twenty-four audible cues when narration and edit timing support them. Deterministic transition accents such as swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, and manga-panel slide should be bound by the visual transition plan and render layer to actual cut timestamps; LLM-authored narrative SFX should cover system or ledger pulses, room hushes, phone/object sounds, crowd reactions, and similar beat-native accents.
+   - After the opening, SFX should stay consistently present but selective. Hit ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals with LLM-authored narrative SFX. Pure edit-transition whooshes/pops/snaps should come from the deterministic transition-audio pass, not from the LLM SFX plan.
    - Ambience should be generated as loopable SFX, not as score. Use ten to fourteen low nonmusical environmental beds between score drops: duel memory air, clan hall room tone, winter courtyard wind, punishment courtyard cold air, ancestral ritual hall, rooftop snow, east courtyard, hidden room, underwater tunnel, ravine forest, etc.
    - Score should be moment-directed, not automatic. For stories that do not need continuous music, use drops-only scoring: `--score-mode drops_only` keeps `score_chapter_plan.json` empty and writes short dramatic accents to `score_drop_plan_<episode>.json`.
+   - When improving only the scoring layer on an already-produced run, prefer `goldflow audio score-drops-chunked` over rerunning full SFX/score enrichment. It plans score drops in smaller LLM chunks from current Qwen segment timing and local Whisper timing, then writes the same production-compatible score plan artifacts consumed by the longform mixer.
    - Score drops should land only on earned dramatic, intense, reveal, reversal, payoff, escape, and cliffhanger moments. The longform mixer fades each accent in/out and ducks overlapping chapter score beds if any exist.
    - Planning backends are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for planning; ModelsLab is used for media generation.
    - Next local LLM bakeoff candidate: `yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF`, stored at `/Users/joel/AniFactoryModels/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF`. Preferred first test file for the 64 GB MacBook Pro is `gemma4-coding-Q8_0.gguf`, downloaded at about 12 GB with SHA-256 prefix `5291d70fcffe05b3869de8f1f41aa89ca361913aa7b76af22867a798999672f7`; fall back to `gemma4-coding-Q6_K.gguf` only if Q8 is too slow or memory pressure is too high. Evaluate it against local Qwen for semantic planning, visual prompt authoring, visual prompt review, and code/pipeline patch suggestions before changing defaults. The earlier `mlx-community/gemma-4-12B-it-OptiQ-4bit` pull is a secondary comparison candidate only.
@@ -79,12 +91,15 @@ The approved narration script is production truth. The pipeline should extract, 
 13. Longform audio bed mix.
    - Mixes narration, SFX, and score into one final continuous audio track.
    - Production narration loudness starts at `--narration-volume-db 2`, with the longform limiter enabled.
-   - Use `--narration-volume-db 3` only after a loudness/clip check passes. If narration competes with music, lower score beds or drops before pushing narration harder.
+   - Use the narrator-forward retention recipe when the narrator feels behind the score/SFX: `--narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`. Verify the AAC output with `ffprobe` and `ffmpeg ... -af volumedetect`; if narration still competes with music, lower score beds or drops before pushing narration harder.
+   - Transition SFX does not belong in the longform audio planning/mix by default. Audio planning handles story SFX, ambience, and score drops. A later visual transition plan decides which cut boundaries need transition SFX, and render/edit places those sounds at the actual cut.
    - For SFX-only, pass `--skip-score true` so chapter beds and score drops are excluded from the final mix.
 
 14. Visual beat planning.
    - Splits timed semantic scenes into image beats.
-   - Current target: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
+   - Current baseline target after the retention runway: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
+   - The first 3 minutes are the retention runway. Treat 0-30 seconds as the dense cold open and 30-180 seconds as the retention ramp. Target roughly 8-12 distinct cold-open cuts with `--hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2`, then keep the ramp faster than normal with `--retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`, unless the narration itself demands slower pacing.
+   - Hook and ramp cuts should each do a different retention job: immediate premise image, reversal, system/threat reveal, emotional reaction, consequence, status turn, or click-forward question. If score/SFX drops are active but the image barely changes, the first-3-minutes visual beat plan is underbuilt.
    - Each visual beat carries a local script excerpt or concrete beat action so the prompt LLM authors the specific cut moment.
    - Visual prompt authoring is manifest-first. Each cut must include a `shot_manifest` with physically visible characters, mentioned-only characters, active character-state refs, location ref, foreground action, shot job, props/UI, and forbidden refs before the prose prompt is trusted.
    - The LLM receives previous/next beat summaries for sequencing and variety, but those summaries are context only. Current `visual_beat_script_excerpt` remains the authority for what appears in the frame.
@@ -108,6 +123,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Run references first with a reference-only imagegen pass.
    - Manually inspect generated refs before any scene cut generation.
    - Reject refs with panel grids, speech bubbles, multi-position character layouts, strong scene backgrounds, cinematic action poses, or pose/background elements likely to transfer into cuts.
+   - Run duplicate-hash QA across required reference targets. Different required ref IDs must not point to byte-identical images unless reuse was explicitly intended and documented. Exact duplicates between distinct locations, props, UI motifs, or character anchors are reference-generation failures and must be regenerated before visual prompt planning.
    - Regenerate failed refs selectively with `--reference-ids`; do not wipe approved refs.
 
 18. Visual prompt planning.
@@ -152,6 +168,7 @@ The approved narration script is production truth. The pipeline should extract, 
 21. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
+   - The image provider is locked in `run_identity.json`. Normal production uses `--image-provider modelslab`; `imagegen start` refuses a different provider unless the operator explicitly approves `--confirm-image-provider true`.
    - Flux Klein and Flux Kontext are both treated as four-reference models in this pipeline.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
    - Scene attachment prioritizes visible character refs first, then location, then prop/UI, then action/effects. Priority kind outranks required/optional flags. Style refs are only attached to scene cuts when no concrete refs are available.
@@ -167,23 +184,36 @@ The approved narration script is production truth. The pipeline should extract, 
    - Ritual/document close-ups should favor physical seal glow, ink, brush water, paper, and altar light. Add supernatural UI only when the beat explicitly calls for a ledger/interface reveal.
    - Subject fusion, miniature heads, duplicate protagonist faces, or faces embedded in another body are generated-still failures. Regenerate those cuts with positive staging language: separate complete bodies, clear spacing, distinct face placement, visible robe and shoulder boundaries, one continuous manhwa frame.
    - If ModelsLab returns a queue, rate-limit, fetch failure, or long stuck tail, rerun the affected `--cut-ids` with lower concurrency and leave `--force` unset unless intentionally replacing a bad cut. Completed good images should be reused.
-   - Use the hardened prompt artifact for production scene imagegen. Imagegen rejects non-hardened prompt plans by default; `--allow-unhardened-prompts true` is diagnostic only.
+   - Use the hardened prompt artifact for production scene imagegen. `imagegen start` defaults to `section_image_prompts_hardened.json` and rejects non-hardened prompt plans by default; `--allow-unhardened-prompts true` is diagnostic only.
    - For bad scene cuts, regenerate only affected `--cut-ids` with cache reuse.
    - After targeted cut regeneration, run one full no-force imagegen pass to refresh the complete report and confirm all expected images exist.
    - Babysit new productions through staged visual gates before trusting full automation: reference QA, sanitized prompt sample QA, first small image batches, and periodic contact-sheet checks through high-risk sections. Promote to lower-touch runs only after several consecutive batches show no duplicate protagonist, subject fusion, destructive UI, wrong refs, or major location/style drift.
 
 22. Render.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
-   - Current render style uses full-frame profile-based Ken Burns motion by default. Use the blurred foreground mode only as a deliberate style override.
-   - For longform episodes, render motion clips with bounded concurrency and a moderate Ken Burns overscale multiplier. Motion should stay visible and intentional without serial 4K intermediates becoming the bottleneck for 1080p delivery. Use `--motion fill_pan` when `zoompan` is too slow for a full still-image episode.
-   - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, and steady pushes. Aggressive motion should not mean constant random movement.
-   - Transitions should be hand-picked by beat, not default fade-to-black. Use smooth FFmpeg transitions such as wipes, pushes, slides, flashes, and manga-panel swipes where they match the moment.
-   - Transition SFX should be bound to the actual transition timestamp on selected cuts. The opening thirty seconds should use frequent noticeable transition cues such as swipe-up flash, swipe-down whoosh, scene-card whoosh, impact flash, and manga-panel slide; after the hook, use them selectively so they feel intentional.
+   - Optional engagement bait belongs in render-layer overlays only. If the operator asks for comment/like/subscribe prompts, run `goldflow visual engagement` after prompt hardening and before render, then let render apply exact animated bubbles from `engagement_overlay_plan_<episode>.json`.
+   - Engagement overlays should be sparse and story-timed: one early comment question after the cold open, a few choice/prediction prompts on real dilemmas or reveals, and at most one or two direct like/subscribe CTAs near a high-retention beat or the end/cliffhanger. Do not bake engagement text into generated scene images, narration, subtitles, or SFX planning.
+   - Premium full-frame profile-based Ken Burns is the default production render profile: `--motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`. Use blurred foreground drift or `fill_pan` only as an explicitly approved diagnostic fallback after the premium render is proven unsuitable for the specific episode.
+   - Render timing is absolute. Preserve the `start_sec` timeline from `section_image_prompts_hardened.json` / `visual_beat_plan.json`; do not globally scale image durations to fill the audio. If the visual plan has a gap before the next cut, hold the current image until the next cut's real start time or add new visual beats/images in a planning pass.
+   - Each generated motion clip must be duration-probed immediately. Abort on malformed clips rather than continuing a long render.
+   - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, steady pushes, lateral trucks, vertical/diagonal moves, and true zoom-outs that expose more of the image canvas for establishing or reveal beats. Aggressive motion should not mean constant random movement, but a premium render must not be all push-ins under different profile labels. Check `render_motion.motion_behaviors` for real variation before calling the MP4 review-ready.
+   - Transitions should be hand-picked by beat, not default fade-to-black. Use smooth FFmpeg transitions such as wipes, pushes, slides, flashes, and manga-panel swipes where they match the moment, while preserving absolute cut timing.
+   - Transition SFX should be bound deterministically to the actual transition timestamp on selected cuts. The opening thirty seconds should use frequent noticeable transition cues such as swipe-up flash, swipe-down whoosh, scene-card whoosh, impact flash, and manga-panel slide; from 30-180 seconds, keep transition SFX selective but still active on scene changes, system/UI reveals, reversals, humiliations, status turns, and curiosity pivots. The LLM audio planner should not author generic edit-transition whooshes/pops/snaps as narrative SFX.
+   - Use the transition edit plan to choose true FFmpeg `xfade` transitions and transition SFX together. This borrows the useful idea from xfade chaining tools: video transitions are edit decisions. Because Goldflow uses one continuous mixed narration track, do not `acrossfade` the final audio between clips; instead, render/edit adds selected transition SFX on top of the continuous mix.
+   - Opening retention QA must check visual cuts, transition SFX, and score drops together across the first 3 minutes. In the first 30 seconds, expect visible cut changes every 2-4 seconds when narration supports it. From 30-180 seconds, expect cuts often enough to feel hand edited, usually every 4-7 seconds during escalation. Transition SFX should align within roughly one frame of selected cuts, and score drops should be reserved for sustained hook/ramp turns rather than every edit.
    - Subtitles should be yellow text with small black outline and no box/background.
    - Subtitle text should come from the final approved/stitch script; Whisper provides timing anchors only.
    - Use the hardened prompt artifact so render image lookup matches approved scene prompts.
    - Final MP4s must be upload-safe `yuv420p`; verify format, duration, fps, audio codec, and size after render.
+   - Audit rendered cut times against transcript/visual-beat `start_sec`. A final MP4 with the right total duration is not enough if individual images drift from the story.
    - Extract QA frames and spot-check final prompt/image/ref consistency before treating the render as publishable.
+
+23. Upload packaging.
+   - Generate title, thumbnail, and description hooks after the story/render is understood.
+   - Use proven channel packaging recipes before generic recap phrasing. Current strongest hooks are humiliation and simp framing: "wanted to humiliate me", "world's biggest simp", "my system awakened", "regressed", "left me for boss/rich man", and concrete sacrifice/debt proof.
+   - Use Codex/OpenAI image generation by default for final thumbnail base art. Thumbnail composition is packaging, not production scene imagegen; it should be purpose-built for click readability.
+   - Generate thumbnail base art with no baked text, then add exact text, yellow bubble arrows, labels, badges, white glow, and black outlines locally for spelling and style control.
+   - A high-CTR thumbnail should have one dominant emotional subject, one clear humiliation/reversal target, mobile-readable faces, high contrast, and at most a few short words such as `SIMP`, `LOSER`, `SYSTEM ACTIVATED`, `HUMILIATED`, or `REGRESSED`.
 
 ## Current Model And Provider Choices
 
@@ -192,10 +222,16 @@ The approved narration script is production truth. The pipeline should extract, 
 - Timing: local Whisper word timing on the final stitched narration.
 - SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
 - SFX prompting: concrete source/material/action/space prompts, short clean effects, no story-summary prompts, no melody, no speech, no crowd dialogue.
+- SFX bank maintenance: run `goldflow sfx-bank rebuild` after importing or generating legacy bank assets, then `goldflow sfx-bank audit`. Use `goldflow sfx-bank list --status needs_review --query <term>` for spot-listen batches. Reject bad sounds with `goldflow sfx-bank reject --cue <cue_id> [--asset <asset_id>]`; promote a known-good alternate with `goldflow sfx-bank prefer --cue <cue_id> --asset <asset_id>`. Reuse only explicitly `available` bank assets, and prefer proven edit SFX instead of regenerating common whoosh-pop, manga snap, system ping, crowd gasp, room hush, screen-scan zip, camera flash pop, and low sub impact cues.
 - Ambience assets: generated with the SFX model as loopable nonmusical beds. Plans should mark them with `recurrence_class: "ambience"`, `loop: true`, short `asset_duration_sec`, longer timeline `duration_sec`, and low gain around -34 to -28 dB.
 - Score beds: local ACE-Step 1.5 is preferred when intentionally using chapter score beds. Current default model pair is DiT `acestep-v15-turbo` and LM `acestep-5Hz-lm-1.7B`. ModelsLab music generation is not the preferred production score path.
-- Score drops: preferred scoring mode for narration-led recaps when music should be sparse. Use twenty to thirty-five short ACE-Step riser/hit accents, timed from Whisper, on focal drama, hype, reveal, reversal, payoff, escape, and cliffhanger beats.
-- Image model: ModelsLab Flux Klein.
+- Score drops: preferred scoring mode for narration-led recaps when music should be sparse. Use twenty to thirty-five short ACE-Step riser/hit accents for normal runs; for loud retention/final-review runs, use chunked score planning around sixty to eighty held ACE-Step drops, timed from Whisper, on focal drama, hype, reveal, reversal, payoff, escape, and cliffhanger beats.
+- Score bank status: ACE-Step drops are currently generated per episode under `assets/audio/ace_step_score_drops`; they are not automatically a curated reusable score bank. Promote reusable score-drop prompts/assets only after spot-listen and explicit approval.
+- Score bank maintenance: run `goldflow score-bank rebuild` to index episode-local ACE-Step drops, then `goldflow score-bank audit`. Use `goldflow score-bank list --status needs_review --query <tag>` for review batches; promote with `goldflow score-bank approve --id <bank_id>` and reject with `goldflow score-bank reject --id <bank_id> --note <reason>`. Keep this bank for reusable score-drop presets only; do not replace current-story score planning with random old drops.
+- Image model: ModelsLab Flux Klein by default.
+- Explicit Codex/OpenAI imagegen runs: before any batch, run a one-image probe and verify that a real raster was imported into `assets/images` or `assets/images/references`. A nested Codex response that returns text/JSON success without a new raster is a failed provider probe; stop or use an approved fallback before spending image budget. If direct built-in Codex/OpenAI image generation is used manually, import each selected real raster with `goldflow imagegen import-codex`; partial reports with `missing_image_count > 0` are proof batches only and are not full-render image reports.
+- Codex/OpenAI manual or subagent cuts must be generated into isolated one-cut staging folders. Do not actively generate into shared wave folders or copy the newest/global Codex cache raster; every worker stages exactly one PNG named for its assigned image ID and reports SHA-256. Import gates must reject duplicate hashes across distinct accepted image IDs. Repairs use fresh isolated folders and must not reuse stale staged or cached rasters.
+- Before render, audit accepted image hashes from `imagegen_report_<episode>.json`. Any duplicate hash across distinct image IDs blocks render until the wrong/stale cut is regenerated, imported, and the duplicate audit passes.
 - Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
 - Render audio: one continuous longform mix containing narration, SFX, and score.
 - Render loudness: narration raised at longform mix with `--narration-volume-db 2` as the production starting point.
@@ -204,6 +240,7 @@ The approved narration script is production truth. The pipeline should extract, 
 ## Command Order
 
 ```bash
+node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_01 --title <episode-title> --source <chatbot-output.md>
 node bin/goldflow.mjs ingest source --channel <channel> --series <series> --week <week> --episode ep_01 --source <chatbot-output.md>
 node bin/goldflow.mjs script approve --channel <channel> --series <series> --week <week> --episode ep_01 --hash <script_clean_sha256>
 node bin/goldflow.mjs script targeted --channel <channel> --series <series> --week <week> --episode ep_01
@@ -212,16 +249,22 @@ node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <w
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --score-mode drops_only --sfx-target-count 90 --score-target-drops 24
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2
-node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --score-mode drops_only --retention-mix true --sfx-target-count 190 --sfx-target-max 260 --score-target-drops 58 --score-target-drops-max 80 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --ambience-min-count 20 --ambience-ideal-min-count 22 --ambience-ideal-max-count 28
+# Score-only improvement or fallback when the full enrichment prompt is too large:
+node bin/goldflow.mjs audio score-drops-chunked --channel <channel> --series <series> --week <week> --episode ep_01 --score-target-drops 72 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --chunk-sec 360 --chunk-overlap-sec 18 --concurrency 3
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1 --outputBase ep_01-<channel>-retention-final --reportSuffix -retention-final
+node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01 --hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2 --retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --references-only true --reference-concurrency 6
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --references-only true --reference-concurrency 6
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual harden --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --sample-count 14
-node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 6 --reference-concurrency 6
-node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json
+node bin/goldflow.mjs visual engagement --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --max-events 7
+node bin/goldflow.mjs visual transitions --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 6 --reference-concurrency 6
+# Optional for direct/manual Codex/OpenAI proof batches:
+node bin/goldflow.mjs imagegen import-codex --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --image-id <image_id> --source <codex-generated-raster.png> --output <episode-dir>/imagegen_report_codex_manual_ep_01.json
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
 ```
 
 Small-batch visual authoring test:
@@ -239,8 +282,8 @@ SFX-only audio variant:
 
 ```bash
 node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --sfx-only true --sfx-target-count 45
-node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --skip-score true --sfx-boost-db -4 --narration-volume-db 2 --outputBase ep_01-<channel>-qwen-sfx-only --reportSuffix -sfx-only
-node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --audio <episode-dir>/assets/audio/longform_mix/ep_01-<channel>-qwen-sfx-only.m4a --prompts <episode-dir>/section_image_prompts_reviewed.json --output <episode-dir>/assets/renders/<title>-sfx-only.mp4 --report-output <episode-dir>/render_report_ep_01-sfx-only.json
+node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --skip-score true --narration-volume-db 2 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1 --outputBase ep_01-<channel>-qwen-sfx-only --reportSuffix -sfx-only
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --audio <episode-dir>/assets/audio/longform_mix/ep_01-<channel>-qwen-sfx-only.m4a --prompts <episode-dir>/section_image_prompts_hardened.json --output <episode-dir>/assets/renders/<title>-sfx-only.mp4 --report-output <episode-dir>/render_report_ep_01-sfx-only.json --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
 ```
 
 ## Next Production Run Checklist
@@ -269,17 +312,18 @@ Use this checklist before spending generation time:
    - SFX prompts must name the source, material, action, space, and intensity. Example: `short cold crystalline digital transaction chime, quick attack, clean decay, subtle corporate interface texture`.
    - Use local ACE-Step for score drops or any intentional score beds:
      `ANIFACTORY_SCORE_PROVIDER=local_ace_step`.
-   - Default for this style should be drops-only scoring:
-     `--score-mode drops_only --sfx-target-count 90 --score-target-drops 24`.
-   - Keep SFX audible but controlled. Current mix starting point:
-     `--sfx-boost-db -4 --score-volume-db -27 --narration-volume-db 2`.
+   - Default for this style should be drops-only scoring; for final retention passes, prefer chunked score planning around 60-80 drops:
+     `audio score-drops-chunked --score-target-drops 72 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --chunk-sec 360 --concurrency 3`.
+   - Keep SFX audible but controlled. Current narrator-forward retention mix starting point:
+     `--narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`.
+   - Transition SFX is handled by `visual transitions` plus render, not by the audio enrichment planner or longform-bed default.
    - Check the final longform mix for clipping and intelligibility. Use `--narration-volume-db 3` only if the limiter/loudness check passes.
    - Do not generate production score beds with ModelsLab music unless explicitly requested.
-   - Optional score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on focal beats, mixed by ducking the base score bed.
+   - Optional score-drop layer: add twenty to thirty-five short ACE-Step riser/hit accents on focal beats for ordinary runs; use 60-80 held ACE-Step drops for loud retention/final-review runs, mixed by ducking the base score bed if one exists.
 
 5. Visuals
    - Run visual beats before prompt authoring.
-   - Target beat duration: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
+   - Target beat duration: normal longform average near 8 seconds, but first-30 hook mode should produce roughly 8-12 distinct cuts at about 2-4 seconds each.
    - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
    - Use reference-only generation first, then selectively regenerate failed refs with `--reference-ids`.
    - Character state refs are definitive for identity and wardrobe.
@@ -293,9 +337,15 @@ Use this checklist before spending generation time:
 6. Render
    - Render from the continuous mixed audio track.
    - Use final-script subtitles timed to Whisper, not Whisper-recognized text.
+   - If `engagement_overlay_plan_<episode>.json` is present and passed, spot-check that bubbles do not cover faces, subtitles, or key UI, and that the prompt feels native to the current story beat.
    - Subtitle style: yellow text, small black outline, no background box.
-   - Motion style: fast transitions and intentional profile-based Ken Burns, not random movement.
+   - Motion style: premium profile-based Ken Burns by default: `--motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`.
+   - Preserve absolute visual cut `start_sec`; do not globally scale cut durations. Probe motion clip durations and audit rendered image timing against transcript/visual beats.
    - Verify final MP4 codec/pixel format with `ffprobe`, especially `yuv420p` for upload compatibility.
+
+7. Upload packaging
+   - Package with proven channel hooks: humiliation, simp, system awakening, regression, boss/rich-man betrayal, and concrete sacrifice/debt.
+   - Use Codex/OpenAI for a purpose-built thumbnail base, then add exact short bubble text and yellow bubble arrows locally.
 
 ## Change Policy
 

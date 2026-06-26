@@ -13,7 +13,7 @@ const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
-const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
+const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const visualReferencePlanPath = flags.referencePlan ?? flags["reference-plan"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const imageDir = path.join(episodeDir, "assets", "images");
@@ -30,6 +30,8 @@ const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-refer
 const allowUnhardenedPrompts = flags["allow-unhardened-prompts"] === "true";
 const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ?? null;
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
+const confirmImageProvider = flags["confirm-image-provider"] === "true";
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -77,6 +79,26 @@ async function exists(filePath) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function assertRunIdentityImageProvider() {
+  const runIdentity = await readJson(runIdentityPath, null);
+  if (!runIdentity) {
+    throw new Error(`Missing run identity preflight: ${runIdentityPath}. Run "goldflow run preflight" before imagegen.`);
+  }
+  for (const [key, actual, expected] of [
+    ["channel", channel, runIdentity.channel],
+    ["series", series, runIdentity.series_slug],
+    ["week", week, runIdentity.week],
+    ["episode", episode, runIdentity.episode],
+  ]) {
+    if (actual !== expected) throw new Error(`Run identity mismatch for ${key}: command has ${actual}, run_identity.json has ${expected}.`);
+  }
+  const lockedProvider = normalizeImageProvider(runIdentity.image_provider ?? "modelslab");
+  if (lockedProvider !== imageProvider && !confirmImageProvider) {
+    throw new Error(`Image provider mismatch: run_identity.json locks ${lockedProvider}, command requested ${imageProvider}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
+  }
+  return runIdentity;
 }
 
 function requestedIds() {
@@ -311,7 +333,19 @@ async function runPool(items, worker, limit) {
   async function next() {
     while (index < items.length) {
       const current = index++;
-      results[current] = await worker(items[current], current);
+      try {
+        results[current] = await worker(items[current], current);
+      } catch (error) {
+        const item = items[current] ?? {};
+        const id = item.image_id ?? item.ref_id ?? `item_${current}`;
+        console.error(`${id} generation failed: ${error.message}`);
+        results[current] = {
+          image_id: item.image_id,
+          ref_id: item.ref_id,
+          status: "failed",
+          error: error.message,
+        };
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
@@ -362,14 +396,22 @@ async function generateOne(prompt) {
   return { image_id: prompt.image_id, status: "generated", image_path: generated.downloaded_path ?? outputPath, prompt_hash: promptHash, image_provider: imageProvider, generated };
 }
 
-async function generateReference(target, styleRefPath = null) {
+async function generateReference(target, styleRefPath = null, referenceLookup = new Map(), characterStateRefs = []) {
   const outputPath = referencePathFor(target);
-  const prompt = referencePrompt(target);
+  const stateRef = characterStateRefs.find((ref) => ref.source_ref_id === target.ref_id);
+  const baseIdentityRefId = stateRef?.base_identity_ref_id ?? target.identity_ref_id ?? target.source_identity_ref_id ?? null;
+  const baseIdentityPath = baseIdentityRefId ? referenceLookup.get(baseIdentityRefId) : null;
+  const prompt = baseIdentityPath
+    ? `${referencePrompt(target)}\n\nUse the first attached image as the exact facial likeness and identity anchor for ${stateRef?.character ?? target.subject}. Preserve the same face, age impression, hair color, hairline, and core facial structure; change only the requested wardrobe, posture, expression, and emotional state.`
+    : referencePrompt(target);
   const promptHash = sha256(prompt);
   if (!forceReferences && await referenceFresh(target, outputPath)) {
     return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
   }
-  const referenceImagePaths = target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : [];
+  const referenceImagePaths = [
+    ...(baseIdentityPath ? [baseIdentityPath] : []),
+    ...(target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : []),
+  ].slice(0, 4);
   const generated = await generateProviderImage({
     prompt,
     outputPath,
@@ -384,6 +426,7 @@ async function generateReference(target, styleRefPath = null) {
     prompt_hash: promptHash,
     source_reference_plan_path: visualReferencePlanPath,
     reference_image_paths: referenceImagePaths,
+    base_identity_ref_id: baseIdentityRefId,
     image_provider: imageProvider,
     model: imageProvider === "codex_imagegen" ? generated.model : (target.image_model_route ?? "flux-klein"),
     generated,
@@ -408,23 +451,39 @@ async function generateReferences() {
   }
   await fs.mkdir(referenceDir, { recursive: true });
   const referenceScope = requestedReferenceIds();
-  const targets = referencePlan.reference_targets
-    .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true)
+  const existingReferenceEntries = [
+    ...(referencePlan?.reference_targets ?? [])
+      .filter((target) => target.ref_id && target.reference_image_path)
+      .map((target) => [target.ref_id, target.reference_image_path]),
+    ...(characterRefs?.character_state_refs ?? [])
+      .filter((ref) => ref.source_ref_id && ref.reference_image_path)
+      .map((ref) => [ref.source_ref_id, ref.reference_image_path]),
+  ];
+  const requestedTargets = referencePlan.reference_targets
+    .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true || referenceScope.has(target.ref_id))
     .filter((target) => !referenceScope.size || referenceScope.has(target.ref_id));
+  const targets = [];
+  for (const target of requestedTargets) {
+    if (!forceReferences && target.reference_image_path && await exists(target.reference_image_path)) continue;
+    targets.push(target);
+  }
   const styleTarget = targets.find((target) => isStyleReferenceTarget(target));
   const results = [];
-  let styleRefPath = null;
+  const existingStyleTarget = referencePlan.reference_targets.find((target) => isStyleReferenceTarget(target) && target.reference_image_path);
+  let styleRefPath = existingStyleTarget && await exists(existingStyleTarget.reference_image_path)
+    ? existingStyleTarget.reference_image_path
+    : null;
+  const referenceById = new Map(existingReferenceEntries);
   if (styleTarget) {
-    const result = await generateReference(styleTarget, null);
+    const result = await generateReference(styleTarget, null, referenceById, characterRefs?.character_state_refs ?? []);
     results.push(result);
+    referenceById.set(result.ref_id, result.image_path);
     styleRefPath = result.image_path;
   }
   const remaining = targets.filter((target) => target.ref_id !== styleTarget?.ref_id);
-  results.push(...await runPool(remaining, (target) => generateReference(target, styleRefPath), referenceConcurrency));
-  const referenceById = new Map([
-    ...results.map((row) => [row.ref_id, row.image_path]),
-    ...(characterRefs?.character_state_refs ?? []).filter((ref) => ref.source_ref_id && ref.reference_image_path).map((ref) => [ref.source_ref_id, ref.reference_image_path]),
-  ]);
+  const remainingResults = await runPool(remaining, (target) => generateReference(target, styleRefPath, referenceById, characterRefs?.character_state_refs ?? []), referenceConcurrency);
+  results.push(...remainingResults);
+  for (const row of remainingResults) referenceById.set(row.ref_id, row.image_path);
   const updatedReferencePlan = {
     ...referencePlan,
     reference_targets: referencePlan.reference_targets.map((target) => ({
@@ -470,6 +529,7 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
 }
 
 async function main() {
+  const runIdentity = await assertRunIdentityImageProvider();
   const referenceRun = await generateReferences();
   if (referencesOnly) {
     const report = {
@@ -480,6 +540,8 @@ async function main() {
       week,
       episode,
       image_provider: imageProvider,
+      run_identity_path: runIdentityPath,
+      run_identity_image_provider: runIdentity.image_provider ?? null,
       prompt_plan_path: promptPath,
       visual_reference_plan_path: visualReferencePlanPath,
       character_state_refs_path: characterStateRefsPath,
@@ -523,6 +585,8 @@ async function main() {
     prompt_plan_path: promptPath,
     prompt_plan_hash: promptPlanHash,
     image_provider: imageProvider,
+    run_identity_path: runIdentityPath,
+    run_identity_image_provider: runIdentity.image_provider ?? null,
     image_dir: imageDir,
     concurrency,
     image_count: mergedResults.length,

@@ -21,6 +21,9 @@ const outputPath = flags.output ?? path.join(episodeDir, "visual_reference_plan.
 const characterStateRefsOutputPath = flags.characterStateRefs
   ?? flags["character-state-refs"]
   ?? path.join(path.dirname(outputPath), "character_state_refs.json");
+const visualStyleBiblePath = flags.visualStyleBible ?? flags["visual-style-bible"] ?? path.join(weekDir, "visual_style_bible.json");
+const characterBiblePath = flags.characterBible ?? flags["character-bible"] ?? path.join(weekDir, "character_bible.json");
+const episodeVisualDirectionPath = flags.episodeVisualDirection ?? flags["episode-visual-direction"] ?? path.join(episodeDir, "episode_visual_direction.md");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -42,6 +45,14 @@ function sha256(value) {
 async function readJson(filePath, fallback = null) {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+async function readText(filePath, fallback = "") {
+  try {
+    return await fs.readFile(filePath, "utf8");
   } catch {
     return fallback;
   }
@@ -90,7 +101,15 @@ function compactScene(scene) {
   };
 }
 
-function buildPrompt(semanticPlan, { chunkLabel = null } = {}) {
+function visualGuidanceBlock(guidance = {}) {
+  return JSON.stringify({
+    visual_style_bible: guidance.visualStyleBible ?? null,
+    character_bible: guidance.characterBible ?? null,
+    episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 5000),
+  }, null, 2);
+}
+
+function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {} } = {}) {
   const compact = {
     source_script_hash: semanticPlan.source_script_hash,
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -132,6 +151,9 @@ Rules:
 - Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
 - Return only valid JSON.
 
+VISUAL BIBLES AND OPERATOR DIRECTION:
+${visualGuidanceBlock(guidance)}
+
 SEMANTIC PLAN:
 ${JSON.stringify(compact, null, 2)}
 
@@ -169,10 +191,10 @@ Return:
     }
   ],
   "warnings": []
-}`;
+	}`;
 }
 
-function buildMergePrompt(semanticPlan, chunkPlans) {
+function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}) {
   const compact = {
     source_script_hash: semanticPlan.source_script_hash,
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -237,6 +259,9 @@ Rules:
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
 - Return only valid JSON.
+
+VISUAL BIBLES AND OPERATOR DIRECTION:
+${visualGuidanceBlock(guidance)}
 
 EPISODE SUMMARY:
 ${JSON.stringify(compact, null, 2)}
@@ -548,13 +573,13 @@ function chunkArray(items, size) {
   return chunks;
 }
 
-async function createReferencePlan(semanticPlan, stageName) {
-  const useChunking = isLocalLLMRoute(stageName)
-    && flags["visual-ref-chunking"] !== "false"
+async function createReferencePlan(semanticPlan, stageName, guidance = {}) {
+  const useLocalRoute = isLocalLLMRoute(stageName);
+  const useChunking = flags["visual-ref-chunking"] !== "false"
     && semanticPlan.scenes.length > Number(flags["visual-ref-single-call-max-scenes"] ?? 12);
   if (!useChunking) {
-    const prompt = buildPrompt(semanticPlan);
-    return isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+    const prompt = buildPrompt(semanticPlan, { guidance });
+    return useLocalRoute ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
   }
 
   const sceneChunks = chunkArray(semanticPlan.scenes, Number(flags["visual-ref-chunk-scenes"] ?? 8));
@@ -566,8 +591,11 @@ async function createReferencePlan(semanticPlan, stageName) {
       scenes: sceneChunks[index],
       scene_count: sceneChunks[index].length,
     };
-    const prompt = buildPrompt(chunkSemanticPlan, { chunkLabel: `chunk ${index + 1} of ${sceneChunks.length}` });
-    const llm = await callLocal(prompt, `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000));
+    const prompt = buildPrompt(chunkSemanticPlan, { chunkLabel: `chunk ${index + 1} of ${sceneChunks.length}`, guidance });
+    const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
+    const llm = useLocalRoute
+      ? await callLocal(prompt, chunkStageName, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000))
+      : await callCodex(prompt, chunkStageName);
     if (!Array.isArray(llm.parsed.reference_targets) || !llm.parsed.reference_targets.length) {
       throw new Error(`Visual reference chunk ${index + 1}/${sceneChunks.length} returned no reference_targets.`);
     }
@@ -575,11 +603,15 @@ async function createReferencePlan(semanticPlan, stageName) {
     console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: accepted ${llm.parsed.reference_targets.length} targets`);
   }
   console.error(`visual refs merge: ${chunkPlans.length} chunk plans`);
-  const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans);
-  const merged = await callLocal(mergePrompt, `${stageName}_merge`, Number(flags["visual-ref-merge-max-tokens"] ?? 8000));
+  const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans, guidance);
+  const mergeStageName = `${stageName}_merge`;
+  const merged = useLocalRoute
+    ? await callLocal(mergePrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
+    : await callCodex(mergePrompt, mergeStageName);
   return {
-    provider: "local-qwen",
-    model: getLLMModel(stageName),
+    provider: merged.provider,
+    model: useLocalRoute ? getLLMModel(stageName) : merged.model ?? "codex_cli_default",
+    output_path: merged.output_path ?? null,
     chunked: true,
     chunk_count: sceneChunks.length,
     parsed: merged.parsed,
@@ -588,10 +620,16 @@ async function createReferencePlan(semanticPlan, stageName) {
 }
 
 async function main() {
-  const semanticPlan = await readJson(semanticPlanPath, null);
+  const [semanticPlan, visualStyleBible, characterBible, episodeVisualDirection] = await Promise.all([
+    readJson(semanticPlanPath, null),
+    readJson(visualStyleBiblePath, null),
+    readJson(characterBiblePath, null),
+    readText(episodeVisualDirectionPath, ""),
+  ]);
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   const stageName = `${episode}_visual_reference_plan`;
-  const llm = await createReferencePlan(semanticPlan, stageName);
+  const guidance = { visualStyleBible, characterBible, episodeVisualDirection };
+  const llm = await createReferencePlan(semanticPlan, stageName, guidance);
   let referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
   if (flags["deterministic-location-seeds"] === "true") {
     referenceTargets = ensureLocationReferenceTargets(referenceTargets, semanticPlan.scenes);
@@ -599,6 +637,7 @@ async function main() {
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
   assertPositiveAnchors(referenceTargets, characterStateRefs);
+  const sourceArtifactPaths = [semanticPlanPath, visualStyleBiblePath, characterBiblePath, episodeVisualDirectionPath];
   const report = {
     schema: "goldflow_visual_reference_plan_v1",
     status: "passed",
@@ -607,8 +646,13 @@ async function main() {
     week,
     episode,
     source_script_hash: semanticPlan.source_script_hash,
-    source_artifact_paths: [semanticPlanPath],
-    source_hashes: Object.fromEntries((await Promise.all([semanticPlanPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: sourceArtifactPaths,
+    source_hashes: Object.fromEntries((await Promise.all(sourceArtifactPaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    operator_visual_guidance: {
+      visual_style_bible_path: visualStyleBible ? visualStyleBiblePath : null,
+      character_bible_path: characterBible ? characterBiblePath : null,
+      episode_visual_direction_path: episodeVisualDirection.trim() ? episodeVisualDirectionPath : null,
+    },
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     policy: "Reference strategy only. Manual review must approve prompt anchors before reference generation or production imagegen.",
     reference_targets: referenceTargets,

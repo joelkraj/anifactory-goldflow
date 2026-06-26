@@ -39,19 +39,20 @@ const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(epi
 
 const plannerVersion = 1;
 const plannerName = "llm_audio_enrichment_v1";
-const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? 220, 90, 360);
-const scoreDropTargetMax = clampInt(flags["score-target-drops-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS_MAX ?? 60, 35, 90);
-const scoreDropMinDurationSec = Number(flags["score-drop-min-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MIN_DURATION_SEC ?? 5);
-const scoreDropMaxDurationSec = Number(flags["score-drop-max-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MAX_DURATION_SEC ?? 15);
+const retentionMix = flags["retention-mix"] === "true" || /^(true|1|yes)$/i.test(String(process.env.ANIFACTORY_AUDIO_RETENTION_MIX ?? ""));
+const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? (retentionMix ? 320 : 220), 90, 420);
+const scoreDropTargetMax = clampInt(flags["score-target-drops-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS_MAX ?? (retentionMix ? 90 : 60), 35, 110);
+const scoreDropMinDurationSec = Number(flags["score-drop-min-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MIN_DURATION_SEC ?? (retentionMix ? 8 : 5));
+const scoreDropMaxDurationSec = Number(flags["score-drop-max-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MAX_DURATION_SEC ?? (retentionMix ? 18 : 15));
 const openingSfxMinCount = clampInt(flags["opening-sfx-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_MIN_COUNT ?? 14, 8, 28);
 const openingSfxIdealMinCount = clampInt(flags["opening-sfx-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MIN_COUNT ?? 16, openingSfxMinCount, 32);
 const openingSfxIdealMaxCount = clampInt(flags["opening-sfx-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MAX_COUNT ?? 20, openingSfxIdealMinCount, 36);
-const ambienceMinCount = clampInt(flags["ambience-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_MIN_COUNT ?? 12, 6, 28);
-const ambienceIdealMinCount = clampInt(flags["ambience-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MIN_COUNT ?? 14, ambienceMinCount, 32);
-const ambienceIdealMaxCount = clampInt(flags["ambience-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MAX_COUNT ?? 20, ambienceIdealMinCount, 36);
-const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? 90, 24, sfxTargetMax);
+const ambienceMinCount = clampInt(flags["ambience-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_MIN_COUNT ?? (retentionMix ? 20 : 12), 6, 36);
+const ambienceIdealMinCount = clampInt(flags["ambience-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MIN_COUNT ?? (retentionMix ? 24 : 14), ambienceMinCount, 40);
+const ambienceIdealMaxCount = clampInt(flags["ambience-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MAX_COUNT ?? (retentionMix ? 30 : 20), ambienceIdealMinCount, 44);
+const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? (retentionMix ? 220 : 90), 24, sfxTargetMax);
 const scoreTargetChapters = clampInt(flags["score-target-chapters"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_CHAPTERS ?? 8, 5, 12);
-const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? 24, 0, scoreDropTargetMax);
+const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? (retentionMix ? 64 : 24), 0, scoreDropTargetMax);
 const scoreMode = String(flags["score-mode"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_MODE ?? "chapters").toLowerCase();
 const sfxOnly = flags["sfx-only"] === "true";
 const scoreDropsOnly = !sfxOnly && /^(drops|drops_only|moments|moment_only)$/.test(scoreMode);
@@ -527,7 +528,9 @@ async function validateAudioAsset(filePath, targetDurationSec, kind) {
 async function loadManifest() {
   const manifest = await readJson(sfxManifestPath, null);
   if (manifest) {
-    manifest.cues ??= {};
+    manifest.cues = Array.isArray(manifest.cues)
+      ? Object.fromEntries(manifest.cues.filter(Boolean).map((cue) => [slug(cue.cue_id ?? cue.id ?? cue.name, "cue"), cue]))
+      : (manifest.cues ?? {});
     return manifest;
   }
   return {
@@ -545,8 +548,8 @@ async function saveManifest(manifest) {
 }
 
 function preferredAsset(cue) {
-  return cue?.assets?.find((asset) => asset.asset_id === cue.preferred_asset_id)
-    ?? [...(cue?.assets ?? [])].reverse().find((asset) => asset?.path && existsSync(asset.path))
+  return cue?.assets?.find((asset) => asset.asset_id === cue.preferred_asset_id && asset.status === "available")
+    ?? [...(cue?.assets ?? [])].reverse().find((asset) => asset?.path && existsSync(asset.path) && asset.status === "available")
     ?? null;
 }
 
@@ -568,7 +571,7 @@ function findTightSfxBankMatch(manifest, event) {
   let best = null;
   for (const cue of Object.values(manifest.cues ?? {})) {
     const asset = preferredAsset(cue);
-    if (!asset?.path || !existsSync(asset.path) || asset.status === "rejected") continue;
+    if (!asset?.path || !existsSync(asset.path) || asset.status !== "available") continue;
     const text = [cue.cue_id, cue.generation_prompt, ...(cue.aliases ?? []), ...(cue.queries ?? []), asset.prompt].filter(Boolean).join(" ");
     const score = overlapScore(desired, text);
     if (!best || score > best.score) best = { cue, asset, score };
@@ -576,11 +579,48 @@ function findTightSfxBankMatch(manifest, event) {
   return best?.score >= Number(flags["sfx-bank-match-threshold"] ?? 0.62) ? best : null;
 }
 
+function sfxPromptQuality(event) {
+  if (event.loop || event.recurrence_class === "ambience") return { status: "passed", issues: [] };
+  const text = String(event.sound_description ?? "");
+  const lower = text.toLowerCase();
+  const issues = [];
+  const concreteTerms = /\b(?:whoosh|swipe|pop|snap|click|chime|ping|pulse|thump|hit|hush|gasp|laugh|applause|clink|buzz|vibration|paper|card|glass|screen|scan|static|door|footstep|metal|wood|fabric|table|phone|kiosk|keyboard|camera|flash|bell|sub|rumble|crack|shatter|flicker|glitch|beep|tick)\b/i;
+  const vagueTerms = /\b(?:bloom|pressure|energy|aura|truth|reveal tone|family reveal|dramatic|cinematic|tension|weight|absence|void|destiny|worship energy|throne shimmer|god shimmer|plain ordinary room tone)\b/i;
+  if (!concreteTerms.test(text)) issues.push("missing_concrete_sound_source_or_action");
+  if (vagueTerms.test(lower)) issues.push("abstract_or_poetic_audio_prompt");
+  if (text.split(/\s+/).length < 6) issues.push("too_short_to_control_generation");
+  return { status: issues.length ? "needs_review" : "passed", issues };
+}
+
+function hardenedSfxPrompt(event) {
+  const quality = sfxPromptQuality(event);
+  const description = String(event.sound_description ?? event.cue_id ?? "short clean sound effect").trim();
+  const palette = String(event.palette_note ?? "").trim();
+  const concreteInstruction = quality.issues.includes("abstract_or_poetic_audio_prompt") || quality.issues.includes("missing_concrete_sound_source_or_action")
+    ? "Translate any abstract story wording into a concrete physical or interface sound: clean whoosh, pop, snap, click, chime, pulse, sub thump, screen scan, glass tick, room hush, or paper movement."
+    : "";
+  const fullPrompt = [
+    description,
+    palette,
+    concreteInstruction,
+    "Single clean studio sound effect, dry and mixable, clear attack, controlled decay.",
+    "No speech, no vocals, no lyrics, no melody, no musical loop, no crowd dialogue, no harsh distortion, no clipping, no long reverb wash.",
+  ].filter(Boolean).join(" ");
+  if (fullPrompt.length <= 440) return fullPrompt;
+  const compactPrompt = [
+    description,
+    palette,
+    "Clean dry sound effect, clear attack, controlled decay.",
+    "No speech, vocals, lyrics, melody, crowd dialogue, clipping, or long reverb.",
+  ].filter(Boolean).join(" ");
+  return compactPrompt.length <= 440 ? compactPrompt : compactPrompt.slice(0, 440).trim();
+}
+
 async function generateSfxAsset(event) {
   const cueId = slug(event.cue_id ?? event.sound_description, "llm_sfx");
   const assetDuration = Number(event.asset_duration_sec ?? event.generation_duration_sec);
   const duration = Math.max(3, Math.min(12, Number.isFinite(assetDuration) ? assetDuration : (event.loop ? 10 : Number(event.duration_sec ?? 3) || 3)));
-  const prompt = `${event.sound_description}. ${event.palette_note ?? ""} Clean isolated sound effect, no speech, no music.`;
+  const prompt = hardenedSfxPrompt(event);
   const outDir = path.join(sfxAssetDir, cueId);
   await fs.mkdir(outDir, { recursive: true });
   const outPath = path.join(outDir, `${cueId}-${sha256(`${prompt}:${duration}`).slice(0, 12)}.wav`);
@@ -634,7 +674,10 @@ async function registerGeneratedSfx(manifest, event, generation) {
     model_license_note: "Generated with ModelsLab sound-generation model through /api/v7/voice/sound-generation; observed billing remains ledger-governed.",
     generated_at: nowIso(),
     status: generation.validation.status === "passed" ? "available" : "needs_regeneration",
-    validation: generation.validation,
+    validation: {
+      ...generation.validation,
+      prompt_quality: sfxPromptQuality(event),
+    },
     llm_enrichment: {
       planner: plannerName,
       source_episode: { channel, series, week, episode },
@@ -763,13 +806,42 @@ async function biblePacket() {
   return out;
 }
 
-function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
-  const bankSummary = Object.values(manifest.cues ?? {}).slice(0, 140).map((cue) => ({
+function bankCuePriority(cue) {
+  const asset = preferredAsset(cue);
+  const text = [cue?.cue_id, cue?.generation_prompt, ...(cue?.aliases ?? []), asset?.prompt].filter(Boolean).join(" ").toLowerCase();
+  let score = asset?.path ? 100 : 0;
+  const premiumTerms = [
+    "whoosh", "swipe", "sweep", "pop", "snap", "zip", "flash", "impact", "thump",
+    "system", "digital", "ping", "chime", "screen", "scan", "glitch", "holographic",
+    "hush", "gasp", "laugh", "applause", "crowd", "room", "phone", "buzz", "card",
+    "paper", "glass", "door", "kiosk", "transaction", "broadcast",
+  ];
+  for (const term of premiumTerms) {
+    if (text.includes(term)) score += 12;
+  }
+  if (/abstract|energy|vibe|tone|pressure|destiny|emotion/.test(text)) score -= 16;
+  return score;
+}
+
+function premiumBankSummary(manifest) {
+  return Object.values(manifest.cues ?? {})
+    .map((cue) => ({ cue, asset: preferredAsset(cue), priority: bankCuePriority(cue) }))
+    .filter((entry) => entry.asset?.path)
+    .sort((left, right) => right.priority - left.priority || String(left.cue.cue_id).localeCompare(String(right.cue.cue_id)))
+    .slice(0, 220)
+    .map(({ cue, asset, priority }) => ({
     cue_id: cue.cue_id,
     aliases: cue.aliases ?? [],
     generation_prompt: cue.generation_prompt ?? null,
-    has_available_asset: Boolean(preferredAsset(cue)?.path),
-  }));
+      preferred_asset_id: asset?.asset_id ?? null,
+      asset_prompt: asset?.prompt ?? null,
+      asset_duration_sec: asset?.duration_sec ?? null,
+      bank_priority: priority,
+    }));
+}
+
+function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
+  const bankSummary = premiumBankSummary(manifest);
   const modeInstruction = sfxOnly
     ? `SFX-ONLY MODE:
 - Build SFX events only.
@@ -784,9 +856,9 @@ function buildPrompt({ script, bibles, segments, durationSec, manifest }) {
 - Do not create continuous chapter beds, generic music ambience beds, or mechanical time-window music.
 - Each score drop needs: drop_id, segment_id, target_phrase, start_sec, duration_sec, gain_db, score_intent, story_function, intensity_score 1-10, ace_step_prompt, beat_reason.
 - start_sec must be on the real ${Math.round(durationSec)} second timeline; target_phrase anchors the same moment for audit.
-- Drops should be moment-directed scoring cues, not full songs or continuous background beds. Prefer ${Math.max(5, scoreDropMinDurationSec)} to ${Math.max(scoreDropMinDurationSec, scoreDropMaxDurationSec)} seconds per drop so major audience-feel moments can breathe, hang, and fade out easily. Use the longer end of the range for shame, silence, reversal, confession, system awakening, and payoff beats.
+- Drops should be moment-directed scoring cues, not full songs or continuous background beds. Prefer ${Math.max(5, scoreDropMinDurationSec)} to ${Math.max(scoreDropMinDurationSec, scoreDropMaxDurationSec)} seconds per drop so major audience-feel moments can breathe, hang, and fade out easily. Use the longer end of the range for shame, silence, reversal, confession, system awakening, speech payoffs, villain offer beats, and cliffhanger beats.
 - Prompts must be instrumental, no vocals/lyrics/speech/crowd noise, and palette-native to this episode.
-- Musical hits should feel earned and varied: low taiko pressure, bowed-metal dread, guqin scrape, dark cinematic rise, impact hit, cold trailing pulse.`
+- Musical drops should feel like held cinematic retention punctuation, not tiny one-shot stingers. Vary the palette: low taiko pressure, sub pulse, bowed-metal dread, cold glass shimmer, broadcast-screen resonance, elegant dark synth rise, impact hit, trailing pulse, brief silence-before-impact setup.`
     : `SCORE REQUIREMENTS:
 - Emit ${scoreTargetChapters} or fewer/more as the story beats require; do not use fixed 3-minute windows.
 - Each chapter needs: chapter_id, start_sec, end_sec, target_duration_sec, score_intent, story_function, intensity_score 1-10, gain_db, ace_step_prompt, beat_reason, sourcing_intent.
@@ -802,11 +874,11 @@ GENRE NEUTRALITY:
 Derive the sonic and musical palette from THIS story and bible. Do not use hardcoded genre templates. If this is finance/city/system, use that palette. If a future story is dungeon/monster/system, use that story's palette. Do not forbid or force any genre vocabulary globally.
 
 SFX REQUIREMENTS:
-- Emit about ${sfxTargetCount} abundant, beat-anchored SFX events across the full runtime, not sparse literal keyword hits.
-- The opening 30 seconds is a designed hook burst: place at least ${openingSfxMinCount} and ideally ${openingSfxIdealMinCount}-${openingSfxIdealMaxCount} audible SFX/transition cues in the first 30 seconds. Use the short sentence rhythm of the hook; do not stop at only a few literal hits.
-- Opening hook cues should include noticeable edit-transition sounds when appropriate: swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, or fast manga-panel slide. Treat these as transition SFX anchored to nearby spoken phrases, not visible narration.
-- After the opening, keep SFX consistently present but selective: punctuate scene transitions, ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals.
-- Transitions should be noticeable but not random. Use swipe/flash/whoosh cues at real scene turns, memory cuts, ledger windows, combat beats, and cliffhanger shifts.
+- Emit about ${sfxTargetCount} abundant, beat-anchored SFX events across the full runtime, not sparse literal keyword hits. In retention mode, keep the episode audibly alive after the hook: system pings, screen pulses, room hushes, crowd reactions, phone/card/object hits, and payoff impacts should appear throughout the whole timeline.
+- The opening 30 seconds is a designed hook burst: place at least ${openingSfxMinCount} and ideally ${openingSfxIdealMinCount}-${openingSfxIdealMaxCount} audible narrative SFX cues in the first 30 seconds. Use the short sentence rhythm of the hook; do not stop at only a few literal hits.
+- Do not plan generic edit-transition whooshes, swipes, pops, or scene-card snaps as normal LLM SFX. Those are applied deterministically by the edit/mix layer from actual cut timing. Only include a whoosh/snap/flash when it is a diegetic or story-specific sound source, such as a physical card snap, screen glitch, camera flash, system window, or object impact.
+- After the opening, keep SFX consistently present but selective: punctuate scene transitions, system activations, broadcast screens, glass towers, kiosk payments, crowd hush/laughter, card/message handling, refusal hits, belief-collapse glitches, crown/throne pressure, and major reversals.
+- Scene turns may receive narrative SFX when the story itself provides a concrete sound source, but pure edit-transition SFX belongs to the deterministic transition-audio pass, not this LLM plan.
 - Generate ambience as SFX, not score. Add at least ${ambienceMinCount} and ideally ${ambienceIdealMinCount}-${ambienceIdealMaxCount} loopable ambience events for major locations or atmosphere runs. Derive the actual locations from this story. These should be nonmusical environmental beds at low gain, loop true, duration_sec covering the scene span, and asset_duration_sec around 8-12 seconds for the generated loop clip.
 - Ambience should cover most non-score runtime by location zones; avoid leaving long stretches with no environmental floor unless the scene intentionally needs hard silence.
 - Ambience should sit elsewhere under the narration when there is no score drop. Use low gains around -34 to -28 dB, and avoid melody, rhythm, vocals, speech, or crowd dialogue.
@@ -824,8 +896,10 @@ SFX REQUIREMENTS:
 SFX GENERATION PROMPT RULES:
 - Write concrete sound descriptions, not story summaries.
 - Name the sound source, material, action, space, and intensity.
-- Keep each generated effect short and clean; avoid music, melody, vocals, speech, narration, and crowd dialogue inside SFX prompts.
+- Keep each generated effect short and clean; avoid music, melody, vocals, speech, narration, crowd dialogue, harsh distortion, clipping, and long reverb wash inside SFX prompts.
+- Avoid abstract-only phrases such as "throne pressure", "family reveal tone", "worship energy", "truth bloom", or "destiny shimmer" unless they are translated into a concrete source/action. Good replacements: low sub thump under glass chair lock, intimate single bell chime with cold glass tail, display-wall electrical flicker, screen-scan zip, paper-panel snap, camera flash pop.
 - For UI/system sounds, specify tone shape and texture: short crystalline digital chime, cold corporate transaction ping, low confirmation pulse, subtle holographic shimmer.
+- If a beat legitimately needs a non-diegetic sound accent, describe the concrete generated source and action. Avoid generic "transition whoosh" requests; those are handled separately by the edit layer.
 - For room/crowd sounds, specify nonverbal texture: brief wealthy-room laugh ripple, shocked gasp wave, applause swell, sudden room hush.
 - For object sounds, specify material and contact: cream paper card slid on polished table, phone vibration on fabric, glassware clink, wooden case set on metal dessert trolley.
 - Use dry, mixable sounds with clear attack and quick decay unless the cue is an intentional ambience.
@@ -833,6 +907,7 @@ SFX GENERATION PROMPT RULES:
 ${modeInstruction}
 
 BANKED SFX SUMMARY FOR POSSIBLE TIGHT MATCHES ONLY:
+Bank cue IDs and existing asset prompts are inventory hints, not a quality standard. Some legacy cue names are too abstract or too short. If you reuse a banked cue_id, still write a production-quality concrete sound_description for the event using the SFX GENERATION PROMPT RULES above. If a bank cue name says only "hook room hush flash", translate the event description into concrete source/action/space language such as "sudden large-room hush wave with a short camera-flash pop and clean decay".
 ${JSON.stringify(bankSummary, null, 2)}
 
 EPISODE BIBLES:
@@ -1337,6 +1412,7 @@ async function main() {
     timing_source: "local_whisper_word_timing",
     timing_gate: whisperTimingGate,
     policy: "LLM SFX enrichment is the primary cue source; deterministic regex SFX is fallback only. LLM decides sound intent and target phrase; deterministic code resolves target_phrase through local Whisper word timing and uses segment-relative placement only when a phrase miss passes the sanity envelope.",
+    retention_mix: retentionMix,
     palette: llm.parsed.palette ?? {},
     mix_rules: {
       narration_priority: "dominant",

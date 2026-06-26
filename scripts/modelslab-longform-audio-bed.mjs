@@ -28,6 +28,7 @@ const sfxBankManifestPath = path.join(dataRoot, "sfx_bank", "sfx_manifest.json")
 const scorePlanPath = flags.scorePlan ?? path.join(episodeDir, "score_chapter_plan.json");
 const scoreDropPlanPath = flags.scoreDropPlan ?? flags["score-drop-plan"] ?? path.join(episodeDir, `score_drop_plan_${episode}.json`);
 const sfxPlanPath = flags.sfxPlan ?? path.join(episodeDir, `sfx_event_plan_${episode}.json`);
+const promptPlanPath = flags.promptPlan ?? flags["prompt-plan"] ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
 const outputBase = flags.outputBase ?? `${episode}-${channel}-modelslab-qwen-scored-sfx`;
 const forceScore = flags["force-score"] === "true";
@@ -38,13 +39,23 @@ const maxDurationSec = Number(flags["max-duration-sec"] ?? 0);
 const reportSuffix = flags.reportSuffix ?? (maxDurationSec > 0 ? `-test-${Math.round(maxDurationSec)}s` : "");
 const scoreVolumeDb = Number(flags["score-volume-db"] ?? -26);
 const scoreDropVolumeDb = Number(flags["score-drop-volume-db"] ?? -18);
+const scoreDropBoostDb = Number(flags["score-drop-boost-db"] ?? 0);
 const scoreDropDuckDb = Number(flags["score-drop-duck-db"] ?? -8);
 const sfxVolumeBoostDb = Number(flags["sfx-boost-db"] ?? 0);
+const signatureSfxBoostDb = Number(flags["signature-sfx-boost-db"] ?? 0);
+const incidentalSfxBoostDb = Number(flags["incidental-sfx-boost-db"] ?? 0);
+const ambienceSfxBoostDb = Number(flags["ambience-sfx-boost-db"] ?? 0);
+const transitionSfxBoostDb = Number(flags["transition-sfx-boost-db"] ?? 0);
 const narrationVolumeDb = Number(flags["narration-volume-db"] ?? 0);
 const targetLufs = flags["target-lufs"] === undefined ? null : Number(flags["target-lufs"]);
 const truePeakDb = Number(flags["true-peak-db"] ?? -1.0);
 const loudnessRange = Number(flags["loudness-range"] ?? 11);
 const skipScore = flags["skip-score"] === "true";
+const transitionSfxEnabled = flags["transition-sfx"] === "true";
+const transitionSfxMaxCount = Number(flags["transition-sfx-max-count"] ?? 100);
+const transitionSfxMinGapSec = Number(flags["transition-sfx-min-gap-sec"] ?? 6.5);
+const transitionSfxBucketSec = Number(flags["transition-sfx-bucket-sec"] ?? 180);
+const transitionSfxBucketMax = Number(flags["transition-sfx-bucket-max"] ?? 9);
 
 let cachedKey = null;
 
@@ -384,20 +395,125 @@ function allSfxEvents(sfxPlan) {
   ].filter((event) => event?.asset_path);
 }
 
+function normalizeManifestCues(manifest) {
+  return Array.isArray(manifest?.cues)
+    ? Object.fromEntries(manifest.cues.filter(Boolean).map((cue) => [String(cue.cue_id ?? cue.id ?? cue.name), cue]))
+    : (manifest?.cues ?? {});
+}
+
 function preferredSfxAsset(cue) {
-  return cue?.assets?.find((asset) => asset.asset_id === cue.preferred_asset_id)
-    ?? [...(cue?.assets ?? [])].reverse().find((asset) => asset?.path)
+  return cue?.assets?.find((asset) => asset.asset_id === cue.preferred_asset_id && asset.status === "available")
+    ?? [...(cue?.assets ?? [])].reverse().find((asset) => asset?.path && asset.status === "available")
     ?? null;
 }
 
 async function latestSfxAssetByCueId() {
   const manifest = await readJson(sfxBankManifestPath, { cues: {} });
   const entries = new Map();
-  for (const [cueId, cue] of Object.entries(manifest.cues ?? {})) {
+  for (const [cueId, cue] of Object.entries(normalizeManifestCues(manifest))) {
     const asset = preferredSfxAsset(cue);
     if (asset?.path) entries.set(cueId, asset);
   }
   return entries;
+}
+
+function pickCue(bankMap, cueIds) {
+  for (const cueId of cueIds) {
+    const asset = bankMap.get(cueId);
+    if (asset?.path) return { cue_id: cueId, asset };
+  }
+  return null;
+}
+
+function pickCueCycle(bankMap, cueIds, index = 0) {
+  const rotated = cueIds.map((_, offset) => cueIds[(index + offset) % cueIds.length]);
+  return pickCue(bankMap, rotated);
+}
+
+function transitionCueForCut(cut, index, sceneChanged, bankMap) {
+  const text = [
+    cut.image_id,
+    cut.scene_id,
+    cut.visual_beat_action,
+    cut.visual_beat_script_excerpt,
+    cut.shot_manifest?.shot_job,
+    cut.shot_manifest?.foreground_action,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (index < 5) {
+    return pickCueCycle(bankMap, [
+      "hook_swipe_up_flash",
+      "hook_hard_scene_card_whoosh",
+      "hook_dark_paper_title_snap",
+      "hook_impact_flash_with_muted_sub_thud",
+      "swipe_up_flash",
+    ], index);
+  }
+  if (/\bmemory\b|first life|flashback|died on my knees|remembering/.test(text)) {
+    return pickCueCycle(bankMap, ["swipe_down_memory", "memory_overlay_whoosh", "hook_swipe_down_whoosh", "swipe_down_whoosh"], index);
+  }
+  if (/system|window|screen|broadcast|kiosk|floating number|number floated|glitch|phase|warning|goddess board|board went dark/.test(text)) {
+    return pickCueCycle(bankMap, ["system_scan_sweep", "status_scan_down", "map_scan_event", "system_contract_ping"], index);
+  }
+  if (/crown|throne|offer|refuse|mirror|collapse|crack|impact|reveal|warning/.test(text)) {
+    return pickCueCycle(bankMap, ["impact_flash", "impact_flash_soft", "dark_title_snap", "hard_scene_card_whoosh"], index);
+  }
+  if (sceneChanged) {
+    return pickCueCycle(bankMap, ["scene_whoosh", "hard_scene_card_whoosh", "dark_paper_title_snap", "swipe_up_flash"], index);
+  }
+  return pickCueCycle(bankMap, ["scene_whoosh", "swipe_up_flash"], index);
+}
+
+function buildDeterministicTransitionSfxEvents(promptPlan, bankMap, durationSec) {
+  if (!transitionSfxEnabled) return [];
+  const prompts = Array.isArray(promptPlan?.prompts) ? promptPlan.prompts : [];
+  const selected = [];
+  let lastStart = -Infinity;
+  const bucketCounts = new Map();
+  for (let index = 1; index < prompts.length; index += 1) {
+    const cut = prompts[index];
+    const start = Number(cut.start_sec);
+    if (!Number.isFinite(start) || start <= 0.35 || start >= durationSec) continue;
+    const previous = prompts[index - 1];
+    const sceneChanged = Boolean(previous?.scene_id && previous.scene_id !== cut.scene_id);
+    const text = [
+      cut.visual_beat_action,
+      cut.visual_beat_script_excerpt,
+      cut.shot_manifest?.shot_job,
+      cut.shot_manifest?.foreground_action,
+    ].filter(Boolean).join(" ");
+    const hook = start < 36;
+    const important = /\b(system|screen|board|broadcast|kiosk|memory|first life|crown|throne|offer|refuse|mirror|damien|vivienne|sarah|warning|phase|glitch|collapse|federation)\b/i.test(text);
+    if (!hook && !sceneChanged && !important) continue;
+    if (!hook && start - lastStart < transitionSfxMinGapSec) continue;
+    if (!hook && transitionSfxBucketSec > 0 && transitionSfxBucketMax > 0) {
+      const bucket = Math.floor(start / transitionSfxBucketSec);
+      const count = bucketCounts.get(bucket) ?? 0;
+      if (count >= transitionSfxBucketMax) continue;
+      bucketCounts.set(bucket, count + 1);
+    }
+    const picked = transitionCueForCut(cut, index, sceneChanged, bankMap);
+    if (!picked?.asset?.path) continue;
+    const gain = hook ? -17 : sceneChanged ? -20 : -23;
+    selected.push({
+      event_id: `det_transition_${String(selected.length + 1).padStart(3, "0")}`,
+      cue_id: picked.cue_id,
+      image_id: cut.image_id,
+      scene_id: cut.scene_id,
+      asset_path: picked.asset.path,
+      asset_id: picked.asset.asset_id ?? null,
+      start_sec: Number(Math.max(0, start - 0.035).toFixed(3)),
+      duration_sec: 0.65,
+      gain_db: gain,
+      recurrence_class: "transition",
+      category: "transition_sfx",
+      source: "deterministic_visual_cut_transition_sfx",
+      scene_changed: sceneChanged,
+      visual_beat_action: String(cut.visual_beat_action ?? cut.visual_beat_script_excerpt ?? "").slice(0, 220),
+    });
+    lastStart = start;
+    if (selected.length >= transitionSfxMaxCount) break;
+  }
+  return selected;
 }
 
 function eventStartSec(event, starts) {
@@ -413,6 +529,19 @@ function eventStartSec(event, starts) {
     : 0;
   const offset = Number.isFinite(Number(event.offset_sec)) ? Number(event.offset_sec) : 0;
   return Math.max(0, segmentStart + offset);
+}
+
+function eventSfxGainDb(event) {
+  const base = Number.isFinite(Number(event.gain_db)) ? Number(event.gain_db) : -18;
+  const recurrence = String(event.recurrence_class ?? event.category ?? "").toLowerCase();
+  const classBoost = recurrence.includes("transition")
+    ? transitionSfxBoostDb
+    : event.loop || recurrence.includes("ambience")
+    ? ambienceSfxBoostDb
+    : recurrence.includes("signature")
+      ? signatureSfxBoostDb
+      : incidentalSfxBoostDb;
+  return base + sfxVolumeBoostDb + classBoost;
 }
 
 async function ensureSfxEvents(sfxPlan) {
@@ -497,7 +626,7 @@ function validateScoreDropPlanForProduction(scoreDropPlan, scorePlan) {
   }
 }
 
-async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan, scoreDropRows, sfxPlan, durationSec, qwenReport }) {
+async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan, scoreDropRows, sfxPlan, promptPlan, bankMap, durationSec, qwenReport }) {
   await fs.mkdir(mixDir, { recursive: true });
   const wavPath = path.join(mixDir, `${outputBase}.wav`);
   const m4aPath = path.join(mixDir, `${outputBase}.m4a`);
@@ -505,6 +634,7 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
   const chapters = activeChapters(scorePlan, durationSec);
   const scoreDrops = activeScoreDrops(scoreDropPlan, durationSec);
   const events = eventsWithLockedSfxAssets(sfxPlan);
+  const transitionEvents = buildDeterministicTransitionSfxEvents(promptPlan, bankMap, durationSec);
   const existingEvents = [];
   const inputs = ["-i", narrationPath];
   const filters = [`[0:a]volume=${narrationVolumeDb}dB[narr]`];
@@ -532,7 +662,7 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     const start = Number(drop.start_sec ?? 0);
     if (maxDurationSec && start >= maxDurationSec) continue;
     const dropDuration = Math.max(0.5, Math.min(Number(drop.duration_sec ?? 6), durationSec - start));
-    const gain = Number.isFinite(Number(drop.gain_db)) ? Number(drop.gain_db) : scoreDropVolumeDb;
+    const gain = (Number.isFinite(Number(drop.gain_db)) ? Number(drop.gain_db) : scoreDropVolumeDb) + scoreDropBoostDb;
     inputs.push("-i", scoreDrop.asset_path);
     const label = `scoreDrop${inputIndex}`;
     const delay = Math.max(0, Math.round(start * 1000));
@@ -551,12 +681,29 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     const eventDuration = event.loop
       ? Math.max(0.5, Number.isFinite(eventEnd) ? eventEnd - start : Number(event.duration_sec ?? durationSec - start))
       : Math.max(0.25, Number(event.duration_sec ?? 3));
-    const gain = (Number.isFinite(Number(event.gain_db)) ? Number(event.gain_db) : -18) + sfxVolumeBoostDb;
+    const gain = eventSfxGainDb(event);
     if (event.loop) inputs.push("-stream_loop", "-1");
     inputs.push("-i", event.asset_path);
     const label = `sfx${inputIndex}`;
     const delay = Math.max(0, Math.round(start * 1000));
     filters.push(`[${inputIndex}:a]atrim=0:${Math.min(eventDuration, durationSec).toFixed(3)},asetpts=PTS-STARTPTS,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
+    labels.push(`[${label}]`);
+    inputIndex += 1;
+  }
+
+  const mixedTransitionEvents = [];
+  for (const event of transitionEvents) {
+    if (!event.asset_path || !(await exists(event.asset_path))) continue;
+    mixedTransitionEvents.push(event);
+    const start = eventStartSec(event, starts);
+    if (maxDurationSec && start >= maxDurationSec) continue;
+    const eventDuration = Math.max(0.2, Number(event.duration_sec ?? 0.65));
+    const gain = eventSfxGainDb(event);
+    inputs.push("-i", event.asset_path);
+    const label = `transitionSfx${inputIndex}`;
+    const delay = Math.max(0, Math.round(start * 1000));
+    const fadeOutStart = Math.max(0, eventDuration - 0.08);
+    filters.push(`[${inputIndex}:a]atrim=0:${Math.min(eventDuration, durationSec).toFixed(3)},asetpts=PTS-STARTPTS,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=0.080,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
     labels.push(`[${label}]`);
     inputIndex += 1;
   }
@@ -577,6 +724,26 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     score_drop_mix_policy: "Short local ACE-Step accents are faded in/out and normal score beds are ducked during overlapping drop windows.",
     narration_volume_db: narrationVolumeDb,
     sfx_volume_boost_db: sfxVolumeBoostDb,
+    signature_sfx_boost_db: signatureSfxBoostDb,
+    incidental_sfx_boost_db: incidentalSfxBoostDb,
+    ambience_sfx_boost_db: ambienceSfxBoostDb,
+    transition_sfx_enabled: transitionSfxEnabled,
+    transition_sfx_boost_db: transitionSfxBoostDb,
+    transition_sfx_input_count: mixedTransitionEvents.length,
+    transition_sfx_event_count: transitionEvents.length,
+    transition_sfx_policy: "deterministic visual-cut accents selected from available banked transition assets; LLM does not author generic transition SFX",
+    transition_sfx_events: mixedTransitionEvents.map((event) => ({
+      event_id: event.event_id,
+      cue_id: event.cue_id,
+      image_id: event.image_id,
+      scene_id: event.scene_id,
+      start_sec: event.start_sec,
+      gain_db: event.gain_db,
+      scene_changed: event.scene_changed,
+      asset_path: event.asset_path,
+    })),
+    score_drop_volume_db: scoreDropVolumeDb,
+    score_drop_boost_db: scoreDropBoostDb,
     target_lufs: Number.isFinite(targetLufs) ? targetLufs : null,
     true_peak_db: Number.isFinite(targetLufs) ? truePeakDb : null,
     loudness_range: Number.isFinite(targetLufs) ? loudnessRange : null,
@@ -589,11 +756,12 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
 }
 
 async function start() {
-  const [scorePlan, scoreDropPlan, sfxPlan, qwenReport] = await Promise.all([
+  const [scorePlan, scoreDropPlan, sfxPlan, qwenReport, promptPlan] = await Promise.all([
     readJson(scorePlanPath, null),
     readJson(scoreDropPlanPath, null),
     readJson(sfxPlanPath, null),
     readJson(qwenReportPath, null),
+    readJson(promptPlanPath, null),
   ]);
   if (!skipScore && !scorePlan?.chapters?.length && !scoreDropPlan?.drops?.length) {
     throw new Error(`Missing score chapters or score drops: ${scorePlanPath} / ${scoreDropPlanPath}`);
@@ -620,7 +788,9 @@ async function start() {
     scoreDropRows.push(await generateScoreDrop(drop));
   }
   const sfxEnsured = await ensureSfxEvents(sfxPlan);
-  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan: scorePlan ?? { chapters: [] }, scoreDropPlan: skipScore ? null : scoreDropPlan, scoreDropRows, sfxPlan, durationSec, qwenReport });
+  const bankMap = await latestSfxAssetByCueId();
+  const transitionPreview = buildDeterministicTransitionSfxEvents(promptPlan, bankMap, durationSec);
+  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan: scorePlan ?? { chapters: [] }, scoreDropPlan: skipScore ? null : scoreDropPlan, scoreDropRows, sfxPlan, promptPlan, bankMap, durationSec, qwenReport });
   const scoreMeta = scoreProviderMeta();
   const report = {
     status: dryRun ? "dry_run" : "completed",
@@ -643,9 +813,25 @@ async function start() {
     score_chapter_plan_path: skipScore ? null : scorePlanPath,
     score_drop_plan_path: !skipScore && scoreDropPlan ? scoreDropPlanPath : null,
     sfx_event_plan_path: sfxPlanPath,
+    prompt_plan_path: promptPlanPath,
     score_chapters: scoreRows,
     score_drops: scoreDropRows,
     sfx_ensured: sfxEnsured,
+    deterministic_transition_sfx: {
+      enabled: transitionSfxEnabled,
+      planned_count: transitionPreview.length,
+      max_count: transitionSfxMaxCount,
+      min_gap_sec: transitionSfxMinGapSec,
+      source: "section_image_prompts_hardened cut starts plus available sfx bank assets",
+      preview: transitionPreview.slice(0, 20).map((event) => ({
+        event_id: event.event_id,
+        cue_id: event.cue_id,
+        image_id: event.image_id,
+        scene_id: event.scene_id,
+        start_sec: event.start_sec,
+        gain_db: event.gain_db,
+      })),
+    },
     mix,
   };
   const reportPath = path.join(episodeDir, `longform_audio_bed_report_${episode}${reportSuffix}.json`);

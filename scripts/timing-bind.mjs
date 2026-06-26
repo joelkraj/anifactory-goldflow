@@ -168,6 +168,20 @@ function sceneBounds(scene, words, fallbackStart) {
   };
 }
 
+function fillEndFallbackGaps(scenes) {
+  for (let index = 0; index < scenes.length - 1; index += 1) {
+    const scene = scenes[index];
+    const next = scenes[index + 1];
+    if (scene.end_resolution !== "fallback_min_duration") continue;
+    const nextStart = Number(next?.start_sec);
+    if (!Number.isFinite(nextStart) || nextStart <= Number(scene.end_sec)) continue;
+    scene.end_sec = Number(nextStart.toFixed(3));
+    scene.duration_sec = Number((scene.end_sec - scene.start_sec).toFixed(3));
+    scene.end_resolution = "fallback_next_scene_start";
+  }
+  return scenes;
+}
+
 async function main() {
   const [script, semantic, wordTiming, qwenReport] = await Promise.all([
     readText(scriptPath),
@@ -183,7 +197,7 @@ async function main() {
   const audioHash = qwenReport?.output_path ? await hashFile(qwenReport.output_path) : null;
   if (audioHash && wordTiming.narration_audio_hash && wordTiming.narration_audio_hash !== audioHash) throw new Error("Whisper timing is stale for current stitched narration audio.");
   let cursor = 0;
-  const scenes = (semantic.scenes ?? []).map((scene) => {
+  const scenes = fillEndFallbackGaps((semantic.scenes ?? []).map((scene) => {
     const bounds = sceneBounds(scene, wordTiming.words, cursor);
     cursor = bounds.end_sec;
     return {
@@ -192,7 +206,7 @@ async function main() {
       duration_sec: Number((bounds.end_sec - bounds.start_sec).toFixed(3)),
       timing_source: "local_whisper_word_timing",
     };
-  });
+  }));
   const report = {
     schema: "goldflow_timed_scene_plan_v1",
     status: "passed",

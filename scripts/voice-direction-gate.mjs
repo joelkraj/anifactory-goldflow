@@ -782,8 +782,10 @@ function lastMentionedEntry(text, dialogueContext, excludedLabels = new Set()) {
 }
 
 function inferQuoteSpeaker(paragraph, quote, dialogueContext = {}) {
-  if (/app[a']?s close|did you drink water|dinosaur has seniority|dinosaur gets first sip|don't eat the last rice|blanket up|count slow|we get first pick|i'm hanging up|i have to hang up|^yes\.?$|^no\.?$|^tonight\.?$|^tomorrow\.?$/i.test(quote)) return "DAE-HO";
-  if (/^appa\b|dinosaur drank|poor people|get different dreams|basement dreams|^appa\??$|i ate at school|dinosaur gets angry/i.test(quote)) return "HARU";
+  if (seriesSlug === "30-year-old-loser-reborn-to-buy-bitcoin") {
+    if (/app[a']?s close|did you drink water|dinosaur has seniority|dinosaur gets first sip|don't eat the last rice|blanket up|count slow|we get first pick|i'm hanging up|i have to hang up|^yes\.?$|^no\.?$|^tonight\.?$|^tomorrow\.?$/i.test(quote)) return "DAE-HO";
+    if (/^appa\b|dinosaur drank|poor people|get different dreams|basement dreams|^appa\??$|i ate at school|dinosaur gets angry/i.test(quote)) return "HARU";
+  }
   const quoteStart = paragraph.indexOf(`"${quote}"`);
   const quoteEnd = quoteStart + quote.length + 2;
   const after = paragraph.slice(quoteEnd, quoteEnd + 500);
@@ -883,6 +885,49 @@ function naturalizePerformanceText(text, rules = {}) {
   return applyRuleReplacements(naturalizeDialogueLine(text, rules), rules, "performance_replacements")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+const ttsAttributionSpeechVerbPattern = "(?:said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered|repeated)";
+
+function isStandalonePronounAttributionDebris(text) {
+  const next = String(text ?? "").trim();
+  if (!next) return false;
+  return new RegExp(`^,?\\s*(?:I|he|she|they|it)\\s+${ttsAttributionSpeechVerbPattern}(?:\\s+\\w+ly)?\\.?\\s*,?$`, "i").test(next);
+}
+
+function cleanNarratorTtsOnlyAttributionDebris(text) {
+  let next = String(text ?? "").trim();
+  if (!next) return "";
+  if (isStandalonePronounAttributionDebris(next)) return "";
+  if (/^\s*,?\s*(?:stepping|turning|looking|without looking)\b[^.?!]*(?:[.?!]|,)?\s*$/i.test(next)) return "";
+  if (/^\s*,?\s*(?:her|his|their)\s+voice\s+[^.?!]*(?:[.?!]|,)?\s*$/i.test(next)) return "";
+  if (/^\s*to no one in particular\.?\s*$/i.test(next)) return "";
+  next = next
+    .replace(/\bto no one in particular\.?/gi, "")
+    .replace(/\s+([,.!?])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return next;
+}
+
+function shouldSmoothSkippedAttributionJoin(previousRow, nextRow, skippedAttribution) {
+  const previous = String(previousRow?.qwen_spoken_text ?? "").trim();
+  const next = String(nextRow?.qwen_spoken_text ?? "").trim();
+  const skipped = String(skippedAttribution ?? "").trim();
+  const firstPersonAttribution = new RegExp(`^,?\\s*I\\s+${ttsAttributionSpeechVerbPattern}`, "i").test(skipped);
+  return /[A-Za-z0-9]\.\s*$/.test(previous)
+    && (/^[a-z]/.test(next) || (firstPersonAttribution && /^(?:is|are|am|was|were|I|you|we|he|she|they|it|and|but|because|then)\b/.test(next)));
+}
+
+function lowercaseContinuationJoinMark(nextText) {
+  const next = String(nextText ?? "").trim();
+  if (/^(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/i.test(next)) return ",";
+  return "";
+}
+
+function smoothPreviousQwenUnitBoundary(previousRow, joinMark = "") {
+  if (!previousRow) return;
+  previousRow.qwen_spoken_text = String(previousRow.qwen_spoken_text ?? "").replace(/\.\s*$/, joinMark);
 }
 
 function startsWithPerformanceTag(text) {
@@ -1249,6 +1294,12 @@ function lightlyPunctuate(text, mode) {
 function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = {}) {
   const units = [];
   let dialogueTurnIndex = 0;
+  let recentNarrationContext = "";
+  const rememberNarrationContext = (value) => {
+    const clean = String(value ?? "").trim();
+    if (!clean) return;
+    recentNarrationContext = `${recentNarrationContext}\n${clean}`.trim().slice(-900);
+  };
   const paragraphs = stripTitle(script).split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
   for (const paragraph of paragraphs) {
     const lines = paragraph.split(/\n/).map((line) => line.trim()).filter(Boolean);
@@ -1265,6 +1316,7 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
           }
         } else if (line) {
           units.push(...narrationPerformanceUnits(cleanNarrationAttribution(line)));
+          rememberNarrationContext(line);
         }
       }
       units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
@@ -1286,6 +1338,7 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
     const quotes = [...paragraph.matchAll(/"([^"]+)"/g)];
     if (!quotes.length) {
       units.push(...narrationPerformanceUnits(paragraph));
+      rememberNarrationContext(paragraph);
       units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
       continue;
     }
@@ -1297,7 +1350,12 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
         if (words(before).length >= 16) units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
       }
       const spoken = naturalizeDialogueLine(quote[1].trim().replace(/,\s*$/, "."), speakabilityRules);
-      const speaker = inferQuoteSpeaker(paragraph, spoken, dialogueContext);
+      let speaker = inferQuoteSpeaker(paragraph, spoken, dialogueContext);
+      if ((!speaker || /UNKNOWN_DIALOGUE/i.test(speaker)) && recentNarrationContext) {
+        const contextualSpeaker = inferQuoteSpeaker(`${recentNarrationContext}\n${paragraph}`, spoken, dialogueContext);
+        if (contextualSpeaker && !/UNKNOWN_DIALOGUE/i.test(contextualSpeaker)) speaker = contextualSpeaker;
+      }
+      if (/UNKNOWN_DIALOGUE/i.test(speaker ?? "")) speaker = null;
       if (!speaker) {
         units.push(...narrationPerformanceUnits(spoken));
         units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
@@ -1313,6 +1371,7 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
     }
     const after = cleanNarrationAttribution(paragraph.slice(cursor).trim());
     if (after) units.push(...narrationPerformanceUnits(after));
+    rememberNarrationContext(paragraph);
     units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
   }
   return units;
@@ -2374,6 +2433,7 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       caption_text: segment.caption_text ?? segment.stripped_text ?? segment.text,
     }]).filter((unit) => unit.kind !== "sound_design" && !/^SFX$/i.test(String(unit.speaker ?? "")));
     const qwenUnits = [];
+    let pendingNarratorAttributionJoin = null;
     for (const unit of units) {
       const sourceSpeaker = unit.speaker ?? "NARRATOR";
       const speaker = characterVoiceCastingEnabled() ? sourceSpeaker : "NARRATOR";
@@ -2381,8 +2441,18 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       const role = characterVoiceCastingEnabled()
         ? cast?.role ?? speakerRoleFor(speaker, unit.text ?? "", segment, dialogueContext)
         : "narrator";
-      const spokenText = qwenSpokenText(unit.performed_text ?? unit.text ?? unit.caption_text, sourceSpeaker, ttsOverrides);
-      if (!isSpeakableQwenText(spokenText)) continue;
+      const rawPerformanceText = unit.performed_text ?? unit.text ?? unit.caption_text;
+      const isNarratorTtsUnit = unit.kind === "narration" && speakerLabel(sourceSpeaker) === "NARRATOR";
+      const performanceText = isNarratorTtsUnit
+        ? cleanNarratorTtsOnlyAttributionDebris(rawPerformanceText)
+        : rawPerformanceText;
+      const spokenText = qwenSpokenText(performanceText, sourceSpeaker, ttsOverrides);
+      if (!isSpeakableQwenText(spokenText)) {
+        pendingNarratorAttributionJoin = isNarratorTtsUnit && isStandalonePronounAttributionDebris(rawPerformanceText)
+          ? String(rawPerformanceText ?? "").trim()
+          : null;
+        continue;
+      }
       const row = {
         segment_id: segment.segment_id,
         unit_index: qwenUnits.length + 1,
@@ -2400,6 +2470,14 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
         voice_casting_mode: characterVoiceCastingEnabled() ? "explicit_character_voice_casting" : "narrator_only_default",
         reference_id: cast?.reference_id ?? null,
       };
+      if (isNarratorTtsUnit && qwenUnits.at(-1) && shouldSmoothSkippedAttributionJoin(qwenUnits.at(-1), row, "lowercase continuation")) {
+        smoothPreviousQwenUnitBoundary(qwenUnits.at(-1), lowercaseContinuationJoinMark(row.qwen_spoken_text));
+      }
+      if (pendingNarratorAttributionJoin && isNarratorTtsUnit && shouldSmoothSkippedAttributionJoin(qwenUnits.at(-1), row, pendingNarratorAttributionJoin)) {
+        const joinMark = /^[a-z]/.test(String(row.qwen_spoken_text ?? "").trim()) ? "" : ",";
+        smoothPreviousQwenUnitBoundary(qwenUnits.at(-1), joinMark);
+      }
+      pendingNarratorAttributionJoin = null;
       unitRows.push(row);
       qwenUnits.push(row);
     }
@@ -2468,7 +2546,9 @@ function voiceArtifactContaminationGate(artifacts, currentSourceText, { seriesPa
       }
     }
     for (const term of protectedTerms) {
-      if (resetAndTest(term.pattern, text)) {
+      const appearsInArtifact = resetAndTest(term.pattern, text);
+      const allowedFromSourceText = resetAndTest(term.pattern, allowedContext);
+      if (appearsInArtifact && !allowedFromSourceText) {
         blockers.push({
           code: "protected_or_named_voice_style_reference",
           artifact,

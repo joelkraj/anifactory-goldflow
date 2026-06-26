@@ -15,6 +15,8 @@ const episodeDir = path.join(weekDir, "episodes", episode);
 const sourcePath = flags.source ? path.resolve(flags.source) : null;
 const storyText = flags.story ?? null;
 const stripAnnotations = flags["strip-annotations"] === "true";
+const allowMissingRunIdentity = flags["allow-missing-run-identity"] === "true";
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -36,6 +38,10 @@ function sha256(value) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function readJson(filePath) {
+  return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
 function normalizeNewlines(value) {
@@ -71,6 +77,24 @@ function annotationWarnings(value) {
 }
 
 async function main() {
+  let runIdentity = null;
+  try {
+    runIdentity = await readJson(runIdentityPath);
+  } catch {
+    if (!allowMissingRunIdentity) {
+      throw new Error(`Missing run identity preflight: ${runIdentityPath}. Run "node bin/goldflow.mjs run preflight --channel ${channel} --series <series> --week <stable-run-slug> --episode ${episode} --title <title>" before ingest.`);
+    }
+  }
+  if (runIdentity) {
+    for (const [key, actual, expected] of [
+      ["channel", channel, runIdentity.channel],
+      ["series", series, runIdentity.series_slug],
+      ["week", week, runIdentity.week],
+      ["episode", episode, runIdentity.episode],
+    ]) {
+      if (actual !== expected) throw new Error(`Run identity mismatch for ${key}: command has ${actual}, run_identity.json has ${expected}.`);
+    }
+  }
   const source = storyText ?? (sourcePath ? await fs.readFile(sourcePath, "utf8") : "");
   if (!source.trim()) throw new Error("source-ingest requires --source <path> or --story <text>.");
   const operatorSource = normalizeNewlines(source);
@@ -90,6 +114,7 @@ async function main() {
     week,
     episode,
     source_path: sourcePath,
+    run_identity_path: runIdentity ? runIdentityPath : null,
     operator_source_story_path: operatorSourcePath,
     script_clean_path: scriptPath,
     operator_source_hash: sourceHash,

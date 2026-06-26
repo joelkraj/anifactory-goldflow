@@ -124,7 +124,7 @@ Image requirements:
 - Bright vibrant anime/manhwa styling, clean line art, cinematic lighting, polished color.
 - No photorealism, no 3D render, no western comic style, no surreal corporate blue wash unless explicitly requested.
 - No speech bubbles, no subtitles, no readable watermark, no UI text unless the prompt explicitly requires a UI insert.
-- Generate the image with built-in image generation; do not write project files yourself.
+- Generate the image with the built-in image generation tool; do not answer from text alone, do not write project files yourself, and do not report success unless the image tool actually produced a raster file.
 - Leave the generated image in CODEX_HOME/generated_images so the caller can import it.
 
 Return exactly one JSON object after generation:

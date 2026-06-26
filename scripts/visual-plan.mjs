@@ -174,7 +174,11 @@ function compactSceneCharacterRef(ref) {
 }
 
 function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
+  const absoluteIndex = Number.isFinite(Number(scene.__visual_plan_absolute_index))
+    ? Number(scene.__visual_plan_absolute_index)
+    : null;
   return {
+    target_image_id: absoluteIndex == null ? null : `${episode}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`,
     scene_id: scene.scene_id,
     visual_beat_id: scene.visual_beat_id ?? null,
     parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
@@ -322,6 +326,7 @@ Rules:
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
 - Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref from reference_targets_by_scene, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, the prose prompt must describe that visible location.
+- Every input unit includes target_image_id. Copy target_image_id exactly into output image_id. Do not restart image_id numbering inside chunks, and do not invent sequential IDs from the schema example.
 - Parent scene context explains why the beat matters, but visual_beat_script_excerpt decides what appears. Do not include future reveals, earlier setup, or the whole confrontation unless the current beat excerpt physically shows them.
 - previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
 - For transformation arcs, use one base identity face anchor only when the approved reference metadata says identity_usage is face_only; current state wording controls body, hair, shave/facial hair, wardrobe, posture, cleanliness, and social status.
@@ -329,6 +334,7 @@ Rules:
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
+- When using the current apartment kitchen reference, describe the visible counter, sink wall, refrigerator, cabinetry, floor path, and stone work surfaces. Use "kitchen island" only when the current beat excerpt or attached location reference clearly requires an island.
 - Use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
 - If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen and use positive visual substitutes in modelslab_image_prompt, such as "contact-silence streak badge", "stand-firm mission card", "message restraint checklist", or "upstairs restraint icon".
@@ -368,7 +374,7 @@ Return JSON only:
   "style_summary": "...",
   "prompts": [
     {
-      "image_id": "ep_01-cut-001",
+      "image_id": "<copy target_image_id exactly>",
       "scene_id": "scene_001",
       "visual_beat_id": "scene_001_beat_01",
       "start_sec": 0,
@@ -531,11 +537,36 @@ function assertPromptSize(prompt, stageName) {
   }
 }
 
+function targetImageIdForRow(row, episodeId, fallbackIndex = 0) {
+  const absoluteIndex = Number.isFinite(Number(row?.__visual_plan_absolute_index))
+    ? Number(row.__visual_plan_absolute_index)
+    : fallbackIndex;
+  return `${episodeId}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`;
+}
+
+function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label = "visual planner") {
+  const failures = [];
+  for (let index = 0; index < sourceRows.length; index += 1) {
+    const prompt = prompts[index] ?? {};
+    const source = sourceRows[index] ?? {};
+    const expectedImageId = targetImageIdForRow(source, episodeId, index);
+    const actualImageId = String(prompt.image_id ?? "");
+    if (actualImageId !== expectedImageId) {
+      failures.push(`${label} item ${index + 1}: image_id ${actualImageId || "(missing)"} should be ${expectedImageId}`);
+    }
+    const expectedBeatId = source.visual_beat_id ? String(source.visual_beat_id) : "";
+    const actualBeatId = prompt.visual_beat_id ? String(prompt.visual_beat_id) : "";
+    if (expectedBeatId && actualBeatId !== expectedBeatId) {
+      failures.push(`${label} item ${index + 1}: visual_beat_id ${actualBeatId || "(missing)"} should be ${expectedBeatId}`);
+    }
+  }
+  if (failures.length) {
+    throw new Error(`Visual planner output did not preserve input identity:\n${failures.slice(0, 24).join("\n")}`);
+  }
+}
+
 function normalizePrompt(row, index, episodeId, sourceUnit = null) {
-  const absoluteIndex = Number.isFinite(Number(sourceUnit?.__visual_plan_absolute_index))
-    ? Number(sourceUnit.__visual_plan_absolute_index)
-    : index;
-  const imageId = `${episodeId}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`;
+  const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
   const prompt = sanitizePositiveVisualPrompt(String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim());
   return {
     image_id: imageId,
@@ -880,6 +911,7 @@ async function main() {
       if (chunkPrompts.length !== sceneChunk.length) {
         throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunk.length} visual units.`);
       }
+      assertPromptIdentityMatchesInputs(chunkPrompts, sceneChunk, episode, `visual chunk ${index + 1}/${sceneChunks.length}`);
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${chunkPrompts.length} prompts`);
       return { chunkLlm, chunkPrompts };
     });

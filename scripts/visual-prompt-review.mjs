@@ -734,10 +734,11 @@ function assertReviewedPrompts(originalPrompts, reviewedPrompts, timedPlan) {
   }
 }
 
-async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts, chunkIndex = null }) {
-  const stageName = chunkIndex === null
+async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts, chunkIndex = null, attemptIndex = 1 }) {
+  const baseStageName = chunkIndex === null
     ? `${episode}_visual_review`
     : `${episode}_visual_review_chunk_${String(chunkIndex + 1).padStart(2, "0")}`;
+  const stageName = attemptIndex > 1 ? `${baseStageName}_attempt_${attemptIndex}` : baseStageName;
   const prompt = buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts });
   return isLocalLLMRoute(stageName)
     ? callLocal(prompt, stageName, Number(flags["visual-review-chunk-max-tokens"] ?? 9000))
@@ -784,14 +785,35 @@ async function main() {
 
   const chunkResults = await runPool(chunks, async (chunk, index) => {
     if (useChunking) console.error(`visual review chunk ${index + 1}/${chunks.length}: ${chunk.length} prompts`);
-    const llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunk, chunkIndex: useChunking ? index : null });
-    const chunkReviewed = Array.isArray(llm.parsed.reviewed_prompts) ? llm.parsed.reviewed_prompts : [];
-    if (chunkReviewed.length !== chunk.length) throw new Error(`Visual review chunk ${index + 1}/${chunks.length} returned ${chunkReviewed.length} prompts for ${chunk.length} inputs.`);
-    return {
-      reviewed_prompts: chunkReviewed,
-      findings: Array.isArray(llm.parsed.findings) ? llm.parsed.findings : [],
-      warnings: Array.isArray(llm.parsed.warnings) ? llm.parsed.warnings : [],
-    };
+    const maxAttempts = Math.max(1, Number(flags["visual-review-chunk-attempts"] ?? 3));
+    let lastCount = null;
+    let lastError = null;
+    for (let attemptIndex = 1; attemptIndex <= maxAttempts; attemptIndex += 1) {
+      let llm = null;
+      try {
+        llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunk, chunkIndex: useChunking ? index : null, attemptIndex });
+      } catch (error) {
+        lastError = error;
+        if (attemptIndex < maxAttempts) {
+          console.error(`visual review chunk ${index + 1}/${chunks.length}: retrying after provider error (attempt ${attemptIndex}/${maxAttempts}): ${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        throw error;
+      }
+      const chunkReviewed = Array.isArray(llm.parsed.reviewed_prompts) ? llm.parsed.reviewed_prompts : [];
+      lastCount = chunkReviewed.length;
+      if (chunkReviewed.length === chunk.length) {
+        return {
+          reviewed_prompts: chunkReviewed,
+          findings: Array.isArray(llm.parsed.findings) ? llm.parsed.findings : [],
+          warnings: Array.isArray(llm.parsed.warnings) ? llm.parsed.warnings : [],
+        };
+      }
+      if (attemptIndex < maxAttempts) {
+        console.error(`visual review chunk ${index + 1}/${chunks.length}: retrying after ${chunkReviewed.length} prompts for ${chunk.length} inputs (attempt ${attemptIndex}/${maxAttempts})`);
+      }
+    }
+    throw new Error(`Visual review chunk ${index + 1}/${chunks.length} returned ${lastCount ?? 0} prompts for ${chunk.length} inputs after ${maxAttempts} attempts${lastError ? `; last provider error: ${lastError instanceof Error ? lastError.message : String(lastError)}` : ""}.`);
   }, reviewConcurrency);
 
   for (const chunkResult of chunkResults) {

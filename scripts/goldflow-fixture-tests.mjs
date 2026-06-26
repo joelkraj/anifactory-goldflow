@@ -17,6 +17,7 @@ import {
 } from "./lib/visual-scope-utils.mjs";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
+import { voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -151,6 +152,26 @@ function testPositivePromptSanitizerDoesNotInvertNegation() {
 
   assert.equal(sanitizePositiveVisualPrompt("no second character"), "single subject only");
   assert.match(sanitizePositiveVisualPrompt("no duplicate hero, no clone"), /one instance only/i);
+}
+
+function testVoiceDirectionCharacterization() {
+  const pronounced = voiceDirectionTransformForTests("Manhwa Capital showed an SSS-rank warning.", {
+    ttsOverrides: {
+      pronunciation_map: [{ term: "Manhwa", spoken: "Mahn-wah" }],
+    },
+  });
+  assert.equal(pronounced.qwen_spoken_text, "Mahn-wah Capital showed an S S S rank warning.");
+
+  const trailingAttribution = voiceDirectionTransformForTests("\"Run,\" he said.");
+  assert.deepEqual(trailingAttribution.paragraph_units.map((unit) => unit.text), ["Run."]);
+
+  const leadingAttribution = voiceDirectionTransformForTests("The clerk said, \"Door is locked.\"");
+  assert.equal(leadingAttribution.clean_narration_attribution, "\"Door is locked.\"");
+  assert.equal(leadingAttribution.qwen_spoken_text, "Door is locked.");
+
+  const clean = voiceDirectionTransformForTests("The elevator doors opened with a soft chime.");
+  assert.equal(clean.clean_narration_attribution, "The elevator doors opened with a soft chime.");
+  assert.equal(clean.qwen_spoken_text, "The elevator doors opened with a soft chime.");
 }
 
 async function testOnlyScenesDryRun() {
@@ -334,6 +355,7 @@ async function run() {
   testOutOfScopeLocationMentionAssertion();
   testProviderAwarePromptSelection();
   testPositivePromptSanitizerDoesNotInvertNegation();
+  testVoiceDirectionCharacterization();
   await testOnlyScenesDryRun();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();

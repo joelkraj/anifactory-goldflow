@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -2366,6 +2367,24 @@ function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
   return normalized;
 }
 
+export function voiceDirectionTransformForTests(value, { speaker = "", ttsOverrides = {} } = {}) {
+  const clean = cleanNarrationAttribution(String(value ?? "").trim());
+  const paragraphUnitRows = paragraphUnits(String(value ?? ""), {}, {}, {})
+    .filter((unit) => unit.kind !== "segment_boundary")
+    .map((unit) => ({
+      kind: unit.kind,
+      speaker: unit.speaker,
+      text: unit.text,
+      performed_text: unit.performed_text,
+      caption_text: unit.caption_text,
+    }));
+  return {
+    clean_narration_attribution: clean,
+    qwen_spoken_text: qwenSpokenText(clean, speaker, ttsOverrides),
+    paragraph_units: paragraphUnitRows,
+  };
+}
+
 function isSpeakableQwenText(value) {
   return /[\p{L}\p{N}]/u.test(String(value ?? ""));
 }
@@ -3133,7 +3152,9 @@ async function main() {
   if (report.status !== "passed") process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

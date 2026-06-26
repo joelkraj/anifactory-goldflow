@@ -88,7 +88,7 @@ function commandFor(stage, identity) {
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const narratorOnly = isNarratorOnlyAudio(identity);
   const commands = {
-    run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md>`,
+    run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
@@ -104,7 +104,7 @@ function commandFor(stage, identity) {
     visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2 --retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`,
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
     reference_generation: `node bin/goldflow.mjs imagegen start ${base} --references-only true`,
-    visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base} && node bin/goldflow.mjs visual review ${base} && node bin/goldflow.mjs visual harden ${base}`,
+    visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base} && node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2 && node bin/goldflow.mjs visual harden ${base}`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly ? " --transition-sfx false" : ""}`,
     image_generation: `node bin/goldflow.mjs imagegen start ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,

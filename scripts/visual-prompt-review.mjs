@@ -143,16 +143,19 @@ function negativeLanguageMatches(value) {
 function positiveLanguageFindings(prompts) {
   const findings = [];
   for (const prompt of prompts) {
-    const matches = negativeLanguageMatches(prompt.modelslab_image_prompt ?? prompt.image_prompt);
-    if (matches.length) {
-      findings.push({
-        image_id: prompt.image_id,
-        scene_id: prompt.scene_id,
-        severity: "blocker",
-        code: "negative_prompt",
-        message: `Prompt contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
-        resolved: false,
-      });
+    for (const field of ["image_prompt", "modelslab_image_prompt", "codex_image_prompt"]) {
+      if (!prompt[field]) continue;
+      const matches = negativeLanguageMatches(prompt[field]);
+      if (matches.length) {
+        findings.push({
+          image_id: prompt.image_id,
+          scene_id: prompt.scene_id,
+          severity: "blocker",
+          code: "negative_prompt",
+          message: `${field} contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
+          resolved: false,
+        });
+      }
     }
   }
   return findings;
@@ -192,7 +195,9 @@ function compactPrompt(prompt) {
     visual_beat_script_excerpt: prompt.visual_beat_script_excerpt ?? null,
     start_sec: prompt.start_sec,
     duration_sec: prompt.duration_sec,
+    image_prompt: prompt.image_prompt ?? prompt.modelslab_image_prompt,
     modelslab_image_prompt: prompt.modelslab_image_prompt ?? prompt.image_prompt,
+    codex_image_prompt: prompt.codex_image_prompt ?? null,
     reference_requirements: prompt.reference_requirements ?? [],
     required_reference_paths: prompt.required_reference_paths ?? [],
     reference_usage: prompt.reference_usage ?? [],
@@ -327,6 +332,7 @@ Rules:
 - Across prompts with the same scene_id, preserve visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to each beat excerpt.
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
+- codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. If it exists, review it for the same shot_manifest, visible subjects, action, location, and refs as image_prompt; preserve it when good and repair it only when needed.
 - Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
@@ -382,6 +388,7 @@ Return JSON only:
       "duration_sec": 6,
       "image_prompt": "reviewed positive production scene prompt",
       "modelslab_image_prompt": "reviewed positive production scene prompt optimized for image model",
+      "codex_image_prompt": "optional reviewed positive production scene prompt optimized for Codex/OpenAI image generation",
       "reference_requirements": [{"ref_id":"...","kind":"character_state|location|style|ui|prop|action","required":true,"slot_order":1,"slot_purpose":"character identity and wardrobe for ...","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [],
@@ -498,7 +505,13 @@ function chunkByScene(items, targetSize) {
 }
 
 function normalizeReviewedPrompt(row, original) {
-  const prompt = String(row.modelslab_image_prompt ?? row.image_prompt ?? original.modelslab_image_prompt ?? original.image_prompt ?? "").trim();
+  const imagePrompt = String(row.image_prompt ?? row.modelslab_image_prompt ?? original.image_prompt ?? original.modelslab_image_prompt ?? "").trim();
+  const modelslabPrompt = String(row.modelslab_image_prompt ?? imagePrompt).trim();
+  const codexPrompt = row.codex_image_prompt
+    ? String(row.codex_image_prompt).trim()
+    : original.codex_image_prompt
+      ? String(original.codex_image_prompt).trim()
+      : null;
   return {
     ...original,
     image_id: original.image_id,
@@ -508,9 +521,10 @@ function normalizeReviewedPrompt(row, original) {
     visual_beat_script_excerpt: original.visual_beat_script_excerpt ?? row.visual_beat_script_excerpt ?? null,
     start_sec: Number(original.start_sec ?? 0),
     duration_sec: Math.max(1, Number(original.duration_sec ?? 6)),
-    image_prompt: prompt,
-    modelslab_image_prompt: prompt,
-    prompt_hash: sha256(prompt),
+    image_prompt: imagePrompt,
+    modelslab_image_prompt: modelslabPrompt,
+    codex_image_prompt: codexPrompt,
+    prompt_hash: sha256(modelslabPrompt || imagePrompt),
     reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : (original.reference_requirements ?? []),
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : (original.required_reference_paths ?? []),
     reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : (original.reference_usage ?? []),
@@ -549,7 +563,7 @@ function staticPoseFindings(prompts) {
   const staticPose = /\b(?:standing|stands)\s+(?:still|straight|centered|calmly|front-facing|facing camera|with hands in pockets)\b/i;
   const actionWords = /\b(?:fight|combat|attack|horde|swarm|wolf|monster|gate|battle|rescue|lunge|strike|impact|corridor|tide|boss|collapse)\b/i;
   for (const prompt of prompts) {
-    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? prompt.codex_image_prompt ?? "");
     if (staticPose.test(text) && actionWords.test(text)) {
       findings.push({
         image_id: prompt.image_id,
@@ -588,7 +602,7 @@ function repeatedTableauFindings(prompts) {
     if (rows.length < 4) continue;
     const counts = new Map();
     for (const row of rows) {
-      const key = promptSimilarityKey(row.modelslab_image_prompt ?? row.image_prompt);
+      const key = promptSimilarityKey(row.modelslab_image_prompt ?? row.image_prompt ?? row.codex_image_prompt);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     const repeated = [...counts.values()].filter((count) => count >= Math.min(4, rows.length));
@@ -612,7 +626,7 @@ function scenePromptShapeFindings(prompts) {
   const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
   const duplicateSlotText = /\buse image (?:one|two|three|four|five|six|seven|eight) as\b/i;
   for (const prompt of prompts) {
-    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? prompt.codex_image_prompt ?? "");
     if (metadataStart.test(text)) {
       findings.push({
         image_id: prompt.image_id,

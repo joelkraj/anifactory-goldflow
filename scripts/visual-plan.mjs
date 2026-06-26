@@ -102,8 +102,11 @@ function negativeLanguageMatches(value) {
 function assertPositivePromptLanguage(prompts) {
   const failures = [];
   for (const prompt of prompts) {
-    const matches = negativeLanguageMatches(prompt.modelslab_image_prompt ?? prompt.image_prompt);
-    if (matches.length) failures.push(`${prompt.image_id} contains negative visual language: ${matches.join(", ")}`);
+    for (const field of ["image_prompt", "modelslab_image_prompt", "codex_image_prompt"]) {
+      if (!prompt[field]) continue;
+      const matches = negativeLanguageMatches(prompt[field]);
+      if (matches.length) failures.push(`${prompt.image_id} ${field} contains negative visual language: ${matches.join(", ")}`);
+    }
   }
   if (failures.length) {
     throw new Error(`Visual prompt plan violates positive-language-only contract:\n${failures.slice(0, 20).join("\n")}`);
@@ -114,6 +117,7 @@ function sanitizePromptLanguage(prompt) {
   const next = { ...prompt };
   next.modelslab_image_prompt = sanitizePositiveVisualPrompt(next.modelslab_image_prompt ?? next.image_prompt ?? "");
   next.image_prompt = sanitizePositiveVisualPrompt(next.image_prompt ?? next.modelslab_image_prompt ?? "");
+  if (next.codex_image_prompt) next.codex_image_prompt = sanitizePositiveVisualPrompt(next.codex_image_prompt);
   return next;
 }
 
@@ -333,6 +337,7 @@ Rules:
 - previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
 - For transformation arcs, use one base identity face anchor only when the approved reference metadata says identity_usage is face_only; current state wording controls body, hair, shave/facial hair, wardrobe, posture, cleanliness, and social status.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
+- codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. When present, keep the same visible subject, action, location, references, and shot_manifest as image_prompt while using natural Codex-friendly image prose.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
@@ -386,6 +391,7 @@ Return JSON only:
       "duration_sec": 6,
       "image_prompt": "positive production scene prompt only",
       "modelslab_image_prompt": "positive production scene prompt optimized for flux-klein",
+      "codex_image_prompt": "optional positive production scene prompt optimized for Codex/OpenAI image generation",
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
@@ -572,7 +578,9 @@ function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label
 
 function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
-  const prompt = sanitizePositiveVisualPrompt(String(row.modelslab_image_prompt ?? row.image_prompt ?? "").trim());
+  const imagePrompt = sanitizePositiveVisualPrompt(String(row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim());
+  const modelslabPrompt = sanitizePositiveVisualPrompt(String(row.modelslab_image_prompt ?? imagePrompt).trim());
+  const codexPrompt = row.codex_image_prompt ? sanitizePositiveVisualPrompt(String(row.codex_image_prompt).trim()) : null;
   const basePrompt = {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
@@ -581,9 +589,10 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     visual_beat_script_excerpt: sourceUnit?.visual_beat_script_excerpt ?? row.visual_beat_script_excerpt ?? null,
     start_sec: Number(row.start_sec ?? 0),
     duration_sec: Math.max(1, Number(row.duration_sec ?? 6)),
-    image_prompt: prompt,
-    modelslab_image_prompt: prompt,
-    prompt_hash: sha256(prompt),
+    image_prompt: imagePrompt,
+    modelslab_image_prompt: modelslabPrompt,
+    codex_image_prompt: codexPrompt,
+    prompt_hash: sha256(modelslabPrompt || imagePrompt),
     image_provider_route: "modelslab",
     image_model_route: "flux-klein",
     reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : [],
@@ -694,7 +703,7 @@ function assertPromptVariety(prompts) {
     if (rows.length < 4) continue;
     const counts = new Map();
     for (const row of rows) {
-      const key = promptSimilarityKey(row.modelslab_image_prompt ?? row.image_prompt);
+      const key = promptSimilarityKey(row.modelslab_image_prompt ?? row.image_prompt ?? row.codex_image_prompt);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     const repeated = [...counts.entries()].filter(([, count]) => count >= Math.min(4, rows.length));
@@ -711,7 +720,7 @@ function assertScenePromptShape(prompts) {
   const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
   const duplicateSlotText = /\buse image (?:one|two|three|four|five|six|seven|eight) as\b/i;
   for (const prompt of prompts) {
-    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
+    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? prompt.codex_image_prompt ?? "");
     if (metadataStart.test(text)) failures.push(`${prompt.image_id} starts with metadata instead of visible action`);
     if (badLayout.test(text)) failures.push(`${prompt.image_id} requests a reference/sheet layout in a scene cut`);
     if (duplicateSlotText.test(text)) failures.push(`${prompt.image_id} duplicates reference slot text inside prompt body`);

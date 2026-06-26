@@ -15,6 +15,7 @@ import {
   outOfScopeLocationRefMentions,
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
+import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -124,6 +125,17 @@ function testOutOfScopeLocationMentionAssertion() {
   assert.equal(mentions.length, 1);
   assert.equal(mentions[0].code, "out_of_scope_location_ref_mentioned");
   assert.equal(mentions[0].severity, "blocker");
+}
+
+function testProviderAwarePromptSelection() {
+  const prompt = {
+    image_prompt: "generic production prompt",
+    modelslab_image_prompt: "modelslab flux prompt",
+    codex_image_prompt: "codex openai prompt",
+  };
+  assert.equal(promptTextForImageProvider(prompt, "modelslab"), "modelslab flux prompt");
+  assert.equal(promptTextForImageProvider(prompt, "codex_imagegen"), "codex openai prompt");
+  assert.equal(promptTextForImageProvider({ ...prompt, codex_image_prompt: "" }, "codex_imagegen"), "generic production prompt");
 }
 
 async function testOnlyScenesDryRun() {
@@ -305,6 +317,7 @@ async function run() {
   testStarvationGate();
   testOutOfScopeRefDropping();
   testOutOfScopeLocationMentionAssertion();
+  testProviderAwarePromptSelection();
   await testOnlyScenesDryRun();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();

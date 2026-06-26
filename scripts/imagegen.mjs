@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage } from "./modelslab-image-helper.mjs";
 
@@ -315,7 +316,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
 }
 
 function promptWithReferenceSlots(prompt) {
-  const basePrompt = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "").trim();
+  const basePrompt = promptTextForImageProvider(prompt, imageProvider);
   const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? []);
   return [slotInstruction, basePrompt].filter(Boolean).join(" ");
 }
@@ -325,7 +326,7 @@ async function promptFresh(prompt, outputPath) {
   const sidecar = `${outputPath}.prompt.sha256`;
   if (!(await exists(sidecar))) return false;
   const current = String(await fs.readFile(sidecar, "utf8")).trim();
-  return current === (prompt.prompt_hash ?? sha256(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? ""));
+  return current === (prompt.prompt_hash ?? sha256(promptTextForImageProvider(prompt, imageProvider)));
 }
 
 async function runPool(items, worker, limit) {
@@ -387,6 +388,9 @@ async function generateOne(prompt) {
     reference_image_paths: referenceImagePaths,
     reference_slots: prompt.reference_slots ?? [],
     image_prompt: modelPrompt,
+    source_image_prompt: prompt.image_prompt ?? null,
+    source_modelslab_image_prompt: prompt.modelslab_image_prompt ?? null,
+    source_codex_image_prompt: prompt.codex_image_prompt ?? null,
     modelslab_prompt: imageProvider === "modelslab" ? modelPrompt : null,
     codex_prompt: imageProvider === "codex_imagegen" ? modelPrompt : null,
     image_provider: imageProvider,

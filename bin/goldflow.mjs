@@ -138,15 +138,15 @@ Commands:
   goldflow visual review           Review/fix image prompts with LLM, then validate blockers
   goldflow visual harden           Deterministically repair prompt refs and write pre-imagegen sample QA
   goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
-  goldflow visual transitions      Plan xfade transitions and transition SFX from hardened cuts
+  goldflow visual transitions      Plan xfade transitions from hardened cuts; transition SFX is opt-in
   goldflow imagegen start          Generate images from approved prompt plan
   goldflow imagegen import-codex   Import a manually generated Codex/OpenAI raster into the image report
   goldflow imagegen import-staged-codex Import staged worker Codex/OpenAI rasters serially
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
-  goldflow audio enrich-sfx-score  Plan/generate Whisper-timed SFX and score
+  goldflow audio enrich-sfx-score  Opt-in plan/generate Whisper-timed SFX and score
   goldflow audio score-drops-chunked Plan score drops in smaller LLM chunks
   goldflow audio repair-ambience   Add Codex-agent manual ambience beds when enrichment under-targets ambience
-  goldflow audio longform-bed      Mix narration + SFX + score
+  goldflow audio longform-bed      Build the continuous audio bed; narrator-only by default
 
 Common flags:
   --channel <channel>
@@ -155,7 +155,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio enrich-sfx-score -> audio longform-bed -> visual beats -> visual refs -> visual plan -> visual review -> visual harden -> optional visual engagement -> visual transitions -> imagegen start -> render start
+  run preflight -> source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
 `);
 }
 

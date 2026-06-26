@@ -110,6 +110,7 @@ function promptText(prompt) {
   return [
     prompt.modelslab_image_prompt,
     prompt.image_prompt,
+    prompt.codex_image_prompt,
     prompt.primary_subject,
     prompt.location,
     ...(Array.isArray(prompt.visible_subjects) ? prompt.visible_subjects : []),
@@ -130,6 +131,7 @@ function characterMatchText(prompt) {
   return [
     prompt.modelslab_image_prompt,
     prompt.image_prompt,
+    prompt.codex_image_prompt,
     prompt.primary_subject,
   ].filter(Boolean).join(" | ");
 }
@@ -1847,6 +1849,7 @@ function hardenPrompt(prompt, indexes) {
     ...prompt,
     modelslab_image_prompt: precleanText,
     image_prompt: precleanText,
+    codex_image_prompt: prompt.codex_image_prompt ? sanitizePositiveVisualPrompt(prompt.codex_image_prompt) : null,
   };
   let chars = matchedCharacters(precleanedPrompt, indexes.characterRefs);
   const normalizedPrecleanText = normalize(promptText(precleanedPrompt));
@@ -2234,6 +2237,11 @@ function sanitizePrompt(prompt, indexes) {
   let promptTextValue = sanitizePositiveVisualPrompt(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
   promptTextValue = sanitizeModelSafeBeautyLanguage(promptTextValue);
   promptTextValue = applyNamedCharacterMultiplicityContract(promptTextValue, shotManifest);
+  let codexPromptTextValue = prompt.codex_image_prompt ? sanitizePositiveVisualPrompt(prompt.codex_image_prompt) : null;
+  if (codexPromptTextValue) {
+    codexPromptTextValue = sanitizeModelSafeBeautyLanguage(codexPromptTextValue);
+    codexPromptTextValue = applyNamedCharacterMultiplicityContract(codexPromptTextValue, shotManifest);
+  }
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
   const accepted = [];
@@ -2459,7 +2467,7 @@ function sanitizePrompt(prompt, indexes) {
   }
   const selectedLocationRefId = requestedLocationRefId ?? selectedRequirements.find((req) => referenceKindRank(req.kind) === 1)?.ref_id ?? null;
   for (const mention of outOfScopeLocationRefMentions({
-    text: promptTextValue,
+    text: [promptTextValue, codexPromptTextValue].filter(Boolean).join(" "),
     locationTargets: indexes.locationTargets,
     allowedLocationRefId: selectedLocationRefId,
   })) {
@@ -2479,6 +2487,7 @@ function sanitizePrompt(prompt, indexes) {
       ...prompt,
       image_prompt: promptTextValue,
       modelslab_image_prompt: promptTextValue,
+      codex_image_prompt: codexPromptTextValue,
       prompt_hash: sha256(promptTextValue),
       reference_requirements: selectedRequirements,
       required_reference_paths: selectedRequirements.map((req) => req.reference_image_path).filter(Boolean),

@@ -16,15 +16,15 @@ Production moves through one artifact chain. Before step 0, run identity preflig
 7. ModelsLab Qwen TTS and stitch.
 8. Local Whisper word timing on the final stitched narration.
 9. Review TTS and timing artifacts before downstream production.
-10. Timing-bound SFX and score planning from Whisper timing.
-11. Longform audio bed mix.
-12. Visual beat planning: split timing-bound semantic scenes into shorter image beats before prompt authoring.
-13. Visual reference planning: create `character_state_refs.json` and any style/location/action reference specs from locked script, bibles, and semantic scenes.
-14. Manual agent/operator review and optimization of reference prompts. Character state refs become the definitive visual identity/wardrobe/state contract.
-15. Reference generation in dependency order: style ref first, then character/location/action anchors.
-16. Visual prompt planning consumes approved references, current-scene facts, and visual beats.
-17. Visual prompt review/fix pass checks the authored prompts against scene facts and approved refs.
-18. Visual prompt sanitation validates LLM-authored prompt/ref manifests, resolves approved ref paths, strips forbidden or unknown refs, enforces the four-reference cap, and writes a pre-imagegen sample sheet.
+10. Default narrator-only longform audio bed from the stitched narration/Qwen report. SFX, score, ambience, and transition SFX are opt-in variants, not default requirements.
+11. Visual beat planning: split timing-bound semantic scenes into shorter image beats before prompt authoring.
+12. Visual reference planning: create `character_state_refs.json` and any style/location/action reference specs from locked script, bibles, and semantic scenes.
+13. Manual agent/operator review and optimization of reference prompts. Character state refs become the definitive visual identity/wardrobe/state contract.
+14. Reference generation in dependency order: style ref first, then character/location/action anchors.
+15. Visual prompt planning consumes approved references, current-scene facts, and visual beats.
+16. Visual prompt review/fix pass checks the authored prompts against scene facts and approved refs. Use the auto-resolve loop by default.
+17. Visual prompt sanitation validates LLM-authored prompt/ref manifests, resolves approved ref paths, strips forbidden or unknown refs, enforces the four-reference cap, and writes a pre-imagegen sample sheet.
+18. Visual transition planning with silent transition SFX by default.
 19. Image generation.
 20. Render with intentional beat-selected transitions, final-script subtitles timed to Whisper, and one continuous mixed audio track.
 21. Final QA: spot-listen narration cuts, spot-check prompt/image/ref consistency, verify transition style, verify subtitles are final-script text timed to Whisper, then `ffprobe` the final upload-safe render.
@@ -51,6 +51,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Do not run SFX or score planning before final narration exists.
 - Do not run SFX or score planning without current local Whisper timing.
 - Segment or Qwen timing is fallback metadata only; production SFX/score plans must be stamped with `timing_source: "local_whisper_word_timing"`.
+- Default preflight audio target is `narrator_only`. For narrator-only runs, `run status` must skip `sfx_score_plan` and point the next audio command to `audio longform-bed --narration-only true`. Do not run audio enrichment, score generation, SFX bank resolution, or transition SFX unless the operator explicitly opts into an audio-design variant.
 - Planning LLM routes are Codex or local Qwen only. Do not use ModelsLab LLM endpoints for semantic, audio, visual reference, visual prompt, or prompt review planning. ModelsLab is a media generation provider in this workflow, not a planning backend.
 - Image provider routing is explicit and locked at preflight. If the operator says "run it through the pipeline normally" or does not name an image provider, set `--image-provider modelslab` in `goldflow run preflight` and use the goldflow default image lane: ModelsLab Flux Klein for references and scene image cuts, with Codex/local-Qwen used only for LLM planning/review tasks. `imagegen start` must refuse a provider that differs from `run_identity.json` unless the operator explicitly approves `--confirm-image-provider true`. If the operator says "Codex Imagen", "Codex imagegen", "use Codex for images", or similar, lock that in preflight and do not run the ModelsLab route for scene cuts.
 - Codex Imagen means the built-in Codex image generation tool path, executed by Codex subagents/workers for concurrency. The production route is: assign scoped cut IDs to workers, have each worker use built-in Codex image generation to create a real raster, save exactly one PNG named for the assigned image ID inside an isolated staging folder, report the SHA-256, then import with `goldflow imagegen import-staged-codex`. Do not use nested `codex exec --enable image_generation` as the production Codex Imagen route; if it returns JSON/text such as `{"status":"success"}` without a raster, that is a failed provider probe. Do not copy the newest/global `CODEX_HOME/generated_images` file, do not mix stale staged images, and do not fall back to ModelsLab unless the operator explicitly approves that fallback in the current run.
@@ -75,6 +76,9 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - Qwen TTS stitch must include a small inter-segment safety gap by default so unit boundaries do not clip final phonemes or smash narration beats together. Current default is `ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC=0.22`; rerun Whisper after any stitch change.
 - Narration loudness is controlled at longform mix, not by destructively editing cached TTS assets. Production starting point is `--narration-volume-db 2` with the final limiter enabled. For retention/final review mixes where the narrator feels behind SFX/score, use the corrected narrator-forward recipe: `--narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`, then verify with `ffprobe` and `ffmpeg ... -af volumedetect`. If narration still competes with music, lower score beds or drops before pushing narration harder. If the mixer lands low after AAC encode, run a final loudnorm corrective encode/remux rather than shipping a quiet file.
 - Visual planning must use current-scene facts only. Do not import neighboring context, stale refs, negative prompt wording, or characters not visible in the scene.
+- Visual reference scoping invariant: `style` is the only global reference kind. Location, character, prop, UI, action, and effect refs must be scene-scoped and attached only from the current scene candidate set. Deterministic code may validate, drop, and block out-of-scope refs; it must not guess replacement refs or rewrite scene content.
+- Visual reference planning derives location target `scene_ids` from semantic `ref_requirements` and unions them with LLM-authored ids. Any physical scene that requires a location ref but has no covering target must block with `scene_missing_location_ref`.
+- Visual review should run with `--auto-resolve true --max-resolve-iterations 2` by default. Auto-resolve replans blocked scenes only with positive correction directives, re-reviews regenerated scenes only, preserves untouched image/scene/visual beat identity, and writes `visual_resolution_deadletter.json` with status `blocked_deadletter` when capped failures remain. Imagegen must refuse dead-lettered scenes.
 - The LLM is the creative visual author. Give it the story chunk, premise/bible context, approved refs, state contracts, current beat excerpt, and neighboring beat summaries needed to make the same character, location, composition, and ref decisions a hands-on agent would make. Deterministic production code must not creatively choose scene content, infer missing locations, add characters, rewrite action, or patch narrative intent.
 - Visual prompt planning must consume `visual_beat_plan.json` when present. Semantic scenes are not image cuts; long scenes must be split into multiple visual beats before imagegen. Default beat pacing aims for an average near 8 seconds, minimum 3 seconds, maximum 15 seconds.
 - The first 3 minutes are the retention runway. Treat 0-30 seconds as the dense cold open and 30-180 seconds as the retention ramp. Visual beat planning should target roughly 8-12 distinct opening cuts with `--hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2`, then keep 30-180 seconds faster than normal with `--retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`. Each hook/ramp cut needs a new visual job: premise image, reversal, system/threat reveal, reaction, consequence, status turn, or click-forward question. Do not let the first 3 minutes sit on slow Ken Burns images while audio drops are firing.
@@ -106,6 +110,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - If a cut shows subject fusion, miniature heads, duplicate protagonist faces, a face embedded in another body/prop, speech bubbles, or a UI panel covering a face, treat it as a generated-still failure. Regenerate the cut from a hardened prompt with explicit subject count, primary-subject focus, separate bodies, clean prop/UI placement, and a single continuous manhwa frame.
 - Visual prompt planning must not create definitive character anchors. It may consume approved `character_state_refs`, select which refs are visible/style-critical for a cut, and report missing reference coverage as warnings or blockers.
 - Image prompts that attach references must preserve positive Flux-style reference slot mapping through structured `reference_requirements.slot_order` and `slot_purpose`. The imagegen wrapper injects concise "Use image one as..." text at generation time, so authored scene prompt bodies must not duplicate those instructions. When `identity_usage` is `face_only`, attach the base character image only as a facial likeness/source anchor and write the visible transformed state directly in the scene prompt; the current prompt controls body, grooming, clothes, posture, and social status. The face-only anchor applies only to the named character. Attorneys, staff, crowds, coworkers, silhouettes, and other supporting figures must have distinct one-off faces and must not borrow the protagonist's face.
+- Prompt plans may include provider-aware prompt fields. Preserve `modelslab_image_prompt` for ModelsLab/Flux. `codex_image_prompt` is optional; Codex/OpenAI imagegen consumes it when present and otherwise falls back to `image_prompt`. Deterministic hardening may sanitize present provider prompt text, but must not creatively author a missing provider-specific prompt.
 - `shot_manifest.forbidden_ref_ids` is authoritative. Any ref forbidden by the manifest must be removed before imagegen. `shot_manifest.location_ref_id` must match the attached location ref when set, and expected character state refs should be attached directly or through a declared face-only base anchor.
 - If a cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, the LLM must choose the closest approved location ref and set `shot_manifest.location_ref_id`. Sanitation should block physical-location prompts that omit both `location_ref_id` and a location reference instead of guessing the location.
 - Flux Klein and Flux Kontext are both treated as four-reference models in this pipeline.
@@ -170,7 +175,7 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 ## Commands
 
 ```bash
-node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_01 --title <episode-title> --source <chatbot-output.md> --image-provider modelslab --audio-target narrator_forward_retention_mix --run-intent production
+node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_01 --title <episode-title> --source <chatbot-output.md> --image-provider modelslab --audio-target narrator_only --run-intent production
 node bin/goldflow.mjs ingest source --channel <channel> --series <series> --week <week> --episode ep_01 --source <chatbot-output.md>
 node bin/goldflow.mjs script approve --channel <channel> --series <series> --week <week> --episode ep_01 --hash <script_clean_sha256>
 node bin/goldflow.mjs script targeted --channel <channel> --series <series> --week <week> --episode ep_01
@@ -179,22 +184,28 @@ node bin/goldflow.mjs voice plan --channel <channel> --series <series> --week <w
 node bin/goldflow.mjs tts qwen --channel <channel> --series <series> --week <week> --episode ep_01 --suffix -modelslab-qwen
 node bin/goldflow.mjs audio whisper-timing --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs timing bind --channel <channel> --series <series> --week <week> --episode ep_01
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --score-mode drops_only --retention-mix true --sfx-target-count 190 --sfx-target-max 260 --score-target-drops 58 --score-target-drops-max 80 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --ambience-min-count 20 --ambience-ideal-min-count 22 --ambience-ideal-max-count 28
-# If the full SFX/score enrichment prompt stalls or only the score layer needs improvement:
-node bin/goldflow.mjs audio score-drops-chunked --channel <channel> --series <series> --week <week> --episode ep_01 --score-target-drops 72 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --chunk-sec 360 --chunk-overlap-sec 18 --concurrency 3
-ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1 --outputBase ep_01-<channel>-retention-final --reportSuffix -retention-final
+node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01 --hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2 --retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --references-only true --reference-concurrency 6
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01 --auto-resolve true --max-resolve-iterations 2
 node bin/goldflow.mjs visual harden --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --sample-count 14
 node bin/goldflow.mjs visual engagement --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --max-events 7
-node bin/goldflow.mjs visual transitions --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json
+node bin/goldflow.mjs visual transitions --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-sfx false
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 6 --reference-concurrency 6
 # Optional for direct/manual Codex/OpenAI proof batches:
 node bin/goldflow.mjs imagegen import-codex --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --image-id <image_id> --source <codex-generated-raster.png> --output <episode-dir>/imagegen_report_codex_manual_ep_01.json
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/longform_audio_bed_report_ep_01-retention-final.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+```
+
+Opt-in SFX/score/ambience variant:
+
+```bash
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score --channel <channel> --series <series> --week <week> --episode ep_01 --score-mode drops_only --retention-mix true --sfx-target-count 190 --sfx-target-max 260 --score-target-drops 58 --score-target-drops-max 80 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --ambience-min-count 20 --ambience-ideal-min-count 22 --ambience-ideal-max-count 28
+node bin/goldflow.mjs audio score-drops-chunked --channel <channel> --series <series> --week <week> --episode ep_01 --score-target-drops 72 --score-drop-min-duration-sec 8 --score-drop-max-duration-sec 18 --chunk-sec 360 --chunk-overlap-sec 18 --concurrency 3
+ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> --week <week> --episode ep_01 --narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1 --outputBase ep_01-<channel>-retention-final --reportSuffix -retention-final
+node bin/goldflow.mjs visual transitions --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-sfx true
 ```
 
 SFX-only audio variant:

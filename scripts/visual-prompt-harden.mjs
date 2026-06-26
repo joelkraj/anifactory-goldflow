@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { outOfScopeLocationRefMentions } from "./lib/visual-scope-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -415,46 +416,11 @@ function locationContractForPrompt(prompt) {
 
 function applyLocationContract(text, contract) {
   if (!contract) return text;
-  text = stripMixedLocationLanguage(text, contract);
   const clauses = [];
   if (!text.includes(contract.requiredClause)) clauses.push(contract.requiredClause);
   if (!text.includes(contract.forbiddenClause)) clauses.push(contract.forbiddenClause);
   if (!clauses.length) return text;
   return `${text} ${clauses.join(" ")}`.trim();
-}
-
-function stripMixedLocationLanguage(text, contract) {
-  let next = String(text ?? "");
-  if (contract.id === "support_office") {
-    next = next
-      .replace(/\bfirst through a work interaction with Darren and then through a nighttime confrontation with debt at the kitchen table\b/gi, "through a work interaction with Darren inside the support office")
-      .replace(/\bThen montage small daily missions with brief inserts\. End at 9:17 P\.M\. with the narrator seated at the kitchen table, accounts open, notebook total written, and the money stat notification appearing\./gi, "")
-      .replace(/\blater anxious while facing avoided debt\b/gi, "focused during the workplace social test")
-      .replace(/\blater apartment casual clothes at kitchen table\b/gi, "same tired work clothes in the support office")
-      .replace(/\bThe environment is Customer support workplace, then narrators apartment kitchen table\./gi, "The environment is a dead-end customer support workplace.")
-      .replace(/\bThe early grind is grounded in a modest apartment, gym, laptop workspace, blue system glow, effort, loneliness, and routine discipline\./gi, "The workday grind is grounded in a support office, headset station, ticket queue monitor, blue system glow, effort, loneliness, and routine discipline.");
-  }
-  if (contract.id === "apartment") {
-    next = next
-      .replace(/\bAt work, place Darren slightly foregrounded while the system window opens above his shoulder and the narrator answers plainly\./gi, "")
-      .replace(/\bThe environment is Customer support workplace, then narrators apartment kitchen table\./gi, "The environment is Joey's modest apartment kitchen table workspace.")
-      .replace(/\bwork interaction with Darren\b/gi, "private debt confrontation")
-      .replace(/\bsupport headset\b/gi, "household table lamp")
-      .replace(/\bstack of unresolved support tickets\b/gi, "stack of unpaid bills");
-  }
-  if (contract.id === "vending_route") {
-    next = next
-      .replace(/\bMercer Systems office\b/gi, "vending route location")
-      .replace(/\bstartup office\b/gi, "vending route location")
-      .replace(/\bwhiteboards full of diagrams\b/gi, "rows of snack and drink machines")
-      .replace(/\bcheap desks\b/gi, "inventory boxes and service cart");
-  }
-  if (contract.id === "dental_office") {
-    next = next
-      .replace(/\bgeneric office\b/gi, "dental practice office")
-      .replace(/\bapartment workspace\b/gi, "dental practice reception workspace");
-  }
-  return next.replace(/\s+/g, " ").trim();
 }
 
 function removeConflictingSingleLocationClauses(text, contract) {
@@ -2067,6 +2033,21 @@ function hardenPrompt(prompt, indexes) {
       });
     }
   }
+  for (const mention of outOfScopeLocationRefMentions({
+    text,
+    locationTargets: indexes.locationTargets,
+    allowedLocationRefId: shotManifest?.location_ref_id ?? location?.ref_id ?? null,
+  })) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "blocker",
+      code: mention.code,
+      message: mention.message,
+      ref_id: mention.ref_id,
+      resolved: false,
+    });
+  }
   if (selectedRequirements.filter((req) => referenceKindRank(req.kind) === 0).length >= 2 && !/separate complete bod|distinct face placement|readable robe boundaries/i.test(text)) {
     findings.push({
       image_id: prompt.image_id,
@@ -2475,6 +2456,22 @@ function sanitizePrompt(prompt, indexes) {
         resolved: false,
       });
     }
+  }
+  const selectedLocationRefId = requestedLocationRefId ?? selectedRequirements.find((req) => referenceKindRank(req.kind) === 1)?.ref_id ?? null;
+  for (const mention of outOfScopeLocationRefMentions({
+    text: promptTextValue,
+    locationTargets: indexes.locationTargets,
+    allowedLocationRefId: selectedLocationRefId,
+  })) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "blocker",
+      code: mention.code,
+      message: mention.message,
+      ref_id: mention.ref_id,
+      resolved: false,
+    });
   }
 
   return {

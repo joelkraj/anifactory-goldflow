@@ -11,6 +11,7 @@ import {
   applyDeterministicLocationSceneIds,
   dropOutOfScopePromptRefs,
   locationCoverageFindings,
+  outOfScopeLocationRefMentions,
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
 
@@ -106,6 +107,20 @@ function testOutOfScopeRefDropping() {
   ]));
 }
 
+function testOutOfScopeLocationMentionAssertion() {
+  const mentions = outOfScopeLocationRefMentions({
+    text: "A polished frame accidentally names loc_boardroom inside an apartment beat.",
+    locationTargets: [
+      { ref_id: "loc_apartment", kind: "location" },
+      { ref_id: "loc_boardroom", kind: "location" },
+    ],
+    allowedLocationRefId: "loc_apartment",
+  });
+  assert.equal(mentions.length, 1);
+  assert.equal(mentions[0].code, "out_of_scope_location_ref_mentioned");
+  assert.equal(mentions[0].severity, "blocker");
+}
+
 async function testOnlyScenesDryRun() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -187,6 +202,7 @@ async function run() {
   testLocationCandidateExclusion();
   testStarvationGate();
   testOutOfScopeRefDropping();
+  testOutOfScopeLocationMentionAssertion();
   await testOnlyScenesDryRun();
   await testImagegenDeadletterRefusal();
   console.log("goldflow fixture tests passed");

@@ -165,3 +165,22 @@ export function dropOutOfScopePromptRefs(prompt, allowedRefIds) {
 
   return next;
 }
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function outOfScopeLocationRefMentions({ text, locationTargets = [], allowedLocationRefId = null } = {}) {
+  const body = String(text ?? "");
+  const allowed = normalizeRefId(allowedLocationRefId);
+  return asArray(locationTargets)
+    .map((target) => normalizeRefId(target?.ref_id))
+    .filter((refId) => refId && refId !== allowed)
+    .filter((refId) => new RegExp(`\\b${escapeRegExp(refId)}\\b`, "i").test(body))
+    .map((refId) => ({
+      ref_id: refId,
+      code: "out_of_scope_location_ref_mentioned",
+      severity: "blocker",
+      message: `Prompt prose references out-of-scope location ref id ${refId}.`,
+    }));
+}

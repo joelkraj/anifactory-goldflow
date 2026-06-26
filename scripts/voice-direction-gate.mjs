@@ -857,11 +857,9 @@ function cleanNarrationAttribution(text) {
     .replace(/^,\s*(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*/i, "")
     .replace(/^(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*/i, "")
     .replace(/^\s*(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\.?\s*/i, "")
+    .replace(/^\s*(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\s+the\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\.?\s*/i, "")
     .replace(/^,\s*the\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
     .replace(/^the\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
-    .replace(/^,\s*(the teacher|the collector|the clerk)\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*/i, "")
-    .replace(/^(the teacher|the collector|the clerk)\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*/i, "")
-    .replace(/^\s*(said|asked)(?:\s+\w+ly)?\s+(the teacher|the collector|the clerk)\.?\s*/i, "")
     .trim();
 }
 

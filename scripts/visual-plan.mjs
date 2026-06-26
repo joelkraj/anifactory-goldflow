@@ -11,6 +11,7 @@ import {
   dropOutOfScopePromptRefs,
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
+import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -615,49 +616,6 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     characterStateRefs: scopedCharacterRefs,
   });
   return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
-}
-
-function sanitizePositiveVisualPrompt(value) {
-  return String(value ?? "")
-    .replace(/\bno[-\s]?contact\b/gi, "contact-silence")
-    .replace(/\bdo\s+not\s+self[-\s]?deprecate\b/gi, "self-respect response")
-    .replace(/\bdo\s+not\s+beg\b/gi, "stand firm")
-    .replace(/\bdo\s+not\s+call\b/gi, "call restraint")
-    .replace(/\bdo\s+not\s+text\b/gi, "message restraint")
-    .replace(/\bdo\s+not\s+return upstairs\b/gi, "upstairs restraint")
-    .replace(/\bdo\s+not\s+return\b/gi, "return restraint")
-    .replace(/\bnot\s+call\b/gi, "call restraint")
-    .replace(/\bnot\s+text\b/gi, "message restraint")
-    .replace(/\bnot\s+return\b/gi, "return restraint")
-    .replace(/\bnot\s+beg\b/gi, "stand firm")
-    .replace(/\bnot\s+self[-\s]?deprecate\b/gi, "self-respect response")
-    .replace(/\bnot\s+performing\s+for\s+her\b/gi, "self-contained composure")
-    .replace(/\bnot\s+performing\b/gi, "self-contained composure")
-    .replace(/\bnot\s+chasing\b/gi, "controlled distance")
-    .replace(/\bnot\s+confident\s+yet\b/gi, "cautiously building confidence")
-    .replace(/\bwithout\s+performing\s+for\s+her\b/gi, "with self-contained composure")
-    .replace(/\bwithout\s+performing\b/gi, "with self-contained composure")
-    .replace(/\bwithout\s+chasing\b/gi, "with controlled distance")
-    .replace(/\bno\s+rain[-\s]?night\s+grime\b/gi, "cleaner than the rain-night version")
-    .replace(/\bno\s+rain[-\s]?soaked\s+jacket\b/gi, "clean dry simple clothing")
-    .replace(/\bno\s+food\s+stains\b/gi, "clean unstained clothing")
-    .replace(/\bno\s+speech bubbles\b/gi, "silent clean illustration")
-    .replace(/\bno\s+dialogue balloons\b/gi, "silent clean illustration")
-    .replace(/\bno\s+captions\b/gi, "clean image area")
-    .replace(/\bno\s+comic lettering\b/gi, "clean image area")
-    .replace(/\brather\s+than\b/gi, "with")
-    .replace(/\binstead\s+of\b/gi, "with")
-    .replace(/\bnegative\s+prompt\b/gi, "visual prompt")
-    .replace(/--no\b/gi, "")
-    .replace(/\bdo\s+not\b/gi, "show restraint")
-    .replace(/\bdon't\b/gi, "show restraint")
-    .replace(/\bwithout\b/gi, "with")
-    .replace(/\bavoid\b/gi, "favor")
-    .replace(/\bexclude\b/gi, "favor")
-    .replace(/\bnot\b/gi, "restrained")
-    .replace(/\bno\b/gi, "clean")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function sanitizeShotManifest(value) {

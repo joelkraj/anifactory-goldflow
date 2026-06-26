@@ -16,6 +16,7 @@ import {
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
+import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -136,6 +137,20 @@ function testProviderAwarePromptSelection() {
   assert.equal(promptTextForImageProvider(prompt, "modelslab"), "modelslab flux prompt");
   assert.equal(promptTextForImageProvider(prompt, "codex_imagegen"), "codex openai prompt");
   assert.equal(promptTextForImageProvider({ ...prompt, codex_image_prompt: "" }, "codex_imagegen"), "generic production prompt");
+}
+
+function testPositivePromptSanitizerDoesNotInvertNegation() {
+  const textless = sanitizePositiveVisualPrompt("clean UI panel, no readable text, no text");
+  assert.equal(/clean readable text/i.test(textless), false);
+  assert.match(textless, /unreadable/i);
+  assert.match(textless, /textless/i);
+
+  const alone = sanitizePositiveVisualPrompt("one man alone without a crowd");
+  assert.equal(/with a crowd/i.test(alone), false);
+  assert.match(alone, /without a crowd/i);
+
+  assert.equal(sanitizePositiveVisualPrompt("no second character"), "single subject only");
+  assert.match(sanitizePositiveVisualPrompt("no duplicate hero, no clone"), /one instance only/i);
 }
 
 async function testOnlyScenesDryRun() {
@@ -318,6 +333,7 @@ async function run() {
   testOutOfScopeRefDropping();
   testOutOfScopeLocationMentionAssertion();
   testProviderAwarePromptSelection();
+  testPositivePromptSanitizerDoesNotInvertNegation();
   await testOnlyScenesDryRun();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();

@@ -70,12 +70,23 @@ function requiredFlag(name, value) {
   if (!value) throw new Error(`Missing required --${name}. Pass --episode-dir, or pass --channel --week --episode.`);
 }
 
+function normalizeAudioTarget(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!normalized || ["narrator", "narration", "narrator_only", "narration_only", "voice_only"].includes(normalized)) return "narrator_only";
+  return normalized;
+}
+
+function isNarratorOnlyAudio(identity) {
+  return normalizeAudioTarget(identity.audio_target) === "narrator_only";
+}
+
 function commandFor(stage, identity) {
   const channel = identity.channel ?? "<channel>";
   const series = identity.series_slug ?? "<series>";
   const week = identity.week ?? "<week>";
   const episode = identity.episode ?? "<episode>";
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
+  const narratorOnly = isNarratorOnlyAudio(identity);
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md>`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
@@ -86,13 +97,15 @@ function commandFor(stage, identity) {
     qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
-    sfx_score_plan: `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only --retention-mix true`,
-    longform_audio_mix: `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`,
+    sfx_score_plan: narratorOnly ? "skipped because run_identity.audio_target is narrator_only" : `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only --retention-mix true`,
+    longform_audio_mix: narratorOnly
+      ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`
+      : `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`,
     visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2 --retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`,
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
     reference_generation: `node bin/goldflow.mjs imagegen start ${base} --references-only true`,
     visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base} && node bin/goldflow.mjs visual review ${base} && node bin/goldflow.mjs visual harden ${base}`,
-    transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json`,
+    transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly ? " --transition-sfx false" : ""}`,
     image_generation: `node bin/goldflow.mjs imagegen start ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
     final_qa: `ffprobe <final-render.mp4> && ffmpeg -i <final-audio-or-render> -af volumedetect -f null -`,
@@ -276,6 +289,7 @@ async function main() {
     series_slug: flags.series ?? flags.seriesSlug ?? runIdentity.series_slug,
     week: flags.week ?? runIdentity.week,
     episode: flags.episode ?? runIdentity.episode ?? path.basename(episodeDir),
+    audio_target: flags["audio-target"] ?? runIdentity.audio_target ?? "narrator_only",
   };
   const episode = identity.episode;
   const scriptHash = await fileSha256(path.join(episodeDir, "script_clean.md"));
@@ -289,6 +303,13 @@ async function main() {
   const render = await renderComplete(episodeDir, episode);
   const latestQa = await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
+  const narratorOnly = isNarratorOnlyAudio(identity);
+  const sfxScoreDone = narratorOnly
+    ? { done: true, evidence: "skipped: audio_target narrator_only" }
+    : {
+        done: await exists(path.join(episodeDir, `sfx_event_plan_${episode}.json`)) && await exists(path.join(episodeDir, `score_drop_plan_${episode}.json`)),
+        evidence: `sfx_event_plan_${episode}.json`,
+      };
 
   const rows = [
     stage("run_identity", "operator/run intent", "run_identity.json", false, await exists(runIdentityPath), "run_identity.json", identity),
@@ -300,8 +321,8 @@ async function main() {
     stage("qwen_tts_stitch", "voice plan + approved TTS text", `modelslab_qwen_tts_report_${episode}.json + stitched narration`, false, await exists(path.join(episodeDir, `modelslab_qwen_tts_report_${episode}.json`)) && await exists(path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`)), `modelslab_qwen_tts_report_${episode}.json`, identity),
     stage("local_whisper_word_timing", "final stitched narration", `narration_word_timing_${episode}.json`, false, await exists(path.join(episodeDir, `narration_word_timing_${episode}.json`)), `narration_word_timing_${episode}.json`, identity),
     stage("timing_bind", "local Whisper word timing", "timed_scene_plan.json", false, await exists(path.join(episodeDir, "timed_scene_plan.json")), "timed_scene_plan.json", identity),
-    stage("sfx_score_plan", "local Whisper timing + timed scenes", `sfx_event_plan_${episode}.json + score_drop_plan_${episode}.json`, false, await exists(path.join(episodeDir, `sfx_event_plan_${episode}.json`)) && await exists(path.join(episodeDir, `score_drop_plan_${episode}.json`)), `sfx_event_plan_${episode}.json`, identity),
-    stage("longform_audio_mix", "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
+    stage("sfx_score_plan", narratorOnly ? "skipped for narrator_only audio target" : "local Whisper timing + timed scenes", narratorOnly ? "skipped" : `sfx_event_plan_${episode}.json + score_drop_plan_${episode}.json`, false, sfxScoreDone.done, sfxScoreDone.evidence, identity),
+    stage("longform_audio_mix", narratorOnly ? "stitched narration/Qwen report" : "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
     stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, await exists(path.join(episodeDir, "visual_beat_plan.json")), "visual_beat_plan.json", identity),
     stage("visual_reference_plan", "visual beats + semantic facts", "visual_reference_plan.json + character_state_refs.json", true, await exists(path.join(episodeDir, "visual_reference_plan.json")) && await exists(path.join(episodeDir, "character_state_refs.json")), "visual_reference_plan.json", identity),
     stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity),

@@ -50,8 +50,11 @@ const narrationVolumeDb = Number(flags["narration-volume-db"] ?? 0);
 const targetLufs = flags["target-lufs"] === undefined ? null : Number(flags["target-lufs"]);
 const truePeakDb = Number(flags["true-peak-db"] ?? -1.0);
 const loudnessRange = Number(flags["loudness-range"] ?? 11);
+const narrationOnly = flags["narration-only"] === "true";
 const skipScore = flags["skip-score"] === "true";
-const transitionSfxEnabled = flags["transition-sfx"] === "true";
+const skipSfx = narrationOnly || flags["skip-sfx"] === "true";
+const effectiveSkipScore = narrationOnly || skipScore;
+const transitionSfxEnabled = !skipSfx && flags["transition-sfx"] === "true";
 const transitionSfxMaxCount = Number(flags["transition-sfx-max-count"] ?? 100);
 const transitionSfxMinGapSec = Number(flags["transition-sfx-min-gap-sec"] ?? 6.5);
 const transitionSfxBucketSec = Number(flags["transition-sfx-bucket-sec"] ?? 180);
@@ -755,28 +758,71 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
   };
 }
 
+async function mixNarrationOnly({ narrationPath, durationSec }) {
+  await fs.mkdir(mixDir, { recursive: true });
+  const wavPath = path.join(mixDir, `${outputBase}.wav`);
+  const m4aPath = path.join(mixDir, `${outputBase}.m4a`);
+  const loudnessFilter = Number.isFinite(targetLufs)
+    ? `,loudnorm=I=${targetLufs}:TP=${truePeakDb}:LRA=${loudnessRange}:print_format=summary`
+    : "";
+  await execFile("ffmpeg", [
+    "-y",
+    "-i", narrationPath,
+    "-filter_complex", `[0:a]volume=${narrationVolumeDb}dB,alimiter=limit=0.98${loudnessFilter}[aout]`,
+    "-map", "[aout]",
+    "-t", durationSec.toFixed(3),
+    "-ar", "44100",
+    "-ac", "2",
+    "-acodec", "pcm_s16le",
+    wavPath,
+  ], { maxBuffer: 1024 * 1024 * 16 });
+  await execFile("ffmpeg", ["-y", "-i", wavPath, "-c:a", "aac", "-b:a", "192k", m4aPath], { maxBuffer: 1024 * 1024 * 8 });
+  return {
+    wav_path: wavPath,
+    m4a_path: m4aPath,
+    duration_sec: await mediaDuration(wavPath),
+    audio_design_enabled: false,
+    narration_only: true,
+    narration_volume_db: narrationVolumeDb,
+    skip_score: true,
+    skip_sfx: true,
+    score_input_count: 0,
+    score_drop_input_count: 0,
+    score_drop_event_count: 0,
+    sfx_input_count: 0,
+    sfx_event_count: 0,
+    transition_sfx_enabled: false,
+    transition_sfx_input_count: 0,
+    transition_sfx_event_count: 0,
+    target_lufs: Number.isFinite(targetLufs) ? targetLufs : null,
+    true_peak_db: Number.isFinite(targetLufs) ? truePeakDb : null,
+    loudness_range: Number.isFinite(targetLufs) ? loudnessRange : null,
+    mix_policy: "Narrator-only bed: narration gain, limiter, and optional loudnorm only. SFX, score, ambience, and transition SFX are disabled.",
+  };
+}
+
 async function start() {
   const [scorePlan, scoreDropPlan, sfxPlan, qwenReport, promptPlan] = await Promise.all([
-    readJson(scorePlanPath, null),
-    readJson(scoreDropPlanPath, null),
-    readJson(sfxPlanPath, null),
+    narrationOnly ? null : readJson(scorePlanPath, null),
+    narrationOnly ? null : readJson(scoreDropPlanPath, null),
+    skipSfx ? null : readJson(sfxPlanPath, null),
     readJson(qwenReportPath, null),
-    readJson(promptPlanPath, null),
+    skipSfx ? null : readJson(promptPlanPath, null),
   ]);
-  if (!skipScore && !scorePlan?.chapters?.length && !scoreDropPlan?.drops?.length) {
+  if (!effectiveSkipScore && !scorePlan?.chapters?.length && !scoreDropPlan?.drops?.length) {
     throw new Error(`Missing score chapters or score drops: ${scorePlanPath} / ${scoreDropPlanPath}`);
   }
-  if (!sfxPlan) throw new Error(`Missing SFX event plan: ${sfxPlanPath}`);
-  if (!skipScore) {
+  if (!skipSfx && !sfxPlan) throw new Error(`Missing SFX event plan: ${sfxPlanPath}`);
+  if (!effectiveSkipScore) {
     validateScorePlanForProduction(scorePlan);
     validateScoreDropPlanForProduction(scoreDropPlan, scorePlan);
   }
-  validateSfxPlanForProduction(sfxPlan);
+  if (!skipSfx) validateSfxPlanForProduction(sfxPlan);
   const narrationPath = flags.narration ?? qwenReport?.output_path;
   if (!narrationPath || !(await exists(narrationPath))) throw new Error(`Missing narration audio. Pass --narration or create ${qwenReportPath}`);
   const narrationDuration = await mediaDuration(narrationPath);
   const durationSec = maxDurationSec > 0 ? Math.min(maxDurationSec, narrationDuration) : narrationDuration;
-  const chapters = skipScore ? [] : activeChapters(scorePlan, durationSec);
+  const chapters = effectiveSkipScore ? [] : activeChapters(scorePlan, durationSec);
   const scoreRows = [];
   for (const chapter of chapters) {
     const start = Number(chapter.start_sec ?? 0);
@@ -784,13 +830,28 @@ async function start() {
     scoreRows.push(await generateScoreChapter(chapter, Math.max(30, end - start)));
   }
   const scoreDropRows = [];
-  for (const drop of (skipScore ? [] : activeScoreDrops(scoreDropPlan, durationSec))) {
+  for (const drop of (effectiveSkipScore ? [] : activeScoreDrops(scoreDropPlan, durationSec))) {
     scoreDropRows.push(await generateScoreDrop(drop));
   }
-  const sfxEnsured = await ensureSfxEvents(sfxPlan);
-  const bankMap = await latestSfxAssetByCueId();
-  const transitionPreview = buildDeterministicTransitionSfxEvents(promptPlan, bankMap, durationSec);
-  const mix = dryRun ? null : await mixLongform({ narrationPath, scoreRows, scorePlan: scorePlan ?? { chapters: [] }, scoreDropPlan: skipScore ? null : scoreDropPlan, scoreDropRows, sfxPlan, promptPlan, bankMap, durationSec, qwenReport });
+  const sfxEnsured = skipSfx ? [] : await ensureSfxEvents(sfxPlan);
+  const bankMap = skipSfx ? new Map() : await latestSfxAssetByCueId();
+  const transitionPreview = skipSfx ? [] : buildDeterministicTransitionSfxEvents(promptPlan, bankMap, durationSec);
+  const mix = dryRun
+    ? null
+    : narrationOnly
+      ? await mixNarrationOnly({ narrationPath, durationSec })
+      : await mixLongform({
+          narrationPath,
+          scoreRows,
+          scorePlan: scorePlan ?? { chapters: [] },
+          scoreDropPlan: effectiveSkipScore ? null : scoreDropPlan,
+          scoreDropRows,
+          sfxPlan: sfxPlan ?? { events: [] },
+          promptPlan,
+          bankMap,
+          durationSec,
+          qwenReport,
+        });
   const scoreMeta = scoreProviderMeta();
   const report = {
     status: dryRun ? "dry_run" : "completed",
@@ -799,21 +860,25 @@ async function start() {
     series,
     week,
     episode,
-    provider: scoreMeta.provider === "local_ace_step" ? "local-ace-step-plus-modelslab-sfx" : "modelslab-inhouse",
-    skip_score: skipScore,
-    score_provider: scoreMeta.provider,
-    score_model_id: scoreMeta.model_id,
-    score_lm_model_id: scoreMeta.lm_model_id ?? null,
-    score_endpoint: scoreMeta.endpoint,
-    sfx_model_id: "sfx",
-    sfx_endpoint: "/api/v6/voice/sfx",
+    provider: narrationOnly ? "narrator-only" : scoreMeta.provider === "local_ace_step" ? "local-ace-step-plus-modelslab-sfx" : "modelslab-inhouse",
+    audio_design_enabled: !narrationOnly && !skipSfx,
+    narration_only: narrationOnly,
+    skip_score: effectiveSkipScore,
+    skip_sfx: skipSfx,
+    transition_sfx_enabled: transitionSfxEnabled,
+    score_provider: effectiveSkipScore ? null : scoreMeta.provider,
+    score_model_id: effectiveSkipScore ? null : scoreMeta.model_id,
+    score_lm_model_id: effectiveSkipScore ? null : scoreMeta.lm_model_id ?? null,
+    score_endpoint: effectiveSkipScore ? null : scoreMeta.endpoint,
+    sfx_model_id: skipSfx ? null : "sfx",
+    sfx_endpoint: skipSfx ? null : "/api/v6/voice/sfx",
     narration_path: narrationPath,
     narration_duration_sec: narrationDuration,
     mixed_duration_sec: mix?.duration_sec ?? durationSec,
-    score_chapter_plan_path: skipScore ? null : scorePlanPath,
-    score_drop_plan_path: !skipScore && scoreDropPlan ? scoreDropPlanPath : null,
-    sfx_event_plan_path: sfxPlanPath,
-    prompt_plan_path: promptPlanPath,
+    score_chapter_plan_path: effectiveSkipScore ? null : scorePlanPath,
+    score_drop_plan_path: !effectiveSkipScore && scoreDropPlan ? scoreDropPlanPath : null,
+    sfx_event_plan_path: skipSfx ? null : sfxPlanPath,
+    prompt_plan_path: skipSfx ? null : promptPlanPath,
     score_chapters: scoreRows,
     score_drops: scoreDropRows,
     sfx_ensured: sfxEnsured,
@@ -822,7 +887,7 @@ async function start() {
       planned_count: transitionPreview.length,
       max_count: transitionSfxMaxCount,
       min_gap_sec: transitionSfxMinGapSec,
-      source: "section_image_prompts_hardened cut starts plus available sfx bank assets",
+      source: skipSfx ? "disabled by narration-only/skip-sfx audio target" : "section_image_prompts_hardened cut starts plus available sfx bank assets",
       preview: transitionPreview.slice(0, 20).map((event) => ({
         event_id: event.event_id,
         cue_id: event.cue_id,

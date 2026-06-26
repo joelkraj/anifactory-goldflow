@@ -22,6 +22,7 @@ const hookDurationSec = Number(flags["hook-duration-sec"] ?? 30);
 const retentionRampSec = Number(flags["retention-ramp-sec"] ?? 180);
 const maxBoundaries = Number(flags["max-boundaries"] ?? 220);
 const dryRun = flags["dry-run"] === "true";
+const transitionSfxEnabled = flags["transition-sfx"] !== "false";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -158,12 +159,12 @@ function buildPrompt(boundaries, cueBank) {
 Return one valid JSON object only. Do not include markdown.
 
 Goal:
-- Decide which visual cut boundaries deserve true editorial transition treatment and transition SFX.
+- Decide which visual cut boundaries deserve true editorial transition treatment${transitionSfxEnabled ? " and transition SFX" : ""}.
 - Especially in the first 3 minutes, make the edit feel hand placed. Use the first 30 seconds as the densest cold open, then keep the 30-180 second ramp visually alive with selective sweeps, drop-ins, swipe-up/down, manga snaps, system scans, impact flashes, and quieter wipes.
 - Do NOT place SFX on every cut after the hook. Be selective after 30 seconds.
-- Transition SFX should land exactly on the cut boundary, not float under narration.
+${transitionSfxEnabled ? "- Transition SFX should land exactly on the cut boundary, not float under narration." : "- Transition SFX are disabled for this run. Set transition_sfx false, cue_id null, gain_db null, and sfx_offset_sec 0 on every event."}
 - Score drops are handled by the score planner; here you may only add a note when a boundary should be considered a score-drop anchor.
-- Use only cue_id values from the SFX cue bank below.
+${transitionSfxEnabled ? "- Use only cue_id values from the SFX cue bank below." : "- Do not reference cue_id values or SFX assets."}
 
 Allowed xfade transitions:
 fade, dissolve, distance, wipeleft, wiperight, wipeup, wipedown, slideleft, slideright, slideup, slidedown, smoothleft, smoothright, smoothup, smoothdown, circlecrop, rectcrop, pixelize, hblur, fadegrays, wipetl, wipetr, wipebl, wipebr, squeezeh, squeezev, zoomin, fadefast, fadeslow, hlwind, hrwind, vuwind, vdwind, coverleft, coverright, coverup, coverdown, revealleft, revealright, revealup, revealdown.
@@ -182,10 +183,10 @@ Return:
       "to_image_id": "ep_03-cut-002",
       "xfade_transition": "slideup",
       "xfade_duration_sec": 0.28,
-      "transition_sfx": true,
-      "cue_id": "hook_swipe_up_flash",
-      "gain_db": -16,
-      "sfx_offset_sec": -0.015,
+      "transition_sfx": ${transitionSfxEnabled ? "true" : "false"},
+      "cue_id": ${transitionSfxEnabled ? "\"hook_swipe_up_flash\"" : "null"},
+      "gain_db": ${transitionSfxEnabled ? "-16" : "null"},
+      "sfx_offset_sec": ${transitionSfxEnabled ? "-0.015" : "0"},
       "score_drop_anchor": false,
       "edit_reason": "why this transition/SFX earns attention here"
     }
@@ -194,12 +195,12 @@ Return:
 }
 
 Rules:
-- First 30 seconds: most boundaries should have transition_sfx true unless the narration beat is quiet.
-- 30-180 seconds: use transition_sfx on scene changes, system/UI reveals, reversals, humiliations, status turns, impact, memory shifts, and strong curiosity pivots. It should still feel designed, but less constant than the first 30 seconds.
-- After 180 seconds: transition_sfx true only for scene changes, system/UI reveals, reversals, impact, memory shifts, cliffhangers, or strong emotional pivots.
+- First 30 seconds: most boundaries should have vivid visual transitions when the narration beat supports it.
+- 30-180 seconds: use stronger transition families on scene changes, system/UI reveals, reversals, humiliations, status turns, impact, memory shifts, and strong curiosity pivots. It should still feel designed, but less constant than the first 30 seconds.
+- After 180 seconds: reserve strong transitions for scene changes, system/UI reveals, reversals, impact, memory shifts, cliffhangers, or strong emotional pivots.
+${transitionSfxEnabled ? "- When transition_sfx is true, cue_id must come from the cue bank." : "- transition_sfx must be false for every event in this silent-transition run."}
 - xfade_duration_sec should usually be 0.18-0.34 seconds. Use shorter for impact cuts, longer for memory/dissolve.
-- gain_db should usually be -18 to -14 in hook, -24 to -18 later.
-- sfx_offset_sec should be between -0.04 and 0.02 so the attack lands on the cut.
+${transitionSfxEnabled ? "- gain_db should usually be -18 to -14 in hook, -24 to -18 later.\n- sfx_offset_sec should be between -0.04 and 0.02 so the attack lands on the cut." : "- gain_db should be null and sfx_offset_sec should be 0."}
 `;
 }
 
@@ -252,7 +253,7 @@ function normalizeEvent(event, boundariesById, cueById) {
   if (!boundary) return null;
   const cueId = String(event.cue_id ?? "");
   const cue = cueById.get(cueId);
-  const transitionSfx = event.transition_sfx === true && cue;
+  const transitionSfx = transitionSfxEnabled && event.transition_sfx === true && cue;
   return {
     boundary_id: boundary.boundary_id,
     from_image_id: boundary.from_image_id,
@@ -265,8 +266,8 @@ function normalizeEvent(event, boundariesById, cueById) {
     cue_id: transitionSfx ? cueId : null,
     asset_path: transitionSfx ? cue.asset_path : null,
     asset_id: transitionSfx ? cue.asset_id : null,
-    gain_db: Math.max(-36, Math.min(-10, Number(event.gain_db ?? (boundary.in_hook ? -16 : -22)) || (boundary.in_hook ? -16 : -22))),
-    sfx_offset_sec: Math.max(-0.08, Math.min(0.05, Number(event.sfx_offset_sec ?? -0.015) || -0.015)),
+    gain_db: transitionSfx ? Math.max(-36, Math.min(-10, Number(event.gain_db ?? (boundary.in_hook ? -16 : -22)) || (boundary.in_hook ? -16 : -22))) : null,
+    sfx_offset_sec: transitionSfx ? Math.max(-0.08, Math.min(0.05, Number(event.sfx_offset_sec ?? -0.015) || -0.015)) : 0,
     score_drop_anchor: event.score_drop_anchor === true,
     in_hook: boundary.in_hook,
     in_retention_ramp: boundary.in_retention_ramp,
@@ -278,16 +279,16 @@ function normalizeEvent(event, boundariesById, cueById) {
 async function main() {
   const [promptPlan, sfxManifest] = await Promise.all([
     readJson(promptPlanPath, null),
-    readJson(sfxManifestPath, null),
+    transitionSfxEnabled ? readJson(sfxManifestPath, null) : null,
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPlanPath}`);
   const boundaries = buildBoundaries(promptPlan.prompts);
   const cueBank = transitionCueBank(sfxManifest);
-  if (!cueBank.length) throw new Error(`No available transition SFX cue bank entries in ${sfxManifestPath}`);
+  if (transitionSfxEnabled && !cueBank.length) throw new Error(`No available transition SFX cue bank entries in ${sfxManifestPath}`);
   const boundariesById = new Map(boundaries.map((boundary) => [boundary.boundary_id, boundary]));
   const cueById = new Map(cueBank.map((cue) => [cue.cue_id, cue]));
   const llm = dryRun
-    ? { provider: "dry_run", model: "none", prompt_path: null, output_path: null, parsed: { transition_events: boundaries.filter((row) => row.in_hook).map((row, index) => ({ boundary_id: row.boundary_id, to_image_id: row.to_image_id, xfade_transition: index % 2 ? "slideup" : "smoothup", transition_sfx: true, cue_id: cueBank[index % cueBank.length].cue_id, gain_db: -16, sfx_offset_sec: -0.015, edit_reason: "dry run hook transition" })), warnings: [] } }
+    ? { provider: "dry_run", model: "none", prompt_path: null, output_path: null, parsed: { transition_events: boundaries.filter((row) => row.in_hook).map((row, index) => ({ boundary_id: row.boundary_id, to_image_id: row.to_image_id, xfade_transition: index % 2 ? "slideup" : "smoothup", transition_sfx: transitionSfxEnabled, cue_id: transitionSfxEnabled ? cueBank[index % cueBank.length].cue_id : null, gain_db: transitionSfxEnabled ? -16 : null, sfx_offset_sec: transitionSfxEnabled ? -0.015 : 0, edit_reason: "dry run hook transition" })), warnings: [] } }
     : await callCodex(buildPrompt(boundaries, cueBank), `${episode}_transition_edit_plan`);
   const events = (Array.isArray(llm.parsed.transition_events) ? llm.parsed.transition_events : [])
     .map((event) => normalizeEvent(event, boundariesById, cueById))
@@ -300,10 +301,13 @@ async function main() {
     week,
     episode,
     prompt_plan_path: promptPlanPath,
-    sfx_manifest_path: sfxManifestPath,
-    source_hashes: Object.fromEntries((await Promise.all([promptPlanPath, sfxManifestPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    transition_sfx_enabled: transitionSfxEnabled,
+    sfx_manifest_path: transitionSfxEnabled ? sfxManifestPath : null,
+    source_hashes: Object.fromEntries((await Promise.all([promptPlanPath, transitionSfxEnabled ? sfxManifestPath : null].filter(Boolean).map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     planner: { provider: llm.provider, model: llm.model, prompt_path: llm.prompt_path, output_path: llm.output_path },
-    policy: "LLM edit plan chooses visual xfade transitions and transition SFX. Story SFX/score/ambience remain in audio planning; transition SFX are applied by render/edit at cut boundaries.",
+    policy: transitionSfxEnabled
+      ? "LLM edit plan chooses visual xfade transitions and transition SFX. Story SFX/score/ambience remain in audio planning; transition SFX are applied by render/edit at cut boundaries."
+      : "LLM edit plan chooses visual xfade transitions only. Transition SFX are disabled for this narrator-only/silent-transition run.",
     hook_duration_sec: hookDurationSec,
     retention_ramp_sec: retentionRampSec,
     candidate_boundary_count: boundaries.length,

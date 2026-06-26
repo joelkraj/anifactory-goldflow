@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,10 @@ import {
 } from "./lib/visual-scope-utils.mjs";
 
 const execFileAsync = promisify(execFile);
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -197,6 +202,103 @@ async function testImagegenDeadletterRefusal() {
   );
 }
 
+async function testNarratorOnlyStatusAndMixer() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const scriptText = "Fixture narration.";
+  const scriptHash = sha256(Buffer.from(scriptText));
+  await fs.mkdir(path.join(episodeDir, "assets", "audio"), { recursive: true });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await writeJson(path.join(episodeDir, "run_identity.json"), { channel: "test", series_slug: "series", week: "run", episode: "ep_01", audio_target: "narrator_only", image_provider: "modelslab" });
+  await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_speakability_report.json"), { source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "modelslab_qwen_tts_report_ep_01.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "narration_word_timing_ep_01.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "timed_scene_plan.json"), { status: "passed" });
+
+  const narrationPath = path.join(episodeDir, "assets", "audio", "fixture_narration.wav");
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-f", "lavfi",
+    "-i", "anullsrc=r=44100:cl=stereo",
+    "-t", "0.8",
+    "-acodec", "pcm_s16le",
+    narrationPath,
+  ]);
+  await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), {
+    status: "passed",
+    output_path: narrationPath,
+    segments: [{ segment_id: "seg_001", duration_sec: 0.8 }],
+  });
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const status = JSON.parse(stdout);
+  assert.equal(status.current_stage, "longform_audio_mix");
+  assert.match(status.next_command_shape, /--narration-only true/);
+  assert.equal(status.stage_ledger.find((row) => row.stage === "sfx_score_plan").exists, true);
+
+  await execFileAsync(process.execPath, [
+    "scripts/modelslab-longform-audio-bed.mjs",
+    "start",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--episodeDir", episodeDir,
+    "--qwenReport", path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"),
+    "--outputBase", "fixture-narrator-only",
+    "--reportSuffix", "-fixture",
+    "--narration-only", "true",
+    "--narration-volume-db", "1",
+    "--target-lufs", "-16",
+    "--true-peak-db", "-1",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(path.join(episodeDir, "longform_audio_bed_report_ep_01-fixture.json"), "utf8"));
+  assert.equal(report.status, "completed");
+  assert.equal(report.audio_design_enabled, false);
+  assert.equal(report.skip_sfx, true);
+  assert.equal(report.transition_sfx_enabled, false);
+  assert.equal(await fs.stat(report.mix.m4a_path).then((stat) => stat.isFile()), true);
+}
+
+async function testSilentTransitionsWithoutSfxBank() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  await writeJson(promptPath, {
+    status: "passed",
+    prompts: [
+      { image_id: "ep_01-cut-001", scene_id: "scene_001", start_sec: 0, visual_beat_action: "cold open begins" },
+      { image_id: "ep_01-cut-002", scene_id: "scene_001", start_sec: 2, visual_beat_action: "system reveal lands" },
+    ],
+  });
+  const output = path.join(episodeDir, "transition_edit_plan_ep_01.json");
+  await execFileAsync(process.execPath, [
+    "scripts/visual-transition-plan.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--prompts", promptPath,
+    "--output", output,
+    "--transition-sfx", "false",
+    "--dry-run", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(output, "utf8"));
+  assert.equal(report.status, "passed");
+  assert.equal(report.transition_sfx_enabled, false);
+  assert.equal(report.sfx_manifest_path, null);
+  assert.equal(report.transition_events.every((event) => event.transition_sfx === false), true);
+}
+
 async function run() {
   testLocationSceneIdsDerivation();
   testLocationCandidateExclusion();
@@ -205,6 +307,8 @@ async function run() {
   testOutOfScopeLocationMentionAssertion();
   await testOnlyScenesDryRun();
   await testImagegenDeadletterRefusal();
+  await testNarratorOnlyStatusAndMixer();
+  await testSilentTransitionsWithoutSfxBank();
   console.log("goldflow fixture tests passed");
 }
 

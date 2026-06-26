@@ -1047,6 +1047,34 @@ function renderTransitionSfxEvents(transitionEditPlan, audioDuration) {
     .filter((event) => event.start_sec < audioDuration);
 }
 
+function audioReportDisablesTransitionSfx(audioBedReport) {
+  return audioBedReport?.audio_design_enabled === false
+    || audioBedReport?.narration_only === true
+    || audioBedReport?.skip_sfx === true
+    || audioBedReport?.transition_sfx_enabled === false
+    || audioBedReport?.mix?.audio_design_enabled === false
+    || audioBedReport?.mix?.narration_only === true
+    || audioBedReport?.mix?.skip_sfx === true
+    || audioBedReport?.mix?.transition_sfx_enabled === false;
+}
+
+function withoutTransitionSfx(transitionEditPlan) {
+  if (!transitionEditPlan) return null;
+  return {
+    ...transitionEditPlan,
+    transition_sfx_enabled: false,
+    transition_events: (transitionEditPlan.transition_events ?? []).map((event) => ({
+      ...event,
+      transition_sfx: false,
+      cue_id: null,
+      asset_path: null,
+      asset_id: null,
+      gain_db: null,
+      sfx_offset_sec: 0,
+    })),
+  };
+}
+
 async function audioWithRenderTransitionSfx(audioPath, transitionEditPlan, audioDuration) {
   const events = renderTransitionSfxEvents(transitionEditPlan, audioDuration);
   if (!events.length) return { audio_path: audioPath, transition_sfx_events: [], transition_sfx_applied: false };
@@ -1148,7 +1176,12 @@ async function main() {
   await fs.mkdir(renderDir, { recursive: true });
   await fs.mkdir(workDir, { recursive: true });
   const audioDuration = await mediaDuration(audioPath);
-  const usableTransitionPlan = transitionEditPlan?.status === "passed" ? transitionEditPlan : null;
+  const transitionSfxDisabledByAudio = audioReportDisablesTransitionSfx(audioBedReport);
+  const rawTransitionPlan = transitionEditPlan?.status === "passed" ? transitionEditPlan : null;
+  const strippedTransitionSfxCount = transitionSfxDisabledByAudio
+    ? (rawTransitionPlan?.transition_events ?? []).filter((event) => event.transition_sfx === true).length
+    : 0;
+  const usableTransitionPlan = transitionSfxDisabledByAudio ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
   const renderAudio = await audioWithRenderTransitionSfx(audioPath, usableTransitionPlan, audioDuration);
   const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration, usableTransitionPlan);
   const subtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport);
@@ -1275,6 +1308,8 @@ async function main() {
     final_mux_audio_path: muxOutputPath,
     final_audio_loudnorm: finalAudioNormalization,
     transition_edit_plan_path: usableTransitionPlan ? transitionEditPlanPath : null,
+    transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudio,
+    transition_sfx_stripped_count: strippedTransitionSfxCount,
     transition_sfx_applied: renderAudio.transition_sfx_applied,
     transition_sfx_event_count: renderAudio.transition_sfx_events.length,
     transition_sfx_events: renderAudio.transition_sfx_events,

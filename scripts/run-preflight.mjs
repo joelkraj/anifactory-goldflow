@@ -15,7 +15,7 @@ const sourcePath = flags.source ? path.resolve(flags.source) : null;
 const allowPartInWeek = flags["allow-part-in-week"] === "true";
 const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "modelslab");
-const audioTarget = flags["audio-target"] ?? flags.audio ?? "narrator_forward_retention_mix";
+const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
 
 function parseFlags(parts) {
@@ -39,6 +39,12 @@ function normalizeImageProvider(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
   if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
   return "modelslab";
+}
+
+function normalizeAudioTarget(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!normalized || ["narrator", "narration", "narrator_only", "narration_only", "voice_only"].includes(normalized)) return "narrator_only";
+  return normalized;
 }
 
 async function exists(filePath) {
@@ -68,7 +74,8 @@ function impliedEpisodeNumber(value) {
   return null;
 }
 
-function stageChecklist() {
+function stageChecklist(target) {
+  const narratorOnly = target === "narrator_only";
   return [
     ["source_story", "pending"],
     ["script_clean", "pending"],
@@ -78,7 +85,7 @@ function stageChecklist() {
     ["voice_plan", "pending"],
     ["qwen_tts_stitch", "pending"],
     ["local_whisper_word_timing", "pending"],
-    ["timing_bound_sfx_score_plan", "pending"],
+    ["timing_bound_sfx_score_plan", narratorOnly ? "skipped_audio_target_narrator_only" : "pending"],
     ["longform_audio_mix", "pending"],
     ["visual_beat_plan", "pending"],
     ["visual_reference_plan_and_review", "pending"],
@@ -136,7 +143,7 @@ async function main() {
       longform_mix_required_for_production_render: true,
       proof_renders_must_be_labeled_and_must_not_replace_final_render: true,
     },
-    stage_checklist: stageChecklist(),
+    stage_checklist: stageChecklist(audioTarget),
     episode_dir: episodeDir,
     updated_at: now,
   };

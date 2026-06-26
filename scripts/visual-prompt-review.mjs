@@ -22,6 +22,9 @@ const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
 const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `visual_prompt_review_${episode}.json`);
+const autoResolveEnabled = flags["auto-resolve"] === "true";
+const maxResolveIterations = Math.max(1, Number(flags["max-resolve-iterations"] ?? 2));
+const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -81,6 +84,25 @@ async function hashFile(filePath) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function runNodeScript(script, args = []) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(repoRoot, "scripts", script), ...args], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) return resolve({ stdout, stderr });
+      reject(new Error(`${script} exited ${code}: ${stderr || stdout}`));
+    });
+  });
 }
 
 async function exists(filePath) {
@@ -701,6 +723,139 @@ function normalizePreImagegenFindings(findings) {
   });
 }
 
+function unresolvedBlockerFindings(findings) {
+  return (findings ?? []).filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
+}
+
+function sceneIdsFromBlockers(blockers) {
+  return [...new Set(blockers.map((finding) => String(finding.scene_id ?? "").trim()).filter(Boolean))];
+}
+
+function positiveCorrectionDirective(finding) {
+  const code = String(finding?.code ?? "visual_blocker");
+  let directive = "Create a concrete current-beat image from the beat excerpt, with visible subjects, action, props, UI, and approved refs aligned to this scene candidate set.";
+  if (/location|scope|ref/i.test(code)) {
+    directive = "Stage the cut inside the in-scope location reference for this scene. Describe that location's visible architecture, materials, lighting, surfaces, and spatial layout.";
+  } else if (/repeat|tableau|static/i.test(code)) {
+    directive = "Create a distinct shot job for this beat with a new camera distance, foreground action, subject pose, and visible consequence from the beat excerpt.";
+  } else if (/reference|missing/i.test(code)) {
+    directive = "Attach approved refs from this scene candidate set for physically visible subjects and setting, then describe the beat with concrete visible action.";
+  }
+  return {
+    scene_id: finding.scene_id ?? null,
+    code,
+    directive,
+  };
+}
+
+function mergeScenePrompts(basePrompts, replacementPrompts, sceneIds) {
+  const sceneSet = new Set(sceneIds);
+  const replacementsById = new Map((replacementPrompts ?? []).map((prompt) => [prompt.image_id, prompt]));
+  return (basePrompts ?? []).map((prompt) => {
+    if (!sceneSet.has(prompt.scene_id)) return prompt;
+    return replacementsById.get(prompt.image_id) ?? prompt;
+  });
+}
+
+async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
+  let currentPlan = reviewedPlan;
+  let currentReport = reviewReport;
+  const iterations = [];
+  let blockers = unresolvedBlockerFindings(currentReport.findings);
+  for (let iteration = 1; iteration <= maxResolveIterations && blockers.length; iteration += 1) {
+    const sceneIds = sceneIdsFromBlockers(blockers);
+    if (!sceneIds.length) break;
+    const iterationDir = path.join(episodeDir, "_visual_resolution");
+    const correctionPath = path.join(iterationDir, `correction_directives_${episode}_iter_${iteration}.json`);
+    const planPath = path.join(iterationDir, `section_image_prompts_resolve_${episode}_iter_${iteration}.json`);
+    const reviewedPath = path.join(iterationDir, `section_image_prompts_resolve_reviewed_${episode}_iter_${iteration}.json`);
+    const reportPath = path.join(iterationDir, `visual_prompt_review_resolve_${episode}_iter_${iteration}.json`);
+    const correctionDirectives = blockers
+      .filter((finding) => sceneIds.includes(finding.scene_id))
+      .map(positiveCorrectionDirective);
+    await writeJson(correctionPath, {
+      schema: "goldflow_visual_resolution_directives_v1",
+      status: "passed",
+      iteration,
+      scene_ids: sceneIds,
+      correction_directives: correctionDirectives,
+      source_findings: blockers.filter((finding) => sceneIds.includes(finding.scene_id)),
+      updated_at: new Date().toISOString(),
+    });
+    await runNodeScript("visual-plan.mjs", [
+      "--channel", channel,
+      "--series", series,
+      "--week", week,
+      "--episode", episode,
+      "--only-scenes", sceneIds.join(","),
+      "--correction-findings", correctionPath,
+      "--output", planPath,
+    ]);
+    let iterationStatus = "failed";
+    let iterationReport = null;
+    let iterationPlan = null;
+    try {
+      await runNodeScript("visual-prompt-review.mjs", [
+        "--channel", channel,
+        "--series", series,
+        "--week", week,
+        "--episode", episode,
+        "--prompts", planPath,
+        "--output", reviewedPath,
+        "--review-output", reportPath,
+        "--auto-resolve", "false",
+      ]);
+    } catch {
+      // The review script intentionally exits non-zero for blocked review output.
+    }
+    iterationReport = await readJson(reportPath, null);
+    iterationPlan = await readJson(reviewedPath, null);
+    iterationStatus = iterationReport?.status ?? "failed";
+    iterations.push({ iteration, scene_ids: sceneIds, status: iterationStatus, plan_path: planPath, reviewed_path: reviewedPath, review_report_path: reportPath });
+    if (iterationStatus === "passed" && iterationPlan?.prompts?.length) {
+      currentPlan = {
+        ...currentPlan,
+        status: "passed",
+        prompts: mergeScenePrompts(currentPlan.prompts, iterationPlan.prompts, sceneIds),
+        visual_resolution_iterations: iterations,
+        updated_at: new Date().toISOString(),
+      };
+      currentReport = {
+        ...currentReport,
+        status: "passed",
+        findings: (currentReport.findings ?? []).filter((finding) => !sceneIds.includes(finding.scene_id) || finding.severity !== "blocker"),
+        unresolved_blocker_count: 0,
+        visual_resolution_iterations: iterations,
+        reviewed_prompt_count: currentPlan.prompts.length,
+        updated_at: currentPlan.updated_at,
+      };
+      blockers = [];
+      break;
+    }
+    blockers = unresolvedBlockerFindings(iterationReport?.findings ?? blockers);
+  }
+  if (blockers.length) {
+    const sceneIds = sceneIdsFromBlockers(blockers);
+    const deadletter = {
+      schema: "goldflow_visual_resolution_deadletter_v1",
+      status: "blocked_deadletter",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      scene_ids: sceneIds,
+      unresolved_blockers: blockers,
+      last_prompts: (currentPlan.prompts ?? []).filter((prompt) => sceneIds.includes(prompt.scene_id)),
+      visual_resolution_iterations: iterations,
+      updated_at: new Date().toISOString(),
+    };
+    await writeJson(deadletterPath, deadletter);
+    currentPlan = { ...currentPlan, status: "blocked_deadletter", visual_resolution_deadletter_path: deadletterPath, visual_resolution_iterations: iterations, updated_at: deadletter.updated_at };
+    currentReport = { ...currentReport, status: "blocked_deadletter", unresolved_blocker_count: blockers.length, visual_resolution_deadletter_path: deadletterPath, visual_resolution_iterations: iterations, updated_at: deadletter.updated_at };
+  }
+  return { reviewedPlan: currentPlan, reviewReport: currentReport };
+}
+
 async function validateReferencePaths(prompts) {
   const findings = [];
   for (const prompt of prompts) {
@@ -834,7 +989,7 @@ async function main() {
   const normalizedFindings = normalizePreImagegenFindings(findings);
   findings.length = 0;
   findings.push(...normalizedFindings);
-  const unresolvedBlockers = findings.filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
+  const unresolvedBlockers = unresolvedBlockerFindings(findings);
   const status = unresolvedBlockers.length ? "blocked" : "passed";
   const sourcePaths = [promptPath, timedPlanPath, visualReferencePlanPath, characterStateRefsPath];
   const sourceHashes = Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash));
@@ -872,10 +1027,17 @@ async function main() {
     reviewed_prompt_plan_path: outputPath,
     updated_at: reviewedPlan.updated_at,
   };
-  await writeJson(outputPath, reviewedPlan);
-  await writeJson(reviewReportPath, reviewReport);
-  console.log(JSON.stringify({ status, output_path: outputPath, review_report_path: reviewReportPath, prompt_count: reviewedPrompts.length, unresolved_blocker_count: unresolvedBlockers.length }, null, 2));
-  if (status !== "passed") process.exitCode = 1;
+  let finalReviewedPlan = reviewedPlan;
+  let finalReviewReport = reviewReport;
+  if (autoResolveEnabled && status === "blocked") {
+    const resolved = await autoResolveBlockedReview({ reviewedPlan, reviewReport });
+    finalReviewedPlan = resolved.reviewedPlan;
+    finalReviewReport = resolved.reviewReport;
+  }
+  await writeJson(outputPath, finalReviewedPlan);
+  await writeJson(reviewReportPath, finalReviewReport);
+  console.log(JSON.stringify({ status: finalReviewReport.status, output_path: outputPath, review_report_path: reviewReportPath, prompt_count: finalReviewedPlan.prompts?.length ?? reviewedPrompts.length, unresolved_blocker_count: finalReviewReport.unresolved_blocker_count ?? unresolvedBlockers.length }, null, 2));
+  if (finalReviewReport.status !== "passed") process.exitCode = 1;
 }
 
 main().catch(async (error) => {

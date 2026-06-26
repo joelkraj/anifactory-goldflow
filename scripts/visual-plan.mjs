@@ -27,6 +27,7 @@ const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
+const correctionFindingsPath = flags["correction-findings"] ?? flags.correctionFindings ?? null;
 const promptMaxChars = Number(flags["visual-prompt-max-chars"] ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_CHARS ?? 900_000);
 
 function parseFlags(parts) {
@@ -278,7 +279,7 @@ async function enrichVisualReferencePlan(visualReferencePlan) {
   return { ...visualReferencePlan, reference_targets: targets };
 }
 
-function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null) {
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = []) {
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
@@ -302,6 +303,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
       reference_target_ids: (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []).map((target) => target.ref_id),
     })),
     reference_targets_by_scene: referenceTargetsByScene,
+    correction_directives: correctionDirectives,
   };
   const compactSemanticPlan = {
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -368,6 +370,9 @@ ${JSON.stringify(compactTimedPlan, null, 2)}
 
 SEMANTIC PLAN:
 ${JSON.stringify(compactSemanticPlan, null, 2)}
+
+SCENE CORRECTION DIRECTIVES:
+${JSON.stringify(correctionDirectives, null, 2)}
 
 Return JSON only:
 {
@@ -764,8 +769,22 @@ function parseListFlag(value) {
     .filter(Boolean);
 }
 
+async function loadCorrectionDirectives(filePath) {
+  if (!filePath) return [];
+  const artifact = await readJson(filePath, null);
+  if (Array.isArray(artifact)) return artifact;
+  if (Array.isArray(artifact?.correction_directives)) return artifact.correction_directives;
+  if (Array.isArray(artifact?.directives)) return artifact.directives;
+  return [];
+}
+
 function filterVisualSourceRows(rows, episodeId) {
   const annotated = rows.map((row, index) => ({ ...row, __visual_plan_absolute_index: index }));
+  const sceneIds = parseListFlag(flags["only-scenes"] ?? flags.onlyScenes);
+  if (sceneIds.length) {
+    const wanted = new Set(sceneIds);
+    return annotated.filter((row) => wanted.has(row.parent_scene_id ?? row.scene_id));
+  }
   const cutIds = parseListFlag(flags["cut-ids"] ?? flags.cutIds);
   if (cutIds.length) {
     const wanted = new Set(cutIds);
@@ -851,6 +870,7 @@ async function main() {
     throw new Error(`character_state_refs must be approved before visual planning. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
   }
   const enrichedVisualReferencePlan = await enrichVisualReferencePlan(visualReferencePlan);
+  const correctionDirectives = await loadCorrectionDirectives(correctionFindingsPath);
   const stateRefIndex = indexCharacterStateRefs(characterStateRefs);
   const allVisualSourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
@@ -871,11 +891,11 @@ async function main() {
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
-        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives);
         promptSizes.push({ chunk_index: index + 1, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
       }
     } else {
-      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan);
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives);
       promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
     }
     await writeJson(outputPath, {
@@ -909,7 +929,7 @@ async function main() {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
       const chunkLlm = isLocalLLMRoute(chunkStageName)
@@ -938,7 +958,7 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
-    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";

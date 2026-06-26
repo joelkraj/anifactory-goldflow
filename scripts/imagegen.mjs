@@ -32,6 +32,7 @@ const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ??
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
 const confirmImageProvider = flags["confirm-image-provider"] === "true";
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
+const visualResolutionDeadletterPath = flags.deadletter ?? flags["deadletter"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -528,6 +529,20 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
   return [...mergedById.values()].sort((a, b) => String(a.image_id).localeCompare(String(b.image_id), undefined, { numeric: true }));
 }
 
+async function assertNoVisualResolutionDeadletter(plan, selectedPrompts = []) {
+  if (plan?.status === "blocked_deadletter" || plan?.visual_resolution_deadletter_path) {
+    throw new Error(`Imagegen refused blocked visual prompt plan with dead-lettered scenes: ${plan.visual_resolution_deadletter_path ?? visualResolutionDeadletterPath}`);
+  }
+  const deadletter = await readJson(visualResolutionDeadletterPath, null);
+  if (deadletter?.status !== "blocked_deadletter") return;
+  const blockedScenes = new Set((deadletter.scene_ids ?? []).map((sceneId) => String(sceneId)));
+  const selectedScenes = new Set((selectedPrompts ?? []).map((prompt) => String(prompt.scene_id ?? "")).filter(Boolean));
+  const overlap = [...blockedScenes].filter((sceneId) => selectedScenes.has(sceneId));
+  if (overlap.length) {
+    throw new Error(`Imagegen refused dead-lettered visual scenes: ${overlap.join(", ")}. Resolve visual_resolution_deadletter.json before image generation.`);
+  }
+}
+
 async function main() {
   const runIdentity = await assertRunIdentityImageProvider();
   const referenceRun = await generateReferences();
@@ -570,6 +585,7 @@ async function main() {
     .filter((prompt) => prompt.image_generation_required !== false)
     .filter((prompt) => !scope.size || scope.has(prompt.image_id));
   if (!prompts.length) throw new Error("No image prompts selected for generation.");
+  await assertNoVisualResolutionDeadletter(plan, prompts);
   await fs.mkdir(imageDir, { recursive: true });
   const promptPlanHash = await hashFile(promptPath);
   const allPromptIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));

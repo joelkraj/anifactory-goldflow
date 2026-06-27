@@ -15,6 +15,7 @@ import {
   outOfScopeLocationRefMentions,
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
+import { multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
 import { voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
@@ -174,6 +175,114 @@ function testVoiceDirectionCharacterization() {
   assert.equal(clean.qwen_spoken_text, "The elevator doors opened with a soft chime.");
 }
 
+function testCharacterStagingSanitizerAndReviewBlockers() {
+  const characterStateRefs = [
+    {
+      state_ref_id: "joey_state_ref",
+      source_ref_id: "joey_ref",
+      character: "Joey",
+      scene_prompt_anchor: "dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers",
+    },
+    {
+      state_ref_id: "mira_state_ref",
+      source_ref_id: "mira_ref",
+      character: "Mira",
+      scene_prompt_anchor: "cream fitted coat over a black dress, gold phone in hand, sharp heels",
+    },
+  ];
+  const sanitized = sanitizeCharacterStaging([
+    { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira" },
+  ]);
+  assert.deepEqual(sanitized, [
+    { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira" },
+  ]);
+
+  const stagedManifest = {
+    visible_characters: ["Joey", "Mira"],
+    character_staging: [
+      { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
+      { name: "Mira", ref_id: "mira_state_ref", screen_position: "frame-right", wardrobe_from: "character_state_ref:mira_state_ref", pose: "chin lifted with her weight on the back foot" },
+    ],
+  };
+
+  const matchingCoatsPrompt = {
+    image_id: "ep_01-cut-010",
+    scene_id: "scene_010",
+    modelslab_image_prompt: "Joey and Mira stand together in matching coats near the lobby doors.",
+    shot_manifest: stagedManifest,
+  };
+  const matchingCoatsFindings = multiCharacterBleedFindings(matchingCoatsPrompt, characterStateRefs);
+  const matchingCoatsBlockers = matchingCoatsFindings.filter((finding) => finding.severity === "blocker" && finding.code === "character_attribute_bleed_risk");
+  assert.equal(matchingCoatsBlockers.length, 1);
+
+  const identicalHoodiesPrompt = {
+    image_id: "ep_01-cut-011",
+    scene_id: "scene_011",
+    modelslab_image_prompt: "In the hallway, both Joey and Mira wear identical hoodies while staring each other down.",
+    shot_manifest: stagedManifest,
+  };
+  const identicalHoodiesFindings = multiCharacterBleedFindings(identicalHoodiesPrompt, characterStateRefs);
+  const identicalHoodiesBlockers = identicalHoodiesFindings.filter((finding) => finding.severity === "blocker" && finding.code === "character_attribute_bleed_risk");
+  assert.equal(identicalHoodiesBlockers.length, 1);
+
+  const naturalPositionPrompt = {
+    image_id: "ep_01-cut-012",
+    scene_id: "scene_012",
+    modelslab_image_prompt: "On the left, Joey wears a dark varsity jacket over a white T-shirt and black jeans. On the right, Mira wears a cream fitted coat over a black dress and sharp heels.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(naturalPositionPrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const splitSentenceWardrobePrompt = {
+    image_id: "ep_01-cut-013",
+    scene_id: "scene_013",
+    modelslab_image_prompt: "Frame-left stands Joey. He wears a dark varsity jacket over a white T-shirt and black jeans. Frame-right stands Mira. She wears a cream fitted coat over a black dress and sharp heels.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(splitSentenceWardrobePrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const ownWardrobePrompt = {
+    image_id: "ep_01-cut-014",
+    scene_id: "scene_014",
+    modelslab_image_prompt: "Joey faces Mira across the lobby in a dark varsity jacket. Mira squares up in a cream fitted coat with her phone in hand.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(ownWardrobePrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const paraphrasedWardrobePrompt = {
+    image_id: "ep_01-cut-015",
+    scene_id: "scene_015",
+    modelslab_image_prompt: "On the left, Joey stands in his usual casual layers. On the right, Mira answers him in a polished upscale outfit.",
+    shot_manifest: stagedManifest,
+  };
+  const paraphrasedWardrobeFindings = multiCharacterBleedFindings(paraphrasedWardrobePrompt, characterStateRefs);
+  assert.equal(paraphrasedWardrobeFindings.filter((finding) => finding.severity === "blocker").length, 0);
+  assert.equal(paraphrasedWardrobeFindings.filter((finding) => finding.severity === "warning").length >= 1, true);
+
+  const missingCoveragePrompt = {
+    image_id: "ep_01-cut-016",
+    scene_id: "scene_016",
+    modelslab_image_prompt: "On the left, Joey wears a dark varsity jacket over a white T-shirt and black jeans.",
+    shot_manifest: {
+      visible_characters: ["Joey", "Mira"],
+      character_staging: [
+        { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
+      ],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(missingCoveragePrompt, characterStateRefs).some((finding) => finding.severity === "blocker" && /character_staging must cover every visible character/i.test(finding.message)), true);
+
+  const singleCharacterPrompt = {
+    image_id: "ep_01-cut-017",
+    scene_id: "scene_017",
+    modelslab_image_prompt: "Joey pauses alone in the lobby, dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, one hand tight on the bag strap.",
+    shot_manifest: {
+      visible_characters: ["Joey"],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(singleCharacterPrompt, characterStateRefs).length, 0);
+}
+
 async function testOnlyScenesDryRun() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -248,6 +357,98 @@ async function testImagegenDeadletterRefusal() {
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
     /dead-lettered visual scenes/
   );
+}
+
+async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [] }) {
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const hash = "fixture_hash";
+  await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    scenes: [{ scene_id: "scene_001", start_sec: 0, duration_sec: 5, location: "apartment kitchen" }],
+  });
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    reference_targets: [
+      { ref_id: "loc_apartment", kind: "location", subject: "apartment kitchen", scene_ids: ["scene_001"], reference_image_path: "/tmp/loc_apartment.png" },
+      { ref_id: "char_joey_ref", kind: "character_state", subject: "Joey", scene_ids: ["scene_001"], reference_image_path: "/tmp/char_joey_ref.png" },
+    ],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), {
+    status: "approved",
+    source_script_hash: hash,
+    character_state_refs: [
+      { state_ref_id: "char_joey_state", source_ref_id: "char_joey_ref", character: "Joey", scene_ids: ["scene_001"], reference_image_path: "/tmp/char_joey_ref.png" },
+    ],
+  });
+  await writeJson(path.join(episodeDir, "section_image_prompts_reviewed.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    prompts: [{
+      image_id: "ep_01-cut-001",
+      scene_id: "scene_001",
+      image_prompt: promptText,
+      modelslab_image_prompt: promptText,
+      codex_image_prompt: codexPromptText,
+      location: "apartment kitchen",
+      reference_requirements: referenceRequirements,
+      shot_manifest: {
+        visible_characters: ["Joey"],
+        character_state_ref_ids: ["char_joey_state"],
+        location_ref_id: "loc_apartment",
+        forbidden_ref_ids: [],
+        ...shotManifest,
+      },
+    }],
+  });
+  let error = null;
+  try {
+    await execFileAsync(process.execPath, [
+      "scripts/visual-prompt-harden.mjs",
+      "--channel", "test",
+      "--series", "series",
+      "--week", "run",
+      "--episode", "ep_01",
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  } catch (caught) {
+    error = caught;
+  }
+  const plan = JSON.parse(await fs.readFile(path.join(episodeDir, "section_image_prompts_hardened.json"), "utf8"));
+  const report = JSON.parse(await fs.readFile(path.join(episodeDir, "visual_prompt_hardening_ep_01.json"), "utf8"));
+  return { plan, report, error };
+}
+
+async function testVisualHardenFlagsNegativePromptWithoutRewrite() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey at the apartment desk, no second character, no readable text.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 5 }],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(plan.prompts[0].modelslab_image_prompt, promptText);
+  assert.equal(plan.prompts[0].image_prompt, promptText);
+  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt" && finding.severity === "warning"), true);
+}
+
+async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey at the apartment desk with bills spread across the table in quiet morning light.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 9 }],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(plan.prompts[0].modelslab_image_prompt, promptText);
+  assert.equal(plan.prompts[0].image_prompt, promptText);
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_ref"]);
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.slot_order), [1, 2]);
+  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt"), false);
 }
 
 async function testNarratorOnlyStatusAndMixer() {
@@ -356,7 +557,10 @@ async function run() {
   testProviderAwarePromptSelection();
   testPositivePromptSanitizerDoesNotInvertNegation();
   testVoiceDirectionCharacterization();
+  testCharacterStagingSanitizerAndReviewBlockers();
   await testOnlyScenesDryRun();
+  await testVisualHardenFlagsNegativePromptWithoutRewrite();
+  await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();
   await testSilentTransitionsWithoutSfxBank();

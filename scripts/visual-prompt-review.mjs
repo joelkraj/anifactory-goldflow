@@ -6,6 +6,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -120,45 +122,6 @@ function extractJson(text) {
   const end = raw.lastIndexOf("}");
   if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
-}
-
-function negativeLanguageMatches(value) {
-  const text = String(value ?? "").toLowerCase();
-  const patterns = [
-    /\bno\b/,
-    /\bnot\b/,
-    /\bwithout\b/,
-    /\bavoid\b/,
-    /\bexclude\b/,
-    /\binstead\s+of\b/,
-    /\brather\s+than\b/,
-    /\bdo\s+not\b/,
-    /\bdon't\b/,
-    /--no\b/,
-    /\bnegative\s+prompt\b/,
-  ];
-  return patterns.filter((pattern) => pattern.test(text)).map(String);
-}
-
-function positiveLanguageFindings(prompts) {
-  const findings = [];
-  for (const prompt of prompts) {
-    for (const field of ["image_prompt", "modelslab_image_prompt", "codex_image_prompt"]) {
-      if (!prompt[field]) continue;
-      const matches = negativeLanguageMatches(prompt[field]);
-      if (matches.length) {
-        findings.push({
-          image_id: prompt.image_id,
-          scene_id: prompt.scene_id,
-          severity: "blocker",
-          code: "negative_prompt",
-          message: `${field} contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
-          resolved: false,
-        });
-      }
-    }
-  }
-  return findings;
 }
 
 function compactScene(scene) {
@@ -326,6 +289,12 @@ Rules:
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
 - Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, make the prompt and location reference match it.
+- For cuts with two or more visible characters, shot_manifest.character_staging is required and must cover visible_characters in the same order.
+- shot_manifest.character_staging screen_position must use this fixed vocabulary only: ${CHARACTER_STAGING_POSITIONS.join(" | ")}.
+- For cuts with two or more visible characters, keep separate position-bound people clauses in the prompt. Each staged clause must bind screen position, character name, that character's copied scene_prompt_anchor wardrobe/state wording, and that character's pose.
+- Never merge two characters into one shared wardrobe or appearance clause, and never describe wardrobe without naming whose wardrobe it is.
+- Keep reference_requirements.slot_order and slot_purpose aligned with character_staging order so the image model receives the same identity order that the prose prompt uses.
+- For multi-character cuts where any body-occluding surface or large object is in frame (recognize it from the beat/location, not a fixed list), check that modelslab_image_prompt gives each character an explicit side-of-surface placement, states body clearance positively (torso above the surface line, feet grounded, no body-surface merging), and avoids flat centered bilateral staging. codex_image_prompt may stay more centered if bodies remain discrete and clear of the surface.
 - Do not import a named location/world/era/institution from a reference merely because it is visually convenient. If a location ref's named setting is absent from the current visual_beat_script_excerpt, visual_beat_action, and semantic scene location, remove that location ref and stage the generic current location from the beat text.
 - Treat reference target scene_ids as usage contracts for location, prop, UI, and action/effect refs. If such a ref's scene_ids do not cover the current scene, remove it from shot_manifest and reference_requirements, and rewrite the prose location/action from the current beat. When a reference has two scene IDs like scene_009 and scene_039, treat that as an inclusive scene range.
 - Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
@@ -405,7 +374,16 @@ Return JSON only:
         "visible_props": ["..."],
         "ui_elements": ["..."],
         "forbidden_ref_ids": ["..."],
-        "continuity_notes": "..."
+        "continuity_notes": "...",
+        "character_staging": [
+          {
+            "name": "...",
+            "ref_id": "...",
+            "screen_position": "frame-left|frame-right|center|foreground|background-left|background-right",
+            "wardrobe_from": "character_state_ref:...",
+            "pose": "..."
+          }
+        ]
       },
       "visible_subjects": [],
       "character_state_refs_used": [],
@@ -419,8 +397,9 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|beauty_language_risk|named_character_duplication_risk|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|other",
       "message": "specific issue",
+      "target_field": "optional span repair target such as people_clause",
       "resolved": true
     }
   ],
@@ -555,6 +534,7 @@ function sanitizeShotManifest(value) {
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
+    character_staging: sanitizeCharacterStaging(value.character_staging),
   };
 }
 
@@ -993,10 +973,13 @@ async function main() {
 
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));
   assertReviewedPrompts(promptPlan.prompts, reviewedPrompts, timedPlan);
-  findings.push(...positiveLanguageFindings(reviewedPrompts));
+  findings.push(...negativePromptFindings(reviewedPrompts));
+  findings.push(...beautyLanguageFindings(reviewedPrompts));
+  findings.push(...namedCharacterDuplicationFindings(reviewedPrompts));
   findings.push(...scenePromptShapeFindings(reviewedPrompts));
   findings.push(...staticPoseFindings(reviewedPrompts));
   findings.push(...repeatedTableauFindings(reviewedPrompts));
+  findings.push(...reviewedPrompts.flatMap((prompt) => multiCharacterBleedFindings(prompt, characterStateRefs)));
   findings.push(...contaminatedReferenceFindings(visualReferencePlan));
   findings.push(...outOfScopeReferenceFindings(reviewedPrompts, visualReferencePlan));
   findings.push(...await validateReferencePaths(reviewedPrompts));

@@ -205,6 +205,27 @@ function normalizeName(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function stagedCharacterSlotContext(prompt, characterRefs = []) {
+  const staging = Array.isArray(prompt?.shot_manifest?.character_staging) ? prompt.shot_manifest.character_staging : [];
+  const byRefId = new Map();
+  for (const ref of characterRefs ?? []) {
+    for (const id of [ref?.state_ref_id, ref?.source_ref_id].filter(Boolean)) {
+      byRefId.set(String(id), ref);
+    }
+  }
+  const context = new Map();
+  staging.forEach((entry, index) => {
+    const ids = [entry?.ref_id, String(entry?.wardrobe_from ?? "").replace(/^character_state_ref:/i, "")].filter(Boolean);
+    for (const id of ids) {
+      context.set(String(id), { order: index, name: entry?.name ? String(entry.name) : null });
+      const ref = byRefId.get(String(id));
+      if (ref?.state_ref_id) context.set(String(ref.state_ref_id), { order: index, name: entry?.name ? String(entry.name) : ref.character ?? null });
+      if (ref?.source_ref_id) context.set(String(ref.source_ref_id), { order: index, name: entry?.name ? String(entry.name) : ref.character ?? null });
+    }
+  });
+  return context;
+}
+
 function characterReferenceRequirements(prompt, characterRefs, existingIds) {
   const sceneId = String(prompt.scene_id ?? "");
   const visibleText = [
@@ -250,6 +271,7 @@ function isHardenedPromptPlan(plan) {
 function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) {
   const inferVisibleSubjectRefs = !isHardenedPromptPlan(plan);
   const prompts = (plan.prompts ?? []).map((prompt) => {
+    const stagingContext = stagedCharacterSlotContext(prompt, characterRefs);
     const authoredRequirements = Array.isArray(prompt.reference_requirements)
       ? prompt.reference_requirements.filter((requirement) => requirement.inferred_from_visible_subject !== true)
       : [];
@@ -264,9 +286,14 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
         index,
         path: referenceById.get(requirement.ref_id),
         sortKey: referenceSortKey(requirement, index),
+        staging: stagingContext.get(String(requirement.ref_id)) ?? stagingContext.get(String(requirement.source_state_ref_id ?? "")) ?? null,
       }))
       .filter((row) => row.path)
-      .sort((a, b) => a.sortKey.kindRank - b.sortKey.kindRank || a.sortKey.requiredRank - b.sortKey.requiredRank || a.sortKey.explicitOrder - b.sortKey.explicitOrder || a.sortKey.index - b.sortKey.index);
+      .sort((a, b) => a.sortKey.kindRank - b.sortKey.kindRank
+        || (a.staging?.order ?? 999) - (b.staging?.order ?? 999)
+        || a.sortKey.requiredRank - b.sortKey.requiredRank
+        || a.sortKey.explicitOrder - b.sortKey.explicitOrder
+        || a.sortKey.index - b.sortKey.index);
     const nonStyleRows = availableRows.filter((row) => !isStyleReferenceRequirement(row.requirement));
     const styleRows = availableRows.filter((row) => isStyleReferenceRequirement(row.requirement));
     const selected = (nonStyleRows.length ? nonStyleRows : styleRows).slice(0, maxSceneReferences);
@@ -276,7 +303,9 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
       ref_id: row.requirement.ref_id,
       kind: row.requirement.kind ?? null,
       path: row.path,
-      purpose: row.requirement.slot_purpose ?? referenceSlotPurpose(row.requirement),
+      purpose: row.staging?.name && String(row.requirement.kind ?? "").toLowerCase().includes("character")
+        ? `character identity and wardrobe for ${row.staging.name}`
+        : row.requirement.slot_purpose ?? referenceSlotPurpose(row.requirement),
       reason: row.requirement.reason ?? null,
     }));
     return {

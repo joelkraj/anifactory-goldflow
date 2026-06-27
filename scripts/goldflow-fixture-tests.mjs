@@ -197,41 +197,84 @@ function testCharacterStagingSanitizerAndReviewBlockers() {
     { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira" },
   ]);
 
-  const properPrompt = {
+  const stagedManifest = {
+    visible_characters: ["Joey", "Mira"],
+    character_staging: [
+      { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
+      { name: "Mira", ref_id: "mira_state_ref", screen_position: "frame-right", wardrobe_from: "character_state_ref:mira_state_ref", pose: "chin lifted with her weight on the back foot" },
+    ],
+  };
+
+  const matchingCoatsPrompt = {
     image_id: "ep_01-cut-010",
     scene_id: "scene_010",
-    modelslab_image_prompt: "Lobby confrontation at the instant both stop. Frame-left, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, half-turned toward Mira with one shoulder forward. Frame-right, Mira: cream fitted coat over a black dress, gold phone in hand, sharp heels, chin lifted with her weight on the back foot. Clear spatial separation between them.",
-    shot_manifest: {
-      visible_characters: ["Joey", "Mira"],
-      character_staging: [
-        { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
-        { name: "Mira", ref_id: "mira_state_ref", screen_position: "frame-right", wardrobe_from: "character_state_ref:mira_state_ref", pose: "chin lifted with her weight on the back foot" },
-      ],
-    },
+    modelslab_image_prompt: "Joey and Mira stand together in matching coats near the lobby doors.",
+    shot_manifest: stagedManifest,
   };
-  assert.equal(multiCharacterBleedFindings(properPrompt, characterStateRefs).length, 0);
+  const matchingCoatsFindings = multiCharacterBleedFindings(matchingCoatsPrompt, characterStateRefs);
+  const matchingCoatsBlockers = matchingCoatsFindings.filter((finding) => finding.severity === "blocker" && finding.code === "character_attribute_bleed_risk");
+  assert.equal(matchingCoatsBlockers.length, 1);
 
-  const mergedWardrobePrompt = {
-    ...properPrompt,
-    modelslab_image_prompt: "Lobby confrontation. Frame-left, Joey and Mira: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, cream fitted coat over a black dress, gold phone in hand, facing each other in the lobby.",
-  };
-  const mergedFindings = multiCharacterBleedFindings(mergedWardrobePrompt, characterStateRefs);
-  assert.equal(mergedFindings.some((finding) => finding.code === "character_attribute_bleed_risk"), true);
-
-  const missingCoveragePrompt = {
-    ...properPrompt,
-    shot_manifest: {
-      visible_characters: ["Joey", "Mira"],
-      character_staging: [
-        { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
-      ],
-    },
-  };
-  assert.equal(multiCharacterBleedFindings(missingCoveragePrompt, characterStateRefs).some((finding) => /character_staging must cover every visible character/i.test(finding.message)), true);
-
-  const singleCharacterPrompt = {
+  const identicalHoodiesPrompt = {
     image_id: "ep_01-cut-011",
     scene_id: "scene_011",
+    modelslab_image_prompt: "In the hallway, both Joey and Mira wear identical hoodies while staring each other down.",
+    shot_manifest: stagedManifest,
+  };
+  const identicalHoodiesFindings = multiCharacterBleedFindings(identicalHoodiesPrompt, characterStateRefs);
+  const identicalHoodiesBlockers = identicalHoodiesFindings.filter((finding) => finding.severity === "blocker" && finding.code === "character_attribute_bleed_risk");
+  assert.equal(identicalHoodiesBlockers.length, 1);
+
+  const naturalPositionPrompt = {
+    image_id: "ep_01-cut-012",
+    scene_id: "scene_012",
+    modelslab_image_prompt: "On the left, Joey wears a dark varsity jacket over a white T-shirt and black jeans. On the right, Mira wears a cream fitted coat over a black dress and sharp heels.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(naturalPositionPrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const splitSentenceWardrobePrompt = {
+    image_id: "ep_01-cut-013",
+    scene_id: "scene_013",
+    modelslab_image_prompt: "Frame-left stands Joey. He wears a dark varsity jacket over a white T-shirt and black jeans. Frame-right stands Mira. She wears a cream fitted coat over a black dress and sharp heels.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(splitSentenceWardrobePrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const ownWardrobePrompt = {
+    image_id: "ep_01-cut-014",
+    scene_id: "scene_014",
+    modelslab_image_prompt: "Joey faces Mira across the lobby in a dark varsity jacket. Mira squares up in a cream fitted coat with her phone in hand.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(ownWardrobePrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const paraphrasedWardrobePrompt = {
+    image_id: "ep_01-cut-015",
+    scene_id: "scene_015",
+    modelslab_image_prompt: "On the left, Joey stands in his usual casual layers. On the right, Mira answers him in a polished upscale outfit.",
+    shot_manifest: stagedManifest,
+  };
+  const paraphrasedWardrobeFindings = multiCharacterBleedFindings(paraphrasedWardrobePrompt, characterStateRefs);
+  assert.equal(paraphrasedWardrobeFindings.filter((finding) => finding.severity === "blocker").length, 0);
+  assert.equal(paraphrasedWardrobeFindings.filter((finding) => finding.severity === "warning").length >= 1, true);
+
+  const missingCoveragePrompt = {
+    image_id: "ep_01-cut-016",
+    scene_id: "scene_016",
+    modelslab_image_prompt: "On the left, Joey wears a dark varsity jacket over a white T-shirt and black jeans.",
+    shot_manifest: {
+      visible_characters: ["Joey", "Mira"],
+      character_staging: [
+        { name: "Joey", ref_id: "joey_state_ref", screen_position: "frame-left", wardrobe_from: "character_state_ref:joey_state_ref", pose: "half-turned toward Mira with one shoulder forward" },
+      ],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(missingCoveragePrompt, characterStateRefs).some((finding) => finding.severity === "blocker" && /character_staging must cover every visible character/i.test(finding.message)), true);
+
+  const singleCharacterPrompt = {
+    image_id: "ep_01-cut-017",
+    scene_id: "scene_017",
     modelslab_image_prompt: "Joey pauses alone in the lobby, dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, one hand tight on the bag strap.",
     shot_manifest: {
       visible_characters: ["Joey"],

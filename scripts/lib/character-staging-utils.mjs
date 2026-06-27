@@ -20,14 +20,34 @@ export const CHARACTER_STAGING_POSITIONS = [
   "background-right",
 ];
 
-function normalizeToken(value) {
-  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const POSITION_SYNONYMS = {
+  "frame-left": [/\bframe[-\s]*left\b/i, /\bon (?:his|her|their|the) left\b/i, /\bto (?:his|her|their|the) left\b/i, /\bleft (?:side|of frame)\b/i, /\bstage left\b/i],
+  "frame-right": [/\bframe[-\s]*right\b/i, /\bon (?:his|her|their|the) right\b/i, /\bto (?:his|her|their|the) right\b/i, /\bright (?:side|of frame)\b/i, /\bstage right\b/i],
+  center: [/\bcenter(?:ed)?\b/i, /\bcentre\b/i, /\bmiddle\b/i, /\bcentral\b/i],
+  foreground: [/\bforeground\b/i, /\bup front\b/i, /\bin front\b/i, /\bclosest to (?:the )?camera\b/i],
+  "background-left": [/\bback(?:ground)?[-\s]*left\b/i, /\brear[-\s]*left\b/i, /\bfar left\b/i],
+  "background-right": [/\bback(?:ground)?[-\s]*right\b/i, /\brear[-\s]*right\b/i, /\bfar right\b/i],
+};
+
+function positionMatchesText(position, text) {
+  const patterns = POSITION_SYNONYMS[String(position ?? "").toLowerCase()] || [];
+  return patterns.some((pattern) => pattern.test(String(text ?? "")));
 }
 
-function positionPattern(value) {
-  const normalized = String(value ?? "").toLowerCase().trim();
-  if (!normalized) return null;
-  return new RegExp(`\\b${normalized.replace(/[^a-z0-9]+/g, "[-\\s]+")}\\b`, "i");
+function sharedWardrobeMerge(clause, stagedNames) {
+  const present = stagedNames.filter((name) => new RegExp(`\\b${name.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(clause)));
+  if (present.length < 2) return false;
+  const hasWardrobe = WARDROBE_KEYWORDS.some((keyword) => new RegExp(`\\b${keyword}s?\\b`, "i").test(clause));
+  if (!hasWardrobe) return false;
+  const conjoined = present.some((left) => present.some((right) =>
+    left !== right && new RegExp(`\\b${left.replace(/\s+/g, "\\s+")}\\s+(?:and|&|with)\\s+${right.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(clause))
+  ));
+  const sharedCue = /\b(both|together|matching|same|identical|each other)\b/i.test(clause);
+  return conjoined || sharedCue;
+}
+
+function normalizeToken(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function splitClauses(text) {
@@ -96,21 +116,25 @@ function characterStateRefMap(characterStateRefs = []) {
   return byId;
 }
 
-function stagedCharacterSegment(promptText, stage, stagedNames) {
+function characterWindow(promptText, stage, stagedNames) {
   const name = normalizeCharacterName(stage?.name);
-  const namePattern = name ? new RegExp(`\\b${name.replace(/\s+/g, "\\s+")}\\b`, "i") : null;
-  const screenPositionPattern = positionPattern(stage?.screen_position);
+  if (!name) return null;
+  const selfPattern = new RegExp(`\\b${name.replace(/\s+/g, "\\s+")}\\b`, "i");
+  const others = stagedNames.filter((other) => other !== name);
   const clauses = splitClauses(promptText);
-  const matches = clauses.filter((clause) => (!namePattern || namePattern.test(normalizeToken(clause))) && (!screenPositionPattern || screenPositionPattern.test(clause)));
-  if (!matches.length) return null;
-  const merged = matches.find((clause) => {
-    const beforeColon = clause.split(":")[0] ?? clause;
-    return stagedNames.some((otherName) =>
-      otherName !== name
-      && new RegExp(`\\b${otherName.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(beforeColon))
-    );
-  });
-  return { clause: matches[0], merged: merged ?? null };
+  const index = clauses.findIndex((clause) => selfPattern.test(normalizeToken(clause)));
+  if (index === -1) return { hasName: false };
+  let end = index;
+  for (let current = index + 1; current < clauses.length; current += 1) {
+    if (others.some((other) => new RegExp(`\\b${other.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(clauses[current])))) break;
+    end = current;
+  }
+  const windowText = clauses.slice(index, end + 1).join(" ");
+  return {
+    hasName: true,
+    windowText,
+    hasPosition: positionMatchesText(stage?.screen_position, windowText),
+  };
 }
 
 function sameNames(left = [], right = []) {
@@ -188,33 +212,41 @@ export function multiCharacterBleedFindings(prompt, characterStateRefs = []) {
         message: `Character ${stage.name} is missing a distinct pose/action in character_staging.pose.`,
       });
     }
-    const segment = stagedCharacterSegment(promptText, stage, stagedNames);
-    if (!segment?.clause) {
+    const window = characterWindow(promptText, stage, stagedNames);
+    if (!window?.hasName) {
       findings.push({
         ...baseFinding,
-        message: `Prompt prose does not give ${stage.name} an explicit ${stage.screen_position} clause with the character name attached.`,
+        message: `Prompt prose has no clause naming ${stage.name}.`,
       });
       continue;
     }
-    if (segment.merged) {
+    if (!window.hasPosition) {
       findings.push({
         ...baseFinding,
-        message: `Prompt prose merges multiple staged characters into one clause: "${segment.merged}". Each character needs a separate position-bound clause.`,
+        severity: "warning",
+        message: `No positional cue for ${stage.name} (expected ${stage.screen_position}); soft check.`,
       });
-      continue;
     }
     const ref = stageRefIdCandidates(stage).map((id) => byRefId.get(id)).find(Boolean);
-    const anchor = String(ref?.scene_prompt_anchor ?? "");
-    const expectedWardrobeTokens = wardrobeEvidenceTokens(anchor);
-    if (expectedWardrobeTokens.length) {
-      const clauseText = normalizeToken(segment.clause);
-      const matched = expectedWardrobeTokens.filter((token) => clauseText.includes(token));
-      if (matched.length < Math.min(2, expectedWardrobeTokens.length)) {
+    const tokens = wardrobeEvidenceTokens(String(ref?.scene_prompt_anchor ?? ""));
+    if (tokens.length) {
+      const clauseText = normalizeToken(window.windowText);
+      if (tokens.filter((token) => clauseText.includes(token)).length < Math.min(2, tokens.length)) {
         findings.push({
           ...baseFinding,
-          message: `Prompt clause for ${stage.name} does not carry enough wardrobe evidence from ${stage.wardrobe_from ?? stage.ref_id ?? "character_state_ref"} inside that character's own named segment.`,
+          severity: "warning",
+          message: `Wardrobe for ${stage.name} not clearly carried in prose (paraphrase/missing); soft check.`,
         });
       }
+    }
+  }
+
+  for (const clause of splitClauses(promptText)) {
+    if (sharedWardrobeMerge(clause, stagedNames)) {
+      findings.push({
+        ...baseFinding,
+        message: `Two staged characters share one wardrobe clause (bleed risk): "${clause.trim()}". Give each their own wardrobe clause.`,
+      });
     }
   }
 

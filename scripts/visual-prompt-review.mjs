@@ -332,9 +332,7 @@ Rules:
 - For cuts with two or more visible characters, keep separate position-bound people clauses in the prompt. Each staged clause must bind screen position, character name, that character's copied scene_prompt_anchor wardrobe/state wording, and that character's pose.
 - Never merge two characters into one shared wardrobe or appearance clause, and never describe wardrobe without naming whose wardrobe it is.
 - Keep reference_requirements.slot_order and slot_purpose aligned with character_staging order so the image model receives the same identity order that the prose prompt uses.
-- When a multi-character cut includes a waist-height support surface such as a kitchen island, counter, desk, table, bar, sink run, or reception desk, review modelslab_image_prompt for side-of-surface staging. Prefer near side, far side, behind the counter, beside the counter edge, or another explicit side-of-surface relationship for each visible character.
-- For those modelslab support-surface cuts, rewrite body placement positively: full torso clear above the surface line, feet on the floor, hands resting on or hovering above the surface edge, and no body-surface merging.
-- For those modelslab support-surface cuts, avoid perfectly centered bilateral staging when it risks body-surface overlap. codex_image_prompt may keep a more cinematic centered layout if body clearance and side-of-surface placement stay readable.
+- For multi-character cuts where any body-occluding surface or large object is in frame (recognize it from the beat/location, not a fixed list), check that modelslab_image_prompt gives each character an explicit side-of-surface placement, states body clearance positively (torso above the surface line, feet grounded, no body-surface merging), and avoids flat centered bilateral staging. codex_image_prompt may stay more centered if bodies remain discrete and clear of the surface.
 - Do not import a named location/world/era/institution from a reference merely because it is visually convenient. If a location ref's named setting is absent from the current visual_beat_script_excerpt, visual_beat_action, and semantic scene location, remove that location ref and stage the generic current location from the beat text.
 - Treat reference target scene_ids as usage contracts for location, prop, UI, and action/effect refs. If such a ref's scene_ids do not cover the current scene, remove it from shot_manifest and reference_requirements, and rewrite the prose location/action from the current beat. When a reference has two scene IDs like scene_009 and scene_039, treat that as an inclusive scene range.
 - Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
@@ -437,7 +435,7 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|surface_staging_risk|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|other",
       "message": "specific issue",
       "target_field": "optional span repair target such as people_clause",
       "resolved": true
@@ -677,38 +675,6 @@ function scenePromptShapeFindings(prompts) {
         resolved: false,
       });
     }
-  }
-  return findings;
-}
-
-function supportSurfaceStagingFindings(prompts) {
-  const findings = [];
-  const surfaceText = /\b(?:island|counter|countertop|desk|table|bar|sink run|reception desk)\b/i;
-  const riskyCenteredStaging = /\b(?:between them|centered between|flanking|across the (?:island|counter|desk|table)|on either side of the (?:island|counter|desk|table)|face(?:s|d)? off across the (?:island|counter|desk|table)|opposite each other across the (?:island|counter|desk|table))\b/i;
-  const safeSurfacePlacement = /\b(?:near side|far side|behind the counter|behind the island|behind the desk|behind the table|beside the counter edge|beside the island edge|counter edge|island edge|torso clear above|feet on the floor|diagonal separation|offset from center|near-side corner|far-side corner)\b/i;
-  for (const prompt of prompts) {
-    const visibleCharacters = Array.isArray(prompt?.shot_manifest?.visible_characters) ? prompt.shot_manifest.visible_characters : [];
-    if (visibleCharacters.length < 2) continue;
-    const surfaceContext = [
-      prompt.modelslab_image_prompt,
-      prompt.location,
-      prompt.visual_beat_action,
-      prompt.visual_beat_script_excerpt,
-      prompt.shot_manifest?.foreground_action,
-      ...(prompt.shot_manifest?.visible_props ?? []),
-    ].filter(Boolean).join(" | ");
-    if (!surfaceText.test(surfaceContext)) continue;
-    const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
-    if (safeSurfacePlacement.test(text)) continue;
-    if (!riskyCenteredStaging.test(text) && !surfaceText.test(text)) continue;
-    findings.push({
-      image_id: prompt.image_id,
-      scene_id: prompt.scene_id,
-      severity: "warning",
-      code: "surface_staging_risk",
-      message: "Multi-character support-surface cut may merge bodies into the counter or island plane; add near/far side placement, body-clearance phrasing, and offset or diagonal staging for the modelslab prompt.",
-      resolved: false,
-    });
   }
   return findings;
 }
@@ -1050,7 +1016,6 @@ async function main() {
   findings.push(...staticPoseFindings(reviewedPrompts));
   findings.push(...repeatedTableauFindings(reviewedPrompts));
   findings.push(...reviewedPrompts.flatMap((prompt) => multiCharacterBleedFindings(prompt, characterStateRefs)));
-  findings.push(...supportSurfaceStagingFindings(reviewedPrompts));
   findings.push(...contaminatedReferenceFindings(visualReferencePlan));
   findings.push(...outOfScopeReferenceFindings(reviewedPrompts, visualReferencePlan));
   findings.push(...await validateReferencePaths(reviewedPrompts));

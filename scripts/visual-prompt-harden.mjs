@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
 import { outOfScopeLocationRefMentions } from "./lib/visual-scope-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -991,39 +992,7 @@ function hardenPrompt(prompt, indexes) {
 
 function sanitizePositiveVisualPrompt(value) {
   return String(value ?? "")
-    .replace(/\bno[-\s]?contact\b/gi, "contact-silence")
-    .replace(/\bdo\s+not\s+self[-\s]?deprecate\b/gi, "self-respect response")
-    .replace(/\bdo\s+not\s+beg\b/gi, "stand firm")
-    .replace(/\bdo\s+not\s+call\b/gi, "call restraint")
-    .replace(/\bdo\s+not\s+text\b/gi, "message restraint")
-    .replace(/\bdo\s+not\s+return upstairs\b/gi, "upstairs restraint")
-    .replace(/\bdo\s+not\s+return\b/gi, "return restraint")
-    .replace(/\bnot\s+call\b/gi, "call restraint")
-    .replace(/\bnot\s+text\b/gi, "message restraint")
-    .replace(/\bnot\s+return\b/gi, "return restraint")
-    .replace(/\bnot\s+beg\b/gi, "stand firm")
-    .replace(/\bnot\s+self[-\s]?deprecate\b/gi, "self-respect response")
-    .replace(/\bnot\s+performing\s+for\s+her\b/gi, "self-contained composure")
-    .replace(/\bnot\s+performing\b/gi, "self-contained composure")
-    .replace(/\bnot\s+chasing\b/gi, "controlled distance")
-    .replace(/\bnot\s+confident\s+yet\b/gi, "cautiously building confidence")
-    .replace(/\bwithout\s+performing\s+for\s+her\b/gi, "with self-contained composure")
-    .replace(/\bwithout\s+performing\b/gi, "with self-contained composure")
-    .replace(/\bwithout\s+chasing\b/gi, "with controlled distance")
-    .replace(/\bno\s+rain[-\s]?night\s+grime\b/gi, "cleaner than the rain-night version")
-    .replace(/\bno\s+rain[-\s]?soaked\s+jacket\b/gi, "clean dry simple clothing")
-    .replace(/\bno\s+food\s+stains\b/gi, "clean unstained clothing")
-    .replace(/\binstead\s+of\b/gi, "with")
-    .replace(/\brather\s+than\b/gi, "with")
-    .replace(/\bnegative\s+prompt\b/gi, "visual prompt")
-    .replace(/--no\b/gi, "")
-    .replace(/\bdo\s+not\b/gi, "show restraint")
-    .replace(/\bdon't\b/gi, "show restraint")
-    .replace(/\bwithout\b/gi, "with")
-    .replace(/\bavoid\b/gi, "favor")
-    .replace(/\bexclude\b/gi, "favor")
-    .replace(/\bnot\b/gi, "restrained")
-    .replace(/\bno\b/gi, "clean")
+    .replace(/\s+--no(?:\s+\S+)*/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1103,24 +1072,6 @@ function applyNamedCharacterMultiplicityContract(text, shotManifest) {
 
 function sanitizeModelSafeBeautyLanguage(text) {
   return String(text ?? "")
-    .replace(/\bbreathtaking\s+adult\s+campus\s+goddess\b/gi, "striking high-status campus woman")
-    .replace(/\bbreathtaking\s+adult\s+woman\b/gi, "striking elegant adult woman")
-    .replace(/\bcampus\s+goddess\b/gi, "high-status campus woman")
-    .replace(/\bgoddess\s+state\b/gi, "high-status campus state")
-    .replace(/\bgoddess\s+formal\s+styling\b/gi, "polished ceremony styling")
-    .replace(/\bformal\s+dress\b/gi, "modest formal outfit")
-    .replace(/\bthrone\s+lineup\b/gi, "ceremonial seating lineup")
-    .replace(/\bmain\s+throne\b/gi, "central ceremonial chair")
-    .replace(/\bthrone\s+arrangement\b/gi, "ceremonial seating arrangement")
-    .replace(/\bleans\s+closer\s+across\b/gi, "sits forward at")
-    .replace(/\bleans\s+closer\b/gi, "sits forward")
-    .replace(/\bnarrow\s+gap\b/gi, "desk space")
-    .replace(/\blong\s+black\s+hair\s+falling\s+forward\b/gi, "long black hair neatly styled")
-    .replace(/\bblack\s+skirt\b/gi, "modest dark uniform skirt")
-    .replace(/\bhot\b/gi, "striking")
-    .replace(/\bsexy\b/gi, "glamorous")
-    .replace(/\bseductive\b/gi, "confident")
-    .replace(/\bsensual\b/gi, "elegant")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1145,24 +1096,11 @@ function sanitizePrompt(prompt, indexes) {
     (value) => sanitizePositiveVisualPrompt(value),
     { prompt }
   );
-  promptTextValue = trackedMutation("sanitizeModelSafeBeautyLanguage", promptTextValue, (value) => sanitizeModelSafeBeautyLanguage(value), { prompt });
-  promptTextValue = trackedValueMutation(
-    "applyNamedCharacterMultiplicityContract",
-    promptTextValue,
-    applyNamedCharacterMultiplicityContract(promptTextValue, shotManifest),
-    { prompt }
-  );
   let codexPromptTextValue = prompt.codex_image_prompt
     ? trackedMutation("sanitizePositiveVisualPrompt", prompt.codex_image_prompt, (value) => sanitizePositiveVisualPrompt(value), { prompt })
     : null;
   if (codexPromptTextValue) {
     codexPromptTextValue = trackedMutation("sanitizeModelSafeBeautyLanguage", codexPromptTextValue, (value) => sanitizeModelSafeBeautyLanguage(value), { prompt });
-    codexPromptTextValue = trackedValueMutation(
-      "applyNamedCharacterMultiplicityContract",
-      codexPromptTextValue,
-      applyNamedCharacterMultiplicityContract(codexPromptTextValue, shotManifest),
-      { prompt }
-    );
   }
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
@@ -1403,6 +1341,28 @@ function sanitizePrompt(prompt, indexes) {
       resolved: false,
     });
   }
+  findings.push(...negativePromptFindings([{
+    image_id: prompt.image_id,
+    scene_id: prompt.scene_id,
+    image_prompt: promptTextValue,
+    modelslab_image_prompt: promptTextValue,
+    codex_image_prompt: codexPromptTextValue,
+  }]));
+  findings.push(...beautyLanguageFindings([{
+    image_id: prompt.image_id,
+    scene_id: prompt.scene_id,
+    image_prompt: promptTextValue,
+    modelslab_image_prompt: promptTextValue,
+    codex_image_prompt: codexPromptTextValue,
+  }]));
+  findings.push(...namedCharacterDuplicationFindings([{
+    image_id: prompt.image_id,
+    scene_id: prompt.scene_id,
+    image_prompt: promptTextValue,
+    modelslab_image_prompt: promptTextValue,
+    codex_image_prompt: codexPromptTextValue,
+    shot_manifest: shotManifest,
+  }]));
 
   return {
     prompt: {

@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -121,45 +122,6 @@ function extractJson(text) {
   const end = raw.lastIndexOf("}");
   if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
-}
-
-function negativeLanguageMatches(value) {
-  const text = String(value ?? "").toLowerCase();
-  const patterns = [
-    /\bno\b/,
-    /\bnot\b/,
-    /\bwithout\b/,
-    /\bavoid\b/,
-    /\bexclude\b/,
-    /\binstead\s+of\b/,
-    /\brather\s+than\b/,
-    /\bdo\s+not\b/,
-    /\bdon't\b/,
-    /--no\b/,
-    /\bnegative\s+prompt\b/,
-  ];
-  return patterns.filter((pattern) => pattern.test(text)).map(String);
-}
-
-function positiveLanguageFindings(prompts) {
-  const findings = [];
-  for (const prompt of prompts) {
-    for (const field of ["image_prompt", "modelslab_image_prompt", "codex_image_prompt"]) {
-      if (!prompt[field]) continue;
-      const matches = negativeLanguageMatches(prompt[field]);
-      if (matches.length) {
-        findings.push({
-          image_id: prompt.image_id,
-          scene_id: prompt.scene_id,
-          severity: "blocker",
-          code: "negative_prompt",
-          message: `${field} contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
-          resolved: false,
-        });
-      }
-    }
-  }
-  return findings;
 }
 
 function compactScene(scene) {
@@ -435,7 +397,7 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|beauty_language_risk|named_character_duplication_risk|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|other",
       "message": "specific issue",
       "target_field": "optional span repair target such as people_clause",
       "resolved": true
@@ -1011,7 +973,9 @@ async function main() {
 
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));
   assertReviewedPrompts(promptPlan.prompts, reviewedPrompts, timedPlan);
-  findings.push(...positiveLanguageFindings(reviewedPrompts));
+  findings.push(...negativePromptFindings(reviewedPrompts));
+  findings.push(...beautyLanguageFindings(reviewedPrompts));
+  findings.push(...namedCharacterDuplicationFindings(reviewedPrompts));
   findings.push(...scenePromptShapeFindings(reviewedPrompts));
   findings.push(...staticPoseFindings(reviewedPrompts));
   findings.push(...repeatedTableauFindings(reviewedPrompts));

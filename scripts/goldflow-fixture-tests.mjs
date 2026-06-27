@@ -427,10 +427,11 @@ async function testVisualHardenFlagsNegativePromptWithoutRewrite() {
     promptText,
     referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 5 }],
   });
-  assert.ok(error, "visual harden should block on negative prompt language");
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
   assert.equal(plan.prompts[0].modelslab_image_prompt, promptText);
   assert.equal(plan.prompts[0].image_prompt, promptText);
-  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt" && finding.severity === "blocker"), true);
+  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt" && finding.severity === "warning"), true);
 }
 
 async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs() {

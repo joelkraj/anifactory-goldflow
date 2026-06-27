@@ -38,7 +38,7 @@ export function negativePromptFindings(prompts) {
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
-        severity: "blocker",
+        severity: "warning",
         code: "negative_prompt",
         message: `${field} contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
         target_field: "people_clause",

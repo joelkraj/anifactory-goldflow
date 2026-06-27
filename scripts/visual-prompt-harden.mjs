@@ -20,9 +20,12 @@ const characterStateRefsPath = flags.characterStateRefs ?? flags["character-stat
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const reportPath = flags.report ?? flags["report-output"] ?? path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
 const samplePath = flags.sample ?? flags["sample-output"] ?? path.join(episodeDir, `visual_prompt_hardening_sample_${episode}.md`);
+const mutationHitsOutputPath = flags["mutation-hits-output"] ?? null;
 const sampleCount = Math.max(1, Number(flags["sample-count"] ?? 12));
 const maxRefs = Math.max(1, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
 const hardenMode = String(flags.mode ?? flags["harden-mode"] ?? "sanitize").toLowerCase();
+const mutationTrackingEnabled = Boolean(mutationHitsOutputPath);
+const mutationStats = new Map();
 
 function parseFlags(parts) {
   const parsed = {};
@@ -60,6 +63,50 @@ async function hashFile(filePath) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function mutationStat(name) {
+  if (!mutationStats.has(name)) {
+    mutationStats.set(name, {
+      function_name: name,
+      call_count: 0,
+      matched_count: 0,
+      changed_count: 0,
+      examples: [],
+    });
+  }
+  return mutationStats.get(name);
+}
+
+function recordMutationHit(name, { before, after, matched = null, prompt = null }) {
+  if (!mutationTrackingEnabled) return after;
+  const stat = mutationStat(name);
+  stat.call_count += 1;
+  const normalizedBefore = String(before ?? "");
+  const normalizedAfter = String(after ?? "");
+  const derivedMatch = matched == null ? normalizedBefore !== normalizedAfter : Boolean(matched);
+  if (derivedMatch) stat.matched_count += 1;
+  if (normalizedBefore !== normalizedAfter) {
+    stat.changed_count += 1;
+    if (stat.examples.length < 3) {
+      stat.examples.push({
+        image_id: prompt?.image_id ?? null,
+        scene_id: prompt?.scene_id ?? null,
+        before: normalizedBefore,
+        after: normalizedAfter,
+      });
+    }
+  }
+  return after;
+}
+
+function trackedMutation(name, before, mutate, options = {}) {
+  const after = mutate(String(before ?? ""));
+  return recordMutationHit(name, { before, after, ...options });
+}
+
+function trackedValueMutation(name, before, after, options = {}) {
+  return recordMutationHit(name, { before, after, ...options });
 }
 
 function normalize(value) {
@@ -1846,12 +1893,15 @@ function ensurePromptClauses(prompt, characterCount) {
 function hardenPrompt(prompt, indexes) {
   const findings = [];
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
-  const precleanText = ensurePromptClauses(prompt, 0);
+  const precleanSeed = prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "";
+  const precleanText = trackedValueMutation("ensurePromptClauses", precleanSeed, ensurePromptClauses(prompt, 0), { prompt });
   const precleanedPrompt = {
     ...prompt,
     modelslab_image_prompt: precleanText,
     image_prompt: precleanText,
-    codex_image_prompt: prompt.codex_image_prompt ? sanitizePositiveVisualPrompt(prompt.codex_image_prompt) : null,
+    codex_image_prompt: prompt.codex_image_prompt
+      ? trackedMutation("sanitizePositiveVisualPrompt", prompt.codex_image_prompt, (value) => sanitizePositiveVisualPrompt(value), { prompt })
+      : null,
   };
   let chars = matchedCharacters(precleanedPrompt, indexes.characterRefs);
   const normalizedPrecleanText = normalize(promptText(precleanedPrompt));
@@ -1935,24 +1985,33 @@ function hardenPrompt(prompt, indexes) {
     });
   }
   let selectedRequirements = trimRequirements(dedupedRequirements.filter((req) => !forbiddenManifestRefs.has(req.ref_id)));
-  let text = ensurePromptClauses(precleanedPrompt, selectedRequirements.filter((req) => referenceKindRank(req.kind) === 0).length);
+  let text = trackedValueMutation(
+    "ensurePromptClauses",
+    precleanedPrompt.modelslab_image_prompt ?? precleanedPrompt.image_prompt ?? "",
+    ensurePromptClauses(precleanedPrompt, selectedRequirements.filter((req) => referenceKindRank(req.kind) === 0).length),
+    { prompt: precleanedPrompt }
+  );
   const stateContracts = selectedRequirements
     .filter((req) => req.identity_usage === "face_only" && req.state_contract)
     .map((req) => `Visible transformed character state: ${req.state_contract}. Use the attached base identity only for facial likeness of that named character; the current prompt controls body, grooming, wardrobe, posture, and social status. Supporting people, attorneys, staff, crowds, coworkers, and silhouettes must use distinct one-off faces and must not resemble the attached face anchor.`);
   for (const contract of stateContracts) {
     if (!text.includes(contract)) text = `${text} ${contract}`.trim();
   }
-  text = resolveCharacterStateConflicts(text, selectedRequirements);
-  text = sanitizeUnattachedCharacterMentions(text, selectedRequirements, indexes.characterRefs);
-  text = applyShotContract(text, precleanedPrompt);
-  text = stripDialogueCueLanguage(text);
-  text = applyLocationContract(text, locationContract);
+  text = trackedValueMutation("resolveCharacterStateConflicts", text, resolveCharacterStateConflicts(text, selectedRequirements), { prompt: precleanedPrompt });
+  text = trackedValueMutation("sanitizeUnattachedCharacterMentions", text, sanitizeUnattachedCharacterMentions(text, selectedRequirements, indexes.characterRefs), { prompt: precleanedPrompt });
+  text = trackedValueMutation("applyShotContract", text, applyShotContract(text, precleanedPrompt), { prompt: precleanedPrompt });
+  text = trackedValueMutation("stripDialogueCueLanguage", text, stripDialogueCueLanguage(text), { prompt: precleanedPrompt });
+  text = trackedValueMutation("applyLocationContract", text, applyLocationContract(text, locationContract), { prompt: precleanedPrompt });
   const progression = joeyProgressionClause(precleanedPrompt, selectedRequirements);
-  if (progression && !text.includes(progression)) text = `${text} ${progression}`.trim();
-  text = enforceSingleMomentComposition(text, precleanedPrompt);
-  text = removeConflictingSingleLocationClauses(text, locationContract);
-  text = removeConflictingVisibleLocationClauses(text, locationContract);
-  text = stripDialogueCueLanguage(text);
+  if (progression && !text.includes(progression)) {
+    text = trackedValueMutation("joeyProgressionClause", text, `${text} ${progression}`.trim(), { prompt: precleanedPrompt, matched: true });
+  } else {
+    trackedValueMutation("joeyProgressionClause", text, text, { prompt: precleanedPrompt, matched: Boolean(progression) });
+  }
+  text = trackedValueMutation("enforceSingleMomentComposition", text, enforceSingleMomentComposition(text, precleanedPrompt), { prompt: precleanedPrompt });
+  text = trackedValueMutation("removeConflictingSingleLocationClauses", text, removeConflictingSingleLocationClauses(text, locationContract), { prompt: precleanedPrompt });
+  text = trackedValueMutation("removeConflictingVisibleLocationClauses", text, removeConflictingVisibleLocationClauses(text, locationContract), { prompt: precleanedPrompt });
+  text = trackedValueMutation("stripDialogueCueLanguage", text, stripDialogueCueLanguage(text), { prompt: precleanedPrompt });
   if (locationContract && !location) {
     findings.push({
       image_id: prompt.image_id,
@@ -1967,10 +2026,20 @@ function hardenPrompt(prompt, indexes) {
     ? "two child memory silhouettes"
     : String(prompt.primary_subject ?? "").trim();
   if (primaryLabel && !/primary visual focus:/i.test(text)) {
-    text = `${text} Primary visual focus: ${primaryLabel}; supporting figures must not take over the center composition unless they are the action subject.`.trim();
+    text = trackedValueMutation(
+      "primaryVisualFocusInjection",
+      text,
+      `${text} Primary visual focus: ${primaryLabel}; supporting figures must not take over the center composition unless they are the action subject.`.trim(),
+      { prompt: precleanedPrompt, matched: true }
+    );
   }
   if (selectedRequirements.some((req) => req.ref_id === "char_jin_mu_gyeol_disgraced_gray_robes") && !/Mu-gyeol remains in patched gray robes/i.test(text)) {
-    text = `${text} Mu-gyeol remains in patched gray winter-thin robes with bruised exhausted features; do not change him into clean green, blue, white, or noble robes. Show only one Mu-gyeol in the entire frame, with no twin, no second seated copy, no mirrored duplicate, and no alternate-pose duplicate.`.trim();
+    text = trackedValueMutation(
+      "disgracedGrayRobeClauseInjection",
+      text,
+      `${text} Mu-gyeol remains in patched gray winter-thin robes with bruised exhausted features; do not change him into clean green, blue, white, or noble robes. Show only one Mu-gyeol in the entire frame, with no twin, no second seated copy, no mirrored duplicate, and no alternate-pose duplicate.`.trim(),
+      { prompt: precleanedPrompt, matched: true }
+    );
   }
   const unresolvedRole = /\b(?:white[-\s]bearded elder|patriarch|deputy envoy|murim alliance envoy|replacement heir|favored heir|cousin attacker|victorious cousin)\b/i.test(promptText(prompt))
     && !selectedRequirements.some((req) => referenceKindRank(req.kind) === 0);
@@ -2238,13 +2307,30 @@ function sanitizePrompt(prompt, indexes) {
       shotManifest.protagonist_state_ref_id = indexes.refIdByStateId?.get(String(shotManifest.protagonist_state_ref_id)) ?? String(shotManifest.protagonist_state_ref_id);
     }
   }
-  let promptTextValue = sanitizePositiveVisualPrompt(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
-  promptTextValue = sanitizeModelSafeBeautyLanguage(promptTextValue);
-  promptTextValue = applyNamedCharacterMultiplicityContract(promptTextValue, shotManifest);
-  let codexPromptTextValue = prompt.codex_image_prompt ? sanitizePositiveVisualPrompt(prompt.codex_image_prompt) : null;
+  let promptTextValue = trackedMutation(
+    "sanitizePositiveVisualPrompt",
+    prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "",
+    (value) => sanitizePositiveVisualPrompt(value),
+    { prompt }
+  );
+  promptTextValue = trackedMutation("sanitizeModelSafeBeautyLanguage", promptTextValue, (value) => sanitizeModelSafeBeautyLanguage(value), { prompt });
+  promptTextValue = trackedValueMutation(
+    "applyNamedCharacterMultiplicityContract",
+    promptTextValue,
+    applyNamedCharacterMultiplicityContract(promptTextValue, shotManifest),
+    { prompt }
+  );
+  let codexPromptTextValue = prompt.codex_image_prompt
+    ? trackedMutation("sanitizePositiveVisualPrompt", prompt.codex_image_prompt, (value) => sanitizePositiveVisualPrompt(value), { prompt })
+    : null;
   if (codexPromptTextValue) {
-    codexPromptTextValue = sanitizeModelSafeBeautyLanguage(codexPromptTextValue);
-    codexPromptTextValue = applyNamedCharacterMultiplicityContract(codexPromptTextValue, shotManifest);
+    codexPromptTextValue = trackedMutation("sanitizeModelSafeBeautyLanguage", codexPromptTextValue, (value) => sanitizeModelSafeBeautyLanguage(value), { prompt });
+    codexPromptTextValue = trackedValueMutation(
+      "applyNamedCharacterMultiplicityContract",
+      codexPromptTextValue,
+      applyNamedCharacterMultiplicityContract(codexPromptTextValue, shotManifest),
+      { prompt }
+    );
   }
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
@@ -2639,6 +2725,21 @@ async function main() {
   };
   await writeJson(outputPath, hardenedPlan);
   await writeJson(reportPath, report);
+  if (mutationTrackingEnabled) {
+    await writeJson(mutationHitsOutputPath, {
+      schema: "goldflow_visual_prompt_hardening_mutation_hits_v1",
+      status,
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      harden_mode: hardenMode === "repair" ? "repair" : "sanitize",
+      prompt_path: promptPath,
+      prompt_count: prompts.length,
+      functions: [...mutationStats.values()].sort((a, b) => b.changed_count - a.changed_count || b.matched_count - a.matched_count || a.function_name.localeCompare(b.function_name)),
+      updated_at: report.updated_at,
+    });
+  }
   await fs.mkdir(path.dirname(samplePath), { recursive: true });
   await fs.writeFile(samplePath, sampleMarkdown(prompts, sampleRows, report), "utf8");
   console.log(JSON.stringify({ status, output_path: outputPath, report_path: reportPath, sample_path: samplePath, prompt_count: prompts.length, sample_prompt_count: sampleRows.length, unresolved_blocker_count: unresolvedBlockers.length }, null, 2));

@@ -340,10 +340,16 @@ Rules:
 - For transformation arcs, use one base identity face anchor only when the approved reference metadata says identity_usage is face_only; current state wording controls body, hair, shave/facial hair, wardrobe, posture, cleanliness, and social status.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. When present, keep the same visible subject, action, location, references, and shot_manifest as image_prompt while using natural Codex-friendly image prose.
+- Provider-aware staging matters. Keep the same beat facts for both prompts, but modelslab_image_prompt should use safer geometry when support surfaces are in frame, while codex_image_prompt may keep a more cinematic centered composition if it still preserves clean character separation.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
 - When shot_manifest.location_ref_id is set, describe that reference's visible architecture, materials, lighting, surfaces, and spatial layout as the physical setting for the current beat.
+- When a multi-character cut includes a waist-height support surface such as a kitchen island, counter, desk, table, bar, sink run, or reception desk, modelslab_image_prompt must bind each visible character to a side of that surface: near side, far side, behind the counter, beside the counter edge, or another clear side-of-surface relationship.
+- For those modelslab support-surface cuts, state body-clearance positively: full torso clear above the countertop edge, feet on the floor, hands resting on or hovering above the surface edge, and no body part merging into the surface plane.
+- For those modelslab support-surface cuts, prefer asymmetric or diagonal staging over perfectly centered bilateral staging. Offset one character forward or to a near-side corner and the other farther back or across the surface so the layout reads as diagonal depth instead of a flat centered lineup.
+- Do not place both characters on the same surface plane unless the beat physically demands it, and avoid centered face-off wording that makes the counter or island the dominant middle divider.
+- codex_image_prompt may keep a centered or more symmetrical support-surface composition when useful, but it must still preserve discrete bodies, readable side-of-surface placement, and no body-surface merging.
 - Use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
 - If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen and use positive visual substitutes in modelslab_image_prompt, such as "contact-silence streak badge", "stand-firm mission card", "message restraint checklist", or "upstairs restraint icon".
@@ -444,6 +450,40 @@ ${JSON.stringify({
       { ref_id: "second_character_ref", kind: "character_state", required: true, slot_order: 2, slot_purpose: "character identity and wardrobe for Second Character", reason: "Frame-right staged identity and wardrobe." },
       { ref_id: "lobby_location_ref", kind: "location", required: true, slot_order: 3, slot_purpose: "lobby location environment", reason: "Visible setting for the confrontation." },
     ],
+  },
+  support_surface_cut: {
+    shot_manifest: {
+      shot_job: "interaction",
+      visible_characters: ["Joey", "Second Character"],
+      mentioned_only_characters: [],
+      primary_character: "Joey",
+      character_state_ref_ids: ["joey_state_ref", "second_character_state_ref"],
+      protagonist_state_ref_id: "joey_state_ref",
+      location_ref_id: "kitchen_location_ref",
+      foreground_action: "Joey pauses with the mug on the near side of the island while the second character leans on the far side",
+      visible_props: ["coffee mug", "kitchen island"],
+      ui_elements: ["system warning panel"],
+      forbidden_ref_ids: [],
+      continuity_notes: "support-surface confrontation beat",
+      character_staging: [
+        {
+          name: "Joey",
+          ref_id: "joey_state_ref",
+          screen_position: "frame-left",
+          wardrobe_from: "character_state_ref:joey_state_ref",
+          pose: "standing on the near side of the island with the mug raised just above the counter edge",
+        },
+        {
+          name: "Second Character",
+          ref_id: "second_character_state_ref",
+          screen_position: "frame-right",
+          wardrobe_from: "character_state_ref:second_character_state_ref",
+          pose: "standing on the far side of the island with both hands resting on the countertop edge",
+        },
+      ],
+    },
+    modelslab_image_prompt: "Kitchen confrontation at the exact instant the warning appears. Frame-left foreground, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, standing on the near side of the marble island with the mug raised just above the counter edge, full torso clear above the countertop line, feet on the floor. Frame-right, Second Character: cream fitted coat over a black dress, gold phone set aside, standing on the far side of the island with both hands resting on the countertop edge, full torso clear above the counter line. A crisp blue warning panel hovers above the mug. Clear diagonal separation between them, no body merging into the island plane.",
+    codex_image_prompt: "Stylized kitchen standoff across a marble island as the warning appears. Joey on the near side with the mug lifted, the second character on the far side leaning onto the island edge, both bodies fully clear of the countertop silhouette, crisp blue warning panel above the mug, cinematic centered kitchen depth but discrete body placement.",
   },
 }, null, 2)}
 

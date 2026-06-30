@@ -61,6 +61,50 @@ function normalizeCharacterName(value) {
   return normalizeToken(value);
 }
 
+function characterNameAliases(value) {
+  const name = normalizeCharacterName(value);
+  const aliases = new Set([name]);
+  const baseBeforeContext = name
+    .replace(/\b(?:in|on|inside)\s+(?:crown night|sponsor|headset|meme|thumbnail|mockup|mockups|printout|printouts|screen|clip|replay|media frame|panel|monitor).*/i, "")
+    .trim();
+  if (baseBeforeContext) aliases.add(baseBeforeContext);
+  if (/\bstudents?\b/i.test(name)) {
+    aliases.add("students");
+    aliases.add("student");
+  }
+  if (/\baudience\b/i.test(name)) aliases.add("audience");
+  if (/\b(?:clip|replay|mockup|mockups|printout|printouts|thumbnail|thumbnails)\b/i.test(name)) {
+    aliases.add(name.replace(/\b(?:in|on|inside)\b.*$/i, "").trim());
+    if (/\bjoey\b/i.test(name)) {
+      aliases.add("old joey");
+      aliases.add("past joey");
+      aliases.add("replayed joey");
+      aliases.add("joey past self");
+      aliases.add("joey s past self");
+    }
+  }
+  if (/\bon\s+screen\b|\bscreen\b|\bheadset\b|\bmonitor\b|\bpanel\b/i.test(name)) {
+    aliases.add(name.replace(/\b(?:on|inside)\s+(?:screen|headset screen|monitor|panel)\b.*$/i, "").trim());
+  }
+  return [...aliases].map((alias) => normalizeToken(alias)).filter(Boolean);
+}
+
+function clauseMatchesCharacterName(clause, name) {
+  const normalizedClause = normalizeToken(clause);
+  const aliases = characterNameAliases(name);
+  if (aliases.some((alias) => new RegExp(`\\b${alias.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizedClause))) return true;
+  const nameTokens = significantTokens(name, 8);
+  if (/\bstudent pushing cart\b/i.test(name)) return /\bstudent\b.*\bcart\b|\bcart\b.*\bstudent\b/i.test(normalizedClause);
+  if (/\b(?:clip|replay|mockup|mockups|printout|printouts|thumbnail|thumbnails|screen|monitor|panel)\b/i.test(name)) {
+    const baseTokens = nameTokens.filter((token) => !["crown", "night", "clip", "replay", "mockup", "mockups", "printout", "printouts", "thumbnail", "thumbnails", "screen", "monitor", "panel", "headset"].includes(token));
+    const contextHit = /\b(?:old|past|replay|replayed|screen|monitor|panel|clip|mockup|thumbnail|printout)\b/i.test(normalizedClause);
+    if (contextHit && baseTokens.some((token) => normalizedClause.includes(token))) return true;
+  }
+  const usefulTokens = nameTokens.filter((token) => !["class", "crown", "night"].includes(token));
+  if (usefulTokens.length && usefulTokens.every((token) => normalizedClause.includes(token))) return true;
+  return false;
+}
+
 function sanitizeString(value) {
   const text = String(value ?? "").trim();
   return text ? text : null;
@@ -119,14 +163,13 @@ function characterStateRefMap(characterStateRefs = []) {
 function characterWindow(promptText, stage, stagedNames) {
   const name = normalizeCharacterName(stage?.name);
   if (!name) return null;
-  const selfPattern = new RegExp(`\\b${name.replace(/\s+/g, "\\s+")}\\b`, "i");
   const others = stagedNames.filter((other) => other !== name);
   const clauses = splitClauses(promptText);
-  const index = clauses.findIndex((clause) => selfPattern.test(normalizeToken(clause)));
+  const index = clauses.findIndex((clause) => clauseMatchesCharacterName(clause, stage?.name));
   if (index === -1) return { hasName: false };
   let end = index;
   for (let current = index + 1; current < clauses.length; current += 1) {
-    if (others.some((other) => new RegExp(`\\b${other.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(clauses[current])))) break;
+    if (others.some((other) => clauseMatchesCharacterName(clauses[current], other))) break;
     end = current;
   }
   const windowText = clauses.slice(index, end + 1).join(" ");

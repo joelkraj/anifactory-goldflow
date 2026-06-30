@@ -1146,6 +1146,22 @@ function testCharacterStagingSanitizerAndReviewBlockers() {
   assert.equal(paraphrasedWardrobeFindings.filter((finding) => finding.severity === "blocker").length, 0);
   assert.equal(paraphrasedWardrobeFindings.filter((finding) => finding.severity === "warning").length >= 1, true);
 
+  const contextualStateLabelPrompt = {
+    image_id: "ep_01-cut-015b",
+    scene_id: "scene_015",
+    modelslab_image_prompt: "Center foreground, Joey watches the giant screen. On the giant screen, old Joey appears in the Crown Night clip holding flowers while Lana laughs in the replay panel. Background rows of students watch quietly.",
+    shot_manifest: {
+      visible_characters: ["Joey", "Joey in Crown Night clip", "Lana in Crown Night clip", "five hundred students"],
+      character_staging: [
+        { name: "Joey", ref_id: "joey_state_ref", screen_position: "foreground", wardrobe_from: "character_state_ref:joey_state_ref", pose: "watching the replay screen" },
+        { name: "Joey in Crown Night clip", ref_id: "joey_state_ref", screen_position: "center", wardrobe_from: "character_state_ref:joey_state_ref", pose: "holding flowers on the giant screen" },
+        { name: "Lana in Crown Night clip", ref_id: "mira_state_ref", screen_position: "background-right", wardrobe_from: "character_state_ref:mira_state_ref", pose: "laughing in the replay panel" },
+        { name: "five hundred students", screen_position: "background-left", pose: "watching from audience rows" },
+      ],
+    },
+  };
+  assert.equal(multiCharacterBleedFindings(contextualStateLabelPrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
   const missingCoveragePrompt = {
     image_id: "ep_01-cut-016",
     scene_id: "scene_016",

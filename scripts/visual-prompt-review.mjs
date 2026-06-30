@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
+import {
+  compatibleHardenFeedbackBlockers,
+  resolvedDeadletterPayload,
+  unresolvedBlockerFindings as sharedUnresolvedBlockerFindings,
+} from "./lib/visual-resolution-utils.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -28,6 +33,8 @@ const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? flags.r
 const autoResolveEnabled = flags["auto-resolve"] === "true";
 const maxResolveIterations = Math.max(1, Number(flags["max-resolve-iterations"] ?? 2));
 const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
+const hardenFeedbackPath = flags["harden-feedback-report"] ?? flags["harden-report"] ?? path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
+const hardenFeedbackEnabled = flags["harden-feedback"] !== "false";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -785,7 +792,7 @@ function normalizePreImagegenFindings(findings) {
 }
 
 function unresolvedBlockerFindings(findings) {
-  return (findings ?? []).filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
+  return sharedUnresolvedBlockerFindings(findings);
 }
 
 function sceneIdsFromBlockers(blockers) {
@@ -806,9 +813,15 @@ function positiveCorrectionDirective(finding) {
   }
   return {
     scene_id: finding.scene_id ?? null,
+    image_id: finding.image_id ?? null,
     code,
+    field: finding.field ?? finding.target_field ?? null,
     directive,
   };
+}
+
+function isHardenFeedbackFinding(finding) {
+  return finding?.source_stage === "visual_harden";
 }
 
 function mergeScenePrompts(basePrompts, replacementPrompts, sceneIds) {
@@ -833,6 +846,10 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     const planPath = path.join(iterationDir, `section_image_prompts_resolve_${episode}_iter_${iteration}.json`);
     const reviewedPath = path.join(iterationDir, `section_image_prompts_resolve_reviewed_${episode}_iter_${iteration}.json`);
     const reportPath = path.join(iterationDir, `visual_prompt_review_resolve_${episode}_iter_${iteration}.json`);
+    const hardenValidationPath = path.join(iterationDir, `visual_prompt_hardening_resolve_${episode}_iter_${iteration}.json`);
+    const hardenValidationOutputPath = path.join(iterationDir, `section_image_prompts_resolve_hardened_${episode}_iter_${iteration}.json`);
+    const hardenValidationSamplePath = path.join(iterationDir, `visual_prompt_hardening_sample_resolve_${episode}_iter_${iteration}.md`);
+    const needsHardenValidation = blockers.some(isHardenFeedbackFinding);
     const correctionDirectives = blockers
       .filter((finding) => sceneIds.includes(finding.scene_id))
       .map(positiveCorrectionDirective);
@@ -886,7 +903,60 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     iterationReport = await readJson(reportPath, null);
     iterationPlan = await readJson(reviewedPath, null);
     iterationStatus = iterationReport?.status ?? "failed";
-    iterations.push({ iteration, scene_ids: sceneIds, status: iterationStatus, plan_path: planPath, reviewed_path: reviewedPath, review_report_path: reportPath });
+    const iterationRecord = { iteration, scene_ids: sceneIds, status: iterationStatus, plan_path: planPath, reviewed_path: reviewedPath, review_report_path: reportPath };
+    if (iterationStatus === "passed" && iterationPlan?.prompts?.length && needsHardenValidation) {
+      try {
+        await runNodeScript("visual-prompt-harden.mjs", [
+          "--channel", channel,
+          "--series", series,
+          "--week", week,
+          "--episode", episode,
+          "--timed", timedPlanPath,
+          "--prompts", reviewedPath,
+          "--visual-refs", visualReferencePlanPath,
+          "--character-state-refs", characterStateRefsPath,
+          "--output", hardenValidationOutputPath,
+          "--report-output", hardenValidationPath,
+          "--sample-output", hardenValidationSamplePath,
+        ]);
+      } catch {
+        // A blocked harden validation exits non-zero by design; read its report below.
+      }
+      const hardenValidationReport = await readJson(hardenValidationPath, null);
+      iterationRecord.harden_report_path = hardenValidationPath;
+      iterationRecord.harden_status = hardenValidationReport?.status ?? "failed";
+      const hardenBlockers = compatibleHardenFeedbackBlockers({
+        hardenReport: hardenValidationReport,
+        promptPlan: iterationPlan,
+        channel,
+        series,
+        week,
+        episode,
+        hardenReportPath: hardenValidationPath,
+      });
+      if (hardenBlockers.length) {
+        iterationStatus = "blocked_harden";
+        iterationRecord.status = iterationStatus;
+        iterationReport = {
+          ...(iterationReport ?? {}),
+          status: "blocked",
+          findings: [...(iterationReport?.findings ?? []), ...hardenBlockers],
+          unresolved_blocker_count: hardenBlockers.length,
+          harden_feedback_report_path: hardenValidationPath,
+          updated_at: new Date().toISOString(),
+        };
+        iterations.push(iterationRecord);
+        blockers = hardenBlockers;
+        continue;
+      }
+      if (hardenValidationReport?.status && hardenValidationReport.status !== "passed") {
+        iterationStatus = "failed_harden";
+        iterationRecord.status = iterationStatus;
+        iterations.push(iterationRecord);
+        continue;
+      }
+    }
+    iterations.push(iterationRecord);
     if (iterationStatus === "passed" && iterationPlan?.prompts?.length) {
       currentPlan = {
         ...currentPlan,
@@ -929,6 +999,23 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     currentReport = { ...currentReport, status: "blocked_deadletter", unresolved_blocker_count: blockers.length, visual_resolution_deadletter_path: deadletterPath, visual_resolution_iterations: iterations, updated_at: deadletter.updated_at };
   }
   return { reviewedPlan: currentPlan, reviewReport: currentReport };
+}
+
+async function maybeClearResolvedDeadletter({ finalReviewReport, finalReviewedPlan }) {
+  if (finalReviewReport?.status !== "passed") return;
+  const existing = await readJson(deadletterPath, null);
+  const resolved = resolvedDeadletterPayload(existing, {
+    channel,
+    series,
+    week,
+    episode,
+    reviewReportPath,
+    reviewedPromptPlanPath: outputPath,
+  });
+  if (!resolved) return;
+  await writeJson(deadletterPath, resolved);
+  finalReviewedPlan.visual_resolution_deadletter_path = null;
+  finalReviewReport.visual_resolution_deadletter_path = null;
 }
 
 async function validateReferencePaths(prompts) {
@@ -1108,11 +1195,40 @@ async function main() {
   };
   let finalReviewedPlan = reviewedPlan;
   let finalReviewReport = reviewReport;
-  if (autoResolveEnabled && status === "blocked") {
-    const resolved = await autoResolveBlockedReview({ reviewedPlan, reviewReport });
+  if (autoResolveEnabled && status === "passed" && hardenFeedbackEnabled) {
+    const hardenFeedbackReport = await readJson(hardenFeedbackPath, null);
+    const hardenFeedbackBlockers = compatibleHardenFeedbackBlockers({
+      hardenReport: hardenFeedbackReport,
+      promptPlan,
+      channel,
+      series,
+      week,
+      episode,
+      hardenReportPath: hardenFeedbackPath,
+    });
+    if (hardenFeedbackBlockers.length) {
+      finalReviewReport = {
+        ...finalReviewReport,
+        status: "blocked",
+        findings: [...(finalReviewReport.findings ?? []), ...hardenFeedbackBlockers],
+        unresolved_blocker_count: hardenFeedbackBlockers.length,
+        harden_feedback_report_path: hardenFeedbackPath,
+        updated_at: new Date().toISOString(),
+      };
+      finalReviewedPlan = {
+        ...finalReviewedPlan,
+        status: "blocked",
+        harden_feedback_report_path: hardenFeedbackPath,
+        updated_at: finalReviewReport.updated_at,
+      };
+    }
+  }
+  if (autoResolveEnabled && finalReviewReport.status === "blocked") {
+    const resolved = await autoResolveBlockedReview({ reviewedPlan: finalReviewedPlan, reviewReport: finalReviewReport });
     finalReviewedPlan = resolved.reviewedPlan;
     finalReviewReport = resolved.reviewReport;
   }
+  await maybeClearResolvedDeadletter({ finalReviewReport, finalReviewedPlan });
   await writeJson(outputPath, finalReviewedPlan);
   await writeJson(reviewReportPath, finalReviewReport);
   console.log(JSON.stringify({ status: finalReviewReport.status, output_path: outputPath, review_report_path: reviewReportPath, prompt_count: finalReviewedPlan.prompts?.length ?? reviewedPrompts.length, unresolved_blocker_count: finalReviewReport.unresolved_blocker_count ?? unresolvedBlockers.length }, null, 2));

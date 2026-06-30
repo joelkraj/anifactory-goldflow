@@ -26,6 +26,10 @@ import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs
 import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
+import {
+  compatibleHardenFeedbackBlockers,
+  resolvedDeadletterPayload,
+} from "./lib/visual-resolution-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -1262,6 +1266,99 @@ async function testImagegenDeadletterRefusal() {
   );
 }
 
+function testHardenFeedbackBlockersMapToReviewResolveInput() {
+  const promptPlan = {
+    source_script_hash: "script_hash",
+    prompts: [
+      { image_id: "ep_01-cut-001", scene_id: "scene_001" },
+      { image_id: "ep_01-cut-002", scene_id: "scene_002" },
+    ],
+  };
+  const hardenReport = {
+    status: "blocked",
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    source_script_hash: "script_hash",
+    input_prompt_count: 2,
+    findings: [
+      {
+        image_id: "ep_01-cut-002",
+        scene_id: "scene_002",
+        severity: "blocker",
+        code: "physical_location_ref_missing",
+        message: "fixture location blocker",
+        resolved: false,
+      },
+      {
+        image_id: "ep_01-cut-001",
+        scene_id: "scene_001",
+        severity: "warning",
+        code: "fixture_warning",
+        resolved: true,
+      },
+    ],
+  };
+  const blockers = compatibleHardenFeedbackBlockers({
+    hardenReport,
+    promptPlan,
+    channel: "test",
+    series: "series",
+    week: "run",
+    episode: "ep_01",
+    hardenReportPath: "/tmp/harden.json",
+  });
+  assert.equal(blockers.length, 1);
+  assert.equal(blockers[0].source_stage, "visual_harden");
+  assert.equal(blockers[0].source_report_path, "/tmp/harden.json");
+  assert.equal(blockers[0].image_id, "ep_01-cut-002");
+  assert.equal(blockers[0].code, "physical_location_ref_missing");
+  assert.deepEqual(
+    compatibleHardenFeedbackBlockers({
+      hardenReport,
+      promptPlan: { ...promptPlan, source_script_hash: "other_hash" },
+      channel: "test",
+      series: "series",
+      week: "run",
+      episode: "ep_01",
+    }),
+    []
+  );
+}
+
+function testPassedReviewClearsDeadletterPayload() {
+  const resolved = resolvedDeadletterPayload(
+    {
+      status: "blocked_deadletter",
+      channel: "test",
+      series_slug: "series",
+      week: "run",
+      episode: "ep_01",
+      scene_ids: ["scene_002"],
+      unresolved_blockers: [{ scene_id: "scene_002", code: "missing_ref" }],
+    },
+    {
+      channel: "test",
+      series: "series",
+      week: "run",
+      episode: "ep_01",
+      reviewReportPath: "/tmp/review.json",
+      reviewedPromptPlanPath: "/tmp/reviewed.json",
+      now: "2026-06-30T00:00:00.000Z",
+    }
+  );
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.previous_status, "blocked_deadletter");
+  assert.deepEqual(resolved.scene_ids, []);
+  assert.deepEqual(resolved.unresolved_blockers, []);
+  assert.equal(resolved.resolved_by_review_report_path, "/tmp/review.json");
+  assert.equal(
+    resolvedDeadletterPayload({ status: "blocked_deadletter", episode: "ep_02" }, { episode: "ep_01" }),
+    null
+  );
+}
+
 async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraCharacterStateRefs = [] }) {
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   const hash = "fixture_hash";
@@ -1834,6 +1931,8 @@ async function run() {
   await testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm();
   await testVisualPlanAllowsSameLocationLabelAliases();
   await testOnlyScenesDryRun();
+  testHardenFeedbackBlockersMapToReviewResolveInput();
+  testPassedReviewClearsDeadletterPayload();
   await testVisualHardenFlagsNegativePromptWithoutRewrite();
   await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();
   await testVisualHardenBlocksMissingManifestLocationWithoutAddingIt();

@@ -929,6 +929,76 @@ async function testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm() {
   );
 }
 
+async function testVisualPlanAllowsSameLocationLabelAliases() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const weekDir = path.dirname(path.dirname(episodeDir));
+  const hash = "fixture_hash";
+  const beats = Array.from({ length: 9 }, (_, index) => {
+    const start = 181 + index * 15;
+    const location = index % 2 === 0
+      ? "comedy_pressure_studio_table_area"
+      : "streamer academy comedy pressure studio table area";
+    return {
+      scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
+      parent_scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
+      visual_beat_id: `scene_${String(index + 1).padStart(3, "0")}_beat_01`,
+      start_sec: start,
+      end_sec: start + 15,
+      duration_sec: 15,
+      location,
+      visual_beat_script_excerpt: `Fixture beat ${index + 1} remains in the same comedy pressure studio table area.`,
+      visual_job: "humiliation_image",
+      suggested_shot_job: "emotional_reaction",
+    };
+  });
+  await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    timing_source: "fixture",
+    scenes: beats.map((beat) => ({
+      scene_id: beat.scene_id,
+      start_sec: beat.start_sec,
+      end_sec: beat.end_sec,
+      duration_sec: beat.duration_sec,
+      location: beat.location,
+    })),
+  });
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    beats,
+  });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: hash, scenes: [] });
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    reference_targets: [{
+      ref_id: "comedy_pressure_studio_table_area_ref",
+      kind: "location",
+      subject: "comedy pressure studio table area",
+      scene_ids: beats.map((beat) => beat.scene_id),
+      prompt_anchor: "comedy pressure studio table area with cameras and table props",
+    }],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), { status: "approved", source_script_hash: hash, character_state_refs: [] });
+  await writeJson(path.join(weekDir, "visual_style_bible.json"), {});
+  await writeJson(path.join(weekDir, "character_bible.json"), {});
+
+  const dryRunOutput = path.join(episodeDir, "dry_run_visual_plan.json");
+  await execFileAsync(process.execPath, [
+    "scripts/visual-plan.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--dry-run-prompt", "true",
+    "--output", dryRunOutput,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const dryRun = JSON.parse(await fs.readFile(dryRunOutput, "utf8"));
+  assert.equal(dryRun.context_audit.scoped_location_coverage_findings.length, 0);
+}
+
 function testCharacterStagingSanitizerAndReviewBlockers() {
   const characterStateRefs = [
     {
@@ -1682,6 +1752,7 @@ async function run() {
   testLongLocationSpanCrossingRetentionBoundary();
   testRepeatedRetentionShotJobRunFindings();
   await testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm();
+  await testVisualPlanAllowsSameLocationLabelAliases();
   await testOnlyScenesDryRun();
   await testVisualHardenFlagsNegativePromptWithoutRewrite();
   await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();

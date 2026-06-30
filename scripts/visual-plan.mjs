@@ -1148,6 +1148,37 @@ function forcedLocationRefId(row, visualReferencePlan) {
   return locationTargets.length === 1 ? String(locationTargets[0].ref_id ?? "").trim() : null;
 }
 
+function locationLabelTokens(label) {
+  return new Set(String(label ?? "")
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !new Set(["the", "a", "an", "of", "and"]).has(token)));
+}
+
+function locationLabelsEquivalent(left, right) {
+  const leftTokens = locationLabelTokens(left);
+  const rightTokens = locationLabelTokens(right);
+  if (!leftTokens.size || !rightTokens.size) return false;
+  const intersection = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  const smaller = Math.min(leftTokens.size, rightTokens.size);
+  if (intersection === smaller && smaller >= 3) return true;
+  const union = new Set([...leftTokens, ...rightTokens]).size;
+  return union > 0 && intersection / union >= 0.72;
+}
+
+function addDistinctLocationLabel(labels, label) {
+  const trimmed = String(label ?? "").trim();
+  if (!trimmed) return;
+  for (const existing of labels) {
+    if (locationLabelsEquivalent(existing, trimmed)) return;
+  }
+  labels.add(trimmed);
+}
+
 function scopedLocationCoverageFindings(rows, visualReferencePlan, {
   maxSameLocationSpanSec: maxSec = maxSameLocationSpanSec,
   retentionStartSec = 180,
@@ -1178,13 +1209,14 @@ function scopedLocationCoverageFindings(rows, visualReferencePlan, {
         count: 1,
         firstVisualBeatId: row.visual_beat_id ?? row.scene_id ?? null,
         lastVisualBeatId: row.visual_beat_id ?? row.scene_id ?? null,
-        distinctLocationLabels: new Set(locationLabel ? [locationLabel] : []),
+        distinctLocationLabels: new Set(),
       };
+      addDistinctLocationLabel(current.distinctLocationLabels, locationLabel);
     } else {
       current.end = Math.max(current.end, end);
       current.count += 1;
       current.lastVisualBeatId = row.visual_beat_id ?? row.scene_id ?? current.lastVisualBeatId;
-      if (locationLabel) current.distinctLocationLabels.add(locationLabel);
+      addDistinctLocationLabel(current.distinctLocationLabels, locationLabel);
     }
   }
   if (current) spans.push(current);

@@ -81,6 +81,22 @@ function testStarvationGate() {
   assert.equal(findings[0].scene_id, "scene_002");
 }
 
+function testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement() {
+  const findings = locationCoverageFindings(
+    [{ ref_id: "creator_classroom_training_refs", kind: "location", scene_ids: ["scene_021"] }],
+    [
+      {
+        scene_id: "scene_021",
+        location: "analytics hall replay wall",
+        ref_requirements: [{ kind: "location", ref_id: "analytics_hall_replay_wall_ref" }],
+      },
+    ]
+  );
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].code, "scene_missing_location_ref");
+  assert.deepEqual(findings[0].required_ref_ids, ["analytics_hall_replay_wall_ref"]);
+}
+
 function testOutOfScopeRefDropping() {
   const scene = { scene_id: "scene_001" };
   const visualReferencePlan = {
@@ -1645,6 +1661,7 @@ async function run() {
   testLocationSceneIdsDerivation();
   testLocationCandidateExclusion();
   testStarvationGate();
+  testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement();
   testOutOfScopeRefDropping();
   testReferenceLimitOmissionIsNotForbidden();
   testOutOfScopeLocationMentionAssertion();

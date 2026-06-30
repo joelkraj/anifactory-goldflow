@@ -69,18 +69,20 @@ export function locationCoverageFindings(referenceTargets = [], semanticScenes =
     const sceneId = sceneScopeId(scene);
     const requiredLocationRefIds = sceneLocationRequirementRefIds(scene);
     if (!sceneId || !isPhysicalLocationScene(scene) || !requiredLocationRefIds.length) continue;
-    const covered = locationTargets.some((target) => {
-      const targetSceneIds = new Set(asArray(target?.scene_ids).map(normalizeRefId).filter(Boolean));
-      return targetSceneIds.has(sceneId);
+    const missingRefIds = requiredLocationRefIds.filter((requiredRefId) => {
+      const exactTarget = locationTargets.find((target) => normalizeRefId(target?.ref_id) === requiredRefId);
+      if (!exactTarget) return true;
+      const targetSceneIds = new Set(asArray(exactTarget?.scene_ids).map(normalizeRefId).filter(Boolean));
+      return !targetSceneIds.has(sceneId);
     });
-    if (!covered) {
+    if (missingRefIds.length) {
       findings.push({
         code: "scene_missing_location_ref",
         severity: "blocker",
         scene_id: sceneId,
         location: scene.location,
-        required_ref_ids: requiredLocationRefIds,
-        message: `Scene ${sceneId} has physical location "${scene.location}" and location ref requirements, but no location reference target covers the scene.`,
+        required_ref_ids: missingRefIds,
+        message: `Scene ${sceneId} has physical location "${scene.location}" and requires exact location ref ${missingRefIds.join(", ")}, but no matching location reference target covers the scene.`,
       });
     }
   }

@@ -23,6 +23,7 @@ import {
   routedProviderForReference,
 } from "./lib/image-provider-routing.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
+import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 
@@ -190,6 +191,68 @@ function testProviderAwarePromptSelection() {
   assert.equal(promptTextForImageProvider(prompt, "modelslab"), "modelslab flux prompt");
   assert.equal(promptTextForImageProvider(prompt, "codex_imagegen"), "codex openai prompt");
   assert.equal(promptTextForImageProvider({ ...prompt, codex_image_prompt: "" }, "codex_imagegen"), "generic production prompt");
+}
+
+function testLocalBeatFidelityEditorialCases() {
+  const allowedFindings = localBeatFidelityFindingsForTests([
+    {
+      image_id: "ep_01-cut-collective",
+      image_prompt: "Joey Manhwa stands beside a glowing livestream ledger while Lana Vale watches from a campus livestream exam montage, audience seats and creator-screen spaces visible as environmental context.",
+      shot_manifest: {
+        visible_characters: ["Joey Manhwa", "Lana Vale"],
+        location_ref_id: "streamer_university_livestream_exam_spaces_ref",
+      },
+    },
+    {
+      image_id: "ep_01-cut-location-list",
+      image_prompt: "Joey and ExtraEmily stand before Improv Court doors in a streamer university hallway, panels of livestream challenge rooms glowing behind each door.",
+      shot_manifest: {
+        visible_characters: ["Joey", "ExtraEmily"],
+        location_ref_id: "streamer_university_improv_court_door_hall_ref",
+      },
+    },
+  ], [
+    {
+      primary_subject: "Joey Manhwa",
+      visible_subjects: [
+        "Joey Manhwa",
+        "Lana Vale watching remotely",
+        "Streamer University creators and audience spaces",
+      ],
+      location: "streamer_university_livestream_exam_spaces",
+      location_timeline_label: "Joey's livestream ledger screen transitioning into Streamer University livestream-exam montage",
+      visual_beat_script_excerpt: "And somewhere across campus, Lana Vale watched the whole world realize what I had been doing for her in silence. Streamer University did not have normal classes.",
+    },
+    {
+      primary_subject: "Joey",
+      visible_subjects: ["Joey", "ExtraEmily", "fake talk show host", "improv room audience"],
+      location: "streamer_university_improv_court_door_hall",
+      location_timeline_label: "streamer_university_improv_court_door_hall",
+      visual_beat_script_excerpt: "Analytics Hall had graphs. Aura class had mirrors. Tax class had jokes. Improv Court had doors. Behind each door was a livestream situation you could not prepare for.",
+    },
+  ]);
+  assert.deepEqual(allowedFindings, []);
+
+  const blockedFindings = localBeatFidelityFindingsForTests([
+    {
+      image_id: "ep_01-cut-missing",
+      image_prompt: "Joey stands alone in a dorm room with a blue screen glow.",
+      shot_manifest: {
+        visible_characters: ["Joey"],
+        location_ref_id: "dorm_room_ref",
+      },
+    },
+  ], [
+    {
+      primary_subject: "Joey",
+      visible_subjects: ["Joey", "Agent00"],
+      location: "analytics_hall_replay_wall",
+      location_timeline_label: "Analytics Hall replay wall",
+      visual_beat_script_excerpt: "Joey crossed into Analytics Hall. Agent00 waited beside the replay wall.",
+    },
+  ]);
+  assert.equal(blockedFindings.some((finding) => finding.includes("Agent00")), true);
+  assert.equal(blockedFindings.some((finding) => finding.includes("Analytics Hall")), true);
 }
 
 function testHybridImageProviderRouting() {
@@ -1736,6 +1799,7 @@ async function run() {
   testReferenceLimitOmissionIsNotForbidden();
   testOutOfScopeLocationMentionAssertion();
   testProviderAwarePromptSelection();
+  testLocalBeatFidelityEditorialCases();
   testHybridImageProviderRouting();
   await testHybridOpeningWindowPersistsInRunIdentity();
   await testVisualPlannerDriftContracts();

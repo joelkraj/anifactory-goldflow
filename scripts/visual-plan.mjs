@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import {
   allowedRefIdsForScene,
@@ -185,6 +185,13 @@ function firstName(value) {
   return String(value ?? "").trim().split(/\s+/)[0] ?? "";
 }
 
+function isCollectiveOrEnvironmentSubject(value) {
+  const label = normalizeLabel(value);
+  if (!label) return true;
+  if (/\b(?:audience|crowd|creators|students|viewers|fans|followers|staff|workers|classmates|witnesses|people|spaces|areas|rooms|halls|screens|chat|comments)\b/i.test(label)) return true;
+  return /\b(?:campus|university|academy|school|venue|event|stage|hall|room|studio)\b.*\b(?:space|spaces|area|areas|rooms|halls)\b/i.test(label);
+}
+
 function mentionedCandidateNames(scene) {
   const excerpt = String(scene.visual_beat_script_excerpt ?? scene.script_excerpt ?? "");
   const candidates = [
@@ -193,7 +200,8 @@ function mentionedCandidateNames(scene) {
     ...((scene.character_states ?? []).map((state) => state?.character)),
   ]
     .map((name) => String(name ?? "").trim())
-    .filter((name) => name && /^[A-Z][\p{L}\p{N}'’-]+/u.test(name));
+    .filter((name) => name && /^[A-Z][\p{L}\p{N}'’-]+/u.test(name))
+    .filter((name) => !isCollectiveOrEnvironmentSubject(name));
   const unique = [...new Set(candidates)];
   return unique.filter((name) => {
     const full = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -212,6 +220,38 @@ function locationMentionPhrases(text) {
   const genericMovementPattern = /\b(?:entered|arrived at|walked into|stepped into|crossed into|moved into|went into|inside|through|toward)\s+(?:the\s+)?(hall|room|stage|lobby|campus|arena|court|boardroom|office|dorm|apartment|kitchen|elevator|tower|district|station|gym|street|floor|hallway|corridor|courtyard|temple|palace|library|classroom|studio|theater|restaurant|cafe|hospital|bank|store|market|platform|roof|basement|warehouse|server)\b/giu;
   for (const match of source.matchAll(genericMovementPattern)) phrases.push(match[1]);
   return [...new Set(phrases.map((phrase) => phrase.trim()).filter(Boolean))];
+}
+
+function locationPhraseSignature(phrase) {
+  const words = normalizeLabel(phrase).split(/\s+/).filter(Boolean);
+  if (!words.length) return "";
+  return words.slice(Math.max(0, words.length - 2)).join(" ");
+}
+
+function locationPhraseAppearsInSourceLocation(phrase, source) {
+  const phraseLabel = normalizeLabel(phrase);
+  const signature = locationPhraseSignature(phrase);
+  const sourceLocation = normalizeLabel([
+    source?.location,
+    source?.location_timeline_label,
+  ].filter(Boolean).join(" "));
+  return Boolean(phraseLabel && sourceLocation.includes(phraseLabel))
+    || Boolean(signature && sourceLocation.includes(signature));
+}
+
+function locationPhraseHasCurrentBeatCue(phrase, source) {
+  const excerpt = String(source?.visual_beat_script_excerpt ?? source?.script_excerpt ?? "");
+  const escapedPhrase = String(phrase ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escapedPhrase) return false;
+  return new RegExp(
+    `\\b(?:entered|arrived at|walked into|stepped into|crossed into|moved into|went into|reached|stood in|stood inside|waited in|inside|through|toward)\\s+(?:the\\s+)?${escapedPhrase}\\b`,
+    "iu",
+  ).test(excerpt);
+}
+
+function locationPhraseRequiresVisibleStaging(phrase, source) {
+  return locationPhraseAppearsInSourceLocation(phrase, source)
+    || locationPhraseHasCurrentBeatCue(phrase, source);
 }
 
 function compactSceneCharacterRef(ref) {
@@ -995,7 +1035,7 @@ function nameAppearsInPrompt(name, prompt) {
   return first.length > 2 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
 }
 
-function assertLocalBeatFidelity(prompts, sourceRows) {
+function localBeatFidelityFindings(prompts, sourceRows) {
   const failures = [];
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
@@ -1013,11 +1053,20 @@ function assertLocalBeatFidelity(prompts, sourceRows) {
       const text = promptSearchText(prompt);
       const normalizedPhrase = phrase.toLowerCase();
       const importantVenue = /^[A-Z]/.test(phrase) || /\b(?:hall|stage|lobby|room|screen|wall|floor|campus|studio|server)\b/i.test(phrase);
-      if (importantVenue && !text.includes(normalizedPhrase.split(/\s+/).slice(-2).join(" "))) {
+      if (importantVenue && locationPhraseRequiresVisibleStaging(phrase, source) && !text.includes(normalizedPhrase.split(/\s+/).slice(-2).join(" "))) {
         failures.push(`${prompt.image_id} local excerpt names location ${phrase}, but prompt/manifest does not visibly stage it`);
       }
     }
   }
+  return failures;
+}
+
+export function localBeatFidelityFindingsForTests(prompts, sourceRows) {
+  return localBeatFidelityFindings(prompts, sourceRows);
+}
+
+function assertLocalBeatFidelity(prompts, sourceRows) {
+  const failures = localBeatFidelityFindings(prompts, sourceRows);
   if (failures.length) {
     throw new Error(`Visual prompt plan failed local beat fidelity:\n${failures.slice(0, 40).join("\n")}`);
   }
@@ -1525,8 +1574,10 @@ async function main() {
   console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length }, null, 2));
 }
 
-main().catch(async (error) => {
-  await writeJson(outputPath, { schema: "goldflow_section_image_prompts_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(async (error) => {
+    await writeJson(outputPath, { schema: "goldflow_section_image_prompts_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

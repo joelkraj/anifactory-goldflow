@@ -127,6 +127,29 @@ async function download(urls, outputPath) {
   throw lastError ?? new Error(`Could not download ModelsLab output for ${outputPath}`);
 }
 
+async function assertLandscapeOutput(outputPath, requestedWidth, requestedHeight) {
+  const metadata = await sharp(outputPath).metadata();
+  const actualWidth = Number(metadata.width ?? 0);
+  const actualHeight = Number(metadata.height ?? 0);
+  if (!(actualWidth > 0 && actualHeight > 0)) {
+    throw new Error(`ModelsLab output has unreadable dimensions: ${outputPath}`);
+  }
+  const actualAspect = actualWidth / actualHeight;
+  const requestedAspect = requestedWidth / requestedHeight;
+  if (actualWidth <= actualHeight || Math.abs(actualAspect - requestedAspect) > 0.08) {
+    throw new Error(
+      `ModelsLab returned non-landscape output for ${outputPath}: ` +
+      `${actualWidth}x${actualHeight}, requested ${requestedWidth}x${requestedHeight}. ` +
+      "Retry the cut; do not render portrait or square frames into the 16:9 YouTube lane.",
+    );
+  }
+  return {
+    actual_width: actualWidth,
+    actual_height: actualHeight,
+    actual_aspect: Number(actualAspect.toFixed(6)),
+  };
+}
+
 async function prepareReferenceForUpload(filePath, uploadDir, {
   width: requestedWidth = width,
   height: requestedHeight = height,
@@ -201,11 +224,13 @@ export async function generateModelslabImage({
   const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2);
   const resolved = await resolveModelslabImage(initial, "/api/v6/images/fetch", `${model} image`);
   const imageUrl = await download(modelslabOutputs(resolved), outputPath);
+  const actualGeometry = await assertLandscapeOutput(outputPath, requestedWidth, requestedHeight);
   return {
     downloaded_path: outputPath,
     image_url: imageUrl,
     requested_width: requestedWidth,
     requested_height: requestedHeight,
+    ...actualGeometry,
     modelslab_output_dir: outputDir,
     modelslab_elapsed_ms: Date.now() - startedAtMs,
     modelslab_endpoint: endpoint,

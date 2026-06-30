@@ -21,6 +21,7 @@ const episode = flags.episode ?? "ep_01";
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
+const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const outputPath = flags.output ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsOutputPath = flags.characterStateRefs
   ?? flags["character-state-refs"]
@@ -28,6 +29,17 @@ const characterStateRefsOutputPath = flags.characterStateRefs
 const visualStyleBiblePath = flags.visualStyleBible ?? flags["visual-style-bible"] ?? path.join(weekDir, "visual_style_bible.json");
 const characterBiblePath = flags.characterBible ?? flags["character-bible"] ?? path.join(weekDir, "character_bible.json");
 const episodeVisualDirectionPath = flags.episodeVisualDirection ?? flags["episode-visual-direction"] ?? path.join(episodeDir, "episode_visual_direction.md");
+const dropStyleRefs = flags["drop-style-refs"] === "true" || process.env.ANIFACTORY_DROP_STYLE_REFS === "true";
+const keepStyleRefs = flags["drop-style-refs"] === "false" || process.env.ANIFACTORY_DROP_STYLE_REFS === "false";
+const generationModes = new Set([
+  "standalone_ref",
+  "derive_from_first_clean_cut",
+  "derive_from_best_cut",
+  "derive_from_first_clean_wide_cut",
+  "no_ref_needed",
+  "manual_review",
+  "source_only",
+]);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -44,6 +56,18 @@ function parseFlags(parts) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function slug(value, fallback = "ref") {
+  const normalized = String(value ?? fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || fallback;
+}
+
+function personKey(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 async function readJson(filePath, fallback = null) {
@@ -102,6 +126,17 @@ function compactScene(scene) {
     ref_requirements: scene.ref_requirements ?? [],
     action_staging: scene.action_staging ?? "",
     continuity_notes: scene.continuity_notes ?? [],
+    visual_beats: (scene.visual_beats ?? []).map((beat) => ({
+      visual_beat_id: beat.visual_beat_id ?? null,
+      start_sec: beat.start_sec ?? null,
+      visual_job: beat.visual_job ?? null,
+      suggested_shot_job: beat.suggested_shot_job ?? null,
+      visual_beat_script_excerpt: String(beat.visual_beat_script_excerpt ?? beat.script_excerpt ?? "").slice(0, 500),
+      visual_beat_action: String(beat.visual_beat_action ?? beat.action ?? "").slice(0, 360),
+      visible_subjects: beat.visible_subjects ?? [],
+      primary_subject: beat.primary_subject ?? null,
+      location: beat.location ?? null,
+    })),
   };
 }
 
@@ -111,6 +146,59 @@ function visualGuidanceBlock(guidance = {}) {
     character_bible: guidance.characterBible ?? null,
     episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 5000),
   }, null, 2);
+}
+
+function parseListFlag(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function scopedSemanticPlan(plan) {
+  const sceneIds = parseListFlag(flags["only-scenes"] ?? flags.onlyScenes);
+  if (!sceneIds.length) return { plan, scope: { mode: "full_episode", selected_scene_ids: [] } };
+  const wanted = new Set(sceneIds);
+  const scenes = (plan.scenes ?? []).filter((scene) => wanted.has(scene.scene_id));
+  return {
+    plan: {
+      ...plan,
+      scenes,
+      scene_count: scenes.length,
+    },
+    scope: {
+      mode: "scene_scoped",
+      selected_scene_ids: scenes.map((scene) => scene.scene_id),
+      requested_scene_ids: sceneIds,
+      total_scene_count: plan.scenes?.length ?? 0,
+    },
+  };
+}
+
+function visualBeatRows(plan) {
+  if (!plan || plan.status && plan.status !== "passed") return [];
+  const rows = Array.isArray(plan.beats) ? plan.beats : (Array.isArray(plan.visual_beats) ? plan.visual_beats : []);
+  return rows.filter((row) => row && row.scene_id);
+}
+
+function semanticPlanWithVisualBeats(semanticPlan, visualBeatPlan) {
+  const rows = visualBeatRows(visualBeatPlan);
+  if (!rows.length) return semanticPlan;
+  const byScene = new Map();
+  for (const row of rows) {
+    const sceneId = String(row.parent_scene_id ?? row.scene_id ?? "").trim();
+    if (!sceneId) continue;
+    if (!byScene.has(sceneId)) byScene.set(sceneId, []);
+    byScene.get(sceneId).push(row);
+  }
+  return {
+    ...semanticPlan,
+    visual_beat_plan_path: visualBeatPlanPath,
+    scenes: (semanticPlan.scenes ?? []).map((scene) => ({
+      ...scene,
+      visual_beats: byScene.get(scene.scene_id) ?? [],
+    })),
+  };
 }
 
 function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {} } = {}) {
@@ -127,6 +215,10 @@ ${chunkLabel ? `\nThis is ${chunkLabel}. Identify reference needs visible in thi
 Rules:
 - This stage decides reference strategy only. It does not write final image prompts.
 - Identify recurring characters, character states, major locations, important props, UI motifs, and high-risk repeated action states.
+- Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
+- For real named public creators, streamers, celebrities, or influencers whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and anime/manhwa styling.
+- Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
+- If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
 - Decide whether each target needs a standalone reference, should be derived from a generated cut, needs no reference, or needs operator/manual review.
 - Use generic production logic. Do not hardcode story-specific rules.
 - Positive visual language is mandatory. Prompt anchors must describe what should appear, never what should be avoided.
@@ -134,15 +226,18 @@ Rules:
 - Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction. Example: write "single visible protagonist centered in frame, plain institutional detainee jacket with open collar and flat fabric panels" rather than saying what clothing or extra characters to avoid.
 - Prompt anchors must be concrete and specific enough for image generation, but they are draft anchors requiring manual review before reference generation.
+- Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
 - Reference kind taxonomy is strict:
-  - style refs define anime/manhwa rendering language, line quality, color, lighting, and shot polish.
+  - style refs define polished 2D anime/manhwa rendering language, line quality, color, lighting, and shot polish.
   - character_state refs define face, hair, age, body type, wardrobe, and state; they are identity/wardrobe evidence, not reusable pose instructions.
-  - location refs define environment, architecture, materials, lighting, and scale; include wide empty or lightly populated staging.
+  - location refs define environment, architecture, materials, lighting, and scale; use open environment-only staging with enough clean space for later scene characters.
   - prop refs define object shape, surface, markings, and scale.
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should be single-person, single-pose, plain-background identity refs; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- Character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- UI refs that represent a named person as data should use dossier identity tile, silhouette identity marker, or archival record wording so the ref stays an interface design plate instead of a character reference card.
+- Style references are optional. Prefer the visual style bible and style_summary text over a generated style image. Create a style reference only when it is a clean abstract rendering/material/lighting sample; it must not contain character faces, character sheets, expression panels, UI screens, speech bubbles, or readable text.
 - For progressive transformation arcs where the same character changes body, grooming, hair, facial hair, clothing, wealth status, injury state, power level, or age presentation, separate identity from state:
   - Create one base identity anchor for the character's face likeness and core recognizable identity.
   - Later character_state refs and scene_prompt_anchor values must dictate the current state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status, and emotional bearing.
@@ -153,6 +248,9 @@ Rules:
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
 - Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
+- Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If consecutive scenes or a long story span moves between different visible areas, create separate scene-scoped location refs for those areas, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
+- Semantic scene ref_requirements with kind "location" are binding target IDs. For every required location ref_id in a scene, return a location reference_target with that exact ref_id covering that scene. Broad venue refs may be added, but they must not replace the exact required scene-level location ref_id.
+- Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
 - Return only valid JSON.
 
 VISUAL BIBLES AND OPERATOR DIRECTION:
@@ -170,7 +268,7 @@ Return:
       "subject": "human readable subject",
       "scene_ids": ["scene_001"],
       "priority": "required|high|medium|low",
-      "generation_mode": "standalone_ref|derive_from_first_clean_cut|derive_from_best_cut|derive_from_first_clean_wide_cut|no_ref_needed|manual_review",
+      "generation_mode": "standalone_ref|derive_from_first_clean_cut|derive_from_best_cut|derive_from_first_clean_wide_cut|no_ref_needed|manual_review|source_only",
       "required_before_imagegen": true,
       "reference_image_path": null,
       "prompt_anchor": "positive draft reference prompt anchor",
@@ -238,21 +336,28 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}) {
 Rules:
 - Qwen authors the merged plan. Code will only validate schema and blockers.
 - Merge duplicate character/location/prop/UI/action targets across chunks.
+- Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
+- For real named public creators, streamers, celebrities, or influencers whose likeness matters, preserve or request face-only source identity anchors and use those anchors as base_identity_ref_id for the generated anime/manhwa character-state refs. Do not merge these into generic role refs or text-only lookalikes.
 - Preserve all relevant scene_ids from the chunk plans.
 - Keep generation_mode decisions coherent at episode level.
 - Positive visual language is mandatory. Prompt anchors must describe what should appear, never what should be avoided.
 - Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than" in prompt_anchor fields.
 - Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
+- If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
+- Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
 - Reference kind taxonomy is strict:
-  - style refs define anime/manhwa rendering language, line quality, color, lighting, and shot polish.
+  - style refs define polished 2D anime/manhwa rendering language, line quality, color, lighting, and shot polish.
   - character_state refs define face, hair, age, body type, wardrobe, and state; they are identity/wardrobe evidence, not reusable pose instructions.
-  - location refs define environment, architecture, materials, lighting, and scale; include wide empty or lightly populated staging.
+  - location refs define environment, architecture, materials, lighting, and scale; use open environment-only staging with enough clean space for later scene characters.
   - prop refs define object shape, surface, markings, and scale.
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should be single-person, single-pose, plain-background identity refs; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- Character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- UI refs that represent a named person as data should use dossier identity tile, silhouette identity marker, or archival record wording so the ref stays an interface design plate instead of a character reference card.
+- Style references are optional. Prefer the visual style bible and style_summary text over a generated style image. Preserve a style reference only when it is a clean abstract rendering/material/lighting sample; it must not contain character faces, character sheets, expression panels, UI screens, speech bubbles, or readable text.
 - For progressive transformation arcs where the same character changes body, grooming, hair, facial hair, clothing, wealth status, injury state, power level, or age presentation, separate identity from state:
   - Create one base identity anchor for the character's face likeness and core recognizable identity.
   - Later character_state refs and scene_prompt_anchor values must dictate the current state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status, and emotional bearing.
@@ -262,6 +367,9 @@ Rules:
 - Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
+- Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If chunk plans contain separate visible areas inside one larger venue, preserve or create separate scene-scoped location refs for those areas during merge, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
+- Preserve exact semantic location ref_ids during merge. If a chunk plan or semantic scene requires a location ref_id, the merged plan must keep a location reference_target with that exact ref_id and scene coverage, even when a broader venue ref is also present.
+- Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
 - Return only valid JSON.
 
 VISUAL BIBLES AND OPERATOR DIRECTION:
@@ -282,7 +390,7 @@ Return:
       "subject": "human readable subject",
       "scene_ids": ["scene_001"],
       "priority": "required|high|medium|low",
-      "generation_mode": "standalone_ref|derive_from_first_clean_cut|derive_from_best_cut|derive_from_first_clean_wide_cut|no_ref_needed|manual_review",
+      "generation_mode": "standalone_ref|derive_from_first_clean_cut|derive_from_best_cut|derive_from_first_clean_wide_cut|no_ref_needed|manual_review|source_only",
       "required_before_imagegen": true,
       "reference_image_path": null,
       "prompt_anchor": "positive draft reference prompt anchor",
@@ -322,7 +430,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a visual reference strategy planner for longform anime/manhwa production. Use positive visual language only: describe what should appear, never what should be avoided." },
+          { role: "system", content: "Return only valid JSON. You are a visual reference strategy planner for longform anime/manhwa production. Preserve story intent and prefer positive visual language when it stays faithful." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -361,17 +469,18 @@ async function callCodex(prompt, stageName) {
 }
 
 function normalizeTarget(target, index) {
-  const refId = String(target.ref_id ?? `${target.kind ?? "ref"}_${index + 1}`).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const refId = slug(target.ref_id ?? `${target.kind ?? "ref"}_${index + 1}`);
   const mode = String(target.generation_mode ?? "manual_review");
+  const kind = target.kind ?? "unknown";
   return {
     ref_id: refId,
-    kind: target.kind ?? "unknown",
+    kind,
     subject: target.subject ?? refId,
     scene_ids: Array.isArray(target.scene_ids) ? target.scene_ids : [],
     priority: target.priority ?? "medium",
-    generation_mode: ["standalone_ref", "derive_from_first_clean_cut", "derive_from_best_cut", "derive_from_first_clean_wide_cut", "no_ref_needed", "manual_review"].includes(mode) ? mode : "manual_review",
+    generation_mode: generationModes.has(mode) ? mode : "manual_review",
     required_before_imagegen: Boolean(target.required_before_imagegen),
-    prompt_anchor: String(target.prompt_anchor ?? "").trim(),
+    prompt_anchor: ensureLandscapeReferenceAnchor(target.prompt_anchor, kind),
     anchor_cut_policy: target.anchor_cut_policy ?? "none",
     appearance_count: Number(target.appearance_count ?? 0),
     risk_notes: Array.isArray(target.risk_notes) ? target.risk_notes : [],
@@ -382,18 +491,161 @@ function normalizeTarget(target, index) {
 
 function normalizeStateRef(ref, index) {
   const character = String(ref.character ?? ref.character_name ?? ref.name ?? `character_${index + 1}`).trim();
-  const stateRefId = String(ref.state_ref_id ?? ref.ref_id ?? `${character}_${index + 1}`).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const stateRefId = slug(ref.state_ref_id ?? ref.ref_id ?? `${character}_${index + 1}`);
   return {
     state_ref_id: stateRefId,
     character,
     scene_ids: Array.isArray(ref.scene_ids) ? ref.scene_ids : [],
-    prompt_anchor: String(ref.prompt_anchor ?? "").trim(),
+    prompt_anchor: ensureLandscapeReferenceAnchor(ref.prompt_anchor, "character_state"),
     scene_prompt_anchor: String(ref.scene_prompt_anchor ?? ref.scene_anchor ?? ref.prompt_anchor ?? "").trim(),
     definitive: false,
     reference_image_path: ref.reference_image_path ?? null,
     source_ref_id: ref.source_ref_id ?? ref.ref_id ?? null,
     base_identity_ref_id: ref.base_identity_ref_id ?? ref.base_identity_ref ?? null,
     identity_usage: ref.identity_usage ?? (ref.base_identity_ref_id || ref.base_identity_ref ? "face_only" : "full_identity"),
+  };
+}
+
+function sourceFaceAnchorRows(characterBible) {
+  const rows = [];
+  const directRows = Array.isArray(characterBible?.source_face_anchors)
+    ? characterBible.source_face_anchors
+    : Array.isArray(characterBible?.sourceFaceAnchors)
+      ? characterBible.sourceFaceAnchors
+      : [];
+  rows.push(...directRows);
+  const characterRows = Array.isArray(characterBible?.characters)
+    ? characterBible.characters
+    : Array.isArray(characterBible?.character_bible)
+      ? characterBible.character_bible
+      : [];
+  for (const character of characterRows) {
+    const anchor = character?.source_face_anchor ?? character?.sourceFaceAnchor ?? null;
+    const imagePath = anchor?.reference_image_path
+      ?? anchor?.path
+      ?? character?.source_face_image_path
+      ?? character?.sourceFaceImagePath
+      ?? null;
+    if (!imagePath) continue;
+    rows.push({
+      ...anchor,
+      character: anchor?.character ?? character.character ?? character.name ?? character.canonical_name,
+      aliases: anchor?.aliases ?? character.aliases ?? [],
+      reference_image_path: imagePath,
+      ref_id: anchor?.ref_id ?? character.source_face_ref_id ?? null,
+      scene_ids: anchor?.scene_ids ?? character.scene_ids ?? [],
+      prompt_anchor: anchor?.prompt_anchor ?? character.source_face_prompt_anchor ?? null,
+      approved: anchor?.approved ?? character.source_face_approved ?? false,
+      source: anchor?.source ?? character.source_face_source ?? null,
+    });
+  }
+  return rows.filter((row) => row && (row.character || row.ref_id) && (row.reference_image_path || row.path));
+}
+
+function sceneIdsForCharacter(character, aliases, scenes, characterStateRefs, explicitSceneIds = []) {
+  const keys = [character, ...(Array.isArray(aliases) ? aliases : [])].map(personKey).filter(Boolean);
+  const sceneIds = new Set((Array.isArray(explicitSceneIds) ? explicitSceneIds : []).filter(Boolean));
+  for (const ref of characterStateRefs) {
+    const refKeys = [ref.character, ref.state_ref_id, ref.source_ref_id].map(personKey).filter(Boolean);
+    if (!keys.some((key) => refKeys.some((refKey) => refKey.includes(key) || key.includes(refKey)))) continue;
+    for (const sceneId of ref.scene_ids ?? []) sceneIds.add(sceneId);
+  }
+  for (const scene of scenes ?? []) {
+    const haystack = [
+      scene.primary_subject,
+      ...(scene.visible_subjects ?? []),
+      ...(scene.character_states ?? []).flatMap((state) => [state.character, state.state, state.wardrobe]),
+    ].map(personKey).filter(Boolean).join(" ");
+    if (keys.some((key) => key && haystack.includes(key))) sceneIds.add(scene.scene_id);
+  }
+  return [...sceneIds].filter(Boolean);
+}
+
+function sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterStateRefs) {
+  const seen = new Set();
+  const anchors = [];
+  for (const row of sourceFaceAnchorRows(characterBible)) {
+    const character = String(row.character ?? row.name ?? row.subject ?? row.ref_id ?? "").trim();
+    const aliases = Array.isArray(row.aliases) ? row.aliases : [];
+    const refId = slug(row.ref_id ?? `${character}_real_face_source`);
+    if (!refId || seen.has(refId)) continue;
+    seen.add(refId);
+    const sceneIds = sceneIdsForCharacter(character, aliases, scenes, characterStateRefs, row.scene_ids);
+    anchors.push({
+      ref_id: refId,
+      kind: "character_state",
+      subject: row.subject ?? `${character} real face source`,
+      scene_ids: sceneIds,
+      priority: row.priority ?? "required",
+      generation_mode: "source_only",
+      required_before_imagegen: false,
+      reference_image_path: row.reference_image_path ?? row.path,
+      prompt_anchor: ensureLandscapeReferenceAnchor(
+        row.prompt_anchor
+          ?? `face source identity anchor for ${character}, source image supplies facial likeness only, state refs supply wardrobe, body language, pose, and anime/manhwa styling`,
+        "character_state"
+      ),
+      anchor_cut_policy: "none",
+      appearance_count: sceneIds.length,
+      risk_notes: [
+        ...(Array.isArray(row.risk_notes) ? row.risk_notes : []),
+        "Approved source portrait supplies face identity continuity for generated anime/manhwa character-state refs.",
+      ],
+      manual_review_required: row.manual_review_required ?? row.approved !== true,
+      source_face_character: character,
+      source_face_aliases: aliases,
+      source_face_status: row.approved === true ? "approved" : (row.status ?? "needs_manual_review"),
+      source: row.source ?? null,
+    });
+  }
+  return anchors;
+}
+
+function applySourceFaceAnchors({ referenceTargets, characterStateRefs, characterBible, scenes }) {
+  const anchors = sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterStateRefs);
+  if (!anchors.length) {
+    return { referenceTargets, characterStateRefs, warnings: [] };
+  }
+  const targetById = new Map(referenceTargets.map((target) => [target.ref_id, target]));
+  for (const anchor of anchors) {
+    const previous = targetById.get(anchor.ref_id);
+    targetById.set(anchor.ref_id, previous ? {
+      ...previous,
+      ...anchor,
+      scene_ids: [...new Set([...(previous.scene_ids ?? []), ...(anchor.scene_ids ?? [])].filter(Boolean))],
+      risk_notes: [...new Set([...(previous.risk_notes ?? []), ...(anchor.risk_notes ?? [])].filter(Boolean))],
+      reference_image_path: anchor.reference_image_path ?? previous.reference_image_path ?? null,
+      generation_mode: "source_only",
+      required_before_imagegen: false,
+    } : anchor);
+  }
+  const anchorsByCharacter = new Map();
+  for (const anchor of anchors) {
+    for (const key of [anchor.source_face_character, ...(anchor.source_face_aliases ?? [])].map(personKey).filter(Boolean)) {
+      anchorsByCharacter.set(key, anchor);
+    }
+  }
+  const anchoredStateRefs = characterStateRefs.map((ref) => {
+    const refKeys = [ref.character, ref.state_ref_id, ref.source_ref_id].map(personKey).filter(Boolean);
+    const anchor = [...anchorsByCharacter.entries()]
+      .find(([key]) => refKeys.some((refKey) => refKey.includes(key) || key.includes(refKey)))?.[1] ?? null;
+    if (!anchor || ref.source_ref_id === anchor.ref_id || ref.state_ref_id === anchor.ref_id) return ref;
+    return {
+      ...ref,
+      base_identity_ref_id: anchor.ref_id,
+      identity_usage: "face_only",
+    };
+  });
+  return {
+    referenceTargets: [...targetById.values()],
+    characterStateRefs: anchoredStateRefs,
+    warnings: anchors.map((anchor) => ({
+      code: "source_face_anchor_applied",
+      severity: anchor.source_face_status === "approved" ? "info" : "warning",
+      ref_id: anchor.ref_id,
+      character: anchor.source_face_character,
+      message: `Source-face anchor ${anchor.ref_id} is available for ${anchor.source_face_character}.`,
+    })),
   };
 }
 
@@ -432,10 +684,75 @@ function assertPositiveAnchors(referenceTargets, characterStateRefs) {
   }
 }
 
+function styleReferenceContaminationFindings(referenceTargets) {
+  const badPattern = /\b(?:face|faces|character|characters|portrait|expression|expressions|closeup|closeups|panel|panels|sheet|turnaround|ui|interface|screen|screens|speech bubble|text|caption|chat|profile card)\b/i;
+  return referenceTargets
+    .filter((target) => String(target.kind ?? "").toLowerCase() === "style")
+    .filter((target) => badPattern.test(`${target.subject ?? ""} ${target.prompt_anchor ?? ""}`))
+    .map((target) => ({
+      code: "style_ref_contamination_risk",
+      severity: "blocker",
+      ref_id: target.ref_id,
+      message: `Style ref ${target.ref_id} describes character/UI/panel/text content. Style refs must be abstract rendering/material/lighting samples only.`,
+    }));
+}
+
 function chunkArray(items, size) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
   return chunks;
+}
+
+function mergeArraysById(rows, idKey) {
+  const merged = new Map();
+  for (const row of rows) {
+    const id = String(row?.[idKey] ?? "").trim();
+    if (!id) continue;
+    const previous = merged.get(id);
+    if (!previous) {
+      merged.set(id, { ...row });
+      continue;
+    }
+    merged.set(id, {
+      ...previous,
+      ...row,
+      scene_ids: [...new Set([...(previous.scene_ids ?? []), ...(row.scene_ids ?? [])].filter(Boolean))],
+      risk_notes: [...new Set([...(previous.risk_notes ?? []), ...(row.risk_notes ?? [])].filter(Boolean))],
+      appearance_count: Math.max(Number(previous.appearance_count ?? 0), Number(row.appearance_count ?? 0)),
+      manual_review_required: previous.manual_review_required !== false || row.manual_review_required !== false,
+      required_before_imagegen: Boolean(previous.required_before_imagegen || row.required_before_imagegen),
+    });
+  }
+  return [...merged.values()];
+}
+
+function fallbackMergeChunkPlans(chunkPlans, mergeWarnings = []) {
+  return {
+    reference_targets: mergeArraysById(chunkPlans.flatMap((plan) => plan.reference_targets ?? []), "ref_id"),
+    character_state_refs: mergeArraysById(chunkPlans.flatMap((plan) => plan.character_state_refs ?? []), "state_ref_id"),
+    warnings: [
+      ...mergeWarnings,
+      "Merge LLM returned no top-level reference targets; preserved accepted chunk-authored targets with deterministic id de-duplication.",
+    ],
+  };
+}
+
+function landscapePrefixForKind(kind) {
+  const normalized = String(kind ?? "").toLowerCase();
+  if (normalized === "style") return "16:9 landscape polished 2D anime/manhwa style reference card";
+  if (normalized === "character_state") return "16:9 landscape polished 2D anime/manhwa single-character identity reference card";
+  if (normalized === "location") return "16:9 landscape polished 2D anime/manhwa environment-only location reference card";
+  if (normalized === "prop") return "16:9 landscape polished 2D anime/manhwa prop reference card";
+  if (normalized === "ui") return "16:9 landscape polished 2D anime/manhwa UI reference card";
+  if (normalized === "action") return "16:9 landscape polished 2D anime/manhwa action and effect reference card";
+  return "16:9 landscape polished 2D anime/manhwa production reference card";
+}
+
+function ensureLandscapeReferenceAnchor(anchor, kind) {
+  const text = String(anchor ?? "").trim();
+  if (/^16:9\s+landscape\b/i.test(text)) return text;
+  const prefix = landscapePrefixForKind(kind);
+  return [prefix, text].filter(Boolean).join(", ");
 }
 
 async function createReferencePlan(semanticPlan, stageName, guidance = {}) {
@@ -473,37 +790,64 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}) {
   const merged = useLocalRoute
     ? await callLocal(mergePrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
     : await callCodex(mergePrompt, mergeStageName);
+  const parsed = Array.isArray(merged.parsed?.reference_targets) && merged.parsed.reference_targets.length
+    ? merged.parsed
+    : fallbackMergeChunkPlans(chunkPlans, Array.isArray(merged.parsed?.warnings) ? merged.parsed.warnings : []);
   return {
     provider: merged.provider,
     model: useLocalRoute ? getLLMModel(stageName) : merged.model ?? "codex_cli_default",
     output_path: merged.output_path ?? null,
     chunked: true,
     chunk_count: sceneChunks.length,
-    parsed: merged.parsed,
+    parsed,
     json_attempt: merged.json_attempt,
   };
 }
 
 async function main() {
-  const [semanticPlan, visualStyleBible, characterBible, episodeVisualDirection] = await Promise.all([
+  const [semanticPlan, visualBeatPlan, visualStyleBible, characterBible, episodeVisualDirection] = await Promise.all([
     readJson(semanticPlanPath, null),
+    readJson(visualBeatPlanPath, null),
     readJson(visualStyleBiblePath, null),
     readJson(characterBiblePath, null),
     readText(episodeVisualDirectionPath, ""),
   ]);
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
+  const semanticWithBeats = semanticPlanWithVisualBeats(semanticPlan, visualBeatPlan);
+  const { plan: scopedSemantic, scope } = scopedSemanticPlan(semanticWithBeats);
+  if (!Array.isArray(scopedSemantic.scenes) || !scopedSemantic.scenes.length) throw new Error("Visual reference planner scope selected zero semantic scenes.");
   const stageName = `${episode}_visual_reference_plan`;
   const guidance = { visualStyleBible, characterBible, episodeVisualDirection };
-  const llm = await createReferencePlan(semanticPlan, stageName, guidance);
+  const llm = await createReferencePlan(scopedSemantic, stageName, guidance);
   let referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
-  const deterministicLocationScope = applyDeterministicLocationSceneIds(referenceTargets, semanticPlan.scenes);
+  const shouldDropStyleRefs = dropStyleRefs || (Boolean(visualStyleBible) && !keepStyleRefs);
+  if (shouldDropStyleRefs) {
+    referenceTargets = referenceTargets.filter((target) => String(target.kind ?? "").toLowerCase() !== "style");
+  }
+  const deterministicLocationScope = applyDeterministicLocationSceneIds(referenceTargets, scopedSemantic.scenes);
   referenceTargets = deterministicLocationScope.targets;
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
-  const characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
+  let characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
+  const sourceFaceAnchoring = applySourceFaceAnchors({
+    referenceTargets,
+    characterStateRefs,
+    characterBible,
+    scenes: scopedSemantic.scenes,
+  });
+  referenceTargets = sourceFaceAnchoring.referenceTargets;
+  characterStateRefs = sourceFaceAnchoring.characterStateRefs;
   assertPositiveAnchors(referenceTargets, characterStateRefs);
-  const coverageFindings = locationCoverageFindings(referenceTargets, semanticPlan.scenes);
-  const status = coverageFindings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
-  const sourceArtifactPaths = [semanticPlanPath, visualStyleBiblePath, characterBiblePath, episodeVisualDirectionPath];
+  const coverageFindings = locationCoverageFindings(referenceTargets, scopedSemantic.scenes);
+  const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
+  const findings = [...coverageFindings, ...styleFindings];
+  const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
+  const sourceArtifactPaths = [
+    semanticPlanPath,
+    visualBeatPlan?.status === "passed" ? visualBeatPlanPath : null,
+    visualStyleBiblePath,
+    characterBiblePath,
+    episodeVisualDirectionPath,
+  ].filter(Boolean);
   const report = {
     schema: "goldflow_visual_reference_plan_v1",
     status,
@@ -515,28 +859,36 @@ async function main() {
     source_artifact_paths: sourceArtifactPaths,
     source_hashes: Object.fromEntries((await Promise.all(sourceArtifactPaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     operator_visual_guidance: {
+      visual_beat_plan_path: visualBeatPlan?.status === "passed" ? visualBeatPlanPath : null,
       visual_style_bible_path: visualStyleBible ? visualStyleBiblePath : null,
       character_bible_path: characterBible ? characterBiblePath : null,
       episode_visual_direction_path: episodeVisualDirection.trim() ? episodeVisualDirectionPath : null,
     },
+    visual_reference_scope: scope,
+    style_reference_policy: shouldDropStyleRefs
+      ? "style refs dropped for this run; use style bible/text guidance only"
+      : "style refs allowed only as abstract rendering/material/lighting samples",
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     policy: "Reference strategy only. Manual review must approve prompt anchors before reference generation or production imagegen.",
     reference_targets: referenceTargets,
     character_state_refs: characterStateRefs,
-    findings: coverageFindings,
+    findings,
     warnings: [
       ...(llm.parsed.warnings ?? []),
       ...deterministicLocationScope.warnings,
-      ...coverageFindings,
+      ...findings,
+      ...sourceFaceAnchoring.warnings,
     ],
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
+  const visualReferencePlanHash = await hashFile(outputPath);
   await writeJson(characterStateRefsOutputPath, {
     schema: "goldflow_character_state_refs_v1",
     status: "draft_needs_manual_review",
     source_visual_reference_plan_path: outputPath,
     source_script_hash: semanticPlan.source_script_hash,
+    source_hashes: visualReferencePlanHash ? { [outputPath]: visualReferencePlanHash } : {},
     character_state_refs: report.character_state_refs,
     updated_at: report.updated_at,
   });

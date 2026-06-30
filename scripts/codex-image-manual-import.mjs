@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -87,7 +88,7 @@ function referenceSlotInstruction(slots) {
 }
 
 function promptWithReferenceSlots(prompt) {
-  const basePrompt = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "").trim();
+  const basePrompt = promptTextForImageProvider(prompt, "codex_imagegen");
   const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? []);
   return [slotInstruction, basePrompt].filter(Boolean).join(" ");
 }

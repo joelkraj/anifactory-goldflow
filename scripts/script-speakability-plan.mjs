@@ -132,6 +132,12 @@ function deterministicScan(script) {
   addMatches(script, rows, "all_caps_ui", /\b[A-Z][A-Z0-9' -]{8,}\b/g, "All-caps UI text may be spelled or shouted unless normalized.", null);
   addMatches(script, rows, "percent_token", /\b\d+(?:\.\d+)?%/g, "Percent symbols need explicit spoken wording.", (match) => match[0].replace("%", " percent"));
   addMatches(script, rows, "ratio_or_odds", /\b\d+(?:\.\d+)?\s*(?:to|:)\s*1\b/gi, "Odds/ratios need context-aware spoken wording.", null);
+  addMatches(script, rows, "tts_homograph_live_content", /\blive\s+content\b/gi, "The phrase live content can be misread as liv/contented wording. Prefer livestream video content in Qwen spoken text.", (match) => preserveCase(match[0], "livestream video content"));
+  addMatches(script, rows, "tts_homograph_streaming_live", /\bstreaming\s+live\b/gi, "The phrase streaming live can still make TTS choose the wrong live pronunciation. Prefer livestreaming in Qwen spoken text.", (match) => preserveCase(match[0], "livestreaming"));
+  addMatches(script, rows, "tts_homograph_live_stream_noun", /\blive\s+stream\b/gi, "The phrase live stream should be collapsed to livestream for stable TTS pronunciation.", (match) => preserveCase(match[0], "livestream"));
+  addMatches(script, rows, "tts_homograph_stream_content", /\bstream\s+content\b/gi, "The phrase stream content can make TTS choose the adjective content pronunciation. Prefer stream videos in Qwen spoken text.", (match) => preserveCase(match[0], "stream videos"));
+  addMatches(script, rows, "tts_homograph_live_stream", /\b(?:go|went|going|goes|is|was|were|be|being|stayed|stay)\s+live\b/gi, "The word live can be misread as liv instead of live-stream live. Prefer an explicit streaming phrase in Qwen spoken text.", (match) => homographLiveSuggestion(match[0]));
+  addMatches(script, rows, "tts_homograph_content_noun", /\b(?:became|become|becoming|is|was|were|are|as|into)\s+(?:her\s+|his\s+|their\s+|the\s+)?content\b/gi, "The noun content can be misread like satisfied/content. Prefer clip, video content, or stream content in Qwen spoken text.", (match) => homographContentSuggestion(match[0]));
   addMatches(
     script,
     rows,
@@ -146,6 +152,78 @@ function deterministicScan(script) {
     if (!dedup.has(key)) dedup.set(key, row);
   }
   return [...dedup.values()].slice(0, Number(flags["max-detected-terms"] ?? 240));
+}
+
+function preserveCase(source, replacement) {
+  const text = String(source ?? "");
+  if (!text) return replacement;
+  return /^[A-Z]/.test(text) ? replacement.charAt(0).toUpperCase() + replacement.slice(1) : replacement;
+}
+
+function homographLiveSuggestion(value) {
+  const text = String(value ?? "");
+  const lower = text.toLowerCase();
+  if (lower.startsWith("go live")) return preserveCase(text, "start a livestream");
+  if (lower.startsWith("going live")) return preserveCase(text, "starting a livestream");
+  if (lower.startsWith("went live")) return preserveCase(text, "started livestreaming");
+  if (lower.startsWith("goes live")) return preserveCase(text, "starts livestreaming");
+  if (lower.startsWith("is live")) return preserveCase(text, "is livestreaming");
+  if (lower.startsWith("was live")) return preserveCase(text, "was livestreaming");
+  if (lower.startsWith("were live")) return preserveCase(text, "were livestreaming");
+  if (lower.startsWith("be live")) return preserveCase(text, "be livestreaming");
+  if (lower.startsWith("being live")) return preserveCase(text, "being on a livestream");
+  if (lower.startsWith("stayed live")) return preserveCase(text, "kept livestreaming");
+  if (lower.startsWith("stay live")) return preserveCase(text, "keep livestreaming");
+  return preserveCase(text, `${text} on stream`);
+}
+
+function homographContentSuggestion(value) {
+  const text = String(value ?? "");
+  const lower = text.toLowerCase();
+  if (/\b(?:became|become|becoming)\b/.test(lower)) return text.replace(/\bcontent\b/i, "a clip");
+  if (/\binto\b/.test(lower)) return text.replace(/\bcontent\b/i, "a clip");
+  if (/\b(?:her|his|their|the)\s+content\b/i.test(text)) return text.replace(/\bcontent\b/i, "stream content");
+  return text.replace(/\bcontent\b/i, "video content");
+}
+
+function deterministicReplacementCandidates(script) {
+  const candidates = [];
+  const add = (from, to, reason) => {
+    if (!from || !to || from === to) return;
+    candidates.push({
+      from,
+      to,
+      regex: false,
+      flags: "g",
+      scope: "qwen_spoken_text",
+      reason,
+    });
+  };
+  for (const match of String(script ?? "").matchAll(/\b(?:go|went|going|goes|is|was|were|be|being|stayed|stay)\s+live\b/gi)) {
+    add(match[0], homographLiveSuggestion(match[0]), "Deterministic TTS homograph guard: force live-stream meaning for Qwen narration.");
+  }
+  for (const match of String(script ?? "").matchAll(/\bstreaming\s+live\b/gi)) {
+    add(match[0], preserveCase(match[0], "livestreaming"), "Deterministic TTS homograph guard: force livestreaming pronunciation for Qwen narration.");
+  }
+  for (const match of String(script ?? "").matchAll(/\blive\s+stream\b/gi)) {
+    add(match[0], preserveCase(match[0], "livestream"), "Deterministic TTS homograph guard: force livestream noun pronunciation for Qwen narration.");
+  }
+  for (const match of String(script ?? "").matchAll(/\blive\s+content\b/gi)) {
+    add(match[0], preserveCase(match[0], "livestream video content"), "Deterministic TTS homograph guard: force live-stream media-content meaning for Qwen narration.");
+  }
+  for (const match of String(script ?? "").matchAll(/\bstream\s+content\b/gi)) {
+    add(match[0], preserveCase(match[0], "stream videos"), "Deterministic TTS homograph guard: force media-content meaning for Qwen narration.");
+  }
+  for (const match of String(script ?? "").matchAll(/\b(?:became|become|becoming|is|was|were|are|as|into)\s+(?:her\s+|his\s+|their\s+|the\s+)?content\b/gi)) {
+    add(match[0], homographContentSuggestion(match[0]), "Deterministic TTS homograph guard: force media-content meaning for Qwen narration.");
+  }
+  const seen = new Set();
+  return candidates.filter((row) => {
+    const key = `${row.from}\u0000${row.to}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function biblePacket() {
@@ -168,6 +246,7 @@ Rules:
 - Produce spoken equivalents only for tokens/phrases that are risky for TTS.
 - Spoken equivalents must preserve meaning and be natural for a controlled anime/manhwa narrator.
 - Prefer exact literal phrase replacements. Use regex only for simple repeated token classes.
+- Flag and repair ambiguous homographs when context proves the intended meaning, especially "live" meaning live-stream and "content" meaning media/clip content.
 - Mark story rewrites as forbidden. This is a TTS guidance artifact, not an enhancement pass.
 - Return JSON only.
 
@@ -292,7 +371,12 @@ async function main() {
     ? { provider: "deterministic", model: null, parsed: { status: "passed", summary: "Deterministic scan only.", warnings: [], replacements: [], pronunciation_map: [], pacing_notes: [] } }
     : isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
   const parsed = llm.parsed ?? {};
-  const replacements = (parsed.replacements ?? []).map(normalizeReplacement).filter(Boolean);
+  const deterministicReplacements = deterministicReplacementCandidates(script);
+  const replacementMap = new Map();
+  for (const row of [...deterministicReplacements, ...(parsed.replacements ?? []).map(normalizeReplacement).filter(Boolean)]) {
+    replacementMap.set(`${row.from}\u0000${row.regex === true}\u0000${row.scope ?? ""}`, row);
+  }
+  const replacements = [...replacementMap.values()];
   const warnings = [...deterministicWarnings(detectedTerms), ...(parsed.warnings ?? [])];
   const report = {
     schema: "goldflow_script_speakability_report_v1",

@@ -40,38 +40,53 @@ The approved narration script is production truth. The pipeline should extract, 
    - Approve the exact `script_clean.md` hash.
    - Writes `manual_agent_script_review.json`, `operator_script_approval.json`, and `script_lock.json`.
 
-6. Targeted speakability.
+6. Script pace check.
+   - New production narration targets 210-220 spoken words per minute.
+   - Run after exact-hash script approval:
+     `node bin/goldflow.mjs script pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 210 --target-wpm-max 220`
+   - Writes `script_pace_report.json` for the approved script hash with word count, estimated runtime at the 215 WPM midpoint, and hook milestone timing when detectable.
+   - This stage blocks detected late hook milestones. WPM/runtime estimates alone are not enough; source/chatbot hook timing must be fixed before speakability, semantic planning, TTS, or visuals.
+   - This is the script-stage budget plus hook gate; actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing.
+
+7. Targeted speakability.
    - Preferred over broad speakability for polished scripts.
    - Requires the approved/locked script hash.
    - Writes `script_speakability_report.json`, `tts_spoken_overrides.json`, and `script_speakability_problem_areas_report.json`.
    - Use for TTS-only risks: protected terms, ranks, UI text, numbers, currencies, pronunciations, and known problem phrases.
    - It must not mutate `script_clean.md`.
 
-7. Semantic scene plan.
+8. Semantic scene plan.
    - Extracts semantic scenes from locked script and bibles.
    - This is story/visual meaning, not word timing.
 
-8. Voice plan.
+9. Voice plan.
    - Narrator-only by default.
    - Character voice casting requires an explicit operator request.
    - Voice plan requires current speakability artifacts unless running a diagnostic bypass.
 
-9. TTS generation and stitch.
+10. TTS generation and stitch.
    - Uses ModelsLab Qwen TTS.
    - Generates one continuous narration track and generation metadata.
    - Stitching includes a small inter-segment safety gap by default to protect clipped final phonemes and preserve narration beat separation.
    - If the stitched audio changes, rerun Whisper timing and every timing-dependent downstream artifact.
    - Do not destructively amplify cached TTS segments. Narration loudness is raised later in the longform mix.
 
-10. Whisper timing.
+11. Whisper timing.
    - Run local Whisper word timing on the final stitched narration.
    - Whisper timing is production timing truth for subtitles, SFX, scoring, semantic timing, visual beats, and render.
    - Qwen/segment timing is fallback metadata only.
 
-11. Timing bind.
+12. Audio pace check.
+   - Run after local Whisper timing and before timing bind:
+     `node bin/goldflow.mjs audio pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 210 --target-wpm-max 220`
+   - Writes `narration_pace_report_<episode>.json`.
+   - This is a hard production gate: actual WPM is computed from Whisper word count and audio duration, and must be 210-220 WPM unless the operator explicitly approves a diagnostic/recovery bypass.
+   - If provider TTS misses the gate, use `audio tempo-normalize --target-wpm 215` as the explicit recovery path, then rerun Whisper timing and audio pace check. Do not apply hidden manual `ffmpeg atempo` fixes outside the ledger.
+
+13. Timing bind.
    - Binds semantic scenes to Whisper timing.
 
-12. SFX and score planning/generation.
+14. SFX and score planning/generation.
    - This is an explicit opt-in variant, not the default happy path. For `audio_target: narrator_only`, `run status` skips this stage and the next audio command is `audio longform-bed --narration-only true`.
    - When opted in, it must run after Whisper timing.
    - SFX should be noticeable but controlled.
@@ -82,7 +97,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Do not use ModelsLab music generation for production score unless the operator explicitly asks for a fallback.
    - Opening hook SFX should be abundant. In the first thirty seconds, target at least fourteen and ideally eighteen to twenty-four audible cues when narration and edit timing support them. Deterministic transition accents such as swipe-up flash, swipe-down whoosh, hard scene-card whoosh, impact flash, dark-paper title snap, and manga-panel slide should be bound by the visual transition plan and render layer to actual cut timestamps; LLM-authored narrative SFX should cover system or ledger pulses, room hushes, phone/object sounds, crowd reactions, and similar beat-native accents.
    - After the opening, SFX should stay consistently present but selective. Hit ledger/system activations, blood/sword/contact, crowd hush/laughter, qi pressure, gates/doors, snow/water movement, and major reversals with LLM-authored narrative SFX. Pure edit-transition whooshes/pops/snaps should come from the deterministic transition-audio pass, not from the LLM SFX plan.
-   - Ambience should be generated as loopable SFX, not as score. Use ten to fourteen low nonmusical environmental beds between score drops: duel memory air, clan hall room tone, winter courtyard wind, punishment courtyard cold air, ancestral ritual hall, rooftop snow, east courtyard, hidden room, underwater tunnel, ravine forest, etc.
+   - Ambience should be generated as loopable SFX, not as score. Use low nonmusical environmental beds between score drops for the actual locations in the episode: hallway air, crowd room tone, exterior wind, office hum, event-stage air, dorm tone, street rain, vehicle cabin, server room, rooftop air, or other concrete spaces named by the current script.
    - Score should be moment-directed, not automatic. For stories that do not need continuous music, use drops-only scoring: `--score-mode drops_only` keeps `score_chapter_plan.json` empty and writes short dramatic accents to `score_drop_plan_<episode>.json`.
    - When improving only the scoring layer on an already-produced run, prefer `goldflow audio score-drops-chunked` over rerunning full SFX/score enrichment. It plans score drops in smaller LLM chunks from current Qwen segment timing and local Whisper timing, then writes the same production-compatible score plan artifacts consumed by the longform mixer.
    - Score drops should land only on earned dramatic, intense, reveal, reversal, payoff, escape, and cliffhanger moments. The longform mixer fades each accent in/out and ducks overlapping chapter score beds if any exist.
@@ -99,11 +114,18 @@ The approved narration script is production truth. The pipeline should extract, 
    - For SFX-only, pass `--skip-score true` so chapter beds and score drops are excluded from the final mix.
 
 14. Visual beat planning.
-   - Splits timed semantic scenes into image beats.
-   - Current baseline target after the retention runway: minimum 3 seconds, maximum 15 seconds, average near 8 seconds.
-   - The first 3 minutes are the retention runway. Treat 0-30 seconds as the dense cold open and 30-180 seconds as the retention ramp. Target roughly 8-12 distinct cold-open cuts with `--hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2`, then keep the ramp faster than normal with `--retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`, unless the narration itself demands slower pacing.
+   - Builds transcript-first editorial image beats from the final script, local Whisper word timing, and timed semantic scene context.
+   - Beat planning is transcript-first, not duration-first. It detects story turns from local narration excerpts: new location, named character presence, system/quest/reward text, public humiliation or reversal, chat/viewer-count change, emotional pivot, new objective, threat reveal, reaction/cutaway opportunity, consequence, and cliffhanger/question beats.
+   - Every beat must carry exact local narration text, Whisper-derived `start_sec`/`end_sec`, `editorial_cues`, `visual_job`, `suggested_shot_job`, location/character context, and a `location_timeline_label` when applicable. Empty `visual_beat_script_excerpt` / `visual_beat_action` is a production blocker because prompt authoring otherwise falls back to repeated parent-scene summaries.
+   - The output includes `location_timeline` so agents can see where the story physically is at key timestamps before prompt authoring.
+   - Split on story turns before splitting on time: new location, named character entry, physical entrance, system message, quest/reward/failure, public-audience/status-metric change, emotional pivot, objective change, threat reveal, public witness reaction, remote chat/message cutaway, consequence, and hard scene transition.
+   - Assign every beat a visual job: premise image, humiliation image, system/quest reveal, reaction shot, chat/UI insert, remote witness cutaway, location transition, physical entrance, consequence, status turn, payoff, or cliffhanger question.
+   - Current baseline target after the retention runway: editorial beats may merge low-signal narration up to an average near 8 seconds, but strong story-turn cues split immediately. Do not treat the target as a blind "cut every 8 seconds" rule.
+   - The first 3 minutes are the retention runway. Treat 0-30 seconds as the dense cold open and 30-180 seconds as the retention ramp. For any story with an early hidden power, public humiliation, ranking/status rule, regression, system, or major premise reversal, the title promise should pay off by 0:30, the first visible proof/payoff should land by about 0:45, the core power/status rule should be clear before or around that payoff, and the next major arc should begin by about 1:00 when the script supports it. Target roughly 8-12 distinct cold-open cuts with `--hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2`, then keep the ramp faster than normal with `--retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`, unless the narration itself demands slower pacing.
+   - After the first 20 minutes, visual pacing can relax when the story is in stable explanation, dialogue, analysis, or aftermath. It is acceptable to hold longer, reuse approved images, and reduce cut turnover, while still creating fresh cuts for new locations, character state changes, reveals, public status turns, action, emotional pivots, and cliffhangers.
    - Hook and ramp cuts should each do a different retention job: immediate premise image, reversal, system/threat reveal, emotional reaction, consequence, status turn, or click-forward question. If score/SFX drops are active but the image barely changes, the first-3-minutes visual beat plan is underbuilt.
-   - Each visual beat carries a local script excerpt or concrete beat action so the prompt LLM authors the specific cut moment.
+   - Prompt plans must preserve that variety. In the first 3 minutes, do not run more than three consecutive cuts with the same location ref and same `shot_job`; split repeated UI/reaction runs with object inserts, crowd reactions, physical actions, consequences, transitions, or a new composition tied to the beat excerpt.
+   - Repetition QA is part of the beat/prompt gate. Long same-location spans after the retention runway, named physical characters missing from nearby visuals, and narration mentioning a new major location while the prompt plan stays in the prior room must block before imagegen.
    - Visual prompt authoring is manifest-first. Each cut must include a `shot_manifest` with physically visible characters, mentioned-only characters, active character-state refs, location ref, foreground action, shot job, props/UI, and forbidden refs before the prose prompt is trusted.
    - The LLM receives previous/next beat summaries for sequencing and variety, but those summaries are context only. Current `visual_beat_script_excerpt` remains the authority for what appears in the frame.
 
@@ -112,6 +134,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Character state refs are the definitive identity/wardrobe/state contract.
    - Only `style` refs are global. Location, character, prop, UI, action, and effect refs are scene-scoped and must be attached only from the current scene candidate set.
    - Location target `scene_ids` are derived from semantic location `ref_requirements` and unioned with LLM-authored ids. A physical scene that requires a location ref but has no covering target blocks with `scene_missing_location_ref`.
+   - Same venue does not automatically mean same location ref. When a long arc moves through visually distinct areas inside one building, campus, company, palace, arena, city, or event space, create separate scene-scoped location refs for the distinct physical areas named by semantic scene locations/ref requirements. The visual-plan coverage gate may block when one broad location ref is forced to carry too many distinct beat-location labels after the retention runway.
    - Style ref comes first, then character/location/action anchors.
    - Lower-priority anchors can be generated as standalone refs or derived from selected generated cuts when appropriate.
    - Named human characters in physical contact or close confrontation with the protagonist should use standalone refs before imagegen, even for one-scene appearances.
@@ -119,7 +142,7 @@ The approved narration script is production truth. The pipeline should extract, 
 16. Manual reference prompt review.
    - Agent/operator reviews and optimizes style, character, and key action reference prompts before image generation.
    - Keep this positive-only and specific.
-   - Character refs for scene conditioning must be single-person, single-pose, plain-background identity refs.
+   - Character refs for scene conditioning must be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas.
    - Do not use multi-position sheets, turnaround boards, multiple face-angle grids, scene backgrounds, dramatic action poses, or composition language that can transfer into cuts.
 
 17. Reference generation and approval.
@@ -137,9 +160,11 @@ The approved narration script is production truth. The pipeline should extract, 
    - Prompts must preserve attached reference slots in structured order through `reference_requirements.slot_order` and `slot_purpose`.
    - The imagegen wrapper injects reference slot mapping, so the authored prompt body should not duplicate the same "Use image..." sentences.
    - If a cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, the LLM must choose the closest approved location ref and set `shot_manifest.location_ref_id`. Sanitation blocks physical-location prompts that omit both `location_ref_id` and a location reference instead of guessing the location.
-   - Prompt bodies should describe one continuous full-frame scene by default, while intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals.
+   - Prompt bodies must always include explicit polished 2D anime/manhwa style language in text: clean line art, cel-shaded characters, cinematic webtoon/manhwa lighting, and non-photorealistic painted backgrounds/crowd extras. Do not rely on attached refs alone for style, especially with ModelsLab.
+   - Composition is beat-authored, not globally defaulted. The planner may choose close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when that shot scale serves the current visual job and narration excerpt. Do not impose a universal wide/full-frame/medium-wide default.
+   - Real named public creators, streamers, celebrities, or influencers whose likeness matters need approved source-face anchors before character-state refs are generated. Use the source portrait as face-only identity input, then generate the episode-specific anime/manhwa state ref from that identity plus the current wardrobe/state contract. If no approved source face exists, flag it for operator review instead of inventing a generic lookalike.
    - References are design guides, not visible reference panels, sheets, or backgrounds.
-   - Prompts must use positive visual language only.
+   - Prompts should prefer positive visual language, but story fidelity wins. Do not distort exact UI text, named-character presence, character count, or shot intent just to remove a negative word.
    - Prompt plans may carry provider-aware text: `modelslab_image_prompt` for ModelsLab/Flux, optional `codex_image_prompt` for Codex/OpenAI, and generic `image_prompt` as fallback. The shot_manifest and refs must stay identical across provider-specific wording.
    - Run prompt authoring in small parent-scene-aware chunks for both Codex and local Qwen; large whole-episode batches tend to collapse into repeated hero tableaux or incomplete JSON.
    - Codex visual authoring should scale by parallel four-cut chunks, not by large single prompts. Default target is four visual units per chunk with up to six chunk calls in parallel after sample gates pass.
@@ -156,37 +181,37 @@ The approved narration script is production truth. The pipeline should extract, 
 20. Visual prompt sanitation.
    - Run after LLM review and before any scene image generation.
    - Writes `section_image_prompts_hardened.json`, `visual_prompt_hardening_<episode>.json`, and `visual_prompt_hardening_sample_<episode>.md`.
-   - The command remains `visual harden`, but production default mode is sanitation-only. It validates approved ref IDs and paths, strips unknown or forbidden refs, enforces the four-reference model limit, normalizes known non-creative unsafe UI label phrasing, validates `shot_manifest` ref/location contradictions, and blocks unresolved ref risks.
+   - The command remains `visual harden`, but production default mode is sanitation-only. It validates approved ref IDs and paths, strips unknown or forbidden refs, reports/block manifest-reference contradictions, enforces the four-reference model limit by blocking over-limit plans, normalizes manifest/reference structure plus format-only prompt syntax, and blocks unresolved ref risks.
    - The LLM is the creative visual author. It must receive the story chunk, premise/bible context, approved refs, state contracts, current beat excerpt, and neighboring beat summaries needed to choose visible characters, location, composition, shot job, and necessary refs. Deterministic production sanitation must not creatively infer missing locations, add characters, rewrite action, choose shot jobs, insert staging clauses, or repair narrative intent.
-   - The old deterministic creative repair behavior is diagnostic only with `--mode repair`. Do not use repair mode as the production default.
-   - Mixed-location scenes must be resolved at beat level by the author/reviewer. If a parent scene contains "support workplace, then apartment kitchen table", each cut receives its own location contract from the beat excerpt. The workplace cut must attach or request the support-office location, while the debt cut must attach the apartment location.
-   - Beat-level location contracts override parent-scene location fallbacks during LLM authoring/review. A current cut that says "went to work", "headset", "manager", or "support tickets" is a support-office shot even if the parent scene later returns to the apartment.
-   - Montage scenes must be authored as one present-tense location per cut. If a parent scene mentions apartment kitchen, dumpster exterior, and bedroom sleep, the individual cuts should become kitchen cleanup, dumpster victory, system reward, or bedroom sleep frames, not uncontrolled panel grids or multi-time collages.
+   - There is no production deterministic creative repair lane. If a cut needs a different location, visible character, composition, shot job, or ref priority, send it back to `visual review --auto-resolve` or re-plan the cut/scene.
+   - Mixed-location scenes must be resolved at beat level by the author/reviewer. If a parent scene spans more than one environment, each cut receives its own location contract from the beat excerpt and the scene-scoped candidate set. The prompt must attach or request the location ref matching the cut's current visible environment.
+   - Beat-level location contracts override parent-scene location fallbacks during LLM authoring/review. When the current cut's excerpt names a different workplace, school, street, room, vehicle, venue, or transition path than the parent scene began with, the current cut's visible environment wins.
+   - Montage scenes must be authored as one present-tense location per cut. If a parent scene mentions several environments or times, the individual cuts should become separate present-tense frames for each visible moment, not uncontrolled panel grids or multi-time collages.
    - Unattached character mentions are sanitized when they are phone, text, voicemail, document, profile, or memory mentions. A character reference is attached only when the LLM physically stages that character in the current cut.
    - Communication-heavy beats can use intentional manga-style split panels when useful. The LLM should assign strict panel roles: largest panel is the local protagonist in the real current location; smaller panels are device close-ups, contact avatar icons, email/envelope icons, call-flow cards, opportunity badges, or abstract system glyphs. Do not let a phone call, voicemail, cold email, or remote sales call become a physical remote-person scene unless the script places that person in the room.
    - Dialogue-heavy beats are authored/reviewed as silent acting frames. Prompts should stage emotion through posture, eyelines, expressions, hand placement, prop action, and blocking rather than phrases like "spoken line", "says", or "says loudly", which can produce speech bubbles and caption artifacts.
    - Every cut gets a shot job from the beat excerpt, such as location establishment, object insert, interaction, physical action, or emotional reaction. This prevents adjacent cuts from collapsing into repeated hero portraits or repeated desk-and-UI tableaux.
-   - If four visible character refs consume all available slots, the LLM should keep the four character refs and report the dropped location ref in `reference_usage`. Sanitation enforces the cap but should not creatively reprioritize content.
+   - If four visible character refs consume all available slots, the LLM should keep the four character refs and report the dropped location ref in `reference_usage` as `available_not_attached_reference_limit`. Sanitation enforces the cap but should not creatively reprioritize content or force-add the omitted location at the cost of visible character identity. In-scope refs omitted by the reference limit are not `forbidden_ref_ids`; reserve `forbidden_ref_ids` for wrong-state, wrong-location, wrong-timeline, or out-of-scope anchors that would corrupt the cut.
    - The LLM author/reviewer handles known Flux failure classes with positive construction: duplicate protagonist copies, foreground close-up plus tiny secondary overlays, reflected faces inside props, speech bubbles/dialogue lettering, UI panels covering faces, or UI panels reading as solid censor blocks.
    - UI, system, and ledger text accuracy is not a blocker by itself. Treat UI as a problem only when it becomes physically destructive, covers the subject/action, creates duplicate figures, or changes the shot into a prop/device shot. Exact story-critical words can still be added during render as overlays when intentionally needed.
    - Supernatural UI and ledger panels should remain immaterial floating light panels with a visible air gap from hands. They must not become books, laptops, tablets, phones, monitors, keyboards, scrolls, boards, or other physical held objects.
    - Abstract energy, memory, and aura effects should be phrased positively as ribbon-like light, empty glow, silhouettes, or abstract shapes. Avoid negative ghost/face/body wording in prompts because image models often render the forbidden subject named in the negative phrase.
-   - Review the markdown sample sheet before spending full imagegen budget. It must include risky examples such as the hook, one location-anchor cut, elder/patriarch/envoy aliases, crowded multi-character shots, action/combat, UI/prop/document, and a late-episode continuity cut.
+   - Review the markdown sample sheet before spending full imagegen budget. It must include risky examples such as the hook, one location-anchor cut, authority/rival/witness role-label cuts, crowded multi-character shots, action/contact, UI/prop/document, and a late-episode continuity cut.
 
 21. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
-   - The image provider is locked in `run_identity.json`. Normal production uses `--image-provider modelslab`; `imagegen start` refuses a different provider unless the operator explicitly approves `--confirm-image-provider true`.
+   - The image provider is locked in `run_identity.json`. Normal production uses `--image-provider modelslab`; `imagegen start` refuses a different provider unless the operator explicitly approves `--confirm-image-provider true`. The experimental speed-test hybrid lane is `--image-provider hybrid_codex_refs_multichar`: references and risky multi-character cuts route to Codex imagegen, while lower-risk simple cuts route to ModelsLab. The retention-window hybrid lane is `--image-provider hybrid_codex_opening_modelslab_rest --codex-opening-sec <seconds>`: references route to Codex imagegen, scene cuts before the locked timestamp route to Codex imagegen, and the rest of the video routes to ModelsLab.
    - Flux Klein and Flux Kontext are both treated as four-reference models in this pipeline.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
    - Scene attachment prioritizes visible character refs first, then location, then prop/UI, then action/effects. Priority kind outranks required/optional flags. Style refs are only attached to scene cuts when no concrete refs are available.
    - When all four reference slots are needed for visible characters, keep those character refs and drop location first.
    - For sanitized prompt plans, `section_image_prompts_hardened.json` is authoritative. Imagegen must not infer extra character refs from stale `visible_subjects`, and it must not write runtime reference paths or inferred refs back into the hardened prompt plan.
-   - Continuous-location scenes keep the active location ref attached across the whole location block, not only on wide shots or scene starts. Hall, courtyard, rooftop, ravine, and similar sequences need the same location anchor on every continuity-sensitive cut.
-   - Explicit venue words in the cleaned scene prompt override contextual prop or action cues when selecting location refs. A banquet-hall restraint beat should keep the banquet hall ref even if it mentions spirit rope.
-   - Offscreen sound or light from another venue must not override the visible staging. If a courtyard or side-corridor shot mentions banquet hall glow, music, or sound cues, keep the visible courtyard/corridor location ref.
-   - Character aliases must be resolved before imagegen. Role labels such as "white-bearded elder," "patriarch," "envoy," "replacement heir," and "cousin attacker" attach the matching approved character_state_ref when visible.
-   - Possessive name phrases do not imply visible characters. Object inserts such as "Mu-gyeol's mother's sword" should attach prop and location refs, not Mu-gyeol's character ref, unless his body is actually visible.
+   - Continuous-location scenes keep the active location ref attached across the whole location block, not only on wide shots or scene starts. Any continuity-sensitive environment needs its location anchor on each cut where that environment remains physically visible.
+   - Explicit visible-venue words in the current beat excerpt override contextual prop, action, sound, or light cues when selecting location refs.
+   - Offscreen sound, light, memory, broadcast, or dialogue from another venue must not override the visible staging. Keep the location ref for the place the camera is actually showing.
+   - Character aliases and role labels must be resolved from the approved character-state refs before imagegen. A role label attaches a character ref only when that person is visible in the current cut.
+   - Possessive name phrases do not imply visible characters. Object inserts should attach prop/location refs, not a named character ref, unless that character's body is actually visible.
    - Memory/reflection beats should stage memories as separate translucent silhouettes near the prop, not as faces embedded in basins, mirrors, blades, documents, or bodies.
    - Childhood flashbacks need child-specific refs or no adult character refs. If child refs are unavailable, stage the beat as child memory silhouettes with the current location ref only, because adult refs contaminate age, wardrobe, and body shape.
    - Ritual/document close-ups should favor physical seal glow, ink, brush water, paper, and altar light. Add supernatural UI only when the beat explicitly calls for a ledger/interface reveal.
@@ -322,7 +347,7 @@ Use this checklist before spending generation time:
    - Generate narrator-only Qwen TTS.
    - Review a few risk windows before committing downstream.
    - Run local Whisper timing after final stitched audio.
-   - If any TTS unit is regenerated or the stitch changes, rerun Whisper and all timing-dependent stages.
+   - If any TTS unit is regenerated, the stitch changes, or narration tempo-normalization is applied, rerun Whisper and all timing-dependent stages.
 
 4. SFX and scoring
    - Run SFX/score planning only after Whisper timing.
@@ -341,7 +366,7 @@ Use this checklist before spending generation time:
 
 5. Visuals
    - Run visual beats before prompt authoring.
-   - Target beat duration: normal longform average near 8 seconds, but first-30 hook mode should produce roughly 8-12 distinct cuts at about 2-4 seconds each.
+   - Beat planning is transcript-first: exact local final-script excerpt plus Whisper timing first, then editorial cue detection and visual job assignment. Target duration is a pacing guard, not the source of the cuts.
    - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
    - Use reference-only generation first, then selectively regenerate failed refs with `--reference-ids`.
    - Character state refs are definitive for identity and wardrobe.

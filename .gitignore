@@ -3,3 +3,6 @@ node_modules/
 tmp/
 temp/
 *.log
+scratch/
+ab-validation/
+HANDOFF-*.md

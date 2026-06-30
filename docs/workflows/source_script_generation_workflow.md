@@ -8,12 +8,12 @@ The chatbot should produce a polished narration script that is already close to 
 
 ## Default Flow
 
-1. Operator provides a premise, target length, subgenre, and title promise.
+1. Operator provides a premise, target length, subgenre, and title promise. Default production narration pace is 210-220 spoken words per minute, with 215 WPM used for runtime estimates.
 2. Agent selects the best prompt template from `docs/prompts/`.
 3. Agent fills the template variables and returns one copy-paste prompt to the operator.
 4. Operator gives the prompt to the chatbot.
 5. Chatbot returns spoken narration prose only.
-6. Operator or agent reviews the first page and a few random sections for source-prose violations.
+6. Operator or agent reviews the first page and a few random sections for source-prose violations, hook timing, and common TTS homograph risks.
 7. If acceptable, ingest into Goldflow as `script_clean.md`.
 8. Run targeted readiness/speakability only for pronunciation and known TTS risks.
 
@@ -29,6 +29,10 @@ Reject or revise the chatbot output before ingest if it contains:
 - Long UI dumps that will sound unnatural when spoken.
 - Dialogue formatted like a screenplay instead of prose.
 - A cold open that does not pay off the title/thumbnail promise quickly.
+- A cold open that spends the first 30-60 seconds on setup instead of visible wound, hidden-power spark, first counter, and the next arc.
+- Streamer/system premises where the first live/system quest, status mechanic, or next arc arrives too late for the title promise.
+- TTS-ambiguous wording such as "go live" without streaming context or "content" where the intended meaning is media/clip content.
+- Prose that is padded for length instead of written for the 210-220 WPM narration target.
 
 ## Research And Revision Loop
 
@@ -44,6 +48,8 @@ When a better tactic is discovered:
    - narrator self-reference
    - payoff density
    - TTS speakability
+   - first 30/45/60/90/180 second story milestones
+   - ambiguous streamer homographs such as "live", "streaming live", "live stream", "live content", and media "content"
 
 ## Current Recommended Template
 
@@ -63,4 +69,3 @@ Search and caption samples show that high-performing videos in this niche usuall
 The strongest titles often promise the transformation in one sentence: betrayed trash becomes rank one, a discarded hunter gains a system, a regressed player returns with a cheat, or a weak character exposes an entire guild.
 
 That title promise should appear in the script immediately, not twenty minutes later.
-

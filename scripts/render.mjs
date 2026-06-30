@@ -831,6 +831,9 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
   const transitionPrefix = transitionFilters ? `${transitionFilters},` : "";
   const transitionSuffix = transitionFilters ? `,${transitionFilters}` : "";
   const fades = fadeFilters(duration);
+  if (motionMode === "fit_static" || motionMode === "full_frame") {
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,${transitionPrefix}fps=${fps},format=yuv420p${fades}`;
+  }
   if (motionMode === "fill_ken_burns") {
     const { startZoom, endZoom, curve } = zoomRange(profile);
     const startXBias = offsets.startX / width;

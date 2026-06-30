@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import sharp from "sharp";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -126,14 +127,35 @@ async function download(urls, outputPath) {
   throw lastError ?? new Error(`Could not download ModelsLab output for ${outputPath}`);
 }
 
-async function uploadModelslabReference(filePath, uploadDir) {
-  const ext = path.extname(filePath).replace(".", "").toLowerCase() || "png";
+async function prepareReferenceForUpload(filePath, uploadDir, {
+  width: requestedWidth = width,
+  height: requestedHeight = height,
+} = {}) {
+  if (!(requestedWidth > requestedHeight)) return filePath;
+  const preparedDir = path.join(uploadDir, "prepared_landscape_refs");
+  await ensureDir(preparedDir);
+  const preparedPath = path.join(preparedDir, `${path.basename(filePath, path.extname(filePath))}-${requestedWidth}x${requestedHeight}.png`);
+  await sharp(filePath)
+    .resize({
+      width: requestedWidth,
+      height: requestedHeight,
+      fit: "contain",
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    })
+    .png()
+    .toFile(preparedPath);
+  return preparedPath;
+}
+
+async function uploadModelslabReference(filePath, uploadDir, geometry = {}) {
+  const uploadPath = await prepareReferenceForUpload(filePath, uploadDir, geometry);
+  const ext = path.extname(uploadPath).replace(".", "").toLowerCase() || "png";
   const mimeExt = ext === "jpg" ? "jpeg" : ext;
   await ensureDir(uploadDir);
-  const base64 = (await fs.readFile(filePath)).toString("base64");
-  const json = await postModelslabJson("/api/v6/base64_to_url", { base64_string: `data:image/${mimeExt};base64,${base64}` }, `upload ${path.basename(filePath)}`, 2);
+  const base64 = (await fs.readFile(uploadPath)).toString("base64");
+  const json = await postModelslabJson("/api/v6/base64_to_url", { base64_string: `data:image/${mimeExt};base64,${base64}` }, `upload ${path.basename(uploadPath)}`, 2);
   const url = modelslabOutputs(json)[0];
-  if (!url) throw new Error(`ModelsLab upload returned no URL for ${filePath}`);
+  if (!url) throw new Error(`ModelsLab upload returned no URL for ${uploadPath}`);
   return url;
 }
 
@@ -151,7 +173,9 @@ export async function generateModelslabImage({
   await ensureDir(outputDir);
   const referenceUrls = [];
   const maxReferences = 4;
-  for (const refPath of referenceImagePaths.slice(0, maxReferences)) referenceUrls.push(await uploadModelslabReference(refPath, uploadDir));
+  for (const refPath of referenceImagePaths.slice(0, maxReferences)) {
+    referenceUrls.push(await uploadModelslabReference(refPath, uploadDir, { width: requestedWidth, height: requestedHeight }));
+  }
   const endpoint = referenceUrls.length ? "/api/v6/images/img2img" : "/api/v6/images/text2img";
   if (model === "flux-klein" && referenceUrls.length && endpoint !== "/api/v6/images/img2img") {
     throw new Error("flux-klein references require /api/v6/images/img2img; text2img would discard init_image references.");
@@ -180,6 +204,8 @@ export async function generateModelslabImage({
   return {
     downloaded_path: outputPath,
     image_url: imageUrl,
+    requested_width: requestedWidth,
+    requested_height: requestedHeight,
     modelslab_output_dir: outputDir,
     modelslab_elapsed_ms: Date.now() - startedAtMs,
     modelslab_endpoint: endpoint,

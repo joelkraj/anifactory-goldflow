@@ -127,6 +127,13 @@ export function dropOutOfScopePromptRefs(prompt, allowedRefIds) {
       : prompt?.shot_manifest,
   };
   const referenceUsage = [...next.reference_usage];
+  const referenceLimitDropped = new Set(referenceUsage
+    .filter((usage) => {
+      const label = String(usage?.usage ?? "").trim();
+      return label === "available_not_attached_reference_limit";
+    })
+    .map((usage) => normalizeRefId(usage?.ref_id))
+    .filter((refId) => refId && allowed.has(refId)));
   const recordDrop = (refId, field) => {
     referenceUsage.push({
       ref_id: refId,
@@ -143,6 +150,21 @@ export function dropOutOfScopePromptRefs(prompt, allowedRefIds) {
   };
 
   if (next.shot_manifest && typeof next.shot_manifest === "object" && !Array.isArray(next.shot_manifest)) {
+    next.shot_manifest.forbidden_ref_ids = asArray(next.shot_manifest.forbidden_ref_ids)
+      .map(normalizeRefId)
+      .filter((refId) => {
+        if (!refId) return false;
+        if (referenceLimitDropped.has(refId)) {
+          referenceUsage.push({
+            ref_id: refId,
+            usage: "non_forbidden_ref_removed_from_forbidden_ref_ids",
+            field: "shot_manifest.forbidden_ref_ids",
+            reason: "Ref id was in the current scene candidate set and was already reported as omitted only because the four-reference cap was full.",
+          });
+          return false;
+        }
+        return true;
+      });
     if (next.shot_manifest.location_ref_id && !keepRef(next.shot_manifest.location_ref_id, "shot_manifest.location_ref_id")) {
       next.shot_manifest.location_ref_id = null;
     }

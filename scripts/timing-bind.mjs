@@ -16,6 +16,8 @@ const semanticPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_pla
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
 const outputPath = flags.output ?? path.join(episodeDir, "timed_scene_plan.json");
+const maxSceneDurationSec = Number(flags["max-scene-duration-sec"] ?? process.env.ANIFACTORY_TIMING_MAX_SCENE_DURATION_SEC ?? 240);
+const allowTimingFallbacks = flags["allow-timing-fallbacks"] === "true" || process.env.ANIFACTORY_ALLOW_TIMING_FALLBACKS === "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -101,12 +103,16 @@ function similarityRatio(a, b) {
   return 1 - (levenshteinDistance(left, right) / maxLength);
 }
 
-function findPhrase(words, phrase, minStartSec = 0) {
+function findPhrase(words, phrase, minStartSec = 0, maxStartSec = null) {
   const tokens = phraseTokens(phrase);
   if (!tokens.length) return null;
   const wordTokens = words.map((word) => normalize(word.word));
   const firstIndex = words.findIndex((word) => Number(word.end_sec ?? word.start_sec ?? 0) >= Number(minStartSec ?? 0));
-  for (let index = Math.max(0, firstIndex); index <= wordTokens.length - tokens.length; index += 1) {
+  const startIndex = Math.max(0, firstIndex);
+  const maxStart = Number(maxStartSec);
+  for (let index = startIndex; index <= wordTokens.length - tokens.length; index += 1) {
+    const candidateStart = Number(words[index]?.start_sec ?? 0);
+    if (Number.isFinite(maxStart) && candidateStart > maxStart) break;
     let ok = true;
     for (let offset = 0; offset < tokens.length; offset += 1) {
       if (wordTokens[index + offset] !== tokens[offset]) {
@@ -124,7 +130,9 @@ function findPhrase(words, phrase, minStartSec = 0) {
   const minWindow = Math.max(1, tokens.length - 3);
   const maxWindow = Math.min(tokens.length + 3, tokens.length < 4 ? tokens.length + 2 : tokens.length + 4);
   let best = null;
-  for (let index = Math.max(0, firstIndex); index < wordTokens.length; index += 1) {
+  for (let index = startIndex; index < wordTokens.length; index += 1) {
+    const candidateStart = Number(words[index]?.start_sec ?? 0);
+    if (Number.isFinite(maxStart) && candidateStart > maxStart) break;
     for (let windowSize = minWindow; windowSize <= maxWindow && index + windowSize <= wordTokens.length; windowSize += 1) {
       const candidate = wordTokens.slice(index, index + windowSize).join(" ");
       const score = similarityRatio(target, candidate);
@@ -151,20 +159,71 @@ function findPhrase(words, phrase, minStartSec = 0) {
   return null;
 }
 
-function sceneBounds(scene, words, fallbackStart) {
-  const startMatch = findPhrase(words, scene.script_excerpt_start, Math.max(0, Number(fallbackStart ?? 0) - 0.5));
-  const start = Number(startMatch?.start_sec ?? fallbackStart ?? 0);
-  const endMatch = findPhrase(words, scene.script_excerpt_end, start);
-  const end = Number(endMatch?.end_sec ?? Math.max(start + 6, start));
+function scriptTokenPosition(script, phrase) {
+  const phraseNorm = normalize(phrase);
+  if (!phraseNorm) return null;
+  const scriptNorm = normalize(script);
+  const charIndex = scriptNorm.indexOf(phraseNorm);
+  if (charIndex < 0) return null;
+  const before = scriptNorm.slice(0, charIndex).split(/\s+/).filter(Boolean).length;
+  const total = Math.max(1, scriptNorm.split(/\s+/).filter(Boolean).length);
+  return { token_index: before, token_count: total, ratio: Math.max(0, Math.min(1, before / total)) };
+}
+
+function timeFromScriptPosition(words, script, phrase) {
+  const position = scriptTokenPosition(script, phrase);
+  if (!position || !words.length) return null;
+  const wordIndex = Math.max(0, Math.min(words.length - 1, Math.round(position.ratio * (words.length - 1))));
+  const word = words[wordIndex];
+  return {
+    start_sec: Number(word.start_sec ?? 0),
+    end_sec: Number(word.end_sec ?? word.start_sec ?? 0),
+    script_token_index: position.token_index,
+    script_token_count: position.token_count,
+    script_ratio: Number(position.ratio.toFixed(6)),
+  };
+}
+
+function sceneStartBounds(scenes, words, script) {
+  let cursor = 0;
+  return scenes.map((scene) => {
+    const startMatch = findPhrase(words, scene.script_excerpt_start, Math.max(0, Number(cursor ?? 0) - 0.5));
+    const scriptPosition = startMatch ? null : timeFromScriptPosition(words, script, scene.script_excerpt_start);
+    const start = Number(startMatch?.start_sec ?? scriptPosition?.start_sec ?? cursor ?? 0);
+    if (startMatch || scriptPosition) cursor = Math.max(cursor, Number(startMatch?.end_sec ?? scriptPosition?.end_sec ?? start) + 0.01);
+    return {
+      start_sec: Number(start.toFixed(3)),
+      start_resolution: startMatch ? (startMatch.fuzzy_score ? "whisper_fuzzy_phrase_match" : "whisper_phrase_match") : scriptPosition ? "script_position_estimate" : "fallback_previous_scene_end",
+      matched_start_words: startMatch?.matched_words ?? null,
+      start_fuzzy_score: startMatch?.fuzzy_score ?? null,
+      start_script_ratio: scriptPosition?.script_ratio ?? null,
+    };
+  });
+}
+
+function sceneBounds(scene, words, script, startBound, nextStartSec = null) {
+  const start = Number(startBound.start_sec ?? 0);
+  const nextStart = Number(nextStartSec);
+  const endSearchMax = Number.isFinite(nextStart) && nextStart > start ? Math.max(start, nextStart - 0.01) : null;
+  const endMatch = findPhrase(words, scene.script_excerpt_end, start, endSearchMax);
+  const scriptPosition = endMatch ? null : timeFromScriptPosition(words, script, scene.script_excerpt_end);
+  let end = Number(endMatch?.end_sec ?? scriptPosition?.end_sec ?? Math.max(start + 6, start));
+  let endResolution = endMatch ? (endMatch.fuzzy_score ? "whisper_fuzzy_phrase_match" : "whisper_phrase_match") : scriptPosition ? "script_position_estimate" : "fallback_min_duration";
+  if ((!endMatch || (Number.isFinite(nextStart) && end > nextStart)) && Number.isFinite(nextStart) && nextStart > start + 1) {
+    end = nextStart;
+    endResolution = endMatch ? "bounded_next_scene_start" : scriptPosition ? "bounded_script_position_estimate" : "fallback_next_scene_start";
+  }
   return {
     start_sec: Number(start.toFixed(3)),
     end_sec: Number(Math.max(start + 1, end).toFixed(3)),
-    start_resolution: startMatch ? (startMatch.fuzzy_score ? "whisper_fuzzy_phrase_match" : "whisper_phrase_match") : "fallback_previous_scene_end",
-    end_resolution: endMatch ? (endMatch.fuzzy_score ? "whisper_fuzzy_phrase_match" : "whisper_phrase_match") : "fallback_min_duration",
-    matched_start_words: startMatch?.matched_words ?? null,
+    start_resolution: startBound.start_resolution,
+    end_resolution: endResolution,
+    matched_start_words: startBound.matched_start_words ?? null,
     matched_end_words: endMatch?.matched_words ?? null,
-    start_fuzzy_score: startMatch?.fuzzy_score ?? null,
+    start_fuzzy_score: startBound.start_fuzzy_score ?? null,
     end_fuzzy_score: endMatch?.fuzzy_score ?? null,
+    start_script_ratio: startBound.start_script_ratio ?? null,
+    end_script_ratio: scriptPosition?.script_ratio ?? null,
   };
 }
 
@@ -182,6 +241,25 @@ function fillEndFallbackGaps(scenes) {
   return scenes;
 }
 
+function assertTimingQuality(scenes) {
+  const failures = [];
+  for (const scene of scenes) {
+    const duration = Number(scene.duration_sec ?? 0);
+    if (Number.isFinite(maxSceneDurationSec) && maxSceneDurationSec > 0 && duration > maxSceneDurationSec) {
+      failures.push(`${scene.scene_id} duration ${duration.toFixed(1)}s exceeds max ${maxSceneDurationSec}s (${scene.title ?? "untitled"})`);
+    }
+    if (!allowTimingFallbacks && scene.start_resolution === "fallback_previous_scene_end") {
+      failures.push(`${scene.scene_id} start anchor did not bind to Whisper (${scene.title ?? "untitled"})`);
+    }
+    if (!allowTimingFallbacks && scene.end_resolution === "fallback_min_duration") {
+      failures.push(`${scene.scene_id} end anchor did not bind or bound to next scene (${scene.title ?? "untitled"})`);
+    }
+  }
+  if (failures.length) {
+    throw new Error(`Timing bind quality gate failed:\n${failures.slice(0, 40).join("\n")}`);
+  }
+}
+
 async function main() {
   const [script, semantic, wordTiming, qwenReport] = await Promise.all([
     readText(scriptPath),
@@ -196,10 +274,10 @@ async function main() {
   if (wordTiming.source_script_hash && wordTiming.source_script_hash !== scriptHash) throw new Error("Whisper timing is stale for current script_clean.md.");
   const audioHash = qwenReport?.output_path ? await hashFile(qwenReport.output_path) : null;
   if (audioHash && wordTiming.narration_audio_hash && wordTiming.narration_audio_hash !== audioHash) throw new Error("Whisper timing is stale for current stitched narration audio.");
-  let cursor = 0;
-  const scenes = fillEndFallbackGaps((semantic.scenes ?? []).map((scene) => {
-    const bounds = sceneBounds(scene, wordTiming.words, cursor);
-    cursor = bounds.end_sec;
+  const semanticScenes = semantic.scenes ?? [];
+  const startBounds = sceneStartBounds(semanticScenes, wordTiming.words, script);
+  const scenes = fillEndFallbackGaps(semanticScenes.map((scene, index) => {
+    const bounds = sceneBounds(scene, wordTiming.words, script, startBounds[index], startBounds[index + 1]?.start_sec);
     return {
       ...scene,
       ...bounds,
@@ -207,6 +285,7 @@ async function main() {
       timing_source: "local_whisper_word_timing",
     };
   }));
+  assertTimingQuality(scenes);
   const report = {
     schema: "goldflow_timed_scene_plan_v1",
     status: "passed",

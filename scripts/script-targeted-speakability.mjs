@@ -122,6 +122,38 @@ const targetedPatterns = [
   },
 ];
 
+function preserveCase(source, replacement) {
+  const text = String(source ?? "");
+  if (!text) return replacement;
+  return /^[A-Z]/.test(text) ? replacement.charAt(0).toUpperCase() + replacement.slice(1) : replacement;
+}
+
+function homographLiveSuggestion(value) {
+  const text = String(value ?? "");
+  const lower = text.toLowerCase();
+  if (lower.startsWith("go live")) return preserveCase(text, "start a livestream");
+  if (lower.startsWith("going live")) return preserveCase(text, "starting a livestream");
+  if (lower.startsWith("went live")) return preserveCase(text, "started livestreaming");
+  if (lower.startsWith("goes live")) return preserveCase(text, "starts livestreaming");
+  if (lower.startsWith("is live")) return preserveCase(text, "is livestreaming");
+  if (lower.startsWith("was live")) return preserveCase(text, "was livestreaming");
+  if (lower.startsWith("were live")) return preserveCase(text, "were livestreaming");
+  if (lower.startsWith("be live")) return preserveCase(text, "be livestreaming");
+  if (lower.startsWith("being live")) return preserveCase(text, "being on a livestream");
+  if (lower.startsWith("stayed live")) return preserveCase(text, "kept livestreaming");
+  if (lower.startsWith("stay live")) return preserveCase(text, "keep livestreaming");
+  return preserveCase(text, `${text} on stream`);
+}
+
+function homographContentSuggestion(value) {
+  const text = String(value ?? "");
+  const lower = text.toLowerCase();
+  if (/\b(?:became|become|becoming)\b/.test(lower)) return text.replace(/\bcontent\b/i, "a clip");
+  if (/\binto\b/.test(lower)) return text.replace(/\bcontent\b/i, "a clip");
+  if (/\b(?:her|his|their|the)\s+content\b/i.test(text)) return text.replace(/\bcontent\b/i, "stream content");
+  return text.replace(/\bcontent\b/i, "video content");
+}
+
 function targetedFindings(script) {
   const findings = [];
   for (const item of targetedPatterns) {
@@ -136,6 +168,72 @@ function targetedFindings(script) {
         reason: "Explicit narrator self-reference sounds artificial when voiced literally; use direct narration in TTS only.",
       });
     }
+  }
+  for (const match of script.matchAll(/\b(?:go|went|going|goes|is|was|were|be|being|stayed|stay)\s+live\b/gi)) {
+    findings.push({
+      severity: "warning",
+      code: "tts_homograph_live_stream",
+      line: lineNumberForIndex(script, match.index ?? 0),
+      source_text: match[0],
+      suggested_spoken_text: homographLiveSuggestion(match[0]),
+      excerpt: excerptAround(script, match.index ?? 0, match[0].length),
+      reason: "The word live can be misread as liv instead of live-stream live; use an explicit streaming phrase in Qwen spoken text only.",
+    });
+  }
+  for (const match of script.matchAll(/\bstreaming\s+live\b/gi)) {
+    findings.push({
+      severity: "warning",
+      code: "tts_homograph_streaming_live",
+      line: lineNumberForIndex(script, match.index ?? 0),
+      source_text: match[0],
+      suggested_spoken_text: preserveCase(match[0], "livestreaming"),
+      excerpt: excerptAround(script, match.index ?? 0, match[0].length),
+      reason: "The phrase streaming live can still make TTS choose the wrong live pronunciation; use livestreaming in Qwen spoken text only.",
+    });
+  }
+  for (const match of script.matchAll(/\blive\s+stream\b/gi)) {
+    findings.push({
+      severity: "warning",
+      code: "tts_homograph_live_stream_noun",
+      line: lineNumberForIndex(script, match.index ?? 0),
+      source_text: match[0],
+      suggested_spoken_text: preserveCase(match[0], "livestream"),
+      excerpt: excerptAround(script, match.index ?? 0, match[0].length),
+      reason: "The phrase live stream should be collapsed to livestream for stable Qwen pronunciation.",
+    });
+  }
+  for (const match of script.matchAll(/\blive\s+content\b/gi)) {
+    findings.push({
+      severity: "warning",
+      code: "tts_homograph_live_content",
+      line: lineNumberForIndex(script, match.index ?? 0),
+      source_text: match[0],
+      suggested_spoken_text: preserveCase(match[0], "livestream video content"),
+      excerpt: excerptAround(script, match.index ?? 0, match[0].length),
+      reason: "The phrase live content can be misread as liv/contented wording; use livestream video content in Qwen spoken text only.",
+    });
+  }
+  for (const match of script.matchAll(/\bstream\s+content\b/gi)) {
+    findings.push({
+      severity: "warning",
+      code: "tts_homograph_stream_content",
+      line: lineNumberForIndex(script, match.index ?? 0),
+      source_text: match[0],
+      suggested_spoken_text: preserveCase(match[0], "stream videos"),
+      excerpt: excerptAround(script, match.index ?? 0, match[0].length),
+      reason: "The phrase stream content can make TTS choose the adjective content pronunciation; use stream videos in Qwen spoken text only.",
+    });
+  }
+  for (const match of script.matchAll(/\b(?:became|become|becoming|is|was|were|are|as|into)\s+(?:her\s+|his\s+|their\s+|the\s+)?content\b/gi)) {
+    findings.push({
+      severity: "warning",
+      code: "tts_homograph_content_noun",
+      line: lineNumberForIndex(script, match.index ?? 0),
+      source_text: match[0],
+      suggested_spoken_text: homographContentSuggestion(match[0]),
+      excerpt: excerptAround(script, match.index ?? 0, match[0].length),
+      reason: "The noun content can be misread like satisfied/content; use clip, video content, or stream content in Qwen spoken text only.",
+    });
   }
   return findings.sort((a, b) => a.line - b.line || a.source_text.localeCompare(b.source_text));
 }
@@ -184,7 +282,7 @@ async function main() {
     planner: { provider: "deterministic_targeted", model: null, output_path: null },
     deterministic_risk_count: findings.length,
     deterministic_risks: findings,
-    summary: `Targeted speakability found ${findings.length} narrator self-reference phrase(s).`,
+    summary: `Targeted speakability found ${findings.length} TTS problem-area phrase(s).`,
     warnings: findings,
     pronunciation_map: [],
     pacing_notes: [],
@@ -214,7 +312,7 @@ async function main() {
   const problemReport = {
     schema: "goldflow_targeted_speakability_problem_areas_v1",
     status: "passed",
-    scope: "meta_narrator_self_reference_only",
+    scope: "known_problem_areas_only",
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
     mutated_script: false,

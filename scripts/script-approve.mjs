@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -42,6 +43,17 @@ async function main() {
   if (expectedHash && expectedHash !== scriptHash) {
     throw new Error(`Refusing approval: expected hash ${expectedHash}, current script hash is ${scriptHash}.`);
   }
+  const metaScan = {
+    ...scanScriptMetaContamination(script),
+    source_script_hash: scriptHash,
+    source_script_path: scriptPath,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(path.join(episodeDir, "script_meta_contamination_report.json"), metaScan);
+  if (metaScan.status !== "passed" && flags["allow-script-meta-contamination"] !== "true") {
+    const preview = metaScan.blockers.slice(0, 5).map((row) => `${row.code} line ${row.line}: ${row.match}`).join("; ");
+    throw new Error(`Refusing approval: script contains production/meta narration contamination (${preview}). Fix script_clean.md or pass --allow-script-meta-contamination true only for explicit diagnostic approval.`);
+  }
   const approvedAt = new Date().toISOString();
   const base = {
     channel,
@@ -78,7 +90,7 @@ async function main() {
   await writeJson(path.join(episodeDir, "manual_agent_script_review.json"), manualReview);
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), operatorApproval);
   await writeJson(path.join(episodeDir, "script_lock.json"), scriptLock);
-  console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, files_written: ["manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
+  console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, files_written: ["script_meta_contamination_report.json", "manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
 }
 
 main().catch((error) => {

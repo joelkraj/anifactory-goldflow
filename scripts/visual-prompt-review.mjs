@@ -20,6 +20,7 @@ const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts.json");
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
+const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? null;
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
@@ -288,6 +289,9 @@ Rules:
 - Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
 - Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
+- Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person and use that named character's ref instead of a separate generic character.
+- If the beat or prompt shows a recognizable named person inside a replay clip, livestream panel, broadcast feed, video wall, chat avatar, dossier card, or phone screen, that person is visually present through media. Keep or add them in shot_manifest.visible_characters, include character_staging that says they are screen-visible or panel-visible, and attach their in-scope character_state ref when their likeness matters and reference slots allow.
+- Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
 - If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, make the prompt and location reference match it.
 - For cuts with two or more visible characters, shot_manifest.character_staging is required and must cover visible_characters in the same order.
 - shot_manifest.character_staging screen_position must use this fixed vocabulary only: ${CHARACTER_STAGING_POSITIONS.join(" | ")}.
@@ -302,10 +306,12 @@ Rules:
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. If it exists, review it for the same shot_manifest, visible subjects, action, location, and refs as image_prompt; preserve it when good and repair it only when needed.
+- Every scene prompt must explicitly request polished 2D anime/manhwa illustration style in text: clean line art, cel-shaded characters, cinematic webtoon/manhwa lighting, and non-photorealistic painted backgrounds/crowd extras. Add or preserve this style language without changing the beat's subject, action, location, references, or shot scale.
+- Composition is beat-authored, not globally defaulted. Preserve or repair close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when that shot scale serves the current visual job and narration excerpt. Do not impose a universal wide/full-frame/medium-wide default.
 - Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
-- Scene cuts should use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
+- Let the visual beat choose the composition. Do not repair prompts toward a global wide, full-frame, medium-wide, full-body, or close-up default. Use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or other framing only when that shot scale best serves the current visual_job, beat excerpt, emotion, object, UI, or transition.
 - UI text policy for image generation: keep modelslab_image_prompt focused on clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Move exact multi-line system text, captions, lists, and long labels to ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Location references provide architecture, environment, lighting, and materials only.
@@ -318,7 +324,7 @@ Rules:
 - If a reference is not visible or style-critical for this cut, remove it from reference_usage and required_reference_paths.
 - Keep at most four reference_requirements for any cut.
 - Attach only necessary references. Use no more than four refs; fewer is better when the cut remains clear. Do not attach refs for people, locations, props, or UI that are only mentioned, remembered, texted, called, or implied.
-- Reference priority is strict: visible character_state refs first, then location, then prop or UI, then action or effects, then style.
+- Reference priority is strict: visible named character_state refs first, including screen-visible people, then location, then prop or UI, then action or effects, then style. If four reference slots are tight, drop optional UI, prop, action, or location refs before dropping a visible named character ref.
 - Attach style only when the cut has zero concrete character, location, prop, UI, or action references.
 - When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
@@ -419,7 +425,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You review and fix image prompts using current-scene facts and approved visual refs. Use positive visual language only: describe what should appear, never what should be avoided." },
+          { role: "system", content: "Return only valid JSON. You review and fix image prompts using current-scene facts and approved visual refs. Preserve the local beat's visible story intent and prefer positive visual language when it stays faithful." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.08) : 0,
@@ -686,6 +692,67 @@ function outOfScopeReferenceFindings(prompts, visualReferencePlan) {
   return findings;
 }
 
+function characterNameVariants(value) {
+  const base = normalize(value);
+  const variants = new Set([base, base.replace(/\s+/g, "")].filter(Boolean));
+  const zeroVariant = base.replace(/\bzero\b/g, "0").replace(/\s+/g, "");
+  if (zeroVariant) variants.add(zeroVariant);
+  return variants;
+}
+
+function characterNamesMatch(left, right) {
+  const leftNorm = normalize(left);
+  const rightNorm = normalize(right);
+  if (!leftNorm || !rightNorm) return false;
+  if (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)) return true;
+  const leftVariants = characterNameVariants(left);
+  const rightVariants = characterNameVariants(right);
+  for (const variant of leftVariants) {
+    if (rightVariants.has(variant)) return true;
+  }
+  return false;
+}
+
+function refIdsForCharacter(characterName, sceneId, characterStateRefs) {
+  const refs = characterStateRefs?.character_state_refs ?? [];
+  return refs
+    .filter((ref) => characterNamesMatch(ref.character, characterName))
+    .filter((ref) => sceneIdsCover(ref.scene_ids, sceneId))
+    .flatMap((ref) => [ref.state_ref_id, ref.source_ref_id, ref.ref_id].filter(Boolean));
+}
+
+function visibleCharacterRefFindings(prompts, characterStateRefs) {
+  const findings = [];
+  for (const prompt of prompts) {
+    const visibleCharacters = [...new Set((prompt.shot_manifest?.visible_characters ?? []).map((name) => String(name ?? "").trim()).filter(Boolean))];
+    if (!visibleCharacters.length) continue;
+    const candidates = visibleCharacters.map((character) => ({
+      character,
+      ref_ids: [...new Set(refIdsForCharacter(character, prompt.scene_id, characterStateRefs))],
+    })).filter((entry) => entry.ref_ids.length);
+    if (!candidates.length || candidates.length > 4) continue;
+    const attachedRefIds = new Set([
+      ...(prompt.shot_manifest?.character_state_ref_ids ?? []),
+      ...(prompt.shot_manifest?.protagonist_state_ref_id ? [prompt.shot_manifest.protagonist_state_ref_id] : []),
+      ...((prompt.reference_requirements ?? []).map((requirement) => requirement?.ref_id).filter(Boolean)),
+      ...(prompt.character_state_refs_used ?? []),
+    ]);
+    for (const candidate of candidates) {
+      const attached = candidate.ref_ids.some((refId) => attachedRefIds.has(refId));
+      if (attached) continue;
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "visible_character_missing_state_ref",
+        message: `Visible named character ${candidate.character} has an in-scope character_state ref, but no matching character ref is attached. Attach that character ref and drop a lower-priority UI, prop, action, or location ref if the four-slot limit is tight.`,
+        resolved: false,
+      });
+    }
+  }
+  return findings;
+}
+
 function normalizePreImagegenFindings(findings) {
   return findings.map((finding) => {
     if (!finding || finding.severity !== "blocker" || finding.resolved === true) return finding;
@@ -728,7 +795,9 @@ function sceneIdsFromBlockers(blockers) {
 function positiveCorrectionDirective(finding) {
   const code = String(finding?.code ?? "visual_blocker");
   let directive = "Create a concrete current-beat image from the beat excerpt, with visible subjects, action, props, UI, and approved refs aligned to this scene candidate set.";
-  if (/location|scope|ref/i.test(code)) {
+  if (code === "visible_character_missing_state_ref") {
+    directive = "Attach approved character_state refs for each visible named person in the cut, including people visible through screen media, and spend the four reference slots on those visible identities before optional UI, prop, action, or location refs.";
+  } else if (/location|scope|ref/i.test(code)) {
     directive = "Stage the cut inside the in-scope location reference for this scene. Describe that location's visible architecture, materials, lighting, surfaces, and spatial layout.";
   } else if (/repeat|tableau|static/i.test(code)) {
     directive = "Create a distinct shot job for this beat with a new camera distance, foreground action, subject pose, and visible consequence from the beat excerpt.";
@@ -781,9 +850,17 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       "--series", series,
       "--week", week,
       "--episode", episode,
+      "--timed", timedPlanPath,
+      ...(flags.semantic ? ["--semantic", flags.semantic] : []),
+      ...(visualBeatPlanPath ? ["--beats", visualBeatPlanPath] : []),
+      "--visual-refs", visualReferencePlanPath,
+      "--character-state-refs", characterStateRefsPath,
       "--only-scenes", sceneIds.join(","),
       "--correction-findings", correctionPath,
       "--output", planPath,
+      ...(flags["image-provider"] ? ["--image-provider", flags["image-provider"]] : []),
+      ...(flags.provider ? ["--provider", flags.provider] : []),
+      ...(flags["allow-draft-refs"] === "true" ? ["--allow-draft-refs", "true"] : []),
     ]);
     let iterationStatus = "failed";
     let iterationReport = null;
@@ -794,10 +871,14 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
         "--series", series,
         "--week", week,
         "--episode", episode,
+        "--timed", timedPlanPath,
         "--prompts", planPath,
+        "--visual-refs", visualReferencePlanPath,
+        "--character-state-refs", characterStateRefsPath,
         "--output", reviewedPath,
         "--review-output", reportPath,
         "--auto-resolve", "false",
+        ...(flags["allow-draft-refs"] === "true" ? ["--allow-draft-refs", "true"] : []),
       ]);
     } catch {
       // The review script intentionally exits non-zero for blocked review output.
@@ -982,6 +1063,7 @@ async function main() {
   findings.push(...reviewedPrompts.flatMap((prompt) => multiCharacterBleedFindings(prompt, characterStateRefs)));
   findings.push(...contaminatedReferenceFindings(visualReferencePlan));
   findings.push(...outOfScopeReferenceFindings(reviewedPrompts, visualReferencePlan));
+  findings.push(...visibleCharacterRefFindings(reviewedPrompts, characterStateRefs));
   findings.push(...await validateReferencePaths(reviewedPrompts));
   const normalizedFindings = normalizePreImagegenFindings(findings);
   findings.length = 0;

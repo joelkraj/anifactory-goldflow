@@ -9,7 +9,7 @@ This template is based on current manhwa recap search/title patterns and a small
 Observed winners in the sampled niche emphasize:
 
 - A clickable promise built from betrayal, rank/status insult, hidden system/cheat, and revenge/payoff.
-- A cold open that delivers the title promise within the first 150-250 words.
+- A cold open that delivers the title promise within the first 105-110 words and turns the hidden power into a visible counter by about 45 seconds.
 - A protagonist who is underestimated in public, then proves the world wrong through a concrete mechanic.
 - Short-to-medium spoken sentences, generally around 13-18 words.
 - Frequent consequence loops: insult, reveal, proof, public reaction, escalation.
@@ -45,6 +45,11 @@ PREMISE:
 
 TARGET WORD COUNT:
 [TARGET_WORD_COUNT]
+
+TARGET NARRATION PACE:
+210-220 spoken words per minute. Estimate runtime from word count at a 215 WPM midpoint. Write tight spoken prose that can be narrated quickly without sounding rushed.
+
+Opening hook default: condense story beats, not WPM. At 215 WPM, use roughly 105-110 words per 30 seconds. In the opening of the full script, make the first 60 seconds carry the whole click promise: 0-10 seconds public wound/title payoff, 10-20 seconds enemy or beneficiary pressure, 20-30 seconds hidden-power spark or impossible contradiction, 30-45 seconds explicit counter/reversal action, and 45-60 seconds first proof or clear transformation promise. For streamer/system humiliation stories, the first live/system quest should complete by about 45 seconds when the premise supports it, the core status mechanic should be understandable before or around that completion, and the next major arc should start by about 60 seconds. By 90 seconds the first enemy and objective should be clear; by 180 seconds the first public test, status challenge, forced choice, or visible consequence should already be underway.
 
 SUBGENRE:
 [SUBGENRE]
@@ -88,12 +93,15 @@ CRITICAL PROSE RULES:
 - Do not use screenplay formatting.
 - Do not use raw outline language.
 - Do not include instructions for visuals, editing, music, or voice acting.
+- Do not include meta-analysis lines such as "that was the hook", "viewer anticipation verified", "the audience should stay", or any other creator-facing retention diagnosis.
 
 STYLE:
 - Modern manhwa/anime recap narration.
 - Clear, dramatic, controlled.
 - Serious, addictive, and emotionally legible.
 - Cold satisfaction over loud hype.
+- Target 210-220 spoken words per minute; avoid filler, repeated attribution, and slow throat-clearing.
+- Avoid ambiguous TTS homographs when a clearer phrase is available. In streamer stories, prefer "livestreaming", "livestream", "live broadcast", "stream videos", or "livestream video content" when you mean live-streaming/media, not just "live", "streaming live", "live stream", "live content", or "stream content" in a context where TTS may choose the wrong pronunciation. Write "clip", "stream videos", or "video content" when you mean media content, not emotional satisfaction.
 - Sentence length should usually be short to medium.
 - Most sentences should be speakable in one breath.
 - Use strong contrast lines after major reversals.
@@ -104,7 +112,13 @@ STYLE:
 RETENTION STRUCTURE:
 
 1. Cold open.
-Start with the strongest crisis, betrayal, death, humiliation, impossible odds, or system reveal. Deliver the title promise quickly. The viewer should understand why they clicked within the first 150-250 words.
+Start with the strongest crisis, betrayal, death, humiliation, impossible odds, or system reveal. Deliver the title promise quickly. The viewer should understand why they clicked within the first 105-110 words.
+
+For the first three minutes, use this timing shape unless the operator gives a different one:
+- First 0-30 seconds, about 105-110 words: visible wound, title promise, enemy pressure, hidden power spark.
+- First 30-60 seconds, about 210-220 total words: pain turns into curiosity, first counter/reversal action, and one concrete reason the protagonist can now fight back.
+- First 60-90 seconds, about 315-330 total words: explain the simple power/status rule, name the first enemy, and make the first payoff obvious.
+- First 90-180 seconds, about 630-660 total words: minimal backstory, first objective, first obstacle, public witnesses, and the first visible status challenge.
 
 2. The wound.
 Show what the world called the protagonist, who used them, what they lost, and why the old system felt impossible to fight.
@@ -190,4 +204,3 @@ Before writing the final answer, silently check:
 
 Now write the complete narration script.
 ```
-

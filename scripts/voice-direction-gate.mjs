@@ -672,16 +672,30 @@ async function requireSpeakabilityReport(sourceScriptHash) {
 }
 
 function applySpokenOverrideRules(text, rules = []) {
+  return applySpokenOverrideRulesWithAudit(text, rules).text;
+}
+
+function applySpokenOverrideRulesWithAudit(text, rules = []) {
   let next = String(text ?? "");
-  for (const rule of rules ?? []) {
+  const applied = [];
+  for (const [index, rule] of (rules ?? []).entries()) {
     if (!rule?.from || typeof rule.to !== "string") continue;
     const flagsValue = rule.flags ?? "g";
     const pattern = rule.regex === true
       ? new RegExp(rule.from, flagsValue)
       : new RegExp(rule.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flagsValue);
+    const before = next;
     next = next.replace(pattern, rule.to);
+    if (next !== before) {
+      applied.push({
+        rule_index: index,
+        from: rule.from,
+        to: rule.to,
+        scope: rule.scope ?? "qwen_spoken_text",
+      });
+    }
   }
-  return next;
+  return { text: next, applied };
 }
 
 function applyPronunciationMap(text, pronunciationMap = []) {
@@ -1455,7 +1469,7 @@ function expectedFishDurationSec(text, { mode = "", hasDialogue = false, hasNarr
   if (hasDialogue && hasNarration) wpm = 120;
   else if (hasDialogue) wpm = 105;
   else if (/\b(SYSTEM|NOTICE|WARNING|UI)\b/.test(speakerText) || /system|warning/.test(modeText)) wpm = 100;
-  else wpm = 190;
+  else wpm = 215;
 
   if (/cliffhanger|dread|tender|memory|child|grief|shame|breath held|dangerous stillness/.test(modeText)) {
     wpm = Math.min(wpm, hasDialogue ? 105 : 145);
@@ -2080,8 +2094,10 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
     return onlyNarrator && segment.dialogue_turn_count === 0 && segment.delivery_mode === "character_dialogue";
   });
   const isTestSlice = Number.isFinite(maxDurationSec) && maxDurationSec > 0;
-  const minUniqueTags = isTestSlice && maxDurationSec <= 45 ? 3 : isTestSlice && maxDurationSec < 90 ? 5 : 8;
-  const maxTopTagPct = isTestSlice && maxDurationSec <= 45 ? 50 : isTestSlice && maxDurationSec < 90 ? 42 : 35;
+  const shortProofSegmentCount = voicedSegments.length <= 40;
+  const mediumProofSegmentCount = voicedSegments.length <= 60;
+  const minUniqueTags = isTestSlice && maxDurationSec <= 45 ? 3 : isTestSlice && maxDurationSec < 90 ? 5 : shortProofSegmentCount ? 5 : mediumProofSegmentCount ? 6 : 8;
+  const maxTopTagPct = isTestSlice && maxDurationSec <= 45 ? 50 : isTestSlice && maxDurationSec < 90 ? 42 : shortProofSegmentCount ? 45 : mediumProofSegmentCount ? 40 : 35;
   const minPhysicalTags = isTestSlice && maxDurationSec <= 45 ? 0 : isTestSlice && maxDurationSec < 90 ? 1 : 2;
   if (Object.keys(counts).length < minUniqueTags) failures.push({ code: "too_few_unique_tags", severity: "blocker", min_unique_tags: minUniqueTags });
   if (topPct > maxTopTagPct) failures.push({
@@ -2331,13 +2347,18 @@ function qwenPronunciationText(value) {
 }
 
 function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
+  return qwenSpokenTextDetailed(value, speaker, ttsOverrides).text;
+}
+
+function qwenSpokenTextDetailed(value, speaker = "", ttsOverrides = {}) {
   const isInterfaceSpeaker = /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(speaker ?? ""));
   let clean = String(value ?? "")
     .replace(/<\|speaker:\d+\|>/g, " ")
     .replace(/^["“]|["”]$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  const replacementCandidate = applySpokenOverrideRules(clean, ttsOverrides.replacements ?? []);
+  const replacementResult = applySpokenOverrideRulesWithAudit(clean, ttsOverrides.replacements ?? []);
+  const replacementCandidate = replacementResult.text;
   if (!isInterfaceSpeaker && replacementCandidate === clean) {
     clean = clean
       .replace(/^\s*[A-Z][A-Z0-9 _'’. -]{1,40}:\s*/, "")
@@ -2362,9 +2383,9 @@ function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
     protectedTokens.forEach((token, index) => {
       sentenceCase = sentenceCase.replace(`__qwen_letter_token_${index}__`, token);
     });
-    return sentenceCase;
+    return { text: sentenceCase, applied_replacements: replacementResult.applied };
   }
-  return normalized;
+  return { text: normalized, applied_replacements: replacementResult.applied };
 }
 
 export function voiceDirectionTransformForTests(value, { speaker = "", ttsOverrides = {} } = {}) {
@@ -2383,6 +2404,10 @@ export function voiceDirectionTransformForTests(value, { speaker = "", ttsOverri
     qwen_spoken_text: qwenSpokenText(clean, speaker, ttsOverrides),
     paragraph_units: paragraphUnitRows,
   };
+}
+
+export function qwenGenerationPlanForTests(segments, { ttsOverrides = {}, ttsProvider = "qwen_local" } = {}) {
+  return buildQwenGenerationPlan(segments, {}, {}, ttsProvider, ttsOverrides);
 }
 
 function isSpeakableQwenText(value) {
@@ -2411,9 +2436,9 @@ function qwenIntensityFor(segment, unit) {
 
 function qwenPacingFor(unit) {
   if (unit?.kind === "mc_internal" || /^MC_INTERNAL$/i.test(String(unit?.speaker ?? ""))) return "close, steady internal monologue with no theatrical projection";
-  if (/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))) return "precise, steady interface cadence, slightly slower on letter ranks and warnings";
-  if (unit?.kind === "dialogue" || unit?.kind === "performance_action") return "tight speaker turn, steady conversational rhythm, no long lead-in or tail";
-  return "measured paragraph delivery around 150-170 words per minute, steady adult recap cadence, no rushed endings";
+  if (/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))) return "precise interface cadence near the episode target of 210-220 words per minute, slightly clearer on letter ranks and warnings without long pauses";
+  if (unit?.kind === "dialogue" || unit?.kind === "performance_action") return "tight speaker turn near 210-220 spoken words per minute, conversational but clipped, no long lead-in or tail";
+  return "forward anime recap narration around 215 spoken words per minute, energetic and clean, no slow dramatic gaps, no rushed endings";
 }
 
 function qwenCharacterLine(speaker, role, cast = null) {
@@ -2441,6 +2466,7 @@ function qwenInstructForUnit({ segment, unit, role, cast }) {
 function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}, ttsProvider = "qwen_local", ttsOverrides = {}) {
   const unitRows = [];
   const segmentRows = [];
+  const appliedOverrideRules = new Map();
   for (const segment of segments) {
     const units = (segment.performance_units?.length ? segment.performance_units : [{
       kind: segment.dialogue_turn_count ? "dialogue" : "narration",
@@ -2463,7 +2489,8 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       const performanceText = isNarratorTtsUnit
         ? cleanNarratorTtsOnlyAttributionDebris(rawPerformanceText)
         : rawPerformanceText;
-      const spokenText = qwenSpokenText(performanceText, sourceSpeaker, ttsOverrides);
+      const spoken = qwenSpokenTextDetailed(performanceText, sourceSpeaker, ttsOverrides);
+      const spokenText = spoken.text;
       if (!isSpeakableQwenText(spokenText)) {
         pendingNarratorAttributionJoin = isNarratorTtsUnit && isStandalonePronounAttributionDebris(rawPerformanceText)
           ? String(rawPerformanceText ?? "").trim()
@@ -2487,6 +2514,27 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
         voice_casting_mode: characterVoiceCastingEnabled() ? "explicit_character_voice_casting" : "narrator_only_default",
         reference_id: cast?.reference_id ?? null,
       };
+      if (spoken.applied_replacements?.length) {
+        row.tts_override_replacements_applied = spoken.applied_replacements;
+        for (const applied of spoken.applied_replacements) {
+          if (!appliedOverrideRules.has(applied.rule_index)) {
+            appliedOverrideRules.set(applied.rule_index, {
+              ...applied,
+              application_count: 0,
+              examples: [],
+            });
+          }
+          const summary = appliedOverrideRules.get(applied.rule_index);
+          summary.application_count += 1;
+          if (summary.examples.length < 3) {
+            summary.examples.push({
+              segment_id: segment.segment_id,
+              unit_index: row.unit_index,
+              qwen_spoken_text: spokenText,
+            });
+          }
+        }
+      }
       if (isNarratorTtsUnit && qwenUnits.at(-1) && shouldSmoothSkippedAttributionJoin(qwenUnits.at(-1), row, "lowercase continuation")) {
         smoothPreviousQwenUnitBoundary(qwenUnits.at(-1), lowercaseContinuationJoinMark(row.qwen_spoken_text));
       }
@@ -2507,6 +2555,16 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       qwen_generation_units: qwenUnits,
     });
   }
+  const loadedOverrides = (ttsOverrides.replacements ?? []).map((rule, index) => ({
+    rule_index: index,
+    from: rule.from ?? null,
+    to: rule.to ?? null,
+    scope: rule.scope ?? "qwen_spoken_text",
+    regex: rule.regex === true,
+  }));
+  const appliedRules = [...appliedOverrideRules.values()];
+  const appliedRuleIndexes = new Set(appliedRules.map((rule) => rule.rule_index));
+  const unmatchedRules = loadedOverrides.filter((rule) => !appliedRuleIndexes.has(rule.rule_index));
   return {
     status: "passed",
     provider: ttsProvider,
@@ -2517,6 +2575,14 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
       letter_ranks_are_spelled: true,
       examples: ["SSS -> S S S", "SS-rank -> S S rank", "XP -> X P", "UI -> U I", "Level -1 -> Level negative one", "confirmed -> verified"],
       tts_spoken_overrides_loaded: (ttsOverrides.replacements ?? []).length,
+      tts_spoken_overrides_applied: appliedRules.length,
+    },
+    tts_override_application_audit: {
+      loaded_count: loadedOverrides.length,
+      applied_rule_count: appliedRules.length,
+      unmatched_rule_count: unmatchedRules.length,
+      applied_rules: appliedRules,
+      unmatched_rules: unmatchedRules,
     },
     segment_count: segmentRows.length,
     unit_count: unitRows.length,

@@ -31,11 +31,14 @@ function commandStage(commandName, subcommandName, parsedFlags) {
   const key = `${commandName} ${subcommandName}`.trim();
   if (key === "ingest source") return "source_ingest";
   if (key === "script approve") return "script_approval";
+  if (key === "script pace-check") return "script_pace_check";
   if (key === "script targeted") return "targeted_speakability";
   if (key === "semantic plan") return "semantic_scene_plan";
   if (key === "voice plan") return "voice_plan";
   if (key === "tts qwen") return "qwen_tts_stitch";
   if (key === "audio whisper-timing") return "local_whisper_word_timing";
+  if (key === "audio pace-check") return "audio_pace_check";
+  if (key === "audio tempo-normalize") return "audio_pace_check";
   if (key === "timing bind") return "timing_bind";
   if (key === "audio enrich-sfx-score") return "sfx_score_plan";
   if (key === "audio score-drops-chunked") return "sfx_score_plan";
@@ -50,7 +53,7 @@ function commandStage(commandName, subcommandName, parsedFlags) {
   if (key === "visual transitions") return "transition_edit_plan";
   if (key === "imagegen start") return isTrue(parsedFlags["references-only"]) ? "reference_generation" : "image_generation";
   if (key === "imagegen import-codex") return "image_generation";
-  if (key === "imagegen import-staged-codex") return "image_generation";
+  if (key === "imagegen import-staged-codex") return isTrue(parsedFlags["references-only"]) ? "reference_generation" : "image_generation";
   if (key === "render start") return "premium_render";
   return null;
 }
@@ -125,12 +128,15 @@ Commands:
   goldflow run status              Print artifact-backed stage ledger before continuing
   goldflow ingest source           Copy raw chatbot/script source into script_clean.md
   goldflow script approve          Write exact-hash review/approval lock artifacts
+  goldflow script pace-check       Write approved-script 210-220 WPM target budget
   goldflow script speakability     Review approved script for broad TTS speakability and spoken overrides
   goldflow script targeted         Write targeted problem-area TTS overrides only
   goldflow semantic plan           Extract semantic scene plan from locked script
   goldflow voice plan              Build narrator-first Qwen generation plan
   goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
   goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
+  goldflow audio pace-check        Verify stitched narration is 210-220 WPM from Whisper timing
+  goldflow audio tempo-normalize   Recovery: non-destructively tempo-correct slow/fast narration, then rerun Whisper
   goldflow timing bind             Bind semantic scenes to Whisper timing
   goldflow visual beats            Split timed semantic scenes into visual image beats
   goldflow visual refs             Plan visual references, state refs, and anchor strategy
@@ -140,8 +146,8 @@ Commands:
   goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
   goldflow visual transitions      Plan xfade transitions from hardened cuts; transition SFX is opt-in
   goldflow imagegen start          Generate images from approved prompt plan
-  goldflow imagegen import-codex   Import a manually generated Codex/OpenAI raster into the image report
-  goldflow imagegen import-staged-codex Import staged worker Codex/OpenAI rasters serially
+  goldflow imagegen import-codex   Import one manually generated Codex/OpenAI scene-cut raster
+  goldflow imagegen import-staged-codex Import staged built-in Codex rasters for scene cuts or --references-only refs
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
   goldflow audio enrich-sfx-score  Opt-in plan/generate Whisper-timed SFX and score
   goldflow audio score-drops-chunked Plan score drops in smaller LLM chunks
@@ -155,7 +161,7 @@ Common flags:
   --episode ep_01
 
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
+  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
 
 Prompt-repair migration guardrails:
   Part F ships before Part G.
@@ -176,6 +182,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("source-ingest.mjs", flags);
 } else if (command === "script" && subcommand === "approve") {
   run("script-approve.mjs", flags);
+} else if (command === "script" && subcommand === "pace-check") {
+  run("narration-pace-check.mjs", ["--mode", "script", ...flags]);
 } else if (command === "script" && subcommand === "speakability") {
   run("script-speakability-plan.mjs", flags);
 } else if (command === "script" && subcommand === "targeted") {
@@ -188,6 +196,10 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("modelslab-qwen-episode-audio.mjs", flags);
 } else if (command === "audio" && subcommand === "whisper-timing") {
   run("local-whisper-word-timing.mjs", flags);
+} else if (command === "audio" && subcommand === "pace-check") {
+  run("narration-pace-check.mjs", ["--mode", "audio", ...flags]);
+} else if (command === "audio" && subcommand === "tempo-normalize") {
+  run("narration-tempo-normalize.mjs", flags);
 } else if (command === "timing" && subcommand === "bind") {
   run("timing-bind.mjs", flags);
 } else if (command === "visual" && subcommand === "beats") {

@@ -191,45 +191,9 @@ function characterAliases(ref) {
   const character = String(ref.character ?? ref.subject ?? "");
   const n = normalize(character);
   const aliases = new Set([n, compactWords(character)]);
-  const lower = n;
-  if ((lower === "jin mu gyeol" || lower.includes("jin mu gyeol")) && !lower.includes("cousin")) aliases.add("mu gyeol");
-  if (lower === "jin seol ah") {
-    aliases.add("seol ah");
-    aliases.add("sister");
-    aliases.add("younger sister");
-    aliases.add("lady seol ah");
-  }
-  if (lower === "jin tae sang" || lower.includes("jin tae sang")) {
-    aliases.add("tae sang");
-    aliases.add("patriarch");
-    aliases.add("father");
-    aliases.add("clan patriarch");
-  }
-  if (lower === "elder jin baek") {
-    aliases.add("jin baek");
-    aliases.add("elder baek");
-    aliases.add("elder");
-    aliases.add("white bearded elder");
-    aliases.add("white bearded man");
-    aliases.add("elder with cane");
-  }
-  if (lower === "envoy do hyun" || lower.includes("envoy do hyun")) {
-    aliases.add("do hyun");
-    aliases.add("envoy");
-    aliases.add("deputy envoy");
-    aliases.add("murim alliance envoy");
-  }
-  if (lower === "jin woon hak") {
-    aliases.add("woon hak");
-    aliases.add("replacement heir");
-    aliases.add("favored heir");
-    aliases.add("new young tiger");
-  }
-  if (lower.includes("cousin")) {
-    aliases.add("cousin");
-    aliases.add("duel attacker");
-    aliases.add("victorious cousin");
-  }
+  const parts = n.split(/\s+/).filter(Boolean);
+  if (parts.length > 1) aliases.add(parts[0]);
+  if (parts.length > 1) aliases.add(parts.at(-1));
   return [...aliases].filter(Boolean);
 }
 
@@ -272,70 +236,6 @@ function buildIndexes(visualReferencePlan, characterStateRefs) {
   return { referenceById, refIdByStateId, characterRefs, locationTargets };
 }
 
-function locationForPrompt(prompt, locationTargets) {
-  const sceneId = prompt.scene_id;
-  const promptLocationText = normalize(`${prompt.modelslab_image_prompt ?? prompt.image_prompt ?? ""}`);
-  const fallbackLocationText = normalize(`${prompt.location ?? ""} ${prompt.modelslab_image_prompt ?? prompt.image_prompt ?? ""}`);
-  if (
-    /\b(?:punishment courtyard|courtyard gate|punishment post|winter stone courtyard|snowy stone path|icy stone path)\b/i.test(promptLocationText)
-    && /\b(?:banquet hall glow|music from the hall|sound wave lines.*banquet hall|banquet hall sound|hall glow)\b/i.test(promptLocationText)
-  ) {
-    const target = locationTargets.find((location) => location.ref_id === "loc_punishment_courtyard");
-    if (target) return target;
-  }
-  if (
-    /\b(?:side corridor|corridor pillar|pillar shadow|carved window lattice|side wall of the ancestral hall|servants passage|service passage|wooden ladder|rafters above|rafter gaps)\b/i.test(promptLocationText)
-    && /\b(?:banquet hall glow|music from the hall|banquet continuing|hall glow)\b/i.test(promptLocationText)
-  ) {
-    const target = locationTargets.find((location) => location.ref_id === "loc_ancestral_hall_altar_rafters");
-    if (target) return target;
-  }
-  if (/\b(?:punishment courtyard|courtyard gate|punishment post|gate-side punishment courtyard|snowy gray stone path|icy stone path|subdued guards|gate path opening)\b/i.test(promptLocationText)) {
-    const target = locationTargets.find((location) => location.ref_id === "loc_punishment_courtyard");
-    if (target) return target;
-  }
-  const explicitVenueMap = [
-    { pattern: /\b(?:great clan hall|banquet hall|honored seat|elder row|ancestral tablet|ceremony hall)\b/i, ref_id: "loc_azure_sky_banquet_hall" },
-    { pattern: /\b(?:punishment courtyard)\b/i, ref_id: "loc_punishment_courtyard" },
-    { pattern: /\b(?:ancestral hall|altar|rafter|service passage|servants passage|ceiling beam)\b/i, ref_id: "loc_ancestral_hall_altar_rafters" },
-    { pattern: /\b(?:east courtyard|mother room|plum tree|old room)\b/i, ref_id: "loc_east_courtyard_mothers_room" },
-    { pattern: /\b(?:rooftop|training square|garden wall)\b/i, ref_id: "loc_clan_rooftops_training_square" },
-    { pattern: /\b(?:snowy courtyard|broken wall)\b/i, ref_id: "loc_snowy_courtyard_broken_wall" },
-    { pattern: /\b(?:underground channel|ravine|water channel)\b/i, ref_id: "loc_underground_channel_winter_ravine" },
-    { pattern: /\b(?:duel platform|arena edge)\b/i, ref_id: "loc_duel_platform_flashback" },
-  ];
-  const contextualMap = [
-    { pattern: /\b(?:ancestral hall|altar|rafter|service passage|servants passage|ceiling beam)\b/i, ref_id: "loc_ancestral_hall_altar_rafters" },
-    { pattern: /\b(?:spirit rope|courtyard gate)\b/i, ref_id: "loc_punishment_courtyard" },
-    { pattern: /\b(?:east courtyard|mother room|plum tree|old room)\b/i, ref_id: "loc_east_courtyard_mothers_room" },
-    { pattern: /\b(?:rooftop|training square|garden wall)\b/i, ref_id: "loc_clan_rooftops_training_square" },
-    { pattern: /\b(?:snowy courtyard|broken wall)\b/i, ref_id: "loc_snowy_courtyard_broken_wall" },
-    { pattern: /\b(?:underground channel|ravine|water channel)\b/i, ref_id: "loc_underground_channel_winter_ravine" },
-    { pattern: /\b(?:duel platform|arena edge)\b/i, ref_id: "loc_duel_platform_flashback" },
-    { pattern: /\b(?:great clan hall|banquet hall|honored seat|elder row|ancestral tablet|ceremony hall)\b/i, ref_id: "loc_azure_sky_banquet_hall" },
-  ];
-  for (const row of explicitVenueMap) {
-    if (row.pattern.test(promptLocationText)) {
-      const target = locationTargets.find((location) => location.ref_id === row.ref_id);
-      if (target) return target;
-    }
-  }
-  for (const row of [...explicitVenueMap, ...contextualMap]) {
-    if (row.pattern.test(fallbackLocationText)) {
-      const target = locationTargets.find((location) => location.ref_id === row.ref_id);
-      if (target) return target;
-    }
-  }
-  const candidates = locationTargets.filter((target) => Array.isArray(target.scene_ids) && target.scene_ids.includes(sceneId));
-  if (!candidates.length) return null;
-  const mixedLocationScene = /\b(?:then|montage|later|after|before|while|meanwhile)\b/i.test(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "");
-  if (mixedLocationScene && !normalize(prompt.location)) return null;
-  const loc = normalize(prompt.location);
-  if (!loc) return null;
-  if (candidates.length === 1) return candidates[0];
-  return candidates.find((target) => normalize(`${target.subject} ${target.prompt_anchor}`).includes(loc.split(" ").slice(0, 3).join(" "))) ?? null;
-}
-
 function dedupeRequirements(requirements) {
   const seen = new Set();
   const out = [];
@@ -347,40 +247,12 @@ function dedupeRequirements(requirements) {
   return out;
 }
 
-function trimRequirements(requirements, options = {}) {
-  const nonStyle = requirements.filter((req) => referenceKindRank(req.kind) < 9);
-  const style = requirements.filter((req) => referenceKindRank(req.kind) >= 9);
-  const pool = nonStyle.length ? nonStyle : style;
-  const chars = pool.filter((req) => referenceKindRank(req.kind) === 0);
-  const locs = pool.filter((req) => referenceKindRank(req.kind) === 1);
-  const others = pool.filter((req) => referenceKindRank(req.kind) > 1).sort((a, b) => referenceKindRank(a.kind) - referenceKindRank(b.kind));
-  const selected = [];
-  const selectedIds = new Set();
-  const protectedRefIds = new Set((options.protectedRefIds ?? []).map(String).filter(Boolean));
-  const add = (req) => {
-    if (!req?.ref_id || selectedIds.has(req.ref_id) || selected.length >= maxRefs) return;
-    selected.push(req);
-    selectedIds.add(req.ref_id);
-  };
-  for (const req of pool) {
-    if (selected.length >= maxRefs) break;
-    if (protectedRefIds.has(req.ref_id)) add(req);
-  }
-  for (const req of chars) add(req);
-  for (const req of locs) add(req);
-  for (const req of others) add(req);
-  return selected.slice(0, maxRefs).map((req, index) => ({ ...req, slot_order: index + 1 }));
-}
-
 function hardenPrompt(prompt, indexes) {
   return sanitizePrompt(prompt, indexes);
 }
 
 function normalizePromptFormatting(value) {
-  return String(value ?? "")
-    .replace(/\s+--no(?:\s+\S+)*/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(value ?? "");
 }
 
 function manifestNameSet(values) {
@@ -433,6 +305,15 @@ function sanitizeRequirementFromRefId(refId, indexes, base = {}) {
 
 function refSelectionIds(req) {
   return [req?.ref_id, req?.source_state_ref_id].filter(Boolean).map(String);
+}
+
+function isReferenceLimitOmission(prompt, refId) {
+  const wanted = String(refId ?? "").trim();
+  if (!wanted) return false;
+  return (prompt.reference_usage ?? []).some((usage) => (
+    String(usage?.ref_id ?? "").trim() === wanted
+    && String(usage?.usage ?? "").trim() === "available_not_attached_reference_limit"
+  ));
 }
 
 function looksLikePhysicalLocation(prompt, promptTextValue) {
@@ -524,12 +405,11 @@ function sanitizePrompt(prompt, indexes) {
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
-        severity: "warning",
-        code: "mentioned_only_character_ref_stripped",
-        message: `Character ref ${rawRefId} was stripped because the shot manifest marks that character as mentioned-only.`,
-        resolved: true,
+        severity: "blocker",
+        code: "mentioned_only_character_ref_attached",
+        message: `Character ref ${rawRefId} is attached, but shot_manifest marks that character as mentioned-only. Replan or review this cut; harden will not decide whether to show the character.`,
+        resolved: false,
       });
-      continue;
     }
     accepted.push(canonical);
   }
@@ -537,19 +417,13 @@ function sanitizePrompt(prompt, indexes) {
   for (const refId of requestedCharacterRefIds) {
     if (accepted.some((req) => refSelectionIds(req).includes(refId))) continue;
     if (forbiddenRefs.has(refId)) continue;
-    const canonical = sanitizeRequirementFromRefId(refId, indexes, {
-      kind: "character_state",
-      required: true,
-      reason: "Sanitizer: character ref required by LLM shot_manifest.",
-    });
-    if (canonical) {
-      accepted.push(canonical);
+    if (indexes.referenceById.has(refId)) {
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
         severity: "warning",
-        code: "manifest_character_ref_added",
-        message: `Added character ref ${refId} because it was declared in shot_manifest.character_state_ref_ids.`,
+        code: "manifest_character_ref_not_attached_report_only",
+        message: `Shot manifest declares character ref ${refId}, but harden will not add refs the LLM omitted from reference_requirements.`,
         resolved: true,
       });
     } else {
@@ -564,34 +438,29 @@ function sanitizePrompt(prompt, indexes) {
     }
   }
 
-  if (requestedLocationRefId) {
+  const requestedLocationOmittedForRefLimit = requestedLocationRefId && isReferenceLimitOmission(prompt, requestedLocationRefId);
+
+  if (requestedLocationRefId && !requestedLocationOmittedForRefLimit) {
     const locationReqs = accepted.filter((req) => referenceKindRank(req.kind) === 1);
     const mismatched = locationReqs.filter((req) => req.ref_id !== requestedLocationRefId);
     if (mismatched.length) {
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
-        severity: "warning",
-        code: "manifest_location_ref_replaced",
-        message: `Replaced location refs ${mismatched.map((req) => req.ref_id).join(", ")} with manifest location ${requestedLocationRefId}.`,
-        resolved: true,
+        severity: "blocker",
+        code: "manifest_location_ref_mismatch",
+        message: `Shot manifest location ${requestedLocationRefId} differs from attached location refs ${mismatched.map((req) => req.ref_id).join(", ")}. Replan or review this cut; harden will not replace LLM refs.`,
+        resolved: false,
       });
-      for (const req of mismatched) accepted.splice(accepted.indexOf(req), 1);
     }
     if (!accepted.some((req) => req.ref_id === requestedLocationRefId)) {
-      const canonical = sanitizeRequirementFromRefId(requestedLocationRefId, indexes, {
-        kind: "location",
-        required: true,
-        reason: "Sanitizer: location ref required by LLM shot_manifest.",
-      });
-      if (canonical) {
-        accepted.push(canonical);
+      if (indexes.referenceById.has(requestedLocationRefId)) {
         findings.push({
           image_id: prompt.image_id,
           scene_id: prompt.scene_id,
           severity: "warning",
-          code: "manifest_location_ref_added",
-          message: `Added location ref ${requestedLocationRefId} because it was declared in shot_manifest.location_ref_id.`,
+          code: "manifest_location_ref_not_attached_report_only",
+          message: `Shot manifest declares location ref ${requestedLocationRefId}, but harden will not add refs the LLM omitted from reference_requirements.`,
           resolved: true,
         });
       } else {
@@ -605,54 +474,44 @@ function sanitizePrompt(prompt, indexes) {
         });
       }
     }
-  }
-
-  const deduped = dedupeRequirements(accepted);
-  const protectedRefIds = [
-    shotManifest?.protagonist_state_ref_id,
-    requestedLocationRefId,
-  ].filter(Boolean);
-  const selectedRequirements = trimRequirements(deduped, { protectedRefIds });
-  if (deduped.length > selectedRequirements.length) {
-    const selectedIds = new Set(selectedRequirements.map((req) => req.ref_id));
+  } else if (requestedLocationOmittedForRefLimit) {
     findings.push({
       image_id: prompt.image_id,
       scene_id: prompt.scene_id,
       severity: "warning",
-      code: "reference_limit_trimmed",
-      message: `Trimmed refs to max ${maxRefs}: ${deduped.filter((req) => !selectedIds.has(req.ref_id)).map((req) => req.ref_id).join(", ")}.`,
+      code: "manifest_location_ref_omitted_for_reference_limit",
+      message: `Location ref ${requestedLocationRefId} is declared in the manifest but intentionally omitted because higher-priority visible refs consume the max ${maxRefs} reference slots.`,
       resolved: true,
     });
   }
 
+  const deduped = dedupeRequirements(accepted);
+  const selectedRequirements = deduped.map((req, index) => ({ ...req, slot_order: index + 1 }));
+  if (deduped.length > maxRefs) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "blocker",
+      code: "reference_limit_exceeded",
+      message: `LLM selected ${deduped.length} refs, above max ${maxRefs}. Harden will not trim creative ref selection; replan this cut.`,
+      resolved: false,
+    });
+  }
+
   const selectedIds = new Set(selectedRequirements.flatMap(refSelectionIds));
-  const selectedAtRefLimit = deduped.length > selectedRequirements.length;
-  const locationPreservedForRefLimit = requestedLocationRefId && selectedRequirements.some((req) => req.ref_id === requestedLocationRefId);
-  const protectedCharacterRefIds = new Set([shotManifest?.protagonist_state_ref_id].filter(Boolean).map(String));
   for (const refId of requestedCharacterRefIds) {
     if (!selectedIds.has(refId)) {
-      if (selectedAtRefLimit && locationPreservedForRefLimit && !protectedCharacterRefIds.has(refId)) {
-        findings.push({
-          image_id: prompt.image_id,
-          scene_id: prompt.scene_id,
-          severity: "warning",
-          code: "manifest_character_ref_dropped_for_location_ref_limit",
-          message: `Shot manifest expected character ref ${refId}, but it was dropped to preserve manifest location ${requestedLocationRefId} within the max ${maxRefs} reference limit.`,
-          resolved: true,
-        });
-        continue;
-      }
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
-        severity: "blocker",
-        code: "manifest_character_ref_missing_after_sanitize",
-        message: `Shot manifest expected character ref ${refId}, but it is not selected after sanitation.`,
-        resolved: false,
+        severity: "warning",
+        code: "manifest_character_ref_missing_report_only",
+        message: `Shot manifest expected character ref ${refId}, but harden will not alter the LLM reference selection.`,
+        resolved: true,
       });
     }
   }
-  if (requestedLocationRefId && !selectedRequirements.some((req) => req.ref_id === requestedLocationRefId)) {
+  if (requestedLocationRefId && !requestedLocationOmittedForRefLimit && !selectedRequirements.some((req) => req.ref_id === requestedLocationRefId)) {
     findings.push({
       image_id: prompt.image_id,
       scene_id: prompt.scene_id,
@@ -764,9 +623,9 @@ function selectSamples(prompts) {
   const find = (predicate) => prompts.find((prompt) => !seen.has(prompt.image_id) && predicate(prompt));
   add(prompts[0], "first cut hook");
   add(find((p) => (p.reference_requirements ?? []).some((r) => String(r.kind).includes("location"))), "location-anchor cut");
-  add(find((p) => /white[-\s]bearded elder|elder jin baek|elder lifts|elder gestures/i.test(promptText(p))), "elder alias cut");
-  add(find((p) => /patriarch|jin tae sang/i.test(promptText(p))), "patriarch alias cut");
-  add(find((p) => /deputy envoy|murim alliance envoy|envoy do hyun/i.test(promptText(p))), "envoy alias cut");
+  add(find((p) => /mentor|elder|teacher|judge|authority|director|dean|boss|officer|captain|leader|moderator|host/i.test(promptText(p))), "authority or mentor role cut");
+  add(find((p) => /rival|antagonist|enemy|traitor|bully|ex|challenger|opponent|competitor/i.test(promptText(p))), "rival or antagonist role cut");
+  add(find((p) => /witness|crowd|audience|chat|viewer|spectator|panel|jury|followers/i.test(promptText(p))), "witness or audience reaction cut");
   add(find((p) => (p.reference_requirements ?? []).filter((r) => String(r.kind).includes("character")).length >= 3), "crowded multi-character identity cut");
   add(find((p) => (p.reference_requirements ?? []).filter((r) => String(r.kind).includes("character")).length >= 2), "multi-character identity cut");
   add(find((p) => /strike|palm|blood|sword|attack|duel|impact|break|counter|qi|dantian/i.test(promptText(p))), "action/combat cut");

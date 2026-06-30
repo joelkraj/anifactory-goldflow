@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -17,6 +18,7 @@ const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "modelslab");
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
+const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -35,16 +37,18 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function normalizeImageProvider(value) {
-  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
-  return "modelslab";
-}
-
 function normalizeAudioTarget(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (!normalized || ["narrator", "narration", "narrator_only", "narration_only", "voice_only"].includes(normalized)) return "narrator_only";
   return normalized;
+}
+
+function imageProviderOptions(provider) {
+  if (provider !== "hybrid_codex_opening_modelslab_rest") return {};
+  const value = Number(codexOpeningSecRaw ?? 120);
+  return {
+    codex_opening_sec: Number.isFinite(value) && value > 0 ? value : 120,
+  };
 }
 
 async function exists(filePath) {
@@ -128,6 +132,7 @@ async function main() {
     episode_number: epNumber,
     title,
     image_provider: imageProvider,
+    image_provider_options: imageProviderOptions(imageProvider),
     audio_target: audioTarget,
     run_intent: runIntent,
     source_path: sourcePath,

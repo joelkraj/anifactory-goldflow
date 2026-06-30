@@ -18,10 +18,15 @@ const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
+const visualReferencePlanPath = flags.referencePlan ?? flags["reference-plan"] ?? path.join(episodeDir, "visual_reference_plan.json");
+const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const stagingDir = flags["staging-dir"] ?? path.join(episodeDir, "assets", "images", "codex_worker_staging");
 const reportPath = flags.output ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `imagegen_report_codex_manual_${episode}.json`);
 const dryRun = flags["dry-run"] === "true";
 const force = flags.force === "true" || flags["force-import"] === "true";
+const workflowBypass = flags["workflow-bypass"] === "true";
+const referencesOnly = flags["references-only"] === "true";
+const referenceDir = path.join(episodeDir, "assets", "images", "references");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -38,6 +43,11 @@ function parseFlags(parts) {
 
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+async function writeJson(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 async function exists(filePath) {
@@ -81,6 +91,18 @@ function imageIdFromPath(filePath) {
   return path.basename(filePath).match(/(ep_\d+-cut-\d+)/)?.[1] ?? null;
 }
 
+function refIdFromPath(filePath, validIds) {
+  const base = path.basename(filePath, path.extname(filePath));
+  if (validIds.has(base)) return base;
+  for (const suffix of ["-codex-imagegen-reference", "-codex-reference", "-reference"]) {
+    if (base.endsWith(suffix)) {
+      const candidate = base.slice(0, -suffix.length);
+      if (validIds.has(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 async function importOne(imageId, sourcePath) {
   const args = [
     path.join(repoRoot, "bin", "goldflow.mjs"),
@@ -103,11 +125,126 @@ async function importOne(imageId, sourcePath) {
     "--output",
     reportPath,
   ];
+  if (workflowBypass) args.push("--workflow-bypass", "true");
   const { stdout } = await execFile(process.execPath, args, { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
   return JSON.parse(stdout);
 }
 
+async function importReferenceOne(refId, sourcePath, referencePlan, characterRefs) {
+  const outputPath = path.join(referenceDir, `${refId}-codex-imagegen-reference.png`);
+  if (!force && await exists(outputPath)) {
+    return { ref_id: refId, source_path: sourcePath, image_path: outputPath, status: "skipped_existing" };
+  }
+  if (dryRun) return { ref_id: refId, source_path: sourcePath, image_path: outputPath, status: "dry_run" };
+  await fs.mkdir(referenceDir, { recursive: true });
+  await fs.copyFile(sourcePath, outputPath);
+  await verifyPng(outputPath);
+  const sourceHash = await hashFile(sourcePath);
+  const target = (referencePlan.reference_targets ?? []).find((row) => row.ref_id === refId) ?? {};
+  const metadata = {
+    ref_id: refId,
+    kind: target.kind ?? null,
+    subject: target.subject ?? null,
+    source_reference_plan_path: visualReferencePlanPath,
+    source_path: sourcePath,
+    image_provider: "codex_imagegen",
+    image_provider_route: "staged_codex_reference_import",
+    generated: {
+      downloaded_path: outputPath,
+      output_sha256: sourceHash,
+      source: "staged_codex_reference_import",
+    },
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(`${outputPath}.metadata.json`, metadata);
+  const updatedReferencePlan = {
+    ...referencePlan,
+    reference_targets: (referencePlan.reference_targets ?? []).map((row) => row.ref_id === refId ? {
+      ...row,
+      reference_image_path: outputPath,
+      image_provider: "codex_imagegen",
+      image_provider_route: "staged_codex_reference_import",
+    } : row),
+    reference_generation_updated_at: new Date().toISOString(),
+  };
+  await writeJson(visualReferencePlanPath, updatedReferencePlan);
+  if (Array.isArray(characterRefs?.character_state_refs)) {
+    const updatedCharacterRefs = {
+      ...characterRefs,
+      character_state_refs: characterRefs.character_state_refs.map((row) => row.source_ref_id === refId ? {
+        ...row,
+        reference_image_path: outputPath,
+        image_provider: "codex_imagegen",
+        image_provider_route: "staged_codex_reference_import",
+      } : row),
+      reference_generation_updated_at: new Date().toISOString(),
+    };
+    await writeJson(characterStateRefsPath, updatedCharacterRefs);
+  }
+  return { ref_id: refId, source_path: sourcePath, image_path: outputPath, status: "imported", sha256: sourceHash };
+}
+
+async function importReferences() {
+  const referencePlan = await readJson(visualReferencePlanPath);
+  const characterRefs = await exists(characterStateRefsPath) ? await readJson(characterStateRefsPath) : null;
+  const validIds = new Set((referencePlan.reference_targets ?? []).map((row) => row.ref_id).filter(Boolean));
+  const scope = new Set(String(flags["reference-ids"] ?? flags["reference-id"] ?? "").split(",").map((row) => row.trim()).filter(Boolean));
+  const files = (await walk(stagingDir))
+    .map((filePath) => ({ filePath, refId: refIdFromPath(filePath, validIds) }))
+    .filter((row) => row.refId && (!scope.size || scope.has(row.refId)))
+    .sort((left, right) => left.refId.localeCompare(right.refId, undefined, { numeric: true }));
+  const byId = new Map();
+  for (const row of files) byId.set(row.refId, row.filePath);
+  const imports = [];
+  const importedHashOwners = new Map();
+  let currentReferencePlan = referencePlan;
+  let currentCharacterRefs = characterRefs;
+  for (const [refId, filePath] of byId.entries()) {
+    await verifyPng(filePath);
+    const sourceHash = await hashFile(filePath);
+    const duplicateOwner = !force ? importedHashOwners.get(sourceHash) : null;
+    if (duplicateOwner && duplicateOwner !== refId) {
+      const skipped = { ref_id: refId, source_path: filePath, status: "skipped_duplicate_hash", duplicate_of: duplicateOwner };
+      imports.push(skipped);
+      console.log(JSON.stringify(skipped));
+      continue;
+    }
+    const result = await importReferenceOne(refId, filePath, currentReferencePlan, currentCharacterRefs);
+    importedHashOwners.set(sourceHash, refId);
+    imports.push(result);
+    console.log(JSON.stringify(result));
+    currentReferencePlan = await readJson(visualReferencePlanPath);
+    currentCharacterRefs = await exists(characterStateRefsPath) ? await readJson(characterStateRefsPath) : null;
+  }
+  const report = {
+    schema: "goldflow_codex_staged_reference_import_v1",
+    status: imports.every((row) => ["imported", "skipped_existing", "dry_run"].includes(row.status)) ? "passed" : "failed",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    reference_only: true,
+    staging_dir: stagingDir,
+    visual_reference_plan_path: visualReferencePlanPath,
+    character_state_refs_path: characterStateRefsPath,
+    imported_count: imports.length,
+    reference_results: imports,
+    updated_at: new Date().toISOString(),
+  };
+  if (!dryRun) await writeJson(reportPath, report);
+  console.log(JSON.stringify({
+    status: dryRun ? "dry_run" : report.status,
+    staging_dir: stagingDir,
+    report_path: dryRun ? null : reportPath,
+    imported_count: imports.length,
+  }, null, 2));
+}
+
 async function main() {
+  if (referencesOnly) {
+    await importReferences();
+    return;
+  }
   const plan = await readJson(promptPath);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
   const validIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));

@@ -1,8 +1,6 @@
-export function normalizeImageProviderForPrompt(value) {
-  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
-  return "modelslab";
-}
+import { normalizeImageProvider as normalizeImageProviderForPrompt } from "./image-provider-routing.mjs";
+
+export { normalizeImageProviderForPrompt };
 
 function firstNonEmpty(values) {
   for (const value of values) {

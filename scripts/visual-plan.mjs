@@ -12,7 +12,11 @@ import {
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
 import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
-import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
+import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import {
+  longLocationSpanFindings,
+  repeatedLocationShotJobFindings,
+} from "./lib/visual-plan-quality-utils.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -31,6 +35,13 @@ const characterStateRefsPath = flags.characterStateRefs ?? flags["character-stat
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
 const correctionFindingsPath = flags["correction-findings"] ?? flags.correctionFindings ?? null;
 const promptMaxChars = Number(flags["visual-prompt-max-chars"] ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_CHARS ?? 900_000);
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
+const allowLongLocationSpans = flags["allow-long-location-spans"] === "true" || process.env.ANIFACTORY_ALLOW_LONG_LOCATION_SPANS === "true";
+const maxSameLocationSpanSec = Number(flags["max-same-location-span-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_SAME_LOCATION_SPAN_SEC ?? 150);
+const allowRepeatedRetentionShotJobs = flags["allow-repeated-retention-shot-jobs"] === "true"
+  || process.env.ANIFACTORY_ALLOW_REPEATED_RETENTION_SHOT_JOBS === "true";
+const maxConsecutiveRetentionShotJobs = Number(flags["max-consecutive-retention-shot-jobs"] ?? process.env.ANIFACTORY_MAX_CONSECUTIVE_RETENTION_SHOT_JOBS ?? 3);
+const compactEditorialProof = flags["compact-editorial-proof"] === "true" || process.env.ANIFACTORY_COMPACT_EDITORIAL_PROOF === "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -110,17 +121,14 @@ function assertPositivePromptLanguage(prompts) {
       if (matches.length) failures.push(`${prompt.image_id} ${field} contains negative visual language: ${matches.join(", ")}`);
     }
   }
-  if (failures.length) {
+  if (failures.length && flags["strict-positive-language-gate"] === "true") {
     throw new Error(`Visual prompt plan violates positive-language-only contract:\n${failures.slice(0, 20).join("\n")}`);
   }
-}
-
-function sanitizePromptLanguage(prompt) {
-  const next = { ...prompt };
-  next.modelslab_image_prompt = sanitizePositiveVisualPrompt(next.modelslab_image_prompt ?? next.image_prompt ?? "");
-  next.image_prompt = sanitizePositiveVisualPrompt(next.image_prompt ?? next.modelslab_image_prompt ?? "");
-  if (next.codex_image_prompt) next.codex_image_prompt = sanitizePositiveVisualPrompt(next.codex_image_prompt);
-  return next;
+  return failures.map((message) => ({
+    code: "positive_language_warning",
+    severity: "warning",
+    message,
+  }));
 }
 
 function normalizeLabel(value) {
@@ -131,10 +139,11 @@ function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
   if (Array.isArray(scene.character_state_refs)) return scene.character_state_refs;
   const refs = [];
   const sceneId = String(scene.scene_id ?? "");
-  const visibleLabels = [
+  const localMentions = compactEditorialProof ? mentionedCandidateNames(scene) : [];
+  const visibleLabels = (localMentions.length ? localMentions : [
     ...(scene.visible_subjects ?? []),
     ...((scene.character_states ?? []).map((state) => state.character)),
-  ].filter(Boolean);
+  ]).filter(Boolean);
   for (const label of visibleLabels) {
     const keys = [
       `${sceneId}:${normalizeLabel(label)}`,
@@ -172,6 +181,39 @@ function compactList(values, maxItems = 6, maxChars = 180) {
     .map((value) => typeof value === "string" ? truncateText(value, maxChars) : value);
 }
 
+function firstName(value) {
+  return String(value ?? "").trim().split(/\s+/)[0] ?? "";
+}
+
+function mentionedCandidateNames(scene) {
+  const excerpt = String(scene.visual_beat_script_excerpt ?? scene.script_excerpt ?? "");
+  const candidates = [
+    scene.primary_subject,
+    ...(scene.visible_subjects ?? []),
+    ...((scene.character_states ?? []).map((state) => state?.character)),
+  ]
+    .map((name) => String(name ?? "").trim())
+    .filter((name) => name && /^[A-Z][\p{L}\p{N}'’-]+/u.test(name));
+  const unique = [...new Set(candidates)];
+  return unique.filter((name) => {
+    const full = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const first = firstName(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${full}\\b`, "iu").test(excerpt)
+      || (first.length > 2 && new RegExp(`\\b${first}\\b`, "iu").test(excerpt));
+  });
+}
+
+function locationMentionPhrases(text) {
+  const source = String(text ?? "");
+  const phrases = [];
+  const venueNouns = "Hall|Room|Stage|Lobby|Campus|Arena|Court|Boardroom|Office|Dorm|Apartment|Kitchen|Elevator|Tower|District|Station|Gym|Street|Floor|Hallway|Corridor|Courtyard|Temple|Palace|Library|Classroom|Studio|Theater|Restaurant|Cafe|Hospital|Bank|Store|Market|Platform|Roof|Basement|Warehouse|Server";
+  const properVenuePattern = new RegExp(`\\b([A-Z][\\p{L}\\p{N}'’-]*(?:\\s+[A-Z][\\p{L}\\p{N}'’-]*){0,3}\\s+(?:${venueNouns}))\\b`, "gu");
+  for (const match of source.matchAll(properVenuePattern)) phrases.push(match[1]);
+  const genericMovementPattern = /\b(?:entered|arrived at|walked into|stepped into|crossed into|moved into|went into|inside|through|toward)\s+(?:the\s+)?(hall|room|stage|lobby|campus|arena|court|boardroom|office|dorm|apartment|kitchen|elevator|tower|district|station|gym|street|floor|hallway|corridor|courtyard|temple|palace|library|classroom|studio|theater|restaurant|cafe|hospital|bank|store|market|platform|roof|basement|warehouse|server)\b/giu;
+  for (const match of source.matchAll(genericMovementPattern)) phrases.push(match[1]);
+  return [...new Set(phrases.map((phrase) => phrase.trim()).filter(Boolean))];
+}
+
 function compactSceneCharacterRef(ref) {
   return {
     state_ref_id: ref.state_ref_id ?? null,
@@ -180,7 +222,7 @@ function compactSceneCharacterRef(ref) {
     identity_usage: ref.identity_usage ?? null,
     character: ref.character ?? null,
     scene_ids: ref.scene_ids ?? [],
-    scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), 900),
+    scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), compactEditorialProof ? 280 : 900),
     reference_image_path: ref.reference_image_path ?? null,
   };
 }
@@ -199,6 +241,15 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     visual_beat_focus: scene.visual_beat_focus ?? null,
     visual_beat_action: scene.visual_beat_action ?? null,
     visual_beat_script_excerpt: scene.visual_beat_script_excerpt ?? null,
+    local_named_character_mentions: mentionedCandidateNames(scene),
+    local_location_mentions: locationMentionPhrases(scene.visual_beat_script_excerpt ?? ""),
+    shot_framing_guidance: "beat-authored composition; use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when it serves the current visual job and narration excerpt",
+    visual_job: scene.visual_job ?? null,
+    editorial_cues: scene.editorial_cues ?? [],
+    suggested_shot_job: scene.suggested_shot_job ?? null,
+    visual_novelty_directive: scene.visual_novelty_directive ?? null,
+    location_timeline_label: scene.location_timeline_label ?? null,
+    visual_beat_quality_findings: compactList(scene.visual_beat_quality_findings ?? [], 4, 260),
     title: scene.title,
     start_sec: scene.start_sec,
     end_sec: scene.end_sec,
@@ -227,6 +278,11 @@ function compactNeighborContext(scene) {
     visual_beat_focus: scene.visual_beat_focus ?? null,
     visual_beat_action: scene.visual_beat_action ?? null,
     visual_beat_script_excerpt: scene.visual_beat_script_excerpt ?? null,
+    visual_job: scene.visual_job ?? null,
+    editorial_cues: scene.editorial_cues ?? [],
+    suggested_shot_job: scene.suggested_shot_job ?? null,
+    location_timeline_label: scene.location_timeline_label ?? null,
+    visual_beat_quality_findings: compactList(scene.visual_beat_quality_findings ?? [], 3, 220),
     location: scene.location ?? null,
     visible_subjects: scene.visible_subjects ?? [],
     primary_subject: scene.primary_subject ?? null,
@@ -234,7 +290,26 @@ function compactNeighborContext(scene) {
 }
 
 function relevantReferenceTargets(scene, visualReferencePlan) {
-  return referenceTargetsForScene(scene, visualReferencePlan).map(compactReferenceTarget);
+  let targets = referenceTargetsForScene(scene, visualReferencePlan);
+  if (compactEditorialProof) {
+    const mentions = mentionedCandidateNames(scene).map(normalizeLabel);
+    const excerpt = normalizeLabel(scene.visual_beat_script_excerpt ?? "");
+    targets = targets.filter((target) => {
+      const kind = String(target.kind ?? "").toLowerCase();
+      if (kind === "location") return true;
+      if (kind === "character_state") {
+        const label = normalizeLabel(`${target.subject ?? ""} ${target.ref_id ?? ""}`);
+        return mentions.some((name) => label.includes(name) || name.includes(label.split(/\s+/)[0] ?? ""));
+      }
+      if (["ui", "prop", "action"].includes(kind)) {
+        const label = normalizeLabel(`${target.subject ?? ""} ${target.ref_id ?? ""}`);
+        return label.split(/\s+/).some((token) => token.length > 3 && excerpt.includes(token))
+          || /system|quest|rank|chat|viewer|screen|phone|livestream|audit|replay|metric|counter/.test(excerpt);
+      }
+      return false;
+    });
+  }
+  return targets.map(compactReferenceTarget);
 }
 
 function compactReferenceTarget(target) {
@@ -246,12 +321,12 @@ function compactReferenceTarget(target) {
     priority: target.priority ?? null,
     generation_mode: target.generation_mode ?? null,
     required_before_imagegen: target.required_before_imagegen ?? null,
-    reference_image_path: target.reference_image_path ?? null,
-    resolved_reference_image_path: target.resolved_reference_image_path ?? null,
-    reference_exists: target.reference_exists ?? null,
-    prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", 900),
+    reference_image_path: compactEditorialProof ? null : (target.reference_image_path ?? null),
+    resolved_reference_image_path: compactEditorialProof ? null : (target.resolved_reference_image_path ?? null),
+    reference_exists: compactEditorialProof ? null : (target.reference_exists ?? null),
+    prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", compactEditorialProof ? 260 : 900),
     anchor_cut_policy: target.anchor_cut_policy ?? null,
-    risk_notes: compactList(target.risk_notes ?? [], 4, 220),
+    risk_notes: compactEditorialProof ? [] : compactList(target.risk_notes ?? [], 4, 220),
   };
 }
 
@@ -285,7 +360,39 @@ async function enrichVisualReferencePlan(visualReferencePlan) {
   return { ...visualReferencePlan, reference_targets: targets };
 }
 
-function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = []) {
+function codexOpeningSecFromOptions(options = {}) {
+  const value = Number(options.codex_opening_sec ?? options.codexOpeningSec ?? 120);
+  return Number.isFinite(value) && value > 0 ? value : 120;
+}
+
+function providerPromptGuidance(activeProvider, providerOptions = {}) {
+  const provider = normalizeImageProvider(activeProvider);
+  if (provider === "codex_imagegen") {
+    return [
+      "ACTIVE IMAGE PROVIDER: codex_imagegen.",
+      "Write image_prompt and codex_image_prompt for every cut. codex_image_prompt is the production prompt consumed by imagegen. Keep modelslab_image_prompt empty unless the cut truly needs ModelsLab-specific wording for a diagnostic fallback.",
+    ].join("\n");
+  }
+  if (provider === "hybrid_codex_refs_multichar") {
+    return [
+      "ACTIVE IMAGE PROVIDER: hybrid_codex_refs_multichar.",
+      "Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends references and risky multi-character cuts to Codex imagegen, while lower-risk simple cuts go to ModelsLab. Keep both provider-specific prompt fields aligned to the same shot_manifest.",
+    ].join("\n");
+  }
+  if (provider === "hybrid_codex_opening_modelslab_rest") {
+    const openingSec = codexOpeningSecFromOptions(providerOptions);
+    return [
+      "ACTIVE IMAGE PROVIDER: hybrid_codex_opening_modelslab_rest.",
+      `Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends all references and the first ${openingSec} seconds of scene cuts to Codex imagegen, then sends the rest of the video to ModelsLab. Keep both provider-specific prompt fields aligned to the same shot_manifest.`,
+    ].join("\n");
+  }
+  return [
+    "ACTIVE IMAGE PROVIDER: modelslab.",
+    "Write image_prompt and modelslab_image_prompt for every cut. modelslab_image_prompt is the production prompt consumed by imagegen. Leave codex_image_prompt empty unless Codex-specific wording is explicitly useful for a later proof.",
+  ].join("\n");
+}
+
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}) {
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
@@ -297,6 +404,8 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
   }
   const compactTimedPlan = {
     source_script_hash: timedPlan.source_script_hash,
+    image_provider: normalizeImageProvider(activeProvider),
+    image_provider_options: activeProviderOptions,
     scene_count: sourceRows?.length ?? 0,
     source_unit: visualBeatPlan ? "visual_beats" : "timed_scenes",
     parent_scene_count: timedPlan.scenes?.length ?? 0,
@@ -304,8 +413,8 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
     scenes: (sourceRows ?? []).map((scene, index, rows) => ({
       ...compactSceneForPrompt(scene, stateRefIndex),
-      previous_beat_context: compactNeighborContext(rows[index - 1]),
-      next_beat_context: compactNeighborContext(rows[index + 1]),
+      previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
+      next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
       reference_target_ids: (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []).map((target) => target.ref_id),
     })),
     reference_targets_by_scene: referenceTargetsByScene,
@@ -320,34 +429,50 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
   return `Author production image prompts from the timed semantic scene plan.
 
 Rules:
-- You are the creative visual author. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
-- Use current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
-- Positive visual language is mandatory. Describe only what should appear.
-- Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
-- Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
+${providerPromptGuidance(activeProvider, activeProviderOptions)}
+
+- You are the creative visual editor and image prompt author. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
+- The local visual_beat_script_excerpt is the source of truth for this cut. If parent scene facts and the local excerpt conflict, make the local excerpt visually clear and use parent-scene facts only as candidate context.
+- Use current beat and current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
+- Prefer positive visual language that describes what should appear, but never distort exact story meaning, UI text, character count, or shot intent just to avoid a negative word. Exact story/UI text belongs in ui_text_on_screen when needed.
+- Avoid negative prompt clauses for image-model mitigation when a positive construction is available. If the beat itself contains a meaningful negative concept, convert it only when the positive wording stays faithful, such as "windowless room" for "no windows" or "single visible subject" for absent extra characters.
 - Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
 - Identify exact subject roles by name and action, especially in multi-character scenes.
 - For visual beats, use visual_beat_focus to change camera angle, pose, action moment, and composition across beats in the same parent scene.
 - For visual beats, visual_beat_script_excerpt and visual_beat_action are the main source for the image. Each cut must show the specific moment in that beat excerpt, not a repeated hero portrait with the whole scene summarized behind the character.
+- visual_job and editorial_cues are the editor's reason this cut exists. Build the cut around that job: premise image, humiliation image, system reveal, reaction shot, chat/UI insert, remote witness cutaway, location transition, consequence, threat reveal, or cliffhanger/question.
+- suggested_shot_job is the default shot_manifest.shot_job. Copy it unless the beat excerpt clearly requires a better allowed shot job, and then keep the replacement aligned to visual_job.
+- location_timeline_label records the current visible location at this timestamp. If the excerpt or location_timeline_label names a new physical place, the prompt must visibly stage that place or a transition into it using the in-scope location ref.
+- visual_novelty_directive is mandatory edit direction. Follow it to make the current cut visually distinct from adjacent beats without importing their story content.
+- visual_beat_quality_findings are deterministic QA warnings for this exact cut. Treat each finding as positive edit direction: visibly stage the named location or transition when the excerpt calls for it, include the named physical character when the beat requires their presence, and vary composition or shot job when repetition is flagged.
+- Named people in the local excerpt are editorially important by default. If the excerpt names a person as a witness, speaker, physical presence, livestream/chat participant, social judge, antagonist, or target of the action, put that person in shot_manifest.visible_characters and stage them visibly in the prompt. Use mentioned_only only for people who are purely discussed and not useful to show for the current beat.
+- Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person rather than inventing a separate generic character.
+- If a named person is present through chat, broadcast, video wall, replay, or livestream rather than physically in the room, make that visible medium explicit in foreground_action, visible_props, ui_elements, and prompt prose.
+- If the current beat shows a recognizable named person inside a replay clip, livestream panel, broadcast feed, video wall, chat avatar, dossier card, or phone screen, that person is still visually present through media. Include them in shot_manifest.visible_characters, add character_staging that says they are screen-visible or panel-visible, and attach their in-scope character_state ref when their likeness matters and reference slots allow.
+- Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
 - Across beats in the same parent scene, vary the visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to the beat excerpt.
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
 - Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
-- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref from reference_targets_by_scene, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, the prose prompt must describe that visible location.
+- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref from reference_targets_by_scene, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, the prose prompt must describe that visible location.
 - Every input unit includes target_image_id. Copy target_image_id exactly into output image_id. Do not restart image_id numbering inside chunks, and do not invent sequential IDs from the schema example.
 - Parent scene context explains why the beat matters, but visual_beat_script_excerpt decides what appears. Do not include future reveals, earlier setup, or the whole confrontation unless the current beat excerpt physically shows them.
 - previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
 - For transformation arcs, use one base identity face anchor only when the approved reference metadata says identity_usage is face_only; current state wording controls body, hair, shave/facial hair, wardrobe, posture, cleanliness, and social status.
+- Provider-specific prompt fields should be written only when useful for the active image provider route above. Any provider-specific prompt that is present must keep the same visible subject, action, location, references, and shot_manifest as image_prompt.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
-- codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. When present, keep the same visible subject, action, location, references, and shot_manifest as image_prompt while using natural Codex-friendly image prose.
+- codex_image_prompt should use natural Codex-friendly image prose with the same shot_manifest contract.
+- Every scene prompt must explicitly request polished 2D anime/manhwa illustration style in text: clean line art, cel-shaded characters, cinematic webtoon/manhwa lighting, and non-photorealistic painted backgrounds/crowd extras. This style clause is mandatory even when a style reference is not attached.
 - ModelsLab Flux handles multi-character shots at surfaces poorly. Whenever two or more characters are positioned at, behind, leaning on, or separated by ANY surface or large object that can cross or occlude a human body (waist-to-chest-height objects — recognize the actual surface from the beat and location, do not rely on a fixed list of furniture types), modelslab_image_prompt must: (a) give each visible character a clear spatial relationship to that surface — near side, far side, behind it, beside its edge, or another explicit side-of-surface placement; (b) state body clearance positively — full torso above the surface line, feet grounded, hands resting on or above the edge, and no body part merging into the surface plane; and (c) prefer asymmetric or diagonal placement over flat centered bilateral staging, offsetting one character forward or to a near corner and the other farther back. codex_image_prompt may keep a more centered, cinematic composition as long as the bodies stay discrete, side-of-surface placement is readable, and no body merges into the surface.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
 - When shot_manifest.location_ref_id is set, describe that reference's visible architecture, materials, lighting, surfaces, and spatial layout as the physical setting for the current beat.
-- Use one continuous full-frame composition by default. Intentional manga panel or split-screen layouts are allowed for montage beats, memory fragments, reaction stacks, parallel action, or UI-heavy reveals when they serve the beat.
+- Composition is beat-authored, not globally defaulted. Let the visual beat choose the composition. Do not impose a universal wide/full-frame/medium-wide default. Use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or other framing only when that shot scale best serves the current visual_job, beat excerpt, emotion, object, UI, or transition.
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
 - If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen and use positive visual substitutes in modelslab_image_prompt, such as "contact-silence streak badge", "stand-firm mission card", "message restraint checklist", or "upstairs restraint icon".
+- If the story beat depends on chat, system panels, viewer counts, receipts, scoreboards, livestream status, or labels, include concise readable UI text in ui_text_on_screen and visually stage the screen/panel as a key story object. Text can be sparse and large; it should serve the beat instead of filling the frame.
+- Shot scale must be intentional and beat-specific. The planner should choose the most useful composition for the cut instead of using a global wide or close-up default.
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
 - Location references are environment evidence. Use them for setting, architecture, lighting, and materials.
@@ -366,9 +491,9 @@ Rules:
 - If a scene needs references, list them as reference_requirements only; do not pretend missing refs exist or define new canonical refs in this stage.
 - For each cut, include only references that are visible or style-critical, with at most four reference_requirements total.
 - Attach only necessary references. Use no more than four refs; fewer is better when the cut remains clear. Do not attach refs for people, locations, props, or UI that are only mentioned, remembered, texted, called, or implied.
-- Reference priority is strict: visible character_state refs first, then location, then prop or UI, then action or effects, then style.
+- Reference priority is strict: visible named character_state refs first, including screen-visible people, then location, then prop or UI, then action or effects, then style. If four reference slots are tight, drop optional UI, prop, action, or location refs before dropping a visible named character ref.
 - Attach style only when the cut has zero concrete character, location, prop, UI, or action references.
-- When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.
+- When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit. Do not put these reference-limit omissions in forbidden_ref_ids.
 - Use visual reference targets to decide reference_usage and anchor_roles.
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1.
 - Put character identity refs before location refs when the main risk is character identity. Put location refs before character refs when the main risk is the environment. Put action/effect refs after identity and location refs unless the effect is the primary subject.
@@ -393,41 +518,41 @@ ${JSON.stringify({
   single_character_cut: {
     shot_manifest: {
       shot_job: "emotional_reaction",
-      visible_characters: ["Joey"],
+      visible_characters: ["Protagonist"],
       mentioned_only_characters: ["Secondary Character"],
-      primary_character: "Joey",
-      character_state_ref_ids: ["joey_state_ref"],
-      protagonist_state_ref_id: "joey_state_ref",
-      location_ref_id: "hallway_location_ref",
-      foreground_action: "Joey freezes in the apartment hallway as the elevator doors part",
-      visible_props: ["delivery bag"],
+      primary_character: "Protagonist",
+      character_state_ref_ids: ["protagonist_state_ref"],
+      protagonist_state_ref_id: "protagonist_state_ref",
+      location_ref_id: "corridor_location_ref",
+      foreground_action: "Protagonist freezes in the corridor as the elevator doors part",
+      visible_props: ["bag"],
       ui_elements: [],
       forbidden_ref_ids: ["secondary_character_state_ref"],
       continuity_notes: "one present-tense beat",
     },
-    modelslab_image_prompt: "Joey halts in the apartment hallway as the elevator doors part, Joey alone in frame, dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, one hand tightening around the delivery bag strap, stunned expression under cold ceiling lights, polished corridor walls and brushed metal elevator doors behind him.",
+    modelslab_image_prompt: "Protagonist halts in a corridor as the elevator doors part, one visible subject alone in frame, casual layered outfit, one hand tightening around a bag strap, stunned expression under cold ceiling lights, polished corridor walls and brushed metal elevator doors behind him.",
   },
   multi_character_cut: {
     shot_manifest: {
       shot_job: "interaction",
-      visible_characters: ["Joey", "Second Character"],
+      visible_characters: ["Protagonist", "Second Character"],
       mentioned_only_characters: [],
-      primary_character: "Joey",
-      character_state_ref_ids: ["joey_state_ref", "second_character_state_ref"],
-      protagonist_state_ref_id: "joey_state_ref",
+      primary_character: "Protagonist",
+      character_state_ref_ids: ["protagonist_state_ref", "second_character_state_ref"],
+      protagonist_state_ref_id: "protagonist_state_ref",
       location_ref_id: "lobby_location_ref",
-      foreground_action: "Joey and the second character stop across from each other in the lobby",
+      foreground_action: "Protagonist and the second character stop across from each other in the lobby",
       visible_props: [],
       ui_elements: [],
       forbidden_ref_ids: [],
       continuity_notes: "single confrontation beat",
       character_staging: [
         {
-          name: "Joey",
-          ref_id: "joey_state_ref",
+          name: "Protagonist",
+          ref_id: "protagonist_state_ref",
           screen_position: "frame-left",
-          wardrobe_from: "character_state_ref:joey_state_ref",
-          pose: "half-turned toward the other character with one shoulder forward and a tense grip on his bag strap",
+          wardrobe_from: "character_state_ref:protagonist_state_ref",
+          pose: "half-turned toward the other character with one shoulder forward and a tense grip on the bag strap",
         },
         {
           name: "Second Character",
@@ -438,10 +563,10 @@ ${JSON.stringify({
         },
       ],
     },
-    modelslab_image_prompt: "Lobby confrontation the instant both characters stop. Frame-left, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, half-turned toward the other character with one shoulder forward and a tense grip on his bag strap. Frame-right, Second Character: cream fitted coat over a black dress, gold phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them inside the polished stone lobby with warm sconces and reflective floor.",
-    codex_image_prompt: "Two-character lobby confrontation at the exact moment both stop. Frame-left, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, half-turned toward the other character with one shoulder forward and a tense grip on his bag strap. Frame-right, Second Character: cream fitted coat over a black dress, gold phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them in a polished stone lobby with warm sconces and reflective floor.",
+    modelslab_image_prompt: "Lobby confrontation the instant both characters stop. Frame-left, Protagonist: casual layered outfit, half-turned toward the other character with one shoulder forward and a tense grip on the bag strap. Frame-right, Second Character: polished upscale outfit, phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them inside the polished stone lobby with warm sconces and reflective floor.",
+    codex_image_prompt: "Two-character lobby confrontation at the exact moment both stop. Frame-left, Protagonist in casual layered clothes, half-turned toward the other character with one shoulder forward and a tense grip on the bag strap. Frame-right, Second Character in a polished upscale outfit, phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them in a polished stone lobby with warm sconces and reflective floor.",
     reference_requirements: [
-      { ref_id: "joey_ref", kind: "character_state", required: true, slot_order: 1, slot_purpose: "character identity and wardrobe for Joey", reason: "Frame-left staged identity and wardrobe." },
+      { ref_id: "protagonist_ref", kind: "character_state", required: true, slot_order: 1, slot_purpose: "character identity and wardrobe for Protagonist", reason: "Frame-left staged identity and wardrobe." },
       { ref_id: "second_character_ref", kind: "character_state", required: true, slot_order: 2, slot_purpose: "character identity and wardrobe for Second Character", reason: "Frame-right staged identity and wardrobe." },
       { ref_id: "lobby_location_ref", kind: "location", required: true, slot_order: 3, slot_purpose: "lobby location environment", reason: "Visible setting for the confrontation." },
     ],
@@ -449,36 +574,36 @@ ${JSON.stringify({
   support_surface_cut: {
     shot_manifest: {
       shot_job: "interaction",
-      visible_characters: ["Joey", "Second Character"],
+      visible_characters: ["Protagonist", "Second Character"],
       mentioned_only_characters: [],
-      primary_character: "Joey",
-      character_state_ref_ids: ["joey_state_ref", "second_character_state_ref"],
-      protagonist_state_ref_id: "joey_state_ref",
-      location_ref_id: "kitchen_location_ref",
-      foreground_action: "Joey pauses with the mug on the near side of the island while the second character leans on the far side",
-      visible_props: ["coffee mug", "kitchen island"],
-      ui_elements: ["system warning panel"],
+      primary_character: "Protagonist",
+      character_state_ref_ids: ["protagonist_state_ref", "second_character_state_ref"],
+      protagonist_state_ref_id: "protagonist_state_ref",
+      location_ref_id: "room_location_ref",
+      foreground_action: "Protagonist pauses with a cup on the near side of a support surface while the second character stands on the far side",
+      visible_props: ["cup", "support surface"],
+      ui_elements: ["warning panel"],
       forbidden_ref_ids: [],
       continuity_notes: "support-surface confrontation beat",
       character_staging: [
         {
-          name: "Joey",
-          ref_id: "joey_state_ref",
+          name: "Protagonist",
+          ref_id: "protagonist_state_ref",
           screen_position: "frame-left",
-          wardrobe_from: "character_state_ref:joey_state_ref",
-          pose: "standing on the near side of the island with the mug raised just above the counter edge",
+          wardrobe_from: "character_state_ref:protagonist_state_ref",
+          pose: "standing on the near side of the support surface with the cup raised just above the edge",
         },
         {
           name: "Second Character",
           ref_id: "second_character_state_ref",
           screen_position: "frame-right",
           wardrobe_from: "character_state_ref:second_character_state_ref",
-          pose: "standing on the far side of the island with both hands resting on the countertop edge",
+          pose: "standing on the far side of the support surface with both hands resting on the edge",
         },
       ],
     },
-    modelslab_image_prompt: "Kitchen confrontation at the exact instant the warning appears. Frame-left foreground, Joey: dark varsity jacket over a white T-shirt, black jeans, scuffed sneakers, standing on the near side of the marble island with the mug raised just above the counter edge, full torso clear above the countertop line, feet on the floor. Frame-right, Second Character: cream fitted coat over a black dress, gold phone set aside, standing on the far side of the island with both hands resting on the countertop edge, full torso clear above the counter line. A crisp blue warning panel hovers above the mug. Clear diagonal separation between them, no body merging into the island plane.",
-    codex_image_prompt: "Stylized kitchen standoff across a marble island as the warning appears. Joey on the near side with the mug lifted, the second character on the far side leaning onto the island edge, both bodies fully clear of the countertop silhouette, crisp blue warning panel above the mug, cinematic centered kitchen depth but discrete body placement.",
+    modelslab_image_prompt: "Support-surface confrontation at the exact instant the warning appears. Frame-left foreground, Protagonist in casual layered clothes, standing on the near side of the surface with the cup raised just above the edge, full torso clear above the surface line, feet on the floor. Frame-right, Second Character in a polished outfit, standing on the far side with both hands resting on the edge, full torso clear above the surface line. A crisp blue warning panel hovers above the cup. Clear diagonal separation between them, both bodies fully separate from the surface plane.",
+    codex_image_prompt: "Stylized standoff across a support surface as the warning appears. Protagonist on the near side with the cup lifted, Second Character on the far side leaning onto the edge, both bodies fully clear of the surface silhouette, crisp blue warning panel above the cup, cinematic centered room depth with discrete body placement.",
   },
 }, null, 2)}
 
@@ -493,8 +618,8 @@ Return JSON only:
       "start_sec": 0,
       "duration_sec": 6,
       "image_prompt": "positive production scene prompt only",
-      "modelslab_image_prompt": "positive production scene prompt optimized for flux-klein",
-      "codex_image_prompt": "optional positive production scene prompt optimized for Codex/OpenAI image generation",
+      "modelslab_image_prompt": "positive production scene prompt optimized for flux-klein when the active route needs ModelsLab, else empty string",
+      "codex_image_prompt": "positive production scene prompt optimized for Codex/OpenAI when the active route needs Codex, else empty string",
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
@@ -548,7 +673,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner. Use positive visual language only: describe what should appear, never what should be avoided." },
+          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner. Preserve the local beat's visible story intent. Prefer positive visual language when it stays faithful." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -690,15 +815,21 @@ function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label
 
 function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
-  const imagePrompt = sanitizePositiveVisualPrompt(String(row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim());
-  const modelslabPrompt = sanitizePositiveVisualPrompt(String(row.modelslab_image_prompt ?? imagePrompt).trim());
-  const codexPrompt = row.codex_image_prompt ? sanitizePositiveVisualPrompt(String(row.codex_image_prompt).trim()) : null;
+  const imagePrompt = String(row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim();
+  const modelslabPrompt = String(row.modelslab_image_prompt ?? imagePrompt).trim();
+  const codexPrompt = row.codex_image_prompt ? String(row.codex_image_prompt).trim() : null;
   const basePrompt = {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
     visual_beat_id: row.visual_beat_id ?? null,
     visual_beat_action: sourceUnit?.visual_beat_action ?? row.visual_beat_action ?? null,
     visual_beat_script_excerpt: sourceUnit?.visual_beat_script_excerpt ?? row.visual_beat_script_excerpt ?? null,
+    visual_job: sourceUnit?.visual_job ?? row.visual_job ?? null,
+    editorial_cues: sourceUnit?.editorial_cues ?? row.editorial_cues ?? [],
+    suggested_shot_job: sourceUnit?.suggested_shot_job ?? row.suggested_shot_job ?? null,
+    visual_novelty_directive: sourceUnit?.visual_novelty_directive ?? row.visual_novelty_directive ?? null,
+    location_timeline_label: sourceUnit?.location_timeline_label ?? row.location_timeline_label ?? null,
+    visual_beat_quality_findings: sourceUnit?.visual_beat_quality_findings ?? row.visual_beat_quality_findings ?? [],
     start_sec: Number(row.start_sec ?? 0),
     duration_sec: Math.max(1, Number(row.duration_sec ?? 6)),
     image_prompt: imagePrompt,
@@ -779,9 +910,52 @@ function assertPromptVariety(prompts) {
     const repeated = [...counts.entries()].filter(([, count]) => count >= Math.min(4, rows.length));
     if (repeated.length) failures.push(`${sceneId} has repeated prompt bodies across ${repeated[0][1]} visual beats`);
   }
-  if (failures.length) {
+  if (failures.length && flags["strict-prompt-variety-gate"] === "true") {
     throw new Error(`Visual prompt plan lacks beat-level variety:\n${failures.slice(0, 20).join("\n")}`);
   }
+  return failures.map((message) => ({
+    code: "prompt_variety_warning",
+    severity: "warning",
+    message,
+  }));
+}
+
+function assertLocationSpanVariety(prompts) {
+  if (allowLongLocationSpans) return [];
+  const findings = longLocationSpanFindings(prompts, {
+    maxSameLocationSpanSec,
+    retentionStartSec: 180,
+  });
+  if (findings.length && flags["strict-location-span-gate"] === "true") {
+    throw new Error(`Visual prompt plan has long repeated-location spans:\n${findings.slice(0, 20).map((span) => (
+      `${span.locationId} ${span.count} cuts ${span.firstImageId}-${span.lastImageId} ${Number(span.start).toFixed(1)}s-${Number(span.end).toFixed(1)}s (${Number(span.measured_after_retention_start_sec).toFixed(1)}s after 3:00)`
+    )).join("\n")}`);
+  }
+  return findings.map((finding) => ({
+    code: "location_span_variety_warning",
+    severity: "warning",
+    message: `${finding.locationId} repeats for ${finding.count} cuts from ${finding.firstImageId} to ${finding.lastImageId} after the retention runway.`,
+    ...finding,
+  }));
+}
+
+function assertRetentionShotJobVarietySoft(prompts) {
+  if (allowRepeatedRetentionShotJobs) return [];
+  const findings = repeatedLocationShotJobFindings(prompts, {
+    maxConsecutiveSameLocationShotJob: maxConsecutiveRetentionShotJobs,
+    retentionEndSec: 180,
+  });
+  if (findings.length && flags["strict-retention-shot-job-gate"] === "true") {
+    throw new Error(`Visual prompt plan repeats the same location/shot job too long in the retention runway:\n${findings.slice(0, 20).map((run) => (
+      `${run.locationId}/${run.shotJob} ${run.count} cuts ${run.firstImageId}-${run.lastImageId} ${Number(run.start).toFixed(1)}s-${Number(run.end).toFixed(1)}s`
+    )).join("\n")}`);
+  }
+  return findings.map((finding) => ({
+    code: "retention_shot_job_variety_warning",
+    severity: "warning",
+    message: `${finding.locationId}/${finding.shotJob} repeats for ${finding.count} opening cuts from ${finding.firstImageId} to ${finding.lastImageId}.`,
+    ...finding,
+  }));
 }
 
 function assertScenePromptShape(prompts) {
@@ -798,6 +972,83 @@ function assertScenePromptShape(prompts) {
   if (failures.length) {
     throw new Error(`Visual prompt plan violates scene-prompt shape contract:\n${failures.slice(0, 30).join("\n")}`);
   }
+}
+
+function promptSearchText(prompt) {
+  return [
+    prompt.image_prompt,
+    prompt.modelslab_image_prompt,
+    prompt.codex_image_prompt,
+    prompt.shot_manifest?.foreground_action,
+    prompt.shot_manifest?.visible_characters,
+    prompt.shot_manifest?.mentioned_only_characters,
+    prompt.visible_subjects,
+    prompt.ui_text_on_screen,
+  ].flat(Infinity).filter(Boolean).join(" ").toLowerCase();
+}
+
+function nameAppearsInPrompt(name, prompt) {
+  const text = promptSearchText(prompt);
+  const full = String(name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const first = full.split(/\s+/)[0] ?? "";
+  if (full && text.includes(full)) return true;
+  return first.length > 2 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+}
+
+function assertLocalBeatFidelity(prompts, sourceRows) {
+  const failures = [];
+  for (let index = 0; index < prompts.length; index += 1) {
+    const prompt = prompts[index];
+    const source = sourceRows[index] ?? {};
+    const localNames = mentionedCandidateNames(source);
+    const qualityNames = (source.visual_beat_quality_findings ?? [])
+      .filter((finding) => finding?.code === "named_character_not_visible_subject" && finding.character)
+      .map((finding) => String(finding.character));
+    for (const name of [...new Set([...localNames, ...qualityNames])]) {
+      if (!nameAppearsInPrompt(name, prompt)) {
+        failures.push(`${prompt.image_id} local excerpt names ${name}, but prompt/manifest does not stage or visibly mediate that person`);
+      }
+    }
+    for (const phrase of locationMentionPhrases(source.visual_beat_script_excerpt ?? "")) {
+      const text = promptSearchText(prompt);
+      const normalizedPhrase = phrase.toLowerCase();
+      const importantVenue = /^[A-Z]/.test(phrase) || /\b(?:hall|stage|lobby|room|screen|wall|floor|campus|studio|server)\b/i.test(phrase);
+      if (importantVenue && !text.includes(normalizedPhrase.split(/\s+/).slice(-2).join(" "))) {
+        failures.push(`${prompt.image_id} local excerpt names location ${phrase}, but prompt/manifest does not visibly stage it`);
+      }
+    }
+  }
+  if (failures.length) {
+    throw new Error(`Visual prompt plan failed local beat fidelity:\n${failures.slice(0, 40).join("\n")}`);
+  }
+}
+
+function assertShotFramingDistribution(prompts) {
+  const closePattern = /\b(?:extreme close|close-up|closeup|tight (?:shot|frame|framing|composition)|face fills|head-and-shoulders|shoulders-up|chest-up|waist-up|cropped face|cropped head)\b/i;
+  const allowedCloseJobs = new Set(["object_insert", "ui_reveal", "emotional_reaction", "consequence"]);
+  const closeRows = prompts.filter((prompt) => closePattern.test([
+    prompt.image_prompt,
+    prompt.modelslab_image_prompt,
+    prompt.codex_image_prompt,
+    prompt.shot_manifest?.shot_job,
+  ].filter(Boolean).join(" ")));
+  const badCloseRows = closeRows.filter((prompt) => !allowedCloseJobs.has(String(prompt.shot_manifest?.shot_job ?? prompt.suggested_shot_job ?? "")));
+  const maxCloseShare = Number(flags["max-close-shot-share"] ?? process.env.ANIFACTORY_MAX_CLOSE_SHOT_SHARE ?? 0.32);
+  const failures = [];
+  if (prompts.length >= 10 && closeRows.length / prompts.length > maxCloseShare) {
+    failures.push(`close/tight framing share ${closeRows.length}/${prompts.length} exceeds ${Math.round(maxCloseShare * 100)}%`);
+  }
+  if (badCloseRows.length) {
+    failures.push(`close/tight language used on non-close shot jobs: ${badCloseRows.slice(0, 12).map((prompt) => prompt.image_id).join(", ")}`);
+  }
+  if (failures.length && flags["strict-framing-gate"] === "true") {
+    throw new Error(`Visual prompt framing gate failed:\n${failures.join("\n")}`);
+  }
+  return failures.map((message) => ({
+    code: "shot_framing_distribution_warning",
+    severity: "warning",
+    message,
+  }));
 }
 
 function chunkArray(items, size) {
@@ -858,7 +1109,12 @@ async function loadCorrectionDirectives(filePath) {
 }
 
 function filterVisualSourceRows(rows, episodeId) {
-  const annotated = rows.map((row, index) => ({ ...row, __visual_plan_absolute_index: index }));
+  const annotated = rows.map((row, index, allRows) => ({
+    ...row,
+    __visual_plan_absolute_index: index,
+    __previous_visual_context: compactNeighborContext(allRows[index - 1]),
+    __next_visual_context: compactNeighborContext(allRows[index + 1]),
+  }));
   const sceneIds = parseListFlag(flags["only-scenes"] ?? flags.onlyScenes);
   if (sceneIds.length) {
     const wanted = new Set(sceneIds);
@@ -882,6 +1138,83 @@ function filterVisualSourceRows(rows, episodeId) {
   return annotated;
 }
 
+function locationTargetsForSourceRow(row, visualReferencePlan) {
+  return referenceTargetsForScene(row, visualReferencePlan)
+    .filter((target) => String(target?.kind ?? "").toLowerCase() === "location");
+}
+
+function forcedLocationRefId(row, visualReferencePlan) {
+  const locationTargets = locationTargetsForSourceRow(row, visualReferencePlan);
+  return locationTargets.length === 1 ? String(locationTargets[0].ref_id ?? "").trim() : null;
+}
+
+function scopedLocationCoverageFindings(rows, visualReferencePlan, {
+  maxSameLocationSpanSec: maxSec = maxSameLocationSpanSec,
+  retentionStartSec = 180,
+} = {}) {
+  const ordered = [...rows]
+    .filter((row) => Number.isFinite(Number(row.start_sec)))
+    .sort((a, b) => Number(a.start_sec) - Number(b.start_sec));
+  const spans = [];
+  let current = null;
+  for (const row of ordered) {
+    const forcedRefId = forcedLocationRefId(row, visualReferencePlan);
+    if (!forcedRefId) {
+      if (current) spans.push(current);
+      current = null;
+      continue;
+    }
+    const start = Number(row.start_sec);
+    const end = Number(row.end_sec ?? (start + Number(row.duration_sec ?? 0)));
+    const locationLabel = String(row.location ?? "").trim();
+    if (!current || current.locationRefId !== forcedRefId) {
+      if (current) spans.push(current);
+      current = {
+        code: "long_single_location_ref_coverage_span",
+        severity: "blocker",
+        locationRefId: forcedRefId,
+        start,
+        end,
+        count: 1,
+        firstVisualBeatId: row.visual_beat_id ?? row.scene_id ?? null,
+        lastVisualBeatId: row.visual_beat_id ?? row.scene_id ?? null,
+        distinctLocationLabels: new Set(locationLabel ? [locationLabel] : []),
+      };
+    } else {
+      current.end = Math.max(current.end, end);
+      current.count += 1;
+      current.lastVisualBeatId = row.visual_beat_id ?? row.scene_id ?? current.lastVisualBeatId;
+      if (locationLabel) current.distinctLocationLabels.add(locationLabel);
+    }
+  }
+  if (current) spans.push(current);
+  return spans
+    .filter((span) => {
+      const measuredStart = Math.max(span.start, retentionStartSec);
+      if (span.end <= measuredStart) return false;
+      const measured = span.end - measuredStart;
+      const effectiveMax = Math.min(Number(maxSec) || 150, 120);
+      return measured > effectiveMax && span.count >= 8 && span.distinctLocationLabels.size >= 2;
+    })
+    .map((span) => ({
+      ...span,
+      measured_after_retention_start_sec: Number((span.end - Math.max(span.start, retentionStartSec)).toFixed(3)),
+      distinctLocationLabels: [...span.distinctLocationLabels],
+      message: `Only one in-scope location ref (${span.locationRefId}) covers ${span.count} consecutive visual units across ${span.distinctLocationLabels.size} beat location labels for ${Number(span.end - Math.max(span.start, retentionStartSec)).toFixed(1)}s after 3:00. Split the semantic/ref plan into scene-scoped location refs or add approved in-scope sublocation targets before prompt authoring.`,
+    }));
+}
+
+function assertScopedLocationCoverage(rows, visualReferencePlan) {
+  if (allowLongLocationSpans) return [];
+  const findings = scopedLocationCoverageFindings(rows, visualReferencePlan);
+  if (findings.length) {
+    throw new Error(`Visual prompt planning has insufficient location-ref coverage:\n${findings.slice(0, 20).map((finding) => (
+      `${finding.locationRefId} ${finding.count} units ${finding.firstVisualBeatId}-${finding.lastVisualBeatId} ${Number(finding.start).toFixed(1)}s-${Number(finding.end).toFixed(1)}s (${Number(finding.measured_after_retention_start_sec).toFixed(1)}s after 3:00): ${finding.distinctLocationLabels.join(" | ")}`
+    )).join("\n")}`);
+  }
+  return findings;
+}
+
 function scopedPlanFromRows(plan, rows, countField = "scene_count") {
   return {
     ...plan,
@@ -896,6 +1229,47 @@ function scopedVisualBeatPlanFromRows(plan, rows) {
     ...plan,
     beats: rows,
     visual_beat_count: rows.length,
+  };
+}
+
+function visualSourceContextAudit(rows, scopedLocationCoverage = []) {
+  const total = rows.length;
+  const countWith = (fn) => rows.filter(fn).length;
+  const byValue = (field) => {
+    const counts = {};
+    for (const row of rows) {
+      const value = row[field] ?? "missing";
+      counts[value] = (counts[value] ?? 0) + 1;
+    }
+    return counts;
+  };
+  const cueCounts = {};
+  for (const row of rows) {
+    for (const cue of row.editorial_cues ?? []) cueCounts[cue] = (cueCounts[cue] ?? 0) + 1;
+  }
+  return {
+    visual_unit_count: total,
+    exact_excerpt_count: countWith((row) => String(row.visual_beat_script_excerpt ?? "").trim().length > 0),
+    visual_job_count: countWith((row) => String(row.visual_job ?? "").trim().length > 0),
+    suggested_shot_job_count: countWith((row) => String(row.suggested_shot_job ?? "").trim().length > 0),
+    editorial_cue_beat_count: countWith((row) => Array.isArray(row.editorial_cues) && row.editorial_cues.length > 0),
+    location_timeline_label_count: countWith((row) => String(row.location_timeline_label ?? "").trim().length > 0),
+    quality_warning_beat_count: countWith((row) => Array.isArray(row.visual_beat_quality_findings) && row.visual_beat_quality_findings.length > 0),
+    visual_job_counts: byValue("visual_job"),
+    suggested_shot_job_counts: byValue("suggested_shot_job"),
+    editorial_cue_counts: cueCounts,
+    scoped_location_coverage_findings: scopedLocationCoverage,
+    first_units: rows.slice(0, 12).map((row) => ({
+      visual_beat_id: row.visual_beat_id ?? null,
+      start_sec: row.start_sec ?? null,
+      end_sec: row.end_sec ?? null,
+      location: row.location ?? null,
+      visual_job: row.visual_job ?? null,
+      suggested_shot_job: row.suggested_shot_job ?? null,
+      editorial_cues: row.editorial_cues ?? [],
+      visual_beat_quality_findings: row.visual_beat_quality_findings ?? [],
+      excerpt: String(row.visual_beat_script_excerpt ?? "").slice(0, 180),
+    })),
   };
 }
 
@@ -933,13 +1307,22 @@ function indexCharacterStateRefs(artifact) {
 }
 
 async function main() {
-  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs, visualBeatPlan] = await Promise.all([
+  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs, visualBeatPlan, runIdentity] = await Promise.all([
     readJson(timedPlanPath, null),
     readJson(semanticPlanPath, null),
     readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
     readJson(visualBeatPlanPath, null),
+    readJson(runIdentityPath, null),
   ]);
+  const activeImageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? runIdentity?.image_provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
+  const activeImageProviderOptions = {
+    ...(runIdentity?.image_provider_options ?? {}),
+  };
+  if (flags["codex-opening-sec"] != null || flags["codex-opening-duration-sec"] != null) {
+    const value = Number(flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"]);
+    if (Number.isFinite(value) && value > 0) activeImageProviderOptions.codex_opening_sec = value;
+  }
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (semanticPlan?.status !== "passed") throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   if (semanticPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("semantic_scene_plan and timed_scene_plan script hashes do not match.");
@@ -956,6 +1339,9 @@ async function main() {
     : timedPlan.scenes;
   const visualSourceRows = filterVisualSourceRows(allVisualSourceRows, episode);
   if (!visualSourceRows.length) throw new Error("Visual planner small-batch filters selected zero visual units.");
+  const scopedLocationCoverage = allowLongLocationSpans
+    ? []
+    : scopedLocationCoverageFindings(visualSourceRows, enrichedVisualReferencePlan);
   const scopedTimedPlan = scopedPlanFromRows(timedPlan, visualSourceRows);
   const scopedVisualBeatPlan = visualBeatPlan?.status === "passed"
     ? scopedVisualBeatPlanFromRows(visualBeatPlan, visualSourceRows)
@@ -970,11 +1356,11 @@ async function main() {
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
-        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives);
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
         promptSizes.push({ chunk_index: index + 1, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
       }
     } else {
-      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives);
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
       promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
     }
     await writeJson(outputPath, {
@@ -990,12 +1376,16 @@ async function main() {
         total_visual_unit_count: allVisualSourceRows.length,
         cut_ids: visualSourceRows.map((row) => `${episode}-cut-${String(Number(row.__visual_plan_absolute_index ?? 0) + 1).padStart(3, "0")}`),
       },
+      image_provider: activeImageProvider,
+      image_provider_options: activeImageProviderOptions,
+      context_audit: visualSourceContextAudit(visualSourceRows, scopedLocationCoverage),
       prompt_sizes: promptSizes,
       updated_at: new Date().toISOString(),
     });
     console.log(JSON.stringify({ status: "dry_run", output_path: outputPath, prompt_sizes: promptSizes }, null, 2));
     return;
   }
+  assertScopedLocationCoverage(visualSourceRows, enrichedVisualReferencePlan);
   let llm;
   let parsedPrompts = [];
   let styleSummary = "";
@@ -1008,7 +1398,7 @@ async function main() {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
       const chunkLlm = isLocalLLMRoute(chunkStageName)
@@ -1037,19 +1427,22 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
-    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
   }
   const prompts = parsedPrompts
-    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, { visualReferencePlan: enrichedVisualReferencePlan, stateRefIndex }))
-    .map(sanitizePromptLanguage);
+    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, { visualReferencePlan: enrichedVisualReferencePlan, stateRefIndex }));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
-  assertPositivePromptLanguage(prompts);
+  const positiveLanguageWarnings = assertPositivePromptLanguage(prompts);
   assertScenePromptShape(prompts);
-  assertPromptVariety(prompts);
+  assertLocalBeatFidelity(prompts, visualSourceRows);
+  const shotFramingWarnings = assertShotFramingDistribution(prompts);
+  const promptVarietyWarnings = assertPromptVariety(prompts);
+  const locationSpanWarnings = assertLocationSpanVariety(prompts);
+  const retentionShotJobWarnings = assertRetentionShotJobVarietySoft(prompts);
   const expectedPromptCount = visualSourceRows.length;
   if (prompts.length !== expectedPromptCount) throw new Error(`Visual planner returned ${prompts.length} prompts for ${expectedPromptCount} visual units.`);
   const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
@@ -1075,7 +1468,10 @@ async function main() {
     source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     style_summary: styleSummary,
-    prompt_policy: "current-scene-only positive prompting; visual-beat-aware when visual_beat_plan exists; references selected only when visible/style-critical and described by explicit image slot roles",
+    prompt_policy: "local-beat-first positive editorial prompting; visual-beat-aware when visual_beat_plan exists; references selected only when visible/style-critical and described by explicit image slot roles",
+    image_provider: activeImageProvider,
+    image_provider_options: activeImageProviderOptions,
+    run_identity_path: runIdentityPath,
     visual_plan_scope: {
       mode: visualSourceRows.length === allVisualSourceRows.length ? "full_episode" : "small_batch",
       selected_visual_unit_count: visualSourceRows.length,
@@ -1083,7 +1479,14 @@ async function main() {
       cut_ids: prompts.map((prompt) => prompt.image_id),
     },
     prompts,
-    warnings: llm.parsed.warnings ?? [],
+    warnings: [
+      ...(llm.parsed.warnings ?? []),
+      ...positiveLanguageWarnings,
+      ...shotFramingWarnings,
+      ...promptVarietyWarnings,
+      ...locationSpanWarnings,
+      ...retentionShotJobWarnings,
+    ],
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

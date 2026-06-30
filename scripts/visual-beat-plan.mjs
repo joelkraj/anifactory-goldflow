@@ -13,6 +13,7 @@ const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
 const scriptPath = flags.script ?? path.join(episodeDir, "script_clean.md");
+const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, "visual_beat_plan.json");
 const targetBeatSec = Number(flags["target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_TARGET_BEAT_SEC ?? 8.5);
 const maxBeatSec = Number(flags["max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_BEAT_SEC ?? 15);
@@ -25,6 +26,14 @@ const retentionRampSec = Number(flags["retention-ramp-sec"] ?? process.env.ANIFA
 const rampTargetBeatSec = Number(flags["ramp-target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_RAMP_TARGET_BEAT_SEC ?? 5.2);
 const rampMaxBeatSec = Number(flags["ramp-max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_RAMP_MAX_BEAT_SEC ?? 6.5);
 const rampMinBeatSec = Number(flags["ramp-min-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_RAMP_MIN_BEAT_SEC ?? 3.2);
+const allowEmptyBeatExcerpts = flags["allow-empty-beat-excerpts"] === "true" || process.env.ANIFACTORY_ALLOW_EMPTY_VISUAL_BEAT_EXCERPTS === "true";
+const allowUnderTargetRetentionBeats = flags["allow-under-target-retention-beats"] === "true"
+  || process.env.ANIFACTORY_ALLOW_UNDER_TARGET_RETENTION_BEATS === "true";
+const blockVisualBeatQualityFindings = flags["block-visual-beat-quality-findings"] === "true"
+  || process.env.ANIFACTORY_BLOCK_VISUAL_BEAT_QUALITY_FINDINGS === "true";
+const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
+const scopeEndSec = flags["scope-end-sec"] ?? flags["max-time-sec"] ?? flags["first-sec"];
+const scopeEndSecNumber = scopeEndSec == null ? null : Number(scopeEndSec);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -62,57 +71,6 @@ async function hashFile(filePath) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
-function beatDurations(scene) {
-  const duration = Math.max(1, Number(scene.duration_sec ?? 0));
-  const start = Math.max(0, Number(scene.start_sec ?? 0));
-  const subjects = Array.isArray(scene.visible_subjects) ? scene.visible_subjects.length : 0;
-  const hasAction = /\b(?:fight|combat|attack|horde|swarm|monster|gate|break|strike|kill|collapse|rescue|chase|battle|explosion|impact|fall|run|lunge|dodge|pull)\b/i
-    .test([scene.title, scene.visual_intent, scene.action_staging, ...(scene.sfx_cues ?? [])].filter(Boolean).join(" "));
-  const target = hasAction || subjects >= 4 ? Math.min(targetBeatSec, 14) : targetBeatSec;
-  const durations = [];
-  const pushEven = (total, count) => {
-    const each = total / count;
-    for (let index = 0; index < count; index += 1) durations.push(each);
-  };
-  if (start < hookDurationSec) {
-    const hookPortion = Math.min(duration, Math.max(0, hookDurationSec - start));
-    if (hookPortion > 0) {
-      const hookCount = Math.max(
-        1,
-        Math.ceil(hookPortion / Math.max(hookMinBeatSec, hookTargetBeatSec)),
-        Math.ceil(hookPortion / Math.max(hookMinBeatSec, hookMaxBeatSec)),
-      );
-      pushEven(hookPortion, hookCount);
-    }
-    const rest = duration - hookPortion;
-    if (rest > 0.001) {
-      if (rest <= maxBeatSec) durations.push(rest);
-      else pushEven(rest, Math.max(2, Math.ceil(rest / Math.max(minBeatSec, target))));
-    }
-    return durations;
-  }
-  if (start < retentionRampSec) {
-    const rampPortion = Math.min(duration, Math.max(0, retentionRampSec - start));
-    if (rampPortion > 0) {
-      const rampCount = Math.max(
-        1,
-        Math.ceil(rampPortion / Math.max(rampMinBeatSec, rampTargetBeatSec)),
-        Math.ceil(rampPortion / Math.max(rampMinBeatSec, rampMaxBeatSec)),
-      );
-      pushEven(rampPortion, rampCount);
-    }
-    const rest = duration - rampPortion;
-    if (rest > 0.001) {
-      if (rest <= maxBeatSec) durations.push(rest);
-      else pushEven(rest, Math.max(2, Math.ceil(rest / Math.max(minBeatSec, target))));
-    }
-    return durations;
-  }
-  if (duration <= maxBeatSec) return [duration];
-  pushEven(duration, Math.max(2, Math.ceil(duration / Math.max(minBeatSec, target))));
-  return durations;
 }
 
 function beatFocusLabel(index, count, startSec = null) {
@@ -153,6 +111,285 @@ function splitSentences(text) {
     .filter(Boolean) ?? [];
 }
 
+function spokenWordCount(text) {
+  return String(text ?? "")
+    .match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+}
+
+function splitLongSentence(text, maxWords = 24) {
+  const source = String(text ?? "").trim();
+  if (spokenWordCount(source) <= maxWords) return [source].filter(Boolean);
+  const clauses = source
+    .split(/(?<=[,;:])\s+|\s+(?=\b(?:then|but|and|because|while|when|before|after)\b)/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (clauses.length <= 1) return [source];
+  const chunks = [];
+  let current = "";
+  for (const clause of clauses) {
+    const candidate = current ? `${current} ${clause}` : clause;
+    if (current && spokenWordCount(candidate) > maxWords) {
+      chunks.push(current);
+      current = clause;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function sceneWords(wordTiming, scene) {
+  const words = Array.isArray(wordTiming?.words) ? wordTiming.words : [];
+  const start = Number(scene.start_sec ?? 0);
+  const end = Number(scene.end_sec ?? (start + Number(scene.duration_sec ?? 0)));
+  return words.filter((word) => {
+    const wordStart = Number(word.start_sec ?? word.start ?? 0);
+    const wordEnd = Number(word.end_sec ?? word.end ?? wordStart);
+    return wordEnd >= start - 0.35 && wordStart <= end + 0.35;
+  });
+}
+
+function timedTextUnits(sceneText, scene, wordRows) {
+  const rawSentences = splitSentences(sceneText).flatMap((sentence) => splitLongSentence(sentence));
+  const sentenceWords = rawSentences.map(spokenWordCount);
+  const totalSentenceWords = sentenceWords.reduce((sum, count) => sum + count, 0);
+  const sceneStart = Number(scene.start_sec ?? 0);
+  const sceneEnd = Number(scene.end_sec ?? (sceneStart + Number(scene.duration_sec ?? 0)));
+  const sceneDuration = Math.max(0.001, sceneEnd - sceneStart);
+  let cumulativeWords = 0;
+  return rawSentences.map((text, index) => {
+    const count = Math.max(1, sentenceWords[index] ?? 1);
+    const startRatio = totalSentenceWords > 0 ? cumulativeWords / totalSentenceWords : index / Math.max(1, rawSentences.length);
+    const endRatio = totalSentenceWords > 0 ? (cumulativeWords + count) / totalSentenceWords : (index + 1) / Math.max(1, rawSentences.length);
+    const wordStartIndex = Math.min(Math.max(0, Math.floor(startRatio * wordRows.length)), Math.max(0, wordRows.length - 1));
+    const wordEndIndex = Math.min(Math.max(wordStartIndex, Math.ceil(endRatio * wordRows.length) - 1), Math.max(0, wordRows.length - 1));
+    const startWord = wordRows[wordStartIndex] ?? null;
+    const endWord = wordRows[wordEndIndex] ?? null;
+    const startSec = startWord ? Number(startWord.start_sec ?? startWord.start ?? sceneStart) : sceneStart + sceneDuration * startRatio;
+    const endSec = endWord ? Number(endWord.end_sec ?? endWord.end ?? (sceneStart + sceneDuration * endRatio)) : sceneStart + sceneDuration * endRatio;
+    cumulativeWords += count;
+    return {
+      text,
+      start_sec: Number(Math.max(sceneStart, Math.min(sceneEnd, startSec)).toFixed(3)),
+      end_sec: Number(Math.max(sceneStart, Math.min(sceneEnd, endSec)).toFixed(3)),
+      word_count: count,
+    };
+  });
+}
+
+function editorialCueForText(text, scene = {}) {
+  const source = String(text ?? "").toLowerCase();
+  const cues = [];
+  if (/\b(?:system|quest|mission|reward|penalty|rank|level|status|activated|interface|panel|notification|dashboard|ledger|audit|skill|ability|regression|transmigration)\b/.test(source)) cues.push("system_message");
+  if (/\b(?:goal|objective|condition|failure|complete|completed|success|timer|deadline|percent|score|trial|task|challenge|requirement)\b/.test(source)) cues.push("objective_or_reward");
+  if (/\b(?:audience|crowd|public|witness|viewer|viewers|chat|comment|comments|message|messages|broadcast|livestream|recording|camera|metric|counter|count|score|rank|ranking|rating|votes|followers|likes|subscribers|reputation|credibility|trust|truth)\b/.test(source)) cues.push("chat_or_viewer_count_change");
+  if (/\b(?:humiliated|shamed|insulted|laughed|mocked|rejected|betrayed|dumped|exposed|embarrassed|framed|accused|blamed|exiled|threatened|called me|called you|labeled me|labeled you|branded me|branded you|kneel|begged)\b/.test(source)
+    || /\b(?:they|crowd|public|audience|everyone)\s+(?:see|sees|saw|treat|treated|label|labeled|brand|branded|frame|framed|record|recorded|clip|clipped)\s+(?:you|me|him|her|them)\s+as\b/.test(source)) cues.push("public_humiliation_or_reversal");
+  if (/\b(?:but|then|instead|until|suddenly|for the first time|mistake|changed|turned|opened|stopped)\b/.test(source)) cues.push("emotional_pivot");
+  if (/\b(?:threat|danger|warning|warned|warns|enemy|rival|failure|remain|lost|kill|trap|punish)\b/.test(source)) cues.push("threat_reveal");
+  if (/\b(?:hall|room|stage|lobby|campus|arena|court|boardroom|office|dorm|apartment|kitchen|elevator|tower|district|station|gym|street|floor|hallway|corridor|courtyard|temple|palace|library|classroom|studio|theater|restaurant|cafe|hospital|bank|store|market|platform|roof|basement|warehouse|server|train|capital)\b/.test(source)) cues.push("location_signal");
+  const visibleSubjects = Array.isArray(scene.visible_subjects) ? scene.visible_subjects : [];
+  const namedMentions = visibleSubjects.filter((name) => {
+    const first = String(name).split(/\s+/)[0]?.toLowerCase();
+    return first && first.length > 2 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+  });
+  if (namedMentions.length) cues.push("named_character_present");
+  return [...new Set(cues)];
+}
+
+function visualJobFromCues(cues, text, index, count, startSec) {
+  const cueSet = new Set(cues);
+  const source = String(text ?? "").toLowerCase();
+  if (Number(startSec) < hookDurationSec && index === 0) return "premise_image";
+  if (cueSet.has("public_humiliation_or_reversal")) return "humiliation_image";
+  if (/\b(?:consequence|proof|evidence|receipt|result|payoff|revealed|exposed|confirmed|failed|failure|shattered|landed)\b/i.test(source)) return "consequence";
+  if (cueSet.has("chat_or_viewer_count_change") && /\b(?:chat|comment|message|viewer|viewers|audience|count|watching|metric|counter|score|rank|ranking|rating|votes|followers|likes|subscribers|reputation|credibility|trust|truth)\b/i.test(source)) return "chat_ui_insert";
+  if (cueSet.has("location_signal") && /\b(?:crossed|entered|arrived|walked|stepped|moved|went|into|inside|through|toward)\b/i.test(source)) return "location_transition";
+  if (cueSet.has("system_message") || cueSet.has("objective_or_reward")) return "system_reveal";
+  if (cueSet.has("chat_or_viewer_count_change")) return "reaction_shot";
+  if (cueSet.has("location_signal") && index === 0) return "location_transition";
+  if (cueSet.has("threat_reveal")) return "threat_reveal";
+  if (/\b(?:watched|looked|laughed|smiled|said|asked|voice|hand)\b/i.test(source)) return "reaction_shot";
+  if (index === count - 1) return "cliffhanger_question";
+  return "story_progression";
+}
+
+function shotJobFromVisualJob(visualJob) {
+  const map = {
+    premise_image: "environment_establishing",
+    humiliation_image: "interaction",
+    system_reveal: "ui_reveal",
+    reaction_shot: "emotional_reaction",
+    chat_ui_insert: "ui_reveal",
+    remote_witness_cutaway: "emotional_reaction",
+    location_transition: "transition",
+    consequence: "consequence",
+    cliffhanger_question: "transition",
+    threat_reveal: "ui_reveal",
+    story_progression: "interaction",
+  };
+  return map[visualJob] ?? "interaction";
+}
+
+function mergeEditorialUnits(units, scene) {
+  const merged = [];
+  for (const unit of units) {
+    const duration = Number(unit.end_sec) - Number(unit.start_sec);
+    const retentionRunway = Number(unit.start_sec) < retentionRampSec;
+    const hardCueCodes = retentionRunway ? [
+      "system_message",
+      "objective_or_reward",
+      "public_humiliation_or_reversal",
+      "chat_or_viewer_count_change",
+      "threat_reveal",
+      "location_signal",
+    ] : [
+      "system_message",
+      "objective_or_reward",
+      "threat_reveal",
+      "location_signal",
+    ];
+    const strongCue = unit.editorial_cues.some((cue) => hardCueCodes.includes(cue));
+    const targetForTime = Number(unit.start_sec) < hookDurationSec
+      ? hookTargetBeatSec * 0.85
+      : Number(unit.start_sec) < retentionRampSec
+        ? rampTargetBeatSec * 0.8
+        : targetBeatSec;
+    const previous = merged[merged.length - 1];
+    const previousDuration = previous ? Number(previous.end_sec) - Number(previous.start_sec) : 0;
+    if (previous && !strongCue && previousDuration < targetForTime && previousDuration + duration <= maxBeatSec) {
+      previous.text = `${previous.text} ${unit.text}`.trim();
+      previous.end_sec = unit.end_sec;
+      previous.word_count += unit.word_count;
+      previous.editorial_cues = [...new Set([...previous.editorial_cues, ...unit.editorial_cues])];
+      previous.visual_job = visualJobFromCues(previous.editorial_cues, previous.text, merged.length - 1, units.length, previous.start_sec);
+      previous.suggested_shot_job = shotJobFromVisualJob(previous.visual_job);
+    } else {
+      merged.push({ ...unit });
+    }
+  }
+  const minHoldForStart = (startSec) => {
+    const value = Number(startSec);
+    if (value < hookDurationSec) return Math.max(0.75, hookMinBeatSec * 0.6);
+    if (value < retentionRampSec) return Math.min(3.6, Math.max(2.8, rampTargetBeatSec * 0.62));
+    return Math.min(4.5, Math.max(3.5, targetBeatSec * 0.65));
+  };
+  const coalesced = [];
+  for (let index = 0; index < merged.length; index += 1) {
+    const unit = { ...merged[index] };
+    const unitStart = Number(unit.start_sec);
+    const unitDuration = Number(unit.end_sec) - unitStart;
+    const minHoldSec = minHoldForStart(unitStart);
+    if (Number.isFinite(unitDuration) && unitDuration < minHoldSec) {
+      const previous = coalesced[coalesced.length - 1];
+      const previousStart = previous ? Number(previous.start_sec) : null;
+      const previousDuration = previous ? Number(previous.end_sec) - Number(previous.start_sec) : 0;
+      const next = merged[index + 1];
+      const previousTarget = previousStart !== null && previousStart < hookDurationSec
+        ? hookTargetBeatSec
+        : previousStart !== null && previousStart < retentionRampSec
+          ? rampTargetBeatSec
+          : targetBeatSec;
+      const previousCanAbsorb = previous
+        && previousDuration + unitDuration <= maxBeatSec
+        && (unitDuration < 1.5 || previousDuration < previousTarget * 1.25);
+      const nextCanAbsorb = Boolean(next);
+      if (previousCanAbsorb) {
+        previous.text = `${previous.text} ${unit.text}`.trim();
+        previous.end_sec = unit.end_sec;
+        previous.word_count += unit.word_count;
+        previous.editorial_cues = [...new Set([...previous.editorial_cues, ...unit.editorial_cues])];
+        previous.visual_job = visualJobFromCues(previous.editorial_cues, previous.text, coalesced.length - 1, units.length, previous.start_sec);
+        previous.suggested_shot_job = shotJobFromVisualJob(previous.visual_job);
+        continue;
+      }
+      if (nextCanAbsorb) {
+        next.text = `${unit.text} ${next.text}`.trim();
+        next.start_sec = unit.start_sec;
+        next.word_count += unit.word_count;
+        next.editorial_cues = [...new Set([...unit.editorial_cues, ...next.editorial_cues])];
+        next.visual_job = visualJobFromCues(next.editorial_cues, next.text, index, units.length, next.start_sec);
+        next.suggested_shot_job = shotJobFromVisualJob(next.visual_job);
+        continue;
+      }
+    }
+    coalesced.push(unit);
+  }
+  const bounded = [];
+  for (const unit of coalesced) {
+    const duration = Number(unit.end_sec) - Number(unit.start_sec);
+    const sentenceParts = splitSentences(unit.text);
+    if (duration <= maxBeatSec || sentenceParts.length <= 1) {
+      bounded.push(unit);
+      continue;
+    }
+    const partWeights = sentenceParts.map((sentence) => Math.max(1, spokenWordCount(sentence)));
+    const totalWeight = partWeights.reduce((sum, weight) => sum + weight, 0);
+    let chunkText = "";
+    let chunkWeight = 0;
+    let chunkStart = Number(unit.start_sec);
+    let elapsed = 0;
+    const flushChunk = () => {
+      if (!chunkText) return;
+      const chunkDuration = duration * (chunkWeight / totalWeight);
+      const chunkEnd = Math.min(Number(unit.end_sec), chunkStart + chunkDuration);
+      const chunkCues = editorialCueForText(chunkText, scene);
+      const visualJob = visualJobFromCues(chunkCues, chunkText, bounded.length, coalesced.length, chunkStart);
+      bounded.push({
+        ...unit,
+        text: chunkText.trim(),
+        start_sec: Number(chunkStart.toFixed(3)),
+        end_sec: Number(chunkEnd.toFixed(3)),
+        word_count: chunkWeight,
+        editorial_cues: chunkCues,
+        visual_job: visualJob,
+        suggested_shot_job: shotJobFromVisualJob(visualJob),
+      });
+      elapsed += chunkDuration;
+      chunkStart = Number(unit.start_sec) + elapsed;
+      chunkText = "";
+      chunkWeight = 0;
+    };
+    for (let index = 0; index < sentenceParts.length; index += 1) {
+      const sentence = sentenceParts[index];
+      const weight = partWeights[index];
+      const candidateWeight = chunkWeight + weight;
+      const candidateDuration = duration * (candidateWeight / totalWeight);
+      if (chunkText && candidateDuration > maxBeatSec) flushChunk();
+      chunkText = `${chunkText} ${sentence}`.trim();
+      chunkWeight += weight;
+    }
+    flushChunk();
+  }
+  const sceneStart = Number(scene.start_sec ?? 0);
+  let cursor = sceneStart;
+  const sequential = bounded.map((unit) => {
+    const start = Math.max(cursor, Number(unit.start_sec));
+    const end = Math.max(start + 0.25, Number(unit.end_sec));
+    cursor = end;
+    return {
+      ...unit,
+      start_sec: Number(start.toFixed(3)),
+      end_sec: Number(end.toFixed(3)),
+    };
+  });
+  return sequential.map((unit, index, rows) => ({
+    ...unit,
+    visual_job: visualJobFromCues(unit.editorial_cues, unit.text, index, rows.length, unit.start_sec),
+    suggested_shot_job: shotJobFromVisualJob(visualJobFromCues(unit.editorial_cues, unit.text, index, rows.length, unit.start_sec)),
+    beat_focus: beatFocusLabel(index, rows.length, unit.start_sec),
+    location_timeline_label: scene.location ? `${formatTimestamp(unit.start_sec)} ${scene.location}` : null,
+  }));
+}
+
+function formatTimestamp(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const secs = Math.floor(value % 60);
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
 function sceneTextFromAnchors(scriptText, scene, searchFrom = 0) {
   const startAnchor = String(scene.script_excerpt_start ?? "").trim();
   const endAnchor = String(scene.script_excerpt_end ?? "").trim();
@@ -181,32 +418,82 @@ function compactBeatAction(text, fallback) {
   return cleaned.length > 360 ? `${cleaned.slice(0, 357).trim()}...` : cleaned;
 }
 
-function splitScene(scene, scriptText, searchFrom = 0) {
-  const durations = beatDurations(scene);
-  const count = durations.length;
+function suggestedShotJobForBeat({ text = "", index = 0, count = 1, startSec = 0 }) {
+  const source = String(text ?? "").toLowerCase();
+  if (/\b(?:system|quest|mission|status|rank|level|panel|screen|metric|counter|timer|score|notification|dashboard|interface|ui|ledger|audit|gauge)\b/.test(source)) return "ui_reveal";
+  if (/\b(?:phone|text|message|receipt|invoice|contract|document|paper|card|ring|box|flowers|mug|cup|bottle|key|badge|wallet|bank|wire|ledger|camera)\b/.test(source)) return "object_insert";
+  if (/\b(?:punch|kick|strike|shove|grab|slam|run|walk|rush|chase|fall|collapse|throw|pull|push|cut|blood|fight|attack|impact|dodge|enter|leave|arrive|step)\b/.test(source)) return "physical_action";
+  if (/\b(?:said|asked|told|called|laughed|smiled|watched|looked|turned|faced|hand|voice)\b/.test(source)) return "interaction";
+  if (/\b(?:crowd|audience|viewers|room|hall|stage|street|lobby|office|dorm|apartment|kitchen|elevator|court|boardroom|campus|arena|floor)\b/.test(source)) return index === 0 || Number(startSec) < hookDurationSec ? "environment_establishing" : "emotional_reaction";
+  if (/\b(?:failed|failure|complete|result|consequence|after|proof|revealed|exposed|changed|lost|won)\b/.test(source)) return "consequence";
+  const cycle = ["emotional_reaction", "interaction", "object_insert", "ui_reveal", "consequence", "transition"];
+  if (count <= 1) return "environment_establishing";
+  return cycle[index % cycle.length];
+}
+
+function normalizedTokens(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/_ref\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2);
+}
+
+function localBeatLocation(scene, beatText) {
+  const locationRequirements = (Array.isArray(scene.ref_requirements) ? scene.ref_requirements : [])
+    .filter((requirement) => String(requirement?.kind ?? "").toLowerCase() === "location");
+  if (!locationRequirements.length) return scene.location ?? null;
+  const excerptTokens = new Set(normalizedTokens(beatText));
+  let best = null;
+  for (const requirement of locationRequirements) {
+    const label = String(requirement.ref_id ?? requirement.subject ?? requirement.reason ?? "").replace(/_ref$/i, "");
+    const tokens = normalizedTokens(`${requirement.ref_id ?? ""} ${requirement.subject ?? ""} ${requirement.reason ?? ""}`);
+    const score = tokens.filter((token) => excerptTokens.has(token)).length;
+    if (score > (best?.score ?? 0)) best = { score, label };
+  }
+  if (best?.score > 0) return best.label;
+  return scene.location ?? null;
+}
+
+function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
   const duration = Math.max(1, Number(scene.duration_sec ?? 0));
-  const start = Number(scene.start_sec ?? 0);
   const sceneText = sceneTextFromAnchors(scriptText, scene, searchFrom);
-  const beatTexts = splitSceneText(sceneText, count);
+  const wordRows = sceneWords(wordTiming, scene);
+  const timedUnits = timedTextUnits(sceneText, scene, wordRows)
+    .map((unit) => ({
+      ...unit,
+      editorial_cues: editorialCueForText(unit.text, scene),
+    }));
+  const editorialUnits = mergeEditorialUnits(timedUnits, scene);
   const beats = [];
-  let cursor = start;
-  for (let index = 0; index < count; index += 1) {
-    const beatStart = cursor;
-    const beatEnd = index === count - 1 ? start + duration : cursor + durations[index];
-    const focus = beatFocusLabel(index, count, beatStart);
+  for (let index = 0; index < editorialUnits.length; index += 1) {
+    const unit = editorialUnits[index];
+    const beatStart = Number(unit.start_sec);
+    const beatEnd = Number(unit.end_sec);
+    const focus = unit.beat_focus ?? beatFocusLabel(index, editorialUnits.length, beatStart);
+    const beatText = unit.text ?? "";
+    const suggestedShotJob = unit.suggested_shot_job ?? suggestedShotJobForBeat({ text: beatText, index, count: editorialUnits.length, startSec: beatStart });
+    const location = localBeatLocation(scene, beatText);
     beats.push({
       ...scene,
+      location,
       visual_beat_id: `${scene.scene_id}_beat_${String(index + 1).padStart(2, "0")}`,
       parent_scene_id: scene.scene_id,
       scene_id: scene.scene_id,
       beat_index: index + 1,
-      beat_count: count,
+      beat_count: editorialUnits.length,
       start_sec: Number(beatStart.toFixed(3)),
       end_sec: Number(beatEnd.toFixed(3)),
       duration_sec: Number(Math.max(1, beatEnd - beatStart).toFixed(3)),
       visual_beat_focus: focus,
-      visual_beat_script_excerpt: beatTexts[index] ?? "",
-      visual_beat_action: compactBeatAction(beatTexts[index], focus),
+      visual_beat_script_excerpt: beatText,
+      visual_beat_action: compactBeatAction(beatText, focus),
+      editorial_cues: unit.editorial_cues ?? [],
+      visual_job: unit.visual_job ?? visualJobFromCues(unit.editorial_cues ?? [], beatText, index, editorialUnits.length, beatStart),
+      suggested_shot_job: suggestedShotJob,
+      location_timeline_label: unit.location_timeline_label ?? null,
+      visual_novelty_directive: `${unit.visual_job ?? suggestedShotJob}: make this cut's visible focus distinct from the previous beat while staying inside the current beat excerpt.`,
       hook_visual: beatStart < hookDurationSec,
       retention_ramp_visual: beatStart >= hookDurationSec && beatStart < retentionRampSec,
       hook_visual_intent: beatStart < hookDurationSec
@@ -217,31 +504,352 @@ function splitScene(scene, scriptText, searchFrom = 0) {
         : null,
       image_id_hint: `${episode}-cut-${String(beats.length + 1).padStart(3, "0")}`,
     });
-    cursor = beatEnd;
   }
   return { beats, sceneText };
 }
 
+function assertBeatExcerptQuality(beats) {
+  if (allowEmptyBeatExcerpts) return;
+  const failures = [];
+  for (const beat of beats) {
+    const excerpt = String(beat.visual_beat_script_excerpt ?? "").trim();
+    if (!excerpt) failures.push(`${beat.visual_beat_id} has empty visual_beat_script_excerpt`);
+  }
+  if (failures.length) {
+    throw new Error(`Visual beat excerpt quality gate failed:\n${failures.slice(0, 40).join("\n")}`);
+  }
+}
+
+function normalizeGlobalBeatTimeline(beats) {
+  let cursor = 0;
+  return beats.map((beat) => {
+    const start = Math.max(cursor, Number(beat.start_sec ?? cursor));
+    const rawEnd = Number(beat.end_sec ?? (start + Number(beat.duration_sec ?? 1)));
+    const end = Math.max(start + 0.25, rawEnd);
+    cursor = end;
+    return {
+      ...beat,
+      start_sec: Number(start.toFixed(3)),
+      end_sec: Number(end.toFixed(3)),
+      duration_sec: Number(Math.max(0.25, end - start).toFixed(3)),
+    };
+  });
+}
+
+function assertRetentionBeatDensity(beats) {
+  if (allowUnderTargetRetentionBeats) return;
+  const ordered = [...beats].sort((a, b) => Number(a.start_sec ?? 0) - Number(b.start_sec ?? 0));
+  const totalEnd = ordered.reduce((max, beat) => Math.max(max, Number(beat.end_sec ?? (Number(beat.start_sec ?? 0) + Number(beat.duration_sec ?? 0))) || 0), 0);
+  const hookCoveredSec = Math.max(0, Math.min(totalEnd, hookDurationSec));
+  const rampCoveredSec = Math.max(0, Math.min(totalEnd, retentionRampSec) - hookDurationSec);
+  const hookBeats = ordered.filter((beat) => Number(beat.start_sec ?? 0) < hookDurationSec).length;
+  const rampBeats = ordered.filter((beat) => {
+    const start = Number(beat.start_sec ?? 0);
+    return start >= hookDurationSec && start < retentionRampSec;
+  }).length;
+  const requiredHookBeats = hookCoveredSec > 0 ? Math.max(1, Math.ceil(hookCoveredSec / Math.max(1, hookMaxBeatSec))) : 0;
+  const requiredRampBeats = rampCoveredSec > 0 ? Math.max(1, Math.ceil(rampCoveredSec / Math.max(1, rampMaxBeatSec))) : 0;
+  const failures = [];
+  if (hookBeats < requiredHookBeats) {
+    failures.push(`hook beat density ${hookBeats}<${requiredHookBeats} for ${Number(hookCoveredSec).toFixed(1)}s covered at max ${hookMaxBeatSec}s`);
+  }
+  if (rampBeats < requiredRampBeats) {
+    failures.push(`retention ramp beat density ${rampBeats}<${requiredRampBeats} for ${Number(rampCoveredSec).toFixed(1)}s covered at max ${rampMaxBeatSec}s`);
+  }
+  if (failures.length) {
+    throw new Error(`Visual beat density gate failed:\n${failures.join("\n")}`);
+  }
+}
+
+function normalizeComparable(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstName(value) {
+  return String(value ?? "").trim().split(/\s+/)[0] ?? "";
+}
+
+function mentionedKnownCharacters(beat) {
+  const excerpt = String(beat.visual_beat_script_excerpt ?? "");
+  const visibleSubjects = Array.isArray(beat.visible_subjects) ? beat.visible_subjects : [];
+  const characterStates = Array.isArray(beat.character_states) ? beat.character_states : [];
+  const knownNames = [
+    beat.primary_subject,
+    ...visibleSubjects,
+    ...characterStates.map((state) => state?.character),
+  ]
+    .map((name) => String(name ?? "").trim())
+    .filter((name) => name && /^[A-Z][\p{L}\p{N}'’-]+/u.test(name));
+  const uniqueNames = [...new Set(knownNames)];
+  return uniqueNames.filter((name) => {
+    const escapedFull = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const first = firstName(name);
+    const escapedFirst = first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escapedFull}\\b`, "u").test(excerpt)
+      || (first.length > 2 && new RegExp(`\\b${escapedFirst}\\b`, "u").test(excerpt));
+  });
+}
+
+function namedCharacterCoverageFindings(beats) {
+  const findings = [];
+  for (const beat of beats) {
+    const visibleSubjects = (Array.isArray(beat.visible_subjects) ? beat.visible_subjects : [])
+      .map(normalizeComparable)
+      .filter(Boolean);
+    const mentioned = mentionedKnownCharacters(beat);
+    for (const name of mentioned) {
+      const normalizedName = normalizeComparable(name);
+      const normalizedFirst = normalizeComparable(firstName(name));
+      const covered = visibleSubjects.some((subject) => (
+        subject === normalizedName
+        || subject.includes(normalizedName)
+        || (normalizedFirst && subject.split(/\s+/).includes(normalizedFirst))
+      ));
+      if (!covered) {
+        findings.push({
+          code: "named_character_not_visible_subject",
+          severity: "warning",
+          scene_id: beat.parent_scene_id ?? beat.scene_id,
+          visual_beat_id: beat.visual_beat_id,
+          character: name,
+          message: `Beat excerpt mentions ${name}, but the beat visible_subjects do not include that character. Carry this as local edit direction; prompt authoring must let the local excerpt win over stale parent-scene subjects.`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+function locationMentionPhrases(text) {
+  const source = String(text ?? "");
+  const phrases = [];
+  const venueNouns = "Hall|Room|Stage|Lobby|Campus|Arena|Court|Boardroom|Office|Dorm|Apartment|Kitchen|Elevator|Tower|District|Station|Gym|Street|Floor|Hallway|Corridor|Courtyard|Temple|Palace|Library|Classroom|Studio|Theater|Restaurant|Cafe|Hospital|Bank|Store|Market|Platform|Roof|Basement|Warehouse|Server";
+  const properVenuePattern = new RegExp(`\\b([A-Z][\\p{L}\\p{N}'’-]*(?:\\s+[A-Z][\\p{L}\\p{N}'’-]*){0,3}\\s+(?:${venueNouns}))\\b`, "gu");
+  for (const match of source.matchAll(properVenuePattern)) phrases.push(match[1]);
+  const stop = "(?!(?:a|an|and|as|at|box|for|frame|from|gifts|his|her|in|inside|into|my|next|of|on|open|our|report|same|the|their|to|whole|with|your)\\b)";
+  const commonVenuePattern = new RegExp(`\\b(?:the\\s+)?((?:${stop}[a-z][\\p{L}\\p{N}'’-]*\\s+){1,3}(?:${venueNouns.toLowerCase().replaceAll("|", "|")}))\\b`, "giu");
+  for (const match of source.matchAll(commonVenuePattern)) phrases.push(match[1]);
+  const genericMovementPattern = /\b(?:entered|arrived at|walked into|stepped into|crossed into|moved into|went into|inside|through|toward)\s+(?:the\s+)?(hall|room|stage|lobby|campus|arena|court|boardroom|office|dorm|apartment|kitchen|elevator|tower|district|station|gym|street|floor|hallway|corridor|courtyard|temple|palace|library|classroom|studio|theater|restaurant|cafe|hospital|bank|store|market|platform|roof|basement|warehouse|server)\b/giu;
+  for (const match of source.matchAll(genericMovementPattern)) phrases.push(match[1]);
+  return [...new Set(phrases.map((phrase) => phrase.trim()).filter(Boolean))];
+}
+
+function locationMentionCoverageFindings(beats) {
+  const findings = [];
+  for (const beat of beats) {
+    const location = normalizeComparable(beat.location ?? beat.location_timeline_label ?? "");
+    if (!location) continue;
+    for (const phrase of locationMentionPhrases(beat.visual_beat_script_excerpt)) {
+      const normalizedPhrase = normalizeComparable(phrase);
+      const tokens = normalizedPhrase.split(/\s+/).filter((token) => token.length > 2);
+      const matchingTokens = tokens.filter((token) => location.split(/\s+/).includes(token));
+      const covered = normalizedPhrase && (
+        location.includes(normalizedPhrase)
+        || normalizedPhrase.includes(location)
+        || (tokens.length > 0 && matchingTokens.length >= Math.min(2, tokens.length))
+      );
+      if (!covered) {
+        findings.push({
+          code: "location_mention_not_in_beat_location",
+          severity: "warning",
+          scene_id: beat.parent_scene_id ?? beat.scene_id,
+          visual_beat_id: beat.visual_beat_id,
+          mentioned_location: phrase,
+          beat_location: beat.location ?? null,
+          message: `Beat excerpt names ${phrase}, but the beat location is ${beat.location ?? "(missing)"}.`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+function repeatedBeatJobFindings(beats, {
+  maxConsecutiveSameLocationJob = 3,
+  retentionEndSec = retentionRampSec,
+} = {}) {
+  const ordered = [...beats].sort((a, b) => Number(a.start_sec ?? 0) - Number(b.start_sec ?? 0));
+  const findings = [];
+  let current = null;
+  for (const beat of ordered) {
+    const start = Number(beat.start_sec ?? 0);
+    if (start >= retentionEndSec) {
+      if (current && current.count > maxConsecutiveSameLocationJob) findings.push(current);
+      current = null;
+      continue;
+    }
+    const location = normalizeComparable(beat.location ?? "none") || "none";
+    const job = String(beat.visual_job ?? "none");
+    const key = `${location}|${job}`;
+    if (!current || current.key !== key) {
+      if (current && current.count > maxConsecutiveSameLocationJob) findings.push(current);
+      current = {
+        code: "repeated_location_visual_job_run",
+        severity: "warning",
+        key,
+        location: beat.location ?? null,
+        visual_job: job,
+        start_sec: beat.start_sec,
+        end_sec: beat.end_sec,
+        count: 1,
+        first_visual_beat_id: beat.visual_beat_id,
+        last_visual_beat_id: beat.visual_beat_id,
+        message: "",
+      };
+    } else {
+      current.count += 1;
+      current.end_sec = beat.end_sec;
+      current.last_visual_beat_id = beat.visual_beat_id;
+    }
+  }
+  if (current && current.count > maxConsecutiveSameLocationJob) findings.push(current);
+  return findings.map((finding) => ({
+    ...finding,
+    message: `Repeated ${finding.visual_job} beats in ${finding.location ?? "unknown location"} for ${finding.count} consecutive cuts.`,
+  }));
+}
+
+function longSameLocationBeatFindings(beats, {
+  maxSameLocationSpanSec = 150,
+  retentionStartSec = retentionRampSec,
+} = {}) {
+  const ordered = [...beats].sort((a, b) => Number(a.start_sec ?? 0) - Number(b.start_sec ?? 0));
+  const findings = [];
+  let current = null;
+  for (const beat of ordered) {
+    const location = normalizeComparable(beat.location ?? "none") || "none";
+    if (!current || current.location_key !== location) {
+      if (current) findings.push(current);
+      current = {
+        code: "long_same_location_beat_span",
+        severity: "warning",
+        location_key: location,
+        location: beat.location ?? null,
+        start_sec: Number(beat.start_sec ?? 0),
+        end_sec: Number(beat.end_sec ?? beat.start_sec ?? 0),
+        count: 1,
+        first_visual_beat_id: beat.visual_beat_id,
+        last_visual_beat_id: beat.visual_beat_id,
+      };
+    } else {
+      current.end_sec = Number(beat.end_sec ?? current.end_sec);
+      current.count += 1;
+      current.last_visual_beat_id = beat.visual_beat_id;
+    }
+  }
+  if (current) findings.push(current);
+  return findings
+    .filter((span) => {
+      if (span.location_key === "none") return false;
+      const measuredStart = Math.max(span.start_sec, retentionStartSec);
+      return span.end_sec > measuredStart && span.end_sec - measuredStart > maxSameLocationSpanSec && span.count >= 8;
+    })
+    .map((span) => ({
+      ...span,
+      measured_after_retention_start_sec: Number((span.end_sec - Math.max(span.start_sec, retentionStartSec)).toFixed(3)),
+      message: `Beat plan holds ${span.location ?? "one location"} for ${span.count} cuts and ${Number(span.end_sec - Math.max(span.start_sec, retentionStartSec)).toFixed(1)}s after the retention runway.`,
+    }));
+}
+
+function visualBeatQualityFindings(beats) {
+  return [
+    ...namedCharacterCoverageFindings(beats),
+    ...locationMentionCoverageFindings(beats),
+    ...repeatedBeatJobFindings(beats),
+    ...longSameLocationBeatFindings(beats),
+  ];
+}
+
+function assertVisualBeatQualityFindings(findings) {
+  if (!blockVisualBeatQualityFindings) return;
+  const blockers = findings.filter((finding) => finding.severity === "blocker");
+  if (blockers.length) {
+    throw new Error(`Visual beat quality gate failed:\n${blockers.slice(0, 40).map((finding) => (
+      `${finding.code} ${finding.visual_beat_id ?? finding.first_visual_beat_id ?? finding.scene_id ?? ""}: ${finding.message}`
+    )).join("\n")}`);
+  }
+}
+
+function scopeBeatsByTime(beats) {
+  const start = Number.isFinite(scopeStartSec) ? scopeStartSec : null;
+  const end = Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : null;
+  if (start === null && end === null) return beats;
+  return beats.filter((beat) => {
+    const beatStart = Number(beat.start_sec ?? 0);
+    const beatEnd = Number(beat.end_sec ?? (beatStart + Number(beat.duration_sec ?? 0)));
+    if (start !== null && beatEnd <= start) return false;
+    if (end !== null && beatStart >= end) return false;
+    return true;
+  }).map((beat) => ({
+    ...beat,
+    scope_window_sec: {
+      start_sec: start,
+      end_sec: end,
+    },
+  }));
+}
+
 async function main() {
-  const [timedPlan, scriptText] = await Promise.all([
+  const [timedPlan, scriptText, wordTiming] = await Promise.all([
     readJson(timedPlanPath, null),
     fs.readFile(scriptPath, "utf8").catch(() => ""),
+    readJson(wordTimingPath, null),
   ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
+  if (!scriptText.trim()) throw new Error(`Missing script: ${scriptPath}`);
+  if (wordTiming?.status !== "passed" || !Array.isArray(wordTiming.words) || !wordTiming.words.length) throw new Error(`Missing passed local Whisper word timing: ${wordTimingPath}`);
+  const scriptHash = sha256(scriptText);
+  if (timedPlan.source_script_hash && timedPlan.source_script_hash !== scriptHash) throw new Error("timed_scene_plan.json is stale for current script_clean.md.");
+  if (wordTiming.source_script_hash && wordTiming.source_script_hash !== scriptHash) throw new Error("narration_word_timing is stale for current script_clean.md.");
   const beats = [];
   let scriptCursor = 0;
   for (const scene of timedPlan.scenes) {
-    const result = splitScene(scene, scriptText, scriptCursor);
+    const result = splitScene(scene, scriptText, wordTiming, scriptCursor);
     for (const beat of result.beats) beats.push(beat);
     if (result.sceneText) {
       const start = scriptText.indexOf(result.sceneText, scriptCursor);
       if (start >= 0) scriptCursor = start + result.sceneText.length;
     }
   }
-  const numberedBeats = beats.map((beat, index) => ({
+  const numberedBeatsAll = normalizeGlobalBeatTimeline(beats).map((beat, index) => ({
     ...beat,
     image_id_hint: `${episode}-cut-${String(index + 1).padStart(3, "0")}`,
   }));
+  const numberedBeats = scopeBeatsByTime(numberedBeatsAll);
+  assertBeatExcerptQuality(numberedBeats);
+  assertRetentionBeatDensity(numberedBeats);
+  const qualityFindings = visualBeatQualityFindings(numberedBeats);
+  assertVisualBeatQualityFindings(qualityFindings);
+  const qualityFindingsByBeat = new Map();
+  for (const finding of qualityFindings) {
+    const beatId = finding.visual_beat_id ?? finding.first_visual_beat_id ?? null;
+    if (!beatId) continue;
+    const rows = qualityFindingsByBeat.get(beatId) ?? [];
+    rows.push(finding);
+    qualityFindingsByBeat.set(beatId, rows);
+  }
+  const beatsWithQuality = numberedBeats.map((beat) => ({
+    ...beat,
+    visual_beat_quality_findings: qualityFindingsByBeat.get(beat.visual_beat_id) ?? [],
+  }));
+  const cueCounts = {};
+  for (const beat of beatsWithQuality) {
+    for (const cue of beat.editorial_cues ?? []) cueCounts[cue] = (cueCounts[cue] ?? 0) + 1;
+  }
+  const locationTimeline = numberedBeats
+    .filter((beat, index, rows) => beat.location && (index === 0 || beat.location !== rows[index - 1]?.location))
+    .map((beat) => ({
+      start_sec: beat.start_sec,
+      timestamp: formatTimestamp(beat.start_sec),
+      location: beat.location,
+      scene_id: beat.parent_scene_id ?? beat.scene_id,
+      visual_beat_id: beat.visual_beat_id,
+      excerpt: beat.visual_beat_script_excerpt,
+    }));
   const report = {
     schema: "goldflow_visual_beat_plan_v1",
     status: "passed",
@@ -249,18 +857,40 @@ async function main() {
     series_slug: series,
     week,
     episode,
-    source_script_hash: timedPlan.source_script_hash,
-    source_artifact_paths: [timedPlanPath, scriptPath],
-    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, scriptPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_script_hash: scriptHash,
+    source_artifact_paths: [timedPlanPath, scriptPath, wordTimingPath],
+    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, scriptPath, wordTimingPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: timedPlan.timing_source,
     audio_duration_sec: timedPlan.audio_duration_sec,
+    word_timing_path: wordTimingPath,
+    word_timing_audio_hash: wordTiming.narration_audio_hash ?? null,
     scene_count: timedPlan.scenes.length,
-    visual_beat_count: numberedBeats.length,
+    visual_beat_count: beatsWithQuality.length,
+    visual_beat_scope: {
+      mode: numberedBeats.length === numberedBeatsAll.length ? "full_episode" : "time_scoped",
+      scope_start_sec: Number.isFinite(scopeStartSec) ? scopeStartSec : null,
+      scope_end_sec: Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : null,
+      selected_visual_beat_count: numberedBeats.length,
+      total_visual_beat_count: numberedBeatsAll.length,
+      selected_scene_ids: [...new Set(numberedBeats.map((beat) => beat.parent_scene_id ?? beat.scene_id).filter(Boolean))],
+    },
     hook_duration_sec: hookDurationSec,
-    hook_visual_beat_count: numberedBeats.filter((beat) => Number(beat.start_sec) < hookDurationSec).length,
+    hook_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) < hookDurationSec).length,
     retention_ramp_sec: retentionRampSec,
-    retention_ramp_visual_beat_count: numberedBeats.filter((beat) => Number(beat.start_sec) >= hookDurationSec && Number(beat.start_sec) < retentionRampSec).length,
-    policy: "Split timed semantic scenes into visual beats before image prompt authoring. Beats preserve scene facts, Whisper timing, and a local script excerpt for each beat; LLM still authors the final prompt.",
+    retention_ramp_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) >= hookDurationSec && Number(beat.start_sec) < retentionRampSec).length,
+    editorial_cue_counts: cueCounts,
+    visual_beat_quality_findings: qualityFindings,
+    visual_beat_quality_summary: {
+      finding_count: qualityFindings.length,
+      warning_count: qualityFindings.filter((finding) => finding.severity === "warning").length,
+      blocker_count: qualityFindings.filter((finding) => finding.severity === "blocker").length,
+      codes: Object.fromEntries([...new Set(qualityFindings.map((finding) => finding.code))].map((code) => [
+        code,
+        qualityFindings.filter((finding) => finding.code === code).length,
+      ])),
+    },
+    location_timeline: locationTimeline,
+    policy: "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry an exact local narration excerpt, editorial cues, a visual job, and a location/character context before prompt authoring.",
     beat_settings: {
       target_beat_sec: targetBeatSec,
       max_beat_sec: maxBeatSec,
@@ -274,7 +904,7 @@ async function main() {
       ramp_max_beat_sec: rampMaxBeatSec,
       ramp_min_beat_sec: rampMinBeatSec,
     },
-    beats: numberedBeats,
+    beats: beatsWithQuality,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

@@ -34,16 +34,31 @@ function positionMatchesText(position, text) {
   return patterns.some((pattern) => pattern.test(String(text ?? "")));
 }
 
+function escapedNamePattern(name) {
+  return String(name ?? "")
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+}
+
 function sharedWardrobeMerge(clause, stagedNames) {
-  const present = stagedNames.filter((name) => new RegExp(`\\b${name.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(clause)));
+  const normalizedClause = normalizeToken(clause);
+  const present = stagedNames.filter((name) => new RegExp(`\\b${escapedNamePattern(name)}\\b`, "i").test(normalizedClause));
   if (present.length < 2) return false;
-  const hasWardrobe = WARDROBE_KEYWORDS.some((keyword) => new RegExp(`\\b${keyword}s?\\b`, "i").test(clause));
+  const wardrobePattern = WARDROBE_KEYWORDS.map((keyword) => `${keyword}s?`).join("|");
+  const wardrobeRegex = new RegExp(`\\b(?:${wardrobePattern})\\b`, "i");
+  const hasWardrobe = wardrobeRegex.test(normalizedClause);
   if (!hasWardrobe) return false;
-  const conjoined = present.some((left) => present.some((right) =>
-    left !== right && new RegExp(`\\b${left.replace(/\s+/g, "\\s+")}\\s+(?:and|&|with)\\s+${right.replace(/\s+/g, "\\s+")}\\b`, "i").test(normalizeToken(clause))
-  ));
-  const sharedCue = /\b(both|together|matching|same|identical|each other)\b/i.test(clause);
-  return conjoined || sharedCue;
+  const sharedWardrobeCue = /\b(matching|same|identical|shared|coordinated)\b/i.test(normalizedClause);
+  const wardrobeVerbPattern = "\\b(?:wear|wears|wearing|wore|dressed|clad|outfitted|in|share|shares|sharing)\\b";
+  const bothShareWardrobe = new RegExp(`\\b(?:both|each)\\b.{0,80}${wardrobeVerbPattern}.{0,100}\\b(?:${wardrobePattern})\\b`, "i").test(normalizedClause);
+  const pairSharesWardrobe = present.some((left) => present.some((right) => {
+    if (left === right) return false;
+    const pairPattern = `\\b${escapedNamePattern(left)}\\s+(?:and|&|with)\\s+${escapedNamePattern(right)}\\b`;
+    const pairThenWardrobe = new RegExp(`${pairPattern}.{0,100}${wardrobeVerbPattern}.{0,100}\\b(?:${wardrobePattern})\\b`, "i").test(normalizedClause);
+    const pairWithSharedCue = new RegExp(pairPattern, "i").test(normalizedClause) && sharedWardrobeCue;
+    return pairThenWardrobe || pairWithSharedCue;
+  }));
+  return bothShareWardrobe || pairSharesWardrobe;
 }
 
 function normalizeToken(value) {

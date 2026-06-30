@@ -171,6 +171,27 @@ function stage(stage, requiredInput, output, approvalRequired, done, evidence, i
   };
 }
 
+async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
+  const channel = identity.channel ?? "<channel>";
+  const series = identity.series_slug ?? "<series>";
+  const week = identity.week ?? "<week>";
+  const episode = identity.episode ?? "<episode>";
+  const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
+  const fullCommand = commandFor("visual_prompt_plan_review_harden", identity);
+  const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
+  if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return fullCommand;
+  const reviewedPlan = await readJson(path.join(episodeDir, "section_image_prompts_reviewed.json"), null);
+  const hardenedPlan = await readJson(path.join(episodeDir, "section_image_prompts_hardened.json"), null);
+  const hardenReport = await readJson(path.join(episodeDir, `visual_prompt_hardening_${episode}.json`), null);
+  if (hardenedPlan?.status === "passed" && Array.isArray(hardenedPlan.prompts) && hardenedPlan.prompts.length) {
+    return `node bin/goldflow.mjs visual harden ${base}`;
+  }
+  if (reviewedPlan?.status === "passed" && hardenReport?.status !== "blocked") {
+    return `node bin/goldflow.mjs visual harden ${base}`;
+  }
+  return `node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2 && node bin/goldflow.mjs visual harden ${base}`;
+}
+
 async function imageReportComplete(episodeDir, episode) {
   const promptPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
   const promptPlan = await readJson(promptPlanPath, null);
@@ -459,11 +480,128 @@ async function jsonStatusComplete(filePath, label) {
   return { done, evidence: `${label}; status=${status || "missing_status"}` };
 }
 
+function statusAllowsDownstreamUse(status) {
+  return !["failed", "blocked", "blocked_deadletter", "failed_repairable"].includes(String(status ?? "").toLowerCase());
+}
+
+async function sourceHashesCurrent(artifact) {
+  const sourceHashes = artifact?.source_hashes && typeof artifact.source_hashes === "object" && !Array.isArray(artifact.source_hashes)
+    ? artifact.source_hashes
+    : null;
+  if (!sourceHashes) return true;
+  for (const [sourcePath, recordedHash] of Object.entries(sourceHashes)) {
+    const currentHash = await fileSha256(sourcePath);
+    if (!currentHash || currentHash !== recordedHash) return false;
+  }
+  return true;
+}
+
+function sortedJson(value) {
+  if (Array.isArray(value)) return JSON.stringify([...value].sort());
+  return JSON.stringify(value ?? null);
+}
+
+function characterStateRefsCompatible(dependentRefs, currentRefs) {
+  const currentById = new Map((currentRefs ?? []).map((ref) => [ref.state_ref_id, ref]));
+  for (const ref of dependentRefs ?? []) {
+    const current = currentById.get(ref.state_ref_id);
+    if (!current) return false;
+    for (const key of ["character", "prompt_anchor", "scene_prompt_anchor", "source_ref_id", "base_identity_ref_id", "identity_usage"]) {
+      if ((ref[key] ?? null) !== (current[key] ?? null)) return false;
+    }
+    if (sortedJson(ref.scene_ids) !== sortedJson(current.scene_ids)) return false;
+  }
+  return true;
+}
+
+function referencedIdsFromPromptPlan(artifact) {
+  const ids = new Set();
+  for (const prompt of artifact?.prompts ?? []) {
+    for (const req of prompt.reference_requirements ?? []) {
+      if (req?.ref_id) ids.add(req.ref_id);
+    }
+    const manifest = prompt.shot_manifest ?? {};
+    if (manifest.location_ref_id) ids.add(manifest.location_ref_id);
+    if (manifest.protagonist_state_ref_id) ids.add(manifest.protagonist_state_ref_id);
+    for (const refId of manifest.character_state_ref_ids ?? []) {
+      if (refId) ids.add(refId);
+    }
+  }
+  return ids;
+}
+
+async function visualReferencePlanHashDriftIsVolatile(sourcePath, dependentArtifact) {
+  if (path.basename(sourcePath) !== "visual_reference_plan.json") return false;
+  const currentPlan = await readJson(sourcePath, null);
+  if (!currentPlan || !statusAllowsDownstreamUse(currentPlan.status) || !(await sourceHashesCurrent(currentPlan))) return false;
+  if (Array.isArray(dependentArtifact?.character_state_refs)) {
+    return characterStateRefsCompatible(dependentArtifact.character_state_refs, currentPlan.character_state_refs ?? []);
+  }
+  if (Array.isArray(dependentArtifact?.prompts)) {
+    const targetIds = new Set((currentPlan.reference_targets ?? []).map((target) => target.ref_id).filter(Boolean));
+    for (const ref of currentPlan.character_state_refs ?? []) {
+      if (ref.state_ref_id) targetIds.add(ref.state_ref_id);
+      if (ref.source_ref_id) targetIds.add(ref.source_ref_id);
+    }
+    for (const refId of referencedIdsFromPromptPlan(dependentArtifact)) {
+      if (!targetIds.has(refId)) return false;
+    }
+  }
+  return true;
+}
+
+async function characterStateRefsHashDriftIsVolatile(sourcePath, dependentArtifact) {
+  if (path.basename(sourcePath) !== "character_state_refs.json") return false;
+  const currentRefs = await readJson(sourcePath, null);
+  if (!currentRefs || !statusAllowsDownstreamUse(currentRefs.status)) return false;
+  const sourceHashes = currentRefs.source_hashes && typeof currentRefs.source_hashes === "object" && !Array.isArray(currentRefs.source_hashes)
+    ? currentRefs.source_hashes
+    : null;
+  if (sourceHashes) {
+    for (const [currentSourcePath, recordedHash] of Object.entries(sourceHashes)) {
+      const currentHash = await fileSha256(currentSourcePath);
+      if (!currentHash) return false;
+      if (currentHash !== recordedHash && !(await visualReferencePlanHashDriftIsVolatile(currentSourcePath, currentRefs))) return false;
+    }
+  }
+  if (Array.isArray(dependentArtifact?.prompts)) {
+    const currentIds = new Set();
+    for (const ref of currentRefs.character_state_refs ?? []) {
+      if (ref.state_ref_id) currentIds.add(ref.state_ref_id);
+      if (ref.source_ref_id) currentIds.add(ref.source_ref_id);
+      if (ref.base_identity_ref_id) currentIds.add(ref.base_identity_ref_id);
+    }
+    for (const sourcePath of Object.keys(sourceHashes ?? {})) {
+      if (path.basename(sourcePath) !== "visual_reference_plan.json") continue;
+      const visualPlan = await readJson(sourcePath, null);
+      for (const target of visualPlan?.reference_targets ?? []) {
+        if (target.ref_id) currentIds.add(target.ref_id);
+      }
+      for (const ref of visualPlan?.character_state_refs ?? []) {
+        if (ref.state_ref_id) currentIds.add(ref.state_ref_id);
+        if (ref.source_ref_id) currentIds.add(ref.source_ref_id);
+        if (ref.base_identity_ref_id) currentIds.add(ref.base_identity_ref_id);
+      }
+    }
+    for (const prompt of dependentArtifact.prompts ?? []) {
+      const manifest = prompt.shot_manifest ?? {};
+      const stateIds = [
+        manifest.protagonist_state_ref_id,
+        ...(manifest.character_state_ref_ids ?? []),
+      ].filter(Boolean);
+      for (const refId of stateIds) {
+        if (!currentIds.has(refId)) return false;
+      }
+    }
+  }
+  return true;
+}
+
 async function jsonStatusWithSourceHashesComplete(filePath, label) {
   const artifact = await readJson(filePath, null);
   if (!artifact) return { done: false, evidence: `${label} missing` };
   const status = String(artifact.status ?? "").toLowerCase();
-  if (["failed", "blocked", "blocked_deadletter", "failed_repairable"].includes(status)) {
+  if (!statusAllowsDownstreamUse(status)) {
     return { done: false, evidence: `${label}; status=${status || "missing_status"}` };
   }
   const sourceHashes = artifact.source_hashes && typeof artifact.source_hashes === "object" && !Array.isArray(artifact.source_hashes)
@@ -471,12 +609,19 @@ async function jsonStatusWithSourceHashesComplete(filePath, label) {
     : null;
   if (!sourceHashes) return { done: true, evidence: `${label}; status=${status || "missing_status"}; source_hashes=missing` };
   const stale = [];
+  const ignored = [];
   for (const [sourcePath, recordedHash] of Object.entries(sourceHashes)) {
     const currentHash = await fileSha256(sourcePath);
     if (!currentHash) {
       stale.push(`${path.basename(sourcePath)} missing`);
     } else if (currentHash !== recordedHash) {
-      stale.push(`${path.basename(sourcePath)} stale`);
+      if (await visualReferencePlanHashDriftIsVolatile(sourcePath, artifact)) {
+        ignored.push(`${path.basename(sourcePath)} reference_paths_updated`);
+      } else if (await characterStateRefsHashDriftIsVolatile(sourcePath, artifact)) {
+        ignored.push(`${path.basename(sourcePath)} reference_paths_updated`);
+      } else {
+        stale.push(`${path.basename(sourcePath)} stale`);
+      }
     }
   }
   if (stale.length) {
@@ -484,7 +629,7 @@ async function jsonStatusWithSourceHashesComplete(filePath, label) {
   }
   return {
     done: true,
-    evidence: `${label}; status=${status || "missing_status"}; source_hashes=current`,
+    evidence: `${label}; status=${status || "missing_status"}; source_hashes=current${ignored.length ? `; ignored=${ignored.slice(0, 4).join(", ")}` : ""}`,
   };
 }
 
@@ -510,13 +655,26 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash) {
     : null;
   if (charSourceHashes) {
     const stale = [];
+    const ignored = [];
     for (const [sourcePath, recordedHash] of Object.entries(charSourceHashes)) {
       const currentHash = await fileSha256(sourcePath);
       if (!currentHash) stale.push(`${path.basename(sourcePath)} missing`);
-      else if (currentHash !== recordedHash) stale.push(`${path.basename(sourcePath)} stale`);
+      else if (currentHash !== recordedHash) {
+        if (await visualReferencePlanHashDriftIsVolatile(sourcePath, characterRefs)) {
+          ignored.push(`${path.basename(sourcePath)} reference_paths_updated`);
+        } else {
+          stale.push(`${path.basename(sourcePath)} stale`);
+        }
+      }
     }
     if (stale.length) {
       return { done: false, evidence: `${visual.evidence}; character_state_refs.json ${stale.slice(0, 4).join(", ")}` };
+    }
+    if (ignored.length) {
+      return {
+        done: visual.done,
+        evidence: `${visual.evidence}; character_state_refs.json status=${characterStatus}; source_hashes=current; ignored=${ignored.slice(0, 4).join(", ")}`,
+      };
     }
   }
   return {
@@ -567,6 +725,7 @@ async function main() {
   const render = await renderComplete(episodeDir, episode);
   const latestQa = await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
+  const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity);
   const narratorOnly = isNarratorOnlyAudio(identity);
   const sfxScoreDone = narratorOnly
     ? { done: true, evidence: "skipped: audio_target narrator_only" }
@@ -592,7 +751,7 @@ async function main() {
     stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, visualBeatPlan.done, visualBeatPlan.evidence, identity),
     stage("visual_reference_plan", "visual beats + semantic facts", "visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity),
     stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity),
-    stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity),
+    stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
     stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),
     stage("image_generation", "hardened prompt plan + generated refs", `imagegen_report_${episode}.json + assets/images`, false, imagegen.done, imagegen.evidence, identity),
     stage("premium_render", "hardened prompts + final longform mix", `render_report_${episode}*.json + final MP4`, false, render.done, render.evidence, identity),

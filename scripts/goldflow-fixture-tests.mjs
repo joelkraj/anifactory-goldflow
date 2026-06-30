@@ -1125,6 +1125,22 @@ function testCharacterStagingSanitizerAndReviewBlockers() {
   };
   assert.equal(multiCharacterBleedFindings(naturalPositionPrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
 
+  const eyelineWithWardrobePrompt = {
+    image_id: "ep_01-cut-012b",
+    scene_id: "scene_012",
+    modelslab_image_prompt: "Center, Mira wears a cream fitted coat over a black dress, tense public composure, eyes caught between Joey and the judge. Frame-left, Joey wears a dark varsity jacket over a white T-shirt and black jeans.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(eyelineWithWardrobePrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
+  const separateWardrobeSharedTorsoPrompt = {
+    image_id: "ep_01-cut-012c",
+    scene_id: "scene_012",
+    modelslab_image_prompt: "Frame-left, Joey wears a dark varsity jacket over a white T-shirt and black jeans while Mira wears a cream fitted coat over a black dress on frame-right; both full torsos stay clear above the table edge.",
+    shot_manifest: stagedManifest,
+  };
+  assert.equal(multiCharacterBleedFindings(separateWardrobeSharedTorsoPrompt, characterStateRefs).filter((finding) => finding.severity === "blocker").length, 0);
+
   const splitSentenceWardrobePrompt = {
     image_id: "ep_01-cut-013",
     scene_id: "scene_013",

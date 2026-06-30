@@ -28,6 +28,7 @@ import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./v
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 import {
   compatibleHardenFeedbackBlockers,
+  hasHardenFeedbackFindings,
   resolvedDeadletterPayload,
 } from "./lib/visual-resolution-utils.mjs";
 
@@ -1314,6 +1315,7 @@ function testHardenFeedbackBlockersMapToReviewResolveInput() {
   assert.equal(blockers[0].source_report_path, "/tmp/harden.json");
   assert.equal(blockers[0].image_id, "ep_01-cut-002");
   assert.equal(blockers[0].code, "physical_location_ref_missing");
+  assert.equal(hasHardenFeedbackFindings(blockers), true);
   assert.deepEqual(
     compatibleHardenFeedbackBlockers({
       hardenReport,

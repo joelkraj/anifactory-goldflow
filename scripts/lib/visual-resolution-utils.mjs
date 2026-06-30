@@ -7,6 +7,10 @@ export function unresolvedBlockerFindings(findings) {
   return (findings ?? []).filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
 }
 
+export function hasHardenFeedbackFindings(findings) {
+  return unresolvedBlockerFindings(findings).some((finding) => finding.source_stage === "visual_harden");
+}
+
 export function compatibleHardenFeedbackBlockers({
   hardenReport,
   promptPlan,

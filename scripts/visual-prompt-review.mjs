@@ -10,6 +10,7 @@ import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeChara
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
 import {
   compatibleHardenFeedbackBlockers,
+  hasHardenFeedbackFindings,
   resolvedDeadletterPayload,
   unresolvedBlockerFindings as sharedUnresolvedBlockerFindings,
 } from "./lib/visual-resolution-utils.mjs";
@@ -820,10 +821,6 @@ function positiveCorrectionDirective(finding) {
   };
 }
 
-function isHardenFeedbackFinding(finding) {
-  return finding?.source_stage === "visual_harden";
-}
-
 function mergeScenePrompts(basePrompts, replacementPrompts, sceneIds) {
   const sceneSet = new Set(sceneIds);
   const replacementsById = new Map((replacementPrompts ?? []).map((prompt) => [prompt.image_id, prompt]));
@@ -837,6 +834,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
   let currentPlan = reviewedPlan;
   let currentReport = reviewReport;
   const iterations = [];
+  const hardenValidationRequired = hasHardenFeedbackFindings(currentReport.findings) || Boolean(currentReport.harden_feedback_report_path);
   let blockers = unresolvedBlockerFindings(currentReport.findings);
   for (let iteration = 1; iteration <= maxResolveIterations && blockers.length; iteration += 1) {
     const sceneIds = sceneIdsFromBlockers(blockers);
@@ -849,7 +847,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     const hardenValidationPath = path.join(iterationDir, `visual_prompt_hardening_resolve_${episode}_iter_${iteration}.json`);
     const hardenValidationOutputPath = path.join(iterationDir, `section_image_prompts_resolve_hardened_${episode}_iter_${iteration}.json`);
     const hardenValidationSamplePath = path.join(iterationDir, `visual_prompt_hardening_sample_resolve_${episode}_iter_${iteration}.md`);
-    const needsHardenValidation = blockers.some(isHardenFeedbackFinding);
+    const needsHardenValidation = hardenValidationRequired;
     const correctionDirectives = blockers
       .filter((finding) => sceneIds.includes(finding.scene_id))
       .map(positiveCorrectionDirective);

@@ -790,9 +790,29 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}) {
   const merged = useLocalRoute
     ? await callLocal(mergePrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
     : await callCodex(mergePrompt, mergeStageName);
-  const parsed = Array.isArray(merged.parsed?.reference_targets) && merged.parsed.reference_targets.length
+  let parsed = Array.isArray(merged.parsed?.reference_targets) && merged.parsed.reference_targets.length
     ? merged.parsed
     : fallbackMergeChunkPlans(chunkPlans, Array.isArray(merged.parsed?.warnings) ? merged.parsed.warnings : []);
+  const mergedLocationFindings = locationCoverageFindings(
+    applyDeterministicLocationSceneIds(parsed.reference_targets ?? [], semanticPlan.scenes ?? []).targets,
+    semanticPlan.scenes ?? []
+  ).filter((finding) => finding.severity === "blocker");
+  if (mergedLocationFindings.length) {
+    const fallbackParsed = fallbackMergeChunkPlans(chunkPlans, [
+      ...(Array.isArray(parsed.warnings) ? parsed.warnings : []),
+      {
+        code: "llm_merge_location_scope_collapsed",
+        severity: "warning",
+        message: "LLM merge dropped exact semantic location ref coverage; preserved accepted chunk targets with deterministic exact-id de-duplication.",
+        collapsed_scene_count: mergedLocationFindings.length,
+      },
+    ]);
+    const fallbackLocationFindings = locationCoverageFindings(
+      applyDeterministicLocationSceneIds(fallbackParsed.reference_targets ?? [], semanticPlan.scenes ?? []).targets,
+      semanticPlan.scenes ?? []
+    ).filter((finding) => finding.severity === "blocker");
+    if (!fallbackLocationFindings.length) parsed = fallbackParsed;
+  }
   return {
     provider: merged.provider,
     model: useLocalRoute ? getLLMModel(stageName) : merged.model ?? "codex_cli_default",

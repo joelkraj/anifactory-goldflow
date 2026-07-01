@@ -137,7 +137,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - The LLM receives previous/next beat summaries for sequencing and variety, but those summaries are context only. Current `visual_beat_script_excerpt` remains the authority for what appears in the frame.
 
 15. Visual reference planning.
-   - Writes `reference_inventory_ledger.json` first, then plans style, character state, location, UI, action, and effect refs.
+   - Writes `reference_inventory_ledger.json` first, then plans a lean prompt-facing set of style, character state, location, UI, action, and effect refs.
    - The inventory ledger is the director layer: it groups canonical recurring characters, major character states, key and recurring locations, uniforms/factions/workforce styling, signature UI motifs, critical props, and useful action/effect anchors before final target prompts are written.
    - Character state refs are the definitive identity/wardrobe/state contract only for director-selected attachable refs. One-scene or text-only state changes stay in prompt authoring and should not bloat `character_state_refs.json`.
    - Only `style` refs are global. Location, character, prop, UI, action, and effect refs are scene-scoped and must be attached only from the current scene candidate set.
@@ -145,6 +145,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - In chunked reference planning, each chunk must see the global director-selected asset map, reuse existing asset/ref ids, and pass through director-inventory pruning before merge. The merge pass should receive bounded proposals, not every chunk's raw local collector list.
    - Semantic `ref_requirements` create scoped coverage evidence, not automatic standalone generation. Location target `scene_ids` are derived from semantic location `ref_requirements` and unioned with LLM-authored ids. A physical scene that requires a location target but has no covering target blocks with `scene_missing_location_ref`.
    - Semantic quality blockers are real blockers. A physical scene with a concrete visible location must include a location `ref_requirement`; this target may later become `no_ref_needed` or `derive_from_best_cut`, but semantic planning must not omit the scoped location target.
+   - `no_ref_needed` assets stay in `reference_inventory_ledger.json` for audit and coverage proof, then are pruned from final `visual_reference_plan.json`. The final prompt-facing reference plan should contain only attachable/generated/source/manual-review targets and derive-from-cut targets that can become references later.
    - Keep standalone refs for recurring characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact one-scene characters.
    - Downgrade one-scene late locations/UI/props to `no_ref_needed`; downgrade minor recurring late locations/UI/props/actions to `derive_from_best_cut` or `derive_from_first_clean_cut` when a clean generated scene image can become the reference later.
    - Do not generate standalone refs for minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off dashboards, one-off documents, or 2-3 occurrence minor assets unless they are truly critical to the story.

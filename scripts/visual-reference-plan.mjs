@@ -1140,6 +1140,9 @@ function identityMergeKey(target) {
     "identity", "source", "anchor", "real", "only", "full", "body", "wardrobe", "version",
     "young", "younger", "older", "current", "final", "early", "late", "clean", "dirty", "poor",
     "rich", "injured", "bloodied", "weak", "strong", "transformed", "before", "after",
+    "captain", "commander", "judge", "councilman", "councilwoman", "guildmaster", "guild",
+    "master", "dean", "professor", "chairman", "chairwoman", "boss", "rival", "saint",
+    "healer", "raid", "court", "tribunal", "prisoner", "restrained", "bound",
   ]);
   const tokens = text
     .replace(/[^a-z0-9]+/g, " ")
@@ -1164,11 +1167,28 @@ function isGenericCharacterIdentityTarget(target) {
   const refId = String(target.ref_id ?? "");
   const subject = String(target.subject ?? "");
   if (/^char_[a-z0-9]+(?:_ref)?$/i.test(refId)) return true;
+  if (/^char_[a-z0-9]+_[a-z0-9]+(?:_ref)?$/i.test(refId) && isPlainNamedIdentitySubject(target)) return true;
   if (/^[a-z0-9]+_(?:base_)?(?:face_)?identity_ref$/i.test(refId)) return true;
+  if (/^[a-z0-9]+_[a-z0-9]+_ref$/i.test(refId) && isPlainNamedIdentitySubject(target)) return true;
   if (/^[a-z0-9]+_character_ref$/i.test(refId)) {
     return !/\b(?:state|office|final|morning|warehouse|business|evening|disgraced|promoted|betrayal|suit|support|ally|executive|cornered|diminished|rain|premiere|winter|mature|memory|archival|public|speaker|operator|leader|companion|confession|exit|reformer|strategist|worker|video)\b/i.test(subject);
   }
   return false;
+}
+
+function isPlainNamedIdentitySubject(target) {
+  const subject = String(target.subject ?? "").trim().toLowerCase();
+  const refTokens = String(target.ref_id ?? "")
+    .toLowerCase()
+    .replace(/^char_/, "")
+    .replace(/_ref$/, "")
+    .split(/_+/)
+    .filter(Boolean);
+  if (refTokens.length < 2) return false;
+  if (/\b(?:state|injured|wounded|bloodied|betrayed|porter|captain|commander|judge|councilman|healer|blindfolded|restrained|bound|court|prisoner|raid|fever|shaken|memory|projection|monster|design|pods|larvae|guild|group|crowd|uniform|family|student|witness)\b/i.test(subject)) return false;
+  const subjectTokens = subject.replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter(Boolean);
+  const overlap = refTokens.filter((token) => subjectTokens.includes(token)).length;
+  return overlap >= Math.min(2, refTokens.length);
 }
 
 function isCanonicalIdentityCandidate(target) {
@@ -1205,6 +1225,7 @@ function mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs) {
     candidateGroups.get(key).push(target);
   }
   const redirect = new Map();
+  const canonicalByKey = new Map();
   const warnings = [];
   const targetById = new Map(referenceTargets.map((target) => [target.ref_id, { ...target }]));
   for (const [key, rows] of candidateGroups.entries()) {
@@ -1215,6 +1236,7 @@ function mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs) {
     const sorted = [...primaryPool].sort((a, b) => identityTargetScore(b) - identityTargetScore(a) || String(a.ref_id).localeCompare(String(b.ref_id)));
     const primary = sorted[0];
     if (!primary) continue;
+    canonicalByKey.set(key, primary.ref_id);
     const primaryRow = targetById.get(primary.ref_id);
     const mergedSceneIds = new Set(primaryRow.scene_ids ?? []);
     const mergedRiskNotes = new Set(primaryRow.risk_notes ?? []);
@@ -1251,12 +1273,33 @@ function mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs) {
       risk_notes: [...mergedRiskNotes].filter(Boolean),
     });
   }
-  if (!redirect.size) return { referenceTargets, characterStateRefs, warnings };
   const redirectedStateRefs = characterStateRefs.map((ref) => ({
     ...ref,
     source_ref_id: redirect.get(ref.source_ref_id) ?? ref.source_ref_id,
     base_identity_ref_id: redirect.get(ref.base_identity_ref_id) ?? ref.base_identity_ref_id,
-  }));
+  })).map((ref) => {
+    const sourceTargetExists = !ref.source_ref_id || targetById.has(ref.source_ref_id);
+    const baseTargetExists = !ref.base_identity_ref_id || targetById.has(ref.base_identity_ref_id);
+    if (sourceTargetExists && baseTargetExists) return ref;
+    const keys = [ref.character, ref.state_ref_id, ref.source_ref_id, ref.base_identity_ref_id]
+      .map((value) => identityMergeKey({ kind: "character_state", subject: value, ref_id: "" }))
+      .filter(Boolean);
+    const canonicalRefId = keys.map((key) => canonicalByKey.get(key)).find(Boolean);
+    if (!canonicalRefId) return ref;
+    warnings.push({
+      code: "canonical_identity_state_ref_rebased",
+      severity: "info",
+      state_ref_id: ref.state_ref_id,
+      canonical_ref_id: canonicalRefId,
+      message: `Rebased dangling state ref ${ref.state_ref_id} to canonical identity ${canonicalRefId}.`,
+    });
+    return {
+      ...ref,
+      source_ref_id: sourceTargetExists ? ref.source_ref_id : canonicalRefId,
+      base_identity_ref_id: baseTargetExists ? ref.base_identity_ref_id : canonicalRefId,
+      identity_usage: ref.identity_usage ?? "face_only",
+    };
+  });
   return {
     referenceTargets: [...targetById.values()],
     characterStateRefs: redirectedStateRefs,
@@ -1749,6 +1792,59 @@ function applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inve
   };
 }
 
+function prunePromptFacingNoRefTargets(referenceTargets) {
+  const warnings = [];
+  const nextTargets = [];
+  const prunedTargetIds = new Set();
+  for (const target of referenceTargets ?? []) {
+    const kind = normalizeKind(target.kind);
+    const noRef = String(target.generation_mode ?? "").toLowerCase() === "no_ref_needed"
+      && target.required_before_imagegen !== true
+      && !target.reference_image_path;
+    if (noRef) {
+      prunedTargetIds.add(target.ref_id);
+      warnings.push({
+        code: "director_pruned_text_only_reference_target",
+        severity: "info",
+        ref_id: target.ref_id,
+        kind,
+        message: `Pruned text-only ${kind} target ${target.ref_id} from visual_reference_plan; it remains represented in reference_inventory_ledger.json when useful as context or coverage evidence.`,
+      });
+      continue;
+    }
+    nextTargets.push(target);
+  }
+  return {
+    referenceTargets: nextTargets,
+    warnings,
+    prunedTargetIds: [...prunedTargetIds],
+  };
+}
+
+function locationCoverageTargetsFromDirectorLedger(referenceTargets, inventoryLedger) {
+  const byRefId = new Map((referenceTargets ?? [])
+    .filter((target) => target?.ref_id)
+    .map((target) => [String(target.ref_id), target]));
+  for (const asset of inventoryLedger?.assets ?? []) {
+    if (normalizeKind(asset.kind) !== "location") continue;
+    const refIds = [asset.ref_id, ...(asset.semantic_ref_ids ?? []), ...(asset.beat_ref_ids ?? [])]
+      .map((refId) => String(refId ?? "").trim())
+      .filter(Boolean);
+    for (const refId of refIds) {
+      if (byRefId.has(refId)) continue;
+      byRefId.set(refId, {
+        ref_id: refId,
+        kind: "location",
+        scene_ids: asset.scene_ids ?? [],
+        generation_mode: asset.recommended_generation_mode ?? "no_ref_needed",
+        required_before_imagegen: asset.recommended_required_before_imagegen === true,
+        inventory_asset_id: asset.asset_id ?? null,
+      });
+    }
+  }
+  return [...byRefId.values()];
+}
+
 function pruneChunkPlanWithDirectorInventory(plan, inventoryLedger) {
   const referenceTargets = (Array.isArray(plan?.reference_targets) ? plan.reference_targets : []).map(normalizeTarget);
   const characterStateRefs = (Array.isArray(plan?.character_state_refs) ? plan.character_state_refs : []).map(normalizeStateRef);
@@ -2104,10 +2200,13 @@ async function main() {
   referenceTargets = directorInventoryPolicy.referenceTargets;
   characterStateRefs = directorInventoryPolicy.characterStateRefs;
   const anchorLanguageWarnings = negativePromptPayloadAnchorWarnings(referenceTargets, characterStateRefs);
-  const coverageFindings = locationCoverageFindings(referenceTargets, scopedSemantic.scenes);
+  const coverageReferenceTargets = locationCoverageTargetsFromDirectorLedger(referenceTargets, referenceInventoryLedger);
+  const coverageFindings = locationCoverageFindings(coverageReferenceTargets, scopedSemantic.scenes);
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
   const findings = [...coverageFindings, ...styleFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
+  const promptFacingPrune = prunePromptFacingNoRefTargets(referenceTargets);
+  referenceTargets = promptFacingPrune.referenceTargets;
   const sourceArtifactPaths = [
     semanticPlanPath,
     visualBeatPlan?.status === "passed" ? visualBeatPlanPath : null,
@@ -2151,6 +2250,7 @@ async function main() {
       ...deterministicLocationScope.warnings,
       ...referenceBudget.warnings,
       ...directorInventoryPolicy.warnings,
+      ...promptFacingPrune.warnings,
       ...anchorLanguageWarnings,
       ...findings,
       ...sourceFaceAnchoring.warnings,

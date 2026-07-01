@@ -356,16 +356,29 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   assert.equal(byId.has("char_victor"), false);
   assert.equal(byId.has("restrained_authority_ref"), false);
   assert.equal(byId.get("opening_room_ref").required_before_imagegen, true);
-  assert.equal(byId.get("late_room_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.has("late_room_ref"), false);
   assert.equal(byId.has("late_ui_ref"), false);
   assert.equal(byId.has("late_prop_ref"), false);
   assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_first_clean_wide_cut");
   assert.equal(byId.get("key_hall_ref").required_before_imagegen, true);
   assert.equal(byId.get("opening_system_ui_ref").required_before_imagegen, true);
   assert.equal(byId.get("critical_prop_ref").required_before_imagegen, true);
+  assert.equal(report.reference_targets.some((target) => target.generation_mode === "no_ref_needed"), false);
   const stateRefs = JSON.parse(await fs.readFile(path.join(episodeDir, "character_state_refs.json"), "utf8"));
   const joeyState = stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "joey_state");
   assert.equal(joeyState.source_ref_id, "joey_manhwa_base_identity_ref");
+
+  await execFileAsync(process.execPath, [
+    "scripts/visual-reference-plan.mjs",
+    "--channel", "test",
+    "--series", "manhwa_candidate_validation",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--revalidate-existing", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const revalidated = JSON.parse(await fs.readFile(path.join(episodeDir, "visual_reference_plan.json"), "utf8"));
+  assert.equal(revalidated.status, "passed");
+  assert.equal(revalidated.reference_targets.some((target) => target.generation_mode === "no_ref_needed"), false);
 }
 
 async function testReferenceDirectorInventoryPreventsCollectorBloat() {
@@ -438,7 +451,11 @@ async function testReferenceDirectorInventoryPreventsCollectorBloat() {
   await writeJson(path.join(weekDir, "character_bible.json"), {});
   const bloatedTargets = [
     { ref_id: "joey_manhwa_base_identity_ref", kind: "character_state", subject: "Joey Manhwa base identity", scene_ids: semanticScenes.map((scene) => scene.scene_id), generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "joey_manhwa_ref", kind: "character_state", subject: "Joey Manhwa", scene_ids: semanticScenes.slice(2, 5).map((scene) => scene.scene_id), generation_mode: "standalone_ref", required_before_imagegen: true },
     { ref_id: "joey_manhwa_bloodied_chamber_state_ref", kind: "character_state", subject: "Joey Manhwa bloodied one chamber state", scene_ids: ["scene_006"], generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "char_harlan_voss_ref", kind: "character_state", subject: "Harlan Voss raid captain identity", scene_ids: ["scene_002", "scene_003"], generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "harlan_voss_ref", kind: "character_state", subject: "Harlan Voss", scene_ids: ["scene_004"], generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "captain_harlan_voss_court_restrained_state", kind: "character_state", subject: "Captain Harlan Voss court restrained state", scene_ids: ["scene_005"], generation_mode: "derive_from_best_cut", required_before_imagegen: false },
     { ref_id: "guild_masters_group_faces_ref", kind: "character_state", subject: "guild masters group uniform system", scene_ids: ["scene_001", "scene_003", "scene_005"], generation_mode: "standalone_ref", required_before_imagegen: true },
     { ref_id: "opening_guild_gate_ref", kind: "location", subject: "opening guild gate", scene_ids: ["scene_001", "scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
     { ref_id: "system_ledger_ui_ref", kind: "ui", subject: "signature system ledger UI", scene_ids: ["scene_001", "scene_002", "scene_003"], appearance_count: 3, generation_mode: "standalone_ref", required_before_imagegen: true },
@@ -466,7 +483,9 @@ async function testReferenceDirectorInventoryPreventsCollectorBloat() {
     reference_targets: bloatedTargets,
     character_state_refs: [
       { state_ref_id: "joey_base_state", character: "Joey Manhwa", source_ref_id: "joey_manhwa_base_identity_ref", scene_ids: semanticScenes.map((scene) => scene.scene_id) },
+      { state_ref_id: "joey_plain_duplicate_state", character: "Joey Manhwa", source_ref_id: "joey_manhwa_ref", scene_ids: ["scene_003"] },
       { state_ref_id: "joey_bloodied_chamber_state", character: "Joey Manhwa", source_ref_id: "joey_manhwa_bloodied_chamber_state_ref", scene_ids: ["scene_006"] },
+      { state_ref_id: "captain_harlan_voss_court_restrained_state", character: "Captain Harlan Voss", source_ref_id: "captain_harlan_voss_court_restrained_state", base_identity_ref_id: "char_captain_harlan_voss_ref", scene_ids: ["scene_005"] },
       { state_ref_id: "guild_masters_group_state", character: "guild masters", source_ref_id: "guild_masters_group_faces_ref", scene_ids: ["scene_001", "scene_003", "scene_005"] },
     ],
   });
@@ -488,13 +507,21 @@ async function testReferenceDirectorInventoryPreventsCollectorBloat() {
   assert.equal(report.reference_inventory_ledger_path.endsWith("reference_inventory_ledger.json"), true);
   assert.equal(ledger.summary.asset_count > report.reference_targets.length, true);
   assert.equal(byId.get("joey_manhwa_base_identity_ref").required_before_imagegen, true);
+  assert.equal(byId.has("joey_manhwa_ref"), false);
   assert.equal(byId.has("joey_manhwa_bloodied_chamber_state_ref"), false);
+  assert.equal(byId.has("char_harlan_voss_ref"), true);
+  assert.equal(byId.has("harlan_voss_ref"), false);
+  assert.equal(byId.has("captain_harlan_voss_court_restrained_state"), false);
   assert.equal(byId.has("guild_masters_group_faces_ref"), false);
-  assert.equal(byId.get("one_off_chamber_3_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.has("one_off_chamber_3_ref"), false);
   assert.equal(byId.has("one_off_relic_1_ref"), false);
   assert.equal(byId.get("poison_ring_ref").required_before_imagegen, true);
   assert.equal(byId.get("system_ledger_ui_ref").required_before_imagegen, false);
-  assert.deepEqual(stateRefs.character_state_refs.map((ref) => ref.state_ref_id), ["joey_base_state"]);
+  assert.equal(report.reference_targets.some((target) => target.generation_mode === "no_ref_needed"), false);
+  assert.deepEqual(stateRefs.character_state_refs.map((ref) => ref.state_ref_id), ["joey_base_state", "joey_plain_duplicate_state", "captain_harlan_voss_court_restrained_state"]);
+  assert.equal(stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "joey_plain_duplicate_state").source_ref_id, "joey_manhwa_base_identity_ref");
+  assert.equal(stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "captain_harlan_voss_court_restrained_state").source_ref_id, "char_harlan_voss_ref");
+  assert.equal(stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "captain_harlan_voss_court_restrained_state").base_identity_ref_id, "char_harlan_voss_ref");
   assert.equal(report.warnings.some((warning) => warning.code === "director_pruned_text_only_reference_target"), true);
   assert.equal(report.warnings.some((warning) => warning.code === "director_pruned_text_only_character_state_ref"), true);
 }

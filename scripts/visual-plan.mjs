@@ -1209,6 +1209,10 @@ function forcedLocationRefId(row, visualReferencePlan) {
 }
 
 function locationLabelTokens(label) {
+  const stopwords = new Set([
+    "the", "a", "an", "of", "and", "same", "inside", "outside", "around", "beside",
+    "near", "with", "within", "into", "onto", "from", "at", "by",
+  ]);
   return new Set(String(label ?? "")
     .toLowerCase()
     .replace(/_/g, " ")
@@ -1216,16 +1220,30 @@ function locationLabelTokens(label) {
     .split(/\s+/)
     .map((token) => token.trim())
     .filter(Boolean)
-    .filter((token) => !new Set(["the", "a", "an", "of", "and"]).has(token)));
+    .filter((token) => !stopwords.has(token)));
 }
 
 function locationLabelsEquivalent(left, right) {
   const leftTokens = locationLabelTokens(left);
   const rightTokens = locationLabelTokens(right);
   if (!leftTokens.size || !rightTokens.size) return false;
-  const intersection = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  const commonTokens = [...leftTokens].filter((token) => rightTokens.has(token));
+  const intersection = commonTokens.length;
   const smaller = Math.min(leftTokens.size, rightTokens.size);
   if (intersection === smaller && smaller >= 3) return true;
+  const strongLocationTokens = new Set([
+    "academy", "altar", "arena", "atrium", "basement", "bathroom", "bedroom", "bridge",
+    "building", "cafe", "cafeteria", "campus", "chamber", "classroom", "core", "corridor",
+    "court", "courthouse", "courtroom", "courtyard", "deck", "district", "door", "dungeon",
+    "elevator", "entrance", "floor", "fountain", "gate", "guild", "gym", "hall", "hallway",
+    "hospital", "house", "island", "kitchen", "lab", "library", "lobby", "office", "palace",
+    "plaza", "platform", "restaurant", "roof", "rooftop", "room", "shop", "square", "stage",
+    "station", "street", "studio", "table", "tower", "tribunal", "vault", "wall", "warehouse",
+  ]);
+  const commonStrong = commonTokens.filter((token) => strongLocationTokens.has(token));
+  const leftUniqueStrong = [...leftTokens].filter((token) => !rightTokens.has(token) && strongLocationTokens.has(token));
+  const rightUniqueStrong = [...rightTokens].filter((token) => !leftTokens.has(token) && strongLocationTokens.has(token));
+  if (intersection >= 3 && commonStrong.length && (!leftUniqueStrong.length || !rightUniqueStrong.length)) return true;
   const union = new Set([...leftTokens, ...rightTokens]).size;
   return union > 0 && intersection / union >= 0.72;
 }

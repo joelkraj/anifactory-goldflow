@@ -1559,9 +1559,11 @@ async function testVisualPlanAllowsSameLocationLabelAliases() {
   const hash = "fixture_hash";
   const beats = Array.from({ length: 9 }, (_, index) => {
     const start = 181 + index * 15;
-    const location = index % 2 === 0
-      ? "comedy_pressure_studio_table_area"
-      : "streamer academy comedy pressure studio table area";
+    const location = [
+      "blood-smeared dungeon council chamber around a cracked fountain and scattered chests",
+      "same dungeon council chamber beside the fountain and defensive chests",
+      "dungeon council chamber fountain area with opened chests",
+    ][index % 3];
     return {
       scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
       parent_scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
@@ -1570,7 +1572,7 @@ async function testVisualPlanAllowsSameLocationLabelAliases() {
       end_sec: start + 15,
       duration_sec: 15,
       location,
-      visual_beat_script_excerpt: `Fixture beat ${index + 1} remains in the same comedy pressure studio table area.`,
+      visual_beat_script_excerpt: `Fixture beat ${index + 1} remains in the same dungeon council chamber fountain area.`,
       visual_job: "humiliation_image",
       suggested_shot_job: "emotional_reaction",
       ref_needs: [],
@@ -1600,11 +1602,11 @@ async function testVisualPlanAllowsSameLocationLabelAliases() {
     status: "passed",
     source_script_hash: hash,
     reference_targets: [{
-      ref_id: "comedy_pressure_studio_table_area_ref",
+      ref_id: "dungeon_council_chamber_fountain_area_ref",
       kind: "location",
-      subject: "comedy pressure studio table area",
+      subject: "dungeon council chamber fountain area",
       scene_ids: beats.map((beat) => beat.scene_id),
-      prompt_anchor: "comedy pressure studio table area with cameras and table props",
+      prompt_anchor: "blood-smeared dungeon council chamber around a cracked fountain and scattered chests",
     }],
   });
   await writeJson(path.join(episodeDir, "character_state_refs.json"), { status: "approved", source_script_hash: hash, character_state_refs: [] });

@@ -244,11 +244,13 @@ Rules:
   - Later character_state refs and scene_prompt_anchor values must dictate the current state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status, and emotional bearing.
   - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
-- Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
-- Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
-- Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
-- Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
-- Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut.
+- Lower-priority entities should usually use no_ref_needed, derive_from_first_clean_cut, or derive_from_best_cut rather than standalone_ref.
+- Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
+- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and late 2-3 occurrence locations/UI/props/actions should not be standalone refs unless the story makes them truly critical. They should be no_ref_needed or derive_from_best_cut so a clean generated scene can become the reference later.
+- Major recurring characters and visually sensitive major wardrobe/state changes should usually use standalone_ref or manual_review.
+- Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
+- Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; use base identity text or derive_from_best_cut unless distinct identity continuity is mission-critical.
+- Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut. Opening-retention physical environments may use standalone_ref even when they appear briefly, because early visual clarity matters.
 - Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If consecutive scenes or a long story span moves between different visible areas, create separate scene-scoped location refs for those areas, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
 - Semantic scene ref_requirements with kind "location" are binding target IDs for scene scoping only. For every required location ref_id in a scene, return a location reference_target with that exact ref_id covering that scene, but choose generation_mode from production value: standalone only for key recurring/major locations, derive_from_best_cut for useful minor recurring locations, and no_ref_needed for one-scene locations. Broad venue refs may be added, but they must not replace the exact required scene-level location ref_id.
 - Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
@@ -364,9 +366,11 @@ Rules:
   - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
-- Lower-priority entities should usually use derive_from_first_clean_cut or derive_from_best_cut rather than standalone_ref.
-- Any named human character who physically touches, fights, restrains, shoves, carries, rescues, confronts at close range, or otherwise directly interacts with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
-- Any named human character who appears beside a protagonist in a two-character or three-character close/medium shot should use standalone_ref before imagegen when their distinct identity matters to the scene.
+- Lower-priority entities should usually use no_ref_needed, derive_from_first_clean_cut, or derive_from_best_cut rather than standalone_ref.
+- Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
+- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and late 2-3 occurrence locations/UI/props/actions should not be standalone refs unless the story makes them truly critical. They should be no_ref_needed or derive_from_best_cut so a clean generated scene can become the reference later.
+- Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
+- Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; use base identity text or derive_from_best_cut unless distinct identity continuity is mission-critical.
 - Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If chunk plans contain separate visible areas inside one larger venue, preserve or create separate scene-scoped location refs for those areas during merge, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
 - Preserve exact semantic location ref_ids during merge. If a chunk plan or semantic scene requires a location ref_id, the merged plan must keep a location reference_target with that exact ref_id and scene coverage, even when a broader venue ref is also present. The preserved target can still be no_ref_needed or derive_from_best_cut when it is a one-off/minor scoped target.
 - Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
@@ -850,52 +854,53 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
   }
   const inOpening = Number.isFinite(stats.earliest_start_sec) && stats.earliest_start_sec < openingSec;
   const recurringAcrossScenes = stats.scene_count >= 2;
-  const majorRecurringAcrossScenes = stats.scene_count >= 3;
-  const recurringCharacter = recurringAcrossScenes;
+  const majorRecurringAcrossScenes = stats.scene_count >= 4 || stats.appearance_count >= 6;
+  const meaningfulRecurringCharacter = stats.scene_count >= 4 || stats.appearance_count >= 6;
+  const minorRecurringMode = recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed";
   const highPriority = ["high", "critical", "signature"].includes(String(target.priority ?? "").toLowerCase());
   const anchorText = `${target.subject ?? ""} ${target.ref_id ?? ""} ${target.prompt_anchor ?? ""}`;
   const riskText = `${anchorText} ${(target.risk_notes ?? []).join(" ")}`;
   const baseIdentity = isExplicitBaseIdentityTarget(target) || isGenericCharacterIdentityTarget(target);
   const signatureSystemUi = kind === "ui" && /\b(?:system|quest|status|ranking|rank|ledger|notification|interface|hud|window|panel|score|stat)\b/i.test(anchorText);
-  const highRiskContact = kind === "character_state" && /\b(?:touch|fight|restrain|shove|carry|rescue|confront|close[- ]?range|close\s+multi[- ]?character|identity[- ]?blend|beside|grabs?|holds?|blocks?|strikes?|slaps?|escorts?|wrestles?|two[- ]character|three[- ]character)\b/i.test(riskText);
+  const highRiskContact = kind === "character_state" && /\b(?:fight(?:s|ing)?|restrain(?:s|ing)?\s+(?:him|her|them|joey|protagonist|victim)|shove(?:s|d|ing)?|rescue(?:s|d|ing)?\s+(?:him|her|them|joey|protagonist|victim)|grab(?:s|bed|bing)?|strike(?:s|d|ing)?|hit(?:s|ting)?|slap(?:s|ped|ping)?|wrestle(?:s|d|ing)?|tackle(?:s|d|ing)?|body[- ]?to[- ]?body|physical contact|hand on (?:his|her|their)|hands on (?:his|her|their))\b/i.test(riskText);
   if (kind === "style") return { generate: false, mode: "no_ref_needed", reason: "candidate validation uses style text/bible instead of spending a style ref" };
   if (kind === "character_state") {
-    const generate = recurringCharacter || highPriority || baseIdentity || highRiskContact;
+    const generate = baseIdentity || highRiskContact || meaningfulRecurringCharacter || (highPriority && recurringAcrossScenes && stats.appearance_count >= 3);
     return {
       generate,
-      mode: "no_ref_needed",
+      mode: baseIdentity ? "no_ref_needed" : minorRecurringMode,
       reason: generate
-        ? "character identity/state is recurring, high-priority, base identity, or high-risk close interaction"
-        : "one-scene character state can be carried by scene prompt text for validation",
+        ? "character identity/state is a base identity, genuinely recurring, high-priority recurring state, or high-risk physical-contact interaction"
+        : (recurringAcrossScenes ? "minor recurring character/state should derive from a clean scene cut or base identity" : "one-scene character/state can be carried by scene prompt text for validation"),
     };
   }
   if (kind === "location") {
-    const generate = highPriority || majorRecurringAcrossScenes || (inOpening && recurringAcrossScenes);
+    const generate = inOpening || majorRecurringAcrossScenes || (highPriority && recurringAcrossScenes);
     return {
       generate,
       mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed",
       reason: generate
-        ? "location is high-priority, major recurring, or recurring inside the opening retention window"
+        ? "location is in the opening retention window, major recurring, or high-priority recurring"
         : (recurringAcrossScenes ? "minor recurring location should derive from a clean scene cut" : "one-scene location remains scoped text-only"),
     };
   }
   if (kind === "ui") {
-    const generate = highPriority || (signatureSystemUi && (recurringAcrossScenes || inOpening)) || majorRecurringAcrossScenes;
+    const generate = majorRecurringAcrossScenes || (signatureSystemUi && stats.appearance_count >= 4) || (highPriority && recurringAcrossScenes && stats.appearance_count >= 4);
     return {
       generate,
       mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed",
       reason: generate
-        ? "UI is signature/high-priority, major recurring, or opening system UI"
+        ? "UI is signature/high-priority and truly recurring, or major recurring"
         : (recurringAcrossScenes ? "minor recurring UI should derive from a clean scene cut" : "one-scene UI remains scoped text-only"),
     };
   }
   if (kind === "prop" || kind === "action" || kind === "effect") {
-    const generate = highPriority || majorRecurringAcrossScenes;
+    const generate = majorRecurringAcrossScenes || (highPriority && recurringAcrossScenes && stats.appearance_count >= 4);
     return {
       generate,
       mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed",
       reason: generate
-        ? `${kind} is high-priority or major recurring`
+        ? `${kind} is high-priority and truly recurring, or major recurring`
         : (recurringAcrossScenes ? `minor recurring ${kind} should derive from a clean scene cut` : `one-scene ${kind} can be described directly in scene prompts`),
     };
   }

@@ -193,14 +193,15 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       { ref_id: "char_joey", kind: "character_state", subject: "Joey", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "victor_base_identity_ref", kind: "character_state", subject: "Victor base identity", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "char_victor", kind: "character_state", subject: "Victor", scene_ids: ["scene_004"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "restrained_authority_ref", kind: "character_state", subject: "one-scene restrained authority figure", scene_ids: ["scene_004"], prompt_anchor: "16:9 landscape anime/manhwa character card, single restrained authority figure on plain background, restrained styling and composed posture", generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "opening_room_ref", kind: "location", subject: "opening system bedroom", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_room_ref", kind: "location", subject: "late one-off hallway", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "minor_lobby_ref", kind: "location", subject: "minor recurring lobby", scene_ids: ["scene_003", "scene_004"], generation_mode: "standalone_ref", required_before_imagegen: true },
-      { ref_id: "key_hall_ref", kind: "location", subject: "key recurring throne hall", scene_ids: ["scene_005", "scene_006", "scene_007"], generation_mode: "standalone_ref", required_before_imagegen: true },
-      { ref_id: "opening_system_ui_ref", kind: "ui", subject: "signature system quest UI", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "key_hall_ref", kind: "location", subject: "key recurring throne hall", scene_ids: ["scene_005", "scene_006", "scene_007"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "opening_system_ui_ref", kind: "ui", subject: "signature system quest UI", scene_ids: ["scene_001", "scene_002", "scene_003", "scene_004"], appearance_count: 4, generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_ui_ref", kind: "ui", subject: "one-scene hallway notice UI", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_prop_ref", kind: "prop", subject: "one-scene signed receipt", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
-      { ref_id: "critical_prop_ref", kind: "prop", subject: "critical recurring poison ring", scene_ids: ["scene_002"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "critical_prop_ref", kind: "prop", subject: "critical recurring poison ring", scene_ids: ["scene_002", "scene_003", "scene_004", "scene_005"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
     ],
     character_state_refs: [
       { state_ref_id: "joey_state", character: "Joey Manhwa", source_ref_id: "char_joey", scene_ids: ["scene_002"] },
@@ -223,7 +224,9 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   assert.equal(byId.get("char_joey").canonical_identity_ref_id, "joey_manhwa_base_identity_ref");
   assert.equal(byId.get("char_joey").required_before_imagegen, false);
   assert.equal(byId.get("char_victor").canonical_identity_ref_id, "victor_base_identity_ref");
-  assert.equal(byId.get("opening_room_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.get("restrained_authority_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.get("restrained_authority_ref").required_before_imagegen, false);
+  assert.equal(byId.get("opening_room_ref").required_before_imagegen, true);
   assert.equal(byId.get("late_room_ref").generation_mode, "no_ref_needed");
   assert.equal(byId.get("late_ui_ref").generation_mode, "no_ref_needed");
   assert.equal(byId.get("late_prop_ref").generation_mode, "no_ref_needed");

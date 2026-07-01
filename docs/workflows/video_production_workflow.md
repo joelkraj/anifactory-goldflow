@@ -136,12 +136,13 @@ The approved narration script is production truth. The pipeline should extract, 
    - Character state refs are the definitive identity/wardrobe/state contract.
    - Only `style` refs are global. Location, character, prop, UI, action, and effect refs are scene-scoped and must be attached only from the current scene candidate set.
    - Semantic `ref_requirements` create scoped target coverage, not automatic standalone generation. Location target `scene_ids` are derived from semantic location `ref_requirements` and unioned with LLM-authored ids. A physical scene that requires a location target but has no covering target blocks with `scene_missing_location_ref`.
-   - Keep standalone refs for recurring characters, major character states, key recurring locations, signature system/UI motifs, critical props, and high-risk close-contact one-scene characters.
-   - Downgrade one-scene locations/UI/props to `no_ref_needed`; downgrade minor recurring locations/UI/props/actions to `derive_from_best_cut` or `derive_from_first_clean_cut` when a clean generated scene image can become the reference later.
+   - Keep standalone refs for recurring characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact one-scene characters.
+   - Downgrade one-scene late locations/UI/props to `no_ref_needed`; downgrade minor recurring late locations/UI/props/actions to `derive_from_best_cut` or `derive_from_first_clean_cut` when a clean generated scene image can become the reference later.
+   - Do not generate standalone refs for minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off dashboards, one-off documents, or 2-3 occurrence minor assets unless they are truly critical to the story.
    - Style refs are optional. If the style bible/text prompt is sufficient, drop generated style refs for the run.
    - Same venue does not automatically mean same location ref. When a long arc moves through visually distinct areas inside one building, campus, company, palace, arena, city, or event space, create separate scene-scoped location refs for the distinct physical areas named by semantic scene locations/ref requirements. The visual-plan coverage gate may block when one broad location ref is forced to carry too many distinct beat-location labels after the retention runway.
    - Generated refs are created before scene imagegen; derive-later refs become attachable only after a real source/generated image path exists.
-   - Named human characters in physical contact or close confrontation with the protagonist should use standalone refs before imagegen, even for one-scene appearances.
+   - Named human characters in true physical contact with the protagonist should use standalone refs before imagegen, even for one-scene appearances. Verbal confrontation, shared framing, or witness presence is not enough by itself.
 
 16. Manual reference prompt review.
    - Agent/operator reviews and optimizes style, character, and key action reference prompts before image generation.

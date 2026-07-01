@@ -35,6 +35,11 @@ import {
   resolvedDeadletterPayload,
   visualResolveScopeForBlockers,
 } from "./lib/visual-resolution-utils.mjs";
+import {
+  semanticBuildPromptForTests,
+  semanticSceneAnchorFindingsForTests,
+  semanticSceneQualityFindingsForTests,
+} from "./semantic-scene-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,6 +50,77 @@ function sha256(value) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function testSemanticSceneAnchorValidation() {
+  const script = [
+    "Joey entered the boardroom with the signed receipt.",
+    "The screen changed and Victor stopped smiling.",
+    "He did not need to speak.",
+  ].join(" ");
+  const validFindings = semanticSceneAnchorFindingsForTests([
+    {
+      scene_id: "scene_001",
+      title: "Receipt Enters Boardroom",
+      script_excerpt_start: "Joey entered the boardroom with the signed receipt.",
+      script_excerpt_end: "The screen changed and Victor stopped smiling.",
+    },
+    {
+      scene_id: "scene_002",
+      title: "Silence Wins",
+      script_excerpt_start: "He did not need to speak.",
+      script_excerpt_end: "He did not need to speak.",
+    },
+  ], script);
+  assert.deepEqual(validFindings, []);
+
+  const brokenFindings = semanticSceneAnchorFindingsForTests([
+    {
+      scene_id: "scene_001",
+      title: "Broken End",
+      script_excerpt_start: "The screen changed and Victor stopped smiling.",
+      script_excerpt_end: "Joey did not need to speak.",
+    },
+  ], script);
+  assert.equal(brokenFindings.some((finding) => finding.code === "semantic_end_anchor_not_found"), true);
+}
+
+function testSemanticSceneQualityFindings() {
+  const findings = semanticSceneQualityFindingsForTests([
+    {
+      scene_id: "scene_001",
+      title: "Mixed Semantic Fixture",
+      location: "Joey's office and phone-message view with system dashboard overlay",
+      visible_subjects: ["Joey Manhwa", "online public through comments"],
+      character_states: [{ character: "Joey", state: "watching the phone", wardrobe: "dark suit" }],
+      props: ["conference room screen", "signed receipt"],
+      ui_text_on_screen: ["This is a very long multi-line legal-system notice that should become a concise panel motif instead of baked image text."],
+      visual_intent: "Show the hook payoff for the viewer.",
+    },
+  ]);
+  const codes = new Set(findings.map((finding) => finding.code));
+  assert.equal(codes.has("semantic_mixed_location_contract"), true);
+  assert.equal(codes.has("semantic_generic_visible_subject"), true);
+  assert.equal(codes.has("semantic_prop_location_or_ui_bleed"), true);
+  assert.equal(codes.has("semantic_dense_ui_text"), true);
+  assert.equal(codes.has("semantic_character_alias_churn"), true);
+  assert.equal(codes.has("semantic_editorial_meta_language"), true);
+}
+
+function testSemanticPlannerPromptContracts() {
+  const prompt = semanticBuildPromptForTests("Joey entered the office.", {}, {
+    words: 4,
+    target: 1,
+    minimum: 1,
+    maximum: 2,
+  });
+  assert.match(prompt, /one visible physical environment/i);
+  assert.match(prompt, /not a mixture of UI, overlays, phone views, document views, remote call locations, or montage destinations/i);
+  assert.match(prompt, /Do not alternate between a first name and a full name/i);
+  assert.match(prompt, /props means tangible foreground objects/i);
+  assert.match(prompt, /Do not put rooms, doors, windows, desks, walls, stages, screens, dashboards, webpages, feeds, architecture/i);
+  assert.match(prompt, /ui_text_on_screen should be concise/i);
+  assert.match(prompt, /not automatic standalone image-generation orders/i);
 }
 
 function testLocationSceneIdsDerivation() {
@@ -2562,6 +2638,9 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
 }
 
 async function run() {
+  testSemanticSceneAnchorValidation();
+  testSemanticSceneQualityFindings();
+  testSemanticPlannerPromptContracts();
   testLocationSceneIdsDerivation();
   testLocationCandidateExclusion();
   testStarvationGate();

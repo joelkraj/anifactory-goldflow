@@ -143,6 +143,185 @@ function normalizeScenes(scenes) {
   }));
 }
 
+function normalizeText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+export function semanticSceneAnchorFindingsForTests(scenes, script) {
+  return semanticSceneAnchorFindings(scenes, script);
+}
+
+export function semanticSceneQualityFindingsForTests(scenes) {
+  return semanticSceneQualityFindings(scenes);
+}
+
+export function semanticBuildPromptForTests(script, bibles, targets, chunk = null) {
+  return buildPrompt(script, bibles, targets, chunk);
+}
+
+function semanticSceneAnchorFindings(scenes, script) {
+  const scriptText = normalizeText(script);
+  const findings = [];
+  let cursor = 0;
+  let previousStart = -1;
+  for (const scene of scenes) {
+    const sceneId = String(scene?.scene_id ?? "");
+    const title = String(scene?.title ?? "");
+    const startAnchor = normalizeText(scene?.script_excerpt_start);
+    const endAnchor = normalizeText(scene?.script_excerpt_end);
+    const startIndex = startAnchor ? scriptText.indexOf(startAnchor, cursor) : -1;
+    const endSearchIndex = startIndex >= 0 ? startIndex : cursor;
+    const endIndex = endAnchor ? scriptText.indexOf(endAnchor, endSearchIndex) : -1;
+    if (!startAnchor) {
+      findings.push({ severity: "blocker", code: "semantic_missing_start_anchor", scene_id: sceneId, title, message: "script_excerpt_start is empty." });
+    } else if (startIndex < 0) {
+      findings.push({ severity: "blocker", code: "semantic_start_anchor_not_found", scene_id: sceneId, title, anchor: startAnchor.slice(0, 180), message: "script_excerpt_start is not found in locked script at or after the previous scene." });
+    }
+    if (!endAnchor) {
+      findings.push({ severity: "blocker", code: "semantic_missing_end_anchor", scene_id: sceneId, title, message: "script_excerpt_end is empty." });
+    } else if (endIndex < 0) {
+      findings.push({ severity: "blocker", code: "semantic_end_anchor_not_found", scene_id: sceneId, title, anchor: endAnchor.slice(0, 180), message: "script_excerpt_end is not found in locked script at or after this scene start." });
+    }
+    if (startIndex >= 0 && previousStart >= 0 && startIndex < previousStart) {
+      findings.push({ severity: "blocker", code: "semantic_anchor_order_regression", scene_id: sceneId, title, message: "script_excerpt_start appears before the previous accepted scene start." });
+    }
+    if (startIndex >= 0 && endIndex >= 0 && endIndex < startIndex) {
+      findings.push({ severity: "blocker", code: "semantic_end_before_start", scene_id: sceneId, title, message: "script_excerpt_end appears before script_excerpt_start." });
+    }
+    if (startIndex >= 0) previousStart = startIndex;
+    if (endIndex >= 0) cursor = Math.max(cursor, endIndex);
+    else if (startIndex >= 0) cursor = Math.max(cursor, startIndex);
+  }
+  return findings;
+}
+
+function countByCode(findings) {
+  const counts = {};
+  for (const finding of findings) {
+    const code = String(finding.code ?? "unknown");
+    counts[code] = (counts[code] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function semanticSceneQualityFindings(scenes) {
+  const findings = [];
+  const mixedLocationPattern = /\b(?:split|montage|then|while|plus|multiple|various|moving between|connected to|transitioning to|and later|screen|dashboard|phone|message view|overlay|system interface|document|publication screens|recorded clip|proposal screen)\b|\/|;/i;
+  const propLocationPattern = /\b(?:room|corridor|hallway|hall|lobby|tower|office|desk area|entrance|elevator|warehouse|street|station|shop|library|apartment|conference|court|stage|theater|bookstore|district|square|gate|screen|dashboard|web page|feed|furniture|doors?|windows?|walls?|lighting)\b/i;
+  const genericSubjectPattern = /\b(?:employees?|crowd|audience|watchers?|customers?|staff|workers?|passengers?|commuters?|students?|tenants?|people|reporters?|press|bystanders?|security guards?|online public)\b/i;
+  const editorialMetaPattern = /\b(?:hook|viewer|retention|thumbnail|youtube|chapter|recap|narrator|audience should|keep watching|ctr)\b/i;
+  const characterNames = [];
+
+  for (const scene of scenes) {
+    const sceneId = String(scene?.scene_id ?? "");
+    const title = String(scene?.title ?? "");
+    const location = normalizeText(scene?.location);
+    if (location && mixedLocationPattern.test(location)) {
+      findings.push({
+        severity: "warning",
+        code: "semantic_mixed_location_contract",
+        scene_id: sceneId,
+        title,
+        value: location,
+        message: "Location appears to mix multiple places, UI, overlays, screens, or montage language instead of one visible physical environment.",
+      });
+    }
+    for (const subject of scene?.visible_subjects ?? []) {
+      const value = normalizeText(subject);
+      if (value) characterNames.push({ scene_id: sceneId, value });
+      if (genericSubjectPattern.test(value)) {
+        findings.push({
+          severity: "warning",
+          code: "semantic_generic_visible_subject",
+          scene_id: sceneId,
+          title,
+          value,
+          message: "Generic groups should only be visible subjects when the beat needs public witnesses or readable group reaction.",
+        });
+      }
+    }
+    for (const state of scene?.character_states ?? []) {
+      const value = normalizeText(state?.character);
+      if (value) characterNames.push({ scene_id: sceneId, value });
+    }
+    for (const prop of scene?.props ?? []) {
+      const value = normalizeText(prop);
+      if (propLocationPattern.test(value)) {
+        findings.push({
+          severity: "warning",
+          code: "semantic_prop_location_or_ui_bleed",
+          scene_id: sceneId,
+          title,
+          value,
+          message: "Props should be tangible foreground objects, not rooms, surfaces, architecture, screens, dashboards, feeds, or location nouns.",
+        });
+      }
+    }
+    for (const text of scene?.ui_text_on_screen ?? []) {
+      const value = normalizeText(text);
+      if (value.length > 90 || value.split(/\s+/).length > 12) {
+        findings.push({
+          severity: "warning",
+          code: "semantic_dense_ui_text",
+          scene_id: sceneId,
+          title,
+          value: value.slice(0, 180),
+          message: "UI text is dense enough that image prompts should use concise labels or render-layer overlays instead of asking imagegen to draw it.",
+        });
+      }
+    }
+    for (const [field, values] of [
+      ["title", [scene?.title]],
+      ["visual_intent", [scene?.visual_intent]],
+      ["action_staging", [scene?.action_staging]],
+      ["continuity_notes", scene?.continuity_notes ?? []],
+    ]) {
+      for (const raw of values) {
+        const value = normalizeText(raw);
+        if (value && editorialMetaPattern.test(value)) {
+          findings.push({
+            severity: "warning",
+            code: "semantic_editorial_meta_language",
+            scene_id: sceneId,
+            title,
+            field,
+            value: value.slice(0, 180),
+            message: "Semantic fields should describe story facts, not packaging or editor/audience intent.",
+          });
+        }
+      }
+    }
+  }
+
+  const namesByFirstToken = new Map();
+  for (const item of characterNames) {
+    const parts = item.value.split(/\s+/).filter(Boolean);
+    if (!parts.length) continue;
+    const first = parts[0].toLowerCase();
+    if (!namesByFirstToken.has(first)) namesByFirstToken.set(first, new Map());
+    const byName = namesByFirstToken.get(first);
+    if (!byName.has(item.value)) byName.set(item.value, new Set());
+    byName.get(item.value).add(item.scene_id);
+  }
+  for (const [first, byName] of namesByFirstToken) {
+    const names = [...byName.keys()];
+    const hasSingle = names.some((name) => name.toLowerCase() === first);
+    const multiword = names.filter((name) => name.includes(" "));
+    if (hasSingle && multiword.length) {
+      findings.push({
+        severity: "warning",
+        code: "semantic_character_alias_churn",
+        character_family: first,
+        names,
+        scene_ids: [...new Set(names.flatMap((name) => [...byName.get(name)]))].sort(),
+        message: "The plan alternates between a bare first name and full canonical name; this can split identity refs downstream.",
+      });
+    }
+  }
+
+  return findings;
+}
+
 function buildPrompt(script, bibles, targets, chunk = null) {
   const scopeLine = chunk
     ? `This is chunk ${chunk.chunk_index} of ${chunk.chunk_count} from the locked script. Extract semantic scenes only for this chunk, preserving local order.`
@@ -163,8 +342,15 @@ Rules:
 - Prefer visual-production units of roughly 120-260 spoken words each; shorter is fine for fast action, reveals, UI inserts, or emotional turns.
 - Include production facts needed by visual prompts: location, visible_subjects, primary_subject, visual_intent, ui_text_on_screen, sfx_cues, character_states, wardrobe, props, ref_requirements, action_staging.
 - Resolve role/title aliases to canonical named characters when the script establishes that relationship. If a named person is introduced as the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions such as "the dean" or "the judge" should refer to that named person instead of creating a new generic character. In visible_subjects and character_states, use the named character and put the role in their state, for example "Kai Cenat, acting as dean and final judge." Only create a separate role character when the script clearly introduces a different person.
-- Treat location as the visible physical environment for this scene, not merely the parent venue name. If a story arc stays inside one larger venue but moves through distinct visible areas, give each scene the specific area name and a matching location ref requirement. Do not reuse one broad location ref ID for different visible areas such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Same building/campus/city/arena/company/palace is not enough to merge location refs when the visuals should change.
+- Use one canonical display name for each named person after the script establishes it. Do not alternate between a first name and a full name for the same character in visible_subjects, character_states, or character ref IDs; keep role/title aliases in the state or continuity notes.
+- Treat location as one visible physical environment for this scene, not merely the parent venue name and not a mixture of UI, overlays, phone views, document views, remote call locations, or montage destinations. If a passage moves through several physical environments, split it into separate semantic scenes whenever possible. If the passage is a communication or montage beat that cannot be split cleanly, set location to the camera's primary physical environment and describe remote/on-screen material in ui_text_on_screen, action_staging, or continuity_notes.
+- If a story arc stays inside one larger venue but moves through distinct visible areas, give each scene the specific area name and a matching location ref requirement. Do not reuse one broad location ref ID for different visible areas such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Same building/campus/city/arena/company/palace is not enough to merge location refs when the visuals should change.
+- visible_subjects means physically visible named people or people visibly shown through a specific screen/broadcast/replay that the scene will depict. Put remote callers, online commenters, text-message senders, and remembered people in ui_text_on_screen, action_staging, or continuity_notes unless the current visual should literally show them on a device or screen. Add anonymous groups such as workers, audience, employees, reporters, customers, or guards only when the local scene needs public witnesses, crowd pressure, or group reaction.
+- props means tangible foreground objects the camera should show. Do not put rooms, doors, windows, desks, walls, stages, screens, dashboards, webpages, feeds, architecture, lighting, or whole locations in props. Put architecture and surfaces in location/action_staging, and put screens/dashboards/feeds in ui_text_on_screen or action_staging.
+- ui_text_on_screen should be concise image/render guidance: short system labels, numbers, chat snippets, document titles, or key words. Do not dump long multi-line system messages, documents, article text, captions, or dense lists into imagegen text. Summarize dense UI as a visual motif here and leave exact long wording to narration/subtitles or render-layer overlays.
 - Location ref_requirements are the source of truth for downstream scene scoping. Use stable, specific snake_case location ref IDs that match the scene's visible physical area. A later reference planner may merge true duplicates, but deterministic code will not invent replacement locations after this stage.
+- Semantic ref_requirements are scoped target suggestions, not automatic standalone image-generation orders. Include refs for canonical recurring characters, major character states, distinct visible physical locations, signature recurring UI motifs, critical props, and high-risk one-scene close-contact characters. Do not create semantic refs for generic background groups, throwaway one-scene UI text, ordinary desks/doors/screens, or props that can be safely derived from the scene image.
+- Avoid editorial/package words in semantic fields, such as hook, retention, thumbnail, CTR, narrator, recap, or what the viewer should feel. Describe the story fact visible in the scene.
 - script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later.
 
 BIBLES:
@@ -315,6 +501,14 @@ async function main() {
   if (scenes.length > targets.maximum) {
     throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
   }
+  const normalizedScenes = normalizeScenes(scenes);
+  const anchorFindings = semanticSceneAnchorFindings(normalizedScenes, script);
+  const anchorBlockers = anchorFindings.filter((finding) => finding.severity === "blocker");
+  if (anchorBlockers.length) {
+    const preview = anchorBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.anchor ?? finding.message}`).join("\n");
+    throw new Error(`Semantic scene planner returned scene anchors that do not bind to the locked script:\n${preview}`);
+  }
+  const semanticQualityFindings = semanticSceneQualityFindings(normalizedScenes);
   const report = {
     schema: "goldflow_semantic_scene_plan_v1",
     status: "passed",
@@ -326,17 +520,26 @@ async function main() {
     source_script_path: scriptPath,
     timing_dependency: "none_semantic_only",
     scene_count_policy: targets,
+    semantic_validation: {
+      anchor_finding_count: anchorFindings.length,
+      anchor_findings_by_code: countByCode(anchorFindings),
+      quality_finding_count: semanticQualityFindings.length,
+      quality_findings_by_code: countByCode(semanticQualityFindings),
+    },
+    semantic_quality_findings: semanticQualityFindings,
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     ...semanticParsed,
-    scenes: normalizeScenes(scenes),
+    scenes: normalizedScenes,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
   console.log(JSON.stringify({ status: "passed", output_path: outputPath, scene_count: scenes.length, source_script_hash: scriptHash }, null, 2));
 }
 
-main().catch(async (error) => {
-  await writeJson(outputPath, { schema: "goldflow_semantic_scene_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(outputPath, { schema: "goldflow_semantic_scene_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

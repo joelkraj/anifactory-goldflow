@@ -23,6 +23,7 @@ import {
   routedProviderForReference,
 } from "./lib/image-provider-routing.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
+import { namedCharacterDuplicationFindings } from "./lib/prompt-prose-findings.mjs";
 import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
@@ -605,6 +606,26 @@ function testPositivePromptSanitizerDoesNotInvertNegation() {
   assert.equal(sanitizePositiveVisualPrompt("no second character"), "no second character");
   assert.match(sanitizePositiveVisualPrompt("no duplicate hero, no clone"), /no duplicate hero, no clone/i);
   assert.equal(sanitizePositiveVisualPrompt("Negative prompt: photorealistic --no text"), "photorealistic text");
+}
+
+function testNamedCharacterDuplicationAllowsReflections() {
+  const reflectionPrompt = {
+    image_id: "cut_reflection",
+    scene_id: "scene_reflection",
+    shot_manifest: { visible_characters: ["Joey Manhwa"] },
+    image_prompt: "Older Joey Manhwa watches the cold reflection of old wealth symbols in the overlook glass. Joey Manhwa stands alone in the foreground.",
+  };
+  assert.deepEqual(namedCharacterDuplicationFindings([reflectionPrompt]), []);
+
+  const clonePrompt = {
+    image_id: "cut_clone",
+    scene_id: "scene_clone",
+    shot_manifest: { visible_characters: ["Joey Manhwa"] },
+    image_prompt: "Joey Manhwa faces a clone of Joey Manhwa in the same hallway.",
+  };
+  const findings = namedCharacterDuplicationFindings([clonePrompt]);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].code, "named_character_duplication_risk");
 }
 
 function testVoiceDirectionCharacterization() {
@@ -2521,6 +2542,7 @@ async function run() {
   await testVisualPlanAllowsSameLocationLabelAliases();
   await testOnlyScenesDryRun();
   await testOnlyCutIdsDryRun();
+  testNamedCharacterDuplicationAllowsReflections();
   testVisualResolveScopePrefersCutIds();
   testHardenFeedbackBlockersMapToReviewResolveInput();
   await testRunStatusResumesBlockedVisualReviewWithoutFullReplan();

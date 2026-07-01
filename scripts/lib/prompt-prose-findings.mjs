@@ -98,7 +98,7 @@ function countNameOccurrences(text, name) {
 
 export function namedCharacterDuplicationFindings(prompts) {
   const findings = [];
-  const hardDuplicationCue = /\b(?:duplicate|duplicated|second version|another version|same character again|same named character again|copy of|clone|twin|mirror version|reflection of)\b/i;
+  const hardDuplicationCue = /\b(?:duplicate|duplicated|second version|another version|same character again|same named character again|copy of|clone|twin|mirror version)\b/i;
   const softDuplicationCue = /\b(?:split[- ]screen|split[- ]panel|panel grid|collage|montage|overlapping vignette)\b/i;
   for (const prompt of prompts) {
     const visibleCharacters = Array.isArray(prompt?.shot_manifest?.visible_characters) ? prompt.shot_manifest.visible_characters.filter(Boolean) : [];

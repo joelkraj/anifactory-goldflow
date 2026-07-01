@@ -493,7 +493,7 @@ async function testReferenceDirectorInventoryPreventsCollectorBloat() {
   assert.equal(byId.get("one_off_chamber_3_ref").generation_mode, "no_ref_needed");
   assert.equal(byId.has("one_off_relic_1_ref"), false);
   assert.equal(byId.get("poison_ring_ref").required_before_imagegen, true);
-  assert.equal(byId.get("system_ledger_ui_ref").required_before_imagegen, true);
+  assert.equal(byId.get("system_ledger_ui_ref").required_before_imagegen, false);
   assert.deepEqual(stateRefs.character_state_refs.map((ref) => ref.state_ref_id), ["joey_base_state"]);
   assert.equal(report.warnings.some((warning) => warning.code === "director_pruned_text_only_reference_target"), true);
   assert.equal(report.warnings.some((warning) => warning.code === "director_pruned_text_only_character_state_ref"), true);

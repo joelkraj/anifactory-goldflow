@@ -1652,12 +1652,19 @@ function applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inve
       if (!next.reference_image_path && String(next.generation_mode ?? "").toLowerCase() !== "source_only") {
         const recommendedMode = String(asset.recommended_generation_mode ?? "").trim();
         const modeChanged = recommendedMode && recommendedMode !== next.generation_mode;
+        const budgetDecision = String(next.reference_budget?.decision ?? "").toLowerCase();
+        const budgetBlockedGeneration = budgetDecision && budgetDecision !== "generate";
+        const recommendedRequiresGeneration = ["standalone_ref", "manual_review", "source_only"].includes(recommendedMode);
         if (recommendedMode && generationModes.has(recommendedMode)) {
-          next.generation_mode = recommendedMode;
-          next.required_before_imagegen = asset.recommended_required_before_imagegen === true;
-          next.anchor_cut_policy = asset.recommended_anchor_cut_policy ?? next.anchor_cut_policy ?? "none";
-          next.manual_review_required = next.required_before_imagegen || /^derive_from_/i.test(recommendedMode);
-          if (modeChanged) {
+          if (!budgetBlockedGeneration || !recommendedRequiresGeneration) {
+            next.generation_mode = recommendedMode;
+            next.required_before_imagegen = recommendedRequiresGeneration
+              ? asset.recommended_required_before_imagegen === true
+              : false;
+            next.anchor_cut_policy = asset.recommended_anchor_cut_policy ?? next.anchor_cut_policy ?? "none";
+            next.manual_review_required = next.required_before_imagegen || /^derive_from_/i.test(recommendedMode);
+          }
+          if (modeChanged && (!budgetBlockedGeneration || !recommendedRequiresGeneration)) {
             warnings.push({
               code: "director_inventory_generation_mode_applied",
               severity: "info",

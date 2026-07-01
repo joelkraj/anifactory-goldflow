@@ -61,6 +61,25 @@ async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
+async function writeFixtureReferenceInventory(episodeDir, sourceScriptHash = "fixture_hash", assets = []) {
+  const ledgerPath = path.join(episodeDir, "reference_inventory_ledger.json");
+  await writeJson(ledgerPath, {
+    schema: "goldflow_reference_inventory_ledger_v1",
+    status: "passed",
+    source_script_hash: sourceScriptHash,
+    policy: "fixture director inventory",
+    summary: {
+      asset_count: assets.length,
+      by_kind: {},
+      by_recommended_generation_mode: {},
+      by_director_role: {},
+    },
+    assets,
+    updated_at: "2026-01-01T00:00:00.000Z",
+  });
+  return ledgerPath;
+}
+
 function testSemanticSceneAnchorValidation() {
   const script = [
     "Joey entered the boardroom with the signed receipt.",
@@ -254,6 +273,13 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       ref_requirements: [{ kind: "location", ref_id: "key_hall_ref" }],
     },
   ];
+  for (const scene of semanticScenes) {
+    scene.visible_subjects = ["Joey Manhwa"];
+    if (scene.scene_id === "scene_001" || scene.scene_id === "scene_004") scene.visible_subjects.push("Victor");
+    if (scene.scene_id === "scene_004") scene.visible_subjects.push("restrained authority figure");
+    scene.props = ["critical recurring poison ring", "one-scene signed receipt"];
+    scene.ui_text_on_screen = ["signature system quest UI"];
+  }
   await writeJson(path.join(episodeDir, "run_identity.json"), {
     channel: "test",
     series_slug: "manhwa_candidate_validation",
@@ -279,7 +305,11 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       visual_beat_id: `${scene.scene_id}_beat_01`,
       start_sec: scene.start_sec,
       duration_sec: 6,
-      visual_beat_script_excerpt: `Fixture beat in ${scene.location}.`,
+      visual_beat_script_excerpt: `Joey Manhwa and ${scene.visible_subjects.includes("Victor") ? "Victor" : "the system"} appear in ${scene.location} with the critical poison ring.`,
+      visible_characters: scene.visible_subjects,
+      local_location: scene.location,
+      local_props: scene.scene_id === "scene_002" ? ["one-scene signed receipt", "critical recurring poison ring"] : ["critical recurring poison ring"],
+      local_ui_elements: ["signature system quest UI"],
       ref_needs: [],
     })),
   });
@@ -322,15 +352,13 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   assert.equal(report.reference_budget.applied, true);
   assert.equal(byId.has("style_ref"), false);
   assert.equal(byId.get("joey_manhwa_base_identity_ref").required_before_imagegen, true);
-  assert.equal(byId.get("char_joey").canonical_identity_ref_id, "joey_manhwa_base_identity_ref");
-  assert.equal(byId.get("char_joey").required_before_imagegen, false);
-  assert.equal(byId.get("char_victor").canonical_identity_ref_id, "victor_base_identity_ref");
-  assert.equal(byId.get("restrained_authority_ref").generation_mode, "no_ref_needed");
-  assert.equal(byId.get("restrained_authority_ref").required_before_imagegen, false);
+  assert.equal(byId.has("char_joey"), false);
+  assert.equal(byId.has("char_victor"), false);
+  assert.equal(byId.has("restrained_authority_ref"), false);
   assert.equal(byId.get("opening_room_ref").required_before_imagegen, true);
   assert.equal(byId.get("late_room_ref").generation_mode, "no_ref_needed");
-  assert.equal(byId.get("late_ui_ref").generation_mode, "no_ref_needed");
-  assert.equal(byId.get("late_prop_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.has("late_ui_ref"), false);
+  assert.equal(byId.has("late_prop_ref"), false);
   assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_best_cut");
   assert.equal(byId.get("key_hall_ref").required_before_imagegen, true);
   assert.equal(byId.get("opening_system_ui_ref").required_before_imagegen, true);
@@ -338,6 +366,137 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   const stateRefs = JSON.parse(await fs.readFile(path.join(episodeDir, "character_state_refs.json"), "utf8"));
   const joeyState = stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "joey_state");
   assert.equal(joeyState.source_ref_id, "joey_manhwa_base_identity_ref");
+}
+
+async function testReferenceDirectorInventoryPreventsCollectorBloat() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const weekDir = path.dirname(path.dirname(episodeDir));
+  const hash = "fixture_hash";
+  const semanticScenes = Array.from({ length: 8 }, (_, index) => ({
+    scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
+    start_sec: index * 90,
+    location: index < 2 ? "opening guild gate" : `one-off chamber ${index + 1}`,
+    visible_subjects: index % 2 === 0 ? ["Joey Manhwa", "guild masters"] : ["Joey Manhwa"],
+    props: [`one-off relic ${index + 1}`, index < 4 ? "poison ring" : `document ${index + 1}`],
+    ref_requirements: [
+      { kind: "location", ref_id: index < 2 ? "opening_guild_gate_ref" : `one_off_chamber_${index + 1}_ref`, reason: "semantic scoped location target" },
+      { kind: "prop", ref_id: `one_off_relic_${index + 1}_ref`, reason: "semantic prop candidate, not automatic standalone" },
+    ],
+  }));
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    channel: "test",
+    series_slug: "manhwa_candidate_validation",
+    week: "run",
+    episode: "ep_01",
+    pace_policy: "diagnostic",
+    image_provider: "modelslab",
+  });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    scenes: semanticScenes,
+  });
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    source_script_hash: hash,
+    beats: semanticScenes.flatMap((scene, sceneIndex) => [0, 1].map((beatIndex) => ({
+      scene_id: scene.scene_id,
+      parent_scene_id: scene.scene_id,
+      visual_beat_id: `${scene.scene_id}_beat_${String(beatIndex + 1).padStart(2, "0")}`,
+      start_sec: scene.start_sec + beatIndex * 8,
+      duration_sec: 8,
+      location: scene.location,
+      local_location: scene.location,
+      visual_beat_script_excerpt: beatIndex === 0
+        ? `Joey Manhwa faces the guild masters in ${scene.location}.`
+        : `The poison ring matters while one-off relic ${sceneIndex + 1} sits nearby.`,
+      visible_characters: beatIndex === 0 ? ["Joey Manhwa", "guild masters"] : ["Joey Manhwa"],
+      local_props: beatIndex === 1 ? ["poison ring", `one-off relic ${sceneIndex + 1}`] : [],
+      local_ui_elements: sceneIndex < 3 && beatIndex === 1 ? ["system ledger UI"] : [],
+      ref_needs: [
+        {
+          ref_id: sceneIndex < 2 ? "opening_guild_gate_ref" : `one_off_chamber_${sceneIndex + 1}_ref`,
+          kind: "location",
+          subject: scene.location,
+          generation_mode: sceneIndex < 2 ? "standalone_ref" : "standalone_ref",
+          reason: "fixture advisory location need",
+        },
+        {
+          ref_id: `one_off_relic_${sceneIndex + 1}_ref`,
+          kind: "prop",
+          subject: `one-off relic ${sceneIndex + 1}`,
+          generation_mode: "standalone_ref",
+          reason: "fixture advisory prop need that should not force standalone generation",
+        },
+      ],
+    }))),
+  });
+  await writeJson(path.join(weekDir, "visual_style_bible.json"), { style_summary: "text style bible is sufficient" });
+  await writeJson(path.join(weekDir, "character_bible.json"), {});
+  const bloatedTargets = [
+    { ref_id: "joey_manhwa_base_identity_ref", kind: "character_state", subject: "Joey Manhwa base identity", scene_ids: semanticScenes.map((scene) => scene.scene_id), generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "joey_manhwa_bloodied_chamber_state_ref", kind: "character_state", subject: "Joey Manhwa bloodied one chamber state", scene_ids: ["scene_006"], generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "guild_masters_group_faces_ref", kind: "character_state", subject: "guild masters group uniform system", scene_ids: ["scene_001", "scene_003", "scene_005"], generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "opening_guild_gate_ref", kind: "location", subject: "opening guild gate", scene_ids: ["scene_001", "scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "system_ledger_ui_ref", kind: "ui", subject: "signature system ledger UI", scene_ids: ["scene_001", "scene_002", "scene_003"], appearance_count: 3, generation_mode: "standalone_ref", required_before_imagegen: true },
+    { ref_id: "poison_ring_ref", kind: "prop", subject: "critical recurring poison ring", scene_ids: ["scene_001", "scene_002", "scene_003", "scene_004"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
+    ...semanticScenes.map((scene, index) => ({
+      ref_id: `one_off_relic_${index + 1}_ref`,
+      kind: "prop",
+      subject: `one-off relic ${index + 1}`,
+      scene_ids: [scene.scene_id],
+      generation_mode: "standalone_ref",
+      required_before_imagegen: true,
+    })),
+    ...semanticScenes.slice(2).map((scene, index) => ({
+      ref_id: `one_off_chamber_${index + 3}_ref`,
+      kind: "location",
+      subject: scene.location,
+      scene_ids: [scene.scene_id],
+      generation_mode: "standalone_ref",
+      required_before_imagegen: true,
+    })),
+  ];
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    reference_targets: bloatedTargets,
+    character_state_refs: [
+      { state_ref_id: "joey_base_state", character: "Joey Manhwa", source_ref_id: "joey_manhwa_base_identity_ref", scene_ids: semanticScenes.map((scene) => scene.scene_id) },
+      { state_ref_id: "joey_bloodied_chamber_state", character: "Joey Manhwa", source_ref_id: "joey_manhwa_bloodied_chamber_state_ref", scene_ids: ["scene_006"] },
+      { state_ref_id: "guild_masters_group_state", character: "guild masters", source_ref_id: "guild_masters_group_faces_ref", scene_ids: ["scene_001", "scene_003", "scene_005"] },
+    ],
+  });
+
+  await execFileAsync(process.execPath, [
+    "scripts/visual-reference-plan.mjs",
+    "--channel", "test",
+    "--series", "manhwa_candidate_validation",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--revalidate-existing", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+
+  const report = await readJson(path.join(episodeDir, "visual_reference_plan.json"));
+  const ledger = await readJson(path.join(episodeDir, "reference_inventory_ledger.json"));
+  const stateRefs = await readJson(path.join(episodeDir, "character_state_refs.json"));
+  const byId = new Map(report.reference_targets.map((target) => [target.ref_id, target]));
+  assert.equal(ledger.schema, "goldflow_reference_inventory_ledger_v1");
+  assert.equal(report.reference_inventory_ledger_path.endsWith("reference_inventory_ledger.json"), true);
+  assert.equal(ledger.summary.asset_count > report.reference_targets.length, true);
+  assert.equal(byId.get("joey_manhwa_base_identity_ref").required_before_imagegen, true);
+  assert.equal(byId.has("joey_manhwa_bloodied_chamber_state_ref"), false);
+  assert.equal(byId.has("guild_masters_group_faces_ref"), false);
+  assert.equal(byId.get("one_off_chamber_3_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.has("one_off_relic_1_ref"), false);
+  assert.equal(byId.get("poison_ring_ref").required_before_imagegen, true);
+  assert.equal(byId.get("system_ledger_ui_ref").required_before_imagegen, true);
+  assert.deepEqual(stateRefs.character_state_refs.map((ref) => ref.state_ref_id), ["joey_base_state"]);
+  assert.equal(report.warnings.some((warning) => warning.code === "director_pruned_text_only_reference_target"), true);
+  assert.equal(report.warnings.some((warning) => warning.code === "director_pruned_text_only_character_state_ref"), true);
 }
 
 function testOutOfScopeRefDropping() {
@@ -1834,9 +1993,13 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
   });
   const refPath = path.join(episodeDir, "assets", "images", "references", "style_ref.png");
   await fs.writeFile(refPath, Buffer.from("fixture ref"));
+  const referenceInventoryPath = await writeFixtureReferenceInventory(episodeDir, scriptHash, [
+    { asset_id: "style_ref", ref_id: "style_ref", kind: "style", subject: "fixture style", scene_ids: [], beat_ids: [] },
+  ]);
   await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
     status: "passed",
     source_script_hash: scriptHash,
+    reference_inventory_ledger_path: referenceInventoryPath,
     reference_targets: [{ ref_id: "style_ref", kind: "style", generation_mode: "standalone_ref", reference_image_path: refPath }],
   });
   await writeJson(path.join(episodeDir, "character_state_refs.json"), { status: "approved", source_script_hash: scriptHash, character_state_refs: [] });
@@ -2548,9 +2711,13 @@ async function testRunStatusBlocksStaleVisualReferenceSourceHashes() {
     beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001", ref_needs: [] }],
   });
   const visualRefPath = path.join(episodeDir, "visual_reference_plan.json");
+  const referenceInventoryPath = await writeFixtureReferenceInventory(episodeDir, scriptHash, [
+    { asset_id: "style_ref", ref_id: "style_ref", kind: "style", subject: "fixture style", scene_ids: [], beat_ids: [] },
+  ]);
   await writeJson(visualRefPath, {
     status: "passed",
     source_script_hash: scriptHash,
+    reference_inventory_ledger_path: referenceInventoryPath,
     source_hashes: {
       [semanticPath]: sha256(await fs.readFile(semanticPath)),
     },
@@ -2619,9 +2786,13 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
     beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001", ref_needs: [] }],
   });
   const visualRefPath = path.join(episodeDir, "visual_reference_plan.json");
+  const referenceInventoryPath = await writeFixtureReferenceInventory(episodeDir, scriptHash, [
+    { asset_id: "style_ref", ref_id: "style_ref", kind: "style", subject: "fixture style", scene_ids: [], beat_ids: [] },
+  ]);
   await writeJson(visualRefPath, {
     status: "passed",
     source_script_hash: scriptHash,
+    reference_inventory_ledger_path: referenceInventoryPath,
     source_hashes: {
       [semanticPath]: sha256(await fs.readFile(semanticPath)),
     },
@@ -2990,6 +3161,7 @@ async function run() {
   testStarvationGate();
   testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement();
   await testCandidateReferenceBudgetDowngradesScopedOneOffRefs();
+  await testReferenceDirectorInventoryPreventsCollectorBloat();
   testOutOfScopeRefDropping();
   testReferenceLimitOmissionIsNotForbidden();
   testOutOfScopeLocationMentionAssertion();

@@ -864,8 +864,18 @@ async function jsonStatusWithSourceHashesComplete(filePath, label) {
 
 async function visualReferencePlanComplete(episodeDir, currentScriptHash, identity) {
   const visualPlanPath = path.join(episodeDir, "visual_reference_plan.json");
+  const inventoryLedgerPath = path.join(episodeDir, "reference_inventory_ledger.json");
   const characterRefsPath = path.join(episodeDir, "character_state_refs.json");
   const visual = await jsonStatusWithSourceHashesComplete(visualPlanPath, "visual_reference_plan.json");
+  const visualPlan = await readJson(visualPlanPath, null);
+  const inventoryPath = visualPlan?.reference_inventory_ledger_path ?? inventoryLedgerPath;
+  const inventoryLedger = await readJson(inventoryPath, null);
+  if (!inventoryLedger || inventoryLedger.status !== "passed" || !Array.isArray(inventoryLedger.assets)) {
+    return {
+      done: false,
+      evidence: `${visual.evidence}; reference_inventory_ledger.json missing or invalid`,
+    };
+  }
   const characterRefs = await readJson(characterRefsPath, null);
   if (!characterRefs) {
     return { done: false, evidence: `${visual.evidence}; character_state_refs.json missing` };
@@ -916,7 +926,7 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
   }
   return {
     done: visual.done,
-    evidence: `${visual.evidence}; character_state_refs.json status=${characterStatus}${charSourceHashes ? "; source_hashes=current" : ""}`,
+    evidence: `${visual.evidence}; reference_inventory_ledger.json assets=${inventoryLedger.assets.length}; character_state_refs.json status=${characterStatus}${charSourceHashes ? "; source_hashes=current" : ""}`,
   };
 }
 
@@ -988,7 +998,7 @@ async function main() {
     stage("sfx_score_plan", narratorOnly ? "skipped for narrator_only audio target" : "local Whisper timing + timed scenes", narratorOnly ? "skipped" : `sfx_event_plan_${episode}.json + score_drop_plan_${episode}.json`, false, sfxScoreDone.done, sfxScoreDone.evidence, identity),
     stage("longform_audio_mix", narratorOnly ? "stitched narration/Qwen report" : "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
     stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, visualBeatPlan.done, visualBeatPlan.evidence, identity),
-    stage("visual_reference_plan", "visual beats + semantic facts", "visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
+    stage("visual_reference_plan", "visual beats + semantic facts", "reference_inventory_ledger.json + visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
     stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity),
     stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
     stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),

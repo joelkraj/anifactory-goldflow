@@ -178,7 +178,7 @@ Validation-batch flags:
   --render-profile smooth_fast_ken_burns makes premium_render use the smoother no-oversample profile as the primary render.
 
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> reference imagegen -> visual approve-refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start --seed-derived-refs true when needed -> imagegen promote-derived-refs when seed cuts are ready -> imagegen start -> render start
+  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs (director inventory + final refs) -> reference imagegen -> visual approve-refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start --seed-derived-refs true when needed -> imagegen promote-derived-refs when seed cuts are ready -> imagegen start -> render start
 
 Prompt-repair migration guardrails:
   Part F ships before Part G.

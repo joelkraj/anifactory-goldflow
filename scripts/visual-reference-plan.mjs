@@ -1866,6 +1866,73 @@ function fallbackMergeChunkPlans(chunkPlans, mergeWarnings = []) {
   };
 }
 
+function priorityRank(priority) {
+  const value = String(priority ?? "").toLowerCase();
+  if (value === "required") return 4;
+  if (value === "high") return 3;
+  if (value === "medium") return 2;
+  if (value === "low") return 1;
+  return 0;
+}
+
+function strongerPriority(left, right) {
+  return priorityRank(right) > priorityRank(left) ? right : left;
+}
+
+function deterministicMergeChunkPlans(chunkPlans, inventoryLedger, mergeWarnings = []) {
+  const inventory = directorInventoryLookup(inventoryLedger);
+  const targetsByKey = new Map();
+  for (const rawTarget of chunkPlans.flatMap((plan) => plan.reference_targets ?? [])) {
+    const target = normalizeTarget(rawTarget);
+    const key = String(target.inventory_asset_id ?? target.ref_id ?? "").trim() || target.ref_id;
+    const inventoryAsset = key ? inventory.byAssetId.get(key) : null;
+    const refId = inventoryAsset?.ref_id ?? target.ref_id;
+    const next = {
+      ...target,
+      ref_id: refId,
+      inventory_asset_id: inventoryAsset?.asset_id ?? target.inventory_asset_id ?? key,
+      director_role: target.director_role ?? inventoryAsset?.director_role ?? null,
+    };
+    if (!targetsByKey.has(key)) {
+      targetsByKey.set(key, next);
+      continue;
+    }
+    const previous = targetsByKey.get(key);
+    targetsByKey.set(key, {
+      ...previous,
+      ...next,
+      ref_id: previous.ref_id ?? next.ref_id,
+      subject: String(previous.subject ?? "").length >= String(next.subject ?? "").length ? previous.subject : next.subject,
+      scene_ids: [...new Set([...(previous.scene_ids ?? []), ...(next.scene_ids ?? [])].filter(Boolean))].sort(),
+      priority: strongerPriority(previous.priority, next.priority),
+      required_before_imagegen: Boolean(previous.required_before_imagegen || next.required_before_imagegen),
+      manual_review_required: previous.manual_review_required === true || next.manual_review_required === true,
+      prompt_anchor: String(previous.prompt_anchor ?? "").length >= String(next.prompt_anchor ?? "").length ? previous.prompt_anchor : next.prompt_anchor,
+      appearance_count: Math.max(Number(previous.appearance_count ?? 0), Number(next.appearance_count ?? 0)),
+      risk_notes: [...new Set([...(previous.risk_notes ?? []), ...(next.risk_notes ?? [])].filter(Boolean))].slice(0, 8),
+      reference_image_path: previous.reference_image_path ?? next.reference_image_path ?? null,
+      inventory_asset_id: previous.inventory_asset_id ?? next.inventory_asset_id ?? null,
+      director_role: previous.director_role ?? next.director_role ?? null,
+    });
+  }
+  return {
+    reference_targets: [...targetsByKey.values()],
+    character_state_refs: mergeArraysById(
+      chunkPlans.flatMap((plan) => plan.character_state_refs ?? []).map((ref) => normalizeStateRef(ref)),
+      "state_ref_id"
+    ),
+    warnings: [
+      ...mergeWarnings,
+      {
+        code: "deterministic_inventory_merge_applied",
+        severity: "info",
+        message: "Merged chunk visual reference plans by inventory_asset_id/ref_id and deferred generation-mode normalization to budget/director validation.",
+      },
+      ...chunkPlans.flatMap((plan) => Array.isArray(plan.warnings) ? plan.warnings : []),
+    ],
+  };
+}
+
 function landscapePrefixForKind(kind) {
   const normalized = String(kind ?? "").toLowerCase();
   if (normalized === "style") return "16:9 landscape polished 2D anime/manhwa style reference card";
@@ -1919,6 +1986,18 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, inven
     console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: accepted ${rawTargetCount} raw targets, kept ${prunedChunk.reference_targets.length} director targets`);
   }
   console.error(`visual refs merge: ${chunkPlans.length} chunk plans`);
+  if (String(flags["visual-ref-merge-mode"] ?? "").toLowerCase() === "deterministic") {
+    const parsed = deterministicMergeChunkPlans(chunkPlans, inventoryLedger);
+    return {
+      provider: "deterministic",
+      model: "inventory_union",
+      output_path: null,
+      chunked: true,
+      chunk_count: sceneChunks.length,
+      parsed,
+      json_attempt: null,
+    };
+  }
   const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans, guidance, inventoryLedger);
   const mergeStageName = `${stageName}_merge`;
   const merged = useLocalRoute

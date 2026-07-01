@@ -579,7 +579,7 @@ async function testVisualPlannerDriftContracts() {
     assert.match(files[file], /Resolve role\/title aliases to canonical named characters/i);
   }
 
-  assert.match(files["scripts/imagegen.mjs"], /Preserve the shot scale and composition requested by the prompt/i);
+  assert.match(files["scripts/imagegen.mjs"], /Preserve the shot scale, subject count, background population, and composition requested by the prompt/i);
   assert.equal(/Wide 16:9 landscape YouTube frame/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/full-frame composition, keep complete heads/i.test(files["scripts/imagegen.mjs"]), false);
   assert.match(files["scripts/codex-image-manual-import.mjs"], /promptTextForImageProvider\(prompt, "codex_imagegen"\)/);
@@ -2544,6 +2544,20 @@ async function testSilentTransitionsWithoutSfxBank() {
   assert.equal(report.transition_events.every((event) => event.transition_sfx === false), true);
 }
 
+async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
+  const files = [
+    "scripts/imagegen.mjs",
+    "scripts/visual-plan.mjs",
+    "scripts/visual-prompt-review.mjs",
+    "AGENTS.md",
+    "docs/workflows/video_production_workflow.md",
+  ];
+  for (const filePath of files) {
+    const text = await fs.readFile(path.join(process.cwd(), filePath), "utf8");
+    assert.equal(/crowd extras/i.test(text), false, `${filePath} must not globally request crowd extras`);
+  }
+}
+
 async function run() {
   testLocationSceneIdsDerivation();
   testLocationCandidateExclusion();
@@ -2595,6 +2609,7 @@ async function run() {
   await testRunStatusBlocksQwenPlanMissingOverrideAudit();
   await testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan();
   await testSilentTransitionsWithoutSfxBank();
+  await testGlobalStylePromptDoesNotInjectCrowdExtras();
   console.log("goldflow fixture tests passed");
 }
 

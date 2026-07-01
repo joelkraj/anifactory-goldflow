@@ -472,7 +472,7 @@ function modelslabReferenceGeometry(target) {
 
 function sceneAspectInstruction(provider) {
   if (normalizeImageProvider(provider) !== "modelslab") return "";
-  return `16:9 landscape YouTube image at ${sceneImageWidth}x${sceneImageHeight}. Polished 2D anime/manhwa illustration style, clean line art, cel-shaded characters, cinematic webtoon lighting, non-photorealistic painted backgrounds and crowd extras. Preserve the shot scale and composition requested by the prompt.`;
+  return `16:9 landscape YouTube image at ${sceneImageWidth}x${sceneImageHeight}. Polished 2D anime/manhwa illustration style, clean line art, cel-shaded characters, cinematic webtoon lighting, non-photorealistic painted backgrounds. Preserve the shot scale, subject count, background population, and composition requested by the prompt.`;
 }
 
 async function generateOne(prompt) {

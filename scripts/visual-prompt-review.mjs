@@ -188,6 +188,17 @@ function compactPrompt(prompt) {
   };
 }
 
+function compactSceneIdsForPrompt(sceneIds, relevantSceneIds) {
+  const ids = Array.isArray(sceneIds) ? sceneIds.filter(Boolean) : [];
+  if (!ids.length) return [];
+  if (ids.includes("*")) return ["*"];
+  if (ids.length <= 12) return ids;
+  const relevant = ids.filter((sceneId) => relevantSceneIds.has(sceneId));
+  if (relevant.length) return relevant.slice(0, 12);
+  if (ids.length === 2) return ids;
+  return [ids[0], ids[Math.floor(ids.length / 2)], ids[ids.length - 1]].filter(Boolean);
+}
+
 function compactReferencePlan(plan, prompts = []) {
   const relevantRefIds = new Set();
   const relevantSceneIds = new Set();
@@ -211,7 +222,8 @@ function compactReferencePlan(plan, prompts = []) {
       ref_id: target.ref_id,
       kind: target.kind,
       subject: target.subject,
-      scene_ids: target.scene_ids ?? [],
+      scene_ids: compactSceneIdsForPrompt(target.scene_ids, relevantSceneIds),
+      scene_scope_total: Array.isArray(target.scene_ids) ? target.scene_ids.length : 0,
       priority: target.priority,
       generation_mode: target.generation_mode,
       required_before_imagegen: target.required_before_imagegen,
@@ -219,7 +231,7 @@ function compactReferencePlan(plan, prompts = []) {
       attachable_reference: Boolean(target.reference_image_path ?? target.required_reference_path ?? target.resolved_reference_image_path),
       reference_budget: target.reference_budget ?? null,
       prompt_anchor: target.prompt_anchor,
-      risk_notes: target.risk_notes ?? [],
+      risk_notes: (target.risk_notes ?? []).slice(0, 4),
     })),
   };
 }
@@ -253,7 +265,8 @@ function compactCharacterStateRefs(refs, prompts = []) {
     character_state_refs: (refs?.character_state_refs ?? []).filter(refIsRelevant).map((ref) => ({
       state_ref_id: ref.state_ref_id,
       character: ref.character,
-      scene_ids: ref.scene_ids ?? [],
+      scene_ids: compactSceneIdsForPrompt(ref.scene_ids, relevantSceneIds),
+      scene_scope_total: Array.isArray(ref.scene_ids) ? ref.scene_ids.length : 0,
       prompt_anchor: ref.prompt_anchor,
       scene_prompt_anchor: ref.scene_prompt_anchor ?? ref.scene_anchor ?? ref.prompt_anchor,
       definitive: ref.definitive,
@@ -499,6 +512,19 @@ function localLLMReviewContent(raw) {
   return parsed?.message?.content ?? parsed?.choices?.[0]?.message?.content ?? raw;
 }
 
+function compactProviderError(value, maxChars = 1800) {
+  const raw = String(value ?? "");
+  if (raw.length <= maxChars) return raw;
+  const importantLines = raw
+    .split(/\r?\n/)
+    .filter((line) => /error|usage limit|exited|http|invalid|timed|failed|quota/i.test(line))
+    .slice(-12)
+    .join("\n")
+    .trim();
+  const preview = importantLines || raw.slice(-maxChars);
+  return `${preview.slice(0, maxChars)}\n[provider output truncated from ${raw.length} chars]`;
+}
+
 function isOllamaNativeBaseURL(baseURL) {
   return /\/api\/?$/i.test(String(baseURL ?? ""));
 }
@@ -512,7 +538,7 @@ async function callCodex(prompt, stageName) {
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     child.on("error", reject);
-    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`codex visual review exited ${code}: ${stderr}`)));
+    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`codex visual review exited ${code}: ${compactProviderError(stderr)}`)));
     child.stdin.end(prompt);
   });
   const content = await fs.readFile(outputPath, "utf8");

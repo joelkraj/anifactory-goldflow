@@ -19,6 +19,8 @@ const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.pr
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
+const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "enforced");
+const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -43,11 +45,24 @@ function normalizeAudioTarget(value) {
   return normalized;
 }
 
+function normalizePacePolicy(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (["diagnostic", "diagnostic_only", "non_blocking", "report_only", "wpm_diagnostic"].includes(normalized)) return "diagnostic";
+  return "enforced";
+}
+
+function normalizeRenderProfile(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (["smooth", "smooth_fast", "smooth_fast_ken_burns", "premium_smooth", "no_oversample_smooth"].includes(normalized)) return "smooth_fast_ken_burns";
+  return "fill_ken_burns";
+}
+
 function imageProviderOptions(provider) {
-  if (provider !== "hybrid_codex_opening_modelslab_rest") return {};
-  const value = Number(codexOpeningSecRaw ?? 120);
+  if (provider !== "hybrid_codex_opening_modelslab_rest" && provider !== "hybrid_modelslab_refs_codex_opening_modelslab_rest") return {};
+  const defaultOpeningSec = provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? 300 : 120;
+  const value = Number(codexOpeningSecRaw ?? defaultOpeningSec);
   return {
-    codex_opening_sec: Number.isFinite(value) && value > 0 ? value : 120,
+    codex_opening_sec: Number.isFinite(value) && value > 0 ? value : defaultOpeningSec,
   };
 }
 
@@ -134,6 +149,8 @@ async function main() {
     image_provider: imageProvider,
     image_provider_options: imageProviderOptions(imageProvider),
     audio_target: audioTarget,
+    pace_policy: pacePolicy,
+    render_profile: renderProfile,
     run_intent: runIntent,
     source_path: sourcePath,
     source_sha256: sourcePath ? sha256(await fs.readFile(sourcePath)) : null,

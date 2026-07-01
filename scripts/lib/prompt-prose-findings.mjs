@@ -14,17 +14,8 @@ function promptFields(prompt) {
 export function negativeLanguageMatches(value) {
   const text = String(value ?? "").toLowerCase();
   const patterns = [
-    /\bno\b/,
-    /\bnot\b/,
-    /\bwithout\b/,
-    /\bavoid\b/,
-    /\bexclude\b/,
-    /\binstead\s+of\b/,
-    /\brather\s+than\b/,
-    /\bdo\s+not\b/,
-    /\bdon't\b/,
     /--no\b/,
-    /\bnegative\s+prompt\b/,
+    /\bnegative\s+prompt\s*[:=]/,
   ];
   return patterns.filter((pattern) => pattern.test(text)).map(String);
 }
@@ -32,6 +23,20 @@ export function negativeLanguageMatches(value) {
 export function negativePromptFindings(prompts) {
   const findings = [];
   for (const prompt of prompts) {
+    for (const [field, rawValue] of Object.entries(prompt ?? {})) {
+      if (!/(?:^|_)(negative_prompt|negativePrompt|avoid_list|avoidList|exclude_list|excludeList)(?:$|_)/.test(field)) continue;
+      const value = Array.isArray(rawValue) ? rawValue.join(", ") : String(rawValue ?? "");
+      if (!value.trim()) continue;
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "blocker",
+        code: "negative_prompt",
+        message: `${field} is a separate negative-prompt payload; keep all provider prompt content in the normal prompt fields and do not send a standalone negative prompt.`,
+        target_field: field,
+        resolved: false,
+      });
+    }
     for (const [field, value] of promptFields(prompt)) {
       const matches = negativeLanguageMatches(value);
       if (!matches.length) continue;
@@ -40,8 +45,8 @@ export function negativePromptFindings(prompts) {
         scene_id: prompt.scene_id,
         severity: "warning",
         code: "negative_prompt",
-        message: `${field} contains negative visual language and must be rewritten as positive construction: ${matches.join(", ")}`,
-        target_field: "people_clause",
+        message: `${field} appears to contain an embedded negative-prompt section or model argument: ${matches.join(", ")}`,
+        target_field: field,
         resolved: false,
       });
     }

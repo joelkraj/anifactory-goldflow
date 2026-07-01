@@ -139,6 +139,16 @@ function splitLongSentence(text, maxWords = 24) {
   return chunks;
 }
 
+function splitByWordCount(text, maxWords = 18) {
+  const words = String(text ?? "").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const chunks = [];
+  for (let index = 0; index < words.length; index += maxWords) {
+    chunks.push(words.slice(index, index + maxWords).join(" "));
+  }
+  return chunks;
+}
+
 function sceneWords(wordTiming, scene) {
   const words = Array.isArray(wordTiming?.words) ? wordTiming.words : [];
   const start = Number(scene.start_sec ?? 0);
@@ -233,6 +243,12 @@ function shotJobFromVisualJob(visualJob) {
 }
 
 function mergeEditorialUnits(units, scene) {
+  const maxHoldForStart = (startSec) => {
+    const value = Number(startSec);
+    if (value < hookDurationSec) return hookMaxBeatSec;
+    if (value < retentionRampSec) return rampMaxBeatSec;
+    return maxBeatSec;
+  };
   const merged = [];
   for (const unit of units) {
     const duration = Number(unit.end_sec) - Number(unit.start_sec);
@@ -258,7 +274,8 @@ function mergeEditorialUnits(units, scene) {
         : targetBeatSec;
     const previous = merged[merged.length - 1];
     const previousDuration = previous ? Number(previous.end_sec) - Number(previous.start_sec) : 0;
-    if (previous && !strongCue && previousDuration < targetForTime && previousDuration + duration <= maxBeatSec) {
+    const previousMaxHold = previous ? maxHoldForStart(previous.start_sec) : maxBeatSec;
+    if (previous && !strongCue && previousDuration < targetForTime && previousDuration + duration <= previousMaxHold) {
       previous.text = `${previous.text} ${unit.text}`.trim();
       previous.end_sec = unit.end_sec;
       previous.word_count += unit.word_count;
@@ -292,7 +309,7 @@ function mergeEditorialUnits(units, scene) {
           ? rampTargetBeatSec
           : targetBeatSec;
       const previousCanAbsorb = previous
-        && previousDuration + unitDuration <= maxBeatSec
+        && previousDuration + unitDuration <= maxHoldForStart(previousStart)
         && (unitDuration < 1.5 || previousDuration < previousTarget * 1.25);
       const nextCanAbsorb = Boolean(next);
       if (previousCanAbsorb) {
@@ -319,8 +336,15 @@ function mergeEditorialUnits(units, scene) {
   const bounded = [];
   for (const unit of coalesced) {
     const duration = Number(unit.end_sec) - Number(unit.start_sec);
-    const sentenceParts = splitSentences(unit.text);
-    if (duration <= maxBeatSec || sentenceParts.length <= 1) {
+    const maxHoldSec = maxHoldForStart(unit.start_sec);
+    let sentenceParts = splitSentences(unit.text);
+    if (duration > maxHoldSec && sentenceParts.length <= 1) {
+      const wordCount = Math.max(1, spokenWordCount(unit.text));
+      const dynamicMaxWords = Math.max(6, Math.floor(wordCount * (maxHoldSec / duration)));
+      sentenceParts = splitLongSentence(unit.text, dynamicMaxWords);
+      if (sentenceParts.length <= 1) sentenceParts = splitByWordCount(unit.text, dynamicMaxWords);
+    }
+    if (duration <= maxHoldSec || sentenceParts.length <= 1) {
       bounded.push(unit);
       continue;
     }
@@ -356,7 +380,7 @@ function mergeEditorialUnits(units, scene) {
       const weight = partWeights[index];
       const candidateWeight = chunkWeight + weight;
       const candidateDuration = duration * (candidateWeight / totalWeight);
-      if (chunkText && candidateDuration > maxBeatSec) flushChunk();
+      if (chunkText && candidateDuration > maxHoldSec) flushChunk();
       chunkText = `${chunkText} ${sentence}`.trim();
       chunkWeight += weight;
     }

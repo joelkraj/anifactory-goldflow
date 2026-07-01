@@ -272,6 +272,10 @@ function targetReferencePath(target) {
   return target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
 }
 
+function targetAttachable(target) {
+  return Boolean(targetReferencePath(target));
+}
+
 function sanitizeRequirementFromRefId(refId, indexes, base = {}) {
   refId = indexes.refIdByStateId?.get(refId) ?? refId;
   const target = indexes.referenceById.get(refId);
@@ -388,6 +392,19 @@ function sanitizePrompt(prompt, indexes) {
       continue;
     }
     const canonical = sanitizeRequirementFromRefId(rawRefId, indexes, req);
+    const selectedTargetForPath = indexes.referenceById.get(canonical.ref_id) ?? indexes.referenceById.get(canonical.source_state_ref_id) ?? target;
+    if (!targetAttachable(selectedTargetForPath)) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "non_attachable_reference_stripped",
+        message: `Reference ${rawRefId} is a scoped text-only or derive-later target with no generated/source image path, so it was stripped from image inputs.`,
+        ref_id: rawRefId,
+        resolved: true,
+      });
+      continue;
+    }
     const selectedIds = refSelectionIds(canonical);
     if (selectedIds.some((id) => forbiddenRefs.has(id))) {
       findings.push({
@@ -439,8 +456,20 @@ function sanitizePrompt(prompt, indexes) {
   }
 
   const requestedLocationOmittedForRefLimit = requestedLocationRefId && isReferenceLimitOmission(prompt, requestedLocationRefId);
+  const requestedLocationTarget = requestedLocationRefId ? indexes.referenceById.get(requestedLocationRefId) : null;
+  const requestedLocationAttachable = requestedLocationTarget ? targetAttachable(requestedLocationTarget) : false;
 
-  if (requestedLocationRefId && !requestedLocationOmittedForRefLimit) {
+  if (requestedLocationRefId && !requestedLocationOmittedForRefLimit && requestedLocationTarget && !requestedLocationAttachable) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "warning",
+      code: "manifest_location_ref_text_only",
+      message: `Shot manifest location ref ${requestedLocationRefId} is scoped text-only or derive-later with no generated/source image path; harden will keep the prose location but not require an image input.`,
+      ref_id: requestedLocationRefId,
+      resolved: true,
+    });
+  } else if (requestedLocationRefId && !requestedLocationOmittedForRefLimit) {
     const locationReqs = accepted.filter((req) => referenceKindRank(req.kind) === 1);
     const mismatched = locationReqs.filter((req) => req.ref_id !== requestedLocationRefId);
     if (mismatched.length) {
@@ -511,7 +540,7 @@ function sanitizePrompt(prompt, indexes) {
       });
     }
   }
-  if (requestedLocationRefId && !requestedLocationOmittedForRefLimit && !selectedRequirements.some((req) => req.ref_id === requestedLocationRefId)) {
+  if (requestedLocationRefId && requestedLocationAttachable && !requestedLocationOmittedForRefLimit && !selectedRequirements.some((req) => req.ref_id === requestedLocationRefId)) {
     findings.push({
       image_id: prompt.image_id,
       scene_id: prompt.scene_id,
@@ -524,7 +553,7 @@ function sanitizePrompt(prompt, indexes) {
   if (!requestedLocationRefId
     && !selectedRequirements.some((req) => referenceKindRank(req.kind) === 1)
     && looksLikePhysicalLocation(prompt, promptTextValue)) {
-    const inScopeLocationRefs = indexes.locationTargets.filter((target) => sceneIdsCover(target.scene_ids, prompt.scene_id));
+    const inScopeLocationRefs = indexes.locationTargets.filter((target) => sceneIdsCover(target.scene_ids, prompt.scene_id) && targetAttachable(target));
     const hasInScopeLocationRef = inScopeLocationRefs.length > 0;
     findings.push({
       image_id: prompt.image_id,

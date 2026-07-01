@@ -46,6 +46,7 @@ The approved narration script is production truth. The pipeline should extract, 
      `node bin/goldflow.mjs script pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 210 --target-wpm-max 220`
    - Writes `script_pace_report.json` for the approved script hash with word count, estimated runtime at the 215 WPM midpoint, and hook milestone timing when detectable.
    - This stage blocks detected late hook milestones. WPM/runtime estimates alone are not enough; source/chatbot hook timing must be fixed before speakability, semantic planning, TTS, or visuals.
+   - Exception: explicit validation batches with reviewed/approved source scripts may lock `--pace-policy diagnostic`; in that mode script pace records `diagnostic_hook_status` and hook warnings without blocking or rewriting the approved script.
    - This is the script-stage budget plus hook gate; actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing.
 
 7. Targeted speakability.
@@ -81,6 +82,7 @@ The approved narration script is production truth. The pipeline should extract, 
      `node bin/goldflow.mjs audio pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 210 --target-wpm-max 220`
    - Writes `narration_pace_report_<episode>.json`.
    - This is a hard production gate: actual WPM is computed from Whisper word count and audio duration, and must be 210-220 WPM unless the operator explicitly approves a diagnostic/recovery bypass.
+   - For explicit validation batches where the operator says actual TTS WPM is diagnostic, preflight with `--pace-policy diagnostic` and run audio pace-check with `--pace-policy diagnostic`. The report still records `actual_wpm` and `diagnostic_pace_status`, but WPM alone does not block the ledger.
    - If provider TTS misses the gate, use `audio tempo-normalize --target-wpm 215` as the explicit recovery path, then rerun Whisper timing and audio pace check. Do not apply hidden manual `ffmpeg atempo` fixes outside the ledger.
 
 13. Timing bind.
@@ -133,15 +135,17 @@ The approved narration script is production truth. The pipeline should extract, 
    - Plans style, character state, location, UI, action, and effect refs.
    - Character state refs are the definitive identity/wardrobe/state contract.
    - Only `style` refs are global. Location, character, prop, UI, action, and effect refs are scene-scoped and must be attached only from the current scene candidate set.
-   - Location target `scene_ids` are derived from semantic location `ref_requirements` and unioned with LLM-authored ids. A physical scene that requires a location ref but has no covering target blocks with `scene_missing_location_ref`.
+   - Semantic `ref_requirements` create scoped target coverage, not automatic standalone generation. Location target `scene_ids` are derived from semantic location `ref_requirements` and unioned with LLM-authored ids. A physical scene that requires a location target but has no covering target blocks with `scene_missing_location_ref`.
+   - Keep standalone refs for recurring characters, major character states, key recurring locations, signature system/UI motifs, critical props, and high-risk close-contact one-scene characters.
+   - Downgrade one-scene locations/UI/props to `no_ref_needed`; downgrade minor recurring locations/UI/props/actions to `derive_from_best_cut` or `derive_from_first_clean_cut` when a clean generated scene image can become the reference later.
+   - Style refs are optional. If the style bible/text prompt is sufficient, drop generated style refs for the run.
    - Same venue does not automatically mean same location ref. When a long arc moves through visually distinct areas inside one building, campus, company, palace, arena, city, or event space, create separate scene-scoped location refs for the distinct physical areas named by semantic scene locations/ref requirements. The visual-plan coverage gate may block when one broad location ref is forced to carry too many distinct beat-location labels after the retention runway.
-   - Style ref comes first, then character/location/action anchors.
-   - Lower-priority anchors can be generated as standalone refs or derived from selected generated cuts when appropriate.
+   - Generated refs are created before scene imagegen; derive-later refs become attachable only after a real source/generated image path exists.
    - Named human characters in physical contact or close confrontation with the protagonist should use standalone refs before imagegen, even for one-scene appearances.
 
 16. Manual reference prompt review.
    - Agent/operator reviews and optimizes style, character, and key action reference prompts before image generation.
-   - Keep this positive-only and specific.
+   - Keep this concrete and specific.
    - Character refs for scene conditioning must be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas.
    - Do not use multi-position sheets, turnaround boards, multiple face-angle grids, scene backgrounds, dramatic action poses, or composition language that can transfer into cuts.
 
@@ -153,6 +157,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Reject refs with panel grids, speech bubbles, multi-position character layouts, strong scene backgrounds, cinematic action poses, or pose/background elements likely to transfer into cuts.
    - Run duplicate-hash QA across required reference targets. Different required ref IDs must not point to byte-identical images unless reuse was explicitly intended and documented. Exact duplicates between distinct locations, props, UI motifs, or character anchors are reference-generation failures and must be regenerated before visual prompt planning.
    - Regenerate failed refs selectively with `--reference-ids`; do not wipe approved refs.
+   - Record approval with `goldflow visual approve-refs` after QA. Do not hand-edit `character_state_refs.json`; `run status` keeps the run at visual reference planning until this approval is recorded.
 
 18. Visual prompt planning.
    - Consumes approved refs, current-scene facts, and visual beats.
@@ -164,15 +169,17 @@ The approved narration script is production truth. The pipeline should extract, 
    - Composition is beat-authored, not globally defaulted. The planner may choose close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when that shot scale serves the current visual job and narration excerpt. Do not impose a universal wide/full-frame/medium-wide default.
    - Real named public creators, streamers, celebrities, or influencers whose likeness matters need approved source-face anchors before character-state refs are generated. Use the source portrait as face-only identity input, then generate the episode-specific anime/manhwa state ref from that identity plus the current wardrobe/state contract. If no approved source face exists, flag it for operator review instead of inventing a generic lookalike.
    - References are design guides, not visible reference panels, sheets, or backgrounds.
-   - Prompts should prefer positive visual language, but story fidelity wins. Do not distort exact UI text, named-character presence, character count, or shot intent just to remove a negative word.
+   - Normal prompt prose may use story-faithful negative words when the beat, UI label, refusal, absence state, or status language needs them. Do not create standalone `negative_prompt`, `avoid_list`, or `exclude_list` payloads, and do not embed a `Negative prompt:` section inside prompt prose.
    - Prompt plans may carry provider-aware text: `modelslab_image_prompt` for ModelsLab/Flux, optional `codex_image_prompt` for Codex/OpenAI, and generic `image_prompt` as fallback. The shot_manifest and refs must stay identical across provider-specific wording.
    - Run prompt authoring in small parent-scene-aware chunks for both Codex and local Qwen; large whole-episode batches tend to collapse into repeated hero tableaux or incomplete JSON.
    - Codex visual authoring should scale by parallel four-cut chunks, not by large single prompts. Default target is four visual units per chunk with up to six chunk calls in parallel after sample gates pass.
 
 19. Visual prompt review/fix.
    - One LLM review/fix pass before imagegen. Default command uses `--auto-resolve true --max-resolve-iterations 2`.
-   - Auto-resolve replans blocked scenes only with positive correction directives, re-reviews only regenerated scenes, and preserves untouched `image_id`, `scene_id`, and `visual_beat_id` identity.
-   - If the previous guarded attempt reached `visual harden` and blocked on compatible manifest/ref/location findings for the same episode and script, the next `visual review --auto-resolve` pass consumes those harden blockers as positive correction directives, replans only affected scenes, and harden-validates repaired scenes before accepting them.
+   - Auto-resolve replans blocked scenes only with specific correction directives, re-reviews only regenerated scenes, and preserves untouched `image_id`, `scene_id`, and `visual_beat_id` identity.
+   - If `section_image_prompts.json` already exists and `section_image_prompts_reviewed.json` is blocked, or if harden reported compatible blockers after review passed, resume with `visual review --resume-blocked true --auto-resolve true --max-resolve-iterations 2`. Do not rerun full `visual plan` unless the plan artifact is missing, stale, corrupt, or the operator explicitly approves a full replan.
+   - Auto-resolve scopes repair as narrowly as the blockers allow: exact `image_id` cuts when every blocker has an image id, falling back to `scene_id` only for true scene-level blockers. The ledger should never suggest a full visual plan rerun for a two-cut review failure when the prompt plan already exists.
+   - If the previous guarded attempt reached `visual harden` and blocked on compatible manifest/ref/location findings for the same episode and script, the next `visual review --auto-resolve` pass consumes those harden blockers as specific correction directives, replans only affected cuts/scenes, and harden-validates repaired cuts/scenes before accepting them.
    - If capped iterations still fail, write `visual_resolution_deadletter.json` with status `blocked_deadletter`; imagegen refuses dead-lettered scenes.
    - Review repairs `shot_manifest` first, then prompt prose and references. Mentioned-only characters stay out of the visible prompt and do not attach refs.
    - Checks subject focus, identity blending risk, unnecessary refs, missing refs, action direction, literalized metaphors, wardrobe ambiguity, and contradictions with semantic facts.
@@ -193,16 +200,16 @@ The approved narration script is production truth. The pipeline should extract, 
    - Dialogue-heavy beats are authored/reviewed as silent acting frames. Prompts should stage emotion through posture, eyelines, expressions, hand placement, prop action, and blocking rather than phrases like "spoken line", "says", or "says loudly", which can produce speech bubbles and caption artifacts.
    - Every cut gets a shot job from the beat excerpt, such as location establishment, object insert, interaction, physical action, or emotional reaction. This prevents adjacent cuts from collapsing into repeated hero portraits or repeated desk-and-UI tableaux.
    - If four visible character refs consume all available slots, the LLM should keep the four character refs and report the dropped location ref in `reference_usage` as `available_not_attached_reference_limit`. Sanitation enforces the cap but should not creatively reprioritize content or force-add the omitted location at the cost of visible character identity. In-scope refs omitted by the reference limit are not `forbidden_ref_ids`; reserve `forbidden_ref_ids` for wrong-state, wrong-location, wrong-timeline, or out-of-scope anchors that would corrupt the cut.
-   - The LLM author/reviewer handles known Flux failure classes with positive construction: duplicate protagonist copies, foreground close-up plus tiny secondary overlays, reflected faces inside props, speech bubbles/dialogue lettering, UI panels covering faces, or UI panels reading as solid censor blocks.
+   - The LLM author/reviewer handles known Flux failure classes with concrete visual construction: duplicate protagonist copies, foreground close-up plus tiny secondary overlays, reflected faces inside props, speech bubbles/dialogue lettering, UI panels covering faces, or UI panels reading as solid censor blocks.
    - UI, system, and ledger text accuracy is not a blocker by itself. Treat UI as a problem only when it becomes physically destructive, covers the subject/action, creates duplicate figures, or changes the shot into a prop/device shot. Exact story-critical words can still be added during render as overlays when intentionally needed.
    - Supernatural UI and ledger panels should remain immaterial floating light panels with a visible air gap from hands. They must not become books, laptops, tablets, phones, monitors, keyboards, scrolls, boards, or other physical held objects.
-   - Abstract energy, memory, and aura effects should be phrased positively as ribbon-like light, empty glow, silhouettes, or abstract shapes. Avoid negative ghost/face/body wording in prompts because image models often render the forbidden subject named in the negative phrase.
+   - Abstract energy, memory, and aura effects should be phrased concretely as ribbon-like light, empty glow, silhouettes, or abstract shapes. Avoid naming unwanted ghost/face/body subjects in prompts unless the story beat genuinely needs those words, because image models often render named subjects.
    - Review the markdown sample sheet before spending full imagegen budget. It must include risky examples such as the hook, one location-anchor cut, authority/rival/witness role-label cuts, crowded multi-character shots, action/contact, UI/prop/document, and a late-episode continuity cut.
 
 21. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
-   - The image provider is locked in `run_identity.json`. Normal production uses `--image-provider modelslab`; `imagegen start` refuses a different provider unless the operator explicitly approves `--confirm-image-provider true`. The experimental speed-test hybrid lane is `--image-provider hybrid_codex_refs_multichar`: references and risky multi-character cuts route to Codex imagegen, while lower-risk simple cuts route to ModelsLab. The retention-window hybrid lane is `--image-provider hybrid_codex_opening_modelslab_rest --codex-opening-sec <seconds>`: references route to Codex imagegen, scene cuts before the locked timestamp route to Codex imagegen, and the rest of the video routes to ModelsLab.
+   - The image provider is locked in `run_identity.json`. Normal production uses `--image-provider modelslab`; `imagegen start` refuses a different provider unless the operator explicitly approves `--confirm-image-provider true`. The experimental speed-test hybrid lane is `--image-provider hybrid_codex_refs_multichar`: references and risky multi-character cuts route to Codex imagegen, while lower-risk simple cuts route to ModelsLab. The retention-window hybrid lane is `--image-provider hybrid_codex_opening_modelslab_rest --codex-opening-sec <seconds>`: references route to Codex imagegen, scene cuts before the locked timestamp route to Codex imagegen, and the rest of the video routes to ModelsLab. The validation-batch lane for ModelsLab refs plus Codex opening scene cuts is `--image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest --codex-opening-sec <seconds>`: references route to ModelsLab, Codex opening cuts are staged/imported into `imagegen_report_<episode>.json`, and the ModelsLab remainder is generated with `imagegen start --provider-filter modelslab`.
    - Codex Imagen means built-in Codex image generation workers plus staged raster import. Assign scoped ref/cut IDs to isolated workers, save exactly one PNG per assigned ID, verify SHA-256 and dimensions, then import with `goldflow imagegen import-staged-codex`. Do not use nested `codex exec --enable image_generation` or copy the newest/global Codex cache image as a production route.
    - Flux Klein and Flux Kontext are both treated as four-reference models in this pipeline.
    - Generate required references first: style reference, then character, location, UI, action, and prop references.
@@ -217,7 +224,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Memory/reflection beats should stage memories as separate translucent silhouettes near the prop, not as faces embedded in basins, mirrors, blades, documents, or bodies.
    - Childhood flashbacks need child-specific refs or no adult character refs. If child refs are unavailable, stage the beat as child memory silhouettes with the current location ref only, because adult refs contaminate age, wardrobe, and body shape.
    - Ritual/document close-ups should favor physical seal glow, ink, brush water, paper, and altar light. Add supernatural UI only when the beat explicitly calls for a ledger/interface reveal.
-   - Subject fusion, miniature heads, duplicate protagonist faces, or faces embedded in another body are generated-still failures. Regenerate those cuts with positive staging language: separate complete bodies, clear spacing, distinct face placement, visible robe and shoulder boundaries, one continuous manhwa frame.
+   - Subject fusion, miniature heads, duplicate protagonist faces, or faces embedded in another body are generated-still failures. Regenerate those cuts with concrete staging language: separate complete bodies, clear spacing, distinct face placement, visible robe and shoulder boundaries, one continuous manhwa frame.
    - If ModelsLab returns a queue, rate-limit, fetch failure, or long stuck tail, rerun the affected `--cut-ids` with lower concurrency and leave `--force` unset unless intentionally replacing a bad cut. Completed good images should be reused.
    - ModelsLab requests must produce actual landscape rasters. A returned portrait or square image is a provider failure for this YouTube lane, even if the request payload asked for 16:9; retry the affected cut instead of letting render crop a vertical frame.
    - Use the hardened prompt artifact for production scene imagegen. `imagegen start` defaults to `section_image_prompts_hardened.json` and rejects non-hardened prompt plans by default; `--allow-unhardened-prompts true` is diagnostic only.
@@ -230,7 +237,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
    - Optional engagement bait belongs in render-layer overlays only. If the operator asks for comment/like/subscribe prompts, run `goldflow visual engagement` after prompt hardening and before render, then let render apply exact animated bubbles from `engagement_overlay_plan_<episode>.json`.
    - Engagement overlays should be sparse and story-timed: one early comment question after the cold open, a few choice/prediction prompts on real dilemmas or reveals, and at most one or two direct like/subscribe CTAs near a high-retention beat or the end/cliffhanger. Do not bake engagement text into generated scene images, narration, subtitles, or SFX planning.
-   - Premium full-frame profile-based Ken Burns is the default production render profile: `--motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`. Use blurred foreground drift or `fill_pan` only as an explicitly approved diagnostic fallback after the premium render is proven unsuitable for the specific episode.
+   - Premium full-frame profile-based Ken Burns is the default production render profile: `--motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`. The official no-oversample smoother sibling for A/B testing is `--motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`; it defaults to 60 fps and render-scale multiplier `1.05`, keeps the same hook/action/reveal/wide/emotional movement grammar, and converts long calm micro-drifts into zoom-only/static-safe holds. Use blurred foreground drift or `fill_pan` only as an explicitly approved diagnostic fallback after the profile-based renders are proven unsuitable for the specific episode.
    - Render timing is absolute. Preserve the `start_sec` timeline from `section_image_prompts_hardened.json` / `visual_beat_plan.json`; do not globally scale image durations to fill the audio. If the visual plan has a gap before the next cut, hold the current image until the next cut's real start time or add new visual beats/images in a planning pass.
    - Each generated motion clip must be duration-probed immediately. Abort on malformed clips rather than continuing a long render.
    - Motion should vary by beat: action pushes, reveal pushes, wide drifts, emotional holds, steady pushes, lateral trucks, vertical/diagonal moves, and true zoom-outs that expose more of the image canvas for establishing or reveal beats. Aggressive motion should not mean constant random movement, but a premium render must not be all push-ins under different profile labels. Check `render_motion.motion_behaviors` for real variation before calling the MP4 review-ready.
@@ -271,7 +278,7 @@ The approved narration script is production truth. The pipeline should extract, 
 - Explicit Codex/OpenAI imagegen runs: before any batch, run a one-image probe and verify that a real raster was imported into `assets/images` or `assets/images/references`. A nested Codex response that returns text/JSON success without a new raster is a failed provider probe; stop or use an approved fallback before spending image budget. If direct built-in Codex/OpenAI image generation is used manually, import each selected real raster with `goldflow imagegen import-codex`; partial reports with `missing_image_count > 0` are proof batches only and are not full-render image reports.
 - Codex/OpenAI manual or subagent cuts must be generated into isolated one-cut staging folders. Do not actively generate into shared wave folders or copy the newest/global Codex cache raster; every worker stages exactly one PNG named for its assigned image ID and reports SHA-256. Import gates must reject duplicate hashes across distinct accepted image IDs. Repairs use fresh isolated folders and must not reuse stale staged or cached rasters.
 - Before render, audit accepted image hashes from `imagegen_report_<episode>.json`. Any duplicate hash across distinct image IDs blocks render until the wrong/stale cut is regenerated, imported, and the duplicate audit passes.
-- Visual prompts: positive-only, current-scene-only, one prompt per visual beat, with explicit reference slot mapping.
+- Visual prompts: normal production prose, current-scene-only, one prompt per visual beat, no standalone negative-prompt payloads, with explicit reference slot mapping.
 - Render audio: one continuous longform mix. Default is narrator-only; SFX, ambience, score, and transition SFX are opt-in variants.
 - Render loudness: narration raised at longform mix with `--narration-volume-db 2` as the production starting point.
 - Render subtitles: final approved/stitch script text timed by Whisper, not Whisper recognition text.
@@ -280,6 +287,8 @@ The approved narration script is production truth. The pipeline should extract, 
 
 ```bash
 node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_01 --title <episode-title> --source <chatbot-output.md> --audio-target narrator_only
+# Validation batch with ModelsLab refs, Codex first five minutes, diagnostic WPM, and smooth premium render:
+node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_01 --title <episode-title> --source <chatbot-output.md> --image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest --codex-opening-sec 300 --audio-target narrator_only --pace-policy diagnostic --render-profile smooth_fast_ken_burns --run-intent production
 node bin/goldflow.mjs ingest source --channel <channel> --series <series> --week <week> --episode ep_01 --source <chatbot-output.md>
 node bin/goldflow.mjs script approve --channel <channel> --series <series> --week <week> --episode ep_01 --hash <script_clean_sha256>
 node bin/goldflow.mjs script targeted --channel <channel> --series <series> --week <week> --episode ep_01
@@ -292,6 +301,7 @@ node bin/goldflow.mjs audio longform-bed --channel <channel> --series <series> -
 node bin/goldflow.mjs visual beats --channel <channel> --series <series> --week <week> --episode ep_01 --hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2 --retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5
 node bin/goldflow.mjs visual refs --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --references-only true --reference-concurrency 6
+node bin/goldflow.mjs visual approve-refs --channel <channel> --series <series> --week <week> --episode ep_01 --note "<reference review notes>"
 node bin/goldflow.mjs visual plan --channel <channel> --series <series> --week <week> --episode ep_01
 node bin/goldflow.mjs visual review --channel <channel> --series <series> --week <week> --episode ep_01 --auto-resolve true --max-resolve-iterations 2
 node bin/goldflow.mjs visual harden --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_reviewed.json --sample-count 14
@@ -301,6 +311,8 @@ node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --wee
 # Optional for direct/manual Codex/OpenAI proof batches:
 node bin/goldflow.mjs imagegen import-codex --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --image-id <image_id> --source <codex-generated-raster.png> --output <episode-dir>/imagegen_report_codex_manual_ep_01.json
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+# Optional smoother no-oversample A/B profile:
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast --output <episode-dir>/assets/renders/<title>-smooth-fast.mp4 --report-output <episode-dir>/render_report_ep_01-smooth-fast.json
 ```
 
 Opt-in SFX/score/ambience variant:
@@ -373,7 +385,7 @@ Use this checklist before spending generation time:
    - Generate and manually inspect style, character, location, prop/UI, and action refs before scene imagegen.
    - Use reference-only generation first, then selectively regenerate failed refs with `--reference-ids`.
    - Character state refs are definitive for identity and wardrobe.
-   - LLM-authored scene prompts should be positive-only. Creative visual decisions belong to LLM authoring/review. Deterministic production sanitation should only validate and sanitize approved refs, paths, max-count limits, forbidden refs, and non-creative unsafe UI label phrasing.
+   - LLM-authored scene prompts should use normal production prose. Story-faithful negative words are allowed inside the main prompt; standalone `negative_prompt`, `avoid_list`, `exclude_list`, or embedded `Negative prompt:` sections are not. Creative visual decisions belong to LLM authoring/review. Deterministic production sanitation should only validate and sanitize approved refs, paths, max-count limits, forbidden refs, and non-creative unsafe UI label phrasing.
    - Reference priority: visible characters, location, prop/UI, action/effects, style only when no concrete refs are available.
    - For multi-character scenes, spot check attached refs before bulk imagegen. Check for wrong character refs, stale visible-subject refs, duplicate MC, face/body fusion, prop-embedded faces, speech bubbles, UI covering faces, and location drift.
    - If Flux times out or a sample fails, resume missing or rejected `--cut-ids` only. Keep completed good cuts cached.
@@ -385,7 +397,7 @@ Use this checklist before spending generation time:
    - Use final-script subtitles timed to Whisper, not Whisper-recognized text.
    - If `engagement_overlay_plan_<episode>.json` is present and passed, spot-check that bubbles do not cover faces, subtitles, or key UI, and that the prompt feels native to the current story beat.
    - Subtitle style: yellow text, small black outline, no background box.
-   - Motion style: premium profile-based Ken Burns by default: `--motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`.
+   - Motion style: premium profile-based Ken Burns by default: `--motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`. Use `--motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast` as the no-oversample smoother sibling when testing for micro-shake; verify `render_motion.mode`, `render_motion.fps`, `render_motion.render_scale_multiplier`, and motion behavior variation in the report.
    - Preserve absolute visual cut `start_sec`; do not globally scale cut durations. Probe motion clip durations and audit rendered image timing against transcript/visual beats.
    - Verify final MP4 codec/pixel format with `ffprobe`, especially `yuv420p` for upload compatibility.
 

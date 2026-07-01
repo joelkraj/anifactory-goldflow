@@ -7,6 +7,47 @@ export function unresolvedBlockerFindings(findings) {
   return (findings ?? []).filter((finding) => finding?.severity === "blocker" && finding.resolved !== true);
 }
 
+export function blockerImageIds(blockers) {
+  return [...new Set((blockers ?? []).map((finding) => String(finding?.image_id ?? "").trim()).filter(Boolean))];
+}
+
+export function blockerSceneIds(blockers) {
+  return [...new Set((blockers ?? []).map((finding) => String(finding?.scene_id ?? "").trim()).filter(Boolean))];
+}
+
+export function visualResolveScopeForBlockers(blockers) {
+  const unresolved = unresolvedBlockerFindings(blockers);
+  const imageIds = blockerImageIds(unresolved);
+  const sceneIds = blockerSceneIds(unresolved);
+  const allBlockersHaveImageIds = unresolved.length > 0
+    && unresolved.every((finding) => String(finding?.image_id ?? "").trim().length > 0);
+  if (allBlockersHaveImageIds && imageIds.length) {
+    return {
+      mode: "cut_ids",
+      args: ["--cut-ids", imageIds.join(",")],
+      image_ids: imageIds,
+      scene_ids: sceneIds,
+    };
+  }
+  return {
+    mode: "scene_ids",
+    args: sceneIds.length ? ["--only-scenes", sceneIds.join(",")] : [],
+    image_ids: imageIds,
+    scene_ids: sceneIds,
+  };
+}
+
+export function mergeScopedPromptReplacements(basePrompts, replacementPrompts, scope) {
+  const replacementsById = new Map((replacementPrompts ?? []).map((prompt) => [prompt.image_id, prompt]));
+  const imageSet = new Set(scope?.image_ids ?? []);
+  const sceneSet = new Set(scope?.scene_ids ?? []);
+  return (basePrompts ?? []).map((prompt) => {
+    if (imageSet.size) return imageSet.has(prompt.image_id) ? (replacementsById.get(prompt.image_id) ?? prompt) : prompt;
+    if (sceneSet.size) return sceneSet.has(prompt.scene_id) ? (replacementsById.get(prompt.image_id) ?? prompt) : prompt;
+    return prompt;
+  });
+}
+
 export function hasHardenFeedbackFindings(findings) {
   return unresolvedBlockerFindings(findings).some((finding) => finding.source_stage === "visual_harden");
 }

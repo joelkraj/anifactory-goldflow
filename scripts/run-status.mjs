@@ -94,6 +94,14 @@ function normalizeImageProvider(value) {
     "codex_first20_modelslab_rest",
     "codex_opening_modelslab_rest",
   ].includes(normalized)) return "hybrid_codex_opening_modelslab_rest";
+  if ([
+    "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    "modelslab_refs_codex_opening_modelslab_rest",
+    "modelslab_references_codex_opening_modelslab_rest",
+    "modelslab_refs_codex_first5_modelslab_rest",
+    "modelslab_refs_codex_first_5_modelslab_rest",
+    "codex_first5_modelslab_rest_modelslab_refs",
+  ].includes(normalized)) return "hybrid_modelslab_refs_codex_opening_modelslab_rest";
   return "modelslab";
 }
 
@@ -108,7 +116,7 @@ function codexOpeningSec(identity) {
 
 function imagegenOpeningFlag(identity) {
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  return provider === "hybrid_codex_opening_modelslab_rest" ? ` --codex-opening-sec ${codexOpeningSec(identity)}` : "";
+  return provider === "hybrid_codex_opening_modelslab_rest" || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? ` --codex-opening-sec ${codexOpeningSec(identity)}` : "";
 }
 
 function usesCodexReferences(identity) {
@@ -118,24 +126,59 @@ function usesCodexReferences(identity) {
     || provider === "hybrid_codex_opening_modelslab_rest";
 }
 
-function commandFor(stage, identity) {
+function usesCodexSceneCuts(identity) {
+  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  return provider === "codex_imagegen"
+    || provider === "hybrid_codex_refs_multichar"
+    || provider === "hybrid_codex_opening_modelslab_rest"
+    || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest";
+}
+
+function paceDiagnosticOnly(identity) {
+  return String(identity?.pace_policy ?? "").toLowerCase() === "diagnostic";
+}
+
+function renderCommand(identity, base, episode) {
+  const smooth = String(identity?.render_profile ?? "").toLowerCase() === "smooth_fast_ken_burns";
+  const common = `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180`;
+  if (smooth) {
+    return `${common} --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`;
+  }
+  return [
+    `${common} --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
+    `${common} --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast --output <episode-dir>/assets/renders/<title>-smooth-fast.mp4 --report-output <episode-dir>/render_report_${episode}-smooth-fast.json`,
+  ].join("; optional A/B smoother sibling without overwriting premium: ");
+}
+
+function commandBase(identity) {
   const channel = identity.channel ?? "<channel>";
   const series = identity.series_slug ?? "<series>";
   const week = identity.week ?? "<week>";
   const episode = identity.episode ?? "<episode>";
-  const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
+  return `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
+}
+
+function visualRefsApproveCommand(identity) {
+  return `node bin/goldflow.mjs visual approve-refs ${commandBase(identity)} --note "<reference review notes>"`;
+}
+
+function commandFor(stage, identity) {
+  const episode = identity.episode ?? "<episode>";
+  const base = commandBase(identity);
   const narratorOnly = isNarratorOnlyAudio(identity);
+  const paceFlag = paceDiagnosticOnly(identity) ? " --pace-policy diagnostic" : "";
+  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
-    script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min 210 --target-wpm-max 220`,
+    script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min 210 --target-wpm-max 220${paceFlag}${paceDiagnosticOnly(identity) ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
     semantic_scene_plan: `node bin/goldflow.mjs semantic plan ${base}`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
     qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
-    audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min 210 --target-wpm-max 220`,
+    audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min 210 --target-wpm-max 220${paceFlag}`,
     audio_tempo_normalize: `node bin/goldflow.mjs audio tempo-normalize ${base} --target-wpm 215`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
     sfx_score_plan: narratorOnly ? "skipped because run_identity.audio_target is narrator_only" : `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only --retention-mix true`,
@@ -146,13 +189,13 @@ function commandFor(stage, identity) {
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
     reference_generation: usesCodexReferences(identity)
       ? `Stage reference PNGs with built-in Codex imagegen workers, then: node bin/goldflow.mjs imagegen import-staged-codex ${base} --references-only true --staging-dir <staging-dir> --reference-ids <ref_ids>`
-      : `node bin/goldflow.mjs imagegen start ${base} --references-only true`,
-    visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base} && node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2 && node bin/goldflow.mjs visual harden ${base}`,
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --references-only true`,
+    visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base}`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly ? " --transition-sfx false" : ""}`,
-    image_generation: usesCodexReferences(identity)
-      ? `Stage Codex-routed cut PNGs with built-in Codex imagegen workers, import them with: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <staging-dir> --image-ids <codex_cut_ids>; then generate the ModelsLab-routed remainder with: node bin/goldflow.mjs imagegen start ${base}${imagegenOpeningFlag(identity)} --prompts <episode-dir>/section_image_prompts_hardened.json`
+    image_generation: usesCodexSceneCuts(identity)
+      ? `Stage Codex-routed cut PNGs with built-in Codex imagegen workers, import them with: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then generate the ModelsLab-routed remainder with: node bin/goldflow.mjs imagegen start ${base}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --provider-filter modelslab --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base}`,
-    premium_render: `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
+    premium_render: renderCommand(identity, base, episode),
     final_qa: `ffprobe <final-render.mp4> && ffmpeg -i <final-audio-or-render> -af volumedetect -f null -`,
     upload_packaging: "Generate title, thumbnail, and description hooks after story/render review.",
   };
@@ -177,19 +220,30 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const week = identity.week ?? "<week>";
   const episode = identity.episode ?? "<episode>";
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
-  const fullCommand = commandFor("visual_prompt_plan_review_harden", identity);
+  const planCommand = commandFor("visual_prompt_plan_review_harden", identity);
   const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
-  if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return fullCommand;
+  if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return planCommand;
   const reviewedPlan = await readJson(path.join(episodeDir, "section_image_prompts_reviewed.json"), null);
   const hardenedPlan = await readJson(path.join(episodeDir, "section_image_prompts_hardened.json"), null);
   const hardenReport = await readJson(path.join(episodeDir, `visual_prompt_hardening_${episode}.json`), null);
+  const reviewedStatus = String(reviewedPlan?.status ?? "").toLowerCase();
+  const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
+  const reviewCommand = `node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2`;
+  const scopedReviewCommand = `node bin/goldflow.mjs visual review ${base} --resume-blocked true --auto-resolve true --max-resolve-iterations 2`;
+  const hardenCommand = `node bin/goldflow.mjs visual harden ${base}`;
   if (hardenedPlan?.status === "passed" && Array.isArray(hardenedPlan.prompts) && hardenedPlan.prompts.length) {
-    return `node bin/goldflow.mjs visual harden ${base}`;
+    return hardenCommand;
   }
-  if (reviewedPlan?.status === "passed" && hardenReport?.status !== "blocked") {
-    return `node bin/goldflow.mjs visual harden ${base}`;
+  if (["blocked", "blocked_deadletter"].includes(reviewedStatus)) {
+    return scopedReviewCommand;
   }
-  return `node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2 && node bin/goldflow.mjs visual harden ${base}`;
+  if (reviewedStatus === "passed" && hardenStatus === "blocked") {
+    return scopedReviewCommand;
+  }
+  if (reviewedStatus === "passed") {
+    return hardenCommand;
+  }
+  return reviewCommand;
 }
 
 async function imageReportComplete(episodeDir, episode) {
@@ -360,7 +414,8 @@ async function paceReportComplete(filePath, currentScriptHash, label) {
   const hookWarnings = Array.isArray(report.hook_milestone_report?.warnings)
     ? report.hook_milestone_report.warnings
     : [];
-  const scriptHookBlocked = label === "script_pace_report.json" && hookWarnings.length > 0;
+  const hookGateEnforced = report.hook_gate_enforced !== false && report.allow_hook_warnings !== true;
+  const scriptHookBlocked = label === "script_pace_report.json" && hookWarnings.length > 0 && hookGateEnforced;
   const sourceHashes = report.source_hashes && typeof report.source_hashes === "object" && !Array.isArray(report.source_hashes)
     ? report.source_hashes
     : null;
@@ -383,6 +438,7 @@ async function paceReportComplete(filePath, currentScriptHash, label) {
 }
 
 async function audioPaceRecoveryCommand(episodeDir, identity) {
+  if (paceDiagnosticOnly(identity)) return null;
   const report = await readJson(path.join(episodeDir, `narration_pace_report_${identity.episode}.json`), null);
   const status = String(report?.status ?? "").toLowerCase();
   const actualWpm = Number(report?.actual_wpm);
@@ -633,7 +689,7 @@ async function jsonStatusWithSourceHashesComplete(filePath, label) {
   };
 }
 
-async function visualReferencePlanComplete(episodeDir, currentScriptHash) {
+async function visualReferencePlanComplete(episodeDir, currentScriptHash, identity) {
   const visualPlanPath = path.join(episodeDir, "visual_reference_plan.json");
   const characterRefsPath = path.join(episodeDir, "character_state_refs.json");
   const visual = await jsonStatusWithSourceHashesComplete(visualPlanPath, "visual_reference_plan.json");
@@ -642,12 +698,20 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash) {
     return { done: false, evidence: `${visual.evidence}; character_state_refs.json missing` };
   }
   const characterStatus = String(characterRefs.status ?? "").toLowerCase();
+  const needsApproval = characterStatus === "draft_needs_manual_review";
   const statusOk = ["approved", "passed", "draft_needs_manual_review"].includes(characterStatus);
   const characterHash = characterRefs.source_script_hash ?? characterRefs.script_hash ?? characterRefs.script_clean_hash ?? null;
   if (!statusOk || characterHash !== currentScriptHash) {
     return {
       done: false,
       evidence: `${visual.evidence}; character_state_refs.json ${characterStatus || "missing_status"} for hash ${characterHash ?? "none"}; required hash ${currentScriptHash}`,
+    };
+  }
+  if (needsApproval) {
+    return {
+      done: false,
+      evidence: `${visual.evidence}; character_state_refs.json status=draft_needs_manual_review`,
+      next_command_shape: visualRefsApproveCommand(identity),
     };
   }
   const charSourceHashes = characterRefs.source_hashes && typeof characterRefs.source_hashes === "object" && !Array.isArray(characterRefs.source_hashes)
@@ -702,6 +766,8 @@ async function main() {
     audio_target: flags["audio-target"] ?? runIdentity.audio_target ?? "narrator_only",
     image_provider: flags["image-provider"] ?? flags.provider ?? runIdentity.image_provider ?? "modelslab",
     image_provider_options: runIdentity.image_provider_options ?? {},
+    pace_policy: flags["pace-policy"] ?? flags["wpm-policy"] ?? runIdentity.pace_policy ?? "enforced",
+    render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "fill_ken_burns",
   };
   const episode = identity.episode;
   const scriptHash = await fileSha256(path.join(episodeDir, "script_clean.md"));
@@ -717,7 +783,7 @@ async function main() {
   const semanticPlan = await jsonStatusComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
   const timedScenePlan = await jsonStatusComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "visual_beat_plan.json"), "visual_beat_plan.json");
-  const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash);
+  const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode);
   const referenceGeneration = await referenceGenerationComplete(episodeDir);
@@ -749,7 +815,7 @@ async function main() {
     stage("sfx_score_plan", narratorOnly ? "skipped for narrator_only audio target" : "local Whisper timing + timed scenes", narratorOnly ? "skipped" : `sfx_event_plan_${episode}.json + score_drop_plan_${episode}.json`, false, sfxScoreDone.done, sfxScoreDone.evidence, identity),
     stage("longform_audio_mix", narratorOnly ? "stitched narration/Qwen report" : "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
     stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, visualBeatPlan.done, visualBeatPlan.evidence, identity),
-    stage("visual_reference_plan", "visual beats + semantic facts", "visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity),
+    stage("visual_reference_plan", "visual beats + semantic facts", "visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
     stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity),
     stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
     stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),

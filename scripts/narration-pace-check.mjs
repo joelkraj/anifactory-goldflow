@@ -20,6 +20,8 @@ const outputPath = flags.output ?? path.join(episodeDir, mode === "audio" ? `nar
 const targetMinWpm = Number(flags["target-wpm-min"] ?? process.env.GOLDFLOW_TARGET_WPM_MIN ?? 210);
 const targetMaxWpm = Number(flags["target-wpm-max"] ?? process.env.GOLDFLOW_TARGET_WPM_MAX ?? 220);
 const targetMidWpm = Number(((targetMinWpm + targetMaxWpm) / 2).toFixed(3));
+const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "enforced");
+const paceGateEnforced = pacePolicy !== "diagnostic";
 const allowHookWarnings = flags["allow-hook-warnings"] === "true"
   || process.env.GOLDFLOW_ALLOW_HOOK_WARNINGS === "true";
 
@@ -34,6 +36,12 @@ function parseFlags(parts) {
     if (value !== "true") index += 1;
   }
   return parsed;
+}
+
+function normalizePacePolicy(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (["diagnostic", "diagnostic_only", "non_blocking", "report_only", "wpm_diagnostic"].includes(normalized)) return "diagnostic";
+  return "enforced";
 }
 
 function sha256(value) {
@@ -184,6 +192,8 @@ async function main() {
     target_wpm_min: targetMinWpm,
     target_wpm_max: targetMaxWpm,
     target_wpm_midpoint: targetMidWpm,
+    pace_policy: pacePolicy,
+    pace_gate_enforced: paceGateEnforced,
     script_word_count: scriptWordCount,
     estimated_runtime_at_target_mid_sec: Number((scriptWordCount / targetMidWpm * 60).toFixed(3)),
     estimated_runtime_at_target_min_sec: Number((scriptWordCount / targetMinWpm * 60).toFixed(3)),
@@ -202,17 +212,19 @@ async function main() {
     const wordCount = Number(wordTiming.word_count ?? wordTiming.words?.length ?? scriptWordCount);
     const durationSec = Number(wordTiming.audio_duration_sec ?? wordTiming.duration_sec ?? 0);
     const actualWpm = durationSec > 0 ? wordCount / (durationSec / 60) : NaN;
-    const status = paceStatus(actualWpm);
+    const measuredStatus = paceStatus(actualWpm);
+    const status = paceGateEnforced ? measuredStatus : "passed";
     const report = {
       ...base,
       status,
+      diagnostic_pace_status: measuredStatus,
       word_timing_path: wordTimingPath,
       narration_audio_path: wordTiming.narration_audio_path ?? null,
       narration_audio_hash: wordTiming.narration_audio_hash ?? null,
       measured_word_count: wordCount,
       measured_duration_sec: durationSec,
       actual_wpm: Number.isFinite(actualWpm) ? Number(actualWpm.toFixed(3)) : null,
-      blocker: status === "passed" ? null : `Actual narration pace must be ${targetMinWpm}-${targetMaxWpm} WPM.`,
+      blocker: paceGateEnforced && status !== "passed" ? `Actual narration pace must be ${targetMinWpm}-${targetMaxWpm} WPM.` : null,
     };
     await writeJson(outputPath, report);
     console.log(JSON.stringify({ status, output_path: outputPath, actual_wpm: report.actual_wpm }, null, 2));
@@ -222,14 +234,21 @@ async function main() {
 
   const hookReport = hookMilestoneReport(script, targetMidWpm);
   const hookWarnings = hookReport.warnings ?? [];
-  const status = hookWarnings.length && !allowHookWarnings ? "blocked" : "passed";
+  const hookGateEnforced = paceGateEnforced && !allowHookWarnings;
+  const measuredHookStatus = hookWarnings.length ? "blocked" : "passed";
+  const status = hookWarnings.length && hookGateEnforced ? "blocked" : "passed";
   const report = {
     ...base,
     status,
     estimated: true,
+    hook_gate_enforced: hookGateEnforced,
+    allow_hook_warnings: allowHookWarnings,
+    diagnostic_hook_status: measuredHookStatus,
     hook_milestone_report: hookReport,
     blocker: status === "passed" ? null : `Script hook timing has ${hookWarnings.length} blocker(s). Tighten the source/chatbot hook or rerun with --allow-hook-warnings true only for diagnostics.`,
-    note: "Script-stage WPM is a target budget; hook milestone timing is enforced here when detected. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing.",
+    note: hookGateEnforced
+      ? "Script-stage WPM is a target budget; hook milestone timing is enforced here when detected. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing."
+      : "Script-stage WPM and hook milestone timing are recorded diagnostically for this run policy. Actual spoken WPM is measured after Qwen stitch and local Whisper timing.",
   };
   await writeJson(outputPath, report);
   console.log(JSON.stringify({ status: report.status, output_path: outputPath, target_wpm: `${targetMinWpm}-${targetMaxWpm}`, estimated_runtime_at_target_mid_sec: report.estimated_runtime_at_target_mid_sec }, null, 2));

@@ -29,8 +29,8 @@ const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-g
 const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.join(episodeDir, `render_report_${episode}.json`);
 const width = Number(flags.width ?? 1920);
 const height = Number(flags.height ?? 1080);
-const fps = Number(flags.fps ?? 30);
-const motionMode = flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "fill_ken_burns";
+const motionMode = normalizeMotionMode(flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "fill_ken_burns");
+const fps = Number(flags.fps ?? process.env.ANIFACTORY_RENDER_FPS ?? (motionMode === "smooth_fast_ken_burns" ? 60 : 30));
 const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTORY_RENDER_FOREGROUND_SCALE ?? 0.93);
 const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.75);
 const visualFadeSec = Number(flags["visual-fade-sec"] ?? process.env.ANIFACTORY_RENDER_VISUAL_FADE_SEC ?? 0);
@@ -40,7 +40,8 @@ const transitionTailSec = Number(flags["transition-tail-sec"] ?? process.env.ANI
 const hookXfadeEnabled = flags["hook-xfade"] !== "false" && !/^(false|0|no)$/i.test(String(process.env.ANIFACTORY_RENDER_HOOK_XFADE ?? "true"));
 const hookXfadeDurationSec = Number(flags["hook-xfade-duration-sec"] ?? process.env.ANIFACTORY_RENDER_HOOK_XFADE_DURATION_SEC ?? 0.28);
 const renderConcurrency = Math.max(1, Number(flags["render-concurrency"] ?? process.env.ANIFACTORY_RENDER_CONCURRENCY ?? 4));
-const renderScaleMultiplier = Math.max(1.05, Number(flags["render-scale-multiplier"] ?? process.env.ANIFACTORY_RENDER_SCALE_MULTIPLIER ?? 1.45));
+const defaultRenderScaleMultiplier = motionMode === "smooth_fast_ken_burns" ? 1.05 : 1.45;
+const renderScaleMultiplier = Math.max(1.05, Number(flags["render-scale-multiplier"] ?? process.env.ANIFACTORY_RENDER_SCALE_MULTIPLIER ?? defaultRenderScaleMultiplier));
 const clipPreset = flags["clip-preset"] ?? process.env.ANIFACTORY_RENDER_CLIP_PRESET ?? "veryfast";
 const finalPreset = flags["final-preset"] ?? process.env.ANIFACTORY_RENDER_FINAL_PRESET ?? "veryfast";
 const finalAudioLoudnormEnabled = flags["final-audio-loudnorm"] !== "false" && !/^(false|0|no)$/i.test(String(process.env.ANIFACTORY_RENDER_FINAL_AUDIO_LOUDNORM ?? "true"));
@@ -59,6 +60,12 @@ function parseFlags(parts) {
     if (value !== "true") index += 1;
   }
   return parsed;
+}
+
+function normalizeMotionMode(value) {
+  const key = String(value ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+  if (key === "smooth_fast" || key === "smooth_ken_burns" || key === "smooth_fast_kenburns") return "smooth_fast_ken_burns";
+  return key || "fill_ken_burns";
 }
 
 function sha256(value) {
@@ -595,12 +602,70 @@ function motionProfile(prompt, index, startSec = 0, previousPrompt = null) {
   return { name: "steady_push", behavior: rotation % 3 === 0 ? "lateral_truck" : "controlled_push_in", zoom: variedZoom(1.056, variance), driftX: 0.036, driftY: 0.024, direction, sceneStart };
 }
 
+function smoothFastMotionProfile(profile, duration, startSec = 0) {
+  const smooth = {
+    ...profile,
+    name: `${profile.name}_smooth_fast`,
+    smooth_fast: true,
+  };
+  if (profile.hook || Number(startSec) < hookTransitionSec) {
+    return {
+      ...smooth,
+      driftX: Number(profile.driftX ?? 0) * 0.82,
+      driftY: Number(profile.driftY ?? 0) * 0.82,
+    };
+  }
+  const behavior = String(profile.behavior ?? "");
+  const longHold = Number(duration) >= 8;
+  const veryLongHold = Number(duration) >= 14;
+  const calmBehavior = new Set(["breathing_hold", "micro_zoom_out", "lateral_truck", "controlled_push_in"]);
+  if (veryLongHold && calmBehavior.has(behavior)) {
+    return {
+      ...smooth,
+      behavior: behavior === "micro_zoom_out" ? "smooth_zoom_out" : behavior === "controlled_push_in" ? "smooth_push_in" : "smooth_static_hold",
+      driftX: 0,
+      driftY: 0,
+    };
+  }
+  if (longHold && calmBehavior.has(behavior)) {
+    return {
+      ...smooth,
+      behavior: behavior === "micro_zoom_out" ? "smooth_zoom_out" : behavior === "lateral_truck" ? "smooth_push_in" : behavior,
+      driftX: 0,
+      driftY: 0,
+    };
+  }
+  if (longHold) {
+    return {
+      ...smooth,
+      driftX: Number(profile.driftX ?? 0) * 0.42,
+      driftY: Number(profile.driftY ?? 0) * 0.42,
+    };
+  }
+  return {
+    ...smooth,
+    driftX: Number(profile.driftX ?? 0) * 0.68,
+    driftY: Number(profile.driftY ?? 0) * 0.68,
+  };
+}
+
+function selectMotionProfile(prompt, index, duration, startSec = 0, previousPrompt = null) {
+  const profile = motionProfile(prompt, index, startSec, previousPrompt);
+  return motionMode === "smooth_fast_ken_burns" ? smoothFastMotionProfile(profile, duration, startSec) : profile;
+}
+
 function zoomRange(profile) {
   const zoomDelta = Math.max(0.01, (Number(profile.zoom ?? 1.05) - 1) * Math.max(1, motionStrength));
   const maxZoom = 1 + zoomDelta;
   const midZoom = 1 + zoomDelta * 0.58;
   const lowZoom = 1 + zoomDelta * 0.12;
   switch (profile.behavior) {
+    case "smooth_static_hold":
+      return { startZoom: 1 + zoomDelta * 0.34, endZoom: 1 + zoomDelta * 0.34, curve: "linear" };
+    case "smooth_zoom_out":
+      return { startZoom: midZoom, endZoom: 1 + zoomDelta * 0.22, curve: "ease_in_out" };
+    case "smooth_push_in":
+      return { startZoom: 1 + zoomDelta * 0.16, endZoom: midZoom, curve: "ease_in_out" };
     case "zoom_out_expose":
       return { startZoom: maxZoom, endZoom: lowZoom, curve: "ease_out" };
     case "snap_zoom_out":
@@ -627,6 +692,7 @@ function progressExpr(frameCount, curve = "linear") {
   if (curve === "fast_in") return `pow(${base},0.72)`;
   if (curve === "ease_out") return `(1-pow(1-${base},1.35))`;
   if (curve === "fast_out") return `(1-pow(1-${base},0.72))`;
+  if (curve === "ease_in_out") return `(${base}*${base}*(3-2*${base}))`;
   return base;
 }
 
@@ -663,7 +729,10 @@ function transitionProfile(duration, profile, prompt = {}, startSec = 0, previou
   const sweepX = -sweepWidth;
   const endStart = Math.max(0, Number(duration) - transitionTailSec);
   const endEnd = Math.max(endStart + 0.02, Number(duration));
-  const treatments = ["eq=contrast=1.035:saturation=1.045:brightness=0.004", "unsharp=5:5:0.38:3:3:0.12"];
+  const longSmoothHold = profile?.smooth_fast === true && Number(duration) >= 8 && !isHook;
+  const treatments = longSmoothHold
+    ? ["eq=contrast=1.018:saturation=1.028:brightness=0.002"]
+    : ["eq=contrast=1.035:saturation=1.045:brightness=0.004", "unsharp=5:5:0.38:3:3:0.12"];
   let name = "polished_motion";
 
   if (isHook) {
@@ -825,7 +894,7 @@ function fadeFilters(duration) {
 function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPrompt = null) {
   const fgW = Math.round(width * Math.max(0.45, Math.min(1, foregroundScale)));
   const fgH = Math.round(height * Math.max(0.45, Math.min(1, foregroundScale)));
-  const profile = motionProfile(prompt, index, startSec, previousPrompt);
+  const profile = selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
   const offsets = motionProfileOffsets(profile);
   const transitionFilters = visualTransitionTreatment(duration, profile, prompt, startSec, previousPrompt, index);
   const transitionPrefix = transitionFilters ? `${transitionFilters},` : "";
@@ -834,7 +903,7 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
   if (motionMode === "fit_static" || motionMode === "full_frame") {
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,${transitionPrefix}fps=${fps},format=yuv420p${fades}`;
   }
-  if (motionMode === "fill_ken_burns") {
+  if (motionMode === "fill_ken_burns" || motionMode === "smooth_fast_ken_burns") {
     const { startZoom, endZoom, curve } = zoomRange(profile);
     const startXBias = offsets.startX / width;
     const endXBias = offsets.endX / width;
@@ -912,7 +981,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
         : audioDuration - startSec
       : imageDuration(prompt, scale);
     const duration = Math.max(1 / fps, Math.min(plannedDuration, Math.max(1 / fps, audioDuration - startSec)));
-    const profile = motionProfile(prompt, index, startSec, previousPrompt);
+    const profile = selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
     const transition = transitionProfile(duration, profile, prompt, startSec, previousPrompt, index);
     motionProfiles[profile.name] = (motionProfiles[profile.name] ?? 0) + 1;
     motionBehaviors[profile.behavior ?? "unspecified"] = (motionBehaviors[profile.behavior ?? "unspecified"] ?? 0) + 1;
@@ -1337,6 +1406,7 @@ async function main() {
     render_motion: {
       mode: concat.motion_mode,
       clip_dir: concat.clip_dir,
+      fps,
       foreground_scale: foregroundScale,
       motion_strength: motionStrength,
       visual_fade_sec: visualFadeSec,

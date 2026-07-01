@@ -29,7 +29,9 @@ import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib
 import {
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
+  mergeScopedPromptReplacements,
   resolvedDeadletterPayload,
+  visualResolveScopeForBlockers,
 } from "./lib/visual-resolution-utils.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -101,6 +103,135 @@ function testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement() {
   assert.equal(findings.length, 1);
   assert.equal(findings[0].code, "scene_missing_location_ref");
   assert.deepEqual(findings[0].required_ref_ids, ["analytics_hall_replay_wall_ref"]);
+}
+
+async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const weekDir = path.dirname(path.dirname(episodeDir));
+  const hash = "fixture_hash";
+  const semanticScenes = [
+    {
+      scene_id: "scene_001",
+      start_sec: 12,
+      location: "opening system bedroom",
+      ref_requirements: [{ kind: "location", ref_id: "opening_room_ref" }],
+    },
+    {
+      scene_id: "scene_002",
+      start_sec: 420,
+      location: "late one-off hallway",
+      ref_requirements: [{ kind: "location", ref_id: "late_room_ref" }],
+    },
+    {
+      scene_id: "scene_003",
+      start_sec: 520,
+      location: "minor recurring lobby",
+      ref_requirements: [{ kind: "location", ref_id: "minor_lobby_ref" }],
+    },
+    {
+      scene_id: "scene_004",
+      start_sec: 620,
+      location: "minor recurring lobby",
+      ref_requirements: [{ kind: "location", ref_id: "minor_lobby_ref" }],
+    },
+    {
+      scene_id: "scene_005",
+      start_sec: 720,
+      location: "key recurring throne hall",
+      ref_requirements: [{ kind: "location", ref_id: "key_hall_ref" }],
+    },
+    {
+      scene_id: "scene_006",
+      start_sec: 820,
+      location: "key recurring throne hall",
+      ref_requirements: [{ kind: "location", ref_id: "key_hall_ref" }],
+    },
+    {
+      scene_id: "scene_007",
+      start_sec: 920,
+      location: "key recurring throne hall",
+      ref_requirements: [{ kind: "location", ref_id: "key_hall_ref" }],
+    },
+  ];
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    channel: "test",
+    series_slug: "manhwa_candidate_validation",
+    week: "run",
+    episode: "ep_01",
+    pace_policy: "diagnostic",
+    image_provider: "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    image_provider_options: { codex_opening_sec: 300 },
+  });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    scenes: semanticScenes,
+  });
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    beats: semanticScenes.map((scene) => ({
+      scene_id: scene.scene_id,
+      parent_scene_id: scene.scene_id,
+      visual_beat_id: `${scene.scene_id}_beat_01`,
+      start_sec: scene.start_sec,
+      duration_sec: 6,
+      visual_beat_script_excerpt: `Fixture beat in ${scene.location}.`,
+    })),
+  });
+  await writeJson(path.join(weekDir, "visual_style_bible.json"), { style_summary: "text style bible is sufficient" });
+  await writeJson(path.join(weekDir, "character_bible.json"), {});
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    reference_targets: [
+      { ref_id: "style_ref", kind: "style", subject: "generated style card", scene_ids: [], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "joey_manhwa_base_identity_ref", kind: "character_state", subject: "Joey Manhwa base identity", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "char_joey", kind: "character_state", subject: "Joey", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "victor_base_identity_ref", kind: "character_state", subject: "Victor base identity", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "char_victor", kind: "character_state", subject: "Victor", scene_ids: ["scene_004"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "opening_room_ref", kind: "location", subject: "opening system bedroom", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "late_room_ref", kind: "location", subject: "late one-off hallway", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "minor_lobby_ref", kind: "location", subject: "minor recurring lobby", scene_ids: ["scene_003", "scene_004"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "key_hall_ref", kind: "location", subject: "key recurring throne hall", scene_ids: ["scene_005", "scene_006", "scene_007"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "opening_system_ui_ref", kind: "ui", subject: "signature system quest UI", scene_ids: ["scene_001"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "late_ui_ref", kind: "ui", subject: "one-scene hallway notice UI", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "late_prop_ref", kind: "prop", subject: "one-scene signed receipt", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "critical_prop_ref", kind: "prop", subject: "critical recurring poison ring", scene_ids: ["scene_002"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
+    ],
+    character_state_refs: [
+      { state_ref_id: "joey_state", character: "Joey Manhwa", source_ref_id: "char_joey", scene_ids: ["scene_002"] },
+      { state_ref_id: "victor_state", character: "Victor", source_ref_id: "char_victor", scene_ids: ["scene_004"] },
+    ],
+  });
+  await execFileAsync(process.execPath, [
+    "scripts/visual-reference-plan.mjs",
+    "--channel", "test",
+    "--series", "manhwa_candidate_validation",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--revalidate-existing", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(path.join(episodeDir, "visual_reference_plan.json"), "utf8"));
+  const byId = new Map(report.reference_targets.map((target) => [target.ref_id, target]));
+  assert.equal(report.reference_budget.applied, true);
+  assert.equal(byId.has("style_ref"), false);
+  assert.equal(byId.get("joey_manhwa_base_identity_ref").required_before_imagegen, true);
+  assert.equal(byId.get("char_joey").canonical_identity_ref_id, "joey_manhwa_base_identity_ref");
+  assert.equal(byId.get("char_joey").required_before_imagegen, false);
+  assert.equal(byId.get("char_victor").canonical_identity_ref_id, "victor_base_identity_ref");
+  assert.equal(byId.get("opening_room_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.get("late_room_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.get("late_ui_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.get("late_prop_ref").generation_mode, "no_ref_needed");
+  assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_best_cut");
+  assert.equal(byId.get("key_hall_ref").required_before_imagegen, true);
+  assert.equal(byId.get("opening_system_ui_ref").required_before_imagegen, true);
+  assert.equal(byId.get("critical_prop_ref").required_before_imagegen, true);
+  const stateRefs = JSON.parse(await fs.readFile(path.join(episodeDir, "character_state_refs.json"), "utf8"));
+  const joeyState = stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "joey_state");
+  assert.equal(joeyState.source_ref_id, "joey_manhwa_base_identity_ref");
 }
 
 function testOutOfScopeRefDropping() {
@@ -297,6 +428,17 @@ function testHybridImageProviderRouting() {
     start_sec: 121,
     shot_manifest: { visible_characters: ["Joey", "Mira"], character_state_ref_ids: ["joey_ref", "mira_ref"] },
   }, "hybrid_codex_opening_modelslab_rest", { codexOpeningSec: 120 }), "modelslab");
+  assert.equal(normalizeImageProvider("modelslab refs codex first 5 modelslab rest"), "hybrid_modelslab_refs_codex_opening_modelslab_rest");
+  assert.equal(routedProviderForReference("hybrid_modelslab_refs_codex_opening_modelslab_rest", { kind: "character_state", ref_id: "joey_ref" }), "modelslab");
+  assert.equal(routedProviderForReference("hybrid_modelslab_refs_codex_opening_modelslab_rest", { kind: "location", ref_id: "loc_stage" }), "modelslab");
+  assert.equal(routedProviderForPrompt({
+    start_sec: 299.9,
+    shot_manifest: { visible_characters: ["Joey"], character_state_ref_ids: ["joey_ref"] },
+  }, "hybrid_modelslab_refs_codex_opening_modelslab_rest", { codexOpeningSec: 300 }), "codex_imagegen");
+  assert.equal(routedProviderForPrompt({
+    start_sec: 300,
+    shot_manifest: { visible_characters: ["Joey", "Mira"], character_state_ref_ids: ["joey_ref", "mira_ref"] },
+  }, "hybrid_modelslab_refs_codex_opening_modelslab_rest", { codexOpeningSec: 300 }), "modelslab");
 }
 
 async function testHybridOpeningWindowPersistsInRunIdentity() {
@@ -359,6 +501,48 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   assert.match(referenceStage.next_command_shape, /--references-only true/);
   assert.match(imageStage.next_command_shape, /imagegen import-staged-codex/);
   assert.match(imageStage.next_command_shape, /--codex-opening-sec 600/);
+
+  const mixedRefsDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const mixedRefsEpisodeDir = path.join(mixedRefsDataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await execFileAsync(process.execPath, [
+    "scripts/run-preflight.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--image-provider", "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    "--codex-opening-sec", "300",
+    "--pace-policy", "diagnostic",
+    "--render-profile", "smooth_fast_ken_burns",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: mixedRefsDataRoot } });
+  const mixedIdentity = JSON.parse(await fs.readFile(path.join(mixedRefsEpisodeDir, "run_identity.json"), "utf8"));
+  assert.equal(mixedIdentity.image_provider, "hybrid_modelslab_refs_codex_opening_modelslab_rest");
+  assert.equal(mixedIdentity.image_provider_options.codex_opening_sec, 300);
+  assert.equal(mixedIdentity.pace_policy, "diagnostic");
+  assert.equal(mixedIdentity.render_profile, "smooth_fast_ken_burns");
+  const mixedStatusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", mixedRefsEpisodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: mixedRefsDataRoot } });
+  const mixedStatus = JSON.parse(mixedStatusResult.stdout);
+  const mixedScriptPaceStage = mixedStatus.stage_ledger.find((row) => row.stage === "script_pace_check");
+  const mixedReferenceStage = mixedStatus.stage_ledger.find((row) => row.stage === "reference_generation");
+  const mixedImageStage = mixedStatus.stage_ledger.find((row) => row.stage === "image_generation");
+  const mixedAudioPaceStage = mixedStatus.stage_ledger.find((row) => row.stage === "audio_pace_check");
+  const mixedRenderStage = mixedStatus.stage_ledger.find((row) => row.stage === "premium_render");
+  assert.match(mixedScriptPaceStage.next_command_shape, /--pace-policy diagnostic/);
+  assert.match(mixedScriptPaceStage.next_command_shape, /--allow-hook-warnings true/);
+  assert.match(mixedReferenceStage.next_command_shape, /imagegen start/);
+  assert.match(mixedReferenceStage.next_command_shape, /--image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest/);
+  assert.match(mixedReferenceStage.next_command_shape, /--references-only true/);
+  assert.doesNotMatch(mixedReferenceStage.next_command_shape, /import-staged-codex/);
+  assert.match(mixedImageStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(mixedImageStage.next_command_shape, /--output <episode-dir>\/imagegen_report_ep_01\.json/);
+  assert.match(mixedImageStage.next_command_shape, /--provider-filter modelslab/);
+  assert.match(mixedImageStage.next_command_shape, /--codex-opening-sec 300/);
+  assert.match(mixedAudioPaceStage.next_command_shape, /--pace-policy diagnostic/);
+  assert.match(mixedRenderStage.next_command_shape, /--motion smooth_fast_ken_burns/);
+  assert.doesNotMatch(mixedRenderStage.next_command_shape, /fill_ken_burns/);
 }
 
 async function testVisualPlannerDriftContracts() {
@@ -411,15 +595,16 @@ async function testVisualPlannerDriftContracts() {
 function testPositivePromptSanitizerDoesNotInvertNegation() {
   const textless = sanitizePositiveVisualPrompt("clean UI panel, no readable text, no text");
   assert.equal(/clean readable text/i.test(textless), false);
-  assert.match(textless, /unreadable/i);
-  assert.match(textless, /textless/i);
+  assert.match(textless, /no readable text/i);
+  assert.match(textless, /no text/i);
 
   const alone = sanitizePositiveVisualPrompt("one man alone without a crowd");
   assert.equal(/with a crowd/i.test(alone), false);
   assert.match(alone, /without a crowd/i);
 
-  assert.equal(sanitizePositiveVisualPrompt("no second character"), "single subject only");
-  assert.match(sanitizePositiveVisualPrompt("no duplicate hero, no clone"), /one instance only/i);
+  assert.equal(sanitizePositiveVisualPrompt("no second character"), "no second character");
+  assert.match(sanitizePositiveVisualPrompt("no duplicate hero, no clone"), /no duplicate hero, no clone/i);
+  assert.equal(sanitizePositiveVisualPrompt("Negative prompt: photorealistic --no text"), "photorealistic text");
 }
 
 function testVoiceDirectionCharacterization() {
@@ -510,6 +695,20 @@ async function testNarrationPaceChecks() {
     word_count: 7,
     words: [],
   });
+  await execFileAsync(process.execPath, [
+    "scripts/narration-pace-check.mjs",
+    "--mode", "audio",
+    "--episode-dir", episodeDir,
+    "--episode", "ep_01",
+    "--pace-policy", "diagnostic",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const diagnosticAudioReport = JSON.parse(await fs.readFile(path.join(episodeDir, "narration_pace_report_ep_01.json"), "utf8"));
+  assert.equal(diagnosticAudioReport.status, "passed");
+  assert.equal(diagnosticAudioReport.pace_policy, "diagnostic");
+  assert.equal(diagnosticAudioReport.pace_gate_enforced, false);
+  assert.equal(diagnosticAudioReport.diagnostic_pace_status, "blocked");
+  assert.equal(diagnosticAudioReport.blocker, null);
+
   let blocked = null;
   try {
     await execFileAsync(process.execPath, [
@@ -545,8 +744,23 @@ async function testScriptPaceBlocksLateHookMilestones() {
   assert.equal(blocked?.code, 1);
   const report = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
   assert.equal(report.status, "blocked");
+  assert.equal(report.hook_gate_enforced, true);
+  assert.equal(report.diagnostic_hook_status, "blocked");
   assert.equal(report.hook_milestone_report.warnings.some((warning) => warning.code === "late_hidden_power_spark"), true);
   assert.match(report.blocker, /Script hook timing/);
+
+  await execFileAsync(process.execPath, [
+    "scripts/narration-pace-check.mjs",
+    "--mode", "script",
+    "--episode-dir", episodeDir,
+    "--pace-policy", "diagnostic",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const diagnosticReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
+  assert.equal(diagnosticReport.status, "passed");
+  assert.equal(diagnosticReport.pace_policy, "diagnostic");
+  assert.equal(diagnosticReport.hook_gate_enforced, false);
+  assert.equal(diagnosticReport.diagnostic_hook_status, "blocked");
+  assert.equal(diagnosticReport.blocker, null);
 }
 
 async function testTargetedSpeakabilityLiveContentHomograph() {
@@ -1254,6 +1468,75 @@ async function testOnlyScenesDryRun() {
   assert.deepEqual(report.visual_plan_scope.cut_ids, ["ep_01-cut-002"]);
 }
 
+async function testOnlyCutIdsDryRun() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const weekDir = path.dirname(path.dirname(episodeDir));
+  const hash = "fixture_hash";
+  await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    timing_source: "fixture",
+    scenes: [{ scene_id: "scene_001", start_sec: 0, duration_sec: 15, location: "event hall" }],
+  });
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    beats: [
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_001", start_sec: 0, duration_sec: 5, location: "event hall" },
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_002", start_sec: 5, duration_sec: 5, location: "event hall" },
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_003", start_sec: 10, duration_sec: 5, location: "event hall" },
+    ],
+  });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: hash, scenes: [] });
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    source_script_hash: hash,
+    reference_targets: [{ ref_id: "style_ref", kind: "style", scene_ids: [] }],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), { status: "approved", source_script_hash: hash, character_state_refs: [] });
+  await writeJson(path.join(weekDir, "visual_style_bible.json"), {});
+  await writeJson(path.join(weekDir, "character_bible.json"), {});
+  const output = path.join(episodeDir, "dry_run_visual_plan_cut_ids.json");
+  await execFileAsync(process.execPath, [
+    "scripts/visual-plan.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--dry-run-prompt", "true",
+    "--cut-ids", "ep_01-cut-002",
+    "--output", output,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(output, "utf8"));
+  assert.equal(report.visual_plan_scope.selected_visual_unit_count, 1);
+  assert.equal(report.visual_plan_scope.total_visual_unit_count, 3);
+  assert.deepEqual(report.visual_plan_scope.cut_ids, ["ep_01-cut-002"]);
+}
+
+function testVisualResolveScopePrefersCutIds() {
+  const blockers = [
+    { severity: "blocker", resolved: false, scene_id: "scene_001", image_id: "ep_01-cut-002", code: "fixture_a" },
+    { severity: "blocker", resolved: false, scene_id: "scene_001", image_id: "ep_01-cut-003", code: "fixture_b" },
+  ];
+  const scope = visualResolveScopeForBlockers(blockers);
+  assert.equal(scope.mode, "cut_ids");
+  assert.deepEqual(scope.args, ["--cut-ids", "ep_01-cut-002,ep_01-cut-003"]);
+  const merged = mergeScopedPromptReplacements(
+    [
+      { image_id: "ep_01-cut-001", scene_id: "scene_001", prompt: "keep" },
+      { image_id: "ep_01-cut-002", scene_id: "scene_001", prompt: "old two" },
+      { image_id: "ep_01-cut-003", scene_id: "scene_001", prompt: "old three" },
+    ],
+    [{ image_id: "ep_01-cut-002", scene_id: "scene_001", prompt: "new two" }],
+    scope
+  );
+  assert.deepEqual(merged.map((prompt) => prompt.prompt), ["keep", "new two", "old three"]);
+  const sceneScope = visualResolveScopeForBlockers([{ severity: "blocker", resolved: false, scene_id: "scene_002", code: "scene_level" }]);
+  assert.equal(sceneScope.mode, "scene_ids");
+  assert.deepEqual(sceneScope.args, ["--only-scenes", "scene_002"]);
+}
+
 async function testImagegenDeadletterRefusal() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -1343,6 +1626,86 @@ function testHardenFeedbackBlockersMapToReviewResolveInput() {
     }),
     []
   );
+}
+
+async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const scriptText = "Fixture narration for scoped visual review resume.";
+  const scriptHash = sha256(Buffer.from(scriptText));
+  await fs.mkdir(path.join(episodeDir, "assets", "audio"), { recursive: true });
+  await fs.mkdir(path.join(episodeDir, "assets", "images", "references"), { recursive: true });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await writeJson(path.join(episodeDir, "run_identity.json"), { channel: "test", series_slug: "series", week: "run", episode: "ep_01", audio_target: "narrator_only", image_provider: "modelslab" });
+  await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash, replacements: [] });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "modelslab_qwen_tts_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash });
+  const narrationPath = path.join(episodeDir, "assets", "audio", "fixture_narration.wav");
+  await fs.writeFile(narrationPath, Buffer.from("fixture audio"));
+  const narrationHash = sha256(await fs.readFile(narrationPath));
+  await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    output_path: narrationPath,
+    final_duration_sec: 1,
+  });
+  const wordTimingPath = path.join(episodeDir, "narration_word_timing_ep_01.json");
+  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 4, audio_duration_sec: 1 });
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    target_wpm_min: 210,
+    target_wpm_max: 220,
+    actual_wpm: 215,
+  });
+  await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    scenes: [
+      { scene_id: "scene_001", start_sec: 0, end_sec: 1, duration_sec: 1 },
+      { scene_id: "scene_002", start_sec: 1, end_sec: 2, duration_sec: 1 },
+    ],
+  });
+  const finalAudioPath = path.join(episodeDir, "assets", "audio", "final_mix.m4a");
+  await fs.writeFile(finalAudioPath, Buffer.from("fixture final audio"));
+  await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), { status: "passed", final_audio_path: finalAudioPath });
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), { status: "passed", source_script_hash: scriptHash, beats: [] });
+  const refPath = path.join(episodeDir, "assets", "images", "references", "style_ref.png");
+  await fs.writeFile(refPath, Buffer.from("fixture ref"));
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    reference_targets: [{ ref_id: "style_ref", kind: "style", generation_mode: "standalone_ref", reference_image_path: refPath }],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), { status: "approved", source_script_hash: scriptHash, character_state_refs: [] });
+  const prompts = [
+    { image_id: "ep_01-cut-001", scene_id: "scene_001", visual_beat_id: "beat_001", modelslab_image_prompt: "fixture prompt one", image_prompt: "fixture prompt one" },
+    { image_id: "ep_01-cut-002", scene_id: "scene_002", visual_beat_id: "beat_002", modelslab_image_prompt: "fixture prompt two", image_prompt: "fixture prompt two" },
+  ];
+  await writeJson(path.join(episodeDir, "section_image_prompts.json"), { status: "passed", source_script_hash: scriptHash, prompts });
+  await writeJson(path.join(episodeDir, "section_image_prompts_reviewed.json"), { status: "blocked", source_script_hash: scriptHash, prompts });
+  await writeJson(path.join(episodeDir, "visual_prompt_review_ep_01.json"), {
+    status: "blocked",
+    findings: [{ severity: "blocker", resolved: false, code: "fixture_visual_blocker", scene_id: "scene_002", image_id: "ep_01-cut-002" }],
+    unresolved_blocker_count: 1,
+  });
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const status = JSON.parse(stdout);
+  assert.equal(status.current_stage, "visual_prompt_plan_review_harden");
+  assert.match(status.next_command_shape, /visual review/);
+  assert.match(status.next_command_shape, /--resume-blocked true/);
+  assert.doesNotMatch(status.next_command_shape, /visual plan/);
+  assert.doesNotMatch(status.next_command_shape, /visual harden/);
 }
 
 function testPassedReviewClearsDeadletterPayload() {
@@ -1440,7 +1803,7 @@ async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = 
   return { plan, report, error };
 }
 
-async function testVisualHardenFlagsNegativePromptWithoutRewrite() {
+async function testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const promptText = "Joey at the apartment desk, no second character, no readable text.";
   const { plan, report, error } = await runVisualHardenFixture({
@@ -1455,7 +1818,34 @@ async function testVisualHardenFlagsNegativePromptWithoutRewrite() {
   assert.equal(plan.status, "passed");
   assert.equal(plan.prompts[0].modelslab_image_prompt, promptText);
   assert.equal(plan.prompts[0].image_prompt, promptText);
-  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt" && finding.severity === "warning"), true);
+  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt"), false);
+}
+
+async function testVisualHardenStripsNonAttachableScopedRefs() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey at the apartment desk with a small holographic one-scene notice on his phone.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    extraReferenceTargets: [{
+      ref_id: "late_ui_ref",
+      kind: "ui",
+      subject: "one-scene phone notice",
+      scene_ids: ["scene_001"],
+      generation_mode: "no_ref_needed",
+      required_before_imagegen: false,
+      prompt_anchor: "scoped text-only UI target for a simple phone notice",
+    }],
+    referenceRequirements: [
+      { ref_id: "loc_apartment", kind: "location", slot_order: 1 },
+      { ref_id: "late_ui_ref", kind: "ui", slot_order: 2 },
+      { ref_id: "char_joey_ref", kind: "character_state", slot_order: 3 },
+    ],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_ref"]);
+  assert.equal(report.findings.some((finding) => finding.code === "non_attachable_reference_stripped" && finding.ref_id === "late_ui_ref"), true);
 }
 
 async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs() {
@@ -1706,6 +2096,89 @@ async function testRunStatusBlocksMissingQwenStitchedAudio() {
   assert.match(stage.evidence, /stitched narration missing/);
 }
 
+async function testTimingBindMatchesPossessiveAnchorsAfterCursor() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const scriptText = [
+    "Earlier, he thought of his mother's piano and kept walking.",
+    "",
+    "But emotional payoff still waited in one place.",
+    "",
+    "His mother's piano.",
+    "",
+    "Joey almost laughed.",
+    "",
+    "He bought the lounge contract.",
+  ].join("\n");
+  const scriptHash = sha256(scriptText);
+  await fs.mkdir(episodeDir, { recursive: true });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    scenes: [
+      {
+        scene_id: "scene_001",
+        title: "Earlier Memory",
+        script_excerpt_start: "Earlier, he thought of his mother's piano and kept walking.",
+        script_excerpt_end: "But emotional payoff still waited in one place.",
+      },
+      {
+        scene_id: "scene_002",
+        title: "Later Possessive Anchor",
+        script_excerpt_start: "His mother's piano.",
+        script_excerpt_end: "Joey almost laughed.",
+      },
+      {
+        scene_id: "scene_003",
+        title: "Next Scene",
+        script_excerpt_start: "He bought the lounge contract.",
+        script_excerpt_end: "He bought the lounge contract.",
+      },
+    ],
+  });
+  const narrationPath = path.join(episodeDir, "narration.m4a");
+  await fs.writeFile(narrationPath, "fixture audio bytes");
+  const narrationHash = sha256(await fs.readFile(narrationPath));
+  const word = (text, start, end) => ({ word: text, start_sec: start, end_sec: end });
+  await writeJson(path.join(episodeDir, "narration_word_timing_ep_01.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    narration_audio_hash: narrationHash,
+    audio_duration_sec: 27,
+    words: [
+      word("Earlier", 0, 0.2), word("he", 0.2, 0.4), word("thought", 0.4, 0.6), word("of", 0.6, 0.8),
+      word("his", 0.8, 1), word("mother's", 1, 1.2), word("piano", 1.2, 1.4), word("and", 1.4, 1.6),
+      word("kept", 1.6, 1.8), word("walking", 1.8, 2),
+      word("But", 4, 4.2), word("emotional", 4.2, 4.4), word("payoff", 4.4, 4.6),
+      word("still", 4.6, 4.8), word("waited", 4.8, 5), word("in", 5, 5.2),
+      word("one", 5.2, 5.4), word("place", 5.4, 5.6),
+      word("His", 12, 12.2), word("mother's", 12.2, 12.4), word("piano", 12.4, 12.6),
+      word("Joey", 14, 14.2), word("almost", 14.2, 14.4), word("laughed", 14.4, 14.6),
+      word("He", 15, 15.2), word("bought", 15.2, 15.4), word("the", 15.4, 15.6),
+      word("lounge", 15.6, 15.8), word("contract", 15.8, 16),
+    ],
+  });
+  await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), {
+    status: "passed",
+    output_path: narrationPath,
+  });
+  await execFileAsync(process.execPath, [
+    "scripts/timing-bind.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--max-scene-duration-sec", "10",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const timed = JSON.parse(await fs.readFile(path.join(episodeDir, "timed_scene_plan.json"), "utf8"));
+  const scene = timed.scenes.find((item) => item.scene_id === "scene_002");
+  assert.equal(scene.start_resolution, "whisper_phrase_match");
+  assert.equal(scene.matched_start_words, "His mother's piano");
+  assert.equal(scene.start_sec, 12);
+  assert.equal(scene.duration_sec < 10, true);
+}
+
 async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -1825,6 +2298,77 @@ async function testRunStatusBlocksStaleVisualReferenceSourceHashes() {
   assert.match(refStage.evidence, /semantic_scene_plan\.json stale/);
 }
 
+async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const scriptText = "Fixture narration for draft visual reference approval.";
+  const scriptHash = sha256(Buffer.from(scriptText));
+  await fs.mkdir(episodeDir, { recursive: true });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await writeJson(path.join(episodeDir, "run_identity.json"), { channel: "test", series_slug: "series", week: "run", episode: "ep_01", audio_target: "narrator_only", image_provider: "modelslab" });
+  await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash });
+  const semanticPath = path.join(episodeDir, "semantic_scene_plan.json");
+  await writeJson(semanticPath, { status: "passed", source_script_hash: scriptHash, scenes: [{ scene_id: "scene_001", location: "hall" }] });
+  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "modelslab_qwen_tts_report_ep_01.json"), { status: "passed" });
+  const narrationPath = path.join(episodeDir, "narration.wav");
+  await fs.writeFile(narrationPath, "fixture audio bytes");
+  const narrationHash = sha256(await fs.readFile(narrationPath));
+  await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), { status: "passed", output_path: narrationPath });
+  await writeJson(path.join(episodeDir, "narration_word_timing_ep_01.json"), { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash });
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220, actual_wpm: 214.286 });
+  const timedPath = path.join(episodeDir, "timed_scene_plan.json");
+  await writeJson(timedPath, { status: "passed", source_script_hash: scriptHash, scenes: [{ scene_id: "scene_001" }] });
+  const mixPath = path.join(episodeDir, "longform_mix.m4a");
+  await fs.writeFile(mixPath, "fixture mix bytes");
+  await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), { status: "completed", mix: { m4a_path: mixPath } });
+  const scriptPath = path.join(episodeDir, "script_clean.md");
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    source_hashes: {
+      [timedPath]: sha256(await fs.readFile(timedPath)),
+      [scriptPath]: sha256(await fs.readFile(scriptPath)),
+    },
+    beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001" }],
+  });
+  const visualRefPath = path.join(episodeDir, "visual_reference_plan.json");
+  await writeJson(visualRefPath, {
+    status: "passed",
+    source_script_hash: scriptHash,
+    source_hashes: {
+      [semanticPath]: sha256(await fs.readFile(semanticPath)),
+    },
+    reference_targets: [{ ref_id: "style_ref", kind: "style", generation_mode: "no_ref_needed", required_before_imagegen: false }],
+    character_state_refs: [],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), {
+    status: "draft_needs_manual_review",
+    source_script_hash: scriptHash,
+    source_visual_reference_plan_path: visualRefPath,
+    source_hashes: {
+      [visualRefPath]: sha256(await fs.readFile(visualRefPath)),
+    },
+    character_state_refs: [],
+  });
+  const { stdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const status = JSON.parse(stdout);
+  const refStage = status.stage_ledger.find((row) => row.stage === "visual_reference_plan");
+  assert.equal(status.current_stage, "visual_reference_plan");
+  assert.equal(refStage.exists, false);
+  assert.match(refStage.evidence, /draft_needs_manual_review/);
+  assert.match(status.next_command_shape, /visual approve-refs/);
+  assert.match(refStage.next_command_shape, /visual approve-refs/);
+}
+
 async function testRunStatusBlocksQwenPlanMissingOverrideAudit() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -1926,6 +2470,7 @@ async function run() {
   testLocationCandidateExclusion();
   testStarvationGate();
   testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement();
+  await testCandidateReferenceBudgetDowngradesScopedOneOffRefs();
   testOutOfScopeRefDropping();
   testReferenceLimitOmissionIsNotForbidden();
   testOutOfScopeLocationMentionAssertion();
@@ -1949,9 +2494,13 @@ async function run() {
   await testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm();
   await testVisualPlanAllowsSameLocationLabelAliases();
   await testOnlyScenesDryRun();
+  await testOnlyCutIdsDryRun();
+  testVisualResolveScopePrefersCutIds();
   testHardenFeedbackBlockersMapToReviewResolveInput();
+  await testRunStatusResumesBlockedVisualReviewWithoutFullReplan();
   testPassedReviewClearsDeadletterPayload();
-  await testVisualHardenFlagsNegativePromptWithoutRewrite();
+  await testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite();
+  await testVisualHardenStripsNonAttachableScopedRefs();
   await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();
   await testVisualHardenBlocksMissingManifestLocationWithoutAddingIt();
   await testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation();
@@ -1959,8 +2508,10 @@ async function run() {
   await testNarratorOnlyStatusAndMixer();
   await testRunStatusBlocksLegacyScriptPaceHookWarnings();
   await testRunStatusBlocksMissingQwenStitchedAudio();
+  await testTimingBindMatchesPossessiveAnchorsAfterCursor();
   await testRunStatusBlocksStaleVisualBeatSourceHashes();
   await testRunStatusBlocksStaleVisualReferenceSourceHashes();
+  await testRunStatusSurfacesDraftReferenceApprovalCommand();
   await testRunStatusBlocksQwenPlanMissingOverrideAudit();
   await testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan();
   await testSilentTransitionsWithoutSfxBank();

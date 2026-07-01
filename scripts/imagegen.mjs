@@ -38,6 +38,7 @@ const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-refer
 const allowUnhardenedPrompts = flags["allow-unhardened-prompts"] === "true";
 const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ?? null;
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
+const providerFilter = normalizeProviderFilter(flags["provider-filter"] ?? flags.providerFilter ?? "");
 const codexOpeningSecFlagRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? null;
 const codexOpeningSecEnvRaw = process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
 let codexOpeningSec = Math.max(0, Number(codexOpeningSecFlagRaw ?? codexOpeningSecEnvRaw ?? 120));
@@ -61,6 +62,12 @@ function parseFlags(parts) {
     if (value !== "true") index += 1;
   }
   return parsed;
+}
+
+function normalizeProviderFilter(value) {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!normalized || normalized === "all") return null;
+  return normalizeImageProvider(normalized);
 }
 
 function sha256(value) {
@@ -637,7 +644,6 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
   if (
     priorReport?.schema === "goldflow_imagegen_report_v1"
     && priorReport.prompt_plan_hash === promptPlanHash
-    && priorReport.image_provider === imageProvider
     && Array.isArray(priorReport.results)
   ) {
     for (const row of priorReport.results) {
@@ -710,6 +716,7 @@ async function main() {
   const scope = requestedIds();
   const prompts = plan.prompts
     .filter((prompt) => prompt.image_generation_required !== false)
+    .filter((prompt) => !providerFilter || promptRoute(prompt) === providerFilter)
     .filter((prompt) => !scope.size || scope.has(prompt.image_id));
   if (!prompts.length) throw new Error("No image prompts selected for generation.");
   await assertNoVisualResolutionDeadletter(plan, prompts);
@@ -735,6 +742,7 @@ async function main() {
     image_dir: imageDir,
     concurrency,
     codex_opening_sec: codexOpeningSec,
+    provider_filter: providerFilter,
     image_count: mergedResults.length,
     current_batch_image_count: results.length,
     reference_count: referenceRun.results.length,

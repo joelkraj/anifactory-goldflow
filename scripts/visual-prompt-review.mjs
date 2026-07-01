@@ -5,14 +5,18 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
 import {
+  blockerImageIds,
+  blockerSceneIds,
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
+  mergeScopedPromptReplacements,
   resolvedDeadletterPayload,
   unresolvedBlockerFindings as sharedUnresolvedBlockerFindings,
+  visualResolveScopeForBlockers,
 } from "./lib/visual-resolution-utils.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,6 +36,7 @@ const characterStateRefsPath = flags.characterStateRefs ?? flags["character-stat
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
 const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `visual_prompt_review_${episode}.json`);
 const autoResolveEnabled = flags["auto-resolve"] === "true";
+const resumeBlockedReview = flags["resume-blocked"] === "true" || flags.resume === "blocked";
 const maxResolveIterations = Math.max(1, Number(flags["max-resolve-iterations"] ?? 2));
 const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 const hardenFeedbackPath = flags["harden-feedback-report"] ?? flags["harden-report"] ?? path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
@@ -211,6 +216,8 @@ function compactReferencePlan(plan, prompts = []) {
       generation_mode: target.generation_mode,
       required_before_imagegen: target.required_before_imagegen,
       reference_image_path: target.reference_image_path ?? target.required_reference_path ?? null,
+      attachable_reference: Boolean(target.reference_image_path ?? target.required_reference_path ?? target.resolved_reference_image_path),
+      reference_budget: target.reference_budget ?? null,
       prompt_anchor: target.prompt_anchor,
       risk_notes: target.risk_notes ?? [],
     })),
@@ -278,7 +285,7 @@ Review for:
 - wardrobe contradiction against character state refs
 - stale neighboring-scene context
 - characters not visible in the current scene
-- negative prompt wording
+- separate negative-prompt payloads or embedded negative-prompt sections
 - vague multi-character action staging
 - prompt contradiction against current scene facts
 - reference-pose lock, where the prompt lets a character preserve a neutral reference pose during an action scene
@@ -288,11 +295,10 @@ Review for:
 Rules:
 - You are the creative visual reviewer. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
 - Use current scene facts only.
-- Positive visual language is mandatory. Describe only what should appear.
-- Do not use negative prompt clauses or mitigation phrasing such as "no", "not", "without", "avoid", "exclude", "instead of", or "rather than".
-- Translate source text that contains negative wording into positive visual wording. Use "windowless room" for "no windows", "single visible subject" for absent extra characters, and "plain open-collar garment" for unwanted formalwear risk.
-- Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
-- For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
+- Write normal descriptive prompt prose and preserve story-faithful refusals, absence states, UI labels, and status language.
+- Do not create separate negative_prompt, avoid_list, or exclude_list payloads, and do not embed a "Negative prompt:" section inside prompt prose.
+- Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- For single-character shots, state the visible subject concretely, such as "one named character alone in frame," while preserving story-faithful absence language when the beat needs it.
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
 - Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
@@ -300,13 +306,13 @@ Rules:
 - Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person and use that named character's ref instead of a separate generic character.
 - If the beat or prompt shows a recognizable named person inside a replay clip, livestream panel, broadcast feed, video wall, chat avatar, dossier card, or phone screen, that person is visually present through media. Keep or add them in shot_manifest.visible_characters, include character_staging that says they are screen-visible or panel-visible, and attach their in-scope character_state ref when their likeness matters and reference slots allow.
 - Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
-- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, make the prompt and location reference match it.
+- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. Only attach refs with attachable_reference true. Targets with generation_mode no_ref_needed, derive_from_best_cut, derive_from_first_clean_cut, or no reference_image_path are scoped prompt context only, not image inputs. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved attachable location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If no attachable location ref exists, leave shot_manifest.location_ref_id empty and describe the concrete current location directly from the beat excerpt. If location_ref_id is set, make the prompt and location reference match it.
 - For cuts with two or more visible characters, shot_manifest.character_staging is required and must cover visible_characters in the same order.
 - shot_manifest.character_staging screen_position must use this fixed vocabulary only: ${CHARACTER_STAGING_POSITIONS.join(" | ")}.
 - For cuts with two or more visible characters, keep separate position-bound people clauses in the prompt. Each staged clause must bind screen position, character name, that character's copied scene_prompt_anchor wardrobe/state wording, and that character's pose.
 - Never merge two characters into one shared wardrobe or appearance clause, and never describe wardrobe without naming whose wardrobe it is.
 - Keep reference_requirements.slot_order and slot_purpose aligned with character_staging order so the image model receives the same identity order that the prose prompt uses.
-- For multi-character cuts where any body-occluding surface or large object is in frame (recognize it from the beat/location, not a fixed list), check that modelslab_image_prompt gives each character an explicit side-of-surface placement, states body clearance positively (torso above the surface line, feet grounded, no body-surface merging), and avoids flat centered bilateral staging. codex_image_prompt may stay more centered if bodies remain discrete and clear of the surface.
+- For multi-character cuts where any body-occluding surface or large object is in frame (recognize it from the beat/location, not a fixed list), check that modelslab_image_prompt gives each character an explicit side-of-surface placement, states body clearance concretely (torso above the surface line, feet grounded, clear body/surface placement), and avoids flat centered bilateral staging. codex_image_prompt may stay more centered if bodies remain discrete and clear of the surface.
 - Do not import a named location/world/era/institution from a reference merely because it is visually convenient. If a location ref's named setting is absent from the current visual_beat_script_excerpt, visual_beat_action, and semantic scene location, remove that location ref and stage the generic current location from the beat text.
 - Treat reference target scene_ids as usage contracts for location, prop, UI, and action/effect refs. If such a ref's scene_ids do not cover the current scene, remove it from shot_manifest and reference_requirements, and rewrite the prose location/action from the current beat. When a reference has two scene IDs like scene_009 and scene_039, treat that as an inclusive scene range.
 - Parent scene context is context only. The visible cut must be the current visual_beat_script_excerpt moment, not a broad parent-scene summary or a future reveal.
@@ -324,7 +330,7 @@ Rules:
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Location references provide architecture, environment, lighting, and materials only.
 - Action/effect references provide effect shape, color, and interaction pattern only. Current scene location and current visible subjects stay authoritative.
-- When references are attached, preserve positive Flux-style slot mapping through reference_requirements.slot_order and slot_purpose. The imagegen wrapper adds the "Use image one as..." text at generation time.
+- When references are attached, preserve Flux-style slot mapping through reference_requirements.slot_order and slot_purpose. The imagegen wrapper adds the "Use image one as..." text at generation time.
 - For action scenes, use active pose language with direction and changed body position.
 - Preserve each image_id, scene_id, start_sec, and duration_sec exactly.
 - Preserve one reviewed prompt for every input prompt.
@@ -338,7 +344,7 @@ Rules:
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
 - Preserve clear reference slot mapping in reference_requirements so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
 - If a required existing reference is missing, add a finding with severity "blocker".
-- Reference image files are generated after this review pass. A null, unresolved, or not-yet-generated reference_image_path is not a blocker here when the ref_id exists in the approved reference plan or character_state_refs; keep the ref_id and let the image generation stage resolve the file.
+- Attach only references that have an attachable reference image path. Scoped text-only targets may guide wording, but they must not appear in reference_requirements.
 - If a problem is fixed in revised prompt text, mark resolved true.
 - Do not invent new canonical character anchors. Use character_state_refs and visual_reference_plan only.
 
@@ -369,9 +375,9 @@ Return JSON only:
       "visual_beat_id": "same",
       "start_sec": 0,
       "duration_sec": 6,
-      "image_prompt": "reviewed positive production scene prompt",
-      "modelslab_image_prompt": "reviewed positive production scene prompt optimized for image model",
-      "codex_image_prompt": "optional reviewed positive production scene prompt optimized for Codex/OpenAI image generation",
+      "image_prompt": "reviewed production scene prompt",
+      "modelslab_image_prompt": "reviewed production scene prompt optimized for image model",
+      "codex_image_prompt": "optional reviewed production scene prompt optimized for Codex/OpenAI image generation",
       "reference_requirements": [{"ref_id":"...","kind":"character_state|location|style|ui|prop|action","required":true,"slot_order":1,"slot_purpose":"character identity and wardrobe for ...","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [],
@@ -427,23 +433,22 @@ async function callLocal(prompt, stageName, maxTokens = null) {
   let lastContent = "";
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const retryPrompt = attempt === 1 ? prompt : `${prompt}\n\nReturn one complete valid JSON object only. No markdown fences, commentary, trailing commas, or partial objects.`;
-    const response = await fetch(localLLMChatCompletionURL(stageName), {
+    const messages = [
+      { role: "system", content: "Return only valid JSON. You review and fix image prompts using current-scene facts and approved visual refs. Preserve the local beat's visible story intent. Keep all provider prompt content in the normal prompt fields." },
+      { role: "user", content: retryPrompt },
+    ];
+    const response = await fetch(localLLMReviewURL(stageName), {
       method: "POST",
       headers: { "Content-Type": "application/json", ...localLLMAuthHeaders() },
-      body: JSON.stringify({
-        model: getLLMModel(stageName),
-        messages: [
-          { role: "system", content: "Return only valid JSON. You review and fix image prompts using current-scene facts and approved visual refs. Preserve the local beat's visible story intent and prefer positive visual language when it stays faithful." },
-          { role: "user", content: retryPrompt },
-        ],
+      body: JSON.stringify(localLLMReviewBody(stageName, messages, {
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.08) : 0,
-        max_tokens: Number(maxTokens ?? flags["llm-max-tokens"] ?? 16000),
-      }),
+        maxTokens: Number(maxTokens ?? flags["llm-max-tokens"] ?? 16000),
+      })),
       signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_VISUAL_REVIEW_TIMEOUT_MS ?? 1_200_000)),
     });
     const raw = await response.text();
     if (!response.ok) throw new Error(`local-qwen visual review HTTP ${response.status}: ${raw.slice(0, 1000)}`);
-    const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
+    const content = localLLMReviewContent(raw);
     lastContent = content;
     try {
       return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content), json_attempt: attempt };
@@ -453,6 +458,43 @@ async function callLocal(prompt, stageName, maxTokens = null) {
     }
   }
   throw new Error(`local-qwen visual review returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
+}
+
+function localLLMReviewURL(stageName) {
+  const baseURL = getLLMBaseURL(stageName);
+  if (isOllamaNativeBaseURL(baseURL)) return `${baseURL.replace(/\/+$/g, "")}/chat`;
+  return localLLMChatCompletionURL(stageName);
+}
+
+function localLLMReviewBody(stageName, messages, { temperature, maxTokens }) {
+  const model = getLLMModel(stageName);
+  if (isOllamaNativeBaseURL(getLLMBaseURL(stageName))) {
+    return {
+      model,
+      messages,
+      stream: false,
+      think: false,
+      options: {
+        temperature,
+        num_predict: maxTokens,
+      },
+    };
+  }
+  return {
+    model,
+    messages,
+    temperature,
+    max_tokens: maxTokens,
+  };
+}
+
+function localLLMReviewContent(raw) {
+  const parsed = JSON.parse(raw);
+  return parsed?.message?.content ?? parsed?.choices?.[0]?.message?.content ?? raw;
+}
+
+function isOllamaNativeBaseURL(baseURL) {
+  return /\/api\/?$/i.test(String(baseURL ?? ""));
 }
 
 async function callCodex(prompt, stageName) {
@@ -796,11 +838,7 @@ function unresolvedBlockerFindings(findings) {
   return sharedUnresolvedBlockerFindings(findings);
 }
 
-function sceneIdsFromBlockers(blockers) {
-  return [...new Set(blockers.map((finding) => String(finding.scene_id ?? "").trim()).filter(Boolean))];
-}
-
-function positiveCorrectionDirective(finding) {
+function correctionDirective(finding) {
   const code = String(finding?.code ?? "visual_blocker");
   let directive = "Create a concrete current-beat image from the beat excerpt, with visible subjects, action, props, UI, and approved refs aligned to this scene candidate set.";
   if (code === "visible_character_missing_state_ref") {
@@ -821,15 +859,6 @@ function positiveCorrectionDirective(finding) {
   };
 }
 
-function mergeScenePrompts(basePrompts, replacementPrompts, sceneIds) {
-  const sceneSet = new Set(sceneIds);
-  const replacementsById = new Map((replacementPrompts ?? []).map((prompt) => [prompt.image_id, prompt]));
-  return (basePrompts ?? []).map((prompt) => {
-    if (!sceneSet.has(prompt.scene_id)) return prompt;
-    return replacementsById.get(prompt.image_id) ?? prompt;
-  });
-}
-
 async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
   let currentPlan = reviewedPlan;
   let currentReport = reviewReport;
@@ -837,8 +866,10 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
   const hardenValidationRequired = hasHardenFeedbackFindings(currentReport.findings) || Boolean(currentReport.harden_feedback_report_path);
   let blockers = unresolvedBlockerFindings(currentReport.findings);
   for (let iteration = 1; iteration <= maxResolveIterations && blockers.length; iteration += 1) {
-    const sceneIds = sceneIdsFromBlockers(blockers);
-    if (!sceneIds.length) break;
+    const resolveScope = visualResolveScopeForBlockers(blockers);
+    const sceneIds = resolveScope.scene_ids;
+    const imageIds = resolveScope.image_ids;
+    if (!resolveScope.args.length) break;
     const iterationDir = path.join(episodeDir, "_visual_resolution");
     const correctionPath = path.join(iterationDir, `correction_directives_${episode}_iter_${iteration}.json`);
     const planPath = path.join(iterationDir, `section_image_prompts_resolve_${episode}_iter_${iteration}.json`);
@@ -848,16 +879,16 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     const hardenValidationOutputPath = path.join(iterationDir, `section_image_prompts_resolve_hardened_${episode}_iter_${iteration}.json`);
     const hardenValidationSamplePath = path.join(iterationDir, `visual_prompt_hardening_sample_resolve_${episode}_iter_${iteration}.md`);
     const needsHardenValidation = hardenValidationRequired;
-    const correctionDirectives = blockers
-      .filter((finding) => sceneIds.includes(finding.scene_id))
-      .map(positiveCorrectionDirective);
+    const correctionDirectives = blockers.map(correctionDirective);
     await writeJson(correctionPath, {
       schema: "goldflow_visual_resolution_directives_v1",
       status: "passed",
       iteration,
+      scope_mode: resolveScope.mode,
       scene_ids: sceneIds,
+      image_ids: imageIds,
       correction_directives: correctionDirectives,
-      source_findings: blockers.filter((finding) => sceneIds.includes(finding.scene_id)),
+      source_findings: blockers,
       updated_at: new Date().toISOString(),
     });
     await runNodeScript("visual-plan.mjs", [
@@ -870,7 +901,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       ...(visualBeatPlanPath ? ["--beats", visualBeatPlanPath] : []),
       "--visual-refs", visualReferencePlanPath,
       "--character-state-refs", characterStateRefsPath,
-      "--only-scenes", sceneIds.join(","),
+      ...resolveScope.args,
       "--correction-findings", correctionPath,
       "--output", planPath,
       ...(flags["image-provider"] ? ["--image-provider", flags["image-provider"]] : []),
@@ -901,7 +932,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     iterationReport = await readJson(reportPath, null);
     iterationPlan = await readJson(reviewedPath, null);
     iterationStatus = iterationReport?.status ?? "failed";
-    const iterationRecord = { iteration, scene_ids: sceneIds, status: iterationStatus, plan_path: planPath, reviewed_path: reviewedPath, review_report_path: reportPath };
+    const iterationRecord = { iteration, scope_mode: resolveScope.mode, scene_ids: sceneIds, image_ids: imageIds, status: iterationStatus, plan_path: planPath, reviewed_path: reviewedPath, review_report_path: reportPath };
     if (iterationStatus === "passed" && iterationPlan?.prompts?.length && needsHardenValidation) {
       try {
         await runNodeScript("visual-prompt-harden.mjs", [
@@ -959,14 +990,18 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       currentPlan = {
         ...currentPlan,
         status: "passed",
-        prompts: mergeScenePrompts(currentPlan.prompts, iterationPlan.prompts, sceneIds),
+        prompts: mergeScopedPromptReplacements(currentPlan.prompts, iterationPlan.prompts, resolveScope),
         visual_resolution_iterations: iterations,
         updated_at: new Date().toISOString(),
       };
       currentReport = {
         ...currentReport,
         status: "passed",
-        findings: (currentReport.findings ?? []).filter((finding) => !sceneIds.includes(finding.scene_id) || finding.severity !== "blocker"),
+        findings: (currentReport.findings ?? []).filter((finding) => {
+          if (finding.severity !== "blocker") return true;
+          if (imageIds.length) return !imageIds.includes(finding.image_id);
+          return !sceneIds.includes(finding.scene_id);
+        }),
         unresolved_blocker_count: 0,
         visual_resolution_iterations: iterations,
         reviewed_prompt_count: currentPlan.prompts.length,
@@ -978,7 +1013,8 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     blockers = unresolvedBlockerFindings(iterationReport?.findings ?? blockers);
   }
   if (blockers.length) {
-    const sceneIds = sceneIdsFromBlockers(blockers);
+    const sceneIds = blockerSceneIds(blockers);
+    const imageIds = blockerImageIds(blockers);
     const deadletter = {
       schema: "goldflow_visual_resolution_deadletter_v1",
       status: "blocked_deadletter",
@@ -987,8 +1023,9 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       week,
       episode,
       scene_ids: sceneIds,
+      image_ids: imageIds,
       unresolved_blockers: blockers,
-      last_prompts: (currentPlan.prompts ?? []).filter((prompt) => sceneIds.includes(prompt.scene_id)),
+      last_prompts: (currentPlan.prompts ?? []).filter((prompt) => imageIds.length ? imageIds.includes(prompt.image_id) : sceneIds.includes(prompt.scene_id)),
       visual_resolution_iterations: iterations,
       updated_at: new Date().toISOString(),
     };
@@ -1014,6 +1051,108 @@ async function maybeClearResolvedDeadletter({ finalReviewReport, finalReviewedPl
   await writeJson(deadletterPath, resolved);
   finalReviewedPlan.visual_resolution_deadletter_path = null;
   finalReviewReport.visual_resolution_deadletter_path = null;
+}
+
+function reviewResumeBlockersFromDeadletter(reviewReport, deadletter) {
+  const reportBlockers = unresolvedBlockerFindings(reviewReport?.findings ?? []);
+  if (reportBlockers.length) return reportBlockers;
+  if (deadletter?.status !== "blocked_deadletter") return [];
+  return unresolvedBlockerFindings(deadletter.unresolved_blockers ?? []);
+}
+
+async function resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan }) {
+  if (!autoResolveEnabled) throw new Error("--resume-blocked requires --auto-resolve true.");
+  const [existingReviewedPlan, existingReviewReport, hardenFeedbackReport, deadletter] = await Promise.all([
+    readJson(outputPath, null),
+    readJson(reviewReportPath, null),
+    readJson(hardenFeedbackPath, null),
+    readJson(deadletterPath, null),
+  ]);
+  if (!existingReviewedPlan?.prompts?.length) throw new Error(`Missing existing reviewed prompt plan to resume: ${outputPath}`);
+  if (existingReviewedPlan.source_script_hash !== timedPlan.source_script_hash) {
+    throw new Error(`Existing reviewed prompt plan hash ${existingReviewedPlan.source_script_hash ?? "none"} does not match timed scene plan hash ${timedPlan.source_script_hash ?? "none"}.`);
+  }
+  const originalIds = (promptPlan.prompts ?? []).map((prompt) => prompt.image_id);
+  const reviewedIds = (existingReviewedPlan.prompts ?? []).map((prompt) => prompt.image_id);
+  if (originalIds.length !== reviewedIds.length || originalIds.some((imageId, index) => imageId !== reviewedIds[index])) {
+    throw new Error("Existing reviewed prompt plan does not preserve image_id order from section_image_prompts.json.");
+  }
+
+  let currentPlan = existingReviewedPlan;
+  let currentReport = existingReviewReport ?? {
+    schema: "goldflow_visual_prompt_review_v1",
+    status: currentPlan.status ?? "blocked",
+    findings: [],
+    unresolved_blocker_count: 0,
+    reviewed_prompt_plan_path: outputPath,
+    updated_at: currentPlan.updated_at ?? new Date().toISOString(),
+  };
+  const hardenFeedbackBlockers = compatibleHardenFeedbackBlockers({
+    hardenReport: hardenFeedbackReport,
+    promptPlan: currentPlan,
+    channel,
+    series,
+    week,
+    episode,
+    hardenReportPath: hardenFeedbackPath,
+  });
+  if (hardenFeedbackBlockers.length) {
+    currentReport = {
+      ...currentReport,
+      status: "blocked",
+      findings: [...(currentReport.findings ?? []), ...hardenFeedbackBlockers],
+      unresolved_blocker_count: hardenFeedbackBlockers.length,
+      harden_feedback_report_path: hardenFeedbackPath,
+      updated_at: new Date().toISOString(),
+    };
+    currentPlan = {
+      ...currentPlan,
+      status: "blocked",
+      harden_feedback_report_path: hardenFeedbackPath,
+      updated_at: currentReport.updated_at,
+    };
+  } else {
+    const deadletterBlockers = reviewResumeBlockersFromDeadletter(currentReport, deadletter);
+    if (deadletterBlockers.length && !unresolvedBlockerFindings(currentReport.findings ?? []).length) {
+      currentReport = {
+        ...currentReport,
+        status: "blocked",
+        findings: [...(currentReport.findings ?? []), ...deadletterBlockers],
+        unresolved_blocker_count: deadletterBlockers.length,
+        visual_resolution_deadletter_path: deadletterPath,
+        updated_at: new Date().toISOString(),
+      };
+      currentPlan = {
+        ...currentPlan,
+        status: "blocked",
+        visual_resolution_deadletter_path: deadletterPath,
+        updated_at: currentReport.updated_at,
+      };
+    }
+  }
+
+  let finalReviewedPlan = currentPlan;
+  let finalReviewReport = currentReport;
+  const blockers = unresolvedBlockerFindings(finalReviewReport.findings ?? []);
+  if (blockers.length) {
+    const resolved = await autoResolveBlockedReview({ reviewedPlan: finalReviewedPlan, reviewReport: finalReviewReport });
+    finalReviewedPlan = resolved.reviewedPlan;
+    finalReviewReport = resolved.reviewReport;
+  }
+  await maybeClearResolvedDeadletter({ finalReviewReport, finalReviewedPlan });
+  await writeJson(outputPath, finalReviewedPlan);
+  await writeJson(reviewReportPath, finalReviewReport);
+  console.log(JSON.stringify({
+    status: finalReviewReport.status,
+    output_path: outputPath,
+    review_report_path: reviewReportPath,
+    prompt_count: finalReviewedPlan.prompts?.length ?? 0,
+    unresolved_blocker_count: finalReviewReport.unresolved_blocker_count ?? unresolvedBlockerFindings(finalReviewReport.findings ?? []).length,
+    resumed_blocked_review: true,
+    blocker_scene_ids: blockerSceneIds(blockers),
+    blocker_image_ids: blockerImageIds(blockers),
+  }, null, 2));
+  if (finalReviewReport.status !== "passed") process.exitCode = 1;
 }
 
 async function validateReferencePaths(prompts) {
@@ -1087,6 +1226,10 @@ async function main() {
   if (visualReferencePlan?.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
   if (!["approved", "passed"].includes(characterStateRefs?.status) && flags["allow-draft-refs"] !== "true") {
     throw new Error(`character_state_refs must be approved before visual review. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
+  }
+  if (resumeBlockedReview) {
+    await resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan });
+    return;
   }
 
   const useChunking = flags["visual-review-chunking"] !== "false"

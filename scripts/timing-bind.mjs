@@ -73,6 +73,16 @@ function phraseTokens(value) {
   return normalize(value).split(/\s+/).filter(Boolean);
 }
 
+function wordTokenEntries(words) {
+  const entries = [];
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+    for (const token of phraseTokens(words[wordIndex]?.word)) {
+      entries.push({ token, wordIndex });
+    }
+  }
+  return entries;
+}
+
 function levenshteinDistance(a, b) {
   const left = String(a ?? "");
   const right = String(b ?? "");
@@ -106,44 +116,51 @@ function similarityRatio(a, b) {
 function findPhrase(words, phrase, minStartSec = 0, maxStartSec = null) {
   const tokens = phraseTokens(phrase);
   if (!tokens.length) return null;
-  const wordTokens = words.map((word) => normalize(word.word));
-  const firstIndex = words.findIndex((word) => Number(word.end_sec ?? word.start_sec ?? 0) >= Number(minStartSec ?? 0));
+  const entries = wordTokenEntries(words);
+  const firstIndex = entries.findIndex((entry) => (
+    Number(words[entry.wordIndex]?.end_sec ?? words[entry.wordIndex]?.start_sec ?? 0) >= Number(minStartSec ?? 0)
+  ));
   const startIndex = Math.max(0, firstIndex);
-  const maxStart = Number(maxStartSec);
-  for (let index = startIndex; index <= wordTokens.length - tokens.length; index += 1) {
-    const candidateStart = Number(words[index]?.start_sec ?? 0);
-    if (Number.isFinite(maxStart) && candidateStart > maxStart) break;
+  const maxStart = maxStartSec === null || maxStartSec === undefined ? null : Number(maxStartSec);
+  for (let index = startIndex; index <= entries.length - tokens.length; index += 1) {
+    const startWordIndex = entries[index]?.wordIndex ?? 0;
+    const candidateStart = Number(words[startWordIndex]?.start_sec ?? 0);
+    if (maxStart !== null && Number.isFinite(maxStart) && candidateStart > maxStart) break;
     let ok = true;
     for (let offset = 0; offset < tokens.length; offset += 1) {
-      if (wordTokens[index + offset] !== tokens[offset]) {
+      if (entries[index + offset]?.token !== tokens[offset]) {
         ok = false;
         break;
       }
     }
     if (ok) {
-      const start = words[index];
-      const end = words[index + tokens.length - 1] ?? start;
-      return { start_sec: start.start_sec, end_sec: end.end_sec, matched_words: words.slice(index, index + tokens.length).map((word) => word.word).join(" ") };
+      const endWordIndex = entries[index + tokens.length - 1]?.wordIndex ?? startWordIndex;
+      const start = words[startWordIndex];
+      const end = words[endWordIndex] ?? start;
+      return { start_sec: start.start_sec, end_sec: end.end_sec, matched_words: words.slice(startWordIndex, endWordIndex + 1).map((word) => word.word).join(" ") };
     }
   }
   const target = tokens.join(" ");
   const minWindow = Math.max(1, tokens.length - 3);
   const maxWindow = Math.min(tokens.length + 3, tokens.length < 4 ? tokens.length + 2 : tokens.length + 4);
   let best = null;
-  for (let index = startIndex; index < wordTokens.length; index += 1) {
-    const candidateStart = Number(words[index]?.start_sec ?? 0);
-    if (Number.isFinite(maxStart) && candidateStart > maxStart) break;
-    for (let windowSize = minWindow; windowSize <= maxWindow && index + windowSize <= wordTokens.length; windowSize += 1) {
-      const candidate = wordTokens.slice(index, index + windowSize).join(" ");
+  for (let index = startIndex; index < entries.length; index += 1) {
+    const startWordIndex = entries[index]?.wordIndex ?? 0;
+    const candidateStart = Number(words[startWordIndex]?.start_sec ?? 0);
+    if (maxStart !== null && Number.isFinite(maxStart) && candidateStart > maxStart) break;
+    for (let windowSize = minWindow; windowSize <= maxWindow && index + windowSize <= entries.length; windowSize += 1) {
+      const candidateEntries = entries.slice(index, index + windowSize);
+      const candidate = candidateEntries.map((entry) => entry.token).join(" ");
       const score = similarityRatio(target, candidate);
       const threshold = target.length < 32 ? 0.78 : 0.84;
       if (score < threshold || (best && score <= best.score)) continue;
-      const start = words[index];
-      const end = words[index + windowSize - 1] ?? start;
+      const endWordIndex = candidateEntries[candidateEntries.length - 1]?.wordIndex ?? startWordIndex;
+      const start = words[startWordIndex];
+      const end = words[endWordIndex] ?? start;
       best = {
         start_sec: start.start_sec,
         end_sec: end.end_sec,
-        matched_words: words.slice(index, index + windowSize).map((word) => word.word).join(" "),
+        matched_words: words.slice(startWordIndex, endWordIndex + 1).map((word) => word.word).join(" "),
         score,
       };
     }

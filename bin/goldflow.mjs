@@ -46,6 +46,7 @@ function commandStage(commandName, subcommandName, parsedFlags) {
   if (key === "audio longform-bed") return "longform_audio_mix";
   if (key === "visual beats") return "visual_beat_plan";
   if (key === "visual refs") return "visual_reference_plan";
+  if (key === "visual approve-refs") return "visual_reference_plan";
   if (key === "visual plan") return "visual_prompt_plan_review_harden";
   if (key === "visual review") return "visual_prompt_plan_review_harden";
   if (key === "visual harden") return "visual_prompt_plan_review_harden";
@@ -140,8 +141,10 @@ Commands:
   goldflow timing bind             Bind semantic scenes to Whisper timing
   goldflow visual beats            Split timed semantic scenes into visual image beats
   goldflow visual refs             Plan visual references, state refs, and anchor strategy
+  goldflow visual approve-refs     Approve reviewed/generated refs for visual prompt planning
   goldflow visual plan             Author current-scene-only image prompts from visual beats
   goldflow visual review           Review/fix prompts with LLM auto-resolve; span repair belongs here
+    use --resume-blocked true to continue an existing blocked review/harden repair without rerunning full visual plan
   goldflow visual harden           Generic-only prompt/ref sanitation and pre-imagegen sample QA
   goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
   goldflow visual transitions      Plan xfade transitions from hardened cuts; transition SFX is opt-in
@@ -160,8 +163,19 @@ Common flags:
   --week <week>
   --episode ep_01
 
+Render profiles:
+  default premium: --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  smoother A/B sibling: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  The smoother sibling writes best to a separate --output/--report-output path so it can be reviewed alongside the premium render.
+
+Validation-batch flags:
+  --image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest --codex-opening-sec 300
+  Routes references through ModelsLab, scene cuts before the locked opening timestamp through staged Codex imagegen import, and later cuts through ModelsLab.
+  --pace-policy diagnostic records actual WPM without blocking production solely for TTS pace.
+  --render-profile smooth_fast_ken_burns makes premium_render use the smoother no-oversample profile as the primary render.
+
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
+  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> reference imagegen -> visual approve-refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
 
 Prompt-repair migration guardrails:
   Part F ships before Part G.
@@ -208,6 +222,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {
   run("visual-reference-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "approve-refs") {
+  run("visual-reference-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "review") {
   run("visual-prompt-review.mjs", flags);
 } else if (command === "visual" && subcommand === "harden") {

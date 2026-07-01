@@ -16,6 +16,14 @@ export function normalizeImageProvider(value) {
     "codex_first20_modelslab_rest",
     "codex_opening_modelslab_rest",
   ].includes(normalized)) return "hybrid_codex_opening_modelslab_rest";
+  if ([
+    "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    "modelslab_refs_codex_opening_modelslab_rest",
+    "modelslab_references_codex_opening_modelslab_rest",
+    "modelslab_refs_codex_first5_modelslab_rest",
+    "modelslab_refs_codex_first_5_modelslab_rest",
+    "codex_first5_modelslab_rest_modelslab_refs",
+  ].includes(normalized)) return "hybrid_modelslab_refs_codex_opening_modelslab_rest";
   return "modelslab";
 }
 
@@ -24,6 +32,7 @@ export function providerSlug(provider) {
   if (normalized === "codex_imagegen") return "codex-imagegen";
   if (normalized === "hybrid_codex_refs_multichar") return "hybrid";
   if (normalized === "hybrid_codex_opening_modelslab_rest") return "hybrid-opening";
+  if (normalized === "hybrid_modelslab_refs_codex_opening_modelslab_rest") return "hybrid-modelslab-refs-opening";
   return "modelslab";
 }
 
@@ -32,13 +41,14 @@ export function isCodexImageProvider(provider) {
 }
 
 export function isHybridImageProvider(provider) {
-  return normalizeImageProvider(provider).startsWith("hybrid_codex_");
+  return normalizeImageProvider(provider).startsWith("hybrid_");
 }
 
 export function routedProviderForReference(globalProvider, target = null) {
   const normalized = normalizeImageProvider(globalProvider);
   if (normalized === "hybrid_codex_refs_multichar") return "codex_imagegen";
   if (normalized === "hybrid_codex_opening_modelslab_rest") return "codex_imagegen";
+  if (normalized === "hybrid_modelslab_refs_codex_opening_modelslab_rest") return "modelslab";
   return normalized;
 }
 
@@ -79,13 +89,13 @@ export function isRiskyMultiCharacterPrompt(prompt) {
 
 export function routedProviderForPrompt(prompt, globalProvider, options = {}) {
   const normalized = normalizeImageProvider(globalProvider);
-  if (!normalized.startsWith("hybrid_codex_")) return normalized;
+  if (!normalized.startsWith("hybrid_")) return normalized;
   const requested = normalizeImageProvider(prompt?.image_provider_route ?? "");
   if (requested === "codex_imagegen") return "codex_imagegen";
   if (normalized === "hybrid_codex_refs_multichar") {
     return isRiskyMultiCharacterPrompt(prompt) ? "codex_imagegen" : "modelslab";
   }
-  if (normalized === "hybrid_codex_opening_modelslab_rest") {
+  if (normalized === "hybrid_codex_opening_modelslab_rest" || normalized === "hybrid_modelslab_refs_codex_opening_modelslab_rest") {
     const openingSec = Number(options.codexOpeningSec ?? 120);
     const startSec = Number(prompt?.start_sec ?? Number.POSITIVE_INFINITY);
     if (Number.isFinite(openingSec) && openingSec > 0 && Number.isFinite(startSec) && startSec < openingSec) return "codex_imagegen";

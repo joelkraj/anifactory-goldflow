@@ -63,14 +63,37 @@ function apiKey() {
     cachedKey = process.env.MODELSLAB_API_KEY;
     return cachedKey;
   }
-  const list = JSON.parse(execFileSync("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot }));
+  const list = modelslabCliJson(["keys", "list", "-o", "json", "--no-color", "--no-update-check"]);
   const items = list?.data?.items || [];
   const selected = items.find((item) => item.is_default === 1 || item.is_default === true) || items[0];
   if (!selected) throw new Error("No ModelsLab API key is configured.");
-  const detail = JSON.parse(execFileSync("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot }));
+  const detail = modelslabCliJson(["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"]);
   cachedKey = detail?.data?.key;
   if (!cachedKey) throw new Error(`Could not read ModelsLab API key ${selected.id}.`);
   return cachedKey;
+}
+
+function modelslabCliJson(args) {
+  const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_KEY_ATTEMPTS ?? 4));
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return JSON.parse(execFileSync("modelslab", args, { cwd: repoRoot, maxBuffer: 8 * 1024 * 1024 }));
+    } catch (error) {
+      lastError = error;
+      const output = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}\n${error?.message ?? ""}`;
+      const retryable = /429|500|503|rate limited|try again|service .*not available|server error/i.test(output);
+      if (!retryable || attempt >= attempts) break;
+      const delayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_KEY_BACKOFF_MS ?? 5000)) * attempt;
+      console.warn(`modelslab ${args.slice(0, 2).join(" ")} failed transiently (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+      syncSleep(delayMs);
+    }
+  }
+  throw lastError ?? new Error(`modelslab ${args.join(" ")} failed`);
+}
+
+function syncSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 async function readJson(filePath, fallback = null) {
@@ -151,23 +174,57 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitResponse(response, json) {
+  const message = `${json?.message ?? ""} ${json?.tips ?? ""}`;
+  return response?.status === 429
+    || response?.status === 503
+    || /rate limit|current_queue|queue is full|too many/i.test(message);
+}
+
 async function post(endpoint, body) {
-  const response = await fetchWithTimeout(`https://modelslab.com${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: apiKey(), ...body }),
-  });
-  const text = await response.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`${endpoint} returned non-json ${response.status}: ${text.slice(0, 500)}`);
+  const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_POST_ATTEMPTS ?? 6));
+  const baseDelayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_RATE_LIMIT_BACKOFF_MS ?? 15000));
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await fetchWithTimeout(`https://modelslab.com${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: apiKey(), ...body }),
+    });
+    const text = await response.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      if (attempt < attempts && isRetryableNonJsonResponse(response, text)) {
+        const delayMs = baseDelayMs * attempt;
+        console.warn(`${endpoint} returned retryable non-json ${response.status} (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw new Error(`${endpoint} returned non-json ${response.status}: ${text.slice(0, 500)}`);
+    }
+    if (!response.ok || json.status === "error" || json.status === "failed") {
+      if (attempt < attempts && isRateLimitResponse(response, json)) {
+        const delayMs = baseDelayMs * attempt;
+        console.warn(`${endpoint} rate limited (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw new Error(`${endpoint} failed ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+    }
+    return json;
   }
-  if (!response.ok || json.status === "error" || json.status === "failed") {
-    throw new Error(`${endpoint} failed ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
-  }
-  return json;
+  throw new Error(`${endpoint} failed after ${attempts} POST attempts`);
+}
+
+function isRetryableNonJsonResponse(response, text) {
+  return response?.status === 429
+    || response?.status === 503
+    || /rate limit|current_queue|queue is full|too many|service .*not available|try again/i.test(String(text ?? ""));
 }
 
 async function fetchVoiceRequest(id) {

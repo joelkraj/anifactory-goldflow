@@ -97,38 +97,29 @@ function extractJson(text) {
 function negativeLanguageMatches(value) {
   const text = String(value ?? "").toLowerCase();
   const patterns = [
-    /\bno\b/,
-    /\bnot\b/,
-    /\bwithout\b/,
-    /\bavoid\b/,
-    /\bexclude\b/,
-    /\binstead\s+of\b/,
-    /\brather\s+than\b/,
-    /\bdo\s+not\b/,
-    /\bdon't\b/,
     /--no\b/,
-    /\bnegative\s+prompt\b/,
+    /\bnegative\s+prompt\s*[:=]/,
   ];
   return patterns.filter((pattern) => pattern.test(text)).map(String);
 }
 
-function assertPositivePromptLanguage(prompts) {
-  const failures = [];
+function negativePromptPayloadMarkerWarnings(prompts) {
+  const warnings = [];
   for (const prompt of prompts) {
     for (const field of ["image_prompt", "modelslab_image_prompt", "codex_image_prompt"]) {
       if (!prompt[field]) continue;
       const matches = negativeLanguageMatches(prompt[field]);
-      if (matches.length) failures.push(`${prompt.image_id} ${field} contains negative visual language: ${matches.join(", ")}`);
+      if (matches.length) warnings.push({
+        code: "negative_prompt_payload_marker",
+        severity: "warning",
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        target_field: field,
+        message: `${prompt.image_id} ${field} appears to contain an embedded negative-prompt payload marker: ${matches.join(", ")}`,
+      });
     }
   }
-  if (failures.length && flags["strict-positive-language-gate"] === "true") {
-    throw new Error(`Visual prompt plan violates positive-language-only contract:\n${failures.slice(0, 20).join("\n")}`);
-  }
-  return failures.map((message) => ({
-    code: "positive_language_warning",
-    severity: "warning",
-    message,
-  }));
+  return warnings;
 }
 
 function normalizeLabel(value) {
@@ -352,7 +343,12 @@ function relevantReferenceTargets(scene, visualReferencePlan) {
   return targets.map(compactReferenceTarget);
 }
 
+function targetHasAttachableReference(target) {
+  return Boolean(target.reference_exists || target.reference_image_path || target.resolved_reference_image_path);
+}
+
 function compactReferenceTarget(target) {
+  const attachable = targetHasAttachableReference(target);
   return {
     ref_id: target.ref_id ?? null,
     kind: target.kind ?? null,
@@ -364,6 +360,8 @@ function compactReferenceTarget(target) {
     reference_image_path: compactEditorialProof ? null : (target.reference_image_path ?? null),
     resolved_reference_image_path: compactEditorialProof ? null : (target.resolved_reference_image_path ?? null),
     reference_exists: compactEditorialProof ? null : (target.reference_exists ?? null),
+    attachable_reference: compactEditorialProof ? null : attachable,
+    reference_budget: target.reference_budget ?? null,
     prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", compactEditorialProof ? 260 : 900),
     anchor_cut_policy: target.anchor_cut_policy ?? null,
     risk_notes: compactEditorialProof ? [] : compactList(target.risk_notes ?? [], 4, 220),
@@ -474,10 +472,10 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - You are the creative visual editor and image prompt author. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
 - The local visual_beat_script_excerpt is the source of truth for this cut. If parent scene facts and the local excerpt conflict, make the local excerpt visually clear and use parent-scene facts only as candidate context.
 - Use current beat and current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
-- Prefer positive visual language that describes what should appear, but never distort exact story meaning, UI text, character count, or shot intent just to avoid a negative word. Exact story/UI text belongs in ui_text_on_screen when needed.
-- Avoid negative prompt clauses for image-model mitigation when a positive construction is available. If the beat itself contains a meaningful negative concept, convert it only when the positive wording stays faithful, such as "windowless room" for "no windows" or "single visible subject" for absent extra characters.
-- Convert risks into positive construction: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
-- For single-character shots, state the visible subject positively, such as "one named character alone in frame" rather than naming absent characters.
+- Write normal descriptive prompt prose that preserves exact story meaning, UI text, character count, and shot intent. Exact story/UI text belongs in ui_text_on_screen when needed.
+- Do not create separate negative_prompt, avoid_list, or exclude_list payloads. If the beat itself contains a meaningful absence or refusal, preserve it naturally inside the normal prompt.
+- Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
+- For single-character shots, state the visible subject concretely, such as "one named character alone in frame," while preserving story-faithful absence language when the beat needs it.
 - Identify exact subject roles by name and action, especially in multi-character scenes.
 - For visual beats, use visual_beat_focus to change camera angle, pose, action moment, and composition across beats in the same parent scene.
 - For visual beats, visual_beat_script_excerpt and visual_beat_action are the main source for the image. Each cut must show the specific moment in that beat excerpt, not a repeated hero portrait with the whole scene summarized behind the character.
@@ -485,7 +483,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - suggested_shot_job is the default shot_manifest.shot_job. Copy it unless the beat excerpt clearly requires a better allowed shot job, and then keep the replacement aligned to visual_job.
 - location_timeline_label records the current visible location at this timestamp. If the excerpt or location_timeline_label names a new physical place, the prompt must visibly stage that place or a transition into it using the in-scope location ref.
 - visual_novelty_directive is mandatory edit direction. Follow it to make the current cut visually distinct from adjacent beats without importing their story content.
-- visual_beat_quality_findings are deterministic QA warnings for this exact cut. Treat each finding as positive edit direction: visibly stage the named location or transition when the excerpt calls for it, include the named physical character when the beat requires their presence, and vary composition or shot job when repetition is flagged.
+- visual_beat_quality_findings are deterministic QA warnings for this exact cut. Treat each finding as specific edit direction: visibly stage the named location or transition when the excerpt calls for it, include the named physical character when the beat requires their presence, and vary composition or shot job when repetition is flagged.
 - SCENE CORRECTION DIRECTIVES are binding for matching scene_id/image_id. When a directive includes image_id, apply it to that exact cut; when it only includes scene_id, apply it to every affected cut in that scene while preserving each cut's own local excerpt and visual job.
 - Named people in the local excerpt are editorially important by default. If the excerpt names a person as a witness, speaker, physical presence, livestream/chat participant, social judge, antagonist, or target of the action, put that person in shot_manifest.visible_characters and stage them visibly in the prompt. Use mentioned_only only for people who are purely discussed and not useful to show for the current beat.
 - Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person rather than inventing a separate generic character.
@@ -495,7 +493,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - Across beats in the same parent scene, vary the visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to the beat excerpt.
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
 - Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
-- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved location ref from reference_targets_by_scene, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If location_ref_id is set, the prose prompt must describe that visible location.
+- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. Only attach refs with attachable_reference true. Targets with generation_mode no_ref_needed, derive_from_best_cut, derive_from_first_clean_cut, or no reference_image_path are scoped prompt context only, not image inputs. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved attachable location ref from reference_targets_by_scene, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If no attachable location ref exists, leave shot_manifest.location_ref_id empty and describe the concrete current location directly from the beat excerpt.
 - Every input unit includes target_image_id. Copy target_image_id exactly into output image_id. Do not restart image_id numbering inside chunks, and do not invent sequential IDs from the schema example.
 - Parent scene context explains why the beat matters, but visual_beat_script_excerpt decides what appears. Do not include future reveals, earlier setup, or the whole confrontation unless the current beat excerpt physically shows them.
 - previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
@@ -504,14 +502,14 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt should use natural Codex-friendly image prose with the same shot_manifest contract.
 - Every scene prompt must explicitly request polished 2D anime/manhwa illustration style in text: clean line art, cel-shaded characters, cinematic webtoon/manhwa lighting, and non-photorealistic painted backgrounds/crowd extras. This style clause is mandatory even when a style reference is not attached.
-- ModelsLab Flux handles multi-character shots at surfaces poorly. Whenever two or more characters are positioned at, behind, leaning on, or separated by ANY surface or large object that can cross or occlude a human body (waist-to-chest-height objects — recognize the actual surface from the beat and location, do not rely on a fixed list of furniture types), modelslab_image_prompt must: (a) give each visible character a clear spatial relationship to that surface — near side, far side, behind it, beside its edge, or another explicit side-of-surface placement; (b) state body clearance positively — full torso above the surface line, feet grounded, hands resting on or above the edge, and no body part merging into the surface plane; and (c) prefer asymmetric or diagonal placement over flat centered bilateral staging, offsetting one character forward or to a near corner and the other farther back. codex_image_prompt may keep a more centered, cinematic composition as long as the bodies stay discrete, side-of-surface placement is readable, and no body merges into the surface.
+- ModelsLab Flux handles multi-character shots at surfaces poorly. Whenever two or more characters are positioned at, behind, leaning on, or separated by ANY surface or large object that can cross or occlude a human body (waist-to-chest-height objects — recognize the actual surface from the beat and location, do not rely on a fixed list of furniture types), modelslab_image_prompt must: (a) give each visible character a clear spatial relationship to that surface — near side, far side, behind it, beside its edge, or another explicit side-of-surface placement; (b) state body clearance concretely — full torso above the surface line, feet grounded, hands resting on or above the edge, and body silhouette clear of the surface plane; and (c) prefer asymmetric or diagonal placement over flat centered bilateral staging, offsetting one character forward or to a near corner and the other farther back. codex_image_prompt may keep a more centered, cinematic composition as long as the bodies stay discrete, side-of-surface placement is readable, and body/surface placement is clear.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
 - When shot_manifest.location_ref_id is set, describe that reference's visible architecture, materials, lighting, surfaces, and spatial layout as the physical setting for the current beat.
 - Composition is beat-authored, not globally defaulted. Let the visual beat choose the composition. Do not impose a universal wide/full-frame/medium-wide default. Use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or other framing only when that shot scale best serves the current visual_job, beat excerpt, emotion, object, UI, or transition.
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
-- If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen and use positive visual substitutes in modelslab_image_prompt, such as "contact-silence streak badge", "stand-firm mission card", "message restraint checklist", or "upstairs restraint icon".
+- If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen. In modelslab_image_prompt, describe the visible UI design naturally and concretely; ordinary negative words are allowed when the image meaning depends on them, but do not add a separate negative_prompt payload.
 - If the story beat depends on chat, system panels, viewer counts, receipts, scoreboards, livestream status, or labels, include concise readable UI text in ui_text_on_screen and visually stage the screen/panel as a key story object. Text can be sparse and large; it should serve the beat instead of filling the frame.
 - Shot scale must be intentional and beat-specific. The planner should choose the most useful composition for the cut instead of using a global wide or close-up default.
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
@@ -540,7 +538,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - Put character identity refs before location refs when the main risk is character identity. Put location refs before character refs when the main risk is the environment. Put action/effect refs after identity and location refs unless the effect is the primary subject.
 - Each reference requirement should include slot_purpose, such as "character identity and wardrobe for Kang Jiwoo" or "dungeon location environment".
 - For standalone_ref targets, mark reference_usage as attach_existing_ref only when a required reference path exists; otherwise report missing_reference_coverage.
-- For derive_from_first_clean_cut, derive_from_best_cut, and derive_from_first_clean_wide_cut targets, nominate suitable source-anchor cuts with anchor_roles.
+- For derive_from_first_clean_cut, derive_from_best_cut, and derive_from_first_clean_wide_cut targets, treat the target as text-only context until it has a real reference_image_path.
 - For no_ref_needed targets, do not attach a reference.
 - Output exactly one prompt per ${compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene"}.
 - Return ${compactTimedPlan.scene_count} prompts, one for every unit in the plan.
@@ -658,9 +656,9 @@ Return JSON only:
       "visual_beat_id": "scene_001_beat_01",
       "start_sec": 0,
       "duration_sec": 6,
-      "image_prompt": "positive production scene prompt only",
-      "modelslab_image_prompt": "positive production scene prompt optimized for flux-klein when the active route needs ModelsLab, else empty string",
-      "codex_image_prompt": "positive production scene prompt optimized for Codex/OpenAI when the active route needs Codex, else empty string",
+      "image_prompt": "production scene prompt only",
+      "modelslab_image_prompt": "production scene prompt optimized for flux-klein when the active route needs ModelsLab, else empty string",
+      "codex_image_prompt": "production scene prompt optimized for Codex/OpenAI when the active route needs Codex, else empty string",
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
@@ -714,7 +712,7 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner. Preserve the local beat's visible story intent. Prefer positive visual language when it stays faithful." },
+          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner. Preserve the local beat's visible story intent. Keep all provider prompt content in the normal prompt fields." },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -1001,18 +999,29 @@ function assertRetentionShotJobVarietySoft(prompts) {
 
 function assertScenePromptShape(prompts) {
   const failures = [];
-  const badLayout = /\b(?:contact sheet|reference sheet|turnaround|character sheet|visible reference panel|reference panel layout)\b/i;
+  const badLayout = /\b(?:contact sheet|reference board|reference sheet|character sheet|visible reference panel|reference panels?|reference panel layout|turnaround sheet|turnaround board|character turnaround)\b/ig;
   const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
   const duplicateSlotText = /\buse image (?:one|two|three|four|five|six|seven|eight) as\b/i;
   for (const prompt of prompts) {
     const text = String(prompt.modelslab_image_prompt ?? prompt.image_prompt ?? prompt.codex_image_prompt ?? "");
     if (metadataStart.test(text)) failures.push(`${prompt.image_id} starts with metadata instead of visible action`);
-    if (badLayout.test(text)) failures.push(`${prompt.image_id} requests a reference/sheet layout in a scene cut`);
+    if (hasAffirmativeReferenceLayoutRequest(text, badLayout)) failures.push(`${prompt.image_id} requests a reference/sheet layout in a scene cut`);
     if (duplicateSlotText.test(text)) failures.push(`${prompt.image_id} duplicates reference slot text inside prompt body`);
   }
   if (failures.length) {
     throw new Error(`Visual prompt plan violates scene-prompt shape contract:\n${failures.slice(0, 30).join("\n")}`);
   }
+}
+
+function hasAffirmativeReferenceLayoutRequest(text, pattern) {
+  pattern.lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const before = text.slice(Math.max(0, match.index - 64), match.index).toLowerCase();
+    if (/\b(?:no|not|without|avoid|avoiding|instead of|rather than|free of|clear of)\b/.test(before)) continue;
+    return true;
+  }
+  return false;
 }
 
 function promptSearchText(prompt) {
@@ -1518,7 +1527,7 @@ async function main() {
     .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, { visualReferencePlan: enrichedVisualReferencePlan, stateRefIndex }));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
-  const positiveLanguageWarnings = assertPositivePromptLanguage(prompts);
+  const negativePromptPayloadWarnings = negativePromptPayloadMarkerWarnings(prompts);
   assertScenePromptShape(prompts);
   assertLocalBeatFidelity(prompts, visualSourceRows);
   const shotFramingWarnings = assertShotFramingDistribution(prompts);
@@ -1550,7 +1559,7 @@ async function main() {
     source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
     style_summary: styleSummary,
-    prompt_policy: "local-beat-first positive editorial prompting; visual-beat-aware when visual_beat_plan exists; references selected only when visible/style-critical and described by explicit image slot roles",
+    prompt_policy: "local-beat-first editorial prompting; ordinary negative words are allowed in normal prose, standalone negative-prompt payloads are disallowed, and references are selected only when visible/style-critical with explicit image slot roles",
     image_provider: activeImageProvider,
     image_provider_options: activeImageProviderOptions,
     run_identity_path: runIdentityPath,
@@ -1563,7 +1572,7 @@ async function main() {
     prompts,
     warnings: [
       ...(llm.parsed.warnings ?? []),
-      ...positiveLanguageWarnings,
+      ...negativePromptPayloadWarnings,
       ...shotFramingWarnings,
       ...promptVarietyWarnings,
       ...locationSpanWarnings,

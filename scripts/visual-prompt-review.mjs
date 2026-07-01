@@ -125,6 +125,14 @@ async function exists(filePath) {
   return Boolean(filePath) && fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
 }
 
+async function mtimeMs(filePath) {
+  try {
+    return (await fs.stat(filePath)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 function extractJson(text) {
   const raw = String(text ?? "").trim();
   try {
@@ -525,13 +533,61 @@ function compactProviderError(value, maxChars = 1800) {
   return `${preview.slice(0, maxChars)}\n[provider output truncated from ${raw.length} chars]`;
 }
 
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function isOllamaNativeBaseURL(baseURL) {
   return /\/api\/?$/i.test(String(baseURL ?? ""));
 }
 
-async function callCodex(prompt, stageName) {
+async function readCachedCodexReview(callDir, stageName, { expectedPromptCount = null, minMtimeMs = 0 } = {}) {
+  if (flags["reuse-codex-review-cache"] === "false" || process.env.ANIFACTORY_REUSE_CODEX_REVIEW_CACHE === "false") return null;
+  let names = [];
+  try {
+    names = await fs.readdir(callDir);
+  } catch {
+    return null;
+  }
+  const exact = escapeRegExp(stageName);
+  const base = stageName.replace(/_attempt_\d+$/i, "");
+  const basePattern = escapeRegExp(base);
+  const pattern = stageName === base
+    ? new RegExp(`-${basePattern}(?:_attempt_\\d+)?-output\\.txt$`)
+    : new RegExp(`-${exact}-output\\.txt$`);
+  const candidates = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const filePath = path.join(callDir, name);
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat?.isFile() || stat.mtimeMs < minMtimeMs) continue;
+    candidates.push({ filePath, mtime: stat.mtimeMs });
+  }
+  candidates.sort((left, right) => right.mtime - left.mtime);
+  for (const candidate of candidates) {
+    const content = await fs.readFile(candidate.filePath, "utf8").catch(() => "");
+    try {
+      const parsed = extractJson(content);
+      const reviewedCount = Array.isArray(parsed.reviewed_prompts) ? parsed.reviewed_prompts.length : 0;
+      if (expectedPromptCount !== null && reviewedCount !== expectedPromptCount) continue;
+      return {
+        provider: "codex_cache",
+        model: "codex_cli_default",
+        output_path: candidate.filePath,
+        content,
+        parsed,
+        cache_hit: true,
+      };
+    } catch {}
+  }
+  return null;
+}
+
+async function callCodex(prompt, stageName, options = {}) {
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
+  const cached = await readCachedCodexReview(callDir, stageName, options);
+  if (cached) return cached;
   const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-output.txt`);
   await new Promise((resolve, reject) => {
     const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
@@ -1277,7 +1333,7 @@ function assertReviewedPrompts(originalPrompts, reviewedPrompts, timedPlan) {
   }
 }
 
-async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts, chunkIndex = null, attemptIndex = 1 }) {
+async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts, chunkIndex = null, attemptIndex = 1, minCacheMtimeMs = 0 }) {
   const baseStageName = chunkIndex === null
     ? `${episode}_visual_review`
     : `${episode}_visual_review_chunk_${String(chunkIndex + 1).padStart(2, "0")}`;
@@ -1285,7 +1341,7 @@ async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, charact
   const prompt = buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts });
   return isLocalLLMRoute(stageName)
     ? callLocal(prompt, stageName, Number(flags["visual-review-chunk-max-tokens"] ?? 9000))
-    : callCodex(prompt, stageName);
+    : callCodex(prompt, stageName, { expectedPromptCount: prompts.length, minMtimeMs: minCacheMtimeMs });
 }
 
 async function runPool(items, worker, limit) {
@@ -1324,6 +1380,12 @@ async function main() {
   const useChunking = flags["visual-review-chunking"] !== "false"
     && promptPlan.prompts.length > Number(flags["visual-review-single-call-max-scenes"] ?? 10);
   const chunks = useChunking ? chunkByScene(promptPlan.prompts, Number(flags["visual-review-chunk-scenes"] ?? 6)) : [promptPlan.prompts];
+  const minCacheMtimeMs = Math.max(
+    await mtimeMs(promptPath),
+    await mtimeMs(timedPlanPath),
+    await mtimeMs(visualReferencePlanPath),
+    await mtimeMs(characterStateRefsPath),
+  );
   const reviewedRows = [];
   const findings = [];
   const warnings = [];
@@ -1338,7 +1400,7 @@ async function main() {
     for (let attemptIndex = 1; attemptIndex <= maxAttempts; attemptIndex += 1) {
       let llm = null;
       try {
-        llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunk, chunkIndex: useChunking ? index : null, attemptIndex });
+        llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunk, chunkIndex: useChunking ? index : null, attemptIndex, minCacheMtimeMs });
       } catch (error) {
         lastError = error;
         if (attemptIndex < maxAttempts) {

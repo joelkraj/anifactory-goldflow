@@ -855,6 +855,29 @@ function referenceTargetStats(target, timingIndex) {
   };
 }
 
+function generatedReferenceSummary(profile, applied, openingSec, referenceTargets) {
+  const summary = {
+    profile,
+    applied,
+    opening_sec: openingSec,
+    generated_target_count: 0,
+    downgraded_target_count: 0,
+    by_kind: {},
+  };
+  for (const target of referenceTargets) {
+    const kind = String(target.kind ?? "unknown").toLowerCase();
+    if (!summary.by_kind[kind]) summary.by_kind[kind] = { generate: 0, downgrade: 0 };
+    if (target.required_before_imagegen === true || target.generation_mode === "standalone_ref" || target.generation_mode === "manual_review") {
+      summary.generated_target_count += 1;
+      summary.by_kind[kind].generate += 1;
+    } else {
+      summary.downgraded_target_count += 1;
+      summary.by_kind[kind].downgrade += 1;
+    }
+  }
+  return summary;
+}
+
 function targetShouldGenerateForCandidate(target, stats, openingSec) {
   const kind = String(target.kind ?? "").toLowerCase();
   const mode = String(target.generation_mode ?? "").toLowerCase();
@@ -875,8 +898,13 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
   const baseIdentity = isExplicitBaseIdentityTarget(target) || isGenericCharacterIdentityTarget(target);
   const signatureSystemUi = kind === "ui" && /\b(?:system|quest|status|ranking|rank|ledger|notification|interface|hud|window|panel|score|stat)\b/i.test(anchorText);
   const highRiskContact = kind === "character_state" && /\b(?:fight(?:s|ing)?|restrain(?:s|ing)?\s+(?:him|her|them|joey|protagonist|victim)|shove(?:s|d|ing)?|rescue(?:s|d|ing)?\s+(?:him|her|them|joey|protagonist|victim)|grab(?:s|bed|bing)?|strike(?:s|d|ing)?|hit(?:s|ting)?|slap(?:s|ped|ping)?|wrestle(?:s|d|ing)?|tackle(?:s|d|ing)?|body[- ]?to[- ]?body|physical contact|hand on (?:his|her|their)|hands on (?:his|her|their))\b/i.test(riskText);
+  const genericGroupIdentity = kind === "character_state" && /\b(?:group|crowd|audience|families|guards?|officers?|fighters?|raiders?|riders?|survivors?|witnesses?|attendants?|workers?|public|uniform system|wardrobe system)\b/i.test(anchorText);
+  const bundledMinorProp = (kind === "prop" || kind === "action" || kind === "effect") && (/\bminor\b/i.test(anchorText) || String(target.subject ?? "").split(",").length >= 4);
   if (kind === "style") return { generate: false, mode: "no_ref_needed", reason: "candidate validation uses style text/bible instead of spending a style ref" };
   if (kind === "character_state") {
+    if (genericGroupIdentity && !baseIdentity) {
+      return { generate: false, mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed", reason: "generic groups, crowds, uniforms, and wardrobe systems are not standalone character identity refs for candidate validation" };
+    }
     const generate = baseIdentity || highRiskContact || meaningfulRecurringCharacter || (highPriority && recurringAcrossScenes && stats.appearance_count >= 3);
     return {
       generate,
@@ -887,7 +915,7 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
     };
   }
   if (kind === "location") {
-    const generate = inOpening || majorRecurringAcrossScenes || (highPriority && recurringAcrossScenes);
+    const generate = inOpening || (recurringAcrossScenes && (majorRecurringAcrossScenes || highPriority));
     return {
       generate,
       mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed",
@@ -907,7 +935,7 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
     };
   }
   if (kind === "prop" || kind === "action" || kind === "effect") {
-    const generate = majorRecurringAcrossScenes || (highPriority && recurringAcrossScenes && stats.appearance_count >= 4);
+    const generate = !bundledMinorProp && (majorRecurringAcrossScenes || (highPriority && recurringAcrossScenes && stats.appearance_count >= 4));
     return {
       generate,
       mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed",
@@ -919,6 +947,94 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
   return { generate: false, mode: "no_ref_needed", reason: "unknown or low-priority target kind for candidate validation" };
 }
 
+function characterGeneratedScore(target, timingIndex, openingSec) {
+  const stats = referenceTargetStats(target, timingIndex);
+  const text = `${target.ref_id ?? ""} ${target.subject ?? ""} ${target.prompt_anchor ?? ""}`;
+  let score = 0;
+  if (target.reference_image_path) score += 1000;
+  if (isExplicitBaseIdentityTarget(target)) score += 500;
+  if (isGenericCharacterIdentityTarget(target)) score += 220;
+  if (Number.isFinite(stats.earliest_start_sec) && stats.earliest_start_sec < openingSec) score += 120;
+  score += Math.min(160, stats.scene_count * 18);
+  score += Math.min(120, stats.appearance_count * 12);
+  if (/\b(?:base|identity|core|main|protagonist|antagonist|ally)\b/i.test(text)) score += 60;
+  if (/\b(?:courtroom|tribunal|memory|projection|flashback|one[- ]scene|single[- ]scene|crowd|group|audience|families|witnesses)\b/i.test(text)) score -= 80;
+  if (String(target.priority ?? "").match(/^(?:high|critical|signature)$/i)) score += 30;
+  return score;
+}
+
+function applyCandidateCharacterStateGenerationCap(referenceTargets, timingIndex, openingSec) {
+  const generated = referenceTargets.filter((target) =>
+    String(target.kind ?? "").toLowerCase() === "character_state"
+    && (target.required_before_imagegen === true || target.generation_mode === "standalone_ref" || target.generation_mode === "manual_review")
+  );
+  const groups = new Map();
+  for (const target of generated) {
+    const key = identityMergeKey(target) ?? String(target.ref_id ?? target.subject ?? "unknown");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(target);
+  }
+  if (!groups.size) return { referenceTargets, downgraded: [], warnings: [] };
+  const groupWeights = [...groups.entries()].map(([key, rows]) => ({
+    key,
+    row_count: rows.length,
+    total_scene_count: rows.reduce((sum, row) => sum + referenceTargetStats(row, timingIndex).scene_count, 0),
+    total_appearance_count: rows.reduce((sum, row) => sum + referenceTargetStats(row, timingIndex).appearance_count, 0),
+  })).sort((a, b) =>
+    b.total_scene_count - a.total_scene_count
+    || b.total_appearance_count - a.total_appearance_count
+    || b.row_count - a.row_count
+  );
+  const primaryKey = groupWeights[0]?.key ?? null;
+  const keepIds = new Set();
+  const downgradedIds = new Set();
+  const warnings = [];
+  for (const group of groupWeights) {
+    const rows = groups.get(group.key) ?? [];
+    const cap = group.key === primaryKey
+      ? 4
+      : group.total_scene_count >= 10 || group.total_appearance_count >= 14
+        ? 2
+        : 1;
+    const sorted = [...rows].sort((a, b) =>
+      characterGeneratedScore(b, timingIndex, openingSec) - characterGeneratedScore(a, timingIndex, openingSec)
+      || String(a.ref_id).localeCompare(String(b.ref_id))
+    );
+    for (const row of sorted.slice(0, cap)) keepIds.add(row.ref_id);
+    for (const row of sorted.slice(cap)) downgradedIds.add(row.ref_id);
+    if (sorted.length > cap) {
+      warnings.push({
+        code: "candidate_character_state_generation_cap",
+        severity: "info",
+        character_key: group.key,
+        kept_count: cap,
+        downgraded_count: sorted.length - cap,
+        message: `Candidate reference budget kept ${cap} generated character-state refs for ${group.key} and downgraded ${sorted.length - cap} extra state variants to derive-from-cut.`,
+      });
+    }
+  }
+  if (!downgradedIds.size) return { referenceTargets, downgraded: [], warnings };
+  const nextTargets = referenceTargets.map((target) => {
+    if (!downgradedIds.has(target.ref_id)) return target;
+    return {
+      ...target,
+      generation_mode: target.reference_image_path ? "source_only" : "derive_from_best_cut",
+      required_before_imagegen: false,
+      manual_review_required: false,
+      reference_budget: {
+        ...(target.reference_budget ?? {}),
+        decision: "downgraded_by_character_generation_cap",
+        reason: "candidate validation caps generated character-state refs per canonical identity; this state should derive from a clean cut or prompt text",
+      },
+    };
+  });
+  return {
+    referenceTargets: nextTargets,
+    downgraded: [...downgradedIds],
+    warnings,
+  };
+}
+
 function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdentity) {
   const profile = referenceBudgetProfile(runIdentity);
   const timingIndex = sceneTimingIndex(scopedSemantic.scenes ?? []);
@@ -926,29 +1042,13 @@ function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdenti
   if (!/^candidate[_-]validation$/i.test(profile)) {
     return {
       referenceTargets,
-      summary: {
-        profile,
-        applied: false,
-        opening_sec: openingSec,
-        generated_target_count: referenceTargets.filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true).length,
-        downgraded_target_count: 0,
-      },
+      summary: generatedReferenceSummary(profile, false, openingSec, referenceTargets),
       warnings: [],
     };
   }
-  const summary = {
-    profile,
-    applied: true,
-    opening_sec: openingSec,
-    generated_target_count: 0,
-    downgraded_target_count: 0,
-    by_kind: {},
-  };
-  const nextTargets = referenceTargets.map((target) => {
+  let nextTargets = referenceTargets.map((target) => {
     const stats = referenceTargetStats(target, timingIndex);
     const decision = targetShouldGenerateForCandidate(target, stats, openingSec);
-    const kind = String(target.kind ?? "unknown").toLowerCase();
-    if (!summary.by_kind[kind]) summary.by_kind[kind] = { generate: 0, downgrade: 0 };
     const next = {
       ...target,
       reference_budget: {
@@ -961,16 +1061,12 @@ function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdenti
       },
     };
     if (decision.generate) {
-      summary.generated_target_count += 1;
-      summary.by_kind[kind].generate += 1;
       return {
         ...next,
         generation_mode: target.generation_mode === "manual_review" ? "manual_review" : "standalone_ref",
         required_before_imagegen: true,
       };
     }
-    summary.downgraded_target_count += 1;
-    summary.by_kind[kind].downgrade += 1;
     return {
       ...next,
       generation_mode: target.reference_image_path ? "source_only" : (decision.mode ?? "no_ref_needed"),
@@ -978,16 +1074,22 @@ function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdenti
       manual_review_required: false,
     };
   });
+  const characterCap = applyCandidateCharacterStateGenerationCap(nextTargets, timingIndex, openingSec);
+  nextTargets = characterCap.referenceTargets;
+  const summary = generatedReferenceSummary(profile, true, openingSec, nextTargets);
   return {
     referenceTargets: nextTargets,
     summary,
-    warnings: [{
-      code: "reference_budget_profile_applied",
-      severity: "info",
-      message: `Candidate validation reference budget kept ${summary.generated_target_count} generated refs and downgraded ${summary.downgraded_target_count} text-only scoped targets.`,
-      profile,
-      opening_sec: openingSec,
-    }],
+    warnings: [
+      {
+        code: "reference_budget_profile_applied",
+        severity: "info",
+        message: `Candidate validation reference budget kept ${summary.generated_target_count} generated refs and downgraded ${summary.downgraded_target_count} text-only or derive-from-cut scoped targets.`,
+        profile,
+        opening_sec: openingSec,
+      },
+      ...characterCap.warnings,
+    ],
   };
 }
 

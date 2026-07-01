@@ -1467,8 +1467,25 @@ async function main() {
 
 main().catch(async (error) => {
   const failed = { schema: "goldflow_visual_prompt_review_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() };
-  await writeJson(reviewReportPath, failed).catch(() => {});
-  await writeJson(outputPath, { schema: "goldflow_section_image_prompts_v1", status: "failed", error: failed.error, updated_at: failed.updated_at }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
+  const existingReviewedPlan = await readJson(outputPath, null);
+  const existingReviewReport = await readJson(reviewReportPath, null);
+  const preserveExisting =
+    Array.isArray(existingReviewedPlan?.prompts)
+    && existingReviewedPlan.prompts.length
+    && existingReviewedPlan.status !== "failed";
+  if (preserveExisting) {
+    const stamp = failed.updated_at.replace(/[:.]/g, "-");
+    const failureReportPath = reviewReportPath.replace(/\.json$/i, `.failed_${stamp}.json`);
+    await writeJson(failureReportPath, {
+      ...failed,
+      preserved_reviewed_prompt_plan_path: outputPath,
+      preserved_review_report_path: existingReviewReport ? reviewReportPath : null,
+    }).catch(() => {});
+    console.error(`${failed.error}\nPreserved existing reviewed prompt artifact; wrote failure details to ${failureReportPath}`);
+  } else {
+    await writeJson(reviewReportPath, failed).catch(() => {});
+    await writeJson(outputPath, { schema: "goldflow_section_image_prompts_v1", status: "failed", error: failed.error, updated_at: failed.updated_at }).catch(() => {});
+    console.error(failed.error);
+  }
   process.exitCode = 1;
 });

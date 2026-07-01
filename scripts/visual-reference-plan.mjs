@@ -576,7 +576,9 @@ function semanticPlanWithVisualBeats(semanticPlan, visualBeatPlan) {
   };
 }
 
-function compactInventoryAsset(asset, { evidenceLimit = 2 } = {}) {
+function compactInventoryAsset(asset, { evidenceLimit = 2, sceneIdLimit = Infinity } = {}) {
+  const sceneIds = asset.scene_ids ?? [];
+  const maxSceneIds = Number.isFinite(Number(sceneIdLimit)) ? Number(sceneIdLimit) : sceneIds.length;
   return {
     asset_id: asset.asset_id,
     ref_id: asset.ref_id,
@@ -586,7 +588,8 @@ function compactInventoryAsset(asset, { evidenceLimit = 2 } = {}) {
     recommended_generation_mode: asset.recommended_generation_mode,
     recommended_required_before_imagegen: asset.recommended_required_before_imagegen,
     recommended_anchor_cut_policy: asset.recommended_anchor_cut_policy,
-    scene_ids: asset.scene_ids ?? [],
+    scene_ids: sceneIds.slice(0, maxSceneIds),
+    scene_ids_truncated_count: Math.max(0, sceneIds.length - maxSceneIds),
     distinct_scene_count: asset.distinct_scene_count,
     beat_count: asset.beat_count,
     semantic_ref_ids: asset.semantic_ref_ids ?? [],
@@ -605,15 +608,22 @@ function inventoryAssetHasReferenceValue(asset) {
 
 function compactInventoryForPrompt(inventoryLedger, sceneIds = null, options = {}) {
   const wantedScenes = sceneIds ? new Set(sceneIds) : null;
+  const referenceValueOnly = options.referenceValueOnly === true;
+  const maxAssets = Number(options.maxAssets ?? Infinity);
   const assets = (inventoryLedger?.assets ?? [])
     .filter((asset) => !wantedScenes || (asset.scene_ids ?? []).some((sceneId) => wantedScenes.has(sceneId)))
-    .map((asset) => compactInventoryAsset(asset));
+    .filter((asset) => !referenceValueOnly || inventoryAssetHasReferenceValue(asset))
+    .slice(0, Number.isFinite(maxAssets) ? maxAssets : undefined)
+    .map((asset) => compactInventoryAsset(asset, {
+      evidenceLimit: Number(options.evidenceLimit ?? 2),
+      sceneIdLimit: Number(options.sceneIdLimit ?? Infinity),
+    }));
   const includeGlobalSelection = options.includeGlobalSelection === true;
   const globalSelectedAssets = includeGlobalSelection
     ? (inventoryLedger?.assets ?? [])
         .filter(inventoryAssetHasReferenceValue)
         .slice(0, Number(flags["visual-ref-global-context-max-assets"] ?? 160))
-        .map((asset) => compactInventoryAsset(asset, { evidenceLimit: 1 }))
+        .map((asset) => compactInventoryAsset(asset, { evidenceLimit: 1, sceneIdLimit: Number(options.globalSceneIdLimit ?? 24) }))
     : [];
   return {
     schema: inventoryLedger?.schema ?? "goldflow_reference_inventory_ledger_v1",
@@ -823,7 +833,7 @@ VISUAL BIBLES AND OPERATOR DIRECTION:
 ${visualGuidanceBlock(guidance)}
 
 REFERENCE DIRECTOR LEDGER:
-${JSON.stringify(compactInventoryForPrompt(inventoryLedger), null, 2)}
+${JSON.stringify(compactInventoryForPrompt(inventoryLedger, null, { referenceValueOnly: true, maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320), evidenceLimit: 0, sceneIdLimit: 18 }), null, 2)}
 
 EPISODE SUMMARY:
 ${JSON.stringify(compact, null, 2)}
@@ -907,6 +917,23 @@ async function callLocal(prompt, stageName, maxTokens = null) {
 async function callCodex(prompt, stageName) {
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
+  const reuseChunks = flags["visual-ref-reuse-codex-chunks"] === "true";
+  if (reuseChunks && /_chunk_\d+$/i.test(stageName)) {
+    const entries = (await fs.readdir(callDir).catch(() => []))
+      .filter((name) => name.endsWith(`-${stageName}-output.txt`))
+      .sort()
+      .reverse();
+    for (const name of entries) {
+      const cachedPath = path.join(callDir, name);
+      const content = await fs.readFile(cachedPath, "utf8").catch(() => "");
+      if (!content.trim()) continue;
+      try {
+        const parsed = extractJson(content);
+        console.error(`visual refs ${stageName}: reused cached Codex chunk output ${cachedPath}`);
+        return { provider: "codex", model: "codex_cli_default", output_path: cachedPath, content, parsed, reused_cached_output: true };
+      } catch {}
+    }
+  }
   const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-output.txt`);
   await new Promise((resolve, reject) => {
     const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });

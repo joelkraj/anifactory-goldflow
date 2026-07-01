@@ -272,6 +272,18 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       location: "key recurring throne hall",
       ref_requirements: [{ kind: "location", ref_id: "key_hall_ref" }],
     },
+    {
+      scene_id: "scene_008",
+      start_sec: 1020,
+      location: "late director-selected battle bridge",
+      ref_requirements: [{ kind: "location", ref_id: "late_key_anchor_ref" }],
+    },
+    {
+      scene_id: "scene_009",
+      start_sec: 1120,
+      location: "late director-selected battle bridge",
+      ref_requirements: [{ kind: "location", ref_id: "late_key_anchor_ref" }],
+    },
   ];
   for (const scene of semanticScenes) {
     scene.visible_subjects = ["Joey Manhwa"];
@@ -299,19 +311,22 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
     planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: hash,
-    beats: semanticScenes.map((scene) => ({
-      scene_id: scene.scene_id,
-      parent_scene_id: scene.scene_id,
-      visual_beat_id: `${scene.scene_id}_beat_01`,
-      start_sec: scene.start_sec,
-      duration_sec: 6,
-      visual_beat_script_excerpt: `Joey Manhwa and ${scene.visible_subjects.includes("Victor") ? "Victor" : "the system"} appear in ${scene.location} with the critical poison ring.`,
-      visible_characters: scene.visible_subjects,
-      local_location: scene.location,
-      local_props: scene.scene_id === "scene_002" ? ["one-scene signed receipt", "critical recurring poison ring"] : ["critical recurring poison ring"],
-      local_ui_elements: ["signature system quest UI"],
-      ref_needs: [],
-    })),
+    beats: semanticScenes.flatMap((scene) => {
+      const repeatCount = scene.scene_id === "scene_008" || scene.scene_id === "scene_009" ? 4 : 1;
+      return Array.from({ length: repeatCount }, (_, beatIndex) => ({
+        scene_id: scene.scene_id,
+        parent_scene_id: scene.scene_id,
+        visual_beat_id: `${scene.scene_id}_beat_${String(beatIndex + 1).padStart(2, "0")}`,
+        start_sec: scene.start_sec + beatIndex * 8,
+        duration_sec: 6,
+        visual_beat_script_excerpt: `Joey Manhwa and ${scene.visible_subjects.includes("Victor") ? "Victor" : "the system"} appear in ${scene.location} with the critical poison ring.`,
+        visible_characters: scene.visible_subjects,
+        local_location: scene.location,
+        local_props: scene.scene_id === "scene_002" ? ["one-scene signed receipt", "critical recurring poison ring"] : ["critical recurring poison ring"],
+        local_ui_elements: ["signature system quest UI"],
+        ref_needs: [],
+      }));
+    }),
   });
   await writeJson(path.join(weekDir, "visual_style_bible.json"), { style_summary: "text style bible is sufficient" });
   await writeJson(path.join(weekDir, "character_bible.json"), {});
@@ -329,6 +344,7 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       { ref_id: "late_room_ref", kind: "location", subject: "late one-off hallway", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "minor_lobby_ref", kind: "location", subject: "minor recurring lobby", scene_ids: ["scene_003", "scene_004"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "key_hall_ref", kind: "location", subject: "key recurring throne hall", scene_ids: ["scene_005", "scene_006", "scene_007"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "late_key_anchor_ref", kind: "location", subject: "late director-selected battle bridge", scene_ids: ["scene_008", "scene_009"], director_role: "key_location_anchor", generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "opening_system_ui_ref", kind: "ui", subject: "signature system quest UI", scene_ids: ["scene_001", "scene_002", "scene_003", "scene_004"], appearance_count: 4, generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_ui_ref", kind: "ui", subject: "one-scene hallway notice UI", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_prop_ref", kind: "prop", subject: "one-scene signed receipt", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
@@ -361,6 +377,9 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   assert.equal(byId.has("late_prop_ref"), false);
   assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_first_clean_wide_cut");
   assert.equal(byId.get("key_hall_ref").required_before_imagegen, true);
+  assert.equal(byId.get("late_key_anchor_ref").required_before_imagegen, true);
+  assert.equal(byId.get("late_key_anchor_ref").generation_mode, "standalone_ref");
+  assert.equal(byId.get("late_key_anchor_ref").reference_budget.decision, "generate");
   assert.equal(byId.get("opening_system_ui_ref").required_before_imagegen, true);
   assert.equal(byId.get("critical_prop_ref").required_before_imagegen, true);
   assert.equal(report.reference_targets.some((target) => target.generation_mode === "no_ref_needed"), false);

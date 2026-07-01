@@ -1401,6 +1401,11 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
   const meaningfulRecurringCharacter = stats.scene_count >= 4 || stats.appearance_count >= 6;
   const minorRecurringMode = recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed";
   const highPriority = ["high", "critical", "signature"].includes(String(target.priority ?? "").toLowerCase());
+  const keyLocationAnchor = kind === "location" && (
+    /\bkey_location_anchor\b/i.test(String(target.director_role ?? ""))
+    || String(target.director_recommended_generation_mode ?? "").toLowerCase() === "standalone_ref"
+    || target.director_recommended_required_before_imagegen === true
+  );
   const anchorText = `${target.subject ?? ""} ${target.ref_id ?? ""} ${target.prompt_anchor ?? ""}`;
   const riskText = `${anchorText} ${(target.risk_notes ?? []).join(" ")}`;
   const baseIdentity = isExplicitBaseIdentityTarget(target) || isGenericCharacterIdentityTarget(target);
@@ -1423,12 +1428,12 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
     };
   }
   if (kind === "location") {
-    const generate = inOpening || (recurringAcrossScenes && (majorRecurringAcrossScenes || highPriority));
+    const generate = inOpening || keyLocationAnchor || (recurringAcrossScenes && (majorRecurringAcrossScenes || highPriority));
     return {
       generate,
       mode: recurringAcrossScenes ? "derive_from_best_cut" : "no_ref_needed",
       reason: generate
-        ? "location is in the opening retention window, major recurring, or high-priority recurring"
+        ? "location is in the opening retention window, director-selected as a key location anchor, major recurring, or high-priority recurring"
         : (recurringAcrossScenes ? "minor recurring location should derive from a clean scene cut" : "one-scene location remains scoped text-only"),
     };
   }
@@ -1543,7 +1548,7 @@ function applyCandidateCharacterStateGenerationCap(referenceTargets, timingIndex
   };
 }
 
-function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdentity) {
+function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdentity, inventoryLedger = null) {
   const profile = referenceBudgetProfile(runIdentity);
   const timingIndex = sceneTimingIndex(scopedSemantic.scenes ?? []);
   const openingSec = referenceBudgetOpeningSecFromRun(runIdentity);
@@ -1556,9 +1561,17 @@ function applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdenti
   }
   let nextTargets = referenceTargets.map((target) => {
     const stats = referenceTargetStats(target, timingIndex);
-    const decision = targetShouldGenerateForCandidate(target, stats, openingSec);
-    const next = {
+    const inventoryAsset = matchDirectorAsset(target, inventoryLedger);
+    const budgetTarget = inventoryAsset ? {
       ...target,
+      inventory_asset_id: target.inventory_asset_id ?? inventoryAsset.asset_id,
+      director_role: target.director_role ?? inventoryAsset.director_role,
+      director_recommended_generation_mode: target.director_recommended_generation_mode ?? inventoryAsset.recommended_generation_mode,
+      director_recommended_required_before_imagegen: target.director_recommended_required_before_imagegen ?? inventoryAsset.recommended_required_before_imagegen,
+    } : target;
+    const decision = targetShouldGenerateForCandidate(budgetTarget, stats, openingSec);
+    const next = {
+      ...budgetTarget,
       reference_budget: {
         profile,
         decision: decision.generate ? "generate" : "text_only",
@@ -2194,7 +2207,7 @@ async function main() {
   const canonicalIdentityMerge = mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs);
   referenceTargets = canonicalIdentityMerge.referenceTargets;
   characterStateRefs = canonicalIdentityMerge.characterStateRefs;
-  const referenceBudget = applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdentity);
+  const referenceBudget = applyReferenceBudgetProfile(referenceTargets, scopedSemantic, runIdentity, referenceInventoryLedger);
   referenceTargets = referenceBudget.referenceTargets;
   const directorInventoryPolicy = applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, referenceInventoryLedger);
   referenceTargets = directorInventoryPolicy.referenceTargets;

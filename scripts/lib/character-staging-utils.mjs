@@ -168,11 +168,23 @@ function characterStateRefMap(characterStateRefs = []) {
       : [];
   const byId = new Map();
   for (const ref of refs) {
-    for (const id of [ref?.state_ref_id, ref?.source_ref_id, ref?.base_identity_ref_id].filter(Boolean)) {
+    for (const id of [ref?.state_ref_id, ref?.source_ref_id, ref?.base_identity_ref_id, ref?.ref_id].filter(Boolean)) {
       byId.set(String(id), ref);
     }
   }
   return byId;
+}
+
+function referenceIsAttachable(ref) {
+  return Boolean(ref?.reference_image_path || ref?.required_reference_path || ref?.resolved_reference_image_path);
+}
+
+function stageHasAttachableRef(stage, byRefId) {
+  return stageRefIdCandidates(stage).some((id) => referenceIsAttachable(byRefId.get(id)));
+}
+
+function genericOrGroupStageName(name) {
+  return /\b(?:agents?|guards?|workers?|owners?|executives?|passengers?|employees?|students?|people|crowd|clerks?|staff|team|representatives?|moderators?|editors?|musicians?|girls?|boys?|men|women|clients?|shareholders?|board members?)\b/i.test(String(name ?? ""));
 }
 
 function characterWindow(promptText, stage, stagedNames) {
@@ -272,8 +284,12 @@ export function multiCharacterBleedFindings(prompt, characterStateRefs = []) {
     }
     const window = characterWindow(promptText, stage, stagedNames);
     if (!window?.hasName) {
+      const softClause = !stageHasAttachableRef(stage, byRefId) || genericOrGroupStageName(stage.name);
       findings.push({
         ...baseFinding,
+        severity: softClause ? "warning" : "blocker",
+        resolved: softClause,
+        generic_or_text_only_people_clause: softClause,
         message: `Prompt prose has no clause naming ${stage.name}.`,
       });
       continue;

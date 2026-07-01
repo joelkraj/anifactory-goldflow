@@ -258,6 +258,12 @@ function compactCharacterStateRefs(refs, prompts = []) {
       scene_prompt_anchor: ref.scene_prompt_anchor ?? ref.scene_anchor ?? ref.prompt_anchor,
       definitive: ref.definitive,
       reference_image_path: ref.reference_image_path ?? null,
+      required_reference_path: ref.required_reference_path ?? null,
+      resolved_reference_image_path: ref.resolved_reference_image_path ?? null,
+      generation_mode: ref.generation_mode ?? null,
+      required_before_imagegen: ref.required_before_imagegen ?? null,
+      attachable_reference: Boolean(ref.reference_image_path ?? ref.required_reference_path ?? ref.resolved_reference_image_path),
+      reference_budget: ref.reference_budget ?? null,
       source_ref_id: ref.source_ref_id ?? null,
     })),
   };
@@ -343,7 +349,7 @@ Rules:
 - When more than four concrete references could apply, keep the highest-priority four and report dropped lower-priority refs in reference_usage as available_not_attached_reference_limit.
 - Order reference_requirements in the exact attachment order wanted by the image model. Use slot_order starting at 1 and slot_purpose for every attached reference.
 - Preserve clear reference slot mapping in reference_requirements so the image model knows which image provides character identity, location, style, UI, prop, or action/effect design.
-- If a required existing reference is missing, add a finding with severity "blocker".
+- If an approved attachable standalone reference is missing for a visible recurring character, key recurring location, signature UI, or critical prop, add a finding with severity "blocker". If the target has no attachable reference path, generation_mode no_ref_needed, or generation_mode derive_from_best_cut, treat it as scoped text context and do not block solely because no image ref is attached.
 - Attach only references that have an attachable reference image path. Scoped text-only targets may guide wording, but they must not appear in reference_requirements.
 - If a problem is fixed in revised prompt text, mark resolved true.
 - Do not invent new canonical character anchors. Use character_state_refs and visual_reference_plan only.
@@ -763,12 +769,33 @@ function characterNamesMatch(left, right) {
   return false;
 }
 
-function refIdsForCharacter(characterName, sceneId, characterStateRefs) {
+function characterRefIsAttachable(ref) {
+  return Boolean(ref?.reference_image_path ?? ref?.required_reference_path ?? ref?.resolved_reference_image_path);
+}
+
+function characterRefIds(ref) {
+  return [ref?.state_ref_id, ref?.source_ref_id, ref?.ref_id, ref?.base_identity_ref_id].filter(Boolean);
+}
+
+function characterRefsForCharacter(characterName, sceneId, characterStateRefs) {
   const refs = characterStateRefs?.character_state_refs ?? [];
   return refs
     .filter((ref) => characterNamesMatch(ref.character, characterName))
-    .filter((ref) => sceneIdsCover(ref.scene_ids, sceneId))
-    .flatMap((ref) => [ref.state_ref_id, ref.source_ref_id, ref.ref_id].filter(Boolean));
+    .filter((ref) => sceneIdsCover(ref.scene_ids, sceneId));
+}
+
+function refIdsForCharacter(characterName, sceneId, characterStateRefs) {
+  return characterRefsForCharacter(characterName, sceneId, characterStateRefs).flatMap(characterRefIds);
+}
+
+function attachableRefIdsForCharacter(characterName, sceneId, characterStateRefs) {
+  return characterRefsForCharacter(characterName, sceneId, characterStateRefs)
+    .filter(characterRefIsAttachable)
+    .flatMap(characterRefIds);
+}
+
+function isGenericOrGroupCharacterName(name) {
+  return /\b(?:agents?|guards?|workers?|owners?|executives?|passengers?|employees?|students?|people|crowd|clerks?|staff|team|representatives?|moderators?|editors?|musicians?|girls?|boys?|men|women|clients?|shareholders?|board members?)\b/i.test(String(name ?? ""));
 }
 
 function visibleCharacterRefFindings(prompts, characterStateRefs) {
@@ -778,7 +805,7 @@ function visibleCharacterRefFindings(prompts, characterStateRefs) {
     if (!visibleCharacters.length) continue;
     const candidates = visibleCharacters.map((character) => ({
       character,
-      ref_ids: [...new Set(refIdsForCharacter(character, prompt.scene_id, characterStateRefs))],
+      ref_ids: [...new Set(attachableRefIdsForCharacter(character, prompt.scene_id, characterStateRefs))],
     })).filter((entry) => entry.ref_ids.length);
     if (!candidates.length || candidates.length > 4) continue;
     const attachedRefIds = new Set([
@@ -803,11 +830,51 @@ function visibleCharacterRefFindings(prompts, characterStateRefs) {
   return findings;
 }
 
-function normalizePreImagegenFindings(findings) {
+function normalizePreImagegenFindings(findings, { characterStateRefs = null } = {}) {
   return findings.map((finding) => {
     if (!finding || finding.severity !== "blocker" || finding.resolved === true) return finding;
     const code = String(finding.code ?? "");
     const message = String(finding.message ?? "");
+    const visibleCharacterMatch = message.match(/Visible named character\s+(.+?)\s+has an in-scope character_state ref/i);
+    if (code === "visible_character_missing_state_ref" && visibleCharacterMatch?.[1]) {
+      const characterName = visibleCharacterMatch[1].trim();
+      const attachableRefIds = attachableRefIdsForCharacter(characterName, finding.scene_id, characterStateRefs ?? {});
+      if (!attachableRefIds.length) {
+        return {
+          ...finding,
+          severity: "warning",
+          resolved: true,
+          no_attachable_character_ref: true,
+          message: `${message} Resolved as scoped text-only character context because no attachable standalone character reference exists for this scene.`,
+        };
+      }
+    }
+    const missingClauseMatch = message.match(/Prompt prose has no clause naming\s+(.+?)\./i);
+    if (code === "character_attribute_bleed_risk" && missingClauseMatch?.[1]) {
+      const characterName = missingClauseMatch[1].trim();
+      const attachableRefIds = attachableRefIdsForCharacter(characterName, finding.scene_id, characterStateRefs ?? {});
+      if (!attachableRefIds.length || isGenericOrGroupCharacterName(characterName)) {
+        return {
+          ...finding,
+          severity: "warning",
+          resolved: true,
+          generic_or_text_only_people_clause: true,
+          message: `${message} Resolved as a soft people-clause warning because the subject is generic/group staging or has no attachable standalone ref for this scene.`,
+        };
+      }
+    }
+    const isNoAttachableReferencePath =
+      code === "missing_ref"
+      && /no attachable reference image path|has no attachable image path|has no attachable reference_image_path|no matching attachable reference image path|in-scope .* refs? have no attachable reference image paths?/i.test(message);
+    if (isNoAttachableReferencePath) {
+      return {
+        ...finding,
+        severity: "warning",
+        resolved: true,
+        no_attachable_reference_path: true,
+        message: `${message} Resolved as scoped text-only reference context because the current reference plan intentionally has no attachable image for this target.`,
+      };
+    }
     const isNoInScopeLocationRef =
       code === "missing_ref"
       && /no in[- ]scope .*location reference exists|no approved .*location ref(?:erence)? exists|only approved .*location reference is out of scope/i.test(message);
@@ -1053,11 +1120,11 @@ async function maybeClearResolvedDeadletter({ finalReviewReport, finalReviewedPl
   finalReviewReport.visual_resolution_deadletter_path = null;
 }
 
-function reviewResumeBlockersFromDeadletter(reviewReport, deadletter) {
-  const reportBlockers = unresolvedBlockerFindings(reviewReport?.findings ?? []);
+function reviewResumeBlockersFromDeadletter(reviewReport, deadletter, { characterStateRefs = null } = {}) {
+  const reportBlockers = unresolvedBlockerFindings(normalizePreImagegenFindings(reviewReport?.findings ?? [], { characterStateRefs }));
   if (reportBlockers.length) return reportBlockers;
   if (deadletter?.status !== "blocked_deadletter") return [];
-  return unresolvedBlockerFindings(deadletter.unresolved_blockers ?? []);
+  return unresolvedBlockerFindings(normalizePreImagegenFindings(deadletter.unresolved_blockers ?? [], { characterStateRefs }));
 }
 
 async function resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan }) {
@@ -1112,7 +1179,7 @@ async function resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan }) {
       updated_at: currentReport.updated_at,
     };
   } else {
-    const deadletterBlockers = reviewResumeBlockersFromDeadletter(currentReport, deadletter);
+    const deadletterBlockers = reviewResumeBlockersFromDeadletter(currentReport, deadletter, { characterStateRefs });
     if (deadletterBlockers.length && !unresolvedBlockerFindings(currentReport.findings ?? []).length) {
       currentReport = {
         ...currentReport,
@@ -1293,7 +1360,7 @@ async function main() {
   findings.push(...outOfScopeReferenceFindings(reviewedPrompts, visualReferencePlan));
   findings.push(...visibleCharacterRefFindings(reviewedPrompts, characterStateRefs));
   findings.push(...await validateReferencePaths(reviewedPrompts));
-  const normalizedFindings = normalizePreImagegenFindings(findings);
+  const normalizedFindings = normalizePreImagegenFindings(findings, { characterStateRefs });
   findings.length = 0;
   findings.push(...normalizedFindings);
   const unresolvedBlockers = unresolvedBlockerFindings(findings);

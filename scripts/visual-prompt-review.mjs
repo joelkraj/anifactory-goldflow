@@ -784,10 +784,6 @@ function characterRefsForCharacter(characterName, sceneId, characterStateRefs) {
     .filter((ref) => sceneIdsCover(ref.scene_ids, sceneId));
 }
 
-function refIdsForCharacter(characterName, sceneId, characterStateRefs) {
-  return characterRefsForCharacter(characterName, sceneId, characterStateRefs).flatMap(characterRefIds);
-}
-
 function attachableRefIdsForCharacter(characterName, sceneId, characterStateRefs) {
   return characterRefsForCharacter(characterName, sceneId, characterStateRefs)
     .filter(characterRefIsAttachable)
@@ -1127,7 +1123,7 @@ function reviewResumeBlockersFromDeadletter(reviewReport, deadletter, { characte
   return unresolvedBlockerFindings(normalizePreImagegenFindings(deadletter.unresolved_blockers ?? [], { characterStateRefs }));
 }
 
-async function resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan }) {
+async function resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan, characterStateRefs }) {
   if (!autoResolveEnabled) throw new Error("--resume-blocked requires --auto-resolve true.");
   const [existingReviewedPlan, existingReviewReport, hardenFeedbackReport, deadletter] = await Promise.all([
     readJson(outputPath, null),
@@ -1295,7 +1291,7 @@ async function main() {
     throw new Error(`character_state_refs must be approved before visual review. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
   }
   if (resumeBlockedReview) {
-    await resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan });
+    await resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan, characterStateRefs });
     return;
   }
 

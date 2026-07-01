@@ -359,7 +359,7 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   assert.equal(byId.get("late_room_ref").generation_mode, "no_ref_needed");
   assert.equal(byId.has("late_ui_ref"), false);
   assert.equal(byId.has("late_prop_ref"), false);
-  assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_best_cut");
+  assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_first_clean_wide_cut");
   assert.equal(byId.get("key_hall_ref").required_before_imagegen, true);
   assert.equal(byId.get("opening_system_ui_ref").required_before_imagegen, true);
   assert.equal(byId.get("critical_prop_ref").required_before_imagegen, true);

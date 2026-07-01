@@ -236,12 +236,19 @@ function beatRowsFromScopedSemantic(scopedSemantic) {
   return rows;
 }
 
+function assetSources(asset) {
+  return asset?.sources instanceof Set
+    ? asset.sources
+    : new Set(Array.isArray(asset?.sources) ? asset.sources : []);
+}
+
 function directorModeForAsset(asset) {
   const kind = normalizeKind(asset.kind);
   const sceneCount = asset.scene_ids.size;
   const beatCount = asset.beat_ids.size;
   const firstStart = Number(asset.first_start_sec);
   const inOpening = Number.isFinite(firstStart) && firstStart < 180;
+  const inColdOpen = Number.isFinite(firstStart) && firstStart < 45;
   const text = `${asset.subject ?? ""} ${asset.asset_id ?? ""} ${[...asset.reasons].join(" ")}`;
   const highPriority = /\b(?:critical|signature|system|quest|status|rank|ledger|ring|receipt|contract|evidence|weapon|badge|uniform|guild|faction|police|royal|throne|crown|poison|key)\b/i.test(text);
   const highRiskContact = /\b(?:fight|restrain|shove|rescue|grab|strike|hit|slap|wrestle|tackle|physical contact|body to body|hand on|hands on)\b/i.test(text);
@@ -266,14 +273,23 @@ function directorModeForAsset(asset) {
     };
   }
   if (kind === "location") {
+    const sources = assetSources(asset);
+    const onlySemanticScope = sources.has("semantic_location_scope") && sources.size === 1;
+    const hasLocalBeatEvidence = beatCount > 0;
     const recurring = sceneCount >= 2 || beatCount >= 3;
     const major = sceneCount >= 4 || beatCount >= 7;
-    const shouldGenerate = inOpening || major || (highPriority && recurring);
+    const openingAnchor = inOpening && hasLocalBeatEvidence && (
+      recurring
+      || beatCount >= 3
+      || (inColdOpen && highPriority && !onlySemanticScope)
+    );
+    const shouldGenerate = major || (highPriority && recurring && hasLocalBeatEvidence) || openingAnchor;
+    const shouldDerive = recurring || (inOpening && hasLocalBeatEvidence);
     return {
       role: shouldGenerate ? "key_location_anchor" : recurring ? "minor_recurring_location" : "scene_scoped_location_text",
-      generation_mode: shouldGenerate ? "standalone_ref" : recurring ? "derive_from_best_cut" : "no_ref_needed",
+      generation_mode: shouldGenerate ? "standalone_ref" : shouldDerive ? "derive_from_first_clean_wide_cut" : "no_ref_needed",
       required_before_imagegen: shouldGenerate,
-      anchor_cut_policy: recurring && !shouldGenerate ? "best_clean_visible_cut" : "none",
+      anchor_cut_policy: shouldDerive && !shouldGenerate ? "first_clean_wide_cut" : "none",
     };
   }
   if (kind === "ui") {
@@ -316,12 +332,24 @@ function buildReferenceInventoryLedger(scopedSemantic, visualBeatPlan, { outputP
     const cleanSubject = String(subject ?? refId ?? "").trim();
     if (!cleanSubject) return;
     const assetKind = normalizedKind === "character_state" && isGenericGroupSubject(cleanSubject) ? "prop" : normalizedKind;
-    const resolvedRefId = refId
+    let resolvedRefId = refId
       ? slug(refId)
       : inventoryRefIdFor(assetKind, cleanSubject, "asset");
-    const assetId = assetKind === "character_state" && !refId
+    let assetId = assetKind === "character_state" && !refId
       ? inventoryRefIdFor("character_state", cleanSubject, "character").replace(/_ref$/i, "_identity")
       : resolvedRefId;
+    if (!refId && assetKind === "location" && sceneId) {
+      let bestLocation = null;
+      for (const existing of assets.values()) {
+        if (existing.kind !== "location" || !existing.scene_ids.has(sceneId)) continue;
+        const score = tokenOverlapScore(cleanSubject, `${existing.subject ?? ""} ${existing.ref_id ?? ""} ${existing.asset_id ?? ""}`);
+        if (score > (bestLocation?.score ?? 0)) bestLocation = { score, asset: existing };
+      }
+      if (bestLocation?.score >= 3) {
+        assetId = bestLocation.asset.asset_id;
+        resolvedRefId = bestLocation.asset.ref_id;
+      }
+    }
     if (!assets.has(assetId)) {
       assets.set(assetId, {
         asset_id: assetId,
@@ -548,29 +576,50 @@ function semanticPlanWithVisualBeats(semanticPlan, visualBeatPlan) {
   };
 }
 
-function compactInventoryForPrompt(inventoryLedger, sceneIds = null) {
+function compactInventoryAsset(asset, { evidenceLimit = 2 } = {}) {
+  return {
+    asset_id: asset.asset_id,
+    ref_id: asset.ref_id,
+    kind: asset.kind,
+    subject: asset.subject,
+    director_role: asset.director_role,
+    recommended_generation_mode: asset.recommended_generation_mode,
+    recommended_required_before_imagegen: asset.recommended_required_before_imagegen,
+    recommended_anchor_cut_policy: asset.recommended_anchor_cut_policy,
+    scene_ids: asset.scene_ids ?? [],
+    distinct_scene_count: asset.distinct_scene_count,
+    beat_count: asset.beat_count,
+    semantic_ref_ids: asset.semantic_ref_ids ?? [],
+    first_start_sec: asset.first_start_sec,
+    evidence_excerpts: (asset.evidence_excerpts ?? []).slice(0, evidenceLimit),
+  };
+}
+
+function inventoryAssetHasReferenceValue(asset) {
+  const mode = String(asset?.recommended_generation_mode ?? "").toLowerCase();
+  if (mode && mode !== "no_ref_needed") return true;
+  if (asset?.recommended_required_before_imagegen === true) return true;
+  const role = String(asset?.director_role ?? "");
+  return /\b(?:anchor|key|signature|critical|recurring|uniform|group_visual_system)\b/i.test(role);
+}
+
+function compactInventoryForPrompt(inventoryLedger, sceneIds = null, options = {}) {
   const wantedScenes = sceneIds ? new Set(sceneIds) : null;
   const assets = (inventoryLedger?.assets ?? [])
     .filter((asset) => !wantedScenes || (asset.scene_ids ?? []).some((sceneId) => wantedScenes.has(sceneId)))
-    .map((asset) => ({
-      asset_id: asset.asset_id,
-      ref_id: asset.ref_id,
-      kind: asset.kind,
-      subject: asset.subject,
-      director_role: asset.director_role,
-      recommended_generation_mode: asset.recommended_generation_mode,
-      recommended_required_before_imagegen: asset.recommended_required_before_imagegen,
-      recommended_anchor_cut_policy: asset.recommended_anchor_cut_policy,
-      scene_ids: asset.scene_ids ?? [],
-      distinct_scene_count: asset.distinct_scene_count,
-      beat_count: asset.beat_count,
-      semantic_ref_ids: asset.semantic_ref_ids ?? [],
-      first_start_sec: asset.first_start_sec,
-      evidence_excerpts: (asset.evidence_excerpts ?? []).slice(0, 2),
-    }));
+    .map((asset) => compactInventoryAsset(asset));
+  const includeGlobalSelection = options.includeGlobalSelection === true;
+  const globalSelectedAssets = includeGlobalSelection
+    ? (inventoryLedger?.assets ?? [])
+        .filter(inventoryAssetHasReferenceValue)
+        .slice(0, Number(flags["visual-ref-global-context-max-assets"] ?? 160))
+        .map((asset) => compactInventoryAsset(asset, { evidenceLimit: 1 }))
+    : [];
   return {
     schema: inventoryLedger?.schema ?? "goldflow_reference_inventory_ledger_v1",
     summary: inventoryLedger?.summary ?? null,
+    chunk_scene_ids: sceneIds ?? null,
+    global_selected_assets: globalSelectedAssets,
     assets,
   };
 }
@@ -589,6 +638,8 @@ ${chunkLabel ? `\nThis is ${chunkLabel}. Identify reference needs visible in thi
 Rules:
 - This stage is the cast/location/prop/UI director. It decides reference strategy only. It does not write final image prompts.
 - Use REFERENCE DIRECTOR LEDGER as the primary source for asset economy. Semantic scenes are broad context and location-scope coverage; visual beats are local transcript evidence. Do not treat raw semantic ref_requirements or beat hints as automatic reference targets.
+- In chunked mode, REFERENCE DIRECTOR LEDGER includes "assets" for the current chunk plus "global_selected_assets" for the whole episode. Reuse the exact global asset_id/ref_id when an asset is already planned elsewhere. Do not invent a duplicate local ref for the same character, location, prop, UI, uniform, or action system.
+- For chunked output, return only current-chunk ledger assets that need attachable reference strategy, plus exact semantic location coverage targets needed for scene scoping. Non-location assets whose ledger mode is no_ref_needed should usually stay only in the inventory ledger, not in reference_targets.
 - Every generated or derived reference target should trace to a ledger asset through inventory_asset_id or the same ref_id. If you add an extra target, it must be a director-level merge/split justified by recurrence, critical story value, or high identity risk.
 - Prefer a small coherent asset strategy over exhaustive coverage. The goal is consistency leverage, not collecting every noun.
 - Identify recurring characters, character states, major locations, important props, UI motifs, and high-risk repeated action states.
@@ -628,7 +679,7 @@ Rules:
 - Major recurring characters and visually sensitive major wardrobe/state changes should usually use standalone_ref or manual_review.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; use base identity text or derive_from_best_cut unless distinct identity continuity is mission-critical.
-- Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut. Opening-retention physical environments may use standalone_ref even when they appear briefly, because early visual clarity matters.
+- Major recurring locations may use standalone_ref or derive_from_first_clean_wide_cut. A small number of opening-retention physical environment anchors may use standalone_ref when they carry multiple beats or major visual clarity risk, but do not upgrade every one-scene opening sublocation to standalone just because it is early. Prefer derive_from_first_clean_wide_cut or no_ref_needed for one-scene scoped locations.
 - Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If consecutive scenes or a long story span moves between different visible areas, create separate scene-scoped location refs for those areas, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
 - Semantic scene ref_requirements with kind "location" are binding target IDs for scene scoping only. For every required location ref_id in a scene, return a location reference_target with that exact ref_id covering that scene, but choose generation_mode from production value: standalone only for key recurring/major locations, derive_from_best_cut for useful minor recurring locations, and no_ref_needed for one-scene locations. Broad venue refs may be added, but they must not replace the exact required scene-level location ref_id.
 - Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
@@ -638,7 +689,7 @@ VISUAL BIBLES AND OPERATOR DIRECTION:
 ${visualGuidanceBlock(guidance)}
 
 REFERENCE DIRECTOR LEDGER:
-${JSON.stringify(compactInventoryForPrompt(inventoryLedger, (semanticPlan.scenes ?? []).map((scene) => scene.scene_id)), null, 2)}
+${JSON.stringify(compactInventoryForPrompt(inventoryLedger, (semanticPlan.scenes ?? []).map((scene) => scene.scene_id), { includeGlobalSelection: Boolean(chunkLabel) }), null, 2)}
 
 SEMANTIC PLAN:
 ${JSON.stringify(compact, null, 2)}
@@ -725,6 +776,7 @@ Rules:
 - Qwen authors the merged director plan. Code validates schema, scope, and whether generated refs trace to the director inventory.
 - Use REFERENCE DIRECTOR LEDGER as the primary source for asset economy. Semantic scenes are broad context and location-scope coverage; visual beats are local transcript evidence. Do not preserve every chunk target just because it was mentioned.
 - The merged output should feel like a human art director chose the cast, location, prop, UI, uniform/faction, and action references that actually buy consistency.
+- Treat chunk plans as proposals against the director ledger, not as a shopping list. Keep only targets that trace to inventory assets with reference value, exact semantic location coverage targets, or a clearly justified merge/split. If several chunks propose the same asset under different names, keep the ledger asset_id/ref_id and fold scene_ids together.
 - Merge duplicate character/location/prop/UI/action targets across chunks.
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
 - For real named public creators, streamers, celebrities, or influencers whose likeness matters, preserve or request face-only source identity anchors and use those anchors as base_identity_ref_id for the generated anime/manhwa character-state refs. Do not merge these into generic role refs or text-only lookalikes.
@@ -759,6 +811,7 @@ Rules:
 - Lower-priority entities should usually use no_ref_needed, derive_from_first_clean_cut, or derive_from_best_cut rather than standalone_ref.
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
 - Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and late 2-3 occurrence locations/UI/props/actions should not be standalone refs unless the story makes them truly critical. They should be no_ref_needed or derive_from_best_cut so a clean generated scene can become the reference later.
+- Do not upgrade every one-scene opening sublocation to standalone solely because it is early. Standalone opening locations should be a small curated set with real multi-beat clarity value; other scoped locations can be derive_from_first_clean_wide_cut or no_ref_needed.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; use base identity text or derive_from_best_cut unless distinct identity continuity is mission-critical.
 - Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If chunk plans contain separate visible areas inside one larger venue, preserve or create separate scene-scoped location refs for those areas during merge, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
@@ -1662,6 +1715,24 @@ function applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inve
   };
 }
 
+function pruneChunkPlanWithDirectorInventory(plan, inventoryLedger) {
+  const referenceTargets = (Array.isArray(plan?.reference_targets) ? plan.reference_targets : []).map(normalizeTarget);
+  const characterStateRefs = (Array.isArray(plan?.character_state_refs) ? plan.character_state_refs : []).map(normalizeStateRef);
+  const policy = applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inventoryLedger);
+  return {
+    ...plan,
+    reference_targets: policy.referenceTargets,
+    character_state_refs: policy.characterStateRefs,
+    warnings: [
+      ...(Array.isArray(plan?.warnings) ? plan.warnings : []),
+      ...policy.warnings.map((warning) => ({
+        ...warning,
+        source: "chunk_director_inventory_policy",
+      })),
+    ],
+  };
+}
+
 function negativeLanguageMatches(value) {
   const text = String(value ?? "").toLowerCase();
   const patterns = [
@@ -1812,8 +1883,13 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, inven
     if (!Array.isArray(llm.parsed.reference_targets) || !llm.parsed.reference_targets.length) {
       throw new Error(`Visual reference chunk ${index + 1}/${sceneChunks.length} returned no reference_targets.`);
     }
-    chunkPlans.push(llm.parsed);
-    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: accepted ${llm.parsed.reference_targets.length} targets`);
+    const rawTargetCount = llm.parsed.reference_targets.length;
+    const prunedChunk = pruneChunkPlanWithDirectorInventory(llm.parsed, inventoryLedger);
+    if (!Array.isArray(prunedChunk.reference_targets) || !prunedChunk.reference_targets.length) {
+      throw new Error(`Visual reference chunk ${index + 1}/${sceneChunks.length} had no director-approved reference targets after inventory pruning.`);
+    }
+    chunkPlans.push(prunedChunk);
+    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: accepted ${rawTargetCount} raw targets, kept ${prunedChunk.reference_targets.length} director targets`);
   }
   console.error(`visual refs merge: ${chunkPlans.length} chunk plans`);
   const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans, guidance, inventoryLedger);

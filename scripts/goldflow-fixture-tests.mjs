@@ -1706,6 +1706,32 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
   assert.match(status.next_command_shape, /--resume-blocked true/);
   assert.doesNotMatch(status.next_command_shape, /visual plan/);
   assert.doesNotMatch(status.next_command_shape, /visual harden/);
+
+  const oldHardenTime = new Date("2026-01-01T00:00:00.000Z");
+  const newReviewTime = new Date("2026-01-01T00:01:00.000Z");
+  const hardenReportPath = path.join(episodeDir, "visual_prompt_hardening_ep_01.json");
+  const hardenedPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  const reviewedPlanPath = path.join(episodeDir, "section_image_prompts_reviewed.json");
+  await writeJson(hardenedPlanPath, { status: "blocked", source_script_hash: scriptHash, prompts });
+  await writeJson(hardenReportPath, {
+    status: "blocked",
+    source_script_hash: scriptHash,
+    findings: [{ severity: "blocker", resolved: false, code: "fixture_harden_blocker", scene_id: "scene_002", image_id: "ep_01-cut-002" }],
+    unresolved_blocker_count: 1,
+  });
+  await fs.utimes(hardenedPlanPath, oldHardenTime, oldHardenTime);
+  await fs.utimes(hardenReportPath, oldHardenTime, oldHardenTime);
+  await writeJson(reviewedPlanPath, { status: "passed", source_script_hash: scriptHash, prompts });
+  await fs.utimes(reviewedPlanPath, newReviewTime, newReviewTime);
+
+  const { stdout: repairedStdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const repairedStatus = JSON.parse(repairedStdout);
+  assert.equal(repairedStatus.current_stage, "visual_prompt_plan_review_harden");
+  assert.match(repairedStatus.next_command_shape, /visual harden/);
+  assert.doesNotMatch(repairedStatus.next_command_shape, /--resume-blocked true/);
 }
 
 function testPassedReviewClearsDeadletterPayload() {

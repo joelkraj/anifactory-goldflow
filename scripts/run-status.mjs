@@ -33,6 +33,11 @@ async function readJson(filePath, fallback = null) {
   }
 }
 
+async function fileMtimeMs(filePath) {
+  const stat = await fs.stat(filePath).catch(() => null);
+  return stat?.mtimeMs ?? 0;
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -223,9 +228,12 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const planCommand = commandFor("visual_prompt_plan_review_harden", identity);
   const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return planCommand;
-  const reviewedPlan = await readJson(path.join(episodeDir, "section_image_prompts_reviewed.json"), null);
-  const hardenedPlan = await readJson(path.join(episodeDir, "section_image_prompts_hardened.json"), null);
-  const hardenReport = await readJson(path.join(episodeDir, `visual_prompt_hardening_${episode}.json`), null);
+  const reviewedPlanPath = path.join(episodeDir, "section_image_prompts_reviewed.json");
+  const hardenedPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  const hardenReportPath = path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
+  const reviewedPlan = await readJson(reviewedPlanPath, null);
+  const hardenedPlan = await readJson(hardenedPlanPath, null);
+  const hardenReport = await readJson(hardenReportPath, null);
   const reviewedStatus = String(reviewedPlan?.status ?? "").toLowerCase();
   const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
   const reviewCommand = `node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2`;
@@ -238,6 +246,11 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
     return scopedReviewCommand;
   }
   if (reviewedStatus === "passed" && hardenStatus === "blocked") {
+    const [reviewedMtime, hardenMtime] = await Promise.all([
+      fileMtimeMs(reviewedPlanPath),
+      fileMtimeMs(hardenReportPath),
+    ]);
+    if (reviewedMtime > hardenMtime) return hardenCommand;
     return scopedReviewCommand;
   }
   if (reviewedStatus === "passed") {

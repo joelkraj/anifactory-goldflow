@@ -52,6 +52,11 @@ export function hasHardenFeedbackFindings(findings) {
   return unresolvedBlockerFindings(findings).some((finding) => finding.source_stage === "visual_harden");
 }
 
+export function hardenFeedbackBlockersNeedManualAgentReview(findings) {
+  const blockers = unresolvedBlockerFindings(findings);
+  return blockers.length > 0 && blockers.every((finding) => finding.source_stage === "visual_harden");
+}
+
 export function compatibleHardenFeedbackBlockers({
   hardenReport,
   promptPlan,

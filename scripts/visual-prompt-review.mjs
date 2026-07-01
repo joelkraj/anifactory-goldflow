@@ -13,6 +13,7 @@ import {
   blockerSceneIds,
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
+  hardenFeedbackBlockersNeedManualAgentReview,
   mergeScopedPromptReplacements,
   resolvedDeadletterPayload,
   unresolvedBlockerFindings as sharedUnresolvedBlockerFindings,
@@ -39,6 +40,7 @@ const autoResolveEnabled = flags["auto-resolve"] === "true";
 const resumeBlockedReview = flags["resume-blocked"] === "true" || flags.resume === "blocked";
 const maxResolveIterations = Math.max(1, Number(flags["max-resolve-iterations"] ?? 2));
 const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
+const manualAgentReviewPath = flags["manual-agent-review-output"] ?? path.join(episodeDir, `visual_manual_agent_review_${episode}.json`);
 const hardenFeedbackPath = flags["harden-feedback-report"] ?? flags["harden-report"] ?? path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
 const hardenFeedbackEnabled = flags["harden-feedback"] !== "false";
 
@@ -1004,6 +1006,33 @@ function correctionDirective(finding) {
   };
 }
 
+function manualAgentReviewRequest({ blockers, currentPlan, currentReport, iterations }) {
+  const sceneIds = blockerSceneIds(blockers);
+  const imageIds = blockerImageIds(blockers);
+  return {
+    schema: "goldflow_visual_manual_agent_review_v1",
+    status: "needs_manual_agent_review",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    reason: "Harden feedback remained blocked after the capped visual review auto-resolve loop. A Codex/operator review should decide whether the prompt is wrong, the ref plan is wrong, or the harden detector is too strict.",
+    required_actions: [
+      "Inspect each blocker against the reviewed prompt, shot_manifest, approved refs, and local beat excerpt.",
+      "If the prompt or refs are wrong, repair through visual review/replan for the affected cut ids or scene ids.",
+      "If harden is wrong to block, patch the detector/gate generally, add a fixture, rerun visual review/harden, then continue from run status.",
+    ],
+    scene_ids: sceneIds,
+    image_ids: imageIds,
+    unresolved_blockers: blockers,
+    last_prompts: (currentPlan.prompts ?? []).filter((prompt) => imageIds.length ? imageIds.includes(prompt.image_id) : sceneIds.includes(prompt.scene_id)),
+    visual_review_report_path: reviewReportPath,
+    harden_feedback_report_path: currentReport.harden_feedback_report_path ?? null,
+    visual_resolution_iterations: iterations,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
   let currentPlan = reviewedPlan;
   let currentReport = reviewReport;
@@ -1158,6 +1187,26 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     blockers = unresolvedBlockerFindings(iterationReport?.findings ?? blockers);
   }
   if (blockers.length) {
+    if (hardenFeedbackBlockersNeedManualAgentReview(blockers)) {
+      const manualReview = manualAgentReviewRequest({ blockers, currentPlan, currentReport, iterations });
+      await writeJson(manualAgentReviewPath, manualReview);
+      currentPlan = {
+        ...currentPlan,
+        status: "needs_manual_agent_review",
+        visual_manual_agent_review_path: manualAgentReviewPath,
+        visual_resolution_iterations: iterations,
+        updated_at: manualReview.updated_at,
+      };
+      currentReport = {
+        ...currentReport,
+        status: "needs_manual_agent_review",
+        unresolved_blocker_count: blockers.length,
+        visual_manual_agent_review_path: manualAgentReviewPath,
+        visual_resolution_iterations: iterations,
+        updated_at: manualReview.updated_at,
+      };
+      return { reviewedPlan: currentPlan, reviewReport: currentReport };
+    }
     const sceneIds = blockerSceneIds(blockers);
     const imageIds = blockerImageIds(blockers);
     const deadletter = {

@@ -30,6 +30,7 @@ import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib
 import {
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
+  hardenFeedbackBlockersNeedManualAgentReview,
   mergeScopedPromptReplacements,
   resolvedDeadletterPayload,
   visualResolveScopeForBlockers,
@@ -1636,6 +1637,14 @@ function testHardenFeedbackBlockersMapToReviewResolveInput() {
   assert.equal(blockers[0].image_id, "ep_01-cut-002");
   assert.equal(blockers[0].code, "physical_location_ref_missing");
   assert.equal(hasHardenFeedbackFindings(blockers), true);
+  assert.equal(hardenFeedbackBlockersNeedManualAgentReview(blockers), true);
+  assert.equal(
+    hardenFeedbackBlockersNeedManualAgentReview([
+      ...blockers,
+      { image_id: "ep_01-cut-003", scene_id: "scene_003", severity: "blocker", code: "regular_review_blocker", resolved: false },
+    ]),
+    false
+  );
   assert.deepEqual(
     compatibleHardenFeedbackBlockers({
       hardenReport,
@@ -1753,6 +1762,29 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
   assert.equal(repairedStatus.current_stage, "visual_prompt_plan_review_harden");
   assert.match(repairedStatus.next_command_shape, /visual harden/);
   assert.doesNotMatch(repairedStatus.next_command_shape, /--resume-blocked true/);
+
+  const manualReviewPath = path.join(episodeDir, "visual_manual_agent_review_ep_01.json");
+  await writeJson(manualReviewPath, {
+    status: "needs_manual_agent_review",
+    image_ids: ["ep_01-cut-002"],
+    unresolved_blockers: [{ severity: "blocker", resolved: false, source_stage: "visual_harden", code: "fixture_harden_blocker" }],
+  });
+  await writeJson(reviewedPlanPath, {
+    status: "needs_manual_agent_review",
+    source_script_hash: scriptHash,
+    prompts,
+    visual_manual_agent_review_path: manualReviewPath,
+  });
+  const { stdout: manualStdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const manualStatus = JSON.parse(manualStdout);
+  const manualStage = manualStatus.stage_ledger.find((row) => row.stage === "visual_prompt_plan_review_harden");
+  assert.equal(manualStatus.current_stage, "visual_prompt_plan_review_harden");
+  assert.equal(manualStage.exists, false);
+  assert.match(manualStatus.next_command_shape, /Manual agent review required/);
+  assert.match(manualStatus.next_command_shape, /visual_manual_agent_review_ep_01\.json/);
 }
 
 function testPassedReviewClearsDeadletterPayload() {

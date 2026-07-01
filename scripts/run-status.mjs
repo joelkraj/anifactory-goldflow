@@ -236,11 +236,15 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const hardenReport = await readJson(hardenReportPath, null);
   const reviewedStatus = String(reviewedPlan?.status ?? "").toLowerCase();
   const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
+  const manualReviewPath = reviewedPlan?.visual_manual_agent_review_path ?? path.join(episodeDir, `visual_manual_agent_review_${episode}.json`);
   const reviewCommand = `node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2`;
   const scopedReviewCommand = `node bin/goldflow.mjs visual review ${base} --resume-blocked true --auto-resolve true --max-resolve-iterations 2`;
   const hardenCommand = `node bin/goldflow.mjs visual harden ${base}`;
   if (hardenedPlan?.status === "passed" && Array.isArray(hardenedPlan.prompts) && hardenedPlan.prompts.length) {
     return hardenCommand;
+  }
+  if (reviewedStatus === "needs_manual_agent_review") {
+    return `Manual agent review required: inspect ${manualReviewPath}; then patch detector/review logic or run a scoped visual review/replan for the listed cut ids before rerunning run status.`;
   }
   if (["blocked", "blocked_deadletter"].includes(reviewedStatus)) {
     return scopedReviewCommand;
@@ -545,12 +549,12 @@ async function jsonStatusComplete(filePath, label) {
   const artifact = await readJson(filePath, null);
   if (!artifact) return { done: false, evidence: `${label} missing` };
   const status = String(artifact.status ?? "").toLowerCase();
-  const done = !["failed", "blocked", "blocked_deadletter", "failed_repairable"].includes(status);
+  const done = !["failed", "blocked", "blocked_deadletter", "failed_repairable", "needs_manual_agent_review"].includes(status);
   return { done, evidence: `${label}; status=${status || "missing_status"}` };
 }
 
 function statusAllowsDownstreamUse(status) {
-  return !["failed", "blocked", "blocked_deadletter", "failed_repairable"].includes(String(status ?? "").toLowerCase());
+  return !["failed", "blocked", "blocked_deadletter", "failed_repairable", "needs_manual_agent_review"].includes(String(status ?? "").toLowerCase());
 }
 
 async function sourceHashesCurrent(artifact) {

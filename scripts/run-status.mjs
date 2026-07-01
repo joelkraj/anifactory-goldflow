@@ -167,6 +167,15 @@ function visualRefsApproveCommand(identity) {
   return `node bin/goldflow.mjs visual approve-refs ${commandBase(identity)} --note "<reference review notes>"`;
 }
 
+function imagegenStartCommand(identity, extra = "") {
+  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json${extra}`;
+}
+
+function imagegenPromoteDerivedRefsCommand(identity) {
+  return `node bin/goldflow.mjs imagegen promote-derived-refs ${commandBase(identity)} --prompts <episode-dir>/section_image_prompts_hardened.json`;
+}
+
 function commandFor(stage, identity) {
   const episode = identity.episode ?? "<episode>";
   const base = commandBase(identity);
@@ -199,7 +208,7 @@ function commandFor(stage, identity) {
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly ? " --transition-sfx false" : ""}`,
     image_generation: usesCodexSceneCuts(identity)
       ? `Stage Codex-routed cut PNGs with built-in Codex imagegen workers, import them with: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then generate the ModelsLab-routed remainder with: node bin/goldflow.mjs imagegen start ${base}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --provider-filter modelslab --output <episode-dir>/imagegen_report_${episode}.json`
-      : `node bin/goldflow.mjs imagegen start ${base}`,
+      : imagegenStartCommand(identity),
     premium_render: renderCommand(identity, base, episode),
     final_qa: `ffprobe <final-render.mp4> && ffmpeg -i <final-audio-or-render> -af volumedetect -f null -`,
     upload_packaging: "Generate title, thumbnail, and description hooks after story/render review.",
@@ -263,7 +272,101 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   return reviewCommand;
 }
 
-async function imageReportComplete(episodeDir, episode) {
+function isDerivedReferenceTarget(target) {
+  return /^derive_from_/i.test(String(target?.generation_mode ?? ""));
+}
+
+function referencePathValue(target) {
+  return target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
+}
+
+function promptStartSec(prompt) {
+  const value = Number(prompt?.start_sec ?? prompt?.start ?? prompt?.timestamp_sec ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function promptMentionsRef(prompt, refId) {
+  const wanted = String(refId ?? "").trim();
+  if (!wanted) return false;
+  if ((prompt.reference_requirements ?? []).some((req) => String(req?.ref_id ?? "").trim() === wanted)) return true;
+  const manifest = prompt.shot_manifest ?? {};
+  return String(manifest.location_ref_id ?? "").trim() === wanted
+    || String(manifest.protagonist_state_ref_id ?? "").trim() === wanted
+    || (manifest.character_state_ref_ids ?? []).some((id) => String(id ?? "").trim() === wanted);
+}
+
+function explicitCandidateIds(target) {
+  return [
+    ...(Array.isArray(target?.candidate_image_ids) ? target.candidate_image_ids : []),
+    ...(Array.isArray(target?.anchor_image_ids) ? target.anchor_image_ids : []),
+    ...(Array.isArray(target?.seed_image_ids) ? target.seed_image_ids : []),
+    ...(Array.isArray(target?.derived_candidate_image_ids) ? target.derived_candidate_image_ids : []),
+  ].map((id) => String(id ?? "").trim()).filter(Boolean);
+}
+
+function candidateImageIdsForDerivedTarget(target, promptPlan) {
+  const prompts = Array.isArray(promptPlan?.prompts) ? promptPlan.prompts : [];
+  const byId = new Map(prompts.map((prompt) => [String(prompt.image_id ?? ""), prompt]));
+  const explicit = explicitCandidateIds(target).filter((id) => byId.has(id));
+  if (explicit.length) return [...new Set(explicit)];
+  const sceneIds = new Set((Array.isArray(target?.scene_ids) ? target.scene_ids : []).map((id) => String(id ?? "").trim()).filter(Boolean));
+  const rows = [
+    ...prompts.filter((prompt) => promptMentionsRef(prompt, target.ref_id)),
+    ...prompts.filter((prompt) => sceneIds.has(String(prompt.scene_id ?? "")) || sceneIds.has(String(prompt.parent_scene_id ?? ""))),
+  ].filter((prompt) => prompt?.image_id)
+    .sort((left, right) => promptStartSec(left) - promptStartSec(right) || String(left.image_id).localeCompare(String(right.image_id), undefined, { numeric: true }))
+    .map((prompt) => String(prompt.image_id));
+  return [...new Set(rows)];
+}
+
+function successfulImageIdsFromReport(report) {
+  const ids = new Set();
+  for (const row of report?.results ?? []) {
+    const status = String(row?.status ?? "").toLowerCase();
+    if (!row?.image_id || status === "failed" || !row.image_path) continue;
+    ids.add(String(row.image_id));
+  }
+  return ids;
+}
+
+function failedImageIdsFromReport(report) {
+  return [...new Set((report?.results ?? [])
+    .filter((row) => row?.image_id && String(row.status ?? "").toLowerCase() === "failed")
+    .map((row) => String(row.image_id)))];
+}
+
+async function derivedReferenceImagegenStatus(episodeDir, promptPlan, latestImageReport, identity) {
+  const visualReferencePlan = await readJson(path.join(episodeDir, "visual_reference_plan.json"), null);
+  const targets = [];
+  for (const target of visualReferencePlan?.reference_targets ?? []) {
+    if (!target?.ref_id || !isDerivedReferenceTarget(target)) continue;
+    const refPath = referencePathValue(target);
+    if (refPath && await exists(refPath)) continue;
+    targets.push({ ...target, candidate_image_ids: candidateImageIdsForDerivedTarget(target, promptPlan) });
+  }
+  if (!targets.length) return null;
+  const successIds = successfulImageIdsFromReport(latestImageReport);
+  const promotable = targets.filter((target) => (target.candidate_image_ids ?? []).some((id) => successIds.has(id)));
+  if (promotable.length) {
+    return {
+      next_command_shape: imagegenPromoteDerivedRefsCommand(identity),
+      evidence: `pending derived refs=${targets.length}; promotable=${promotable.map((target) => target.ref_id).slice(0, 6).join(", ")}${promotable.length > 6 ? ` +${promotable.length - 6} more` : ""}`,
+    };
+  }
+  const seedIds = [...new Set(targets.flatMap((target) => target.candidate_image_ids ?? []))];
+  if (seedIds.length) {
+    return {
+      next_command_shape: imagegenStartCommand(identity, ` --seed-derived-refs true --cut-ids ${seedIds.slice(0, 60).join(",")}`),
+      evidence: `pending derived refs=${targets.length}; seed cuts needed=${seedIds.slice(0, 8).join(", ")}${seedIds.length > 8 ? ` +${seedIds.length - 8} more` : ""}`,
+    };
+  }
+  return {
+    next_command_shape: "Manual reference review required: derived reference targets have no candidate_image_ids and no scene-scoped prompt candidates.",
+    evidence: `pending derived refs=${targets.length}; no candidate seed cuts found`,
+  };
+}
+
+async function imageReportComplete(episodeDir, episode, identity) {
   const promptPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
   const promptPlan = await readJson(promptPlanPath, null);
   const promptCount = Array.isArray(promptPlan) ? promptPlan.length : Array.isArray(promptPlan?.prompts) ? promptPlan.prompts.length : 0;
@@ -293,6 +396,15 @@ async function imageReportComplete(episodeDir, episode) {
     }
     return [...byHash.values()].filter((rows) => rows.length > 1).map((rows) => rows.join("="));
   }
+  const latestReport = reports[0]?.report ?? null;
+  const derivedStatus = await derivedReferenceImagegenStatus(episodeDir, promptPlan, latestReport, identity);
+  if (derivedStatus) {
+    return {
+      done: false,
+      evidence: derivedStatus.evidence,
+      next_command_shape: derivedStatus.next_command_shape,
+    };
+  }
   const passed = reports.find(({ report }) => {
     const status = String(report.status ?? "").toLowerCase();
     const missing = Number(report.missing_image_count ?? report.missing_count ?? 0);
@@ -315,11 +427,31 @@ async function imageReportComplete(episodeDir, episode) {
   const imageNames = await listFiles(imageDir);
   const generated = imageNames.filter((name) => new RegExp(`^${episode}-cut-.*\\.(png|jpe?g|webp)$`, "i").test(name)).length;
   const failedProbe = reports.find(({ report }) => String(report.status ?? "").toLowerCase() === "failed");
-  const latestReport = reports[0]?.report ?? null;
   const duplicates = latestReport ? await duplicateSummary(latestReport) : [];
+  const failedIds = failedImageIdsFromReport(latestReport);
+  if (failedIds.length) {
+    return {
+      done: false,
+      evidence: `image files=${generated}/${promptCount || "unknown"}; failed cuts=${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? ` +${failedIds.length - 8} more` : ""}`,
+      next_command_shape: imagegenStartCommand(identity, ` --cut-ids ${failedIds.join(",")}`),
+    };
+  }
+  const successIds = successfulImageIdsFromReport(latestReport);
+  const missingIds = (promptPlan.prompts ?? [])
+    .filter((prompt) => prompt?.image_generation_required !== false)
+    .map((prompt) => String(prompt.image_id ?? "").trim())
+    .filter((id) => id && !successIds.has(id));
+  if (missingIds.length && latestReport?.prompt_plan_hash === promptPlanHash) {
+    return {
+      done: false,
+      evidence: `image files=${generated}/${promptCount || "unknown"}; missing cuts=${missingIds.slice(0, 8).join(", ")}${missingIds.length > 8 ? ` +${missingIds.length - 8} more` : ""}`,
+      next_command_shape: imagegenStartCommand(identity, ` --cut-ids ${missingIds.join(",")}`),
+    };
+  }
   return {
     done: promptCount > 0 && generated >= promptCount && duplicates.length === 0,
     evidence: `image files=${generated}/${promptCount || "unknown"}${duplicates.length ? `; duplicate_hashes=${duplicates.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}${failedProbe ? `; failed probe/report also present: ${failedProbe.name}` : ""}`,
+    next_command_shape: imagegenStartCommand(identity),
   };
 }
 
@@ -337,6 +469,12 @@ async function referenceGenerationComplete(episodeDir) {
   const missing = [];
   const byHash = new Map();
   let present = 0;
+  if (!required.length) {
+    return {
+      done: true,
+      evidence: "required refs=0/0; no standalone reference images required",
+    };
+  }
   for (const target of required) {
     if (target.reference_image_path && await exists(target.reference_image_path)) {
       present += 1;
@@ -804,7 +942,7 @@ async function main() {
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode);
   const referenceGeneration = await referenceGenerationComplete(episodeDir);
-  const imagegen = await imageReportComplete(episodeDir, episode);
+  const imagegen = await imageReportComplete(episodeDir, episode, identity);
   const render = await renderComplete(episodeDir, episode);
   const latestQa = await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
@@ -836,7 +974,7 @@ async function main() {
     stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity),
     stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
     stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),
-    stage("image_generation", "hardened prompt plan + generated refs", `imagegen_report_${episode}.json + assets/images`, false, imagegen.done, imagegen.evidence, identity),
+    stage("image_generation", "hardened prompt plan + generated refs", `imagegen_report_${episode}.json + assets/images`, false, imagegen.done, imagegen.evidence, identity, imagegen.next_command_shape),
     stage("premium_render", "hardened prompts + final longform mix", `render_report_${episode}*.json + final MP4`, false, render.done, render.evidence, identity),
     stage("final_qa", "final MP4", "ffprobe/loudness/spot-check QA report", true, Boolean(latestQa), latestQa?.name ?? null, identity),
     stage("upload_packaging", "story/render understanding", "title + thumbnail + description package", true, Boolean(latestPackaging), latestPackaging?.name ?? null, identity),

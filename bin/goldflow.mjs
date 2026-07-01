@@ -53,6 +53,7 @@ function commandStage(commandName, subcommandName, parsedFlags) {
   if (key === "visual engagement") return "transition_edit_plan";
   if (key === "visual transitions") return "transition_edit_plan";
   if (key === "imagegen start") return isTrue(parsedFlags["references-only"]) ? "reference_generation" : "image_generation";
+  if (key === "imagegen promote-derived-refs") return "image_generation";
   if (key === "imagegen import-codex") return "image_generation";
   if (key === "imagegen import-staged-codex") return isTrue(parsedFlags["references-only"]) ? "reference_generation" : "image_generation";
   if (key === "render start") return "premium_render";
@@ -149,6 +150,7 @@ Commands:
   goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
   goldflow visual transitions      Plan xfade transitions from hardened cuts; transition SFX is opt-in
   goldflow imagegen start          Generate images from approved prompt plan
+  goldflow imagegen promote-derived-refs Promote successful seed cuts into derive-from-cut reference images
   goldflow imagegen import-codex   Import one manually generated Codex/OpenAI scene-cut raster
   goldflow imagegen import-staged-codex Import staged built-in Codex rasters for scene cuts or --references-only refs
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
@@ -175,7 +177,7 @@ Validation-batch flags:
   --render-profile smooth_fast_ken_burns makes premium_render use the smoother no-oversample profile as the primary render.
 
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> reference imagegen -> visual approve-refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> render start
+  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs -> reference imagegen -> visual approve-refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start --seed-derived-refs true when needed -> imagegen promote-derived-refs when seed cuts are ready -> imagegen start -> render start
 
 Prompt-repair migration guardrails:
   Part F ships before Part G.
@@ -234,6 +236,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-transition-plan.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
+} else if (command === "imagegen" && subcommand === "promote-derived-refs") {
+  run("imagegen.mjs", ["--promote-derived-refs", "true", ...flags]);
 } else if (command === "imagegen" && subcommand === "import-codex") {
   run("codex-image-manual-import.mjs", flags);
 } else if (command === "imagegen" && subcommand === "import-staged-codex") {

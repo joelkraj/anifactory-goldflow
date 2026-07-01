@@ -24,6 +24,10 @@ import {
 } from "./lib/image-provider-routing.mjs";
 import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
 import { namedCharacterDuplicationFindings } from "./lib/prompt-prose-findings.mjs";
+import {
+  attachReferencePathsToPromptsForTests,
+  candidateImageIdsForDerivedTargetForTests,
+} from "./imagegen.mjs";
 import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
@@ -50,6 +54,10 @@ function sha256(value) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function readJson(filePath) {
+  return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
 function testSemanticSceneAnchorValidation() {
@@ -2593,6 +2601,227 @@ async function testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan() 
   assert.match(imageStage.evidence, /section_image_prompts_hardened\.json missing or empty/);
 }
 
+function testDerivedReferenceCandidateSelectionAndManifestAttach() {
+  const promptPlan = {
+    prompt_policy: "deterministic hardening",
+    prompts: [
+      {
+        image_id: "ep_01-cut-001",
+        scene_id: "scene_001",
+        start_sec: 12,
+        shot_manifest: {
+          location_ref_id: "loc_audit_hall",
+          protagonist_state_ref_id: "joey_floor_state",
+          character_state_ref_ids: ["selena_phone_state"],
+        },
+        reference_requirements: [],
+      },
+      {
+        image_id: "ep_01-cut-002",
+        scene_id: "scene_002",
+        start_sec: 18,
+        shot_manifest: { location_ref_id: "loc_dorm" },
+        reference_requirements: [],
+      },
+    ],
+  };
+  const target = { ref_id: "loc_audit_hall", kind: "location", generation_mode: "derive_from_first_clean_cut", scene_ids: ["scene_001"] };
+  assert.deepEqual(candidateImageIdsForDerivedTargetForTests(target, promptPlan), ["ep_01-cut-001"]);
+
+  const attached = attachReferencePathsToPromptsForTests(
+    promptPlan,
+    new Map([
+      ["loc_audit_hall", "/tmp/loc_audit_hall.png"],
+      ["joey_base_ref", "/tmp/joey.png"],
+      ["selena_base_ref", "/tmp/selena.png"],
+    ]),
+    [
+      { state_ref_id: "joey_floor_state", source_ref_id: "joey_base_ref", character: "Joey Manhwa" },
+      { state_ref_id: "selena_phone_state", source_ref_id: "selena_base_ref", character: "Selena" },
+    ],
+    [target]
+  );
+  const firstPrompt = attached.prompts[0];
+  assert.deepEqual(new Set(firstPrompt.required_reference_paths), new Set(["/tmp/loc_audit_hall.png", "/tmp/joey.png", "/tmp/selena.png"]));
+  assert.equal(firstPrompt.reference_requirements.every((requirement) => requirement.inferred_from_shot_manifest === true), true);
+  assert.deepEqual(new Set(firstPrompt.reference_requirements.map((requirement) => requirement.ref_id)), new Set(["loc_audit_hall", "joey_base_ref", "selena_base_ref"]));
+}
+
+async function testDerivedReferencePromotionFromSeedCut() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const imageDir = path.join(episodeDir, "assets", "images");
+  const imagePath = path.join(imageDir, "ep_01-cut-001-modelslab-image.png");
+  await fs.mkdir(imageDir, { recursive: true });
+  await fs.writeFile(imagePath, Buffer.from("fixture image bytes"));
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    image_provider: "modelslab",
+  });
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    reference_targets: [
+      {
+        ref_id: "loc_audit_hall",
+        kind: "location",
+        generation_mode: "derive_from_first_clean_cut",
+        scene_ids: ["scene_001"],
+      },
+    ],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), {
+    status: "approved",
+    character_state_refs: [],
+  });
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  await writeJson(promptPath, {
+    status: "passed",
+    prompt_policy: "deterministic hardening",
+    prompts: [
+      {
+        image_id: "ep_01-cut-001",
+        scene_id: "scene_001",
+        start_sec: 3,
+        image_prompt: "anime manhwa audit hall",
+        modelslab_image_prompt: "anime manhwa audit hall",
+        shot_manifest: { location_ref_id: "loc_audit_hall" },
+        reference_requirements: [],
+      },
+    ],
+  });
+  await writeJson(path.join(episodeDir, "imagegen_report_ep_01.json"), {
+    schema: "goldflow_imagegen_report_v1",
+    status: "passed",
+    prompt_plan_hash: sha256(await fs.readFile(promptPath)),
+    image_count: 1,
+    expected_image_count: 1,
+    missing_image_count: 0,
+    results: [
+      { image_id: "ep_01-cut-001", status: "generated", image_path: imagePath },
+    ],
+  });
+
+  await execFileAsync(process.execPath, [
+    "scripts/imagegen.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--prompts", promptPath,
+    "--promote-derived-refs", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+
+  const referencePlan = await readJson(path.join(episodeDir, "visual_reference_plan.json"));
+  const updatedTarget = referencePlan.reference_targets[0];
+  assert.equal(updatedTarget.derived_reference_status, "promoted");
+  assert.equal(updatedTarget.derived_from_image_id, "ep_01-cut-001");
+  assert.equal(await fs.stat(updatedTarget.reference_image_path).then((stat) => stat.isFile()), true);
+  const promotionReport = await readJson(path.join(episodeDir, "derived_reference_promotion_report_ep_01.json"));
+  assert.equal(promotionReport.promoted_count, 1);
+  assert.equal(promotionReport.unresolved_count, 0);
+}
+
+async function testRunStatusDerivedReferenceSeedPromoteAndScopedRetry() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  await fs.mkdir(path.join(episodeDir, "assets", "images"), { recursive: true });
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+  });
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    reference_targets: [
+      { ref_id: "loc_audit_hall", kind: "location", generation_mode: "derive_from_first_clean_cut", scene_ids: ["scene_001"] },
+    ],
+  });
+  await writeJson(promptPath, {
+    status: "passed",
+    prompt_policy: "deterministic hardening",
+    prompts: [
+      { image_id: "ep_01-cut-001", scene_id: "scene_001", start_sec: 1, image_prompt: "anime manhwa audit hall", shot_manifest: { location_ref_id: "loc_audit_hall" }, reference_requirements: [] },
+      { image_id: "ep_01-cut-002", scene_id: "scene_002", start_sec: 7, image_prompt: "anime manhwa dorm room", shot_manifest: { location_ref_id: "loc_dorm" }, reference_requirements: [] },
+    ],
+  });
+  const promptPlanHash = sha256(await fs.readFile(promptPath));
+  let statusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  let status = JSON.parse(statusResult.stdout);
+  let referenceStage = status.stage_ledger.find((row) => row.stage === "reference_generation");
+  let imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.equal(referenceStage.exists, true);
+  assert.match(referenceStage.evidence, /no standalone reference images required/);
+  assert.match(imageStage.next_command_shape, /--seed-derived-refs true/);
+  assert.match(imageStage.next_command_shape, /--cut-ids ep_01-cut-001/);
+
+  const generatedPath = path.join(episodeDir, "assets", "images", "ep_01-cut-001-modelslab-image.png");
+  await fs.writeFile(generatedPath, Buffer.from("seed cut bytes"));
+  await writeJson(path.join(episodeDir, "imagegen_report_ep_01.json"), {
+    schema: "goldflow_imagegen_report_v1",
+    status: "passed",
+    prompt_plan_hash: promptPlanHash,
+    image_count: 1,
+    expected_image_count: 2,
+    missing_image_count: 1,
+    results: [
+      { image_id: "ep_01-cut-001", status: "generated", image_path: generatedPath },
+    ],
+  });
+  statusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  status = JSON.parse(statusResult.stdout);
+  imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.match(imageStage.next_command_shape, /imagegen promote-derived-refs/);
+
+  const promotedReferencePath = path.join(episodeDir, "assets", "images", "references", "loc_audit_hall-derived-reference.png");
+  await fs.mkdir(path.dirname(promotedReferencePath), { recursive: true });
+  await fs.writeFile(promotedReferencePath, Buffer.from("promoted ref bytes"));
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    reference_targets: [
+      {
+        ref_id: "loc_audit_hall",
+        kind: "location",
+        generation_mode: "derive_from_first_clean_cut",
+        scene_ids: ["scene_001"],
+        reference_image_path: promotedReferencePath,
+      },
+    ],
+  });
+  await writeJson(path.join(episodeDir, "imagegen_report_ep_01.json"), {
+    schema: "goldflow_imagegen_report_v1",
+    status: "failed",
+    prompt_plan_hash: promptPlanHash,
+    image_count: 1,
+    expected_image_count: 2,
+    missing_image_count: 1,
+    results: [
+      { image_id: "ep_01-cut-001", status: "generated", image_path: generatedPath },
+      { image_id: "ep_01-cut-002", status: "failed", error: "fixture failure" },
+    ],
+  });
+  statusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  status = JSON.parse(statusResult.stdout);
+  imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.match(imageStage.next_command_shape, /--cut-ids ep_01-cut-002/);
+  assert.doesNotMatch(imageStage.next_command_shape, /visual plan/);
+}
+
 async function testSilentTransitionsWithoutSfxBank() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -2690,6 +2919,9 @@ async function run() {
   await testRunStatusSurfacesDraftReferenceApprovalCommand();
   await testRunStatusBlocksQwenPlanMissingOverrideAudit();
   await testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan();
+  testDerivedReferenceCandidateSelectionAndManifestAttach();
+  await testDerivedReferencePromotionFromSeedCut();
+  await testRunStatusDerivedReferenceSeedPromoteAndScopedRetry();
   await testSilentTransitionsWithoutSfxBank();
   await testGlobalStylePromptDoesNotInjectCrowdExtras();
   console.log("goldflow fixture tests passed");

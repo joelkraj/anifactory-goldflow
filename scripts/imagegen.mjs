@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 import {
   isCodexImageProvider,
@@ -46,10 +47,13 @@ const confirmImageProvider = flags["confirm-image-provider"] === "true";
 const allowLegacyCodexExec = flags["allow-legacy-codex-exec"] === "true" || process.env.ANIFACTORY_ALLOW_LEGACY_CODEX_EXEC === "true";
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const visualResolutionDeadletterPath = flags.deadletter ?? flags["deadletter"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
+const derivedRefPromotionReportPath = flags["derived-ref-report"] ?? path.join(episodeDir, `derived_reference_promotion_report_${episode}.json`);
 const sceneImageWidth = Number(flags["scene-image-width"] ?? process.env.ANIFACTORY_MODELSLAB_SCENE_IMAGE_WIDTH ?? 1024);
 const sceneImageHeight = Number(flags["scene-image-height"] ?? process.env.ANIFACTORY_MODELSLAB_SCENE_IMAGE_HEIGHT ?? 576);
 const referenceImageWidth = Number(flags["reference-image-width"] ?? process.env.ANIFACTORY_MODELSLAB_REFERENCE_IMAGE_WIDTH ?? process.env.ANIFACTORY_MODELSLAB_IMAGE_WIDTH ?? 1024);
 const referenceImageHeight = Number(flags["reference-image-height"] ?? process.env.ANIFACTORY_MODELSLAB_REFERENCE_IMAGE_HEIGHT ?? process.env.ANIFACTORY_MODELSLAB_IMAGE_HEIGHT ?? 576);
+const seedDerivedRefs = flags["seed-derived-refs"] === "true";
+const promoteDerivedRefs = flags["promote-derived-refs"] === "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -186,6 +190,90 @@ function referencePrompt(target) {
   return parts.join(", ");
 }
 
+function isDerivedReferenceTarget(target) {
+  return /^derive_from_/i.test(String(target?.generation_mode ?? ""));
+}
+
+function referencePathValue(target) {
+  return target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
+}
+
+async function hasExistingReferencePath(target) {
+  const refPath = referencePathValue(target);
+  return Boolean(refPath && await exists(refPath));
+}
+
+function promptStartSec(prompt) {
+  const value = Number(prompt?.start_sec ?? prompt?.start ?? prompt?.timestamp_sec ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function promptWideScore(prompt) {
+  const text = [
+    prompt?.shot_manifest?.shot_job,
+    prompt?.visual_job,
+    prompt?.suggested_shot_job,
+    prompt?.image_prompt,
+    prompt?.modelslab_image_prompt,
+  ].filter(Boolean).join(" ");
+  if (/\b(?:wide|establishing|environment|location|exterior|interior|room|hall|lobby|street|plaza|stage|office)\b/i.test(text)) return 0;
+  return 1;
+}
+
+function promptMentionsRef(prompt, refId) {
+  const wanted = String(refId ?? "").trim();
+  if (!wanted) return false;
+  if ((prompt.reference_requirements ?? []).some((req) => String(req?.ref_id ?? "").trim() === wanted)) return true;
+  const manifest = prompt.shot_manifest ?? {};
+  return String(manifest.location_ref_id ?? "").trim() === wanted
+    || String(manifest.protagonist_state_ref_id ?? "").trim() === wanted
+    || (manifest.character_state_ref_ids ?? []).some((id) => String(id ?? "").trim() === wanted);
+}
+
+function explicitCandidateIds(target) {
+  return [
+    ...(Array.isArray(target?.candidate_image_ids) ? target.candidate_image_ids : []),
+    ...(Array.isArray(target?.anchor_image_ids) ? target.anchor_image_ids : []),
+    ...(Array.isArray(target?.seed_image_ids) ? target.seed_image_ids : []),
+    ...(Array.isArray(target?.derived_candidate_image_ids) ? target.derived_candidate_image_ids : []),
+  ].map((id) => String(id ?? "").trim()).filter(Boolean);
+}
+
+function candidateImageIdsForDerivedTarget(target, promptPlan) {
+  const prompts = Array.isArray(promptPlan?.prompts) ? promptPlan.prompts : [];
+  const byId = new Map(prompts.map((prompt) => [String(prompt.image_id ?? ""), prompt]));
+  const explicit = explicitCandidateIds(target).filter((id) => byId.has(id));
+  if (explicit.length) return [...new Set(explicit)];
+  const sceneIds = new Set((Array.isArray(target?.scene_ids) ? target.scene_ids : []).map((id) => String(id ?? "").trim()).filter(Boolean));
+  const mentioned = prompts.filter((prompt) => promptMentionsRef(prompt, target.ref_id));
+  const inScene = prompts.filter((prompt) => sceneIds.has(String(prompt.scene_id ?? "")) || sceneIds.has(String(prompt.parent_scene_id ?? "")));
+  const combined = [...mentioned, ...inScene]
+    .filter((prompt) => prompt?.image_id)
+    .sort((left, right) => {
+      const mode = String(target?.generation_mode ?? "");
+      const wideDelta = mode === "derive_from_first_clean_wide_cut" ? promptWideScore(left) - promptWideScore(right) : 0;
+      return wideDelta || promptStartSec(left) - promptStartSec(right) || String(left.image_id).localeCompare(String(right.image_id), undefined, { numeric: true });
+    })
+    .map((prompt) => String(prompt.image_id));
+  return [...new Set(combined)];
+}
+
+export function candidateImageIdsForDerivedTargetForTests(target, promptPlan) {
+  return candidateImageIdsForDerivedTarget(target, promptPlan);
+}
+
+async function unresolvedDerivedTargets(referencePlan, promptPlan) {
+  const unresolved = [];
+  for (const target of referencePlan?.reference_targets ?? []) {
+    if (!target?.ref_id || !isDerivedReferenceTarget(target) || await hasExistingReferencePath(target)) continue;
+    unresolved.push({
+      ...target,
+      candidate_image_ids: candidateImageIdsForDerivedTarget(target, promptPlan),
+    });
+  }
+  return unresolved;
+}
+
 function referenceFresh(target, outputPath) {
   return promptFresh({ image_id: target.ref_id, prompt_hash: sha256(referencePrompt(target)), modelslab_image_prompt: referencePrompt(target) }, outputPath);
 }
@@ -312,11 +400,76 @@ function characterReferenceRequirements(prompt, characterRefs, existingIds) {
   return inferred;
 }
 
+function referenceLimitOmitted(prompt, refId) {
+  const wanted = String(refId ?? "").trim();
+  if (!wanted) return false;
+  return (prompt.reference_usage ?? []).some((usage) => (
+    String(usage?.ref_id ?? "").trim() === wanted
+    && String(usage?.usage ?? "").trim() === "available_not_attached_reference_limit"
+  ));
+}
+
+function targetKindById(referenceTargets = []) {
+  return new Map((referenceTargets ?? []).filter((target) => target?.ref_id).map((target) => [String(target.ref_id), String(target.kind ?? "source_anchor")]));
+}
+
+function manifestReferenceRequirements(prompt, characterRefs, referenceById, referenceTargets = [], existingIds = new Set()) {
+  const manifest = prompt.shot_manifest ?? {};
+  const targetKind = targetKindById(referenceTargets);
+  const additions = [];
+  function add(refId, kind, slotPurpose, reason, extra = {}) {
+    const id = String(refId ?? "").trim();
+    if (!id || existingIds.has(id) || !referenceById.has(id) || referenceLimitOmitted(prompt, id)) return;
+    existingIds.add(id);
+    additions.push({
+      ref_id: id,
+      kind,
+      required: true,
+      slot_order: 0,
+      slot_purpose: slotPurpose,
+      reason,
+      inferred_from_shot_manifest: true,
+      ...extra,
+    });
+  }
+
+  add(
+    manifest.location_ref_id,
+    targetKind.get(String(manifest.location_ref_id ?? "")) || "location",
+    `location environment for ${manifest.location_ref_id}`,
+    "Shot manifest declared this location ref; it is now attachable, usually after derived-ref promotion."
+  );
+
+  const characterByStateId = new Map();
+  const characterBySourceId = new Map();
+  for (const ref of characterRefs ?? []) {
+    if (ref?.state_ref_id) characterByStateId.set(String(ref.state_ref_id), ref);
+    if (ref?.source_ref_id) characterBySourceId.set(String(ref.source_ref_id), ref);
+  }
+  const manifestCharacterIds = [
+    manifest.protagonist_state_ref_id,
+    ...(Array.isArray(manifest.character_state_ref_ids) ? manifest.character_state_ref_ids : []),
+  ].map((id) => String(id ?? "").trim()).filter(Boolean);
+  for (const manifestId of manifestCharacterIds) {
+    const ref = characterByStateId.get(manifestId) ?? characterBySourceId.get(manifestId) ?? null;
+    const sourceRefId = ref?.source_ref_id ?? manifestId;
+    add(
+      sourceRefId,
+      "character_state",
+      `character identity and wardrobe for ${ref?.character ?? sourceRefId}`,
+      "Shot manifest declared this character state ref; it is now attachable.",
+      ref?.state_ref_id && ref.state_ref_id !== sourceRefId ? { source_state_ref_id: ref.state_ref_id } : {}
+    );
+  }
+
+  return additions;
+}
+
 function isHardenedPromptPlan(plan) {
   return Boolean(plan?.visual_prompt_hardening_report_path || String(plan?.prompt_policy ?? "").includes("deterministic hardening"));
 }
 
-function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) {
+function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], referenceTargets = []) {
   const inferVisibleSubjectRefs = !isHardenedPromptPlan(plan);
   const prompts = (plan.prompts ?? []).map((prompt) => {
     const stagingContext = stagedCharacterSlotContext(prompt, characterRefs);
@@ -326,6 +479,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
     const existingIds = new Set(authoredRequirements.map((requirement) => requirement.ref_id).filter(Boolean));
     const requirements = [
       ...authoredRequirements,
+      ...manifestReferenceRequirements(prompt, characterRefs, referenceById, referenceTargets, existingIds),
       ...(inferVisibleSubjectRefs ? characterReferenceRequirements(prompt, characterRefs, existingIds) : []),
     ];
     const availableRows = requirements
@@ -390,6 +544,10 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = []) 
     };
   });
   return { ...plan, prompts, reference_paths_attached_at: new Date().toISOString(), max_scene_references: maxSceneReferences };
+}
+
+export function attachReferencePathsToPromptsForTests(plan, referenceById, characterRefs = [], referenceTargets = []) {
+  return attachReferencePathsToPrompts(plan, referenceById, characterRefs, referenceTargets);
 }
 
 function promptWithReferenceSlots(prompt, provider = imageProvider) {
@@ -563,26 +721,29 @@ async function generateReferences() {
   const referencePlan = await readJson(visualReferencePlanPath, null);
   const characterRefs = await readJson(characterStateRefsPath, null);
   if (!referencePlan?.reference_targets?.length || skipReferenceGeneration) {
+    const referenceEntries = [];
+    for (const target of referencePlan?.reference_targets ?? []) {
+      if (target.ref_id && target.reference_image_path && await exists(target.reference_image_path)) referenceEntries.push([target.ref_id, target.reference_image_path]);
+    }
+    for (const ref of characterRefs?.character_state_refs ?? []) {
+      if (ref.source_ref_id && ref.reference_image_path && await exists(ref.reference_image_path)) referenceEntries.push([ref.source_ref_id, ref.reference_image_path]);
+    }
     return {
       referencePlan,
       characterRefs,
       results: [],
-      referenceById: new Map([
-        ...(referencePlan?.reference_targets ?? []).filter((target) => target.reference_image_path).map((target) => [target.ref_id, target.reference_image_path]),
-        ...(characterRefs?.character_state_refs ?? []).filter((ref) => ref.source_ref_id && ref.reference_image_path).map((ref) => [ref.source_ref_id, ref.reference_image_path]),
-      ]),
+      referenceById: new Map(referenceEntries),
     };
   }
   await fs.mkdir(referenceDir, { recursive: true });
   const referenceScope = requestedReferenceIds();
-  const existingReferenceEntries = [
-    ...(referencePlan?.reference_targets ?? [])
-      .filter((target) => target.ref_id && target.reference_image_path)
-      .map((target) => [target.ref_id, target.reference_image_path]),
-    ...(characterRefs?.character_state_refs ?? [])
-      .filter((ref) => ref.source_ref_id && ref.reference_image_path)
-      .map((ref) => [ref.source_ref_id, ref.reference_image_path]),
-  ];
+  const existingReferenceEntries = [];
+  for (const target of referencePlan?.reference_targets ?? []) {
+    if (target.ref_id && target.reference_image_path && await exists(target.reference_image_path)) existingReferenceEntries.push([target.ref_id, target.reference_image_path]);
+  }
+  for (const ref of characterRefs?.character_state_refs ?? []) {
+    if (ref.source_ref_id && ref.reference_image_path && await exists(ref.reference_image_path)) existingReferenceEntries.push([ref.source_ref_id, ref.reference_image_path]);
+  }
   const requestedTargets = referencePlan.reference_targets
     .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true || referenceScope.has(target.ref_id))
     .filter((target) => !referenceScope.size || referenceScope.has(target.ref_id));
@@ -638,6 +799,151 @@ async function generateReferences() {
   return { referencePlan: updatedReferencePlan, characterRefs, results, referenceById };
 }
 
+function successfulImageRows(report) {
+  const byId = new Map();
+  for (const row of report?.results ?? []) {
+    const status = String(row?.status ?? "").toLowerCase();
+    if (!row?.image_id || status === "failed" || !row.image_path) continue;
+    byId.set(String(row.image_id), row);
+  }
+  return byId;
+}
+
+async function probePromptImageRows(promptPlan) {
+  const rows = new Map();
+  for (const prompt of promptPlan?.prompts ?? []) {
+    if (!prompt?.image_id) continue;
+    const provider = promptRoute(prompt);
+    const outputPath = imagePathFor(prompt, provider);
+    if (!(await exists(outputPath))) continue;
+    rows.set(String(prompt.image_id), {
+      image_id: String(prompt.image_id),
+      status: "existing_file",
+      image_path: outputPath,
+      image_provider: provider,
+    });
+  }
+  return rows;
+}
+
+async function promotedReferencePathFor(target) {
+  await fs.mkdir(referenceDir, { recursive: true });
+  return path.join(referenceDir, `${target.ref_id}-derived-reference.png`);
+}
+
+async function promoteDerivedReferences() {
+  const referencePlan = await readJson(visualReferencePlanPath, null);
+  const characterRefs = await readJson(characterStateRefsPath, null);
+  const promptPlan = await readJson(promptPath, null);
+  if (!referencePlan?.reference_targets?.length) throw new Error(`Missing visual reference plan: ${visualReferencePlanPath}`);
+  if (!promptPlan?.prompts?.length) throw new Error(`Missing prompt plan for derived reference promotion: ${promptPath}`);
+  const imagegenReport = await readJson(reportPath, null);
+  const reportRows = successfulImageRows(imagegenReport);
+  const probedRows = await probePromptImageRows(promptPlan);
+  const imageRows = new Map([...probedRows, ...reportRows]);
+  const targets = await unresolvedDerivedTargets(referencePlan, promptPlan);
+  const promoted = [];
+  const unresolved = [];
+  const updatedTargets = [];
+  for (const target of referencePlan.reference_targets ?? []) {
+    if (!target?.ref_id || !isDerivedReferenceTarget(target) || await hasExistingReferencePath(target)) {
+      updatedTargets.push(target);
+      continue;
+    }
+    const candidateIds = candidateImageIdsForDerivedTarget(target, promptPlan);
+    const candidate = candidateIds.map((id) => imageRows.get(id)).find((row) => row?.image_path);
+    if (!candidate || !(await exists(candidate.image_path))) {
+      unresolved.push({
+        ref_id: target.ref_id,
+        generation_mode: target.generation_mode,
+        scene_ids: target.scene_ids ?? [],
+        candidate_image_ids: candidateIds,
+        reason: candidateIds.length ? "candidate cuts are not generated yet" : "no candidate cuts found for derived ref target",
+      });
+      updatedTargets.push(target);
+      continue;
+    }
+    const outputPath = await promotedReferencePathFor(target);
+    await fs.copyFile(candidate.image_path, outputPath);
+    const sourceHash = await hashFile(candidate.image_path);
+    const promotedHash = await hashFile(outputPath);
+    await writeJson(`${outputPath}.metadata.json`, {
+      ref_id: target.ref_id,
+      kind: target.kind ?? null,
+      generation_mode: target.generation_mode,
+      derived_from_image_id: candidate.image_id,
+      derived_from_image_path: candidate.image_path,
+      source_image_sha256: sourceHash,
+      output_sha256: promotedHash,
+      prompt_plan_path: promptPath,
+      visual_reference_plan_path: visualReferencePlanPath,
+      promoted_at: new Date().toISOString(),
+    });
+    const updated = {
+      ...target,
+      reference_image_path: outputPath,
+      derived_reference_status: "promoted",
+      derived_from_image_id: candidate.image_id,
+      derived_from_image_path: candidate.image_path,
+      derived_from_image_sha256: sourceHash,
+      candidate_image_ids: candidateIds,
+      reference_generation_updated_at: new Date().toISOString(),
+    };
+    updatedTargets.push(updated);
+    promoted.push({
+      ref_id: target.ref_id,
+      generation_mode: target.generation_mode,
+      image_id: candidate.image_id,
+      source_image_path: candidate.image_path,
+      reference_image_path: outputPath,
+      output_sha256: promotedHash,
+    });
+  }
+  const updatedReferencePlan = {
+    ...referencePlan,
+    reference_targets: updatedTargets,
+    derived_reference_promotion_updated_at: new Date().toISOString(),
+  };
+  await writeJson(visualReferencePlanPath, updatedReferencePlan);
+  if (characterRefs?.character_state_refs) {
+    const byTarget = new Map(updatedTargets.filter((target) => target.reference_image_path).map((target) => [target.ref_id, target.reference_image_path]));
+    const updatedCharacterRefs = {
+      ...characterRefs,
+      character_state_refs: characterRefs.character_state_refs.map((ref) => ({
+        ...ref,
+        reference_image_path: byTarget.get(ref.source_ref_id) ?? ref.reference_image_path ?? null,
+      })),
+      derived_reference_promotion_updated_at: new Date().toISOString(),
+    };
+    await writeJson(characterStateRefsPath, updatedCharacterRefs);
+  }
+  const report = {
+    schema: "goldflow_derived_reference_promotion_v1",
+    status: "passed",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    prompt_plan_path: promptPath,
+    imagegen_report_path: reportPath,
+    visual_reference_plan_path: visualReferencePlanPath,
+    character_state_refs_path: characterStateRefsPath,
+    pending_derived_ref_count: targets.length,
+    promoted_count: promoted.length,
+    unresolved_count: unresolved.length,
+    promoted,
+    unresolved,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(derivedRefPromotionReportPath, report);
+  console.log(JSON.stringify({
+    status: report.status,
+    report_path: derivedRefPromotionReportPath,
+    promoted_count: promoted.length,
+    unresolved_count: unresolved.length,
+  }, null, 2));
+}
+
 async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash }) {
   const priorReport = await readJson(reportPath, null);
   const mergedById = new Map();
@@ -675,6 +981,10 @@ async function assertNoVisualResolutionDeadletter(plan, selectedPrompts = []) {
 async function main() {
   const runIdentity = await assertRunIdentityImageProvider();
   codexOpeningSec = resolveCodexOpeningSec(runIdentity);
+  if (promoteDerivedRefs) {
+    await promoteDerivedReferences();
+    return;
+  }
   const referenceRun = await generateReferences();
   if (referencesOnly) {
     const report = {
@@ -711,12 +1021,23 @@ async function main() {
     throw new Error(`Imagegen requires a deterministic-hardened prompt plan. Run "goldflow visual harden" and pass section_image_prompts_hardened.json, or use --allow-unhardened-prompts true for diagnostics.`);
   }
   if (referenceRun.referenceById?.size) {
-    plan = attachReferencePathsToPrompts(plan, referenceRun.referenceById, referenceRun.characterRefs?.character_state_refs ?? []);
+    plan = attachReferencePathsToPrompts(
+      plan,
+      referenceRun.referenceById,
+      referenceRun.characterRefs?.character_state_refs ?? [],
+      referenceRun.referencePlan?.reference_targets ?? []
+    );
+  }
+  const seedDerivedTargets = seedDerivedRefs ? await unresolvedDerivedTargets(referenceRun.referencePlan, plan) : [];
+  const seedDerivedImageIds = new Set(seedDerivedTargets.flatMap((target) => target.candidate_image_ids ?? []));
+  if (seedDerivedRefs && !seedDerivedImageIds.size) {
+    throw new Error("No seed cuts found for unresolved derived references. Add candidate_image_ids/scene_ids to derived reference targets or promote existing refs manually.");
   }
   const scope = requestedIds();
   const prompts = plan.prompts
     .filter((prompt) => prompt.image_generation_required !== false)
     .filter((prompt) => !providerFilter || promptRoute(prompt) === providerFilter)
+    .filter((prompt) => !seedDerivedRefs || seedDerivedImageIds.has(String(prompt.image_id ?? "")))
     .filter((prompt) => !scope.size || scope.has(prompt.image_id));
   if (!prompts.length) throw new Error("No image prompts selected for generation.");
   await assertNoVisualResolutionDeadletter(plan, prompts);
@@ -743,6 +1064,9 @@ async function main() {
     concurrency,
     codex_opening_sec: codexOpeningSec,
     provider_filter: providerFilter,
+    seed_derived_refs: seedDerivedRefs,
+    seed_derived_ref_count: seedDerivedTargets.length,
+    seed_derived_image_ids: [...seedDerivedImageIds],
     image_count: mergedResults.length,
     current_batch_image_count: results.length,
     reference_count: referenceRun.results.length,
@@ -755,8 +1079,10 @@ async function main() {
   if (report.status !== "passed") process.exitCode = 1;
 }
 
-main().catch(async (error) => {
-  await writeJson(reportPath, { schema: "goldflow_imagegen_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(reportPath, { schema: "goldflow_imagegen_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

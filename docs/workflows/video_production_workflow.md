@@ -171,7 +171,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Reject refs with panel grids, speech bubbles, multi-position character layouts, strong scene backgrounds, cinematic action poses, or pose/background elements likely to transfer into cuts.
    - Run duplicate-hash QA across required reference targets. Different required ref IDs must not point to byte-identical images unless reuse was explicitly intended and documented. Exact duplicates between distinct locations, props, UI motifs, or character anchors are reference-generation failures and must be regenerated before visual prompt planning.
    - Regenerate failed refs selectively with `--reference-ids`; do not wipe approved refs.
-   - Record approval with `goldflow visual approve-refs` after QA. Do not hand-edit `character_state_refs.json`; `run status` keeps the run at visual reference planning until this approval is recorded.
+   - Record approval with `goldflow visual approve-refs` after QA. Do not hand-edit `character_state_refs.json`; `run status` keeps the run at reference generation/QA until this approval is recorded.
 
 18. Visual prompt planning.
    - Consumes approved refs, current-scene facts, and visual beats.

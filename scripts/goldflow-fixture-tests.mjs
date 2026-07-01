@@ -873,6 +873,7 @@ async function testVisualPlannerDriftContracts() {
   assert.equal(/Wide 16:9 landscape YouTube frame/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/full-frame composition, keep complete heads/i.test(files["scripts/imagegen.mjs"]), false);
   assert.match(files["scripts/codex-image-manual-import.mjs"], /promptTextForImageProvider\(prompt, "codex_imagegen"\)/);
+  assert.match(files["bin/goldflow.mjs"], /if \(key === "visual approve-refs"\) return "reference_generation"/);
   assert.match(files["bin/goldflow.mjs"], /imagegen import-staged-codex"\) return isTrue\(parsedFlags\["references-only"\]\) \? "reference_generation" : "image_generation"/);
 
   for (const file of ["AGENTS.md", "docs/workflows/video_production_workflow.md"]) {

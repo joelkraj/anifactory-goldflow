@@ -46,7 +46,7 @@ function commandStage(commandName, subcommandName, parsedFlags) {
   if (key === "audio longform-bed") return "longform_audio_mix";
   if (key === "visual beats") return "visual_beat_plan";
   if (key === "visual refs") return "visual_reference_plan";
-  if (key === "visual approve-refs") return "visual_reference_plan";
+  if (key === "visual approve-refs") return "reference_generation";
   if (key === "visual plan") return "visual_prompt_plan_review_harden";
   if (key === "visual review") return "visual_prompt_plan_review_harden";
   if (key === "visual harden") return "visual_prompt_plan_review_harden";

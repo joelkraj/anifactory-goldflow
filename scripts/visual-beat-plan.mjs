@@ -243,6 +243,26 @@ function shotJobFromVisualJob(visualJob) {
   return map[visualJob] ?? "interaction";
 }
 
+function retentionVariedVisualJob(visualJob, { location, previousBeats = [], beatText = "", startSec = 0 } = {}) {
+  if (Number(startSec) >= retentionRampSec || !location || !visualJob) return visualJob;
+  let sameRun = 0;
+  for (let index = previousBeats.length - 1; index >= 0; index -= 1) {
+    const previous = previousBeats[index];
+    if (normalizeComparable(previous.local_location ?? previous.location ?? "") !== normalizeComparable(location)) break;
+    if (String(previous.visual_job ?? "") !== String(visualJob)) break;
+    sameRun += 1;
+  }
+  if (sameRun < 3) return visualJob;
+  const source = String(beatText ?? "").toLowerCase();
+  const alternates = [];
+  if (/\b(?:system|quest|status|rank|level|panel|screen|ledger|audit|message|timer|counter)\b/.test(source)) alternates.push("system_reveal", "chat_ui_insert");
+  if (/\b(?:recorder|flare|ledger|contract|receipt|knife|bell|rope|shield|paper|card|key|badge)\b/.test(source)) alternates.push("consequence");
+  if (/\b(?:danger|trap|monster|kill|threat|warning|blood|attack|hounds|enemy)\b/.test(source)) alternates.push("threat_reveal");
+  if (/\b(?:entered|crossed|toward|through|corridor|hall|room|gate|door|crawlspace|bridge|library)\b/.test(source)) alternates.push("location_transition");
+  alternates.push("reaction_shot", "consequence", "threat_reveal", "location_transition");
+  return alternates.find((candidate) => candidate !== visualJob) ?? visualJob;
+}
+
 function mergeEditorialUnits(units, scene) {
   const maxHoldForStart = (startSec) => {
     const value = Number(startSec);
@@ -484,15 +504,20 @@ function normalizedName(value) {
 
 function namesInText(names, text) {
   const source = normalizedName(text);
+  const sourceTokens = new Set(source.split(" ").filter(Boolean));
   return [...new Set((names ?? [])
     .map((name) => String(name ?? "").trim())
     .filter(Boolean)
     .filter((name) => {
       const normalized = normalizedName(name);
       const first = normalized.split(" ")[0];
+      const nameTokens = normalizedTokens(name);
+      const overlap = nameTokens.filter((token) => sourceTokens.has(token)).length;
+      const requiredOverlap = nameTokens.length >= 3 ? 2 : 1;
       return normalized && (
         source.includes(normalized)
         || (first && first.length > 2 && source.split(" ").includes(first))
+        || (nameTokens.length > 0 && overlap >= requiredOverlap)
       );
     }))];
 }
@@ -520,12 +545,13 @@ function localMentionedOnlyCharacters(scene, beatText, visibleCharacters) {
 function localProps(scene, beatText) {
   const props = Array.isArray(scene.props) ? scene.props : [];
   const source = normalizedName(beatText);
+  const sourceTokens = new Set(source.split(" ").filter(Boolean));
   const matched = props.filter((prop) => {
     const tokens = normalizedTokens(prop);
-    return tokens.some((token) => source.split(" ").includes(token));
+    const overlap = tokens.filter((token) => sourceTokens.has(token)).length;
+    return tokens.length > 0 && overlap >= Math.min(2, tokens.length);
   });
-  if (matched.length) return [...new Set(matched)];
-  return props.slice(0, 4);
+  return [...new Set(matched)];
 }
 
 function localUiElements(scene, beatText) {
@@ -681,13 +707,23 @@ function localBeatLocation(scene, beatText) {
   const excerptTokens = new Set(normalizedTokens(beatText));
   let best = null;
   for (const requirement of locationRequirements) {
-    const label = String(requirement.ref_id ?? requirement.subject ?? requirement.reason ?? "").replace(/_ref$/i, "");
+    const fallbackLabel = String(requirement.subject ?? requirement.location ?? scene.location ?? requirement.reason ?? "").trim();
+    const label = fallbackLabel || humanizeReferenceId(requirement.ref_id);
     const tokens = normalizedTokens(`${requirement.ref_id ?? ""} ${requirement.subject ?? ""} ${requirement.reason ?? ""}`);
     const score = tokens.filter((token) => excerptTokens.has(token)).length;
     if (score > (best?.score ?? 0)) best = { score, label };
   }
   if (best?.score > 0) return best.label;
   return scene.location ?? null;
+}
+
+function humanizeReferenceId(refId) {
+  return String(refId ?? "")
+    .replace(/_ref$/i, "")
+    .replace(/^(?:loc|char|prop|ui|style|effect|action)_/i, "")
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
@@ -707,8 +743,10 @@ function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
     const beatEnd = Number(unit.end_sec);
     const focus = unit.beat_focus ?? beatFocusLabel(index, editorialUnits.length, beatStart);
     const beatText = unit.text ?? "";
-    const suggestedShotJob = unit.suggested_shot_job ?? suggestedShotJobForBeat({ text: beatText, index, count: editorialUnits.length, startSec: beatStart });
     const location = localBeatLocation(scene, beatText);
+    const rawVisualJob = unit.visual_job ?? visualJobFromCues(unit.editorial_cues ?? [], beatText, index, editorialUnits.length, beatStart);
+    const visualJob = retentionVariedVisualJob(rawVisualJob, { location, previousBeats: beats, beatText, startSec: beatStart });
+    const suggestedShotJob = shotJobFromVisualJob(visualJob) ?? unit.suggested_shot_job ?? suggestedShotJobForBeat({ text: beatText, index, count: editorialUnits.length, startSec: beatStart });
     const baseBeat = {
       ...scene,
       location,
@@ -716,7 +754,7 @@ function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
       scene_id: scene.scene_id,
       visual_beat_id: `${scene.scene_id}_beat_${String(index + 1).padStart(2, "0")}`,
       start_sec: Number(beatStart.toFixed(3)),
-      visual_job: unit.visual_job ?? visualJobFromCues(unit.editorial_cues ?? [], beatText, index, editorialUnits.length, beatStart),
+      visual_job: visualJob,
       suggested_shot_job: suggestedShotJob,
       visual_beat_script_excerpt: beatText,
       visual_beat_action: compactBeatAction(beatText, focus),
@@ -754,7 +792,7 @@ function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
       visual_beat_script_excerpt: beatText,
       visual_beat_action: compactBeatAction(beatText, focus),
       editorial_cues: unit.editorial_cues ?? [],
-      visual_job: unit.visual_job ?? visualJobFromCues(unit.editorial_cues ?? [], beatText, index, editorialUnits.length, beatStart),
+      visual_job: visualJob,
       suggested_shot_job: suggestedShotJob,
       location_timeline_label: unit.location_timeline_label ?? null,
       visual_novelty_directive: `${unit.visual_job ?? suggestedShotJob}: make this cut's visible focus distinct from the previous beat while staying inside the current beat excerpt.`,
@@ -839,7 +877,9 @@ function firstName(value) {
 
 function mentionedKnownCharacters(beat) {
   const excerpt = String(beat.visual_beat_script_excerpt ?? "");
-  const visibleSubjects = Array.isArray(beat.visible_subjects) ? beat.visible_subjects : [];
+  const visibleSubjects = Array.isArray(beat.visible_characters) && beat.visible_characters.length
+    ? beat.visible_characters
+    : Array.isArray(beat.visible_subjects) ? beat.visible_subjects : [];
   const characterStates = Array.isArray(beat.character_states) ? beat.character_states : [];
   const knownNames = [
     beat.primary_subject,
@@ -861,7 +901,9 @@ function mentionedKnownCharacters(beat) {
 function namedCharacterCoverageFindings(beats) {
   const findings = [];
   for (const beat of beats) {
-    const visibleSubjects = (Array.isArray(beat.visible_subjects) ? beat.visible_subjects : [])
+    const visibleSubjects = (Array.isArray(beat.visible_characters) && beat.visible_characters.length
+      ? beat.visible_characters
+      : Array.isArray(beat.visible_subjects) ? beat.visible_subjects : [])
       .map(normalizeComparable)
       .filter(Boolean);
     const mentioned = mentionedKnownCharacters(beat);
@@ -905,7 +947,8 @@ function locationMentionPhrases(text) {
 function locationMentionCoverageFindings(beats) {
   const findings = [];
   for (const beat of beats) {
-    const location = normalizeComparable(beat.location ?? beat.location_timeline_label ?? "");
+    const beatLocation = beat.local_location ?? beat.location ?? beat.location_timeline_label ?? "";
+    const location = normalizeComparable(beatLocation);
     if (!location) continue;
     for (const phrase of locationMentionPhrases(beat.visual_beat_script_excerpt)) {
       const normalizedPhrase = normalizeComparable(phrase);
@@ -923,8 +966,8 @@ function locationMentionCoverageFindings(beats) {
           scene_id: beat.parent_scene_id ?? beat.scene_id,
           visual_beat_id: beat.visual_beat_id,
           mentioned_location: phrase,
-          beat_location: beat.location ?? null,
-          message: `Beat excerpt names ${phrase}, but the beat location is ${beat.location ?? "(missing)"}.`,
+          beat_location: beatLocation || null,
+          message: `Beat excerpt names ${phrase}, but the beat location is ${beatLocation || "(missing)"}.`,
         });
       }
     }
@@ -946,7 +989,7 @@ function repeatedBeatJobFindings(beats, {
       current = null;
       continue;
     }
-    const location = normalizeComparable(beat.location ?? "none") || "none";
+    const location = normalizeComparable(beat.local_location ?? beat.location ?? "none") || "none";
     const job = String(beat.visual_job ?? "none");
     const key = `${location}|${job}`;
     if (!current || current.key !== key) {
@@ -955,7 +998,7 @@ function repeatedBeatJobFindings(beats, {
         code: "repeated_location_visual_job_run",
         severity: "warning",
         key,
-        location: beat.location ?? null,
+        location: beat.local_location ?? beat.location ?? null,
         visual_job: job,
         start_sec: beat.start_sec,
         end_sec: beat.end_sec,
@@ -985,14 +1028,14 @@ function longSameLocationBeatFindings(beats, {
   const findings = [];
   let current = null;
   for (const beat of ordered) {
-    const location = normalizeComparable(beat.location ?? "none") || "none";
+    const location = normalizeComparable(beat.local_location ?? beat.location ?? "none") || "none";
     if (!current || current.location_key !== location) {
       if (current) findings.push(current);
       current = {
         code: "long_same_location_beat_span",
         severity: "warning",
         location_key: location,
-        location: beat.location ?? null,
+        location: beat.local_location ?? beat.location ?? null,
         start_sec: Number(beat.start_sec ?? 0),
         end_sec: Number(beat.end_sec ?? beat.start_sec ?? 0),
         count: 1,

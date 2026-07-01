@@ -1023,7 +1023,8 @@ async function testVisualBeatQualityFindings() {
   const report = JSON.parse(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json"), "utf8"));
   assert.equal(report.status, "passed");
   assert.equal(report.visual_beat_quality_findings.some((finding) => finding.code === "location_mention_not_in_beat_location"), true);
-  assert.equal(report.visual_beat_quality_findings.some((finding) => finding.code === "named_character_not_visible_subject"), true);
+  assert.equal(report.visual_beat_quality_findings.some((finding) => finding.code === "named_character_not_visible_subject"), false);
+  assert.equal(report.beats.some((beat) => (beat.visible_characters ?? []).includes("Agent00")), true);
   assert.equal(report.beats.some((beat) => beat.visual_beat_quality_findings?.length), true);
 }
 

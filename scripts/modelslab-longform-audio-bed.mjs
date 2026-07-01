@@ -30,7 +30,6 @@ const scoreDropPlanPath = flags.scoreDropPlan ?? flags["score-drop-plan"] ?? pat
 const sfxPlanPath = flags.sfxPlan ?? path.join(episodeDir, `sfx_event_plan_${episode}.json`);
 const promptPlanPath = flags.promptPlan ?? flags["prompt-plan"] ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
-const outputBase = flags.outputBase ?? `${episode}-${channel}-modelslab-qwen-scored-sfx`;
 const forceScore = flags["force-score"] === "true";
 const forceScoreDrops = flags["force-score-drops"] === "true";
 const forceSfx = flags["force-sfx"] === "true";
@@ -55,6 +54,8 @@ const skipScore = flags["skip-score"] === "true";
 const skipSfx = narrationOnly || flags["skip-sfx"] === "true";
 const effectiveSkipScore = narrationOnly || skipScore;
 const transitionSfxEnabled = !skipSfx && flags["transition-sfx"] === "true";
+const outputBase = flags.outputBase ?? `${episode}-${channel}-modelslab-qwen-${narrationOnly ? "narrator-only" : "scored-sfx"}`;
+const keepIntermediateWav = flags["keep-wav"] === "true" || (!narrationOnly && flags["keep-wav"] !== "false");
 const transitionSfxMaxCount = Number(flags["transition-sfx-max-count"] ?? 100);
 const transitionSfxMinGapSec = Number(flags["transition-sfx-min-gap-sec"] ?? 6.5);
 const transitionSfxBucketSec = Number(flags["transition-sfx-bucket-sec"] ?? 180);
@@ -777,10 +778,18 @@ async function mixNarrationOnly({ narrationPath, durationSec }) {
     wavPath,
   ], { maxBuffer: 1024 * 1024 * 16 });
   await execFile("ffmpeg", ["-y", "-i", wavPath, "-c:a", "aac", "-b:a", "192k", m4aPath], { maxBuffer: 1024 * 1024 * 8 });
+  const duration = await mediaDuration(wavPath);
+  let intermediateWavDeleted = false;
+  if (!keepIntermediateWav) {
+    await fs.rm(wavPath, { force: true });
+    intermediateWavDeleted = true;
+  }
   return {
-    wav_path: wavPath,
+    wav_path: keepIntermediateWav ? wavPath : null,
+    intermediate_wav_path: wavPath,
+    intermediate_wav_deleted: intermediateWavDeleted,
     m4a_path: m4aPath,
-    duration_sec: await mediaDuration(wavPath),
+    duration_sec: duration,
     audio_design_enabled: false,
     narration_only: true,
     narration_volume_db: narrationVolumeDb,

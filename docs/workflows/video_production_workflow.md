@@ -64,6 +64,8 @@ The approved narration script is production truth. The pipeline should extract, 
    - Narrator-only by default.
    - Character voice casting requires an explicit operator request.
    - Voice plan requires current speakability artifacts unless running a diagnostic bypass.
+   - Qwen production runs write Qwen/generic voice artifacts only: `qwen_generation_plan.json`, `audio_performance_plan.json`, `voice_direction_strategy_<episode>.json`, and `voice_reference_completeness_report.json`.
+   - Fish artifacts are legacy/diagnostic. Do not emit `narration_fish_*` files or `fish_reference_requirements_report.json` for Qwen runs unless `--emit-legacy-fish-artifacts true` is explicitly requested for a bakeoff or migration audit.
 
 10. TTS generation and stitch.
    - Uses ModelsLab Qwen TTS.
@@ -109,6 +111,7 @@ The approved narration script is production truth. The pipeline should extract, 
 13. Longform audio bed mix.
    - Default happy path is narrator-only: `audio longform-bed --narration-only true`.
    - Narrator-only mode requires only the stitched narration/Qwen report, raises/limits/loudnorms the narration, writes a normal mix report, and marks SFX, score, ambience, and transition SFX disabled.
+   - Narrator-only mode keeps the final M4A and drops the huge intermediate WAV by default. Pass `--keep-wav true` only for diagnostics. Use `goldflow run cleanup --episode-dir <episode-dir>` to audit safe reclaimable intermediates and `--apply true` to prune them.
    - Opt-in audio-design variants mix narration, SFX, ambience, and score into one final continuous audio track.
    - Production narration loudness starts at `--narration-volume-db 2`, with the longform limiter enabled.
    - Use the narrator-forward retention recipe when the narrator feels behind the score/SFX: `--narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`. Verify the AAC output with `ffprobe` and `ffmpeg ... -af volumedetect`; if narration still competes with music, lower score beds or drops before pushing narration harder.
@@ -139,6 +142,7 @@ The approved narration script is production truth. The pipeline should extract, 
    - Only `style` refs are global. Location, character, prop, UI, action, and effect refs are scene-scoped and must be attached only from the current scene candidate set.
    - Consume both broad semantic scenes and local visual beats. Semantic scenes define broad coverage and scene-level location targets; visual beats define transcript-timed local facts plus advisory ref hints. If these disagree, the visual beat excerpt/local cut truth should drive the reference decision, but the LLM still authors the final reference target; deterministic code validates and sanitizes, it does not invent or lock creative targets.
    - Semantic `ref_requirements` create scoped target coverage, not automatic standalone generation. Location target `scene_ids` are derived from semantic location `ref_requirements` and unioned with LLM-authored ids. A physical scene that requires a location target but has no covering target blocks with `scene_missing_location_ref`.
+   - Semantic quality blockers are real blockers. A physical scene with a concrete visible location must include a location `ref_requirement`; this target may later become `no_ref_needed` or `derive_from_best_cut`, but semantic planning must not omit the scoped location target.
    - Keep standalone refs for recurring characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact one-scene characters.
    - Downgrade one-scene late locations/UI/props to `no_ref_needed`; downgrade minor recurring late locations/UI/props/actions to `derive_from_best_cut` or `derive_from_first_clean_cut` when a clean generated scene image can become the reference later.
    - Do not generate standalone refs for minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off dashboards, one-off documents, or 2-3 occurrence minor assets unless they are truly critical to the story.

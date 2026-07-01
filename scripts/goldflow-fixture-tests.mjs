@@ -114,6 +114,19 @@ function testSemanticSceneQualityFindings() {
   assert.equal(codes.has("semantic_dense_ui_text"), true);
   assert.equal(codes.has("semantic_character_alias_churn"), true);
   assert.equal(codes.has("semantic_editorial_meta_language"), true);
+  const missingLocationFindings = semanticSceneQualityFindingsForTests([
+    {
+      scene_id: "scene_002",
+      title: "Location Missing Ref",
+      location: "tribunal witness floor",
+      visible_subjects: ["Joey Manhwa"],
+      ref_requirements: [{ kind: "character", ref_id: "char_joey_manhwa" }],
+    },
+  ]);
+  assert.equal(
+    missingLocationFindings.some((finding) => finding.code === "semantic_physical_scene_missing_location_ref_requirement" && finding.severity === "blocker"),
+    true
+  );
 }
 
 function testSemanticPlannerPromptContracts() {
@@ -2225,6 +2238,57 @@ async function testNarratorOnlyStatusAndMixer() {
   assert.equal(report.skip_sfx, true);
   assert.equal(report.transition_sfx_enabled, false);
   assert.equal(await fs.stat(report.mix.m4a_path).then((stat) => stat.isFile()), true);
+  assert.equal(report.mix.wav_path, null);
+  assert.equal(report.mix.intermediate_wav_deleted, true);
+  assert.equal(await fs.stat(report.mix.intermediate_wav_path).then(() => true).catch(() => false), false);
+}
+
+async function testRunCleanupPrunesNarratorOnlyLongformWav() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const mixDir = path.join(episodeDir, "assets", "audio", "longform_mix");
+  await fs.mkdir(mixDir, { recursive: true });
+  const wavPath = path.join(mixDir, "fixture-narrator-only.wav");
+  const m4aPath = path.join(mixDir, "fixture-narrator-only.m4a");
+  await fs.writeFile(wavPath, Buffer.alloc(2048));
+  await fs.writeFile(m4aPath, Buffer.alloc(1024));
+  const legacyFishPath = path.join(episodeDir, "narration_fish_performance_ep_01.txt");
+  const legacyFishReportPath = path.join(episodeDir, "fish_reference_requirements_report.json");
+  await fs.writeFile(legacyFishPath, "legacy fish narration text", "utf8");
+  await writeJson(legacyFishReportPath, { status: "passed", tts_provider: "qwen3-tts" });
+  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", provider: "qwen3-tts", segments: [{ segment_id: "seg_001" }] });
+  await writeJson(path.join(episodeDir, "voice_reference_completeness_report.json"), { status: "passed", tts_provider: "qwen3-tts" });
+  await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), {
+    status: "completed",
+    audio_design_enabled: false,
+    narration_only: true,
+    mix: {
+      audio_design_enabled: false,
+      narration_only: true,
+      wav_path: wavPath,
+      m4a_path: m4aPath,
+    },
+  });
+  const dryRun = await execFileAsync(process.execPath, [
+    "scripts/run-cleanup.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const dryPayload = JSON.parse(dryRun.stdout);
+  assert.equal(dryPayload.candidate_count, 3);
+  assert.equal(await fs.stat(wavPath).then((stat) => stat.isFile()), true);
+  assert.equal(await fs.stat(legacyFishPath).then((stat) => stat.isFile()), true);
+  await execFileAsync(process.execPath, [
+    "scripts/run-cleanup.mjs",
+    "--episode-dir", episodeDir,
+    "--apply", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), "utf8"));
+  assert.equal(report.mix.wav_path, null);
+  assert.equal(report.mix.intermediate_wav_deleted, true);
+  assert.equal(await fs.stat(wavPath).then(() => true).catch(() => false), false);
+  assert.equal(await fs.stat(m4aPath).then((stat) => stat.isFile()), true);
+  assert.equal(await fs.stat(legacyFishPath).then(() => true).catch(() => false), false);
+  assert.equal(await fs.stat(legacyFishReportPath).then(() => true).catch(() => false), false);
 }
 
 async function testRunStatusBlocksLegacyScriptPaceHookWarnings() {
@@ -2962,6 +3026,7 @@ async function run() {
   await testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();
+  await testRunCleanupPrunesNarratorOnlyLongformWav();
   await testRunStatusBlocksLegacyScriptPaceHookWarnings();
   await testRunStatusBlocksMissingQwenStitchedAudio();
   await testTimingBindMatchesPossessiveAnchorsAfterCursor();

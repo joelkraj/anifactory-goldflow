@@ -128,6 +128,7 @@ Production commands are guarded by the run-status ledger. Use --workflow-bypass 
 Commands:
   goldflow run preflight           Lock run identity before ingest or folder creation
   goldflow run status              Print artifact-backed stage ledger before continuing
+  goldflow run cleanup             Audit/prune safe unused episode intermediates; use --apply true to delete
   goldflow ingest source           Copy raw chatbot/script source into script_clean.md
   goldflow script approve          Write exact-hash review/approval lock artifacts
   goldflow script pace-check       Write approved-script 210-220 WPM target budget
@@ -194,6 +195,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("run-preflight.mjs", flags);
 } else if (command === "run" && subcommand === "status") {
   run("run-status.mjs", flags);
+} else if (command === "run" && subcommand === "cleanup") {
+  run("run-cleanup.mjs", flags);
 } else if (command === "ingest" && subcommand === "source") {
   run("source-ingest.mjs", flags);
 } else if (command === "script" && subcommand === "approve") {

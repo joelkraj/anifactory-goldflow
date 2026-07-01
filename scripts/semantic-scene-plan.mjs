@@ -216,6 +216,9 @@ function semanticSceneQualityFindings(scenes) {
     const sceneId = String(scene?.scene_id ?? "");
     const title = String(scene?.title ?? "");
     const location = normalizeText(scene?.location);
+    const locationRefRequirements = Array.isArray(scene?.ref_requirements)
+      ? scene.ref_requirements.filter((requirement) => String(requirement?.kind ?? "").trim().toLowerCase() === "location")
+      : [];
     if (location && mixedLocationPattern.test(location)) {
       findings.push({
         severity: "warning",
@@ -224,6 +227,16 @@ function semanticSceneQualityFindings(scenes) {
         title,
         value: location,
         message: "Location appears to mix multiple places, UI, overlays, screens, or montage language instead of one visible physical environment.",
+      });
+    }
+    if (location && !/^(?:none|unknown|n\/a|na|abstract|unspecified)$/i.test(location) && !locationRefRequirements.length) {
+      findings.push({
+        severity: "blocker",
+        code: "semantic_physical_scene_missing_location_ref_requirement",
+        scene_id: sceneId,
+        title,
+        location,
+        message: "Physical scenes must include a location ref_requirement so downstream reference scoping has an explicit location target. This target may later be downgraded to no_ref_needed or derive_from_best_cut; it is not an automatic standalone image order.",
       });
     }
     for (const subject of scene?.visible_subjects ?? []) {
@@ -349,6 +362,7 @@ Rules:
 - props means tangible foreground objects the camera should show. Do not put rooms, doors, windows, desks, walls, stages, screens, dashboards, webpages, feeds, architecture, lighting, or whole locations in props. Put architecture and surfaces in location/action_staging, and put screens/dashboards/feeds in ui_text_on_screen or action_staging.
 - ui_text_on_screen should be concise image/render guidance: short system labels, numbers, chat snippets, document titles, or key words. Do not dump long multi-line system messages, documents, article text, captions, or dense lists into imagegen text. Summarize dense UI as a visual motif here and leave exact long wording to narration/subtitles or render-layer overlays.
 - Location ref_requirements are the source of truth for downstream scene scoping. Use stable, specific snake_case location ref IDs that match the scene's visible physical area. A later reference planner may merge true duplicates, but deterministic code will not invent replacement locations after this stage.
+- Every scene with a concrete physical location must include at least one ref_requirements row with kind "location" and a stable location ref_id for that visible area. This is mandatory even when the location is one-scene, late, minor, or likely to become no_ref_needed later. Location ref requirements are scoped coverage, not standalone image orders.
 - Semantic ref_requirements are scoped target suggestions, not automatic standalone image-generation orders. Include refs for canonical recurring characters, major character states, distinct visible physical locations, signature recurring UI motifs, critical props, and high-risk one-scene close-contact characters. Do not create semantic refs for generic background groups, throwaway one-scene UI text, ordinary desks/doors/screens, or props that can be safely derived from the scene image.
 - Avoid editorial/package words in semantic fields, such as hook, retention, thumbnail, CTR, narrator, recap, or what the viewer should feel. Describe the story fact visible in the scene.
 - script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later.
@@ -380,7 +394,7 @@ Return one valid JSON object:
       "sfx_cues": ["..."],
       "character_states": [{"character":"...","state":"...","wardrobe":"..."}],
       "props": ["..."],
-      "ref_requirements": [{"ref_id":"...","kind":"character|location|prop|ui|style","required":true,"reason":"..."}],
+      "ref_requirements": [{"ref_id":"specific_visible_area_location_ref","kind":"location","required":true,"reason":"mandatory scoped location coverage for this concrete physical scene"}, {"ref_id":"...","kind":"character|prop|ui|style","required":true,"reason":"..."}],
       "action_staging": "...",
       "continuity_notes": ["..."]
     }
@@ -509,6 +523,11 @@ async function main() {
     throw new Error(`Semantic scene planner returned scene anchors that do not bind to the locked script:\n${preview}`);
   }
   const semanticQualityFindings = semanticSceneQualityFindings(normalizedScenes);
+  const semanticQualityBlockers = semanticQualityFindings.filter((finding) => finding.severity === "blocker");
+  if (semanticQualityBlockers.length) {
+    const preview = semanticQualityBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.message}`).join("\n");
+    throw new Error(`Semantic scene planner returned blocking quality findings:\n${preview}`);
+  }
   const report = {
     schema: "goldflow_semantic_scene_plan_v1",
     status: "passed",

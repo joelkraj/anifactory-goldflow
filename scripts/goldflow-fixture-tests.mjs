@@ -2841,11 +2841,13 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const status = JSON.parse(stdout);
   const refStage = status.stage_ledger.find((row) => row.stage === "visual_reference_plan");
-  assert.equal(status.current_stage, "visual_reference_plan");
-  assert.equal(refStage.exists, false);
-  assert.match(refStage.evidence, /draft_needs_manual_review/);
+  const referenceGenerationStage = status.stage_ledger.find((row) => row.stage === "reference_generation");
+  assert.equal(status.current_stage, "reference_generation");
+  assert.equal(refStage.exists, true);
+  assert.equal(referenceGenerationStage.exists, false);
+  assert.match(referenceGenerationStage.evidence, /generated reference approval pending/);
   assert.match(status.next_command_shape, /visual approve-refs/);
-  assert.match(refStage.next_command_shape, /visual approve-refs/);
+  assert.match(referenceGenerationStage.next_command_shape, /visual approve-refs/);
 }
 
 async function testRunStatusBlocksQwenPlanMissingOverrideAudit() {

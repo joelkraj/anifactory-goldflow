@@ -456,21 +456,30 @@ async function imageReportComplete(episodeDir, episode, identity) {
   };
 }
 
-async function referenceGenerationComplete(episodeDir) {
+async function referenceGenerationComplete(episodeDir, identity) {
   const planPath = path.join(episodeDir, "visual_reference_plan.json");
   const plan = await readJson(planPath, null);
   if (!plan) return { done: false, evidence: "visual_reference_plan.json missing" };
+  const characterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
+  const characterStatus = String(characterRefs?.status ?? "").toLowerCase();
   const targets = Array.isArray(plan.reference_targets) ? plan.reference_targets : [];
   const required = targets.filter((target) => {
     const mode = String(target.generation_mode ?? "");
     return Boolean(target.required_before_imagegen)
       || mode === "standalone_ref"
-      || mode === "manual";
+      || mode === "manual_review";
   });
   const missing = [];
   const byHash = new Map();
   let present = 0;
   if (!required.length) {
+    if (characterStatus === "draft_needs_manual_review") {
+      return {
+        done: false,
+        evidence: "required refs=0/0; generated reference approval pending",
+        next_command_shape: visualRefsApproveCommand(identity),
+      };
+    }
     return {
       done: true,
       evidence: "required refs=0/0; no standalone reference images required",
@@ -491,6 +500,13 @@ async function referenceGenerationComplete(episodeDir) {
   }
   const duplicates = [...byHash.values()].filter((rows) => rows.length > 1);
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
+  if (missing.length === 0 && duplicates.length === 0 && characterStatus === "draft_needs_manual_review") {
+    return {
+      done: false,
+      evidence: `required refs=${present}/${required.length}; generated reference approval pending`,
+      next_command_shape: visualRefsApproveCommand(identity),
+    };
+  }
   return {
     done: required.length > 0 && missing.length === 0 && duplicates.length === 0,
     evidence: `required refs=${present}/${required.length}${missing.length ? `; missing=${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ` +${missing.length - 8} more` : ""}` : ""}${duplicates.length ? `; duplicate_hashes=${duplicateSummary.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}`,
@@ -881,20 +897,12 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
     return { done: false, evidence: `${visual.evidence}; character_state_refs.json missing` };
   }
   const characterStatus = String(characterRefs.status ?? "").toLowerCase();
-  const needsApproval = characterStatus === "draft_needs_manual_review";
   const statusOk = ["approved", "passed", "draft_needs_manual_review"].includes(characterStatus);
   const characterHash = characterRefs.source_script_hash ?? characterRefs.script_hash ?? characterRefs.script_clean_hash ?? null;
   if (!statusOk || characterHash !== currentScriptHash) {
     return {
       done: false,
       evidence: `${visual.evidence}; character_state_refs.json ${characterStatus || "missing_status"} for hash ${characterHash ?? "none"}; required hash ${currentScriptHash}`,
-    };
-  }
-  if (needsApproval) {
-    return {
-      done: false,
-      evidence: `${visual.evidence}; character_state_refs.json status=draft_needs_manual_review`,
-      next_command_shape: visualRefsApproveCommand(identity),
     };
   }
   const charSourceHashes = characterRefs.source_hashes && typeof characterRefs.source_hashes === "object" && !Array.isArray(characterRefs.source_hashes)
@@ -969,7 +977,7 @@ async function main() {
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode);
-  const referenceGeneration = await referenceGenerationComplete(episodeDir);
+  const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
   const imagegen = await imageReportComplete(episodeDir, episode, identity);
   const render = await renderComplete(episodeDir, episode);
   const latestQa = await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
@@ -999,7 +1007,7 @@ async function main() {
     stage("longform_audio_mix", narratorOnly ? "stitched narration/Qwen report" : "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
     stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, visualBeatPlan.done, visualBeatPlan.evidence, identity),
     stage("visual_reference_plan", "visual beats + semantic facts", "reference_inventory_ledger.json + visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
-    stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity),
+    stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity, referenceGeneration.next_command_shape),
     stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
     stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),
     stage("image_generation", "hardened prompt plan + generated refs", `imagegen_report_${episode}.json + assets/images`, false, imagegen.done, imagegen.evidence, identity, imagegen.next_command_shape),

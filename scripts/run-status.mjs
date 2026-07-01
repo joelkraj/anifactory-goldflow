@@ -6,6 +6,7 @@ import path from "node:path";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
+const CURRENT_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -814,6 +815,23 @@ async function jsonStatusWithSourceHashesComplete(filePath, label) {
   const status = String(artifact.status ?? "").toLowerCase();
   if (!statusAllowsDownstreamUse(status)) {
     return { done: false, evidence: `${label}; status=${status || "missing_status"}` };
+  }
+  if (label === "visual_beat_plan.json") {
+    const contractVersion = artifact.visual_beat_contract_version ?? artifact.planner_contract_version ?? null;
+    if (contractVersion !== CURRENT_VISUAL_BEAT_CONTRACT_VERSION) {
+      return {
+        done: false,
+        evidence: `${label}; status=${status || "missing_status"}; stale planner_contract_version=${contractVersion ?? "missing"} required=${CURRENT_VISUAL_BEAT_CONTRACT_VERSION}`,
+      };
+    }
+    const beats = Array.isArray(artifact.beats) ? artifact.beats : [];
+    const missingRefNeeds = beats.filter((beat) => !Array.isArray(beat.ref_needs) && !Array.isArray(beat.beat_ref_requirements));
+    if (beats.length && missingRefNeeds.length) {
+      return {
+        done: false,
+        evidence: `${label}; status=${status || "missing_status"}; ${missingRefNeeds.length}/${beats.length} beats missing ref_needs contract`,
+      };
+    }
   }
   const sourceHashes = artifact.source_hashes && typeof artifact.source_hashes === "object" && !Array.isArray(artifact.source_hashes)
     ? artifact.source_hashes

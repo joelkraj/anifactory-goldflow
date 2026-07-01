@@ -136,8 +136,14 @@ function compactScene(scene) {
       visual_beat_script_excerpt: String(beat.visual_beat_script_excerpt ?? beat.script_excerpt ?? "").slice(0, 500),
       visual_beat_action: String(beat.visual_beat_action ?? beat.action ?? "").slice(0, 360),
       visible_subjects: beat.visible_subjects ?? [],
+      visible_characters: beat.visible_characters ?? [],
+      mentioned_only_characters: beat.mentioned_only_characters ?? [],
       primary_subject: beat.primary_subject ?? null,
       location: beat.location ?? null,
+      local_location: beat.local_location ?? beat.location ?? null,
+      local_props: beat.local_props ?? beat.props ?? [],
+      local_ui_elements: beat.local_ui_elements ?? beat.ui_text_on_screen ?? [],
+      ref_needs: beat.ref_needs ?? beat.beat_ref_requirements ?? [],
     })),
   };
 }
@@ -220,6 +226,8 @@ Rules:
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
 - For real named public creators, streamers, celebrities, or influencers whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and anime/manhwa styling.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
+- When visual_beats carry ref_needs or beat_ref_requirements, treat those as the local transcript-timed reference strategy. Semantic scene ref_requirements remain broad scene coverage; beat ref_needs decide what the current cut actually needs and whether it should be standalone_ref, no_ref_needed, derive_from_first_clean_cut, derive_from_first_clean_wide_cut, or derive_from_best_cut.
+- Preserve beat-authored generation_mode unless there is a clear episode-level reason to upgrade a recurring/high-risk target or merge duplicate targets. Do not downgrade a beat-level standalone_ref for a visible recurring character, opening-retention anchor, critical prop/UI motif, or high-risk contact character without explaining the reason in warnings/risk_notes.
 - If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
 - Decide whether each target needs a standalone reference, should be derived from a generated cut, needs no reference, or needs operator/manual review. Semantic ref_requirements are scoped target candidates; they are not automatic standalone-generation requirements.
 - Use generic production logic. Do not hardcode story-specific rules.
@@ -347,6 +355,8 @@ Rules:
 - Do not create separate negative_prompt, avoid_list, or exclude_list payloads. Keep provider-facing content in the normal prompt anchor.
 - Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
+- When visual_beats carry ref_needs or beat_ref_requirements, treat those as the local transcript-timed reference strategy. Semantic scene ref_requirements remain broad scene coverage; beat ref_needs decide what the current cut actually needs and whether it should be standalone_ref, no_ref_needed, derive_from_first_clean_cut, derive_from_first_clean_wide_cut, or derive_from_best_cut.
+- Preserve beat-authored generation_mode unless there is a clear episode-level reason to upgrade a recurring/high-risk target or merge duplicate targets. Do not downgrade a beat-level standalone_ref for a visible recurring character, opening-retention anchor, critical prop/UI motif, or high-risk contact character without explaining the reason in warnings/risk_notes.
 - If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
 - Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
 - Reference kind taxonomy is strict:

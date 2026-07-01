@@ -34,6 +34,7 @@ const blockVisualBeatQualityFindings = flags["block-visual-beat-quality-findings
 const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
 const scopeEndSec = flags["scope-end-sec"] ?? flags["max-time-sec"] ?? flags["first-sec"];
 const scopeEndSecNumber = scopeEndSec == null ? null : Number(scopeEndSec);
+const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -464,6 +465,215 @@ function normalizedTokens(value) {
     .filter((token) => token.length > 2);
 }
 
+function refIdForSubject(subject, kind = "ref") {
+  const base = String(subject ?? kind)
+    .toLowerCase()
+    .replace(/\b(?:the|a|an|his|her|their|my|our)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${base || kind}_ref`;
+}
+
+function normalizedName(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function namesInText(names, text) {
+  const source = normalizedName(text);
+  return [...new Set((names ?? [])
+    .map((name) => String(name ?? "").trim())
+    .filter(Boolean)
+    .filter((name) => {
+      const normalized = normalizedName(name);
+      const first = normalized.split(" ")[0];
+      return normalized && (
+        source.includes(normalized)
+        || (first && first.length > 2 && source.split(" ").includes(first))
+      );
+    }))];
+}
+
+function localVisibleCharacters(scene, beatText) {
+  const visibleSubjects = Array.isArray(scene.visible_subjects) ? scene.visible_subjects : [];
+  const stateNames = (Array.isArray(scene.character_states) ? scene.character_states : []).map((state) => state?.character).filter(Boolean);
+  const candidates = [...new Set([...visibleSubjects, ...stateNames].map((name) => String(name ?? "").trim()).filter(Boolean))];
+  const mentioned = namesInText(candidates, beatText);
+  if (mentioned.length) return mentioned;
+  const lower = String(beatText ?? "").toLowerCase();
+  if (/\b(?:he|him|his|i|me|my)\b/.test(lower) && scene.primary_subject) return [scene.primary_subject];
+  return scene.primary_subject ? [scene.primary_subject] : [];
+}
+
+function localMentionedOnlyCharacters(scene, beatText, visibleCharacters) {
+  const visible = new Set((visibleCharacters ?? []).map(normalizedName));
+  const candidates = [
+    ...(Array.isArray(scene.visible_subjects) ? scene.visible_subjects : []),
+    ...(Array.isArray(scene.character_states) ? scene.character_states : []).map((state) => state?.character),
+  ].map((name) => String(name ?? "").trim()).filter(Boolean);
+  return namesInText(candidates, beatText).filter((name) => !visible.has(normalizedName(name)));
+}
+
+function localProps(scene, beatText) {
+  const props = Array.isArray(scene.props) ? scene.props : [];
+  const source = normalizedName(beatText);
+  const matched = props.filter((prop) => {
+    const tokens = normalizedTokens(prop);
+    return tokens.some((token) => source.split(" ").includes(token));
+  });
+  if (matched.length) return [...new Set(matched)];
+  return props.slice(0, 4);
+}
+
+function localUiElements(scene, beatText) {
+  const source = String(beatText ?? "");
+  const sceneUi = Array.isArray(scene.ui_text_on_screen) ? scene.ui_text_on_screen : [];
+  const hasUiCue = /\b(?:system|quest|status|rank|level|panel|screen|notification|dashboard|ledger|audit|timer|score|counter|message|chat|viewer|viewers)\b/i.test(source);
+  if (!hasUiCue) return [];
+  return sceneUi.length ? sceneUi.slice(0, 4) : ["system/status UI motif"];
+}
+
+function generationModeForBeatRef({ kind, beat, subject, visibleCharacters }) {
+  const start = Number(beat.start_sec ?? 0);
+  const source = String(beat.visual_beat_script_excerpt ?? beat.visual_beat_action ?? "").toLowerCase();
+  const hookOrRamp = start < retentionRampSec;
+  if (kind === "character") {
+    if ((visibleCharacters ?? []).length && (hookOrRamp || normalizedName(subject) === normalizedName(beat.primary_subject))) return "standalone_ref";
+    if (/\b(?:grab|shove|push|pull|strike|fight|restrain|carry|rescue|touch|hold|attack)\b/.test(source)) return "standalone_ref";
+    return "derive_from_best_cut";
+  }
+  if (kind === "location") {
+    if (hookOrRamp) return "standalone_ref";
+    if (beat.visual_job === "location_transition" || beat.suggested_shot_job === "environment_establishing") return "derive_from_first_clean_wide_cut";
+    return "derive_from_best_cut";
+  }
+  if (kind === "ui") {
+    return hookOrRamp || /\b(?:system|quest|status|rank|level)\b/.test(source) ? "standalone_ref" : "derive_from_best_cut";
+  }
+  if (kind === "prop") {
+    if (hookOrRamp && /\b(?:evidence|recorder|badge|contract|receipt|ring|key|weapon|phone)\b/.test(source)) return "standalone_ref";
+    return "derive_from_best_cut";
+  }
+  return "no_ref_needed";
+}
+
+function anchorPolicyForMode(mode) {
+  if (mode === "derive_from_first_clean_cut") return "first_clean_visible_cut";
+  if (mode === "derive_from_first_clean_wide_cut") return "first_clean_wide_cut";
+  if (mode === "derive_from_best_cut") return "best_clean_visible_cut";
+  return "none";
+}
+
+function beatRefNeed({ refId, kind, subject, mode, reason, beat }) {
+  return {
+    ref_id: refId,
+    kind,
+    subject,
+    generation_mode: mode,
+    anchor_cut_policy: anchorPolicyForMode(mode),
+    required_before_imagegen: mode === "standalone_ref" || mode === "manual_review",
+    source: "visual_beat_ref_strategy",
+    scene_id: beat.parent_scene_id ?? beat.scene_id,
+    visual_beat_id: beat.visual_beat_id,
+    image_id_hint: beat.image_id_hint ?? null,
+    reason,
+  };
+}
+
+function localBeatReferenceNeeds(scene, beat, {
+  visibleCharacters = [],
+  mentionedOnlyCharacters = [],
+  props = [],
+  uiElements = [],
+} = {}) {
+  const needs = [];
+  const sceneId = beat.parent_scene_id ?? beat.scene_id;
+  const semanticRequirements = Array.isArray(scene.ref_requirements) ? scene.ref_requirements : [];
+  const semanticByKind = new Map();
+  for (const requirement of semanticRequirements) {
+    const kind = String(requirement?.kind ?? "").toLowerCase();
+    if (!semanticByKind.has(kind)) semanticByKind.set(kind, []);
+    semanticByKind.get(kind).push(requirement);
+  }
+
+  for (const character of visibleCharacters) {
+    const mode = generationModeForBeatRef({ kind: "character", beat, subject: character, visibleCharacters });
+    needs.push(beatRefNeed({
+      refId: refIdForSubject(character, "character"),
+      kind: "character",
+      subject: character,
+      mode,
+      reason: "Visible local beat character; visual prompts need identity/wardrobe continuity if recurring or high-risk.",
+      beat,
+    }));
+  }
+
+  for (const character of mentionedOnlyCharacters) {
+    needs.push(beatRefNeed({
+      refId: refIdForSubject(character, "character"),
+      kind: "character",
+      subject: character,
+      mode: "no_ref_needed",
+      reason: "Character is mentioned in the local beat excerpt but not physically visible.",
+      beat,
+    }));
+  }
+
+  const locationRequirements = (semanticByKind.get("location") ?? []).filter((requirement) => (
+    !Array.isArray(requirement.scene_ids)
+    || !requirement.scene_ids.length
+    || requirement.scene_ids.includes(sceneId)
+  ));
+  const locationSubject = beat.location ?? scene.location ?? null;
+  if (locationSubject) {
+    const requirement = locationRequirements[0] ?? null;
+    const mode = generationModeForBeatRef({ kind: "location", beat, subject: locationSubject, visibleCharacters });
+    needs.push(beatRefNeed({
+      refId: requirement?.ref_id ?? refIdForSubject(locationSubject, "location"),
+      kind: "location",
+      subject: locationSubject,
+      mode,
+      reason: requirement?.reason ?? "Local beat has a physical environment that should guide prompt/ref planning.",
+      beat,
+    }));
+  }
+
+  for (const prop of props.slice(0, 6)) {
+    const mode = generationModeForBeatRef({ kind: "prop", beat, subject: prop, visibleCharacters });
+    needs.push(beatRefNeed({
+      refId: refIdForSubject(prop, "prop"),
+      kind: "prop",
+      subject: prop,
+      mode,
+      reason: "Local beat prop/object may need continuity if it recurs or carries story evidence.",
+      beat,
+    }));
+  }
+
+  for (const ui of uiElements.slice(0, 4)) {
+    const mode = generationModeForBeatRef({ kind: "ui", beat, subject: ui, visibleCharacters });
+    needs.push(beatRefNeed({
+      refId: refIdForSubject(ui, "ui"),
+      kind: "ui",
+      subject: ui,
+      mode,
+      reason: "Local beat includes UI/system/chat/status imagery.",
+      beat,
+    }));
+  }
+
+  const seen = new Set();
+  return needs.filter((need) => {
+    const key = `${need.kind}|${need.ref_id}|${need.generation_mode}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function localBeatLocation(scene, beatText) {
   const locationRequirements = (Array.isArray(scene.ref_requirements) ? scene.ref_requirements : [])
     .filter((requirement) => String(requirement?.kind ?? "").toLowerCase() === "location");
@@ -499,10 +709,40 @@ function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
     const beatText = unit.text ?? "";
     const suggestedShotJob = unit.suggested_shot_job ?? suggestedShotJobForBeat({ text: beatText, index, count: editorialUnits.length, startSec: beatStart });
     const location = localBeatLocation(scene, beatText);
+    const baseBeat = {
+      ...scene,
+      location,
+      parent_scene_id: scene.scene_id,
+      scene_id: scene.scene_id,
+      visual_beat_id: `${scene.scene_id}_beat_${String(index + 1).padStart(2, "0")}`,
+      start_sec: Number(beatStart.toFixed(3)),
+      visual_job: unit.visual_job ?? visualJobFromCues(unit.editorial_cues ?? [], beatText, index, editorialUnits.length, beatStart),
+      suggested_shot_job: suggestedShotJob,
+      visual_beat_script_excerpt: beatText,
+      visual_beat_action: compactBeatAction(beatText, focus),
+    };
+    const visibleCharacters = localVisibleCharacters(scene, beatText);
+    const mentionedOnlyCharacters = localMentionedOnlyCharacters(scene, beatText, visibleCharacters);
+    const props = localProps(scene, beatText);
+    const uiElements = localUiElements(scene, beatText);
+    const refNeeds = localBeatReferenceNeeds(scene, baseBeat, {
+      visibleCharacters,
+      mentionedOnlyCharacters,
+      props,
+      uiElements,
+    });
     beats.push({
       ...scene,
       location,
-      visual_beat_id: `${scene.scene_id}_beat_${String(index + 1).padStart(2, "0")}`,
+      local_location: location,
+      visible_characters: visibleCharacters,
+      mentioned_only_characters: mentionedOnlyCharacters,
+      local_props: props,
+      local_ui_elements: uiElements,
+      ref_needs: refNeeds,
+      beat_ref_requirements: refNeeds,
+      visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+      visual_beat_id: baseBeat.visual_beat_id,
       parent_scene_id: scene.scene_id,
       scene_id: scene.scene_id,
       beat_index: index + 1,
@@ -876,6 +1116,8 @@ async function main() {
     }));
   const report = {
     schema: "goldflow_visual_beat_plan_v1",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     status: "passed",
     channel,
     series_slug: series,
@@ -914,7 +1156,7 @@ async function main() {
       ])),
     },
     location_timeline: locationTimeline,
-    policy: "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry an exact local narration excerpt, editorial cues, a visual job, and a location/character context before prompt authoring.",
+    policy: "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry exact local narration excerpt, local location, visible characters, mentioned-only characters, props/UI, visual job, and beat-level reference needs with generation mode decisions before reference or prompt authoring.",
     beat_settings: {
       target_beat_sec: targetBeatSec,
       max_beat_sec: maxBeatSec,

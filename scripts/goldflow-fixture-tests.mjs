@@ -46,6 +46,7 @@ import {
 } from "./semantic-scene-plan.mjs";
 
 const execFileAsync = promisify(execFile);
+const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -256,6 +257,8 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   });
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: hash,
     beats: semanticScenes.map((scene) => ({
       scene_id: scene.scene_id,
@@ -264,6 +267,7 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       start_sec: scene.start_sec,
       duration_sec: 6,
       visual_beat_script_excerpt: `Fixture beat in ${scene.location}.`,
+      ref_needs: [],
     })),
   });
   await writeJson(path.join(weekDir, "visual_style_bible.json"), { style_summary: "text style bible is sufficient" });
@@ -951,9 +955,14 @@ async function testVisualBeatDensityDefaults() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const report = JSON.parse(await fs.readFile(path.join(episodeDir, "visual_beat_plan.json"), "utf8"));
   assert.equal(report.status, "passed");
+  assert.equal(report.visual_beat_contract_version, VISUAL_BEAT_CONTRACT_VERSION);
   assert.equal(report.hook_visual_beat_count >= 8, true);
   assert.equal(report.retention_ramp_visual_beat_count >= 24, true);
   assert.equal(report.beats.every((beat) => String(beat.visual_beat_script_excerpt ?? "").trim()), true);
+  assert.equal(report.beats.every((beat) => Array.isArray(beat.ref_needs)), true);
+  assert.equal(report.beats.some((beat) => beat.ref_needs.some((need) => need.generation_mode === "standalone_ref")), true);
+  assert.equal(report.beats.some((beat) => Array.isArray(beat.visible_characters)), true);
+  assert.equal(report.beats.some((beat) => Array.isArray(beat.local_props)), true);
   assert.equal(report.beats[0].visual_job, "premise_image");
   assert.equal(report.editorial_cue_counts.public_humiliation_or_reversal >= 1, true);
   assert.equal(report.beats.some((beat) => beat.visual_job === "system_reveal"), true);
@@ -1258,6 +1267,7 @@ async function testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm() {
       visual_beat_script_excerpt: `Fixture beat ${index + 1} moves the proof through a distinct visible area.`,
       visual_job: index % 2 === 0 ? "consequence" : "reaction_shot",
       suggested_shot_job: index % 2 === 0 ? "consequence" : "emotional_reaction",
+      ref_needs: [],
     };
   });
   await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
@@ -1274,6 +1284,8 @@ async function testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm() {
   });
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: hash,
     beats,
   });
@@ -1341,6 +1353,7 @@ async function testVisualPlanAllowsSameLocationLabelAliases() {
       visual_beat_script_excerpt: `Fixture beat ${index + 1} remains in the same comedy pressure studio table area.`,
       visual_job: "humiliation_image",
       suggested_shot_job: "emotional_reaction",
+      ref_needs: [],
     };
   });
   await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
@@ -1357,6 +1370,8 @@ async function testVisualPlanAllowsSameLocationLabelAliases() {
   });
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: hash,
     beats,
   });
@@ -1546,10 +1561,12 @@ async function testOnlyScenesDryRun() {
   });
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: hash,
     beats: [
-      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "scene_001_beat_01", start_sec: 0, duration_sec: 5, location: "apartment" },
-      { scene_id: "scene_002", parent_scene_id: "scene_002", visual_beat_id: "scene_002_beat_01", start_sec: 5, duration_sec: 5, location: "boardroom" },
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "scene_001_beat_01", start_sec: 0, duration_sec: 5, location: "apartment", ref_needs: [] },
+      { scene_id: "scene_002", parent_scene_id: "scene_002", visual_beat_id: "scene_002_beat_01", start_sec: 5, duration_sec: 5, location: "boardroom", ref_needs: [] },
     ],
   });
   await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: hash, scenes: [] });
@@ -1590,11 +1607,13 @@ async function testOnlyCutIdsDryRun() {
   });
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: hash,
     beats: [
-      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_001", start_sec: 0, duration_sec: 5, location: "event hall" },
-      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_002", start_sec: 5, duration_sec: 5, location: "event hall" },
-      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_003", start_sec: 10, duration_sec: 5, location: "event hall" },
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_001", start_sec: 0, duration_sec: 5, location: "event hall", ref_needs: [] },
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_002", start_sec: 5, duration_sec: 5, location: "event hall", ref_needs: [] },
+      { scene_id: "scene_001", parent_scene_id: "scene_001", visual_beat_id: "beat_003", start_sec: 10, duration_sec: 5, location: "event hall", ref_needs: [] },
     ],
   });
   await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: hash, scenes: [] });
@@ -1792,7 +1811,13 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
   const finalAudioPath = path.join(episodeDir, "assets", "audio", "final_mix.m4a");
   await fs.writeFile(finalAudioPath, Buffer.from("fixture final audio"));
   await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), { status: "passed", final_audio_path: finalAudioPath });
-  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), { status: "passed", source_script_hash: scriptHash, beats: [] });
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    source_script_hash: scriptHash,
+    beats: [],
+  });
   const refPath = path.join(episodeDir, "assets", "images", "references", "style_ref.png");
   await fs.writeFile(refPath, Buffer.from("fixture ref"));
   await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
@@ -2383,13 +2408,34 @@ async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
     },
     beats: [],
   });
-  await writeJson(timedPath, { status: "passed", source_script_hash: scriptHash, scenes: [{ scene_id: "scene_001" }] });
-  const { stdout } = await execFileAsync(process.execPath, [
+  let statusResult = await execFileAsync(process.execPath, [
     "scripts/run-status.mjs",
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
-  const status = JSON.parse(stdout);
-  const visualBeatStage = status.stage_ledger.find((row) => row.stage === "visual_beat_plan");
+  let status = JSON.parse(statusResult.stdout);
+  let visualBeatStage = status.stage_ledger.find((row) => row.stage === "visual_beat_plan");
+  assert.equal(status.current_stage, "visual_beat_plan");
+  assert.equal(visualBeatStage.exists, false);
+  assert.match(visualBeatStage.evidence, /stale planner_contract_version=missing/);
+
+  await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
+    status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    source_script_hash: scriptHash,
+    source_hashes: {
+      [timedPath]: sha256(await fs.readFile(timedPath)),
+      [scriptPath]: sha256(await fs.readFile(scriptPath)),
+    },
+    beats: [],
+  });
+  await writeJson(timedPath, { status: "passed", source_script_hash: scriptHash, scenes: [{ scene_id: "scene_001" }] });
+  statusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  status = JSON.parse(statusResult.stdout);
+  visualBeatStage = status.stage_ledger.find((row) => row.stage === "visual_beat_plan");
   assert.equal(status.current_stage, "visual_beat_plan");
   assert.equal(visualBeatStage.exists, false);
   assert.match(visualBeatStage.evidence, /timed_scene_plan\.json stale/);
@@ -2427,12 +2473,14 @@ async function testRunStatusBlocksStaleVisualReferenceSourceHashes() {
   const scriptPath = path.join(episodeDir, "script_clean.md");
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: scriptHash,
     source_hashes: {
       [timedPath]: sha256(await fs.readFile(timedPath)),
       [scriptPath]: sha256(await fs.readFile(scriptPath)),
     },
-    beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001" }],
+    beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001", ref_needs: [] }],
   });
   const visualRefPath = path.join(episodeDir, "visual_reference_plan.json");
   await writeJson(visualRefPath, {
@@ -2496,12 +2544,14 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
   const scriptPath = path.join(episodeDir, "script_clean.md");
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
+    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
     source_script_hash: scriptHash,
     source_hashes: {
       [timedPath]: sha256(await fs.readFile(timedPath)),
       [scriptPath]: sha256(await fs.readFile(scriptPath)),
     },
-    beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001" }],
+    beats: [{ visual_beat_id: "scene_001_beat_01", scene_id: "scene_001", ref_needs: [] }],
   });
   const visualRefPath = path.join(episodeDir, "visual_reference_plan.json");
   await writeJson(visualRefPath, {

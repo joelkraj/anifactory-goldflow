@@ -609,6 +609,21 @@ function beatRefNeed({ refId, kind, subject, mode, reason, beat }) {
   };
 }
 
+function semanticRequirementForSubject(requirements, subject) {
+  const subjectTokens = normalizedTokens(subject);
+  if (!subjectTokens.length) return null;
+  let best = null;
+  for (const requirement of (Array.isArray(requirements) ? requirements : [])) {
+    const requirementTokens = normalizedTokens(`${requirement?.ref_id ?? ""} ${requirement?.subject ?? ""} ${requirement?.description ?? ""} ${requirement?.reason ?? ""}`);
+    if (!requirementTokens.length) continue;
+    const overlap = subjectTokens.filter((token) => requirementTokens.includes(token)).length;
+    const firstMatches = subjectTokens[0] && requirementTokens.includes(subjectTokens[0]) ? 1 : 0;
+    const score = overlap + firstMatches;
+    if (score > (best?.score ?? 0)) best = { score, requirement };
+  }
+  return best?.score > 0 ? best.requirement : null;
+}
+
 function localBeatReferenceNeeds(scene, beat, {
   visibleCharacters = [],
   mentionedOnlyCharacters = [],
@@ -626,24 +641,26 @@ function localBeatReferenceNeeds(scene, beat, {
   }
 
   for (const character of visibleCharacters) {
+    const requirement = semanticRequirementForSubject(semanticByKind.get("character") ?? [], character);
     const mode = generationModeForBeatRef({ kind: "character", beat, subject: character, visibleCharacters });
     needs.push(beatRefNeed({
-      refId: refIdForSubject(character, "character"),
+      refId: requirement?.ref_id ?? refIdForSubject(character, "character"),
       kind: "character",
       subject: character,
       mode,
-      reason: "Visible local beat character; visual prompts need identity/wardrobe continuity if recurring or high-risk.",
+      reason: requirement?.reason ?? "Visible local beat character; visual prompts need identity/wardrobe continuity if recurring or high-risk.",
       beat,
     }));
   }
 
   for (const character of mentionedOnlyCharacters) {
+    const requirement = semanticRequirementForSubject(semanticByKind.get("character") ?? [], character);
     needs.push(beatRefNeed({
-      refId: refIdForSubject(character, "character"),
+      refId: requirement?.ref_id ?? refIdForSubject(character, "character"),
       kind: "character",
       subject: character,
       mode: "no_ref_needed",
-      reason: "Character is mentioned in the local beat excerpt but not physically visible.",
+      reason: requirement?.reason ?? "Character is mentioned in the local beat excerpt but not physically visible.",
       beat,
     }));
   }
@@ -668,25 +685,27 @@ function localBeatReferenceNeeds(scene, beat, {
   }
 
   for (const prop of props.slice(0, 6)) {
+    const requirement = semanticRequirementForSubject(semanticByKind.get("prop") ?? [], prop);
     const mode = generationModeForBeatRef({ kind: "prop", beat, subject: prop, visibleCharacters });
     needs.push(beatRefNeed({
-      refId: refIdForSubject(prop, "prop"),
+      refId: requirement?.ref_id ?? refIdForSubject(prop, "prop"),
       kind: "prop",
       subject: prop,
       mode,
-      reason: "Local beat prop/object may need continuity if it recurs or carries story evidence.",
+      reason: requirement?.reason ?? "Local beat prop/object may need continuity if it recurs or carries story evidence.",
       beat,
     }));
   }
 
   for (const ui of uiElements.slice(0, 4)) {
+    const requirement = semanticRequirementForSubject(semanticByKind.get("ui") ?? [], ui);
     const mode = generationModeForBeatRef({ kind: "ui", beat, subject: ui, visibleCharacters });
     needs.push(beatRefNeed({
-      refId: refIdForSubject(ui, "ui"),
+      refId: requirement?.ref_id ?? refIdForSubject(ui, "ui"),
       kind: "ui",
       subject: ui,
       mode,
-      reason: "Local beat includes UI/system/chat/status imagery.",
+      reason: requirement?.reason ?? "Local beat includes UI/system/chat/status imagery.",
       beat,
     }));
   }

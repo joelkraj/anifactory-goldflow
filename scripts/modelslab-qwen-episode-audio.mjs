@@ -743,6 +743,7 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
   const previous = force || !cacheMatchesUnit ? null : cachedMeta;
   let initial = previous?.request?.id ? previous.request : await makeRequest();
   let resolved;
+  let finalUrl = null;
   let lastError = null;
   const attempts = Number(process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_ATTEMPTS ?? 4);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -755,11 +756,17 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
     }, null, 2));
     try {
       resolved = await resolveAudioResponse(initial);
+      const url = audioLinks(resolved)[0];
+      if (!url) throw new Error(`ModelsLab Qwen returned no audio URL for ${unit.segment_id}`);
+      await fs.writeFile(meta, JSON.stringify({ request: initial, resolved, unit, voice }, null, 2));
+      const ok = await downloadWhenReady(url, wav);
+      if (!ok) throw new Error(`Timed out downloading ${url}`);
+      finalUrl = url;
       break;
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
-      if (!/Try Again|failed|Timed out polling|aborted/i.test(message) || attempt === attempts) break;
+      if (!/Try Again|failed|Timed out polling|Timed out downloading|aborted/i.test(message) || attempt === attempts) break;
       initial = await makeRequest();
       await fs.writeFile(meta, JSON.stringify({
         request: initial,
@@ -772,12 +779,8 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
     }
   }
   if (!resolved) throw lastError ?? new Error(`ModelsLab Qwen did not resolve ${unit.segment_id}`);
-  await fs.writeFile(meta, JSON.stringify({ request: initial, resolved, unit, voice }, null, 2));
-  const url = audioLinks(resolved)[0];
-  if (!url) throw new Error(`ModelsLab Qwen returned no audio URL for ${unit.segment_id}`);
-  const ok = await downloadWhenReady(url, wav);
-  if (!ok) throw new Error(`Timed out downloading ${url}`);
-  return { ...unit, status: "generated", wav, url, duration_sec: await mediaDuration(wav), meta };
+  if (!finalUrl) throw lastError ?? new Error(`ModelsLab Qwen did not download audio for ${unit.segment_id}`);
+  return { ...unit, status: "generated", wav, url: finalUrl, duration_sec: await mediaDuration(wav), meta };
 }
 
 function concatLine(filePath) {

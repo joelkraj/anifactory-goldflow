@@ -564,6 +564,18 @@ async function promptFresh(prompt, outputPath) {
   return current === (prompt.prompt_hash ?? sha256(promptTextForImageProvider(prompt, imageProvider)));
 }
 
+async function reusableImportedCodexImage(prompt, outputPath) {
+  if (!(await exists(outputPath))) return false;
+  const metadata = await readJson(`${outputPath}.metadata.json`, null);
+  const provider = String(metadata?.image_provider ?? "");
+  const source = String(metadata?.generated?.source ?? "");
+  if (!/codex/i.test(provider) && !/codex/i.test(source)) return false;
+  if (metadata?.image_id && String(metadata.image_id) !== String(prompt.image_id)) return false;
+  const sourcePromptPath = metadata?.source_prompt_path ? path.resolve(String(metadata.source_prompt_path)) : null;
+  if (sourcePromptPath && sourcePromptPath !== path.resolve(promptPath)) return false;
+  return Boolean(metadata?.generated?.output_sha256 ?? metadata?.generated?.manual_source_sha256 ?? metadata?.prompt_hash);
+}
+
 async function runPool(items, worker, limit) {
   const results = [];
   let index = 0;
@@ -640,6 +652,9 @@ async function generateOne(prompt) {
   const modelPrompt = [sceneAspectInstruction(routedProvider), promptWithReferenceSlots(prompt, routedProvider)].filter(Boolean).join(" ");
   const sceneGeometry = routedProvider === "modelslab" ? modelslabSceneGeometry() : {};
   const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, provider: routedProvider, model: imageModelOverride ?? prompt.image_model_route ?? "flux-klein", ...sceneGeometry }));
+  if (routedProvider === "codex_imagegen" && !forceImages && await reusableImportedCodexImage(prompt, outputPath)) {
+    return { image_id: prompt.image_id, status: "reused_imported_codex", image_path: outputPath, prompt_hash: promptHash, image_provider: routedProvider, image_provider_route: imageProvider };
+  }
   if (!forceImages && await promptFresh({ ...prompt, prompt_hash: promptHash, modelslab_image_prompt: modelPrompt }, outputPath)) {
     return { image_id: prompt.image_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash, image_provider: routedProvider };
   }
@@ -964,6 +979,10 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
   return [...mergedById.values()].sort((a, b) => String(a.image_id).localeCompare(String(b.image_id), undefined, { numeric: true }));
 }
 
+function imageResultPassed(row) {
+  return ["generated", "reused_fresh", "reused_imported_codex", "existing_file"].includes(String(row?.status ?? "").toLowerCase());
+}
+
 async function assertNoVisualResolutionDeadletter(plan, selectedPrompts = []) {
   if (plan?.status === "blocked_deadletter" || plan?.visual_resolution_deadletter_path) {
     throw new Error(`Imagegen refused blocked visual prompt plan with dead-lettered scenes: ${plan.visual_resolution_deadletter_path ?? visualResolutionDeadletterPath}`);
@@ -1048,7 +1067,7 @@ async function main() {
   const mergedResults = await mergeImagegenResults({ currentResults: results, promptIds: allPromptIds, promptPlanHash });
   const report = {
     schema: "goldflow_imagegen_report_v1",
-    status: results.every((row) => row.status === "generated" || row.status === "reused_fresh") ? "passed" : "failed",
+    status: results.every((row) => imageResultPassed(row)) ? "passed" : "failed",
     channel,
     series_slug: series,
     week,

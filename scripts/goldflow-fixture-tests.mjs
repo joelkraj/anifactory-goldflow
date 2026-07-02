@@ -3087,6 +3087,75 @@ async function testDerivedReferencePromotionFromSeedCut() {
   assert.equal(promotionReport.unresolved_count, 0);
 }
 
+async function testImagegenReusesImportedCodexOpeningCut() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const imageDir = path.join(episodeDir, "assets", "images");
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    image_provider: "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    image_provider_options: { codex_opening_sec: 300 },
+    audio_target: "narrator_only",
+    run_intent: "production",
+  });
+  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
+    status: "passed",
+    reference_targets: [],
+  });
+  await writeJson(path.join(episodeDir, "character_state_refs.json"), {
+    status: "approved",
+    character_state_refs: [],
+  });
+  await writeJson(promptPath, {
+    status: "passed",
+    prompt_policy: "deterministic hardening fixture",
+    prompts: [
+      {
+        image_id: "ep_01-cut-001",
+        scene_id: "scene_001",
+        start_sec: 0,
+        image_prompt: "Joey stands under a blue system window.",
+        codex_image_prompt: "anime manhwa frame of Joey under a blue system window",
+        image_generation_required: true,
+      },
+    ],
+  });
+  const imagePath = path.join(imageDir, "ep_01-cut-001-codex-imagegen-image.png");
+  await fs.mkdir(imageDir, { recursive: true });
+  await fs.writeFile(imagePath, Buffer.from("fixture imported codex image"));
+  await writeJson(`${imagePath}.metadata.json`, {
+    image_id: "ep_01-cut-001",
+    image_provider: "codex_imagegen_manual_import",
+    source_prompt_path: promptPath,
+    generated: {
+      output_sha256: sha256("fixture imported codex image"),
+      manual_source_sha256: sha256("fixture imported codex image"),
+    },
+  });
+
+  const result = await execFileAsync(process.execPath, [
+    "scripts/imagegen.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--image-provider", "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    "--codex-opening-sec", "300",
+    "--prompts", promptPath,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const stdout = JSON.parse(result.stdout);
+  assert.equal(stdout.status, "passed");
+  const report = await readJson(path.join(episodeDir, "imagegen_report_ep_01.json"));
+  assert.equal(report.status, "passed");
+  assert.equal(report.results.length, 1);
+  assert.equal(report.results[0].status, "reused_imported_codex");
+  assert.equal(report.results[0].image_path, imagePath);
+}
+
 async function testRunStatusDerivedReferenceSeedPromoteAndScopedRetry() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -3287,6 +3356,7 @@ async function run() {
   await testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan();
   testDerivedReferenceCandidateSelectionAndManifestAttach();
   await testDerivedReferencePromotionFromSeedCut();
+  await testImagegenReusesImportedCodexOpeningCut();
   await testRunStatusDerivedReferenceSeedPromoteAndScopedRetry();
   await testSilentTransitionsWithoutSfxBank();
   await testGlobalStylePromptDoesNotInjectCrowdExtras();

@@ -26,6 +26,7 @@ import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs
 import { namedCharacterDuplicationFindings } from "./lib/prompt-prose-findings.mjs";
 import {
   attachReferencePathsToPromptsForTests,
+  assertNoVisualResolutionDeadletterForTests,
   candidateImageIdsForDerivedTargetForTests,
 } from "./imagegen.mjs";
 import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
@@ -1921,6 +1922,45 @@ async function testImagegenDeadletterRefusal() {
       "--allow-unhardened-prompts", "true",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
     /dead-lettered visual scenes/
+  );
+
+  const deadletterPath = path.join(episodeDir, "visual_resolution_deadletter.json");
+  await writeJson(deadletterPath, {
+    status: "resolved",
+    previous_status: "blocked_deadletter",
+    scene_ids: [],
+    image_ids: [],
+    unresolved_blockers: [],
+  });
+  await assert.doesNotReject(() => assertNoVisualResolutionDeadletterForTests(
+    { status: "passed", visual_resolution_deadletter_path: deadletterPath },
+    [{ image_id: "ep_01-cut-001", scene_id: "scene_001" }],
+    { deadletterPath }
+  ));
+
+  await writeJson(deadletterPath, {
+    status: "blocked_deadletter",
+    scene_ids: ["scene_999"],
+    image_ids: ["ep_01-cut-999"],
+  });
+  await assert.doesNotReject(() => assertNoVisualResolutionDeadletterForTests(
+    { status: "passed", visual_resolution_deadletter_path: deadletterPath },
+    [{ image_id: "ep_01-cut-001", scene_id: "scene_001" }],
+    { deadletterPath }
+  ));
+
+  await writeJson(deadletterPath, {
+    status: "blocked_deadletter",
+    scene_ids: [],
+    image_ids: ["ep_01-cut-001"],
+  });
+  await assert.rejects(
+    () => assertNoVisualResolutionDeadletterForTests(
+      { status: "passed", visual_resolution_deadletter_path: deadletterPath },
+      [{ image_id: "ep_01-cut-001", scene_id: "scene_001" }],
+      { deadletterPath }
+    ),
+    /dead-lettered visual cuts/
   );
 }
 

@@ -1176,6 +1176,12 @@ function isGenericCharacterIdentityTarget(target) {
   return false;
 }
 
+function isGenericGroupCharacterTarget(target) {
+  if (String(target.kind ?? "").toLowerCase() !== "character_state") return false;
+  if (isExplicitBaseIdentityTarget(target) || isGenericCharacterIdentityTarget(target) || isPlainNamedIdentitySubject(target)) return false;
+  return isGenericGroupSubject(`${target.subject ?? ""} ${target.ref_id ?? ""}`);
+}
+
 function isPlainNamedIdentitySubject(target) {
   const subject = String(target.subject ?? "").trim().toLowerCase();
   const refTokens = String(target.ref_id ?? "")
@@ -1411,7 +1417,7 @@ function targetShouldGenerateForCandidate(target, stats, openingSec) {
   const baseIdentity = isExplicitBaseIdentityTarget(target) || isGenericCharacterIdentityTarget(target);
   const signatureSystemUi = kind === "ui" && /\b(?:system|quest|status|ranking|rank|ledger|notification|interface|hud|window|panel|score|stat)\b/i.test(anchorText);
   const highRiskContact = kind === "character_state" && /\b(?:fight(?:s|ing)?|restrain(?:s|ing)?\s+(?:him|her|them|joey|protagonist|victim)|shove(?:s|d|ing)?|rescue(?:s|d|ing)?\s+(?:him|her|them|joey|protagonist|victim)|grab(?:s|bed|bing)?|strike(?:s|d|ing)?|hit(?:s|ting)?|slap(?:s|ped|ping)?|wrestle(?:s|d|ing)?|tackle(?:s|d|ing)?|body[- ]?to[- ]?body|physical contact|hand on (?:his|her|their)|hands on (?:his|her|their))\b/i.test(riskText);
-  const genericGroupIdentity = kind === "character_state" && /\b(?:group|crowd|audience|families|guards?|officers?|fighters?|raiders?|riders?|survivors?|witnesses?|attendants?|workers?|public|uniform system|wardrobe system)\b/i.test(anchorText);
+  const genericGroupIdentity = kind === "character_state" && isGenericGroupCharacterTarget(target);
   const bundledMinorProp = (kind === "prop" || kind === "action" || kind === "effect") && (/\bminor\b/i.test(anchorText) || String(target.subject ?? "").split(",").length >= 4);
   if (kind === "style") return { generate: false, mode: "no_ref_needed", reason: "candidate validation uses style text/bible instead of spending a style ref" };
   if (kind === "character_state") {
@@ -1654,6 +1660,176 @@ function matchDirectorAsset(target, inventoryLedger) {
   return best?.score >= 2 ? best.asset : null;
 }
 
+function promptAnchorFromDirectorAsset(asset) {
+  const kind = normalizeKind(asset?.kind);
+  const subject = String(asset?.subject ?? asset?.ref_id ?? asset?.asset_id ?? "reference asset").trim();
+  const notes = [
+    ...(Array.isArray(asset?.reasons) ? asset.reasons : []),
+    ...(Array.isArray(asset?.evidence_excerpts) ? asset.evidence_excerpts : []),
+  ].join(" ").replace(/\s+/g, " ").trim().slice(0, 420);
+  const noteSuffix = notes ? ` Continuity evidence: ${notes}` : "";
+  if (kind === "character_state") {
+    return ensureLandscapeReferenceAnchor(
+      `16:9 landscape anime/manhwa single-character identity reference card for ${subject}, plain neutral background, full or three-quarter body centered, readable face, hair, body type, wardrobe, and state continuity.${noteSuffix}`,
+      "character_state"
+    );
+  }
+  if (kind === "location") {
+    return ensureLandscapeReferenceAnchor(
+      `16:9 landscape anime/manhwa environment-only staging plate for ${subject}, no named characters, clear architecture, surfaces, pathways, foreground space, and scene geography.${noteSuffix}`,
+      "location"
+    );
+  }
+  if (kind === "ui") {
+    return ensureLandscapeReferenceAnchor(
+      `16:9 landscape anime/manhwa UI design plate for ${subject}, clean readable system-panel structure, interface hierarchy, glowing borders, no character scene.${noteSuffix}`,
+      "ui"
+    );
+  }
+  if (kind === "prop") {
+    return ensureLandscapeReferenceAnchor(
+      `16:9 landscape anime/manhwa prop design plate for ${subject}, neutral background, clear silhouette, materials, scale, and recurring details.${noteSuffix}`,
+      "prop"
+    );
+  }
+  if (kind === "action") {
+    return ensureLandscapeReferenceAnchor(
+      `16:9 landscape anime/manhwa action/effect design plate for ${subject}, neutral staging, clear motion language, energy shape, materials, and repeatable visual motif.${noteSuffix}`,
+      "action"
+    );
+  }
+  return ensureLandscapeReferenceAnchor(
+    `16:9 landscape anime/manhwa reference plate for ${subject}.${noteSuffix}`,
+    kind
+  );
+}
+
+function targetFromDirectorAsset(asset) {
+  const kind = normalizeKind(asset?.kind);
+  const mode = generationModes.has(String(asset?.recommended_generation_mode ?? ""))
+    ? String(asset.recommended_generation_mode)
+    : "manual_review";
+  const requiresGeneration = asset?.recommended_required_before_imagegen === true
+    || mode === "standalone_ref"
+    || mode === "manual_review";
+  return normalizeTarget({
+    ref_id: asset.ref_id ?? asset.asset_id,
+    kind,
+    subject: asset.subject ?? asset.ref_id ?? asset.asset_id,
+    scene_ids: Array.isArray(asset.scene_ids) ? asset.scene_ids : [],
+    priority: requiresGeneration ? "required" : "medium",
+    generation_mode: mode,
+    required_before_imagegen: requiresGeneration,
+    prompt_anchor: promptAnchorFromDirectorAsset(asset),
+    anchor_cut_policy: asset.recommended_anchor_cut_policy ?? "none",
+    appearance_count: Number(asset.beat_count ?? asset.distinct_scene_count ?? 0),
+    risk_notes: [
+      ...(Array.isArray(asset.reasons) ? asset.reasons : []),
+      `Restored from director inventory asset ${asset.asset_id ?? asset.ref_id}.`,
+    ],
+    manual_review_required: true,
+    inventory_asset_id: asset.asset_id ?? null,
+    director_role: asset.director_role ?? null,
+  });
+}
+
+function isRequiredDirectorAsset(asset) {
+  const kind = normalizeKind(asset?.kind);
+  if (!["character_state", "location", "prop", "ui", "action"].includes(kind)) return false;
+  const mode = String(asset?.recommended_generation_mode ?? "").toLowerCase();
+  if (asset?.recommended_required_before_imagegen === true) return true;
+  if (mode === "standalone_ref" || mode === "manual_review") return true;
+  return false;
+}
+
+function ensureRequiredDirectorAssets(referenceTargets, characterStateRefs, inventoryLedger) {
+  const warnings = [];
+  const targetByRefId = new Map((referenceTargets ?? []).map((target) => [String(target.ref_id ?? ""), { ...target }]));
+  const targetByAssetId = new Map();
+  const restoredTargetIds = new Set();
+  for (const target of referenceTargets ?? []) {
+    if (target.inventory_asset_id) targetByAssetId.set(String(target.inventory_asset_id), String(target.ref_id ?? ""));
+  }
+  for (const asset of inventoryLedger?.assets ?? []) {
+    if (!isRequiredDirectorAsset(asset)) continue;
+    const refId = String(asset.ref_id ?? asset.asset_id ?? "").trim();
+    if (!refId) continue;
+    const existingRefId = targetByRefId.has(refId) ? refId : targetByAssetId.get(String(asset.asset_id ?? ""));
+    if (existingRefId && targetByRefId.has(existingRefId)) {
+      const existing = targetByRefId.get(existingRefId);
+      targetByRefId.set(existingRefId, {
+        ...existing,
+        inventory_asset_id: existing.inventory_asset_id ?? asset.asset_id ?? null,
+        director_role: existing.director_role ?? asset.director_role ?? null,
+        scene_ids: [...new Set([...(existing.scene_ids ?? []), ...(asset.scene_ids ?? [])].filter(Boolean))],
+        required_before_imagegen: existing.required_before_imagegen === true || asset.recommended_required_before_imagegen === true,
+      });
+      continue;
+    }
+    const restored = targetFromDirectorAsset(asset);
+    targetByRefId.set(restored.ref_id, restored);
+    restoredTargetIds.add(restored.ref_id);
+    warnings.push({
+      code: "required_director_asset_restored",
+      severity: "warning",
+      ref_id: restored.ref_id,
+      inventory_asset_id: asset.asset_id ?? null,
+      kind: restored.kind,
+      message: `Restored required director inventory asset ${restored.ref_id} that was missing from the LLM-authored reference targets.`,
+    });
+  }
+
+  const stateRefById = new Map((characterStateRefs ?? []).map((ref) => [String(ref.state_ref_id ?? ""), { ...ref }]));
+  const existingStateSourceIds = new Set((characterStateRefs ?? []).flatMap((ref) => [
+    ref.state_ref_id,
+    ref.source_ref_id,
+    ref.base_identity_ref_id,
+  ]).filter(Boolean).map(String));
+  const existingStateRows = [...(characterStateRefs ?? [])];
+  for (const target of targetByRefId.values()) {
+    if (!restoredTargetIds.has(String(target.ref_id))) continue;
+    if (normalizeKind(target.kind) !== "character_state") continue;
+    if (!generatedOrAttachableTarget(target)) continue;
+    if (isGenericGroupCharacterTarget(target)) continue;
+    if (existingStateSourceIds.has(String(target.ref_id))) continue;
+    const identityKey = identityMergeKey(target);
+    const firstTargetSceneId = Array.isArray(target.scene_ids) ? target.scene_ids.find(Boolean) : null;
+    const sameIdentityCoversFirstScene = identityKey && firstTargetSceneId
+      ? existingStateRows.some((ref) =>
+          identityMergeKey({ kind: "character_state", subject: ref.character, ref_id: ref.source_ref_id ?? ref.state_ref_id }) === identityKey
+          && (ref.scene_ids ?? []).includes(firstTargetSceneId))
+      : false;
+    if (sameIdentityCoversFirstScene) continue;
+    const restoredRef = normalizeStateRef({
+      state_ref_id: target.ref_id,
+      character: target.subject ?? target.ref_id,
+      scene_ids: target.scene_ids ?? [],
+      prompt_anchor: target.prompt_anchor,
+      scene_prompt_anchor: `${target.subject ?? target.ref_id}`,
+      source_ref_id: target.ref_id,
+      base_identity_ref_id: target.ref_id,
+      identity_usage: "full_identity",
+      reference_image_path: target.reference_image_path ?? null,
+    });
+    stateRefById.set(restoredRef.state_ref_id, restoredRef);
+    existingStateRows.push(restoredRef);
+    existingStateSourceIds.add(String(target.ref_id));
+    warnings.push({
+      code: "required_director_character_state_ref_restored",
+      severity: "warning",
+      state_ref_id: restoredRef.state_ref_id,
+      source_ref_id: target.ref_id,
+      message: `Restored character_state_ref for required director character target ${target.ref_id}.`,
+    });
+  }
+
+  return {
+    referenceTargets: [...targetByRefId.values()],
+    characterStateRefs: [...stateRefById.values()],
+    warnings,
+  };
+}
+
 function applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inventoryLedger) {
   const warnings = [];
   const nextTargets = [];
@@ -1675,7 +1851,7 @@ function applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inve
       };
     }
     const genericGroupCharacterIdentity = kind === "character_state"
-      && isGenericGroupSubject(`${target.subject ?? ""} ${target.prompt_anchor ?? ""}`)
+      && isGenericGroupCharacterTarget(target)
       && !target.reference_image_path;
     if (genericGroupCharacterIdentity) {
       next = {
@@ -2196,6 +2372,9 @@ async function main() {
   referenceTargets = deterministicLocationScope.targets;
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   let characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
+  const requiredDirectorAssets = ensureRequiredDirectorAssets(referenceTargets, characterStateRefs, referenceInventoryLedger);
+  referenceTargets = requiredDirectorAssets.referenceTargets;
+  characterStateRefs = requiredDirectorAssets.characterStateRefs;
   const sourceFaceAnchoring = applySourceFaceAnchors({
     referenceTargets,
     characterStateRefs,
@@ -2262,6 +2441,7 @@ async function main() {
       ...(llm.parsed.warnings ?? []),
       ...deterministicLocationScope.warnings,
       ...referenceBudget.warnings,
+      ...requiredDirectorAssets.warnings,
       ...directorInventoryPolicy.warnings,
       ...promptFacingPrune.warnings,
       ...anchorLanguageWarnings,

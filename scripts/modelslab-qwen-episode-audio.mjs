@@ -37,6 +37,7 @@ const maxChars = Number(flags["max-chars"] ?? 850);
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 8)));
 const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.22)));
 const stitchSampleRate = Math.max(8000, Math.min(96000, Number(flags["stitch-sample-rate"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_SAMPLE_RATE ?? 24000)));
+const qwenFetchTimeoutMs = Math.max(30000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_TIMEOUT_MS ?? 120000));
 const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REFRESH_VOICES ?? "")
   .split(",")
   .map((value) => value.trim())
@@ -164,7 +165,7 @@ function audioLinks(response) {
   ].filter(Boolean);
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = qwenFetchTimeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -185,15 +186,30 @@ function isRateLimitResponse(response, json) {
     || /rate limit|current_queue|queue is full|too many/i.test(message);
 }
 
+function isAbortError(error) {
+  return error?.name === "AbortError" || /aborted|timeout/i.test(String(error?.message ?? ""));
+}
+
 async function post(endpoint, body) {
   const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_POST_ATTEMPTS ?? 6));
   const baseDelayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_RATE_LIMIT_BACKOFF_MS ?? 15000));
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const response = await fetchWithTimeout(`https://modelslab.com${endpoint}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: apiKey(), ...body }),
-    });
+    let response;
+    try {
+      response = await fetchWithTimeout(`https://modelslab.com${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: apiKey(), ...body }),
+      });
+    } catch (error) {
+      if (attempt < attempts && isAbortError(error)) {
+        const delayMs = baseDelayMs * attempt;
+        console.warn(`${endpoint} timed out (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw error;
+    }
     const text = await response.text();
     let json;
     try {
@@ -228,11 +244,27 @@ function isRetryableNonJsonResponse(response, text) {
 }
 
 async function fetchVoiceRequest(id) {
-  const response = await fetchWithTimeout(`https://modelslab.com/api/v6/voice/fetch/${id}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: apiKey() }),
-  });
+  const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_ATTEMPTS ?? 4));
+  const baseDelayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_BACKOFF_MS ?? 5000));
+  let response;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      response = await fetchWithTimeout(`https://modelslab.com/api/v6/voice/fetch/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: apiKey() }),
+      });
+      break;
+    } catch (error) {
+      if (attempt < attempts && isAbortError(error)) {
+        const delayMs = baseDelayMs * attempt;
+        console.warn(`/api/v6/voice/fetch/${id} timed out (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw error;
+    }
+  }
   const text = await response.text();
   let json;
   try {

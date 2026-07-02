@@ -2293,6 +2293,24 @@ async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs()
   assert.equal(report.findings.some((finding) => finding.code === "negative_prompt"), false);
 }
 
+async function testVisualHardenCanonicalizesStateRefRequirements() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey at the apartment desk with bills spread across the table in quiet morning light.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    referenceRequirements: [
+      { ref_id: "loc_apartment", kind: "location", slot_order: 1 },
+      { ref_id: "char_joey_state", kind: "character_state", slot_order: 2 },
+    ],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_ref"]);
+  assert.equal(plan.prompts[0].shot_manifest.character_state_ref_ids[0], "char_joey_ref");
+  assert.equal(report.findings.some((finding) => finding.code === "unknown_reference_id"), false);
+}
+
 async function testVisualHardenBlocksMissingManifestLocationWithoutAddingIt() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const promptText = "Joey at the apartment desk with bills spread across the table in quiet morning light.";
@@ -3253,6 +3271,7 @@ async function run() {
   await testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite();
   await testVisualHardenStripsNonAttachableScopedRefs();
   await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();
+  await testVisualHardenCanonicalizesStateRefRequirements();
   await testVisualHardenBlocksMissingManifestLocationWithoutAddingIt();
   await testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation();
   await testImagegenDeadletterRefusal();

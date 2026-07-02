@@ -368,7 +368,8 @@ function sanitizePrompt(prompt, indexes) {
       continue;
     }
     const rawRefId = String(req.ref_id);
-    const target = indexes.referenceById.get(rawRefId);
+    const lookupRefId = indexes.refIdByStateId?.get(rawRefId) ?? rawRefId;
+    const target = indexes.referenceById.get(lookupRefId);
     if (!target) {
       findings.push({
         image_id: prompt.image_id,

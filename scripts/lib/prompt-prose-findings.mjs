@@ -96,19 +96,37 @@ function countNameOccurrences(text, name) {
   return matches ? matches.length : 0;
 }
 
+function characterDuplicationCueForName(text, name) {
+  const escaped = String(name ?? "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  if (!escaped) return false;
+  const value = String(text ?? "");
+  return [
+    new RegExp(`\\b(?:duplicate|duplicated|second version|another version|same character again|same named character again|copy of|clone|twin|mirror version)\\s+(?:of\\s+)?${escaped}\\b`, "i"),
+    new RegExp(`\\b${escaped}\\b[^.\\n]{0,80}\\b(?:second version|another version|same character again|same named character again|clone|twin|mirror version)\\b`, "i"),
+  ].some((pattern) => pattern.test(value));
+}
+
+function isLikelyNamedCharacter(name) {
+  const value = String(name ?? "").trim();
+  if (!/[A-Z]/.test(value)) return false;
+  if (/\b(?:crowd|audience|survivors?|guards?|officers?|workers?|customers?|families|witnesses|scryers|artificers|soldiers|students|extras)\b/i.test(value)) return false;
+  return true;
+}
+
 export function namedCharacterDuplicationFindings(prompts) {
   const findings = [];
-  const hardDuplicationCue = /\b(?:duplicate|duplicated|second version|another version|same character again|same named character again|copy of|clone|twin|mirror version)\b/i;
   const softDuplicationCue = /\b(?:split[- ]screen|split[- ]panel|panel grid|collage|montage|overlapping vignette)\b/i;
   for (const prompt of prompts) {
-    const visibleCharacters = Array.isArray(prompt?.shot_manifest?.visible_characters) ? prompt.shot_manifest.visible_characters.filter(Boolean) : [];
+    const visibleCharacters = Array.isArray(prompt?.shot_manifest?.visible_characters) ? prompt.shot_manifest.visible_characters.filter(isLikelyNamedCharacter) : [];
     if (!visibleCharacters.length) continue;
     for (const [field, value] of promptFields(prompt)) {
-      const hardCue = hardDuplicationCue.test(value);
       const softCue = softDuplicationCue.test(value);
-      if (!hardCue && !softCue) continue;
-      const duplicatedNames = visibleCharacters.filter((name) => countNameOccurrences(value, name) >= 2);
+      const duplicatedNames = visibleCharacters.filter((name) =>
+        countNameOccurrences(value, name) >= 2
+        && (characterDuplicationCueForName(value, name) || softCue)
+      );
       if (!duplicatedNames.length) continue;
+      const hardCue = duplicatedNames.some((name) => characterDuplicationCueForName(value, name));
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,

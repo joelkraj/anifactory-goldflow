@@ -937,6 +937,14 @@ function testNamedCharacterDuplicationAllowsReflections() {
   const findings = namedCharacterDuplicationFindings([clonePrompt]);
   assert.equal(findings.length, 1);
   assert.equal(findings[0].code, "named_character_duplication_risk");
+
+  const proofCopiesPrompt = {
+    image_id: "cut_proof_copies",
+    scene_id: "scene_proof_copies",
+    shot_manifest: { visible_characters: ["Commander Asha", "Senn", "artificers"] },
+    image_prompt: "Commander Asha assigns observers while Senn records proof and artificers etch duplicate ledgers into mana glass. Commander Asha points to papers, Senn watches the crystals, and artificers work at a separate table.",
+  };
+  assert.deepEqual(namedCharacterDuplicationFindings([proofCopiesPrompt]), []);
 }
 
 function testVoiceDirectionCharacterization() {

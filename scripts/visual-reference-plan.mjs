@@ -184,7 +184,7 @@ function tokenOverlapScore(left, right) {
 }
 
 function isGenericGroupSubject(value) {
-  return /\b(?:group|crowd|audience|families|guards?|officers?|fighters?|raiders?|riders?|survivors?|witnesses?|attendants?|workers?|students?|teachers?|staff|public|guild masters?|soldiers?|police|workforce|faction|uniform system|wardrobe system)\b/i.test(String(value ?? ""));
+  return /\b(?:group|crowd|audience|families|guards?|officers?|fighters?|raiders?|riders?|survivors?|witnesses?|attendants?|workers?|students?|teachers?|staff|public|guild masters?|soldiers?|police|workforce|faction|uniform system|wardrobe system|monsters?|merchants?|children|civilians?|teams?|members?|holders?)\b/i.test(String(value ?? ""));
 }
 
 function inventoryRefIdFor(kind, subject, fallback = "asset") {
@@ -1191,7 +1191,7 @@ function isPlainNamedIdentitySubject(target) {
     .split(/_+/)
     .filter(Boolean);
   if (refTokens.length < 2) return false;
-  if (/\b(?:state|injured|wounded|bloodied|betrayed|porter|captain|commander|judge|councilman|healer|blindfolded|restrained|bound|court|prisoner|raid|fever|shaken|memory|projection|monster|design|pods|larvae|guild|group|crowd|uniform|family|student|witness)\b/i.test(subject)) return false;
+  if (/\b(?:state|injured|wounded|bloodied|betrayed|porter|captain|commander|judge|councilman|healer|blindfolded|restrained|bound|court|prisoner|raid|fever|shaken|memory|projection|monster|monsters|merchant|merchants|children|civilians?|teams?|members?|holders?|design|pods|larvae|guild|group|crowd|uniform|family|student|witness)\b/i.test(subject)) return false;
   const subjectTokens = subject.replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter(Boolean);
   const overlap = refTokens.filter((token) => subjectTokens.includes(token)).length;
   return overlap >= Math.min(2, refTokens.length);
@@ -1851,11 +1851,13 @@ function applyDirectorInventoryPolicy(referenceTargets, characterStateRefs, inve
       };
     }
     const genericGroupCharacterIdentity = kind === "character_state"
-      && isGenericGroupCharacterTarget(target)
-      && !target.reference_image_path;
+      && isGenericGroupCharacterTarget(target);
     if (genericGroupCharacterIdentity) {
       next = {
         ...next,
+        reference_image_path: null,
+        resolved_reference_image_path: null,
+        path: null,
         generation_mode: "no_ref_needed",
         required_before_imagegen: false,
         manual_review_required: false,

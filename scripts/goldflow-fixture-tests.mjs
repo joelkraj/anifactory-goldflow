@@ -533,7 +533,10 @@ function testEditorialBeatDirectorContracts() {
     end_sec: spoken.at(-1).end_sec,
     location: "Academy Exam Hall",
     visible_subjects: ["Joey", "Victor"],
-    character_states: [{ character: "Joey", wardrobe: "plain gray student shirt", visible_state: "calm eyes" }],
+    character_states: [
+      { character: "Joey", wardrobe: "plain gray student shirt", visible_state: "calm eyes" },
+      { character: "Victor", wardrobe: "Not specified." },
+    ],
   }];
   const ledger = {
     canonical_entities: [
@@ -560,6 +563,14 @@ function testEditorialBeatDirectorContracts() {
           { exact_excerpt: "Joey enters the hall with calm eyes.", confidence: 1 },
           { exact_excerpt: "Joey faces Victor beside the exam platform.", confidence: 1 },
         ],
+      },
+      {
+        entity_id: "joey",
+        state_kind: "possession",
+        from_state: "Not holding the silver key",
+        to_state: "Holding the silver key",
+        transition_evidence_excerpt: "Joey opens the blue system panel slowly.",
+        evidence: [{ exact_excerpt: "Joey opens the blue system panel slowly.", confidence: 1 }],
       },
     ],
   };
@@ -603,10 +614,13 @@ function testEditorialBeatDirectorContracts() {
   const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
   assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
   assert.equal(projected[0].active_state_constraints.entities.joey.visible_state, undefined);
-  assert.equal(projected[0].active_state_constraints.entities.joey.status, "waiting for the exam challenge");
+  assert.equal(projected[0].active_state_constraints.entities.joey.status, undefined);
+  assert.equal(projected[0].active_state_constraints.entities.joey.possession, undefined);
   assert.equal(projected[1].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
+  assert.equal(projected[1].active_state_constraints.entities.joey.possession, "Holding the silver key");
   assert.equal(projected[2].active_state_constraints.entities.joey.wardrobe, "black academy coat");
   assert.equal(projected[3].active_state_constraints.entities.joey.status, "facing Victor at the exam platform");
+  assert.equal(projected[3].active_state_constraints.entities.victor.wardrobe, undefined);
   assert.equal(projected[0].active_state_constraints.entities.joey.state_evidence, undefined);
   assert.equal(projected[3].active_state_constraints.entities.joey.state_evidence.status, "Joey faces Victor beside the exam platform.");
   const invalid = structuredClone(raw);

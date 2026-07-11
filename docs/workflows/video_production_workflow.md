@@ -175,7 +175,7 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
 
 14. Visual beat planning.
    - Atomize exact narration into clause/sentence units with inclusive Whisper word spans. The LLM may regroup contiguous atoms but cannot omit, overlap, reorder, or cross explicit location/state transitions.
-   - Use stable span-derived beat/image IDs, project cumulative `active_state_constraints`, and lock grouping in `visual_beat_approval.json`. Later repair changes named fields only unless an operator explicitly approves regrouping.
+   - Use stable span-derived beat/image IDs, project cumulative `active_state_constraints` only when exact evidence activates a positive visible state, and lock grouping in `visual_beat_approval.json`. Negative/unknown transition placeholders are not depiction requirements. Later repair changes named fields only unless an operator explicitly approves regrouping; use `visual beats --reproject-active-state-only true` to refresh state projection without changing approved grouping.
    - Enforce hold rails: 2.2-4.5s at 0-30s, 3.2-7s at 30-180s, 5-12s through 20 minutes, and 7-15s afterward. Specific indivisible/transition exceptions must be recorded.
    - Builds transcript-first editorial image beats from the final script, local Whisper word timing, and timed semantic scene context.
    - Semantic scenes are broad story truth. Visual beats are local cut truth. The beat plan is where exact transcript timing decides local location, visible characters, mentioned-only characters, props/UI, visual job, and beat-level advisory reference hints.

@@ -1406,17 +1406,27 @@ async function existingGroupingLock() {
 
 async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) {
   const locked = await existingGroupingLock();
-  if (locked && flags["approve-regrouping"] !== "true") {
+  const reprojectActiveStateOnly = flags["reproject-active-state-only"] === "true";
+  if (locked && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly) {
     console.error(`visual beats: grouping lock current; reusing ${outputPath}`);
     return { reused: true, report: locked.plan };
   }
-  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true") {
+  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly) {
     throw new Error("Visual beat grouping was previously locked. Pass --approve-regrouping true only with explicit operator approval.");
   }
   const boundedScope = Number.isFinite(scopeEndSecNumber);
   const scopedScript = boundedScope ? scriptPrefixForTimedWordsForTests(scriptText, wordTiming.words) : { script: scriptText, source_word_end_exclusive: null, matched_timing_tail_words: null, fallback: false };
   const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger);
-  const directed = await directEditorialBeats(atoms, factLedger, timedPlan.scenes);
+  const directed = reprojectActiveStateOnly && locked
+    ? {
+        beats: locked.plan.beats,
+        planner: {
+          ...(locked.plan.editorial_director ?? {}),
+          active_state_reprojected_from_locked_grouping: true,
+          prior_visual_beat_plan_sha256: locked.approval.visual_beat_plan_sha256,
+        },
+      }
+    : await directEditorialBeats(atoms, factLedger, timedPlan.scenes);
   const projectedBase = projectActiveStateConstraints(directed.beats, atoms, factLedger, timedPlan.scenes)
     .map((beat) => enrichEditorialBeat(beat, timedPlan.scenes));
   const projected = projectedBase.map((beat, index) => ({

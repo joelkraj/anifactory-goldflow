@@ -481,21 +481,27 @@ function transitionEvents(atoms, factLedger) {
   return events.sort((a, b) => a.source_word_index - b.source_word_index);
 }
 
+function bindingVisualStateValue(field, value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return null;
+  if (/^(?:not\s+(?:specified|established|known|applicable)|unknown|unspecified|none|n\/a)\.?$/i.test(normalized)) return null;
+  if (/^(?:not|no|without)\b/i.test(normalized)) return null;
+  if (/\b(?:is not established|not visibly identified|not yet established)\b/i.test(normalized)) return null;
+  return normalized;
+}
+
 export function projectActiveStateConstraints(beats, atoms, factLedger, timedScenes = []) {
   const events = transitionEvents(atoms, factLedger);
   const states = {};
-  for (const event of events) {
-    if (!event.entity_id || !event.field || !event.from_value || states[event.entity_id]?.[event.field] !== undefined) continue;
-    states[event.entity_id] = { ...(states[event.entity_id] ?? {}), [event.field]: event.from_value };
-  }
   let eventCursor = 0;
   return beats.map((beat) => {
     while (eventCursor < events.length && events[eventCursor].source_word_index <= Number(beat.source_word_end_index)) {
       const event = events[eventCursor];
-      if (event.entity_id && event.field) {
+      const value = bindingVisualStateValue(event.field, event.value);
+      if (event.entity_id && event.field && value) {
         states[event.entity_id] = {
           ...(states[event.entity_id] ?? {}),
-          [event.field]: event.value,
+          [event.field]: value,
           state_evidence: {
             ...(states[event.entity_id]?.state_evidence ?? {}),
             [event.field]: event.evidence_excerpt,
@@ -513,8 +519,9 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
       ?? sceneForTime(timedScenes, Number(beat.start_sec ?? 0), Number(beat.end_sec ?? beat.start_sec ?? 0));
     for (const state of scene?.character_states ?? []) {
       const entityId = entityIdForName(state.character, factLedger);
-      if (!entityId || !visibleIds.includes(entityId) || !state.wardrobe || states[entityId]?.wardrobe !== undefined) continue;
-      states[entityId] = { ...(states[entityId] ?? {}), wardrobe: state.wardrobe };
+      const wardrobe = bindingVisualStateValue("wardrobe", state.wardrobe);
+      if (!entityId || !visibleIds.includes(entityId) || !wardrobe || states[entityId]?.wardrobe !== undefined) continue;
+      states[entityId] = { ...(states[entityId] ?? {}), wardrobe };
     }
     return {
       ...beat,

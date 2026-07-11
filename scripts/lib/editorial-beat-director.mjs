@@ -476,6 +476,7 @@ function transitionEvents(atoms, factLedger) {
       value: transition.to_state,
       from_value: transition.from_state,
       evidence_excerpt: evidence,
+      transient: /\b(?:temporary|temporarily|momentary|momentarily)\b/i.test(String(transition.to_state ?? "")),
     });
   }
   return events.sort((a, b) => a.source_word_index - b.source_word_index);
@@ -493,6 +494,7 @@ function bindingVisualStateValue(field, value) {
 export function projectActiveStateConstraints(beats, atoms, factLedger, timedScenes = []) {
   const events = transitionEvents(atoms, factLedger);
   const states = {};
+  const transientExpirations = new Map();
   let eventCursor = 0;
   return beats.map((beat) => {
     while (eventCursor < events.length && events[eventCursor].source_word_index <= Number(beat.source_word_end_index)) {
@@ -507,6 +509,7 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
             [event.field]: event.evidence_excerpt,
           },
         };
+        if (event.transient) transientExpirations.set(`${event.entity_id}:${event.field}`, event.source_word_index);
       }
       eventCursor += 1;
     }
@@ -523,7 +526,7 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
       if (!entityId || !visibleIds.includes(entityId) || !wardrobe || states[entityId]?.wardrobe !== undefined) continue;
       states[entityId] = { ...(states[entityId] ?? {}), wardrobe };
     }
-    return {
+    const projectedBeat = {
       ...beat,
       active_state_constraints: {
         location_id: beat.location_id,
@@ -531,6 +534,21 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
         applied_through_source_word_index: beat.source_word_end_index,
       },
     };
+    for (const [key, expiresAt] of transientExpirations) {
+      if (expiresAt > Number(beat.source_word_end_index)) continue;
+      const splitAt = key.lastIndexOf(":");
+      const entityId = key.slice(0, splitAt);
+      const field = key.slice(splitAt + 1);
+      if (states[entityId]) {
+        delete states[entityId][field];
+        if (states[entityId].state_evidence) {
+          delete states[entityId].state_evidence[field];
+          if (!Object.keys(states[entityId].state_evidence).length) delete states[entityId].state_evidence;
+        }
+      }
+      transientExpirations.delete(key);
+    }
+    return projectedBeat;
   });
 }
 

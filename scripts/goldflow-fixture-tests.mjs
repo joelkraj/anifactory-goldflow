@@ -568,7 +568,7 @@ function testEditorialBeatDirectorContracts() {
         entity_id: "joey",
         state_kind: "possession",
         from_state: "Not holding the silver key",
-        to_state: "Holding the silver key",
+        to_state: "Temporarily holding the silver key",
         transition_evidence_excerpt: "Joey opens the blue system panel slowly.",
         evidence: [{ exact_excerpt: "Joey opens the blue system panel slowly.", confidence: 1 }],
       },
@@ -617,8 +617,9 @@ function testEditorialBeatDirectorContracts() {
   assert.equal(projected[0].active_state_constraints.entities.joey.status, undefined);
   assert.equal(projected[0].active_state_constraints.entities.joey.possession, undefined);
   assert.equal(projected[1].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
-  assert.equal(projected[1].active_state_constraints.entities.joey.possession, "Holding the silver key");
+  assert.equal(projected[1].active_state_constraints.entities.joey.possession, "Temporarily holding the silver key");
   assert.equal(projected[2].active_state_constraints.entities.joey.wardrobe, "black academy coat");
+  assert.equal(projected[2].active_state_constraints.entities.joey.possession, undefined);
   assert.equal(projected[3].active_state_constraints.entities.joey.status, "facing Victor at the exam platform");
   assert.equal(projected[3].active_state_constraints.entities.victor.wardrobe, undefined);
   assert.equal(projected[0].active_state_constraints.entities.joey.state_evidence, undefined);

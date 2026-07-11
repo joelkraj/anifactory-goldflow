@@ -1095,6 +1095,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
     if (!resolveScope.args.length) break;
     const iterationDir = path.join(episodeDir, "_visual_resolution");
     const correctionPath = path.join(iterationDir, `correction_directives_${episode}_iter_${iteration}.json`);
+    const basePlanPath = path.join(iterationDir, `section_image_prompts_base_${episode}_iter_${iteration}.json`);
     const planPath = path.join(iterationDir, `section_image_prompts_resolve_${episode}_iter_${iteration}.json`);
     const reviewedPath = path.join(iterationDir, `section_image_prompts_resolve_reviewed_${episode}_iter_${iteration}.json`);
     const reportPath = path.join(iterationDir, `visual_prompt_review_resolve_${episode}_iter_${iteration}.json`);
@@ -1114,6 +1115,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       source_findings: blockers,
       updated_at: new Date().toISOString(),
     });
+    await writeJson(basePlanPath, currentPlan);
     await runNodeScript("visual-plan.mjs", [
       "--channel", channel,
       "--series", series,
@@ -1126,6 +1128,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       "--character-state-refs", characterStateRefsPath,
       ...resolveScope.args,
       "--correction-findings", correctionPath,
+      "--base-prompts", basePlanPath,
       "--output", planPath,
       ...(flags["image-provider"] ? ["--image-provider", flags["image-provider"]] : []),
       ...(flags.provider ? ["--provider", flags.provider] : []),

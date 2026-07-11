@@ -14,6 +14,7 @@ import {
 import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { normalizeImageProvider, routedProviderForPrompt } from "./lib/image-provider-routing.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
+import { mergeScopedPromptReplacements } from "./lib/visual-resolution-utils.mjs";
 import {
   longLocationSpanFindings,
   repeatedLocationShotJobFindings,
@@ -37,6 +38,7 @@ const referencePlanApprovalPath = flags["reference-plan-approval"] ?? path.join(
 const locationContractLedgerPath = flags.locationContractLedger ?? flags["location-contract-ledger"] ?? path.join(episodeDir, "location_contract_ledger.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
+const basePromptPlanPath = flags["base-prompts"] ?? flags["base-prompt-plan"] ?? outputPath;
 const correctionFindingsPath = flags["correction-findings"] ?? flags.correctionFindings ?? null;
 const promptMaxChars = Number(flags["visual-prompt-max-chars"] ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_CHARS ?? 900_000);
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
@@ -1205,6 +1207,7 @@ function activeStateConstraintFindings(prompts, sourceRows) {
           entity_id: entityId,
           field,
           expected_state: value,
+          correction_directive: `Depict ${entityId} with the current ${field}: ${value}.`,
         });
       }
     }
@@ -1832,6 +1835,12 @@ async function main() {
     : timedPlan.scenes;
   const visualSourceRows = filterVisualSourceRows(allVisualSourceRows, episode);
   if (!visualSourceRows.length) throw new Error("Visual planner small-batch filters selected zero visual units.");
+  const scopedRepair = visualSourceRows.length !== allVisualSourceRows.length;
+  const dryRunPrompt = flags["dry-run-prompt"] === "true";
+  const basePromptPlan = scopedRepair && !dryRunPrompt ? await readJson(basePromptPlanPath, null) : null;
+  if (scopedRepair && !dryRunPrompt && (!Array.isArray(basePromptPlan?.prompts) || basePromptPlan.prompts.length !== allVisualSourceRows.length)) {
+    throw new Error(`Scoped visual planning requires a complete passed or blocked base prompt plan at ${basePromptPlanPath}.`);
+  }
   const scopedLocationCoverage = allowLongLocationSpans
     ? []
     : scopedLocationCoverageFindings(visualSourceRows, enrichedVisualReferencePlan);
@@ -1840,7 +1849,7 @@ async function main() {
     ? scopedVisualBeatPlanFromRows(visualBeatPlan, visualSourceRows)
     : null;
   const stageName = `${episode}_visual_plan`;
-  if (flags["dry-run-prompt"] === "true") {
+  if (dryRunPrompt) {
     const useChunkingForDryRun = flags["visual-chunking"] !== "false"
       && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
     const promptSizes = [];
@@ -1937,35 +1946,37 @@ async function main() {
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
   }
-  const prompts = parsedPrompts
+  const scopedPrompts = parsedPrompts
     .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, {
       visualReferencePlan: enrichedVisualReferencePlan,
       stateRefIndex,
       activeImageProvider,
       activeImageProviderOptions,
     }));
-  const empty = prompts.filter((row) => !row.image_prompt);
-  if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
-  const providerExclusionPayloadWarnings = providerExclusionPayloadMarkerWarnings(prompts);
-  const activeStateFindings = activeStateConstraintFindings(prompts, visualSourceRows);
-  if (activeStateFindings.length) {
-    throw new Error(`Visual prompt authoring contradicted binding active state on ${activeStateFindings.length} cut(s): ${activeStateFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.entity_id}:${finding.field}`).join(", ")}`);
+  const empty = scopedPrompts.filter((row) => !row.image_prompt);
+  if (!scopedPrompts.length || empty.length) throw new Error(`Visual planner returned ${scopedPrompts.length} prompts with ${empty.length} empty prompts.`);
+  assertScenePromptShape(scopedPrompts);
+  assertLocalBeatFidelity(scopedPrompts, visualSourceRows);
+  const scopedImageIds = scopedPrompts.map((prompt) => prompt.image_id);
+  let prompts = scopedPrompts;
+  if (scopedRepair) {
+    prompts = mergeScopedPromptReplacements(basePromptPlan.prompts, scopedPrompts, { image_ids: scopedImageIds });
   }
-  assertScenePromptShape(prompts);
-  assertLocalBeatFidelity(prompts, visualSourceRows);
+  const providerExclusionPayloadWarnings = providerExclusionPayloadMarkerWarnings(prompts);
+  const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
   const shotFramingWarnings = assertShotFramingDistribution(prompts);
   const promptVarietyWarnings = assertPromptVariety(prompts);
   const locationSpanWarnings = assertLocationSpanVariety(prompts);
   const retentionShotJobWarnings = assertRetentionShotJobVarietySoft(prompts);
-  const expectedPromptCount = visualSourceRows.length;
+  const expectedPromptCount = allVisualSourceRows.length;
   if (prompts.length !== expectedPromptCount) throw new Error(`Visual planner returned ${prompts.length} prompts for ${expectedPromptCount} visual units.`);
   const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
   if (duplicateImageIds.length) throw new Error(`Visual planner produced duplicate image ids: ${duplicateImageIds.slice(0, 20).join(", ")}`);
-  const timedSceneIds = new Set(visualSourceRows.map((scene) => scene.scene_id));
+  const timedSceneIds = new Set(allVisualSourceRows.map((scene) => scene.scene_id));
   const missingSceneIds = [...timedSceneIds].filter((sceneId) => sceneId && !prompts.some((prompt) => prompt.scene_id === sceneId));
   if (missingSceneIds.length) throw new Error(`Visual planner missed timed scene ids: ${missingSceneIds.slice(0, 20).join(", ")}`);
   const missingBeatIds = visualBeatPlan?.status === "passed"
-    ? visualSourceRows.map((beat) => beat.visual_beat_id).filter((beatId) => beatId && !prompts.some((prompt) => prompt.visual_beat_id === beatId))
+    ? allVisualSourceRows.map((beat) => beat.visual_beat_id).filter((beatId) => beatId && !prompts.some((prompt) => prompt.visual_beat_id === beatId))
     : [];
   if (missingBeatIds.length) throw new Error(`Visual planner missed visual beat ids: ${missingBeatIds.slice(0, 20).join(", ")}`);
   const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
@@ -1975,7 +1986,7 @@ async function main() {
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
-    status: "passed",
+    status: activeStateFindings.length ? "blocked" : "passed",
     channel,
     series_slug: series,
     week,
@@ -2004,10 +2015,13 @@ async function main() {
       mode: visualSourceRows.length === allVisualSourceRows.length ? "full_episode" : "small_batch",
       selected_visual_unit_count: visualSourceRows.length,
       total_visual_unit_count: allVisualSourceRows.length,
-      cut_ids: prompts.map((prompt) => prompt.image_id),
+      cut_ids: scopedImageIds,
+      untouched_prompt_count: scopedRepair ? allVisualSourceRows.length - visualSourceRows.length : 0,
+      base_prompt_plan_path: scopedRepair ? basePromptPlanPath : null,
     },
     prompts,
     active_state_findings: activeStateFindings,
+    findings: activeStateFindings,
     warnings: [
       ...(llm.parsed.warnings ?? []),
       ...providerExclusionPayloadWarnings,
@@ -2019,12 +2033,18 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
-  console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length }, null, 2));
+  if (activeStateFindings.length) {
+    throw new Error(`Visual prompt authoring contradicted binding active state on ${activeStateFindings.length} cut(s): ${activeStateFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.entity_id}:${finding.field}`).join(", ")}`);
+  }
+  console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, scoped_repair_count: scopedRepair ? scopedPrompts.length : 0 }, null, 2));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(async (error) => {
-    await writeJson(outputPath, { schema: "goldflow_section_image_prompts_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    const existing = await readJson(outputPath, null);
+    if (existing?.status !== "blocked" || !Array.isArray(existing?.prompts)) {
+      await writeJson(outputPath, { schema: "goldflow_section_image_prompts_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    }
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

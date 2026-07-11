@@ -1,0 +1,178 @@
+{
+  "schema": "goldflow_remediation_proof_metrics_v1",
+  "status": "passed",
+  "date": "2026-07-11",
+  "branch": "codex/goldflow-pipeline-remediation",
+  "runtime_commit": "0eb4b6d44110a3b7590adf60abe371a9132d9876",
+  "stage_registry_version": "2026-07-11.3",
+  "proof": {
+    "episode_dir": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W28-weakest-extra-remediation-proof-v1/episodes/ep_01",
+    "scope_start_sec": 0,
+    "scope_end_sec": 300,
+    "run_intent": "proof",
+    "image_provider": "modelslab",
+    "image_model": "flux-klein",
+    "planning_model": "gpt-5.6-sol",
+    "planning_reasoning_effort": "medium",
+    "audio_target": "narrator_only",
+    "render_profile": "smooth_fast_ken_burns"
+  },
+  "source": {
+    "script_sha256": "0bb90840c25e9b7a56842968295e12792481141a499ba932d2c84730ea88444b",
+    "baseline_provider_calls": 0,
+    "imported_word_count": 1022,
+    "imported_audio_duration_sec": 300,
+    "imported_audio_sha256": "66b25a76cdbbf4077dce212f8987ed3765c8d0f0929fb6ba66e5d1cb9211bacc"
+  },
+  "semantic_continuity": {
+    "status": "passed",
+    "scene_count": 12,
+    "canonical_entity_count": 9,
+    "canonical_location_count": 10,
+    "canonical_prop_count": 12,
+    "canonical_ui_motif_count": 8,
+    "state_transition_count": 13,
+    "evidence_finding_count": 0
+  },
+  "editorial_beats": {
+    "status": "passed",
+    "atom_count": 144,
+    "covered_word_count": 1022,
+    "beat_count": 62,
+    "hook_beat_count": 9,
+    "retention_ramp_beat_count": 34,
+    "time_gap_count": 0,
+    "time_overlap_count": 0,
+    "word_gap_count": 0,
+    "word_overlap_count": 0,
+    "holds_inside_rail": 53,
+    "explicit_rail_exception_count": 9,
+    "unwaived_rail_violation_count": 0
+  },
+  "references": {
+    "selected_target_count": 16,
+    "standalone_ref_count": 15,
+    "optional_manual_action_ref_count": 1,
+    "generated_png_count": 15,
+    "native_landscape_count": 15,
+    "dimensions": "1024x576",
+    "by_kind": {
+      "character_state": 5,
+      "location": 6,
+      "prop": 2,
+      "ui": 2,
+      "action": 1
+    }
+  },
+  "scene_images": {
+    "cut_count": 62,
+    "completed_count": 62,
+    "native_landscape_count": 62,
+    "dimensions": "1024x576",
+    "unique_sha256_count": 62,
+    "duplicate_sha256_count": 0,
+    "donor_recovery_count": 0
+  },
+  "image_qa": {
+    "status": "passed",
+    "risk_cut_count": 51,
+    "risk_accepted_count": 51,
+    "risk_rejected_count": 0,
+    "risk_not_inspected_count": 0,
+    "low_risk_structural_pass_count": 11,
+    "unresolved_blocker_count": 0,
+    "generated_text_accuracy_in_scope": false
+  },
+  "motion": {
+    "status": "passed",
+    "intent_count": 62,
+    "slow_push_in_count": 36,
+    "reveal_zoom_out_count": 10,
+    "lateral_follow_count": 7,
+    "focus_shift_count": 9,
+    "static_hold_count": 0,
+    "motion_trace_frame_count": 18636,
+    "motion_trace_blocker_count": 0,
+    "final_cache_reused_count": 62,
+    "final_cache_generated_count": 0
+  },
+  "transitions": {
+    "planned_count": 47,
+    "applied_count": 47,
+    "hard_cut_boundary_count": 14,
+    "transition_sfx_enabled": false,
+    "transition_sfx_applied": false
+  },
+  "audio": {
+    "actual_wpm": 204.4,
+    "pace_policy": "diagnostic",
+    "mixed_duration_sec": 299.901814,
+    "narration_volume_db": 3,
+    "target_lufs": -13,
+    "true_peak_db": -1,
+    "encoded_mean_volume_db": -15.8,
+    "encoded_max_volume_db": -1.7,
+    "sfx_enabled": false,
+    "score_enabled": false,
+    "transition_sfx_enabled": false
+  },
+  "render": {
+    "status": "passed",
+    "path": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W28-weakest-extra-remediation-proof-v1/episodes/ep_01/assets/renders/ep_01-53rebirth-goldflow.mp4",
+    "sha256": "74af45f77719b373094bbf78d9bbbf1dcfe180f7aec30ccbcf0f664696dcdb4d",
+    "duration_sec": 299.983333,
+    "size_bytes": 132840700,
+    "bit_rate_bps": 3542615,
+    "video_codec": "h264",
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "pixel_format": "yuv420p",
+    "audio_codec": "aac",
+    "audio_sample_rate_hz": 96000,
+    "audio_channels": 2,
+    "subtitle_event_count": 157,
+    "subtitle_source": "approved_visual_beat_script_text_timed_by_whisper"
+  },
+  "telemetry": {
+    "completed_stage_call_count": 110,
+    "historical_failed_stage_call_count": 24,
+    "retry_or_repeated_call_count": 83,
+    "imagegen_batch_count": 9,
+    "imagegen_passed_batch_count": 6,
+    "imagegen_failed_batch_count": 3,
+    "scoped_scene_retry_batch_count": 3,
+    "generated_image_operation_count": 84,
+    "reference_cost_usd": 0.0752,
+    "initial_scene_cost_usd": 0.2914,
+    "scoped_scene_retry_cost_usd": 0.0282,
+    "cumulative_image_cost_usd": 0.3948,
+    "imagegen_batch_wall_time_sec": 556.058,
+    "cache_reuse_count": 62
+  },
+  "official_baseline_integrity": {
+    "official_full_episode_regenerated": false,
+    "official_script_sha256_current": "0bb90840c25e9b7a56842968295e12792481141a499ba932d2c84730ea88444b",
+    "official_word_timing_sha256_current": "e2f1ce9c3b79f4e373d27347b0fba81776e3b23e639a4d17d0d14d0fe874e042",
+    "official_audio_report_sha256_current": "97dbd28fb2ef820da07b6c882d47827e74c8787ead176507ef99cc13292b2fe0",
+    "official_audio_sha256_current": "fa6bb4a9a1caa5d5a867e598c2544fba8fb4850b47cb83a90b05ad40b7676e39",
+    "all_current_hashes_match_import_provenance": true
+  },
+  "final_qa": {
+    "status": "passed",
+    "stale_source_count": 0,
+    "blocker_count": 0,
+    "upload_packaging_intentionally_omitted": true
+  },
+  "verification": {
+    "npm_run_check": "passed_68_modules_and_generated_guidance_current",
+    "stage_contract_tests": "passed_22",
+    "planner_tests": "passed_64",
+    "media_tests": "passed_23",
+    "integration_tests": "passed_provider_free_preflight_through_final_qa",
+    "git_diff_check": "passed",
+    "post_cleanup_status_through_final_qa": "passed",
+    "cleanup_reclaimed_bytes": 103062885,
+    "upload_packaging_intentionally_missing": true
+  }
+}

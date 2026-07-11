@@ -15,12 +15,14 @@ export function promptTextForImageProvider(prompt, provider) {
   if (normalized === "codex_imagegen") {
     return firstNonEmpty([
       prompt?.codex_image_prompt,
+      prompt?.provider_prompt,
       prompt?.image_prompt,
       prompt?.modelslab_image_prompt,
     ]);
   }
   return firstNonEmpty([
     prompt?.modelslab_image_prompt,
+    prompt?.provider_prompt,
     prompt?.image_prompt,
     prompt?.codex_image_prompt,
   ]);

@@ -216,6 +216,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {
   run("visual-reference-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "approve-ref-plan") {
+  run("visual-reference-plan-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-refs") {
   run("visual-reference-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "review") {

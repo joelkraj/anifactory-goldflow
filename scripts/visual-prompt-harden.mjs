@@ -628,15 +628,14 @@ function sanitizePrompt(prompt, indexes) {
       resolved: false,
     });
   }
+  const activeProviderRoute = String(prompt.image_provider_route ?? "modelslab") === "codex_imagegen" ? "codex_imagegen" : "modelslab";
   let promptTextValue = trackedMutation(
     "normalizePromptFormatting",
-    prompt.modelslab_image_prompt ?? prompt.image_prompt ?? "",
+    prompt.provider_prompt ?? (activeProviderRoute === "codex_imagegen" ? prompt.codex_image_prompt : prompt.modelslab_image_prompt) ?? prompt.image_prompt ?? "",
     (value) => normalizePromptFormatting(value),
     { prompt }
   );
-  let codexPromptTextValue = prompt.codex_image_prompt
-    ? trackedMutation("normalizePromptFormatting", prompt.codex_image_prompt, (value) => normalizePromptFormatting(value), { prompt })
-    : null;
+  let codexPromptTextValue = activeProviderRoute === "codex_imagegen" ? promptTextValue : null;
 
   const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
   const accepted = [];
@@ -1068,10 +1067,22 @@ function sanitizePrompt(prompt, indexes) {
   return {
     prompt: {
       ...prompt,
+      provider_prompt: promptTextValue,
       image_prompt: promptTextValue,
-      modelslab_image_prompt: promptTextValue,
+      modelslab_image_prompt: activeProviderRoute === "modelslab" ? promptTextValue : "",
       codex_image_prompt: codexPromptTextValue,
       prompt_hash: sha256(promptTextValue),
+      shot_manifest: shotManifest ? {
+        ...shotManifest,
+        reference_slots: selectedRequirements.map((req, index) => ({
+          ref_id: req.ref_id,
+          kind: req.kind,
+          required: req.required !== false,
+          slot_order: Number(req.slot_order ?? index + 1),
+          slot_purpose: req.slot_purpose ?? req.reason ?? "conditioning reference",
+          reason: req.reason ?? req.slot_purpose ?? "conditioning reference",
+        })),
+      } : shotManifest,
       reference_requirements: selectedRequirements,
       required_reference_paths: referenceSlots.map((slot) => slot.path),
       reference_slots: referenceSlots,

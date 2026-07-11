@@ -22,6 +22,7 @@ const episodeDir = path.join(weekDir, "episodes", episode);
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
 const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? path.join(episodeDir, "visual_beat_plan.json");
+const storyFactLedgerPath = flags["story-fact-ledger"] ?? path.join(episodeDir, "story_fact_ledger.json");
 const outputPath = flags.output ?? path.join(episodeDir, "visual_reference_plan.json");
 const referenceInventoryLedgerOutputPath = flags.referenceInventory
   ?? flags["reference-inventory"]
@@ -160,6 +161,13 @@ function visualGuidanceBlock(guidance = {}) {
     visual_style_bible: guidance.visualStyleBible ?? null,
     character_bible: guidance.characterBible ?? null,
     episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 5000),
+    story_fact_ledger: guidance.storyFactLedger ? {
+      canonical_entities: guidance.storyFactLedger.canonical_entities ?? [],
+      canonical_locations: guidance.storyFactLedger.canonical_locations ?? [],
+      canonical_props: guidance.storyFactLedger.canonical_props ?? [],
+      canonical_ui_motifs: guidance.storyFactLedger.canonical_ui_motifs ?? [],
+      state_transitions: guidance.storyFactLedger.state_transitions ?? [],
+    } : null,
   }, null, 2);
 }
 
@@ -616,6 +624,9 @@ function buildSelectedReferenceInventory(referenceTargets, {
       reference_value_reason: target.reference_value_reason ?? null,
       why_text_is_insufficient: target.why_text_is_insufficient ?? null,
       clean_plate_contract: target.clean_plate_contract ?? null,
+      conditioning_subject_count: target.conditioning_subject_count ?? null,
+      conditioning_asset_role: target.conditioning_asset_role ?? null,
+      clean_plate_contract: target.clean_plate_contract ?? null,
       evidence_asset_ids: target.evidence_asset_ids ?? (target.inventory_asset_id ? [target.inventory_asset_id] : []),
       prompt_anchor: target.prompt_anchor ?? null,
     }));
@@ -824,6 +835,7 @@ Rules:
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
 - For real named public creators, streamers, celebrities, or influencers whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and anime/manhwa styling.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
+- Treat each beat's active_state_constraints and depiction_mode as binding evidence. Select refs for materially recurring visible states; do not collapse incompatible wardrobe/injury states and do not create refs for transient text-only state changes.
 - When visual_beats carry ref_needs or beat_ref_requirements, treat those as advisory local transcript-timed evidence, not locked reference targets. Semantic scene ref_requirements remain broad scene coverage. The LLM decides the final episode-level reference strategy and may merge, downgrade, upgrade, rename, or replace beat suggestions when the story context supports it.
 - Do not preserve beat-authored generation_mode mechanically. Use it as a hint only. Final generation_mode belongs to this reference-planning stage after considering recurrence, story criticality, identity risk, opening-retention value, and whether a clean scene cut can become the reference later.
 - Distinguish named characters from groups, factions, crowds, and uniforms. A recurring named person gets a character_state/base identity ref when needed. A visible group such as guild masters, guards, families, students, witnesses, or crowds should not become a character identity ref unless a specific named member recurs. If the group has a recognizable uniform, faction styling, badge, armor set, or wardrobe system with real continuity value, propose one clean attachable uniform/faction design plate; otherwise omit it and let scene prompts describe the group.
@@ -843,6 +855,7 @@ Rules:
   - prop refs define object shape, surface, markings, and scale.
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
+- Every selected conditioning asset contains exactly one conditioning concept: one identity/state, one environment, one prop, one UI motif, one faction/uniform language, one action/effect language, or one abstract style language. Set conditioning_subject_count to 1 and conditioning_asset_role accordingly. Never combine a character, populated story scene, prop lineup, and UI panel into one reference.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
 - Character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
 - For adult female character refs, keep the character story-appropriate but conventionally attractive: beautiful face, polished hair/makeup when suitable, flattering outfit, full bust, curvy hourglass adult silhouette, graceful waist-to-hip shape, and confident posture. Keep this non-explicit and avoid nudity, lingerie, childlike features, or pinup posing.
@@ -910,6 +923,8 @@ Return:
       "reference_value_reason": "specific continuity value",
       "why_text_is_insufficient": "specific model-consistency risk",
       "clean_plate_contract": "single clean subject, environment, object, UI, or effect plate without unrelated story-scene contamination"
+      ,"conditioning_subject_count": 1,
+      "conditioning_asset_role": "identity_state|environment|prop|ui_motif|faction_language|action_effect|style_language"
     }
   ],
   "character_state_refs": [
@@ -994,6 +1009,7 @@ Rules:
 - Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - Keep narrative state separate from visible state. Semantic emotional_state, financial_state, social_state, or loose state phrases such as broke, ruined, betrayed, humiliated, indebted, rejected, or emotionally collapsed are story context, not automatic costume/body damage. Use them to choose props, posture, expression, staging, witnesses, UI, receipts, screens, isolation, or power dynamics. Only put dirt, ragged clothing, torn fabric, wounds, illness, homelessness, dumpster-like styling, or severe physical decay into a character prompt_anchor/scene_prompt_anchor when the locked script or semantic visible_state explicitly says that physical detail is visible.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
+- Treat each beat's active_state_constraints and depiction_mode as binding evidence. Select refs for materially recurring visible states; do not collapse incompatible wardrobe/injury states and do not create refs for transient text-only state changes.
 - When visual_beats carry ref_needs or beat_ref_requirements, treat those as advisory local transcript-timed evidence, not locked reference targets. Semantic scene ref_requirements remain broad scene coverage. The LLM decides the final episode-level reference strategy and may merge, downgrade, upgrade, rename, or replace beat suggestions when the story context supports it.
 - Do not preserve beat-authored generation_mode mechanically. Make the final decision from recurrence, story criticality, identity risk, and opening-retention value.
 - Distinguish named characters from groups, creatures, factions, crowds, and uniforms. A recurring named person gets a character_state/base identity ref when needed. A recurring group or creature system may receive a clean group/faction design plate when its shared silhouette, uniform, armor, or visual system matters; never pretend it is one person's face identity.
@@ -1006,6 +1022,7 @@ Rules:
   - prop refs define object shape, surface, markings, and scale.
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
+- Every selected conditioning asset contains exactly one conditioning concept: one identity/state, one environment, one prop, one UI motif, one faction/uniform language, one action/effect language, or one abstract style language. Set conditioning_subject_count to 1 and conditioning_asset_role accordingly. Never combine a character, populated story scene, prop lineup, and UI panel into one reference.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
 - Character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
 - For adult female character refs, keep the character story-appropriate but conventionally attractive: beautiful face, polished hair/makeup when suitable, flattering outfit, full bust, curvy hourglass adult silhouette, graceful waist-to-hip shape, and confident posture. Keep this non-explicit and avoid nudity, lingerie, childlike features, or pinup posing.
@@ -1072,6 +1089,8 @@ Return:
       "reference_value_reason": "specific continuity value",
       "why_text_is_insufficient": "specific generation risk",
       "clean_plate_contract": "clean reusable plate with no unrelated story-scene contamination"
+      ,"conditioning_subject_count": 1,
+      "conditioning_asset_role": "identity_state|environment|prop|ui_motif|faction_language|action_effect|style_language"
     }
   ],
   "character_state_refs": [
@@ -1220,6 +1239,8 @@ function normalizeTarget(target, index) {
     reference_value_reason: target.reference_value_reason ?? null,
     why_text_is_insufficient: target.why_text_is_insufficient ?? null,
     clean_plate_contract: target.clean_plate_contract ?? null,
+    conditioning_subject_count: Number(target.conditioning_subject_count ?? 0),
+    conditioning_asset_role: target.conditioning_asset_role ?? null,
     director_role: target.director_role ?? null,
     director_recommended_generation_mode: target.director_recommended_generation_mode ?? target.recommended_generation_mode ?? null,
     director_recommended_required_before_imagegen: target.director_recommended_required_before_imagegen ?? target.recommended_required_before_imagegen ?? null,
@@ -2131,10 +2152,39 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (!legacyRevalidation && mode !== "source_only" && !String(target.clean_plate_contract ?? "").trim()) {
       findings.push({
         code: "reference_target_missing_clean_plate_contract",
-        severity: "warning",
+        severity: "blocker",
         ref_id: target.ref_id,
         message: `Reference ${target.ref_id} does not state a clean_plate_contract.`,
       });
+    }
+    if (!legacyRevalidation && mode !== "source_only" && Number(target.conditioning_subject_count) !== 1) {
+      findings.push({
+        code: "reference_target_not_single_conditioning_concept",
+        severity: "blocker",
+        ref_id: target.ref_id,
+        conditioning_subject_count: target.conditioning_subject_count,
+        message: `Reference ${target.ref_id} must condition exactly one identity/state, environment, prop, UI motif, faction language, action/effect language, or style language.`,
+      });
+    }
+    if (!legacyRevalidation && mode !== "source_only") {
+      const allowedRoles = {
+        style: new Set(["style_language"]),
+        character_state: new Set(["identity_state", "faction_language"]),
+        location: new Set(["environment"]),
+        prop: new Set(["prop"]),
+        ui: new Set(["ui_motif"]),
+        action: new Set(["action_effect"]),
+      }[normalizeKind(target.kind)] ?? new Set();
+      if (!allowedRoles.has(String(target.conditioning_asset_role ?? ""))) {
+        findings.push({
+          code: "reference_target_conditioning_role_mismatch",
+          severity: "blocker",
+          ref_id: target.ref_id,
+          kind: target.kind,
+          conditioning_asset_role: target.conditioning_asset_role ?? null,
+          message: `Reference ${target.ref_id} has a conditioning role that does not match its reference kind.`,
+        });
+      }
     }
     const canonicalId = String(target.canonical_subject_id ?? "").trim();
     if (canonicalId) {
@@ -2250,9 +2300,10 @@ export function referenceCharacterStateFindingsForTests(characterStateRefs, refe
 }
 
 async function main() {
-  const [semanticPlan, visualBeatPlan, visualStyleBible, characterBible, episodeVisualDirection, runIdentity] = await Promise.all([
+  const [semanticPlan, visualBeatPlan, storyFactLedger, visualStyleBible, characterBible, episodeVisualDirection, runIdentity] = await Promise.all([
     readJson(semanticPlanPath, null),
     readJson(visualBeatPlanPath, null),
+    readJson(storyFactLedgerPath, null),
     readJson(visualStyleBiblePath, null),
     readJson(characterBiblePath, null),
     readText(episodeVisualDirectionPath, ""),
@@ -2263,7 +2314,10 @@ async function main() {
   const { plan: scopedSemantic, scope } = scopedSemanticPlan(semanticWithBeats);
   if (!Array.isArray(scopedSemantic.scenes) || !scopedSemantic.scenes.length) throw new Error("Visual reference planner scope selected zero semantic scenes.");
   const stageName = `${episode}_visual_reference_plan`;
-  const guidance = { visualStyleBible, characterBible, episodeVisualDirection };
+  if (runIdentity?.schema === "goldflow_run_identity_v2" && (storyFactLedger?.status !== "passed" || storyFactLedger.source_script_hash !== semanticPlan.source_script_hash)) {
+    throw new Error(`Reference Director v2 requires current story_fact_ledger.json: ${storyFactLedgerPath}`);
+  }
+  const guidance = { visualStyleBible, characterBible, episodeVisualDirection, storyFactLedger };
   const referenceEvidenceLedger = buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
     outputPath: referenceEvidenceLedgerOutputPath,
   });
@@ -2361,6 +2415,7 @@ async function main() {
   const sourceArtifactPaths = [
     semanticPlanPath,
     visualBeatPlan?.status === "passed" ? visualBeatPlanPath : null,
+    storyFactLedger?.status === "passed" ? storyFactLedgerPath : null,
     referenceEvidenceLedgerOutputPath,
     locationContractLedgerOutputPath,
     referenceInventoryLedgerOutputPath,
@@ -2380,6 +2435,7 @@ async function main() {
     source_hashes: Object.fromEntries((await Promise.all(sourceArtifactPaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     operator_visual_guidance: {
       visual_beat_plan_path: visualBeatPlan?.status === "passed" ? visualBeatPlanPath : null,
+      story_fact_ledger_path: storyFactLedger?.status === "passed" ? storyFactLedgerPath : null,
       reference_evidence_ledger_path: referenceEvidenceLedgerOutputPath,
       location_contract_ledger_path: locationContractLedgerOutputPath,
       reference_inventory_ledger_path: referenceInventoryLedgerOutputPath,

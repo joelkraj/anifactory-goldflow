@@ -57,7 +57,11 @@ import {
   gptImage2OutputSizeForTests,
   prepareGptImage2PromptForTests,
 } from "./modelslab-image-helper.mjs";
-import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
+import {
+  adaptivePromptChunksForTests,
+  localBeatFidelityFindingsForTests,
+  normalizePromptPacketForTests,
+} from "./visual-plan.mjs";
 import {
   referenceCharacterStateFindingsForTests,
   referenceDirectorSelectionFindingsForTests,
@@ -784,6 +788,105 @@ function testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts() {
   assert.equal(findings.some((finding) => finding.code === "director_selected_non_clean_reference_mode" && finding.ref_id === "hall_ref"), true);
   assert.equal(findings.some((finding) => finding.code === "post_llm_reference_target_expansion" && finding.ref_id === "deterministically_restored_prop"), true);
   assert.equal(findings.some((finding) => finding.code === "post_llm_reference_target_expansion" && finding.ref_id === "operator_source_face"), false);
+  assert.equal(findings.some((finding) => finding.code === "reference_target_not_single_conditioning_concept" && finding.ref_id === "joey_identity_ref"), true);
+}
+
+async function testReferencePlanHashApproval() {
+  const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-ref-approval-"));
+  const planPath = path.join(episodeDir, "visual_reference_plan.json");
+  await writeJson(planPath, {
+    status: "passed",
+    reference_director_contract_version: "reference_director_v2",
+    findings: [],
+    reference_targets: [{
+      ref_id: "joey_identity_ref",
+      kind: "character_state",
+      generation_mode: "standalone_ref",
+      scene_ids: ["scene_001"],
+      conditioning_subject_count: 1,
+      conditioning_asset_role: "identity_state",
+    }],
+  });
+  await execFileAsync(process.execPath, [
+    "scripts/visual-reference-plan-approve.mjs",
+    "--episode-dir", episodeDir,
+    "--note", "fixture review",
+  ], { cwd: process.cwd() });
+  const approval = await readJson(path.join(episodeDir, "reference_plan_approval.json"));
+  assert.equal(approval.status, "approved");
+  assert.equal(approval.visual_reference_plan_sha256, sha256(await fs.readFile(planPath)));
+  assert.equal(approval.selected_targets[0].conditioning_asset_role, "identity_state");
+}
+
+function testAdaptiveProviderPromptPackets() {
+  const highRows = Array.from({ length: 5 }, (_value, index) => ({
+    visual_beat_id: `high_${index}`,
+    scene_id: "scene_001",
+    start_sec: index * 4,
+    visible_characters: ["Joey"],
+    visual_job: "story_progression",
+  }));
+  const mediumRows = Array.from({ length: 7 }, (_value, index) => ({
+    visual_beat_id: `medium_${index}`,
+    scene_id: "scene_002",
+    start_sec: 300 + index * 7,
+    visible_characters: ["Joey", "Victor"],
+    visual_job: "interaction",
+  }));
+  const simpleRows = Array.from({ length: 12 }, (_value, index) => ({
+    visual_beat_id: `simple_${index}`,
+    scene_id: "scene_003",
+    start_sec: 600 + index * 10,
+    visible_characters: ["Joey"],
+    visual_job: "story_progression",
+  }));
+  const chunks = adaptivePromptChunksForTests([...highRows, ...mediumRows, ...simpleRows]);
+  assert.deepEqual(chunks.slice(0, 2).map((chunk) => [chunk.risk_class, chunk.ids.length]), [["high", 4], ["high", 1]]);
+  assert.equal(chunks.some((chunk) => chunk.risk_class === "medium" && chunk.ids.length === 6), true);
+  assert.equal(chunks.some((chunk) => chunk.risk_class === "simple" && chunk.ids.length === 10), true);
+
+  const source = {
+    image_id_hint: "ep_01-w000000-w000010",
+    visual_beat_id: "beat_w000000_w000010",
+    scene_id: "scene_001",
+    parent_scene_id: "scene_001",
+    start_sec: 0,
+    duration_sec: 3.2,
+    local_location: "Academy Hall",
+    visible_characters: ["Joey"],
+  };
+  const authored = {
+    image_id: source.image_id_hint,
+    scene_id: "scene_001",
+    visual_beat_id: source.visual_beat_id,
+    provider_prompt: "Joey raises a blue system panel in Academy Hall. 16:9 landscape anime/manhwa frame.",
+    image_provider_route: "modelslab",
+    visible_subjects: ["Wrong Duplicate Field"],
+    shot_manifest: {
+      shot_job: "ui_reveal",
+      visible_characters: ["Joey"],
+      mentioned_only_characters: [],
+      primary_character: "Joey",
+      character_state_ref_ids: ["joey_ref"],
+      protagonist_state_ref_id: "joey_ref",
+      location_contract_id: "hall_contract",
+      location_ref_id: null,
+      foreground_action: "Joey raises the system panel",
+      visible_props: [],
+      ui_elements: ["blue system panel"],
+      forbidden_ref_ids: [],
+      reference_slots: [{ ref_id: "joey_ref", kind: "character_state", slot_order: 1, slot_purpose: "Joey identity" }],
+      continuity_notes: "current beat",
+      character_staging: [{ name: "Joey", ref_id: "joey_ref", screen_position: "frame-center", wardrobe_from: "character_state_ref:joey_ref", pose: "raising panel" }],
+    },
+  };
+  const visualReferencePlan = { reference_targets: [{ ref_id: "joey_ref", kind: "character_state", scene_ids: ["scene_001"], generation_mode: "standalone_ref" }] };
+  const normalized = normalizePromptPacketForTests(authored, source, { activeImageProvider: "modelslab", visualReferencePlan });
+  assert.equal(normalized.image_id, source.image_id_hint);
+  assert.equal(normalized.modelslab_image_prompt, authored.provider_prompt);
+  assert.equal(normalized.codex_image_prompt, null);
+  assert.deepEqual(normalized.visible_subjects, ["Joey"]);
+  assert.deepEqual(normalized.reference_requirements.map((row) => row.ref_id), ["joey_ref"]);
 }
 
 function testSelectedReferenceInventoryContainsOnlyDirectorSelections() {
@@ -1514,6 +1617,7 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
     "--episode", "ep_01",
     "--image-provider", "hybrid_codex_opening_modelslab_rest",
     "--references-only", "true",
+    "--skip-reference-generation", "true",
     "--output", imagegenReportPath,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot, ANIFACTORY_CODEX_OPENING_SEC: "" } });
   const imagegenReport = JSON.parse(await fs.readFile(imagegenReportPath, "utf8"));
@@ -1529,6 +1633,7 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
       "--episode", "ep_01",
       "--image-provider", "hybrid_codex_opening_modelslab_rest",
       "--references-only", "true",
+      "--skip-reference-generation", "true",
       "--codex-opening-sec", "120",
       "--output", path.join(episodeDir, "imagegen_report_mismatch.json"),
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
@@ -3402,7 +3507,7 @@ async function testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored() {
     finding.code === "character_ref_anchor_not_reaffirmed"
     && finding.ref_id === "char_joey_state"
     && finding.prompt_field === "codex_image_prompt"
-  )), true);
+  )), false);
 }
 
 async function testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed() {
@@ -4657,6 +4762,8 @@ async function run() {
   testLocationSceneIdsDerivation();
   testReferenceDirectorV2EvidenceAndLocationContracts();
   testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts();
+  await testReferencePlanHashApproval();
+  testAdaptiveProviderPromptPackets();
   testSelectedReferenceInventoryContainsOnlyDirectorSelections();
   testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates();
   testLocationCandidateExclusion();

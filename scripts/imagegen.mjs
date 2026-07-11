@@ -51,6 +51,7 @@ let codexOpeningSec = Math.max(0, Number(codexOpeningSecFlagRaw ?? codexOpeningS
 const confirmImageProvider = flags["confirm-image-provider"] === "true";
 const allowLegacyCodexExec = flags["allow-legacy-codex-exec"] === "true" || process.env.ANIFACTORY_ALLOW_LEGACY_CODEX_EXEC === "true";
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
+const referencePlanApprovalPath = flags["reference-plan-approval"] ?? path.join(episodeDir, "reference_plan_approval.json");
 const visualResolutionDeadletterPath = flags.deadletter ?? flags["deadletter"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 const derivedRefPromotionReportPath = flags["derived-ref-report"] ?? path.join(episodeDir, `derived_reference_promotion_report_${episode}.json`);
 const providerHealthReportPath = flags["provider-health-report"] ?? path.join(episodeDir, `imagegen_provider_health_${episode}.json`);
@@ -1612,6 +1613,13 @@ async function main() {
   if (promoteDerivedRefs) {
     await promoteDerivedReferences();
     return;
+  }
+  if (runIdentity.schema === "goldflow_run_identity_v2" && !skipReferenceGeneration) {
+    const approval = await readJson(referencePlanApprovalPath, null);
+    const currentPlanHash = await hashFile(visualReferencePlanPath);
+    if (approval?.status !== "approved" || !currentPlanHash || approval.visual_reference_plan_sha256 !== currentPlanHash) {
+      throw new Error(`Reference generation refused: current reference_plan_approval.json is missing or stale for ${visualReferencePlanPath}. Run goldflow visual approve-ref-plan first.`);
+    }
   }
   const referenceRun = await generateReferences();
   if (referencesOnly) {

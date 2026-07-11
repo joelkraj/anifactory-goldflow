@@ -176,6 +176,8 @@ export function dropOutOfScopePromptRefs(prompt, allowedRefIds) {
     if (next.shot_manifest.protagonist_state_ref_id && !keepRef(next.shot_manifest.protagonist_state_ref_id, "shot_manifest.protagonist_state_ref_id")) {
       next.shot_manifest.protagonist_state_ref_id = null;
     }
+    next.shot_manifest.reference_slots = asArray(next.shot_manifest.reference_slots)
+      .filter((slot) => keepRef(slot?.ref_id, "shot_manifest.reference_slots.ref_id"));
   }
 
   const keptRequirements = [];

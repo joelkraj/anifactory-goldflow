@@ -194,6 +194,8 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
    - The LLM receives previous/next beat summaries for sequencing and variety, but those summaries are context only. Current `visual_beat_script_excerpt` remains the authority for what appears in the frame.
 
 15. Visual reference planning.
+   - Hash-approve the selected plan with `goldflow visual approve-ref-plan` before reference generation. Keep generated-image approval as a separate later gate.
+   - A conditioning ref contains one concept only: identity/state, environment, prop, UI motif, faction language, action/effect language, or abstract style language.
    - Writes `reference_evidence_ledger.json` first as a broad non-authoring observation index, and `location_contract_ledger.json` as text-only physical-location truth. Chunk LLM calls propose bounded candidates from that evidence. One global reference-director LLM is the sole creative selector; its final selections become `visual_reference_plan.json`, `character_state_refs.json`, and selected-only `reference_inventory_ledger.json`.
    - The evidence ledger may contain many nouns because it spends nothing. It records canonical hints, scene ids, beat ids, reuse span, source type, and excerpts; it does not assign generation modes or force targets. The selected inventory contains only real clean attachable/source assets chosen by the global director.
    - Reference allocation is beat-value driven, not just semantic-scene-count driven. The global director weighs recurrence, state/identity risk, opening value, reuse span, contamination risk, and whether text is sufficient. Deterministic code does not score nouns into image orders.
@@ -233,6 +235,8 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
    - Record approval with `goldflow visual approve-refs` after QA. Do not hand-edit `character_state_refs.json`; `run status` keeps the run at reference generation/QA until this approval is recorded.
 
 18. Visual prompt planning.
+   - Send one entity dictionary, one location dictionary, and compact beat rows. Author `shot_manifest` plus one active `provider_prompt`; derive compatibility fields deterministically.
+   - Use adaptive chunk sizes: 4 high-risk opening/action/dense cuts, 6 medium-risk cuts, and 8-12 simple continuity cuts. Harden first; run prompt review only for blocker IDs unless explicitly requested as a diagnostic.
    - Consumes approved refs, current-scene facts, and visual beats.
    - Uses current-scene context only.
    - Prompts must preserve attached reference slots in structured order through `reference_requirements.slot_order` and `slot_purpose`.

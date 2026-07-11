@@ -12,7 +12,7 @@ import {
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
 import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
-import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import { normalizeImageProvider, routedProviderForPrompt } from "./lib/image-provider-routing.mjs";
 import {
   longLocationSpanFindings,
   repeatedLocationShotJobFindings,
@@ -30,7 +30,9 @@ const episodeDir = path.join(weekDir, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
 const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
+const storyFactLedgerPath = flags["story-fact-ledger"] ?? path.join(episodeDir, "story_fact_ledger.json");
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
+const referencePlanApprovalPath = flags["reference-plan-approval"] ?? path.join(episodeDir, "reference_plan_approval.json");
 const locationContractLedgerPath = flags.locationContractLedger ?? flags["location-contract-ledger"] ?? path.join(episodeDir, "location_contract_ledger.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
@@ -280,6 +282,15 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     visual_beat_focus: scene.visual_beat_focus ?? null,
     visual_beat_action: scene.visual_beat_action ?? null,
     visual_beat_script_excerpt: scene.visual_beat_script_excerpt ?? null,
+    source_word_start_index: scene.source_word_start_index ?? null,
+    source_word_end_index: scene.source_word_end_index ?? null,
+    source_atom_ids: scene.source_atom_ids ?? [],
+    depiction_mode: scene.depiction_mode ?? "current_reality",
+    physically_visible_entity_ids: scene.physically_visible_entity_ids ?? [],
+    screen_visible_entity_ids: scene.screen_visible_entity_ids ?? [],
+    preview_visible_entity_ids: scene.preview_visible_entity_ids ?? [],
+    mentioned_only_entity_ids: scene.mentioned_only_entity_ids ?? [],
+    active_state_constraints: scene.active_state_constraints ?? null,
     local_named_character_mentions: mentionedCandidateNames(scene),
     local_location_mentions: locationMentionPhrases(scene.visual_beat_script_excerpt ?? ""),
     shot_framing_guidance: "beat-authored composition; use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when it serves the current visual job and narration excerpt",
@@ -300,10 +311,10 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     primary_subject: scene.primary_subject ?? null,
     visual_intent: truncateText(scene.visual_intent ?? "", 360),
     character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex).map(compactSceneCharacterRef),
-    ui_text_on_screen: scene.ui_text_on_screen ?? [],
+    ui_text_on_screen: scene.local_ui_elements ?? scene.ui_text_on_screen ?? [],
     character_states: compactList(scene.character_states ?? [], 4),
     wardrobe: scene.wardrobe ?? null,
-    props: compactList(scene.props ?? [], 8),
+    props: compactList(scene.local_props ?? scene.props ?? [], 8),
     action_staging: truncateText(scene.action_staging ?? "", 500),
     continuity_notes: compactList(scene.continuity_notes ?? [], 4, 220),
   };
@@ -462,35 +473,11 @@ function codexOpeningSecFromOptions(options = {}) {
 
 function providerPromptGuidance(activeProvider, providerOptions = {}) {
   const provider = normalizeImageProvider(activeProvider);
-  if (provider === "codex_imagegen") {
-    return [
-      "ACTIVE IMAGE PROVIDER: codex_imagegen.",
-      "Write image_prompt and codex_image_prompt for every cut. codex_image_prompt is the production prompt consumed by imagegen. Keep modelslab_image_prompt empty unless the cut truly needs ModelsLab-specific wording for a diagnostic fallback.",
-    ].join("\n");
-  }
-  if (provider === "hybrid_codex_refs_multichar") {
-    return [
-      "ACTIVE IMAGE PROVIDER: hybrid_codex_refs_multichar.",
-      "Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends references and risky multi-character cuts to Codex imagegen, while lower-risk simple cuts go to ModelsLab. Keep both provider-specific prompt fields aligned to the same shot_manifest.",
-    ].join("\n");
-  }
-  if (provider === "hybrid_codex_opening_modelslab_rest") {
-    const openingSec = codexOpeningSecFromOptions(providerOptions);
-    return [
-      "ACTIVE IMAGE PROVIDER: hybrid_codex_opening_modelslab_rest.",
-      `Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends all references and the first ${openingSec} seconds of scene cuts to Codex imagegen, then sends the rest of the video to ModelsLab. Keep both provider-specific prompt fields aligned to the same shot_manifest.`,
-    ].join("\n");
-  }
-  if (provider === "hybrid_codex_refs_opening_risky_modelslab_rest") {
-    const openingSec = codexOpeningSecFromOptions(providerOptions);
-    return [
-      "ACTIVE IMAGE PROVIDER: hybrid_codex_refs_opening_risky_modelslab_rest.",
-      `Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends all references, every scene cut before ${openingSec} seconds, and risky multi-character or explicitly Codex-routed cuts to Codex imagegen; simpler later cuts go to ModelsLab. Set image_provider_route to codex_imagegen only for later high-risk cuts that need Codex beyond the automatic opening and multi-character routing. Keep provider-specific prompt fields aligned to the same shot_manifest.`,
-    ].join("\n");
-  }
+  const opening = codexOpeningSecFromOptions(providerOptions);
   return [
-    "ACTIVE IMAGE PROVIDER: modelslab.",
-    "Write image_prompt and modelslab_image_prompt for every cut. modelslab_image_prompt is the production prompt consumed by imagegen. Leave codex_image_prompt empty unless Codex-specific wording is explicitly useful for a later proof.",
+    `LOCKED IMAGE LANE: ${provider}.`,
+    `For hybrid lanes the deterministic packet already assigns target_provider_route per cut${provider.includes("opening") ? ` using the locked ${opening}s opening window` : ""}.`,
+    "Author exactly one provider_prompt for each cut, optimized for that cut's target_provider_route. Do not author parallel ModelsLab/Codex variants. Compatibility fields are derived later from provider_prompt and shot_manifest.",
   ].join("\n");
 }
 
@@ -534,10 +521,11 @@ Core contract:
 - When a physically visible, screen-visible, or preview-visible named character has a matching attachable character_state target in the current unit packet, attach that character ref unless the four-slot cap makes it impossible. Do not leave a visible canonical identity text-only while an exact approved identity ref is available.
 - Location contracts and image refs are separate. For a physical setting, select the exact in-scope textual location contract in shot_manifest.location_contract_id and use its prompt_anchor to describe the environment. Set shot_manifest.location_ref_id only when the current unit packet contains a matching approved attachable location image ref. A text-only location contract never belongs in reference_requirements and never consumes an image slot.
 - For every attached character state, reaffirm the supplied scene_prompt_anchor in that person's own clause, then add current screen position and action. If the anchor already begins with the character's name, do not repeat the name a second time.
-- Keep reference-role metadata in reference_requirements. Do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
+- Put ordered reference-role metadata once in shot_manifest.reference_slots. Do not duplicate it in top-level compatibility fields and do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
+- active_state_constraints is binding. Preserve its current wardrobe, injury, possession, status, visible state, and location facts for every visible entity; never reset a character to a base/default state merely because an older ref exists.
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
 - Background extras appear only when the local beat asks for them. Keep private, lonely, or solo beats visibly clear of unrelated people.
-- Provider-specific prompts may differ in phrasing but must depict the same manifest, action, people, location, and refs.
+- Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
 - Do not create standalone negative_prompt, avoid_list, or exclude_list fields. Normal story-faithful prose may freely state absences, refusals, and contrast.
 - Correction directives are binding only for their matching image_id or scene_id.
 ${riskRules.map((rule) => `- ${rule}`).join("\n")}
@@ -560,14 +548,8 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
     "visual_beat_id": "copy visual_beat_id when present",
     "start_sec": 0,
     "duration_sec": 6,
-    "image_prompt": "provider-neutral scene prose",
-    "modelslab_image_prompt": "ModelsLab scene prose or empty when route does not use it",
-    "codex_image_prompt": "Codex scene prose or empty when route does not use it",
-    "image_provider_route": "modelslab|codex_imagegen",
-    "reference_requirements": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","required":true,"slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
-    "required_reference_paths": [],
-    "reference_usage": [{"ref_id":"id","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"decision"}],
-    "anchor_roles": [{"ref_id":"id","kind":"character_state|location|prop|ui|action","anchor_role":"source_anchor","reason":"role"}],
+    "provider_prompt": "one production prompt optimized for target_provider_route",
+    "image_provider_route": "copy target_provider_route",
     "shot_manifest": {
       "shot_job": "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition",
       "visible_characters": [],
@@ -581,14 +563,10 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
       "visible_props": [],
       "ui_elements": [],
       "forbidden_ref_ids": [],
+      "reference_slots": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
       "continuity_notes": "current-beat continuity",
       "character_staging": [{"name":"Name","ref_id":"state_ref","screen_position":"frame-left","wardrobe_from":"character_state_ref:state_ref","pose":"current pose/action"}]
-    },
-    "visible_subjects": [],
-    "character_state_refs_used": [],
-    "primary_subject": "visible focus",
-    "location": "current visible environment",
-    "ui_text_on_screen": []
+    }
   }],
   "warnings": []
 }`;
@@ -612,7 +590,46 @@ function locationContractsForUnit(unit, locationContractLedger) {
   }));
 }
 
-function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null) {
+function promptEntityDictionary(storyFactLedger, stateRefIndex) {
+  const rows = (storyFactLedger?.canonical_entities ?? []).map((entity) => {
+    const displayName = entity.display_name ?? entity.label ?? entity.entity_id;
+    const matchingStateRefs = [...stateRefIndex.values()].filter((ref) => normalizeLabel(ref.character) === normalizeLabel(displayName));
+    return {
+      entity_id: entity.entity_id,
+      display_name: displayName,
+      aliases: entity.aliases ?? [],
+      kind: entity.kind ?? "person",
+      state_refs: [...new Map(matchingStateRefs.map((ref) => [ref.state_ref_id, {
+        state_ref_id: ref.state_ref_id,
+        scene_ids: ref.scene_ids ?? (ref.scene_id ? [ref.scene_id] : []),
+        scene_prompt_anchor: ref.scene_prompt_anchor ?? null,
+        reference_image_path: ref.conditioning_image_path ?? ref.reference_image_path ?? null,
+      }])).values()],
+    };
+  });
+  return rows;
+}
+
+function promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan) {
+  const targets = (visualReferencePlan?.reference_targets ?? []).filter((target) => String(target.kind ?? "").toLowerCase() === "location");
+  return (storyFactLedger?.canonical_locations ?? []).map((location) => ({
+    location_id: location.location_id,
+    display_name: location.display_name ?? location.label ?? location.location_id,
+    aliases: location.aliases ?? [],
+    contracts: (locationContractLedger?.contracts ?? []).filter((contract) => {
+      const labels = [contract.description, contract.prompt_anchor, ...(contract.local_location_labels ?? [])].map(normalizeLabel);
+      return labels.some((label) => label && (label.includes(normalizeLabel(location.display_name ?? location.label)) || normalizeLabel(location.display_name ?? location.label).includes(label)));
+    }).map((contract) => ({
+      location_contract_id: contract.location_contract_id,
+      scene_ids: contract.scene_ids ?? [],
+      prompt_anchor: contract.prompt_anchor ?? contract.description ?? null,
+    })),
+    attachable_refs: targets.filter((target) => (target.location_contract_ids ?? []).some((id) => (locationContractLedger?.contracts ?? []).some((contract) => contract.location_contract_id === id)))
+      .map((target) => ({ ref_id: target.ref_id, scene_ids: target.scene_ids ?? [], prompt_anchor: target.prompt_anchor ?? null })),
+  }));
+}
+
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null, storyFactLedger = null) {
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
@@ -639,6 +656,8 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     parent_scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
+    entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex),
+    location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan),
     scenes: (sourceRows ?? []).map((scene, index, rows) => {
       const unitId = scene.visual_beat_id ?? scene.scene_id;
       const targets = compactEditorialProof
@@ -646,6 +665,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
         : (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []);
       return {
         ...compactSceneForPrompt(scene, stateRefIndex),
+        target_provider_route: routedProviderForPrompt(scene, activeProvider, activeProviderOptions),
         previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
         next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
         reference_target_ids: targets.map((target) => target.ref_id),
@@ -1085,9 +1105,31 @@ function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label
 
 function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
-  const imagePrompt = String(row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim();
-  const modelslabPrompt = String(row.modelslab_image_prompt ?? imagePrompt).trim();
-  const codexPrompt = row.codex_image_prompt ? String(row.codex_image_prompt).trim() : null;
+  const manifest = sanitizeShotManifest(row.shot_manifest);
+  if (manifest && !manifest.reference_slots.length && Array.isArray(row.reference_requirements)) {
+    manifest.reference_slots = row.reference_requirements.map((slot, slotIndex) => ({
+      ref_id: String(slot?.ref_id ?? "").trim(),
+      kind: String(slot?.kind ?? "").trim(),
+      required: slot?.required !== false,
+      slot_order: Number(slot?.slot_order ?? slotIndex + 1),
+      slot_purpose: String(slot?.slot_purpose ?? "").trim(),
+      reason: String(slot?.reason ?? slot?.slot_purpose ?? "").trim(),
+    })).filter((slot) => slot.ref_id);
+  }
+  const route = routedProviderForPrompt(sourceUnit ?? row, scope.activeImageProvider ?? row.image_provider_route ?? "modelslab", scope.activeImageProviderOptions ?? {});
+  const providerPrompt = String(row.provider_prompt ?? row.image_prompt ?? row.modelslab_image_prompt ?? row.codex_image_prompt ?? "").trim();
+  const referenceRequirements = (manifest?.reference_slots ?? []).map((slot) => ({
+    ref_id: slot.ref_id,
+    kind: slot.kind,
+    required: slot.required !== false,
+    slot_order: slot.slot_order,
+    slot_purpose: slot.slot_purpose,
+    reason: slot.reason ?? slot.slot_purpose,
+  }));
+  const characterRefIds = [...new Set([
+    ...(manifest?.character_state_ref_ids ?? []),
+    manifest?.protagonist_state_ref_id,
+  ].filter(Boolean))];
   const basePrompt = {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
@@ -1100,24 +1142,26 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     visual_novelty_directive: sourceUnit?.visual_novelty_directive ?? row.visual_novelty_directive ?? null,
     location_timeline_label: sourceUnit?.location_timeline_label ?? row.location_timeline_label ?? null,
     visual_beat_quality_findings: sourceUnit?.visual_beat_quality_findings ?? row.visual_beat_quality_findings ?? [],
-    start_sec: Number(row.start_sec ?? 0),
-    duration_sec: Math.max(1, Number(row.duration_sec ?? 6)),
-    image_prompt: imagePrompt,
-    modelslab_image_prompt: modelslabPrompt,
-    codex_image_prompt: codexPrompt,
-    prompt_hash: sha256(modelslabPrompt || imagePrompt),
-    image_provider_route: normalizeImageProvider(row.image_provider_route ?? "") === "codex_imagegen" ? "codex_imagegen" : "modelslab",
+    active_state_constraints: sourceUnit?.active_state_constraints ?? null,
+    start_sec: Number(sourceUnit?.start_sec ?? row.start_sec ?? 0),
+    duration_sec: Math.max(0.25, Number(sourceUnit?.duration_sec ?? row.duration_sec ?? 6)),
+    provider_prompt: providerPrompt,
+    image_prompt: providerPrompt,
+    modelslab_image_prompt: route === "modelslab" ? providerPrompt : "",
+    codex_image_prompt: route === "codex_imagegen" ? providerPrompt : null,
+    prompt_hash: sha256(providerPrompt),
+    image_provider_route: route,
     image_model_route: process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
-    reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : [],
-    required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : [],
-    reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : [],
-    anchor_roles: Array.isArray(row.anchor_roles) ? row.anchor_roles : [],
-    shot_manifest: sanitizeShotManifest(row.shot_manifest),
-    visible_subjects: row.visible_subjects ?? [],
-    character_state_refs_used: Array.isArray(row.character_state_refs_used) ? row.character_state_refs_used : [],
-    primary_subject: row.primary_subject ?? null,
-    location: row.location ?? null,
-    ui_text_on_screen: row.ui_text_on_screen ?? [],
+    reference_requirements: referenceRequirements,
+    required_reference_paths: [],
+    reference_usage: referenceRequirements.map((requirement) => ({ ref_id: requirement.ref_id, usage: "attach_existing_ref", reason: requirement.reason })),
+    anchor_roles: referenceRequirements.map((requirement) => ({ ref_id: requirement.ref_id, kind: requirement.kind, anchor_role: "source_anchor", reason: requirement.reason })),
+    shot_manifest: manifest,
+    visible_subjects: manifest?.visible_characters ?? [],
+    character_state_refs_used: characterRefIds,
+    primary_subject: manifest?.primary_character ?? null,
+    location: sourceUnit?.local_location ?? sourceUnit?.location ?? null,
+    ui_text_on_screen: manifest?.ui_elements ?? [],
     image_generation_required: true,
   };
   const scene = sourceUnit ?? row;
@@ -1128,6 +1172,43 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     characterStateRefs: scopedCharacterRefs,
   });
   return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+}
+
+export function normalizePromptPacketForTests(row, sourceUnit, options = {}) {
+  return normalizePrompt(row, 0, options.episode ?? "ep_01", sourceUnit, {
+    visualReferencePlan: options.visualReferencePlan ?? { reference_targets: [] },
+    stateRefIndex: options.stateRefIndex ?? new Map(),
+    activeImageProvider: options.activeImageProvider ?? "modelslab",
+    activeImageProviderOptions: options.activeImageProviderOptions ?? {},
+  });
+}
+
+function activeStateConstraintFindings(prompts, sourceRows) {
+  const findings = [];
+  const stop = new Set(["with", "from", "into", "wearing", "current", "same", "their", "visible", "state"]);
+  for (let index = 0; index < prompts.length; index += 1) {
+    const prompt = prompts[index];
+    const source = sourceRows[index];
+    const text = normalizeLabel(prompt.provider_prompt ?? prompt.image_prompt ?? "");
+    for (const [entityId, state] of Object.entries(source?.active_state_constraints?.entities ?? {})) {
+      for (const field of ["wardrobe", "injury", "visible_state", "possession"]) {
+        const value = String(state?.[field] ?? "").trim();
+        if (!value) continue;
+        const tokens = normalizeLabel(value).split(/\s+/).filter((token) => token.length > 3 && !stop.has(token));
+        if (!tokens.length || tokens.some((token) => text.includes(token))) continue;
+        findings.push({
+          severity: "blocker",
+          code: "active_state_constraint_not_reaffirmed",
+          image_id: prompt.image_id,
+          visual_beat_id: prompt.visual_beat_id,
+          entity_id: entityId,
+          field,
+          expected_state: value,
+        });
+      }
+    }
+  }
+  return findings;
 }
 
 function sanitizeShotManifest(value) {
@@ -1146,6 +1227,14 @@ function sanitizeShotManifest(value) {
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
+    reference_slots: (Array.isArray(value.reference_slots) ? value.reference_slots : []).map((slot, index) => ({
+      ref_id: String(slot?.ref_id ?? "").trim(),
+      kind: String(slot?.kind ?? "").trim(),
+      required: slot?.required !== false,
+      slot_order: Number(slot?.slot_order ?? index + 1),
+      slot_purpose: String(slot?.slot_purpose ?? "").trim(),
+      reason: String(slot?.reason ?? slot?.slot_purpose ?? "").trim(),
+    })).filter((slot) => slot.ref_id),
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
     character_staging: sanitizeCharacterStaging(value.character_staging),
   };
@@ -1372,6 +1461,48 @@ function chunkByParentScene(items, targetSize) {
   return chunks;
 }
 
+function visualUnitRiskClass(unit, visualReferencePlan, stateRefIndex) {
+  const visibleCount = (unit.visible_characters ?? unit.visible_subjects ?? []).length;
+  const referenceCount = relevantReferenceTargets(unit, visualReferencePlan, stateRefIndex).length;
+  const job = `${unit.visual_job ?? ""} ${unit.suggested_shot_job ?? ""} ${unit.visual_beat_action ?? ""}`;
+  if (Number(unit.start_sec ?? 0) < 180
+    || visibleCount >= 3
+    || referenceCount >= 4
+    || /physical_action|fight|strike|grab|carry|rescue|impact|shove|restrain/i.test(job)) return "high";
+  if (visibleCount >= 2 || referenceCount >= 2 || /system_reveal|ui_reveal|interaction|reaction|consequence/i.test(job)) return "medium";
+  return "simple";
+}
+
+function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex) {
+  const limits = {
+    high: Math.max(1, Number(flags["visual-high-risk-chunk-size"] ?? 4)),
+    medium: Math.max(1, Number(flags["visual-medium-risk-chunk-size"] ?? 6)),
+    simple: Math.max(1, Number(flags["visual-simple-chunk-size"] ?? 10)),
+  };
+  const priority = { simple: 1, medium: 2, high: 3 };
+  const chunks = [];
+  let index = 0;
+  while (index < items.length) {
+    const initialRisk = visualUnitRiskClass(items[index], visualReferencePlan, stateRefIndex);
+    const chunk = [];
+    let risk = initialRisk;
+    while (index < items.length && chunk.length < limits[risk]) {
+      const nextRisk = visualUnitRiskClass(items[index], visualReferencePlan, stateRefIndex);
+      if (chunk.length && nextRisk !== risk) break;
+      chunk.push(items[index]);
+      if (priority[nextRisk] > priority[risk]) risk = nextRisk;
+      index += 1;
+    }
+    chunks.push(Object.assign(chunk, { risk_class: risk, target_chunk_size: limits[risk] }));
+  }
+  return chunks;
+}
+
+export function adaptivePromptChunksForTests(items, options = {}) {
+  return adaptivePromptChunks(items, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map())
+    .map((chunk) => ({ risk_class: chunk.risk_class, target_chunk_size: chunk.target_chunk_size, ids: chunk.map((row) => row.visual_beat_id ?? row.scene_id) }));
+}
+
 async function mapWithConcurrency(items, concurrency, mapper) {
   const results = new Array(items.length);
   let nextIndex = 0;
@@ -1418,7 +1549,7 @@ function filterVisualSourceRows(rows, episodeId) {
   const cutIds = parseListFlag(flags["cut-ids"] ?? flags.cutIds);
   if (cutIds.length) {
     const wanted = new Set(cutIds);
-    return annotated.filter((row, index) => wanted.has(`${episodeId}-cut-${String(index + 1).padStart(3, "0")}`));
+    return annotated.filter((row, index) => wanted.has(row.image_id_hint ?? `${episodeId}-cut-${String(index + 1).padStart(3, "0")}`));
   }
   const beatIds = parseListFlag(flags["beat-ids"] ?? flags.beatIds);
   if (beatIds.length) {
@@ -1652,10 +1783,12 @@ function indexCharacterStateRefs(artifact) {
 }
 
 async function main() {
-  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs, visualBeatPlan, runIdentity, locationContractLedger] = await Promise.all([
+  const [timedPlan, semanticPlan, storyFactLedger, visualReferencePlan, referencePlanApproval, characterStateRefs, visualBeatPlan, runIdentity, locationContractLedger] = await Promise.all([
     readJson(timedPlanPath, null),
     readJson(semanticPlanPath, null),
+    readJson(storyFactLedgerPath, null),
     readJson(visualReferencePlanPath, null),
+    readJson(referencePlanApprovalPath, null),
     readJson(characterStateRefsPath, null),
     readJson(visualBeatPlanPath, null),
     readJson(runIdentityPath, null),
@@ -1672,7 +1805,16 @@ async function main() {
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (semanticPlan?.status !== "passed") throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   if (semanticPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("semantic_scene_plan and timed_scene_plan script hashes do not match.");
+  if (runIdentity?.schema === "goldflow_run_identity_v2" && (storyFactLedger?.status !== "passed" || storyFactLedger.source_script_hash !== timedPlan.source_script_hash)) {
+    throw new Error(`Visual prompt authoring requires current story_fact_ledger.json: ${storyFactLedgerPath}`);
+  }
   if (!visualReferencePlan || visualReferencePlan.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
+  if (runIdentity?.schema === "goldflow_run_identity_v2") {
+    const referencePlanHash = await hashFile(visualReferencePlanPath);
+    if (referencePlanApproval?.status !== "approved" || referencePlanApproval.visual_reference_plan_sha256 !== referencePlanHash) {
+      throw new Error(`Visual prompt authoring requires current reference_plan_approval.json: ${referencePlanApprovalPath}`);
+    }
+  }
   const requiresLocationContractLedger = visualReferencePlan.reference_director_contract_version === "reference_director_v2";
   if (requiresLocationContractLedger && (locationContractLedger?.status !== "passed" || !Array.isArray(locationContractLedger?.contracts))) {
     throw new Error(`Missing passed location contract ledger for reference_director_v2: ${locationContractLedgerPath}`);
@@ -1702,15 +1844,15 @@ async function main() {
       && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
     const promptSizes = [];
     if (useChunkingForDryRun) {
-      const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 4));
+      const sceneChunks = adaptivePromptChunks(visualSourceRows, enrichedVisualReferencePlan, stateRefIndex);
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
-        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
-        promptSizes.push({ chunk_index: index + 1, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
+        promptSizes.push({ chunk_index: index + 1, risk_class: sceneChunks[index].risk_class, target_chunk_size: sceneChunks[index].target_chunk_size, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
       }
     } else {
-      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
       promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
     }
     await writeJson(outputPath, {
@@ -1724,7 +1866,7 @@ async function main() {
         mode: visualSourceRows.length === allVisualSourceRows.length ? "full_episode" : "small_batch",
         selected_visual_unit_count: visualSourceRows.length,
         total_visual_unit_count: allVisualSourceRows.length,
-        cut_ids: visualSourceRows.map((row) => `${episode}-cut-${String(Number(row.__visual_plan_absolute_index ?? 0) + 1).padStart(3, "0")}`),
+        cut_ids: visualSourceRows.map((row) => row.image_id_hint ?? `${episode}-cut-${String(Number(row.__visual_plan_absolute_index ?? 0) + 1).padStart(3, "0")}`),
       },
       image_provider: activeImageProvider,
       image_provider_options: activeImageProviderOptions,
@@ -1739,16 +1881,24 @@ async function main() {
   let llm;
   let parsedPrompts = [];
   let styleSummary = "";
+  let adaptiveChunkTelemetry = [];
   const useChunking = flags["visual-chunking"] !== "false"
     && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
   if (useChunking) {
-    const sceneChunks = chunkByParentScene(visualSourceRows, Number(flags["visual-chunk-scenes"] ?? 4));
+    const sceneChunks = adaptivePromptChunks(visualSourceRows, enrichedVisualReferencePlan, stateRefIndex);
+    adaptiveChunkTelemetry = sceneChunks.map((chunk, index) => ({
+      chunk_index: index + 1,
+      risk_class: chunk.risk_class,
+      target_chunk_size: chunk.target_chunk_size,
+      visual_unit_count: chunk.length,
+      beat_ids: chunk.map((row) => row.visual_beat_id ?? null).filter(Boolean),
+    }));
     const chunkConcurrency = Math.max(1, Number(flags["visual-chunk-concurrency"] ?? 6));
     const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
-      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units`);
+      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units, risk=${sceneChunk.risk_class}`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
       const chunkLlm = isLocalLLMRoute(chunkStageName)
@@ -1781,16 +1931,25 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
-    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
   }
   const prompts = parsedPrompts
-    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, { visualReferencePlan: enrichedVisualReferencePlan, stateRefIndex }));
+    .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, {
+      visualReferencePlan: enrichedVisualReferencePlan,
+      stateRefIndex,
+      activeImageProvider,
+      activeImageProviderOptions,
+    }));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
   const providerExclusionPayloadWarnings = providerExclusionPayloadMarkerWarnings(prompts);
+  const activeStateFindings = activeStateConstraintFindings(prompts, visualSourceRows);
+  if (activeStateFindings.length) {
+    throw new Error(`Visual prompt authoring contradicted binding active state on ${activeStateFindings.length} cut(s): ${activeStateFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.entity_id}:${finding.field}`).join(", ")}`);
+  }
   assertScenePromptShape(prompts);
   assertLocalBeatFidelity(prompts, visualSourceRows);
   const shotFramingWarnings = assertShotFramingDistribution(prompts);
@@ -1809,6 +1968,8 @@ async function main() {
     : [];
   if (missingBeatIds.length) throw new Error(`Visual planner missed visual beat ids: ${missingBeatIds.slice(0, 20).join(", ")}`);
   const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
+  if (referencePlanApproval?.status === "approved") sourcePaths.push(referencePlanApprovalPath);
+  if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
   if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   const report = {
@@ -1830,9 +1991,10 @@ async function main() {
       output_path: llm.output_path ?? null,
       chunked: llm.chunked ?? false,
       chunk_count: llm.chunk_count ?? null,
+      adaptive_chunks: adaptiveChunkTelemetry,
     },
     style_summary: styleSummary,
-    prompt_policy: "local-beat-first editorial prompting; normal prose preserves story intent, standalone provider-exclusion payloads are disallowed, and references are selected only when visible/style-critical with explicit image slot roles",
+    prompt_policy: "shot_manifest-authoritative provider-aware prompt packets; the LLM authors one active provider_prompt and deterministic compatibility fields are derived without changing depicted content",
     image_provider: activeImageProvider,
     image_provider_options: activeImageProviderOptions,
     run_identity_path: runIdentityPath,
@@ -1844,6 +2006,7 @@ async function main() {
       cut_ids: prompts.map((prompt) => prompt.image_id),
     },
     prompts,
+    active_state_findings: activeStateFindings,
     warnings: [
       ...(llm.parsed.warnings ?? []),
       ...providerExclusionPayloadWarnings,

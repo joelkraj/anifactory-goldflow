@@ -14,6 +14,7 @@ import {
 } from "./lib/image-provider-routing.mjs";
 import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage } from "./modelslab-image-helper.mjs";
+import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -1665,8 +1666,9 @@ async function main() {
   }
   if (runIdentity.schema === "goldflow_run_identity_v2" && !skipReferenceGeneration) {
     const approval = await readJson(referencePlanApprovalPath, null);
+    const currentPlan = await readJson(visualReferencePlanPath, null);
     const currentPlanHash = await hashFile(visualReferencePlanPath);
-    if (approval?.status !== "approved" || !currentPlanHash || approval.visual_reference_plan_sha256 !== currentPlanHash) {
+    if (!currentPlan || !referencePlanApprovalMatches({ approval, plan: currentPlan, fileSha256: currentPlanHash })) {
       throw new Error(`Reference generation refused: current reference_plan_approval.json is missing or stale for ${visualReferencePlanPath}. Run goldflow visual approve-ref-plan first.`);
     }
   }

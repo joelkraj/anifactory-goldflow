@@ -60,6 +60,10 @@ import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
 import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
 import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
+import {
+  referencePlanApprovalContractSha256,
+  referencePlanApprovalMatches,
+} from "./lib/reference-plan-contract.mjs";
 import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents, xfadeTimelineGroupsForTests } from "./render.mjs";
 import {
   motionIntentFindings,
@@ -1057,7 +1061,21 @@ async function testReferencePlanHashApproval() {
   const approval = await readJson(path.join(episodeDir, "reference_plan_approval.json"));
   assert.equal(approval.status, "approved");
   assert.equal(approval.visual_reference_plan_sha256, sha256(await fs.readFile(planPath)));
+  const approvedPlan = await readJson(planPath);
+  assert.equal(approval.reference_plan_contract_sha256, referencePlanApprovalContractSha256(approvedPlan));
   assert.equal(approval.selected_targets[0].conditioning_asset_role, "identity_state");
+  const generatedPlan = {
+    ...approvedPlan,
+    reference_generation_updated_at: "2026-07-11T12:00:00.000Z",
+    reference_targets: approvedPlan.reference_targets.map((target) => ({
+      ...target,
+      reference_image_path: "/tmp/generated.png",
+      conditioning_image_path: "/tmp/generated.png",
+    })),
+  };
+  assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), true);
+  generatedPlan.reference_targets[0].prompt_anchor = "creatively changed identity";
+  assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), false);
 }
 
 function testAdaptiveProviderPromptPackets() {

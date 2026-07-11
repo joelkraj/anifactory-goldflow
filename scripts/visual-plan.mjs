@@ -13,6 +13,7 @@ import {
 } from "./lib/visual-scope-utils.mjs";
 import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { normalizeImageProvider, routedProviderForPrompt } from "./lib/image-provider-routing.mjs";
+import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import {
   longLocationSpanFindings,
   repeatedLocationShotJobFindings,
@@ -1811,7 +1812,7 @@ async function main() {
   if (!visualReferencePlan || visualReferencePlan.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
   if (runIdentity?.schema === "goldflow_run_identity_v2") {
     const referencePlanHash = await hashFile(visualReferencePlanPath);
-    if (referencePlanApproval?.status !== "approved" || referencePlanApproval.visual_reference_plan_sha256 !== referencePlanHash) {
+    if (!referencePlanApprovalMatches({ approval: referencePlanApproval, plan: visualReferencePlan, fileSha256: referencePlanHash })) {
       throw new Error(`Visual prompt authoring requires current reference_plan_approval.json: ${referencePlanApprovalPath}`);
     }
   }

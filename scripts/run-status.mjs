@@ -10,6 +10,7 @@ import {
   stageDefinition,
   stageIsSatisfied,
 } from "./lib/pipeline-stage-registry.mjs";
+import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -1349,12 +1350,13 @@ async function main() {
 
   const referencePlanPath = path.join(episodeDir, "visual_reference_plan.json");
   const referencePlanHash = await fileSha256(referencePlanPath);
+  const referencePlanArtifact = await readJson(referencePlanPath, null);
   const referencePlanApproval = await readJson(path.join(episodeDir, "reference_plan_approval.json"), null);
-  const referencePlanApprovalDone = Boolean(
-    referencePlanHash
-    && ["approved", "passed"].includes(String(referencePlanApproval?.status ?? "").toLowerCase())
-    && referencePlanApproval?.visual_reference_plan_sha256 === referencePlanHash
-  );
+  const referencePlanApprovalDone = Boolean(referencePlanArtifact && referencePlanApprovalMatches({
+    approval: referencePlanApproval,
+    plan: referencePlanArtifact,
+    fileSha256: referencePlanHash,
+  }));
   const hardenReport = await readJson(path.join(episodeDir, `visual_prompt_hardening_${episode}.json`), null);
   const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
   const transitionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `transition_edit_plan_${episode}.json`), `transition_edit_plan_${episode}.json`);
@@ -1388,7 +1390,7 @@ async function main() {
     visual_reference_plan: visualReferencePlan,
     reference_plan_approval: legacyIdentity
       ? { state: "skipped_with_waiver", evidence: "legacy run predates reference-plan hash approval" }
-      : { done: referencePlanApprovalDone, evidence: referencePlanApprovalDone ? "reference_plan_approval.json hash=current" : "reference plan hash approval missing or stale" },
+      : { done: referencePlanApprovalDone, evidence: referencePlanApprovalDone ? "reference_plan_approval.json creative contract hash=current" : "reference plan creative contract approval missing or stale" },
     reference_generation: referenceGeneration,
     reference_image_approval: legacyIdentity && legacyCharacterRefStatus !== "draft_needs_manual_review" && !referenceImageApproval.done
       ? { state: "skipped_with_waiver", evidence: "legacy run predates separate generated-reference approval report" }

@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { referencePlanApprovalContractSha256 } from "./lib/reference-plan-contract.mjs";
 
 const flags = parseFlags(process.argv.slice(2));
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -59,13 +60,15 @@ async function main() {
   const targets = Array.isArray(plan.reference_targets) ? plan.reference_targets : [];
   if (!targets.length) throw new Error("Reference plan has no selected targets.");
   const planHash = sha256(await fs.readFile(planPath));
+  const planContractHash = referencePlanApprovalContractSha256(plan);
   const outputPath = path.resolve(flags.output ?? path.join(episodeDir, "reference_plan_approval.json"));
   const report = {
-    schema: "goldflow_reference_plan_approval_v1",
+    schema: "goldflow_reference_plan_approval_v2",
     status: "approved",
     episode,
     visual_reference_plan_path: planPath,
     visual_reference_plan_sha256: planHash,
+    reference_plan_contract_sha256: planContractHash,
     reference_director_contract_version: plan.reference_director_contract_version ?? null,
     selected_target_count: targets.length,
     selected_targets: targets.map((target) => ({

@@ -2207,7 +2207,7 @@ function finalDirectorSelectionFindings(referenceTargets, {
         style: new Set(["style_language"]),
         character_state: new Set(["identity_state", "faction_language"]),
         location: new Set(["environment"]),
-        prop: new Set(["prop"]),
+        prop: new Set(["prop", "faction_language"]),
         ui: new Set(["ui_motif"]),
         action: new Set(["action_effect"]),
       }[normalizeKind(target.kind)] ?? new Set();

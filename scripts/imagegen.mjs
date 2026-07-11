@@ -1283,17 +1283,64 @@ async function generateReferences() {
     referenceById.set(result.ref_id, result.image_path);
     styleRefPath = result.image_path;
   }
-  const remaining = targets.filter((target) => target.ref_id !== styleTarget?.ref_id);
-  const referencePool = await runPoolWithCircuitBreaker(
-    remaining,
-    (target) => generateReference(target, styleRefPath, referenceById, characterRefs?.character_state_refs ?? []),
-    referenceConcurrency,
+  const characterStateRows = characterRefs?.character_state_refs ?? [];
+  const stateBySourceRefId = new Map(
+    characterStateRows
+      .filter((row) => row?.source_ref_id)
+      .map((row) => [String(row.source_ref_id), row]),
   );
-  const remainingResults = referencePool.results;
-  results.push(...remainingResults);
-  for (const row of remainingResults) {
-    if (row?.ref_id && row?.image_path && imageResultPassed(row)) referenceById.set(row.ref_id, row.image_path);
+  const remaining = targets.filter((target) => target.ref_id !== styleTarget?.ref_id);
+  const requestedTargetIds = new Set(remaining.map((target) => String(target.ref_id)));
+  const pendingById = new Map(remaining.map((target) => [String(target.ref_id), target]));
+  const referencePoolSummaries = [];
+
+  while (pendingById.size) {
+    const ready = [...pendingById.values()].filter((target) => {
+      const stateRef = stateBySourceRefId.get(String(target.ref_id));
+      const baseRefId = String(
+        stateRef?.base_identity_ref_id
+          ?? target.identity_ref_id
+          ?? target.source_identity_ref_id
+          ?? "",
+      ).trim();
+      return !baseRefId
+        || baseRefId === String(target.ref_id)
+        || referenceById.has(baseRefId)
+        || !requestedTargetIds.has(baseRefId);
+    });
+    if (!ready.length) {
+      const unresolved = [...pendingById.values()].map((target) => {
+        const stateRef = stateBySourceRefId.get(String(target.ref_id));
+        return {
+          ref_id: target.ref_id,
+          base_identity_ref_id: stateRef?.base_identity_ref_id
+            ?? target.identity_ref_id
+            ?? target.source_identity_ref_id
+            ?? null,
+        };
+      });
+      throw new Error(`Reference dependency cycle or unresolved base identities: ${JSON.stringify(unresolved)}`);
+    }
+
+    const wave = await runPoolWithCircuitBreaker(
+      ready,
+      (target) => generateReference(target, styleRefPath, referenceById, characterStateRows),
+      referenceConcurrency,
+    );
+    referencePoolSummaries.push(wave);
+    results.push(...wave.results);
+    for (const target of ready) pendingById.delete(String(target.ref_id));
+    for (const row of wave.results) {
+      if (row?.ref_id && row?.image_path && imageResultPassed(row)) referenceById.set(row.ref_id, row.image_path);
+    }
+    if (wave.circuit_open) break;
   }
+
+  const referencePool = {
+    circuit_open: referencePoolSummaries.some((wave) => wave.circuit_open),
+    circuit_reason: referencePoolSummaries.find((wave) => wave.circuit_open)?.circuit_reason ?? null,
+    adaptive_concurrency: referencePoolSummaries.at(-1)?.adaptive_concurrency ?? referenceConcurrency,
+  };
   const updatedReferencePlan = {
     ...referencePlan,
     reference_targets: referencePlan.reference_targets.map((target) => ({

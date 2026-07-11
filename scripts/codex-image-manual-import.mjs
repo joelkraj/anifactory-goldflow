@@ -134,7 +134,13 @@ async function main() {
     reference_slots: Array.isArray(prompt.reference_slots) ? prompt.reference_slots : referenceSlotsFromPrompt(prompt),
   };
   const modelPrompt = promptWithReferenceSlots(promptForHash);
-  const promptHash = sha256(modelPrompt);
+  const referenceImagePaths = prompt.required_reference_paths ?? [];
+  const referenceInputs = await Promise.all(referenceImagePaths.map(async (referencePath) => ({
+    path: referencePath,
+    sha256: await hashFile(referencePath),
+  })));
+  const promptPlanHash = await hashFile(promptPath);
+  const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, reference_inputs: referenceInputs, prompt_plan_sha256: promptPlanHash }));
   const outputPath = imagePathFor(prompt);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.copyFile(sourcePath, outputPath);
@@ -147,9 +153,11 @@ async function main() {
     image_id: prompt.image_id,
     prompt_hash: promptHash,
     source_prompt_path: promptPath,
+    source_prompt_sha256: promptPlanHash,
     source_manual_codex_image_path: sourcePath,
     source_manual_codex_image_sha256: sourceHash,
-    reference_image_paths: prompt.required_reference_paths ?? [],
+    reference_image_paths: referenceImagePaths,
+    reference_inputs: referenceInputs,
     reference_slots: promptForHash.reference_slots ?? [],
     image_prompt: modelPrompt,
     codex_prompt: modelPrompt,
@@ -163,7 +171,6 @@ async function main() {
     },
     updated_at: updatedAt,
   });
-  const promptPlanHash = await hashFile(promptPath);
   const allPromptIds = new Set(plan.prompts.filter((row) => row.image_generation_required !== false).map((row) => row.image_id));
   const priorReport = await readJson(reportPath, null);
   const mergedById = new Map();

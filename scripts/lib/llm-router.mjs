@@ -1,6 +1,6 @@
 // LLM Router
 // ANIFACTORY_LLM_ROUTE values:
-//   codex       - Codex/GPT-5.5 via API/CLI (default)
+//   codex       - Codex/GPT-5.6 Sol through the pinned CLI runner (default)
 //   local-qwen  - local Qwen via Rapid-MLX OpenAI-compatible endpoint
 //   auto        - local-qwen for volume stages, codex for quality stages
 

@@ -29,7 +29,7 @@ Classification summary:
 | `applyLocationContract` | `live` | 1134 | 1134 | 1860 |
 | `joeyProgressionClause` | `live` | 1095 | 1095 | 1860 |
 | `resolveCharacterStateConflicts` | `live` | 681 | 681 | 1860 |
-| `sanitizePositiveVisualPrompt` | `live` | 405 | 405 | 1860 |
+| `stripEmbeddedNegativePromptPayloadSyntax` | `live` | 405 | 405 | 1860 |
 | `sanitizeModelSafeBeautyLanguage` | `live` | 293 | 293 | 1860 |
 | `removeConflictingSingleLocationClauses` | `live` | 65 | 65 | 1860 |
 | `stripDialogueCueLanguage` | `live` | 15 | 15 | 3720 |
@@ -39,7 +39,7 @@ Classification summary:
 Read:
 
 - The `repair` path is still a large prose authoring system and is heavily live on real prompts.
-- The production `sanitize` path is also not prose-stable: it mutates authored text via negation rewriting, beauty-language rewriting, multiplicity-clause injection, and other clause appenders.
+- The production `sanitize` path was not prose-stable in this historical audit: it mutated authored text through old prompt-payload/negation handling, beauty-language rewriting, multiplicity-clause injection, and other clause appenders. The current policy is narrower: normal prompt prose stays creative-author-owned; only standalone or embedded provider-exclusion payload syntax is sanitation scope.
 - `removeConflictingVisibleLocationClauses` was dead on this sample and is the only measured dead prose mutator.
 
 Representative examples are stored in `scratch/harden-mutation-audit-run2/summary.md`.

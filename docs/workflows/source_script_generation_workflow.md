@@ -8,7 +8,7 @@ The chatbot should produce a polished narration script that is already close to 
 
 ## Default Flow
 
-1. Operator provides a premise, target length, subgenre, and title promise. Default production narration pace is 210-220 spoken words per minute, with 215 WPM used for runtime estimates.
+1. Operator provides a premise, target length, subgenre, and title promise. Default production narration pace is 195-220 spoken words per minute, with 208 WPM used for runtime estimates.
 2. Agent selects the best prompt template from `docs/prompts/`.
 3. Agent fills the template variables and returns one copy-paste prompt to the operator.
 4. Operator gives the prompt to the chatbot.
@@ -32,7 +32,7 @@ Reject or revise the chatbot output before ingest if it contains:
 - A cold open that spends the first 30-60 seconds on setup instead of visible wound, hidden-power spark, first counter, and the next arc.
 - Streamer/system premises where the first live/system quest, status mechanic, or next arc arrives too late for the title promise.
 - TTS-ambiguous wording such as "go live" without streaming context or "content" where the intended meaning is media/clip content.
-- Prose that is padded for length instead of written for the 210-220 WPM narration target.
+- Prose that is padded for length instead of written for the 195-220 WPM narration target.
 
 ## Research And Revision Loop
 

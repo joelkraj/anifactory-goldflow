@@ -3,6 +3,8 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
+import { pathToFileURL } from "node:url";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -502,6 +504,58 @@ function normalizedName(value) {
     .trim();
 }
 
+function titleCaseName(value) {
+  return String(value ?? "")
+    .replace(/_ref$/i, "")
+    .replace(/^(?:char|character|protagonist|mc|host)_/i, "")
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function hasFirstPersonNarration(text) {
+  return /\b(?:i|me|my|mine|myself)\b/i.test(String(text ?? ""));
+}
+
+function firstPersonProtagonistName(scene) {
+  const requirements = Array.isArray(scene?.ref_requirements) ? scene.ref_requirements : [];
+  const characterRequirements = requirements.filter((requirement) => String(requirement?.kind ?? "").toLowerCase() === "character");
+  const protagonistRequirement = characterRequirements.find((requirement) => (
+    /\b(?:protagonist|main character|main lead|mc|host|narrator|viewpoint character|pov character)\b/i.test([
+      requirement?.subject,
+      requirement?.character,
+      requirement?.role,
+      requirement?.ref_id,
+      requirement?.reason,
+      requirement?.description,
+    ].filter(Boolean).join(" "))
+  ));
+  const label = protagonistRequirement?.subject
+    ?? protagonistRequirement?.character
+    ?? protagonistRequirement?.name
+    ?? protagonistRequirement?.ref_id;
+  if (label) return titleCaseName(label);
+  const scenePrimary = String(scene?.primary_subject ?? "").trim();
+  if (scenePrimary && !/\b(?:antagonist|enemy|villain|culprit|target|rival|manager|captain|doctor|clerk|assessor)\b/i.test(scenePrimary)) {
+    return scenePrimary;
+  }
+  return null;
+}
+
+function uniqueNames(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const name = String(value ?? "").trim();
+    const key = normalizedName(name);
+    if (!name || !key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(name);
+  }
+  return result;
+}
+
 function namesInText(names, text) {
   const source = normalizedName(text);
   const sourceTokens = new Set(source.split(" ").filter(Boolean));
@@ -527,9 +581,11 @@ function localVisibleCharacters(scene, beatText) {
   const stateNames = (Array.isArray(scene.character_states) ? scene.character_states : []).map((state) => state?.character).filter(Boolean);
   const candidates = [...new Set([...visibleSubjects, ...stateNames].map((name) => String(name ?? "").trim()).filter(Boolean))];
   const mentioned = namesInText(candidates, beatText);
-  if (mentioned.length) return mentioned;
+  const firstPersonProtagonist = hasFirstPersonNarration(beatText) ? firstPersonProtagonistName(scene) : null;
+  if (mentioned.length) return uniqueNames([firstPersonProtagonist, ...mentioned].filter(Boolean));
   const lower = String(beatText ?? "").toLowerCase();
-  if (/\b(?:he|him|his|i|me|my)\b/.test(lower) && scene.primary_subject) return [scene.primary_subject];
+  if (firstPersonProtagonist) return [firstPersonProtagonist];
+  if (/\b(?:he|him|his)\b/.test(lower) && scene.primary_subject) return [scene.primary_subject];
   return scene.primary_subject ? [scene.primary_subject] : [];
 }
 
@@ -1144,7 +1200,8 @@ async function main() {
       if (start >= 0) scriptCursor = start + result.sceneText.length;
     }
   }
-  const numberedBeatsAll = normalizeGlobalBeatTimeline(beats).map((beat, index) => ({
+  const whisperAligned = alignExcerptRowsToWhisper(beats, wordTiming.words);
+  const numberedBeatsAll = normalizeGlobalBeatTimeline(whisperAligned.rows).map((beat, index) => ({
     ...beat,
     image_id_hint: `${episode}-cut-${String(index + 1).padStart(3, "0")}`,
   }));
@@ -1222,6 +1279,7 @@ async function main() {
     },
     location_timeline: locationTimeline,
     policy: "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry exact local narration excerpt, local location, visible characters, mentioned-only characters, props/UI, visual job, and beat-level advisory reference hints before reference or prompt authoring. Beat ref_needs are local evidence, not official locked reference targets.",
+    whisper_excerpt_alignment: whisperAligned.summary,
     beat_settings: {
       target_beat_sec: targetBeatSec,
       max_beat_sec: maxBeatSec,
@@ -1242,8 +1300,17 @@ async function main() {
   console.log(JSON.stringify({ status: report.status, output_path: outputPath, scene_count: report.scene_count, visual_beat_count: report.visual_beat_count }, null, 2));
 }
 
-main().catch(async (error) => {
-  await writeJson(outputPath, { schema: "goldflow_visual_beat_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+export const visualBeatInternalsForTests = {
+  firstPersonProtagonistName,
+  hasFirstPersonNarration,
+  localVisibleCharacters,
+  localBeatReferenceNeeds,
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(async (error) => {
+    await writeJson(outputPath, { schema: "goldflow_visual_beat_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

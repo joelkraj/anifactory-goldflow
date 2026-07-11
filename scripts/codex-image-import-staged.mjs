@@ -147,6 +147,7 @@ async function importReferenceOne(refId, sourcePath, referencePlan, characterRef
     subject: target.subject ?? null,
     source_reference_plan_path: visualReferencePlanPath,
     source_path: sourcePath,
+    conditioning_image_path: outputPath,
     image_provider: "codex_imagegen",
     image_provider_route: "staged_codex_reference_import",
     generated: {
@@ -162,6 +163,7 @@ async function importReferenceOne(refId, sourcePath, referencePlan, characterRef
     reference_targets: (referencePlan.reference_targets ?? []).map((row) => row.ref_id === refId ? {
       ...row,
       reference_image_path: outputPath,
+      conditioning_image_path: outputPath,
       image_provider: "codex_imagegen",
       image_provider_route: "staged_codex_reference_import",
     } : row),
@@ -174,6 +176,7 @@ async function importReferenceOne(refId, sourcePath, referencePlan, characterRef
       character_state_refs: characterRefs.character_state_refs.map((row) => row.source_ref_id === refId ? {
         ...row,
         reference_image_path: outputPath,
+        conditioning_image_path: outputPath,
         image_provider: "codex_imagegen",
         image_provider_route: "staged_codex_reference_import",
       } : row),

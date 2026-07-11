@@ -4,6 +4,11 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  configuredCodexModel,
+  configuredCodexReasoningEffort,
+  resolveCodexRuntime,
+} from "./lib/codex-cli-runner.mjs";
 
 const execFile = promisify(execFileCb);
 const supportedImageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp"]);
@@ -148,14 +153,21 @@ export async function generateCodexImage({ prompt, outputPath, referenceImagePat
     if (!(await exists(imagePath))) throw new Error(`Missing Codex image reference: ${imagePath}`);
     imageArgs.push("--image", shellQuote(imagePath));
   }
+  const orchestratorModel = configuredCodexModel(process.env.ANIFACTORY_CODEX_IMAGEGEN_ORCHESTRATOR_MODEL ?? null);
+  const orchestratorReasoningEffort = configuredCodexReasoningEffort(process.env.ANIFACTORY_CODEX_IMAGEGEN_REASONING_EFFORT ?? null);
+  const codexRuntime = await resolveCodexRuntime({ model: orchestratorModel });
   const command = [
-    "codex",
+    shellQuote(codexRuntime.executable),
     "exec",
     "--enable",
     "image_generation",
     "--skip-git-repo-check",
     "-C",
     shellQuote(process.cwd()),
+    "-m",
+    shellQuote(orchestratorModel),
+    "-c",
+    shellQuote(`model_reasoning_effort="${orchestratorReasoningEffort}"`),
     "--sandbox",
     "read-only",
     "--add-dir",
@@ -205,6 +217,10 @@ export async function generateCodexImage({ prompt, outputPath, referenceImagePat
     codex_session_id: sessionId,
     codex_import_selection_mode: sessionId ? "session_folder" : "global_job_start_time_fallback",
     codex_reference_count: referenceImagePaths.length,
+    codex_orchestrator_model: orchestratorModel,
+    codex_orchestrator_reasoning_effort: orchestratorReasoningEffort,
+    codex_cli_path: codexRuntime.executable,
+    codex_cli_version: codexRuntime.version,
     model: parsed?.model ?? "codex_image_generation",
     source_dimensions: await readPngDimensions(chosen.sourcePath),
     output_dimensions: await readPngDimensions(outputPath),

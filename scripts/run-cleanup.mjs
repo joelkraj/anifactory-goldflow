@@ -52,6 +52,16 @@ async function sizeBytes(filePath) {
   return fs.stat(filePath).then((stat) => stat.size).catch(() => 0);
 }
 
+async function pathSizeBytes(targetPath) {
+  const stat = await fs.stat(targetPath).catch(() => null);
+  if (!stat) return 0;
+  if (stat.isFile()) return stat.size;
+  if (!stat.isDirectory()) return 0;
+  const entries = await fs.readdir(targetPath, { withFileTypes: true }).catch(() => []);
+  const sizes = await Promise.all(entries.map((entry) => pathSizeBytes(path.join(targetPath, entry.name))));
+  return sizes.reduce((sum, size) => sum + size, 0);
+}
+
 function formatBytes(bytes) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = Number(bytes) || 0;
@@ -152,6 +162,50 @@ async function collectLegacyFishArtifactCandidates() {
   return candidates;
 }
 
+async function collectPostQaRenderIntermediateCandidates() {
+  const entries = await fs.readdir(episodeDir, { withFileTypes: true }).catch(() => []);
+  const finalQaExists = entries.some((entry) => entry.isFile() && /^(?:final_qa_|upload_qa_|qa_report_).*\.json$/i.test(entry.name));
+  if (!finalQaExists) return [];
+  const renderReports = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !new RegExp(`^render_report_${episode}.*\\.json$`).test(entry.name)) continue;
+    const filePath = path.join(episodeDir, entry.name);
+    const report = await readJson(filePath, null);
+    const outputPath = report?.output_path ?? report?.final_video_path ?? null;
+    if (report?.status !== "passed" || !outputPath || !(await exists(outputPath))) continue;
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (stat) renderReports.push({ filePath, outputPath, mtimeMs: stat.mtimeMs });
+  }
+  if (!renderReports.length) return [];
+  const renderWork = path.join(episodeDir, "assets", "render-work");
+  const names = [
+    "silent_video.mp4",
+    "silent_video_normalized.mp4",
+    "pre_final_audio_loudnorm.mp4",
+    "subtitle_overlay.mov",
+    "engagement_overlay.mov",
+    "subtitle-frames",
+    "engagement-frames",
+    "subtitles.concat.txt",
+    "engagement.concat.txt",
+    "audio_with_render_transition_sfx.m4a",
+    "final_audio_loudnorm.m4a",
+  ];
+  const candidates = [];
+  for (const name of names) {
+    const targetPath = path.join(renderWork, name);
+    if (!(await fs.stat(targetPath).catch(() => null))) continue;
+    candidates.push({
+      type: "post_qa_render_intermediate",
+      path: targetPath,
+      size_bytes: await pathSizeBytes(targetPath),
+      report_path: renderReports.sort((a, b) => b.mtimeMs - a.mtimeMs)[0].filePath,
+      replacement_path: renderReports[0].outputPath,
+    });
+  }
+  return candidates;
+}
+
 async function applyCandidate(candidate) {
   if (candidate.type === "narrator_only_longform_intermediate_wav") {
     const report = await readJson(candidate.report_path, null);
@@ -171,6 +225,10 @@ async function applyCandidate(candidate) {
   }
   if (candidate.type === "legacy_fish_voice_artifact_for_qwen_run") {
     await fs.rm(candidate.path, { force: true });
+    return;
+  }
+  if (candidate.type === "post_qa_render_intermediate") {
+    await fs.rm(candidate.path, { recursive: true, force: true });
   }
 }
 
@@ -178,6 +236,7 @@ async function main() {
   const candidates = [
     ...(await collectLongformWavPruneCandidate()),
     ...(await collectLegacyFishArtifactCandidates()),
+    ...(await collectPostQaRenderIntermediateCandidates()),
     ...(await collectArchiveCandidates()),
   ];
   let reclaimed = 0;
@@ -198,6 +257,7 @@ async function main() {
     candidate_count: candidates.length,
     reclaimable_bytes: reclaimed,
     reclaimable: formatBytes(reclaimed),
+    preserved_render_cache: path.join(episodeDir, "assets", "render-work", "motion-clips"),
     actions,
   }, null, 2));
 }

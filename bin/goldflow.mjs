@@ -52,10 +52,19 @@ function commandStage(commandName, subcommandName, parsedFlags) {
   if (key === "visual harden") return "visual_prompt_plan_review_harden";
   if (key === "visual engagement") return "transition_edit_plan";
   if (key === "visual transitions") return "transition_edit_plan";
-  if (key === "imagegen start") return isTrue(parsedFlags["references-only"]) ? "reference_generation" : "image_generation";
+  if (key === "imagegen start") {
+    if (isTrue(parsedFlags["references-only"])) return "reference_generation";
+    if (isTrue(parsedFlags["qa-recovery"])) return "image_output_qa";
+    return "image_generation";
+  }
   if (key === "imagegen promote-derived-refs") return "image_generation";
   if (key === "imagegen import-codex") return "image_generation";
-  if (key === "imagegen import-staged-codex") return isTrue(parsedFlags["references-only"]) ? "reference_generation" : "image_generation";
+  if (key === "imagegen import-staged-codex") {
+    if (isTrue(parsedFlags["references-only"])) return "reference_generation";
+    if (isTrue(parsedFlags["qa-recovery"])) return "image_output_qa";
+    return "image_generation";
+  }
+  if (key === "imagegen qa") return "image_output_qa";
   if (key === "render start") return "premium_render";
   return null;
 }
@@ -127,25 +136,27 @@ Production commands are guarded by the run-status ledger. Use --workflow-bypass 
 
 Commands:
   goldflow run preflight           Lock run identity before ingest or folder creation
+  goldflow run codex-doctor        Show the pinned Codex model, reasoning effort, CLI path, and CLI version; add --probe true for a live call
   goldflow run status              Print artifact-backed stage ledger before continuing
   goldflow run cleanup             Audit/prune safe unused episode intermediates; use --apply true to delete
   goldflow ingest source           Copy raw chatbot/script source into script_clean.md
   goldflow script approve          Write exact-hash review/approval lock artifacts
-  goldflow script pace-check       Write approved-script 210-220 WPM target budget
+  goldflow script pace-check       Write approved-script 195-220 WPM target budget
   goldflow script speakability     Review approved script for broad TTS speakability and spoken overrides
   goldflow script targeted         Write targeted problem-area TTS overrides only
   goldflow semantic plan           Extract semantic scene plan from locked script
   goldflow voice plan              Build narrator-first Qwen generation plan
-  goldflow tts qwen                Generate/stitch ModelsLab Qwen narration
+  goldflow tts qwen                Generate/stitch ModelsLab Qwen narration at provider-native speed
   goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
-  goldflow audio pace-check        Verify stitched narration is 210-220 WPM from Whisper timing
-  goldflow audio tempo-normalize   Recovery: non-destructively tempo-correct slow/fast narration, then rerun Whisper
+  goldflow audio pace-check        Verify stitched narration is 195-220 WPM from Whisper timing
+  goldflow audio tempo-normalize   Emergency diagnostic only; requires --operator-approved-emergency true
   goldflow timing bind             Bind semantic scenes to Whisper timing
   goldflow visual beats            Split timed semantic scenes into visual image beats
-  goldflow visual refs             Plan visual references, state refs, and anchor strategy
+  goldflow visual planner-ab       Diagnostic-only thin-ledger/editorial-beat A/B; writes sidecars and never regenerates production media
+  goldflow visual refs             Build evidence/location ledgers, then let the global LLM director select clean refs
   goldflow visual approve-refs     Approve reviewed/generated refs for visual prompt planning
   goldflow visual plan             Author current-scene-only image prompts from visual beats
-  goldflow visual review           Review/fix prompts with LLM auto-resolve; span repair belongs here
+  goldflow visual review           Optional blocker-only/risk diagnostic prompt repair; not a default full-episode toll
     use --resume-blocked true to continue an existing blocked review/harden repair without rerunning full visual plan
   goldflow visual harden           Generic-only prompt/ref sanitation and pre-imagegen sample QA
   goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
@@ -154,6 +165,7 @@ Commands:
   goldflow imagegen promote-derived-refs Promote successful seed cuts into derive-from-cut reference images
   goldflow imagegen import-codex   Import one manually generated Codex/OpenAI scene-cut raster
   goldflow imagegen import-staged-codex Import staged built-in Codex rasters for scene cuts or --references-only refs
+  goldflow imagegen qa             Build output contact sheets, audit image integrity, and record risk-cut approval
   goldflow render start            Render final video from mixed audio, images, Whisper subtitles
   goldflow audio enrich-sfx-score  Opt-in plan/generate Whisper-timed SFX and score
   goldflow audio score-drops-chunked Plan score drops in smaller LLM chunks
@@ -167,18 +179,21 @@ Common flags:
   --episode ep_01
 
 Render profiles:
-  default premium: --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
-  smoother A/B sibling: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
-  The smoother sibling writes best to a separate --output/--report-output path so it can be reviewed alongside the premium render.
+  default premium: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  legacy diagnostic: --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  Motion clips are hash cached; compliant concat streams skip the redundant normalization encode.
 
 Validation-batch flags:
+  --qwen-native-speed 1.25 locks provider-native narration speed at preflight; run status adjusts this natively when enforced WPM misses.
   --image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest --codex-opening-sec 300
   Routes references through ModelsLab, scene cuts before the locked opening timestamp through staged Codex imagegen import, and later cuts through ModelsLab.
+  --image-provider hybrid_codex_refs_opening_risky_modelslab_rest --codex-opening-sec 600
+  Routes all references, opening-window cuts, and risky multi-character or explicitly Codex-routed cuts through staged Codex imagegen import, and later simple cuts through ModelsLab.
   --pace-policy diagnostic records actual WPM without blocking production solely for TTS pace.
-  --render-profile smooth_fast_ken_burns makes premium_render use the smoother no-oversample profile as the primary render.
+  --render-profile smooth_fast_ken_burns is the default; use --render-profile fill_ken_burns only for a deliberate legacy comparison.
 
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs (director inventory + final refs) -> reference imagegen -> visual approve-refs -> visual plan -> visual review --auto-resolve true -> visual harden -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start --seed-derived-refs true when needed -> imagegen promote-derived-refs when seed cuts are ready -> imagegen start -> render start
+  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen --native-speed <locked-speed> -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs (evidence ledger + location contracts + global LLM director + selected inventory) -> reference imagegen -> visual approve-refs -> visual plan -> visual harden -> blocker-only visual review only when harden blocks -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> imagegen qa -> render start
 
 Prompt-repair migration guardrails:
   Part F ships before Part G.
@@ -193,6 +208,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   help();
 } else if (command === "run" && subcommand === "preflight") {
   run("run-preflight.mjs", flags);
+} else if (command === "run" && subcommand === "codex-doctor") {
+  run("codex-runtime-doctor.mjs", flags);
 } else if (command === "run" && subcommand === "status") {
   run("run-status.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {
@@ -223,6 +240,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("timing-bind.mjs", flags);
 } else if (command === "visual" && subcommand === "beats") {
   run("visual-beat-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "planner-ab") {
+  run("visual-planner-ab.mjs", flags);
 } else if (command === "visual" && subcommand === "plan") {
   run("visual-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "refs") {
@@ -245,6 +264,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("codex-image-manual-import.mjs", flags);
 } else if (command === "imagegen" && subcommand === "import-staged-codex") {
   run("codex-image-import-staged.mjs", flags);
+} else if (command === "imagegen" && subcommand === "qa") {
+  run("image-output-qa.mjs", flags);
 } else if (command === "render" && subcommand === "start") {
   run("render.mjs", flags);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {

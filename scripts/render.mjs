@@ -4,12 +4,15 @@ import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sharp from "sharp";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
+let ffmpegBin = flags["ffmpeg-bin"] ?? process.env.ANIFACTORY_FFMPEG_BIN ?? "ffmpeg";
+let ffprobeBin = flags["ffprobe-bin"] ?? process.env.ANIFACTORY_FFPROBE_BIN ?? "ffprobe";
 const channel = flags.channel ?? "53rebirth";
 const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
@@ -18,18 +21,21 @@ const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week,
 const assetsDir = path.join(episodeDir, "assets");
 const renderDir = path.join(assetsDir, "renders");
 const workDir = path.join(assetsDir, "render-work");
-const promptPlanPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts.json");
+const promptPlanPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const audioBedReportPath = flags.audioBedReport ?? flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
 const audioStitchReportPath = flags.audioStitchReport ?? flags["audio-stitch-report"] ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
+const imageOutputQaPath = flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
+const cutExecutionLedgerPath = flags["cut-execution-ledger"] ?? path.join(episodeDir, "cut_execution_ledger.json");
 const transitionEditPlanPath = flags.transitionPlan ?? flags["transition-plan"] ?? path.join(episodeDir, `transition_edit_plan_${episode}.json`);
 const engagementOverlayPlanPath = flags.engagementPlan ?? flags["engagement-plan"] ?? path.join(episodeDir, `engagement_overlay_plan_${episode}.json`);
 const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-goldflow.mp4`);
 const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.join(episodeDir, `render_report_${episode}.json`);
 const width = Number(flags.width ?? 1920);
 const height = Number(flags.height ?? 1080);
-const motionMode = normalizeMotionMode(flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "fill_ken_burns");
+const motionMode = normalizeMotionMode(flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "smooth_fast_ken_burns");
 const fps = Number(flags.fps ?? process.env.ANIFACTORY_RENDER_FPS ?? (motionMode === "smooth_fast_ken_burns" ? 60 : 30));
 const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTORY_RENDER_FOREGROUND_SCALE ?? 0.93);
 const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.75);
@@ -65,7 +71,7 @@ function parseFlags(parts) {
 function normalizeMotionMode(value) {
   const key = String(value ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
   if (key === "smooth_fast" || key === "smooth_ken_burns" || key === "smooth_fast_kenburns") return "smooth_fast_ken_burns";
-  return key || "fill_ken_burns";
+  return key || "smooth_fast_ken_burns";
 }
 
 function sha256(value) {
@@ -98,17 +104,129 @@ async function writeJson(filePath, value) {
 }
 
 async function mediaDuration(filePath) {
-  const { stdout } = await execFile("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", filePath]);
+  const { stdout } = await execFile(ffprobeBin, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", filePath]);
   return Number(stdout.trim());
+}
+
+async function videoStreamInfo(filePath) {
+  const { stdout } = await execFile(ffprobeBin, [
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height,pix_fmt,r_frame_rate",
+    "-of", "json",
+    filePath,
+  ]);
+  const stream = JSON.parse(stdout)?.streams?.[0] ?? {};
+  const [fpsNumerator, fpsDenominator] = String(stream.r_frame_rate ?? "0/1").split("/").map(Number);
+  return {
+    width: Number(stream.width ?? 0),
+    height: Number(stream.height ?? 0),
+    pix_fmt: stream.pix_fmt ?? null,
+    fps: fpsDenominator ? fpsNumerator / fpsDenominator : 0,
+    duration_sec: await mediaDuration(filePath),
+  };
 }
 
 async function ffmpegHasFilter(filterName) {
   try {
-    const { stdout } = await execFile("ffmpeg", ["-hide_banner", "-filters"]);
+    const { stdout } = await execFile(ffmpegBin, ["-hide_banner", "-filters"]);
     return new RegExp(`\\s${filterName}\\s`).test(stdout);
   } catch {
     return false;
   }
+}
+
+async function configureMediaTools() {
+  if (flags["ffmpeg-bin"] || process.env.ANIFACTORY_FFMPEG_BIN) return;
+  const fullFfmpeg = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg";
+  const fullFfprobe = "/opt/homebrew/opt/ffmpeg-full/bin/ffprobe";
+  if (!(await exists(fullFfmpeg)) || !(await exists(fullFfprobe))) return;
+  try {
+    const { stdout } = await execFile(fullFfmpeg, ["-hide_banner", "-filters"]);
+    if (/\sass\s/.test(stdout)) {
+      ffmpegBin = fullFfmpeg;
+      ffprobeBin = fullFfprobe;
+    }
+  } catch {}
+}
+
+function imageOutputQaRequired(identity = {}) {
+  return identity?.image_output_qa_required === true
+    || identity?.production_gates?.image_output_qa_required_before_render === true;
+}
+
+function explicitEditorialReuse(metadata = {}, sourceImageId = null) {
+  const approved = metadata.editorial_reuse_approved === true || metadata.generated?.editorial_reuse_approved === true;
+  const source = metadata.reuse_source_image_id ?? metadata.editorial_reuse_source_image_id ?? metadata.generated?.reuse_source_image_id ?? null;
+  return approved && Boolean(source) && (!sourceImageId || String(source) === String(sourceImageId));
+}
+
+function forbiddenDonorRecovery(metadata = {}) {
+  const mode = String(metadata.recovery_mode ?? metadata.generated?.recovery_mode ?? "").toLowerCase();
+  const donorId = metadata.donor_image_id ?? metadata.copied_from_image_id ?? metadata.source_image_id ?? null;
+  const perturbed = metadata.hash_perturbation === true || metadata.generated?.hash_perturbation === true;
+  if (!donorId && !/donor|nearest.?neighbor|copied.?scene|hash.?perturb/.test(mode) && !perturbed) return null;
+  if (explicitEditorialReuse(metadata, donorId)) return null;
+  return donorId ?? "unknown";
+}
+
+async function assertRenderImageIntegrity(promptPlan, imagegenReport, identity, imageOutputQa, cutLedger, options = {}) {
+  const qaRequired = imageOutputQaRequired(identity);
+  if (qaRequired && imageOutputQa?.status !== "passed") {
+    throw new Error(`Render requires passed image output QA: ${imageOutputQaPath}`);
+  }
+  if (qaRequired) {
+    const currentPromptPath = options.promptPlanPath ?? promptPlanPath;
+    const currentImagegenReportPath = options.imagegenReportPath ?? imagegenReportPath;
+    const [currentPromptHash, currentImagegenHash] = await Promise.all([hashFile(currentPromptPath), hashFile(currentImagegenReportPath)]);
+    if (!imageOutputQa.prompt_plan_sha256 || imageOutputQa.prompt_plan_sha256 !== currentPromptHash) {
+      throw new Error("Render prompt plan changed after image output QA; rerun imagegen qa.");
+    }
+    if (!imageOutputQa.imagegen_report_sha256 || imageOutputQa.imagegen_report_sha256 !== currentImagegenHash) {
+      throw new Error("Render imagegen report changed after image output QA; rerun imagegen qa.");
+    }
+  }
+  const acceptedHashes = imageOutputQa?.accepted_image_hashes ?? {};
+  const resultById = new Map((imagegenReport?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const ledgerById = new Map((cutLedger?.cuts ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const hashOwners = new Map();
+  let checked = 0;
+  for (const prompt of promptPlan?.prompts ?? []) {
+    if (prompt.image_generation_required === false) continue;
+    const imageId = String(prompt.image_id ?? "");
+    const result = resultById.get(imageId);
+    const imagePath = result?.image_path ?? null;
+    if (!imagePath || !(await exists(imagePath))) throw new Error(`Render image missing for ${imageId}: ${imagePath ?? "no path"}`);
+    const imageHash = await hashFile(imagePath);
+    const metadata = await readJson(`${imagePath}.metadata.json`, {});
+    const donor = forbiddenDonorRecovery(metadata);
+    if (donor) throw new Error(`Render refused donor/hash-perturbation recovery for ${imageId} from ${donor}. Generate the actual cut.`);
+    const priorOwner = hashOwners.get(imageHash);
+    if (priorOwner && priorOwner !== imageId && !explicitEditorialReuse(metadata, priorOwner)) {
+      throw new Error(`Render refused byte-identical scene images ${priorOwner} and ${imageId}. Record deliberate editorial reuse explicitly or regenerate the failed cut.`);
+    }
+    hashOwners.set(imageHash, priorOwner ?? imageId);
+    if (qaRequired) {
+      const ledgerRow = ledgerById.get(imageId);
+      if (acceptedHashes[imageId] !== imageHash) throw new Error(`Render image ${imageId} changed after output QA; rerun imagegen qa.`);
+      if (ledgerRow?.image_sha256 !== imageHash || !String(ledgerRow?.image_qa_status ?? "").startsWith("passed")) {
+        throw new Error(`Render image ${imageId} lacks hash-matched passed QA in ${cutExecutionLedgerPath}.`);
+      }
+    }
+    checked += 1;
+  }
+  if (!checked) throw new Error("Render found no generated scene images to validate.");
+  return {
+    qa_required: qaRequired,
+    qa_report_path: qaRequired ? imageOutputQaPath : null,
+    checked_image_count: checked,
+    duplicate_hash_count: 0,
+    donor_recovery_count: 0,
+  };
+}
+
+export async function assertRenderImageIntegrityForTests(promptPlan, imagegenReport, identity, imageOutputQa, cutLedger, options = {}) {
+  return assertRenderImageIntegrity(promptPlan, imagegenReport, identity, imageOutputQa, cutLedger, options);
 }
 
 function assTime(seconds) {
@@ -154,7 +272,7 @@ function timedCaptionSegments(stitchReport) {
   }).filter((segment) => segment.segment_id && segment.caption_text && segment.end_sec > segment.start_sec);
 }
 
-function whisperSubtitleGroups(words) {
+function initialWhisperSubtitleGroups(words) {
   const events = [];
   let row = [];
   for (const word of words) {
@@ -168,6 +286,79 @@ function whisperSubtitleGroups(words) {
   }
   if (row.length) events.push(row);
   return events;
+}
+
+const ORPHAN_SUBTITLE_WORDS = new Set([
+  "a", "an", "and", "as", "at", "because", "but", "by", "for", "from", "if", "in", "into", "nor", "of", "on", "or", "so", "than", "that", "the", "then", "to", "until", "when", "while", "with", "yet",
+]);
+
+function subtitleWordCount(text) {
+  return captionTokens(text).length;
+}
+
+function normalizedSubtitleWord(text) {
+  return String(text ?? "").toLowerCase().replace(/[^a-z0-9']/g, "");
+}
+
+function intentionalSingleWordEvent(event) {
+  if (subtitleWordCount(event?.text) !== 1) return false;
+  const text = String(event?.text ?? "").trim();
+  const word = normalizedSubtitleWord(text);
+  if (!word || ORPHAN_SUBTITLE_WORDS.has(word)) return false;
+  return /[!?]$/.test(text) || /^(?:no|yes|stop|run|wait|never|impossible|enough)$/i.test(word);
+}
+
+function canMergeSubtitleEvents(left, right) {
+  if (!left || !right) return false;
+  const gap = Number(right.start_sec) - Number(left.end_sec);
+  const duration = Number(right.end_sec) - Number(left.start_sec);
+  const words = subtitleWordCount(left.text) + subtitleWordCount(right.text);
+  return gap <= 0.35 && duration <= 3.2 && words <= 10;
+}
+
+function joinedSubtitleEvent(left, right) {
+  return {
+    start_sec: Number(left.start_sec),
+    end_sec: Number(right.end_sec),
+    text: `${left.text} ${right.text}`.replace(/\s+/g, " ").trim(),
+  };
+}
+
+export function mergeShortSubtitleEvents(events) {
+  const rows = (events ?? []).map((event) => ({ ...event, text: String(event?.text ?? "").trim() })).filter((event) => event.text);
+  const merged = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const current = rows[index];
+    const count = subtitleWordCount(current.text);
+    if (count > 2 || intentionalSingleWordEvent(current)) {
+      merged.push(current);
+      continue;
+    }
+    const firstWord = normalizedSubtitleWord(captionTokens(current.text)[0]);
+    const preferNext = ORPHAN_SUBTITLE_WORDS.has(firstWord) || (merged.length && /[.!?]$/.test(String(merged.at(-1)?.text ?? "")));
+    const next = rows[index + 1] ?? null;
+    if (preferNext && canMergeSubtitleEvents(current, next)) {
+      merged.push(joinedSubtitleEvent(current, next));
+      index += 1;
+      continue;
+    }
+    const previous = merged.at(-1) ?? null;
+    if (canMergeSubtitleEvents(previous, current)) {
+      merged[merged.length - 1] = joinedSubtitleEvent(previous, current);
+      continue;
+    }
+    if (canMergeSubtitleEvents(current, next)) {
+      merged.push(joinedSubtitleEvent(current, next));
+      index += 1;
+      continue;
+    }
+    merged.push(current);
+  }
+  return merged;
+}
+
+function whisperSubtitleGroups(words) {
+  return initialWhisperSubtitleGroups(words);
 }
 
 function subtitleEventsFromScript(words, stitchReport) {
@@ -210,17 +401,17 @@ function subtitleEventsFromScript(words, stitchReport) {
       }
     }
   }
-  return events.filter((row) => row.text && row.end_sec > row.start_sec);
+  return mergeShortSubtitleEvents(events.filter((row) => row.text && row.end_sec > row.start_sec));
 }
 
 function subtitleEvents(words, stitchReport = null) {
   const scriptEvents = subtitleEventsFromScript(words, stitchReport);
   if (scriptEvents?.length) return scriptEvents;
-  return whisperSubtitleGroups(words).map((items) => ({
+  return mergeShortSubtitleEvents(whisperSubtitleGroups(words).map((items) => ({
     start_sec: Number(items[0].start_sec),
     end_sec: Number(items.at(-1).end_sec),
     text: items.map((item) => item.word).join(" ").replace(/\s+/g, " ").trim(),
-  })).filter((row) => row.text && row.end_sec > row.start_sec);
+  })).filter((row) => row.text && row.end_sec > row.start_sec));
 }
 
 function buildSubtitleEvents(wordTiming, audioStitchReport = null) {
@@ -235,6 +426,10 @@ function buildSubtitleEvents(wordTiming, audioStitchReport = null) {
     events: subtitleEvents(wordTiming.words ?? []),
     source: "whisper_recognized_words_fallback",
   };
+}
+
+export function buildSubtitleEventsForTests(wordTiming, audioStitchReport = null) {
+  return buildSubtitleEvents(wordTiming, audioStitchReport);
 }
 
 async function writeAss(filePath, events) {
@@ -422,7 +617,7 @@ async function writeSubtitleOverlayVideo(filePath, events, audioDuration) {
   }
   lines.push(`file '${concatEscape(rows.at(-1).filePath)}'`);
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
-  await execFile("ffmpeg", [
+  await execFile(ffmpegBin, [
     "-y",
     "-f", "concat",
     "-safe", "0",
@@ -492,7 +687,7 @@ async function writeEngagementOverlayVideo(filePath, engagementPlan, audioDurati
   }
   lines.push(`file '${concatEscape(rows.at(-1).filePath)}'`);
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
-  await execFile("ffmpeg", [
+  await execFile(ffmpegBin, [
     "-y",
     "-f", "concat",
     "-safe", "0",
@@ -953,7 +1148,6 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
   const hasAbsoluteStarts = prompts.every((prompt) => Number.isFinite(Number(prompt.start_sec)));
   const scale = hasAbsoluteStarts ? 1 : audioDuration > 0 && totalPromptDuration > 0 ? audioDuration / totalPromptDuration : 1;
   const clipDir = path.join(workDir, "motion-clips");
-  await fs.rm(clipDir, { recursive: true, force: true });
   await fs.mkdir(clipDir, { recursive: true });
   const lines = [];
   const motionProfiles = {};
@@ -963,6 +1157,8 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
   const hookClipIds = [];
   const transitionClipIds = [];
   const clipJobs = [];
+  let clipCacheReused = 0;
+  let clipCacheGenerated = 0;
   const plannedStarts = prompts.map((prompt, index) => {
     if (hasAbsoluteStarts) return Number(prompt.start_sec);
     return prompts.slice(0, index).reduce((sum, row) => sum + imageDuration(row, scale), 0);
@@ -1011,13 +1207,47 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     const tailSec = hookXfadeDurations.get(row.index) ?? 0;
     const renderDuration = row.duration + tailSec;
     const frameCount = clipFrameCount(renderDuration);
+    const filter = motionClipFilter(renderDuration, row.index, row.prompt, row.startSec, row.previousPrompt);
+    const imageSha256 = await hashFile(row.imagePath);
+    const motionProfileHash = sha256(JSON.stringify({
+      profile: row.profile,
+      filter,
+      width,
+      height,
+      fps,
+      render_scale_multiplier: renderScaleMultiplier,
+      motion_strength: motionStrength,
+      foreground_scale: foregroundScale,
+    }));
+    const cacheKey = sha256(JSON.stringify({
+      image_sha256: imageSha256,
+      motion_profile_hash: motionProfileHash,
+      start_sec: Number(row.startSec.toFixed(6)),
+      duration_sec: Number(renderDuration.toFixed(6)),
+      frame_count: frameCount,
+      clip_preset: clipPreset,
+      crf: 20,
+    }));
+    const cachePath = `${row.clipPath}.cache.json`;
+    Object.assign(row, { renderDuration, frameCount, filter, imageSha256, motionProfileHash, cacheKey, cachePath });
     clipJobs.push(async () => {
-      await execFile("ffmpeg", [
+      const cache = await readJson(cachePath, null);
+      if (cache?.cache_key === cacheKey && await exists(row.clipPath)) {
+        const actualDuration = await mediaDuration(row.clipPath).catch(() => NaN);
+        const expectedDuration = frameCount / fps;
+        if (Number.isFinite(actualDuration) && Math.abs(actualDuration - expectedDuration) <= Math.max(0.1, expectedDuration * 0.03)) {
+          row.motionClipSha256 = await hashFile(row.clipPath);
+          row.cacheStatus = "reused";
+          clipCacheReused += 1;
+          return;
+        }
+      }
+      await execFile(ffmpegBin, [
         "-y",
         "-loop", "1",
         "-t", renderDuration.toFixed(3),
         "-i", row.imagePath,
-        "-filter_complex", motionClipFilter(renderDuration, row.index, row.prompt, row.startSec, row.previousPrompt),
+        "-filter_complex", filter,
         "-an",
         "-c:v", "libx264",
         "-preset", clipPreset,
@@ -1032,9 +1262,47 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       if (Math.abs(actualDuration - expectedDuration) > Math.max(0.1, expectedDuration * 0.03)) {
         throw new Error(`Rendered malformed motion clip ${path.basename(row.clipPath)}: expected ${expectedDuration.toFixed(3)}s, got ${actualDuration.toFixed(3)}s`);
       }
+      row.motionClipSha256 = await hashFile(row.clipPath);
+      row.cacheStatus = "generated";
+      clipCacheGenerated += 1;
+      await writeJson(cachePath, {
+        schema: "goldflow_motion_clip_cache_v1",
+        cache_key: cacheKey,
+        image_id: row.prompt.image_id,
+        image_path: row.imagePath,
+        image_sha256: imageSha256,
+        motion_profile_hash: motionProfileHash,
+        motion_clip_path: row.clipPath,
+        motion_clip_sha256: row.motionClipSha256,
+        expected_duration_sec: Number(expectedDuration.toFixed(6)),
+        frame_count: frameCount,
+        updated_at: new Date().toISOString(),
+      });
     });
   }
   await runLimited(clipJobs, renderConcurrency);
+  const cutLedger = await readJson(cutExecutionLedgerPath, null);
+  if (Array.isArray(cutLedger?.cuts)) {
+    const motionById = new Map(clipRows.map((row) => [String(row.prompt.image_id ?? ""), row]));
+    const updatedCuts = cutLedger.cuts.map((cut) => {
+      const row = motionById.get(String(cut.image_id ?? ""));
+      if (!row || cut.image_sha256 !== row.imageSha256) return cut;
+      return {
+        ...cut,
+        motion_profile_hash: row.motionProfileHash,
+        motion_clip_cache_key: row.cacheKey,
+        motion_clip_path: row.clipPath,
+        motion_clip_sha256: row.motionClipSha256,
+        motion_clip_cache_status: row.cacheStatus,
+      };
+    });
+    await writeJson(cutExecutionLedgerPath, {
+      ...cutLedger,
+      cuts: updatedCuts,
+      motion_cached_cut_count: updatedCuts.filter((cut) => cut.motion_clip_sha256).length,
+      updated_at: new Date().toISOString(),
+    });
+  }
   if (hookXfadeCount) {
     const hookXfadePath = path.join(clipDir, "00000-hook-xfade-segment.mp4");
     const filterParts = [];
@@ -1058,7 +1326,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       });
       previousLabel = outLabel;
     }
-    await execFile("ffmpeg", [
+    await execFile(ffmpegBin, [
       "-y",
       ...hookRows.flatMap((row) => ["-i", row.clipPath]),
       "-filter_complex", filterParts.join(";"),
@@ -1103,6 +1371,8 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     transition_tail_sec: transitionTailSec,
     hook_clip_ids: hookClipIds,
     transition_clip_ids: transitionClipIds,
+    motion_clip_cache_reused_count: clipCacheReused,
+    motion_clip_cache_generated_count: clipCacheGenerated,
   };
 }
 
@@ -1163,7 +1433,7 @@ async function audioWithRenderTransitionSfx(audioPath, transitionEditPlan, audio
     labels.push(`[${label}]`);
   });
   filters.push(`${labels.join("")}amix=inputs=${labels.length}:duration=first:dropout_transition=0,alimiter=limit=0.98[aout]`);
-  await execFile("ffmpeg", [
+  await execFile(ffmpegBin, [
     ...args,
     "-filter_complex", filters.join(";"),
     "-map", "[aout]",
@@ -1198,24 +1468,20 @@ function finalAudioLoudnormSettings(audioBedReport) {
   };
 }
 
-async function applyFinalAudioLoudnorm(inputMp4Path, outputMp4Path, settings) {
+async function prepareFinalMuxAudio(inputAudioPath, settings) {
   if (!settings.enabled) {
-    if (inputMp4Path !== outputMp4Path) await fs.copyFile(inputMp4Path, outputMp4Path);
-    return { applied: false, output_path: outputMp4Path };
+    return { applied: false, audio_path: inputAudioPath };
   }
-  await execFile("ffmpeg", [
+  const outputAudioPath = path.join(workDir, "final_audio_loudnorm.m4a");
+  await execFile(ffmpegBin, [
     "-y",
-    "-i", inputMp4Path,
-    "-map", "0:v:0",
-    "-map", "0:a:0",
-    "-c:v", "copy",
+    "-i", inputAudioPath,
     "-af", `loudnorm=I=${settings.target_lufs}:TP=${settings.true_peak_db}:LRA=${settings.loudness_range}:print_format=summary`,
     "-c:a", "aac",
     "-b:a", "192k",
-    "-movflags", "+faststart",
-    outputMp4Path,
+    outputAudioPath,
   ], { maxBuffer: 1024 * 1024 * 32 });
-  return { applied: true, output_path: outputMp4Path, ...settings };
+  return { applied: true, audio_path: outputAudioPath, source_audio_path: inputAudioPath, ...settings };
 }
 
 async function runLimited(jobs, limit) {
@@ -1231,7 +1497,8 @@ async function runLimited(jobs, limit) {
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, engagementOverlayPlan] = await Promise.all([
+  await configureMediaTools();
+  const [promptPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
     readJson(promptPlanPath, null),
     readJson(imagegenReportPath, null),
     readJson(wordTimingPath, null),
@@ -1239,10 +1506,14 @@ async function main() {
     readJson(audioStitchReportPath, null),
     readJson(transitionEditPlanPath, null),
     readJson(engagementOverlayPlanPath, null),
+    readJson(runIdentityPath, {}),
+    readJson(imageOutputQaPath, null),
+    readJson(cutExecutionLedgerPath, null),
   ]);
   if (promptPlan?.status !== "passed") throw new Error(`Missing passed prompt plan: ${promptPlanPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
+  const imageIntegrity = await assertRenderImageIntegrity(promptPlan, imagegenReport, runIdentity, imageOutputQa, cutExecutionLedger);
   const audioPath = flags.audio ?? audioBedReport?.mix?.m4a_path ?? audioBedReport?.mix?.wav_path;
   if (!audioPath || !(await exists(audioPath))) throw new Error(`Missing final mixed audio from ${audioBedReportPath}`);
   await fs.mkdir(renderDir, { recursive: true });
@@ -1260,7 +1531,7 @@ async function main() {
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
   const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), engagementOverlayPlan, audioDuration);
   const videoPath = path.join(workDir, "silent_video.mp4");
-  await execFile("ffmpeg", [
+  await execFile(ffmpegBin, [
     "-y",
     "-f", "concat",
     "-safe", "0",
@@ -1269,31 +1540,41 @@ async function main() {
     "-movflags", "+faststart",
     videoPath,
   ], { maxBuffer: 1024 * 1024 * 32 });
-  await execFile("ffmpeg", [
-    "-y",
-    "-i", videoPath,
-    "-t", audioDuration.toFixed(3),
-    "-vf", `setsar=1,fps=${fps}`,
-    "-c:v", "libx264",
-    "-preset", clipPreset,
-    "-crf", "20",
-    "-pix_fmt", "yuv420p",
-    "-r", String(fps),
-    path.join(workDir, "silent_video_normalized.mp4"),
-  ], { maxBuffer: 1024 * 1024 * 32 });
-  const normalizedVideoPath = path.join(workDir, "silent_video_normalized.mp4");
+  const concatStream = await videoStreamInfo(videoPath);
+  const concatStreamReusable = concatStream.width === width
+    && concatStream.height === height
+    && concatStream.pix_fmt === "yuv420p"
+    && Math.abs(concatStream.fps - fps) < 0.02
+    && Math.abs(concatStream.duration_sec - audioDuration) <= Math.max(0.25, audioDuration * 0.0002);
+  let normalizedVideoPath = videoPath;
+  if (!concatStreamReusable) {
+    normalizedVideoPath = path.join(workDir, "silent_video_normalized.mp4");
+    await execFile(ffmpegBin, [
+      "-y",
+      "-i", videoPath,
+      "-t", audioDuration.toFixed(3),
+      "-vf", `setsar=1,fps=${fps}`,
+      "-c:v", "libx264",
+      "-preset", clipPreset,
+      "-crf", "20",
+      "-pix_fmt", "yuv420p",
+      "-r", String(fps),
+      normalizedVideoPath,
+    ], { maxBuffer: 1024 * 1024 * 32 });
+  }
   const hasAssFilter = await ffmpegHasFilter("ass");
   let subtitleRenderer = "ffmpeg_ass_filter";
   let subtitleOverlay = null;
-  const muxOutputPath = finalAudioLoudnormEnabled ? path.join(workDir, "pre_final_audio_loudnorm.mp4") : outputPath;
-  let finalAudioNormalization = { applied: false, output_path: outputPath };
+  const finalAudioNormalization = await prepareFinalMuxAudio(renderAudio.audio_path, finalAudioLoudnormSettings(audioBedReport));
+  const finalMuxAudioPath = finalAudioNormalization.audio_path;
+  const muxOutputPath = outputPath;
   if (hasAssFilter) {
     if (engagementOverlay.path) {
-      await execFile("ffmpeg", [
+      await execFile(ffmpegBin, [
         "-y",
         "-i", normalizedVideoPath,
         "-i", engagementOverlay.path,
-        "-i", renderAudio.audio_path,
+        "-i", finalMuxAudioPath,
         "-filter_complex", `[0:v][1:v]overlay=0:0:format=auto,ass=filename=${ffmpegFilterFilename(ass.path)}[v]`,
         "-map", "[v]",
         "-map", "2:a:0",
@@ -1306,10 +1587,10 @@ async function main() {
         muxOutputPath,
       ], { maxBuffer: 1024 * 1024 * 32 });
     } else {
-      await execFile("ffmpeg", [
+      await execFile(ffmpegBin, [
         "-y",
         "-i", normalizedVideoPath,
-        "-i", renderAudio.audio_path,
+        "-i", finalMuxAudioPath,
         "-vf", `ass=filename=${ffmpegFilterFilename(ass.path)}`,
         "-map", "0:v:0",
         "-map", "1:a:0",
@@ -1326,12 +1607,12 @@ async function main() {
     subtitleRenderer = "sharp_png_overlay_video";
     subtitleOverlay = await writeSubtitleOverlayVideo(path.join(workDir, "subtitle_overlay.mov"), subtitleRows.events, audioDuration);
     if (engagementOverlay.path) {
-      await execFile("ffmpeg", [
+      await execFile(ffmpegBin, [
         "-y",
         "-i", normalizedVideoPath,
         "-i", engagementOverlay.path,
         "-i", subtitleOverlay.path,
-        "-i", renderAudio.audio_path,
+        "-i", finalMuxAudioPath,
         "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto[v1];[v1][2:v]overlay=0:0:format=auto[v]",
         "-map", "[v]",
         "-map", "3:a:0",
@@ -1345,11 +1626,11 @@ async function main() {
         muxOutputPath,
       ], { maxBuffer: 1024 * 1024 * 32 });
     } else {
-      await execFile("ffmpeg", [
+      await execFile(ffmpegBin, [
         "-y",
         "-i", normalizedVideoPath,
         "-i", subtitleOverlay.path,
-        "-i", renderAudio.audio_path,
+        "-i", finalMuxAudioPath,
         "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto[v]",
         "-map", "[v]",
         "-map", "2:a:0",
@@ -1364,7 +1645,6 @@ async function main() {
       ], { maxBuffer: 1024 * 1024 * 32 });
     }
   }
-  finalAudioNormalization = await applyFinalAudioLoudnorm(muxOutputPath, outputPath, finalAudioLoudnormSettings(audioBedReport));
   const report = {
     schema: "goldflow_render_report_v1",
     status: "passed",
@@ -1377,8 +1657,12 @@ async function main() {
     output_duration_sec: await mediaDuration(outputPath),
     audio_path: audioPath,
     render_audio_path: renderAudio.audio_path,
-    final_mux_audio_path: muxOutputPath,
+    final_mux_audio_path: finalMuxAudioPath,
     final_audio_loudnorm: finalAudioNormalization,
+    ffmpeg_bin: ffmpegBin,
+    ffprobe_bin: ffprobeBin,
+    silent_concat_stream: concatStream,
+    silent_concat_reused_without_normalization_encode: concatStreamReusable,
     transition_edit_plan_path: usableTransitionPlan ? transitionEditPlanPath : null,
     transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudio,
     transition_sfx_stripped_count: strippedTransitionSfxCount,
@@ -1393,6 +1677,7 @@ async function main() {
     engagement_overlays: engagementOverlay.events,
     prompt_plan_path: promptPlanPath,
     imagegen_report_path: imagegenReportPath,
+    image_output_integrity: imageIntegrity,
     word_timing_path: wordTimingPath,
     audio_bed_report_path: audioBedReportPath,
     audio_stitch_report_path: audioStitchReportPath,
@@ -1426,6 +1711,8 @@ async function main() {
       hook_xfade_duration_sec: concat.hook_xfade_duration_sec,
       hook_xfade_transition_count: concat.hook_xfade_transition_count,
       hook_xfade_transitions: concat.hook_xfade_transitions,
+      motion_clip_cache_reused_count: concat.motion_clip_cache_reused_count,
+      motion_clip_cache_generated_count: concat.motion_clip_cache_generated_count,
     },
     updated_at: new Date().toISOString(),
   };
@@ -1433,8 +1720,10 @@ async function main() {
   console.log(JSON.stringify({ status: "passed", output_path: outputPath, report_path: renderReportPath, duration_sec: report.output_duration_sec }, null, 2));
 }
 
-main().catch(async (error) => {
-  await writeJson(renderReportPath, { schema: "goldflow_render_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(renderReportPath, { schema: "goldflow_render_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

@@ -11,7 +11,7 @@ function promptFields(prompt) {
     });
 }
 
-export function negativeLanguageMatches(value) {
+export function providerExclusionPayloadSyntaxMatches(value) {
   const text = String(value ?? "").toLowerCase();
   const patterns = [
     /--no\b/,
@@ -20,7 +20,7 @@ export function negativeLanguageMatches(value) {
   return patterns.filter((pattern) => pattern.test(text)).map(String);
 }
 
-export function negativePromptFindings(prompts) {
+export function providerExclusionPayloadFindings(prompts) {
   const findings = [];
   for (const prompt of prompts) {
     for (const [field, rawValue] of Object.entries(prompt ?? {})) {
@@ -31,21 +31,21 @@ export function negativePromptFindings(prompts) {
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
         severity: "blocker",
-        code: "negative_prompt",
-        message: `${field} is a separate negative-prompt payload; keep all provider prompt content in the normal prompt fields and do not send a standalone negative prompt.`,
+        code: "provider_exclusion_payload",
+        message: `${field} is a separate provider-exclusion payload; keep all provider prompt content in the normal prompt fields.`,
         target_field: field,
         resolved: false,
       });
     }
     for (const [field, value] of promptFields(prompt)) {
-      const matches = negativeLanguageMatches(value);
+      const matches = providerExclusionPayloadSyntaxMatches(value);
       if (!matches.length) continue;
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
         severity: "warning",
-        code: "negative_prompt",
-        message: `${field} appears to contain an embedded negative-prompt section or model argument: ${matches.join(", ")}`,
+        code: "provider_exclusion_payload",
+        message: `${field} appears to contain embedded provider-exclusion payload syntax: ${matches.join(", ")}`,
         target_field: field,
         resolved: false,
       });

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import {
   allowedRefIdsForScene,
   dropOutOfScopePromptRefs,
@@ -31,6 +31,7 @@ const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.jso
 const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
+const locationContractLedgerPath = flags.locationContractLedger ?? flags["location-contract-ledger"] ?? path.join(episodeDir, "location_contract_ledger.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
 const correctionFindingsPath = flags["correction-findings"] ?? flags.correctionFindings ?? null;
@@ -94,7 +95,7 @@ function extractJson(text) {
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
 }
 
-function negativeLanguageMatches(value) {
+function providerExclusionPayloadSyntaxMatches(value) {
   const text = String(value ?? "").toLowerCase();
   const patterns = [
     /--no\b/,
@@ -103,19 +104,19 @@ function negativeLanguageMatches(value) {
   return patterns.filter((pattern) => pattern.test(text)).map(String);
 }
 
-function negativePromptPayloadMarkerWarnings(prompts) {
+function providerExclusionPayloadMarkerWarnings(prompts) {
   const warnings = [];
   for (const prompt of prompts) {
     for (const field of ["image_prompt", "modelslab_image_prompt", "codex_image_prompt"]) {
       if (!prompt[field]) continue;
-      const matches = negativeLanguageMatches(prompt[field]);
+      const matches = providerExclusionPayloadSyntaxMatches(prompt[field]);
       if (matches.length) warnings.push({
-        code: "negative_prompt_payload_marker",
+        code: "provider_exclusion_payload_marker",
         severity: "warning",
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
         target_field: field,
-        message: `${prompt.image_id} ${field} appears to contain an embedded negative-prompt payload marker: ${matches.join(", ")}`,
+        message: `${prompt.image_id} ${field} appears to contain embedded provider-exclusion payload syntax: ${matches.join(", ")}`,
       });
     }
   }
@@ -126,12 +127,19 @@ function normalizeLabel(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function uniqueStrings(values) {
+  return [...new Set((values ?? []).map((value) => String(value ?? "").trim()).filter(Boolean))];
+}
+
 function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
   if (Array.isArray(scene.character_state_refs)) return scene.character_state_refs;
   const refs = [];
   const sceneId = String(scene.scene_id ?? "");
-  const localMentions = compactEditorialProof ? mentionedCandidateNames(scene) : [];
+  const localMentions = compactEditorialProof
+    ? uniqueStrings([...(scene.visible_characters ?? []), ...(scene.screen_visible_characters ?? []), ...(scene.preview_visible_characters ?? [])])
+    : [];
   const visibleLabels = (localMentions.length ? localMentions : [
+    ...(scene.visible_characters ?? []),
     ...(scene.visible_subjects ?? []),
     ...((scene.character_states ?? []).map((state) => state.character)),
   ]).filter(Boolean);
@@ -254,7 +262,7 @@ function compactSceneCharacterRef(ref) {
     character: ref.character ?? null,
     scene_ids: ref.scene_ids ?? [],
     scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), compactEditorialProof ? 280 : 900),
-    reference_image_path: ref.reference_image_path ?? null,
+    reference_image_path: ref.conditioning_image_path ?? ref.reference_image_path ?? null,
   };
 }
 
@@ -287,6 +295,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     duration_sec: scene.duration_sec,
     location: scene.location,
     time: scene.time,
+    visible_characters: scene.visible_characters ?? [],
     visible_subjects: scene.visible_subjects ?? [],
     primary_subject: scene.primary_subject ?? null,
     visual_intent: truncateText(scene.visual_intent ?? "", 360),
@@ -320,48 +329,95 @@ function compactNeighborContext(scene) {
   };
 }
 
-function relevantReferenceTargets(scene, visualReferencePlan) {
+function characterStateRefForTarget(target, scene, stateRefIndex = new Map()) {
+  const ids = [target?.ref_id, target?.source_ref_id, target?.state_ref_id].map((value) => String(value ?? "")).filter(Boolean);
+  for (const id of ids) {
+    const direct = stateRefIndex.get(id);
+    if (direct) return direct;
+  }
+  const sceneId = String(scene?.parent_scene_id ?? scene?.scene_id ?? "");
+  const labels = [target?.subject, target?.character, target?.ref_id].map(normalizeLabel).filter(Boolean);
+  for (const label of labels) {
+    const ref = stateRefIndex.get(`${sceneId}:${label}`) ?? stateRefIndex.get(`*:${label}`) ?? stateRefIndex.get(label);
+    if (ref) return ref;
+  }
+  return null;
+}
+
+function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = new Map()) {
   let targets = referenceTargetsForScene(scene, visualReferencePlan);
   if (compactEditorialProof) {
-    const mentions = mentionedCandidateNames(scene).map(normalizeLabel);
+    const visibleLabels = uniqueStrings([
+      ...(scene.visible_characters ?? []),
+      ...(scene.screen_visible_characters ?? []),
+      ...(scene.preview_visible_characters ?? []),
+    ]).map(normalizeLabel);
     const excerpt = normalizeLabel(scene.visual_beat_script_excerpt ?? "");
+    const localUi = (scene.local_ui_elements ?? []).map(normalizeLabel).filter(Boolean);
+    const localProps = (scene.local_props ?? []).map(normalizeLabel).filter(Boolean);
+    const advisoryRefIds = new Set((scene.ref_needs ?? scene.beat_ref_requirements ?? []).map((need) => String(need?.ref_id ?? "")).filter(Boolean));
     targets = targets.filter((target) => {
       const kind = String(target.kind ?? "").toLowerCase();
-      if (kind === "location") return true;
+      if (kind === "style" || kind === "location") return true;
       if (kind === "character_state") {
-        const label = normalizeLabel(`${target.subject ?? ""} ${target.ref_id ?? ""}`);
-        return mentions.some((name) => label.includes(name) || name.includes(label.split(/\s+/)[0] ?? ""));
+        const targetLabels = [target.subject, target.character].map(normalizeLabel).filter(Boolean);
+        return targetLabels.some((label) => visibleLabels.includes(label));
       }
-      if (["ui", "prop", "action"].includes(kind)) {
+      if (kind === "ui") {
+        return localUi.length > 0 || ["system_reveal", "ui_insert"].includes(String(scene.visual_job ?? ""));
+      }
+      if (["prop", "action", "effect"].includes(kind)) {
+        if (advisoryRefIds.has(String(target.ref_id ?? ""))) return true;
         const label = normalizeLabel(`${target.subject ?? ""} ${target.ref_id ?? ""}`);
-        return label.split(/\s+/).some((token) => token.length > 3 && excerpt.includes(token))
-          || /system|quest|rank|chat|viewer|screen|phone|livestream|audit|replay|metric|counter/.test(excerpt);
+        const evidence = [...localProps, ...localUi, excerpt];
+        return label.split(/\s+/).some((token) => token.length > 3 && evidence.some((value) => value.includes(token)));
       }
       return false;
     });
   }
-  return targets.map(compactReferenceTarget);
+  return targets.map((target) => {
+    if (String(target?.kind ?? "").toLowerCase() !== "character_state") return compactReferenceTarget(target);
+    const stateRef = characterStateRefForTarget(target, scene, stateRefIndex);
+    return compactReferenceTarget({
+      ...target,
+      character: stateRef?.character ?? target.character ?? target.subject,
+      source_ref_id: stateRef?.source_ref_id ?? target.source_ref_id ?? target.ref_id,
+      scene_prompt_anchor: stateRef?.scene_prompt_anchor ?? target.scene_prompt_anchor,
+      prompt_anchor: target.prompt_anchor ?? stateRef?.prompt_anchor,
+      identity_usage: stateRef?.identity_usage ?? target.identity_usage,
+    });
+  });
 }
 
 function targetHasAttachableReference(target) {
-  return Boolean(target.reference_exists || target.reference_image_path || target.resolved_reference_image_path);
+  return Boolean(target.reference_exists || target.conditioning_image_path || target.reference_image_path || target.resolved_reference_image_path);
 }
 
 function compactReferenceTarget(target) {
   const attachable = targetHasAttachableReference(target);
+  const generationMode = String(target.generation_mode ?? "");
+  const pendingDerived = /^derive_from_/i.test(generationMode) && !attachable;
+  const locationContractReference = String(target.kind ?? "").toLowerCase() === "location" && (attachable || pendingDerived);
   return {
     ref_id: target.ref_id ?? null,
     kind: target.kind ?? null,
     subject: target.subject ?? null,
+    character: target.character ?? null,
+    source_ref_id: target.source_ref_id ?? null,
+    identity_usage: target.identity_usage ?? null,
     scene_ids: target.scene_ids ?? [],
+    location_contract_ids: target.location_contract_ids ?? [],
     priority: target.priority ?? null,
     generation_mode: target.generation_mode ?? null,
     required_before_imagegen: target.required_before_imagegen ?? null,
-    reference_image_path: compactEditorialProof ? null : (target.reference_image_path ?? null),
+    reference_image_path: compactEditorialProof ? null : (target.conditioning_image_path ?? target.reference_image_path ?? null),
     resolved_reference_image_path: compactEditorialProof ? null : (target.resolved_reference_image_path ?? null),
     reference_exists: compactEditorialProof ? null : (target.reference_exists ?? null),
-    attachable_reference: compactEditorialProof ? null : attachable,
+    attachable_reference: attachable,
+    pending_derived_reference: pendingDerived,
+    location_contract_reference: locationContractReference,
     reference_budget: target.reference_budget ?? null,
+    scene_prompt_anchor: truncateText(target.scene_prompt_anchor ?? "", compactEditorialProof ? 260 : 900),
     prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", compactEditorialProof ? 260 : 900),
     anchor_cut_policy: target.anchor_cut_policy ?? null,
     risk_notes: compactEditorialProof ? [] : compactList(target.risk_notes ?? [], 4, 220),
@@ -386,11 +442,12 @@ async function fileExists(filePath) {
 async function enrichVisualReferencePlan(visualReferencePlan) {
   if (!visualReferencePlan) return null;
   const targets = await Promise.all((visualReferencePlan.reference_targets ?? []).map(async (target) => {
-    const referencePath = target.reference_image_path ?? target.required_reference_path ?? target.path ?? null;
+    const referencePath = target.conditioning_image_path ?? target.reference_image_path ?? target.required_reference_path ?? target.path ?? null;
     const resolvedPath = resolvedReferencePath(referencePath);
     return {
       ...target,
       reference_image_path: referencePath,
+      conditioning_image_path: target.conditioning_image_path ?? referencePath,
       resolved_reference_image_path: resolvedPath,
       reference_exists: await fileExists(resolvedPath),
     };
@@ -424,21 +481,154 @@ function providerPromptGuidance(activeProvider, providerOptions = {}) {
       `Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends all references and the first ${openingSec} seconds of scene cuts to Codex imagegen, then sends the rest of the video to ModelsLab. Keep both provider-specific prompt fields aligned to the same shot_manifest.`,
     ].join("\n");
   }
+  if (provider === "hybrid_codex_refs_opening_risky_modelslab_rest") {
+    const openingSec = codexOpeningSecFromOptions(providerOptions);
+    return [
+      "ACTIVE IMAGE PROVIDER: hybrid_codex_refs_opening_risky_modelslab_rest.",
+      `Write image_prompt, modelslab_image_prompt, and codex_image_prompt. Hybrid routing sends all references, every scene cut before ${openingSec} seconds, and risky multi-character or explicitly Codex-routed cuts to Codex imagegen; simpler later cuts go to ModelsLab. Set image_provider_route to codex_imagegen only for later high-risk cuts that need Codex beyond the automatic opening and multi-character routing. Keep provider-specific prompt fields aligned to the same shot_manifest.`,
+    ].join("\n");
+  }
   return [
     "ACTIVE IMAGE PROVIDER: modelslab.",
     "Write image_prompt and modelslab_image_prompt for every cut. modelslab_image_prompt is the production prompt consumed by imagegen. Leave codex_image_prompt empty unless Codex-specific wording is explicitly useful for a later proof.",
   ].join("\n");
 }
 
-function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}) {
+function compactAuthorRiskRules(compactTimedPlan) {
+  const rows = compactTimedPlan.scenes ?? [];
+  const text = JSON.stringify(rows);
+  const rules = [];
+  const hasMultiCharacter = rows.some((row) => (row.visible_characters ?? row.visible_subjects ?? []).length >= 2);
+  const hasPhysicalAction = /\b(?:physical_action|fight|strike|hit|lift|carry|catch|pin|restrain|shield|stab|shove|grab|rescue)\b/i.test(text);
+  const hasSurfaceRisk = /\b(?:table|desk|counter|island|railing|barrier|podium|bench|console|carriage|vehicle)\b/i.test(text);
+  const hasScreenVisiblePerson = /\b(?:replay|livestream|broadcast|video wall|phone screen|dossier|chat avatar)\b/i.test(text);
+  if (hasMultiCharacter) {
+    rules.push("For multi-character cuts, shot_manifest.character_staging lists every visible named character in visible-character order with distinct screen positions, ref ids, wardrobe sources, and poses. Give each person a separate prose clause and separate body silhouette.");
+  }
+  if (hasPhysicalAction) {
+    rules.push("For physical action, begin with actor, affected person/object, screen positions, exact contact plane, and the visible result proving the beat. Put identity anchors and environment after the decisive action sentence.");
+  }
+  if (hasSurfaceRisk) {
+    rules.push("When a surface or large object can cross a body, state which side each person occupies and keep torsos, hands, feet, and body silhouettes spatially clear of the surface plane.");
+  }
+  if (hasScreenVisiblePerson) {
+    rules.push("A named person visibly shown through replay, livestream, broadcast, phone, or dossier is visible through media: include their staged likeness and ref when available, while keeping them physically separate from people in the room.");
+  }
+  return rules;
+}
+
+function buildCompactAuthorPrompt({ compactTimedPlan, compactSemanticPlan, correctionDirectives, activeProvider, activeProviderOptions }) {
+  const unitLabel = compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene";
+  const riskRules = compactAuthorRiskRules(compactTimedPlan);
+  return `Author one production image prompt for every ${unitLabel} below.
+
+${providerPromptGuidance(activeProvider, activeProviderOptions)}
+
+Core contract:
+- You are the creative visual editor. The exact local visual_beat_script_excerpt, visual_beat_action, timing, visual_job, local location, and current-scene candidate refs are the source of truth.
+- Ask what the viewer needs to see now to understand, feel, and keep watching. Depict one present-tense moment, not a parent-scene summary or generic hero portrait.
+- Author shot_manifest first, then prose that obeys it. Preserve target_image_id, scene_id, visual_beat_id, start_sec, and duration_sec exactly.
+- Start provider prompt prose with the visible subject, decisive action or reaction, and current location. Use the best composition for this beat without a global wide or close-up bias.
+- Physically visible named people belong in visible_characters. Pure mentions belong in mentioned_only_characters and receive no character ref. Resolve first-person physical action to the narrator/protagonist unless the cut is explicitly POV, UI-only, document-only, or offscreen narration.
+- Use only approved in-scope refs from the current unit's reference_target_ids and matching reference target packet. Attach up to four refs in the actual desired slot order: visible identity/wardrobe first when that is the main risk, then location, critical prop/UI, and action/effect. Fewer refs are fine.
+- When a physically visible, screen-visible, or preview-visible named character has a matching attachable character_state target in the current unit packet, attach that character ref unless the four-slot cap makes it impossible. Do not leave a visible canonical identity text-only while an exact approved identity ref is available.
+- Location contracts and image refs are separate. For a physical setting, select the exact in-scope textual location contract in shot_manifest.location_contract_id and use its prompt_anchor to describe the environment. Set shot_manifest.location_ref_id only when the current unit packet contains a matching approved attachable location image ref. A text-only location contract never belongs in reference_requirements and never consumes an image slot.
+- For every attached character state, reaffirm the supplied scene_prompt_anchor in that person's own clause, then add current screen position and action. If the anchor already begins with the character's name, do not repeat the name a second time.
+- Keep reference-role metadata in reference_requirements. Do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
+- Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
+- Background extras appear only when the local beat asks for them. Keep private, lonely, or solo beats visibly clear of unrelated people.
+- Provider-specific prompts may differ in phrasing but must depict the same manifest, action, people, location, and refs.
+- Do not create standalone negative_prompt, avoid_list, or exclude_list fields. Normal story-faithful prose may freely state absences, refusals, and contrast.
+- Correction directives are binding only for their matching image_id or scene_id.
+${riskRules.map((rule) => `- ${rule}`).join("\n")}
+
+TIMED LOCAL UNITS AND SCOPED REFS:
+${JSON.stringify(compactTimedPlan, null, 2)}
+
+BROAD SEMANTIC CONTEXT:
+${JSON.stringify(compactSemanticPlan, null, 2)}
+
+CORRECTION DIRECTIVES:
+${JSON.stringify(correctionDirectives, null, 2)}
+
+Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
+{
+  "style_summary": "short episode style summary",
+  "prompts": [{
+    "image_id": "copy target_image_id",
+    "scene_id": "copy scene_id",
+    "visual_beat_id": "copy visual_beat_id when present",
+    "start_sec": 0,
+    "duration_sec": 6,
+    "image_prompt": "provider-neutral scene prose",
+    "modelslab_image_prompt": "ModelsLab scene prose or empty when route does not use it",
+    "codex_image_prompt": "Codex scene prose or empty when route does not use it",
+    "image_provider_route": "modelslab|codex_imagegen",
+    "reference_requirements": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","required":true,"slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
+    "required_reference_paths": [],
+    "reference_usage": [{"ref_id":"id","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"decision"}],
+    "anchor_roles": [{"ref_id":"id","kind":"character_state|location|prop|ui|action","anchor_role":"source_anchor","reason":"role"}],
+    "shot_manifest": {
+      "shot_job": "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition",
+      "visible_characters": [],
+      "mentioned_only_characters": [],
+      "primary_character": null,
+      "character_state_ref_ids": [],
+      "protagonist_state_ref_id": null,
+      "location_contract_id": null,
+      "location_ref_id": null,
+      "foreground_action": "specific visible action",
+      "visible_props": [],
+      "ui_elements": [],
+      "forbidden_ref_ids": [],
+      "continuity_notes": "current-beat continuity",
+      "character_staging": [{"name":"Name","ref_id":"state_ref","screen_position":"frame-left","wardrobe_from":"character_state_ref:state_ref","pose":"current pose/action"}]
+    },
+    "visible_subjects": [],
+    "character_state_refs_used": [],
+    "primary_subject": "visible focus",
+    "location": "current visible environment",
+    "ui_text_on_screen": []
+  }],
+  "warnings": []
+}`;
+}
+
+function locationContractsForUnit(unit, locationContractLedger) {
+  const contracts = Array.isArray(locationContractLedger?.contracts) ? locationContractLedger.contracts : [];
+  const beatId = String(unit?.visual_beat_id ?? "").trim();
+  const sceneId = String(unit?.parent_scene_id ?? unit?.scene_id ?? "").trim();
+  const beatMatches = beatId
+    ? contracts.filter((contract) => (contract.beat_ids ?? []).map(String).includes(beatId))
+    : [];
+  const rows = beatMatches.length
+    ? beatMatches
+    : contracts.filter((contract) => (contract.scene_ids ?? []).map(String).includes(sceneId));
+  return rows.map((contract) => ({
+    location_contract_id: contract.location_contract_id,
+    description: contract.description ?? null,
+    prompt_anchor: contract.prompt_anchor ?? contract.description ?? null,
+    local_location_labels: contract.local_location_labels ?? [],
+  }));
+}
+
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null) {
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
   const referenceTargetsByScene = {};
+  const referenceTargetsByUnit = {};
   for (const scene of sourceRows ?? []) {
     const sceneId = scene.parent_scene_id ?? scene.scene_id;
-    if (!sceneId || referenceTargetsByScene[sceneId]) continue;
-    referenceTargetsByScene[sceneId] = relevantReferenceTargets(scene, visualReferencePlan);
+    if (!sceneId) continue;
+    if (compactEditorialProof) {
+      const unitId = scene.visual_beat_id ?? scene.scene_id;
+      referenceTargetsByUnit[unitId] = relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex);
+      continue;
+    }
+    if (!referenceTargetsByScene[sceneId]) {
+      referenceTargetsByScene[sceneId] = relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex);
+    }
   }
   const compactTimedPlan = {
     source_script_hash: timedPlan.source_script_hash,
@@ -449,13 +639,22 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     parent_scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
-    scenes: (sourceRows ?? []).map((scene, index, rows) => ({
-      ...compactSceneForPrompt(scene, stateRefIndex),
-      previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
-      next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
-      reference_target_ids: (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []).map((target) => target.ref_id),
-    })),
-    reference_targets_by_scene: referenceTargetsByScene,
+    scenes: (sourceRows ?? []).map((scene, index, rows) => {
+      const unitId = scene.visual_beat_id ?? scene.scene_id;
+      const targets = compactEditorialProof
+        ? (referenceTargetsByUnit[unitId] ?? [])
+        : (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []);
+      return {
+        ...compactSceneForPrompt(scene, stateRefIndex),
+        previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
+        next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
+        reference_target_ids: targets.map((target) => target.ref_id),
+        location_contracts: locationContractsForUnit(scene, locationContractLedger),
+      };
+    }),
+    ...(compactEditorialProof
+      ? { reference_targets_by_unit: referenceTargetsByUnit }
+      : { reference_targets_by_scene: referenceTargetsByScene }),
     correction_directives: correctionDirectives,
   };
   const compactSemanticPlan = {
@@ -464,6 +663,15 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     style_summary: semanticPlan.style_summary ?? "",
     warnings: semanticPlan.warnings ?? [],
   };
+  if (flags["legacy-author-instructions"] !== "true") {
+    return buildCompactAuthorPrompt({
+      compactTimedPlan,
+      compactSemanticPlan,
+      correctionDirectives,
+      activeProvider,
+      activeProviderOptions,
+    });
+  }
   return `Author production image prompts from the timed semantic scene plan.
 
 Rules:
@@ -473,27 +681,31 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - The local visual_beat_script_excerpt is the source of truth for this cut. If parent scene facts and the local excerpt conflict, make the local excerpt visually clear and use parent-scene facts only as candidate context.
 - Use current beat and current scene only. Do not import neighboring scene characters, injuries, locations, props, or UI.
 - Write normal descriptive prompt prose that preserves exact story meaning, UI text, character count, and shot intent. Exact story/UI text belongs in ui_text_on_screen when needed.
-- Do not create separate negative_prompt, avoid_list, or exclude_list payloads. If the beat itself contains a meaningful absence or refusal, preserve it naturally inside the normal prompt.
+- Do not create separate provider-exclusion payload fields such as negative_prompt, avoid_list, or exclude_list. If the beat itself contains a meaningful absence or refusal, preserve it naturally inside the normal prompt.
 - Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject concretely, such as "one named character alone in frame," while preserving story-faithful absence language when the beat needs it.
 - Identify exact subject roles by name and action, especially in multi-character scenes.
+- Reference anchors are binding authoring contracts. If you attach a character_state ref that has scene_prompt_anchor, paste that scene_prompt_anchor's identity/wardrobe/body/state wording into that character's own prompt clause. Do not replace it with generic or inferred wardrobe such as "academy clothes", "casual clothes", "training attire", "uniform", or "clean outfit" unless those exact concepts are in the scene_prompt_anchor. If the local beat suggests a different outfit but the attached character_state ref says otherwise, either use the ref anchor or do not attach that ref.
+- For each attached character ref, the prompt body must contain a local clause shaped like: "[screen position], [Character Name]: [copied scene_prompt_anchor], [current pose/action]." The character_staging entry must use the same ref_id, screen_position, and pose as the prose clause.
+- The imagegen wrapper will also add "Reference usage" text, but that wrapper is not a substitute for prompt authoring. The modelslab_image_prompt and codex_image_prompt themselves must reaffirm the attached ref anchors.
 - For visual beats, use visual_beat_focus to change camera angle, pose, action moment, and composition across beats in the same parent scene.
 - For visual beats, visual_beat_script_excerpt and visual_beat_action are the main source for the image. Each cut must show the specific moment in that beat excerpt, not a repeated hero portrait with the whole scene summarized behind the character.
 - visual_job and editorial_cues are the editor's reason this cut exists. Build the cut around that job: premise image, humiliation image, system reveal, reaction shot, chat/UI insert, remote witness cutaway, location transition, consequence, threat reveal, or cliffhanger/question.
 - suggested_shot_job is the default shot_manifest.shot_job. Copy it unless the beat excerpt clearly requires a better allowed shot job, and then keep the replacement aligned to visual_job.
-- location_timeline_label records the current visible location at this timestamp. If the excerpt or location_timeline_label names a new physical place, the prompt must visibly stage that place or a transition into it using the in-scope location ref.
+- location_timeline_label records the current visible location at this timestamp. If the excerpt or location_timeline_label names a new physical place, the prompt must visibly stage that place or a transition into it using the in-scope textual location contract; attach a location image ref only when one exists in the current candidate packet.
 - visual_novelty_directive is mandatory edit direction. Follow it to make the current cut visually distinct from adjacent beats without importing their story content.
 - visual_beat_quality_findings are deterministic QA warnings for this exact cut. Treat each finding as specific edit direction: visibly stage the named location or transition when the excerpt calls for it, include the named physical character when the beat requires their presence, and vary composition or shot job when repetition is flagged.
 - SCENE CORRECTION DIRECTIVES are binding for matching scene_id/image_id. When a directive includes image_id, apply it to that exact cut; when it only includes scene_id, apply it to every affected cut in that scene while preserving each cut's own local excerpt and visual job.
 - Named people in the local excerpt are editorially important by default. If the excerpt names a person as a witness, speaker, physical presence, livestream/chat participant, social judge, antagonist, or target of the action, put that person in shot_manifest.visible_characters and stage them visibly in the prompt. Use mentioned_only only for people who are purely discussed and not useful to show for the current beat.
+- First-person narration is visual evidence. When the local excerpt uses "I", "me", or "my" for a physical action, reaction, spoken confrontation, object use, or system interaction, treat the narrator/protagonist from visible_characters or character_state_refs as visibly present unless the visual_job is explicitly pure POV, document insert, UI-only, or offscreen narration. Attach the protagonist_state_ref_id / character_state_ref_ids when an in-scope attachable protagonist ref exists.
 - Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person rather than inventing a separate generic character.
 - If a named person is present through chat, broadcast, video wall, replay, or livestream rather than physically in the room, make that visible medium explicit in foreground_action, visible_props, ui_elements, and prompt prose.
 - If the current beat shows a recognizable named person inside a replay clip, livestream panel, broadcast feed, video wall, chat avatar, dossier card, or phone screen, that person is still visually present through media. Include them in shot_manifest.visible_characters, add character_staging that says they are screen-visible or panel-visible, and attach their in-scope character_state ref when their likeness matters and reference slots allow.
 - Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
 - Across beats in the same parent scene, vary the visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to the beat excerpt.
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
-- Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
-- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. Only attach refs with attachable_reference true. Targets with generation_mode no_ref_needed, derive_from_best_cut, derive_from_first_clean_cut, or no reference_image_path are scoped prompt context only, not image inputs. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved attachable location ref from reference_targets_by_scene, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If no attachable location ref exists, leave shot_manifest.location_ref_id empty and describe the concrete current location directly from the beat excerpt.
+- Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, textual location contract, optional attachable location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
+- The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. Only attach refs with attachable_reference true. For physical locations, choose the matching in-scope LOCATION CONTRACT LEDGER entry and set shot_manifest.location_contract_id. Describe its prompt_anchor architecture, materials, and layout in prose. Set shot_manifest.location_ref_id and add a location reference_requirement only when a matching approved attachable location image target exists. Never use a text-only contract id as an image ref id.
 - Every input unit includes target_image_id. Copy target_image_id exactly into output image_id. Do not restart image_id numbering inside chunks, and do not invent sequential IDs from the schema example.
 - Parent scene context explains why the beat matters, but visual_beat_script_excerpt decides what appears. Do not include future reveals, earlier setup, or the whole confrontation unless the current beat excerpt physically shows them.
 - previous_beat_context and next_beat_context are sequencing aids only. Use them to avoid repeated shots and to choose progression, but do not import their characters, props, locations, or reveals into the current cut unless the current visual_beat_script_excerpt also includes them.
@@ -501,23 +713,23 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - Provider-specific prompt fields should be written only when useful for the active image provider route above. Any provider-specific prompt that is present must keep the same visible subject, action, location, references, and shot_manifest as image_prompt.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt should use natural Codex-friendly image prose with the same shot_manifest contract.
-- Every scene prompt must explicitly request polished 2D anime/manhwa illustration style in text: clean line art, cel-shaded characters, cinematic webtoon/manhwa lighting, and non-photorealistic painted backgrounds. This style clause is mandatory even when a style reference is not attached.
+- Every scene prompt should carry concise anime/manhwa style intent without boilerplate. Prefer a short tail such as "16:9 landscape anime/manhwa frame" when the prompt would otherwise be ambiguous. Do not append long repeated style phrases such as clean line art, cel-shaded characters, cinematic webtoon lighting, or non-photorealistic painted background to every cut.
 - Background extras are beat-authored, not a style default. Add anonymous customers, staff, workers, crowds, or audience figures only when the local beat excerpt, visible_subjects, editorial cue, or shot_manifest explicitly calls for them. For lonely/private/solo investigation beats, make the room visibly empty except for the named subject and necessary objects, even if the location is normally public.
 - ModelsLab Flux handles multi-character shots at surfaces poorly. Whenever two or more characters are positioned at, behind, leaning on, or separated by ANY surface or large object that can cross or occlude a human body (waist-to-chest-height objects — recognize the actual surface from the beat and location, do not rely on a fixed list of furniture types), modelslab_image_prompt must: (a) give each visible character a clear spatial relationship to that surface — near side, far side, behind it, beside its edge, or another explicit side-of-surface placement; (b) state body clearance concretely — full torso above the surface line, feet grounded, hands resting on or above the edge, and body silhouette clear of the surface plane; and (c) prefer asymmetric or diagonal placement over flat centered bilateral staging, offsetting one character forward or to a near corner and the other farther back. codex_image_prompt may keep a more centered, cinematic composition as long as the bodies stay discrete, side-of-surface placement is readable, and body/surface placement is clear.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
-- When shot_manifest.location_ref_id is set, describe that reference's visible architecture, materials, lighting, surfaces, and spatial layout as the physical setting for the current beat.
+- When shot_manifest.location_contract_id is set, describe that contract's visible architecture, materials, lighting, surfaces, and spatial layout as the physical setting for the current beat. When location_ref_id is also set, use the attached image as continuity evidence for that same setting.
 - Composition is beat-authored, not globally defaulted. Let the visual beat choose the composition. Do not impose a universal wide/full-frame/medium-wide default. Use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or other framing only when that shot scale best serves the current visual_job, beat excerpt, emotion, object, UI, or transition.
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
-- If a mission/UI label contains negative words, put the exact wording in ui_text_on_screen. In modelslab_image_prompt, describe the visible UI design naturally and concretely; ordinary negative words are allowed when the image meaning depends on them, but do not add a separate negative_prompt payload.
+- If a mission/UI label contains refusal or absence wording, put the exact wording in ui_text_on_screen. In modelslab_image_prompt, describe the visible UI design naturally and concretely, but do not add a separate provider-exclusion payload.
 - If the story beat depends on chat, system panels, viewer counts, receipts, scoreboards, livestream status, or labels, include concise readable UI text in ui_text_on_screen and visually stage the screen/panel as a key story object. Text can be sparse and large; it should serve the beat instead of filling the frame.
 - Shot scale must be intentional and beat-specific. The planner should choose the most useful composition for the cut instead of using a global wide or close-up default.
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
 - Location references are environment evidence. Use them for setting, architecture, lighting, and materials.
 - Action/effect references are visual language evidence. Use them for power shape, energy color, and interaction pattern while keeping the beat's current location and subjects.
-- Put reference slot roles in reference_requirements.slot_purpose and slot_order. The imagegen wrapper will prepend Flux context instructions such as "Use image one as character identity for Kang Jiwoo" at generation time.
+- Put reference slot roles in reference_requirements.slot_purpose and slot_order. The imagegen wrapper will prepend concise "Reference usage" instructions such as "Use Image 1 for Kang Jiwoo's face, hair, body type, outfit, wardrobe, and identity" at generation time.
 - Keep modelslab_image_prompt as a production scene description. Reference images guide identity, wardrobe, style, UI, props, and effects; they are design evidence for the final cut, not visible reference panels.
 - Character state refs are definitive when present. For every visible named character with a character_state_refs.scene_prompt_anchor, copy that scene_prompt_anchor into the prompt rather than inventing or paraphrasing wardrobe. Use prompt_anchor only for generating reference images, not inside scene prompts.
 - If semantic wardrobe conflicts with character_state_refs, character_state_refs wins.
@@ -539,7 +751,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - Put character identity refs before location refs when the main risk is character identity. Put location refs before character refs when the main risk is the environment. Put action/effect refs after identity and location refs unless the effect is the primary subject.
 - Each reference requirement should include slot_purpose, such as "character identity and wardrobe for Kang Jiwoo" or "dungeon location environment".
 - For standalone_ref targets, mark reference_usage as attach_existing_ref only when a required reference path exists; otherwise report missing_reference_coverage.
-- For derive_from_first_clean_cut, derive_from_best_cut, and derive_from_first_clean_wide_cut targets, treat the target as text-only context until it has a real reference_image_path.
+- For derive_from_first_clean_cut, derive_from_best_cut, and derive_from_first_clean_wide_cut targets, treat the target as text-only image context until it has a real reference_image_path. If the target is a location, still use it as the shot_manifest.location_ref_id contract for every beat that physically remains in that local location block.
 - For no_ref_needed targets, do not attach a reference.
 - Output exactly one prompt per ${compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene"}.
 - Return ${compactTimedPlan.scene_count} prompts, one for every unit in the plan.
@@ -563,6 +775,7 @@ ${JSON.stringify({
       primary_character: "Protagonist",
       character_state_ref_ids: ["protagonist_state_ref"],
       protagonist_state_ref_id: "protagonist_state_ref",
+      location_contract_id: "corridor_location_contract",
       location_ref_id: "corridor_location_ref",
       foreground_action: "Protagonist freezes in the corridor as the elevator doors part",
       visible_props: ["bag"],
@@ -580,6 +793,7 @@ ${JSON.stringify({
       primary_character: "Protagonist",
       character_state_ref_ids: ["protagonist_state_ref", "second_character_state_ref"],
       protagonist_state_ref_id: "protagonist_state_ref",
+      location_contract_id: "lobby_location_contract",
       location_ref_id: "lobby_location_ref",
       foreground_action: "Protagonist and the second character stop across from each other in the lobby",
       visible_props: [],
@@ -603,8 +817,8 @@ ${JSON.stringify({
         },
       ],
     },
-    modelslab_image_prompt: "Lobby confrontation the instant both characters stop. Frame-left, Protagonist: casual layered outfit, half-turned toward the other character with one shoulder forward and a tense grip on the bag strap. Frame-right, Second Character: polished upscale outfit, phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them inside the polished stone lobby with warm sconces and reflective floor.",
-    codex_image_prompt: "Two-character lobby confrontation at the exact moment both stop. Frame-left, Protagonist in casual layered clothes, half-turned toward the other character with one shoulder forward and a tense grip on the bag strap. Frame-right, Second Character in a polished upscale outfit, phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them in a polished stone lobby with warm sconces and reflective floor.",
+    modelslab_image_prompt: "Lobby confrontation the instant both characters stop. Frame-left, Protagonist: Protagonist, tired adult lead in dark practical work clothes, shoulder bag strap tight in one hand, half-turned toward the other character with one shoulder forward. Frame-right, Second Character: Second Character, polished adult rival in cream fitted coat over black dress, gold phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them inside the polished stone lobby with warm sconces and reflective floor. 16:9 landscape anime/manhwa frame.",
+    codex_image_prompt: "Two-character lobby confrontation at the exact moment both stop. Frame-left, Protagonist: Protagonist, tired adult lead in dark practical work clothes, shoulder bag strap tight in one hand, half-turned toward the other character with one shoulder forward. Frame-right, Second Character: Second Character, polished adult rival in cream fitted coat over black dress, gold phone in hand, chin lifted with weight settled on the back foot. Clear spatial separation between them in a polished stone lobby with warm sconces and reflective floor. 16:9 landscape anime/manhwa frame.",
     reference_requirements: [
       { ref_id: "protagonist_ref", kind: "character_state", required: true, slot_order: 1, slot_purpose: "character identity and wardrobe for Protagonist", reason: "Frame-left staged identity and wardrobe." },
       { ref_id: "second_character_ref", kind: "character_state", required: true, slot_order: 2, slot_purpose: "character identity and wardrobe for Second Character", reason: "Frame-right staged identity and wardrobe." },
@@ -619,6 +833,7 @@ ${JSON.stringify({
       primary_character: "Protagonist",
       character_state_ref_ids: ["protagonist_state_ref", "second_character_state_ref"],
       protagonist_state_ref_id: "protagonist_state_ref",
+      location_contract_id: "room_location_contract",
       location_ref_id: "room_location_ref",
       foreground_action: "Protagonist pauses with a cup on the near side of a support surface while the second character stands on the far side",
       visible_props: ["cup", "support surface"],
@@ -642,8 +857,8 @@ ${JSON.stringify({
         },
       ],
     },
-    modelslab_image_prompt: "Support-surface confrontation at the exact instant the warning appears. Frame-left foreground, Protagonist in casual layered clothes, standing on the near side of the surface with the cup raised just above the edge, full torso clear above the surface line, feet on the floor. Frame-right, Second Character in a polished outfit, standing on the far side with both hands resting on the edge, full torso clear above the surface line. A crisp blue warning panel hovers above the cup. Clear diagonal separation between them, both bodies fully separate from the surface plane.",
-    codex_image_prompt: "Stylized standoff across a support surface as the warning appears. Protagonist on the near side with the cup lifted, Second Character on the far side leaning onto the edge, both bodies fully clear of the surface silhouette, crisp blue warning panel above the cup, cinematic centered room depth with discrete body placement.",
+    modelslab_image_prompt: "Support-surface confrontation at the exact instant the warning appears. Frame-left foreground, Protagonist: Protagonist, tired adult lead in dark practical work clothes, standing on the near side of the surface with the cup raised just above the edge, full torso clear above the surface line, feet on the floor. Frame-right, Second Character: Second Character, polished adult rival in cream fitted coat over black dress, standing on the far side with both hands resting on the edge, full torso clear above the surface line. A crisp blue warning panel hovers above the cup. Clear diagonal separation between them, both bodies fully separate from the surface plane. 16:9 landscape anime/manhwa frame.",
+    codex_image_prompt: "Stylized standoff across a support surface as the warning appears. Frame-left foreground, Protagonist: Protagonist, tired adult lead in dark practical work clothes, on the near side with the cup lifted. Frame-right, Second Character: Second Character, polished adult rival in cream fitted coat over black dress, on the far side leaning onto the edge. Both bodies fully clear of the surface silhouette, crisp blue warning panel above the cup, cinematic centered room depth with discrete body placement. 16:9 landscape anime/manhwa frame.",
   },
 }, null, 2)}
 
@@ -658,8 +873,9 @@ Return JSON only:
       "start_sec": 0,
       "duration_sec": 6,
       "image_prompt": "production scene prompt only",
-      "modelslab_image_prompt": "production scene prompt optimized for flux-klein when the active route needs ModelsLab, else empty string",
+      "modelslab_image_prompt": "production scene prompt optimized for the active ModelsLab image model when the active route needs ModelsLab, else empty string",
       "codex_image_prompt": "production scene prompt optimized for Codex/OpenAI when the active route needs Codex, else empty string",
+      "image_provider_route": "modelslab|codex_imagegen",
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
@@ -671,6 +887,7 @@ Return JSON only:
         "primary_character": "Joey",
         "character_state_ref_ids": ["joey_ref"],
         "protagonist_state_ref_id": "joey_ref",
+        "location_contract_id": "location_contract",
         "location_ref_id": "location_ref",
         "foreground_action": "Joey holds a delivery bag alone in the elevator corridor",
         "visible_props": ["delivery bag"],
@@ -740,7 +957,7 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
   if (flags["codex-reuse-latest"] === "true" || flags["codex-reuse-cache"] === "true") {
-    const cached = await findLatestCodexOutput(callDir, stageName, expectedBeatIds);
+    const cached = await findLatestCodexOutput(callDir, stageName, expectedBeatIds, prompt);
     if (cached) return cached;
     console.error(`visual ${stageName}: no reusable cached Codex output found; calling Codex`);
   }
@@ -750,28 +967,25 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-attempt_${attempt}-output.txt`);
     try {
-      await new Promise((resolve, reject) => {
-        const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
-        let stderr = "";
-        const timer = setTimeout(() => {
-          child.kill("SIGTERM");
-          setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
-          reject(new Error(`codex visual plan timed out after ${timeoutMs}ms for ${stageName} attempt ${attempt}`));
-        }, timeoutMs);
-        timer.unref();
-        child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-        child.on("error", (error) => {
-          clearTimeout(timer);
-          reject(error);
-        });
-        child.on("exit", (code) => {
-          clearTimeout(timer);
-          code === 0 ? resolve() : reject(new Error(`codex visual plan exited ${code}: ${stderr}`));
-        });
-        child.stdin.end(prompt);
+      const call = await runCodexCli({
+        prompt,
+        stageName,
+        repoRoot,
+        outputPath,
+        model: flags.model ?? flags["llm-model"] ?? null,
+        reasoningEffort: flags["reasoning-effort"] ?? null,
+        timeoutMs,
       });
-      const content = await fs.readFile(outputPath, "utf8");
-      return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+      return {
+        provider: "codex",
+        model: call.model,
+        reasoning_effort: call.reasoning_effort,
+        codex_cli_path: call.codex_cli_path,
+        codex_cli_version: call.codex_cli_version,
+        output_path: outputPath,
+        content: call.content,
+        parsed: extractJson(call.content),
+      };
     } catch (error) {
       lastError = error;
       if (attempt < attempts) console.error(`visual ${stageName}: retrying after ${error instanceof Error ? error.message : String(error)}`);
@@ -780,7 +994,7 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
   throw lastError ?? new Error(`codex visual plan failed for ${stageName}`);
 }
 
-async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null) {
+async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null, prompt = "") {
   let entries = [];
   try {
     entries = await fs.readdir(callDir, { withFileTypes: true });
@@ -801,6 +1015,12 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null)
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   for (const candidate of candidates) {
     try {
+      const metadata = await readCodexCallMetadata(candidate.outputPath);
+      if (!isCodexCacheCompatible(metadata, {
+        model: flags.model ?? flags["llm-model"] ?? null,
+        reasoningEffort: flags["reasoning-effort"] ?? null,
+        promptHash: sha256(prompt),
+      })) continue;
       const content = await fs.readFile(candidate.outputPath, "utf8");
       const parsed = extractJson(content);
       if (Array.isArray(parsed.prompts) && parsed.prompts.length) {
@@ -810,7 +1030,16 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null)
           if (!expectedBeatIds.every((beatId, index) => actualBeatIds[index] === beatId)) continue;
         }
         console.error(`visual ${stageName}: reused cached Codex output ${candidate.outputPath}`);
-        return { provider: "codex-cache", model: "codex_cli_default", output_path: candidate.outputPath, content, parsed };
+        return {
+          provider: "codex-cache",
+          model: metadata.model,
+          reasoning_effort: metadata.reasoning_effort,
+          codex_cli_path: metadata.codex_cli_path,
+          codex_cli_version: metadata.codex_cli_version,
+          output_path: candidate.outputPath,
+          content,
+          parsed,
+        };
       }
     } catch {}
   }
@@ -876,8 +1105,8 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     modelslab_image_prompt: modelslabPrompt,
     codex_image_prompt: codexPrompt,
     prompt_hash: sha256(modelslabPrompt || imagePrompt),
-    image_provider_route: "modelslab",
-    image_model_route: "flux-klein",
+    image_provider_route: normalizeImageProvider(row.image_provider_route ?? "") === "codex_imagegen" ? "codex_imagegen" : "modelslab",
+    image_model_route: process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
     reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : [],
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : [],
     reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : [],
@@ -910,6 +1139,7 @@ function sanitizeShotManifest(value) {
     primary_character: value.primary_character ? String(value.primary_character) : null,
     character_state_ref_ids: arrayOfStrings("character_state_ref_ids"),
     protagonist_state_ref_id: value.protagonist_state_ref_id ? String(value.protagonist_state_ref_id) : null,
+    location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
     visible_props: arrayOfStrings("visible_props"),
@@ -1038,8 +1268,12 @@ function promptSearchText(prompt) {
   ].flat(Infinity).filter(Boolean).join(" ").toLowerCase();
 }
 
+function normalizedPromptSearchText(prompt) {
+  return promptSearchText(prompt).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function nameAppearsInPrompt(name, prompt) {
-  const text = promptSearchText(prompt);
+  const text = normalizedPromptSearchText(prompt);
   const full = String(name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const first = full.split(/\s+/)[0] ?? "";
   if (full && text.includes(full)) return true;
@@ -1417,13 +1651,14 @@ function indexCharacterStateRefs(artifact) {
 }
 
 async function main() {
-  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs, visualBeatPlan, runIdentity] = await Promise.all([
+  const [timedPlan, semanticPlan, visualReferencePlan, characterStateRefs, visualBeatPlan, runIdentity, locationContractLedger] = await Promise.all([
     readJson(timedPlanPath, null),
     readJson(semanticPlanPath, null),
     readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
     readJson(visualBeatPlanPath, null),
     readJson(runIdentityPath, null),
+    readJson(locationContractLedgerPath, null),
   ]);
   const activeImageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? runIdentity?.image_provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
   const activeImageProviderOptions = {
@@ -1437,6 +1672,10 @@ async function main() {
   if (semanticPlan?.status !== "passed") throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
   if (semanticPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("semantic_scene_plan and timed_scene_plan script hashes do not match.");
   if (!visualReferencePlan || visualReferencePlan.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
+  const requiresLocationContractLedger = visualReferencePlan.reference_director_contract_version === "reference_director_v2";
+  if (requiresLocationContractLedger && (locationContractLedger?.status !== "passed" || !Array.isArray(locationContractLedger?.contracts))) {
+    throw new Error(`Missing passed location contract ledger for reference_director_v2: ${locationContractLedgerPath}`);
+  }
   const allowDraftRefs = flags["allow-draft-refs"] === "true";
   if (!["approved", "passed"].includes(characterStateRefs?.status) && !allowDraftRefs) {
     throw new Error(`character_state_refs must be approved before visual planning. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
@@ -1466,11 +1705,11 @@ async function main() {
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
-        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
         promptSizes.push({ chunk_index: index + 1, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
       }
     } else {
-      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
       promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
     }
     await writeJson(outputPath, {
@@ -1508,7 +1747,7 @@ async function main() {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
       const chunkLlm = isLocalLLMRoute(chunkStageName)
@@ -1528,16 +1767,20 @@ async function main() {
       if (result.chunkLlm.parsed.style_summary) styleSummaries.push(result.chunkLlm.parsed.style_summary);
     }
     styleSummary = styleSummaries.filter(Boolean)[0] ?? "";
+    const firstChunkLlm = chunkResults[0]?.chunkLlm ?? null;
     llm = {
-      provider: isLocalLLMRoute(stageName) ? "local-qwen" : "codex",
-      model: isLocalLLMRoute(stageName) ? getLLMModel(stageName) : "codex_cli_default",
+      provider: firstChunkLlm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
+      model: firstChunkLlm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel()),
+      reasoning_effort: firstChunkLlm?.reasoning_effort ?? null,
+      codex_cli_path: firstChunkLlm?.codex_cli_path ?? null,
+      codex_cli_version: firstChunkLlm?.codex_cli_version ?? null,
       chunked: true,
       chunk_count: sceneChunks.length,
       chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
-    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
@@ -1546,7 +1789,7 @@ async function main() {
     .map((row, index) => normalizePrompt(row, index, episode, visualSourceRows[index] ?? null, { visualReferencePlan: enrichedVisualReferencePlan, stateRefIndex }));
   const empty = prompts.filter((row) => !row.image_prompt);
   if (!prompts.length || empty.length) throw new Error(`Visual planner returned ${prompts.length} prompts with ${empty.length} empty prompts.`);
-  const negativePromptPayloadWarnings = negativePromptPayloadMarkerWarnings(prompts);
+  const providerExclusionPayloadWarnings = providerExclusionPayloadMarkerWarnings(prompts);
   assertScenePromptShape(prompts);
   assertLocalBeatFidelity(prompts, visualSourceRows);
   const shotFramingWarnings = assertShotFramingDistribution(prompts);
@@ -1566,6 +1809,7 @@ async function main() {
   if (missingBeatIds.length) throw new Error(`Visual planner missed visual beat ids: ${missingBeatIds.slice(0, 20).join(", ")}`);
   const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
   if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
+  if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
     status: "passed",
@@ -1576,12 +1820,22 @@ async function main() {
     source_script_hash: timedPlan.source_script_hash,
     source_artifact_paths: sourcePaths,
     source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
-    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
+    planner: {
+      provider: llm.provider,
+      model: llm.model ?? null,
+      reasoning_effort: llm.reasoning_effort ?? null,
+      codex_cli_path: llm.codex_cli_path ?? null,
+      codex_cli_version: llm.codex_cli_version ?? null,
+      output_path: llm.output_path ?? null,
+      chunked: llm.chunked ?? false,
+      chunk_count: llm.chunk_count ?? null,
+    },
     style_summary: styleSummary,
-    prompt_policy: "local-beat-first editorial prompting; ordinary negative words are allowed in normal prose, standalone negative-prompt payloads are disallowed, and references are selected only when visible/style-critical with explicit image slot roles",
+    prompt_policy: "local-beat-first editorial prompting; normal prose preserves story intent, standalone provider-exclusion payloads are disallowed, and references are selected only when visible/style-critical with explicit image slot roles",
     image_provider: activeImageProvider,
     image_provider_options: activeImageProviderOptions,
     run_identity_path: runIdentityPath,
+    location_contract_ledger_path: locationContractLedger?.status === "passed" ? locationContractLedgerPath : null,
     visual_plan_scope: {
       mode: visualSourceRows.length === allVisualSourceRows.length ? "full_episode" : "small_batch",
       selected_visual_unit_count: visualSourceRows.length,
@@ -1591,7 +1845,7 @@ async function main() {
     prompts,
     warnings: [
       ...(llm.parsed.warnings ?? []),
-      ...negativePromptPayloadWarnings,
+      ...providerExclusionPayloadWarnings,
       ...shotFramingWarnings,
       ...promptVarietyWarnings,
       ...locationSpanWarnings,

@@ -19,10 +19,11 @@ const episodeDir = flags["episode-dir"]
 const stitchReportPath = flags.qwenReport ?? flags["qwen-report"] ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
 const paceReportPath = flags.paceReport ?? flags["pace-report"] ?? path.join(episodeDir, `narration_pace_report_${episode}.json`);
 const outputReportPath = flags.output ?? flags.report ?? path.join(episodeDir, `narration_tempo_normalize_${episode}.json`);
-const targetWpm = Number(flags["target-wpm"] ?? process.env.GOLDFLOW_TARGET_WPM_MID ?? 215);
+const targetWpm = Number(flags["target-wpm"] ?? process.env.GOLDFLOW_TARGET_WPM_MID ?? 208);
 const minFactor = Number(flags["min-factor"] ?? 0.85);
 const maxFactor = Number(flags["max-factor"] ?? 1.45);
 const replaceStitchReport = flags["replace-stitch-report"] !== "false";
+const operatorApprovedEmergency = flags["operator-approved-emergency"] === "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -101,6 +102,9 @@ function scaledSegments(segments, factor) {
 }
 
 async function main() {
+  if (!operatorApprovedEmergency) {
+    throw new Error("Post-TTS tempo normalization is emergency-only. Regenerate Qwen with provider-native --native-speed first. Use --operator-approved-emergency true only after an explicit operator decision.");
+  }
   if (!Number.isFinite(targetWpm) || targetWpm <= 0) throw new Error(`Invalid --target-wpm ${targetWpm}`);
   const stitch = await readJson(stitchReportPath, null);
   if (!stitch?.output_path) throw new Error(`Missing stitch report output_path: ${stitchReportPath}`);
@@ -167,7 +171,8 @@ async function main() {
     tempo_factor: factor,
     ffmpeg_filter: filter,
     stitch_report_updated: replaceStitchReport,
-    policy: "Non-destructive narration tempo normalization after provider TTS. Raw TTS is preserved; Whisper timing must be rerun after this stage.",
+    operator_approved_emergency: true,
+    policy: "Emergency-only post-TTS tempo normalization. Normal production obtains pace from provider-native Qwen speed and delivery direction. Raw TTS is preserved; Whisper timing must be rerun after this stage.",
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputReportPath, report);

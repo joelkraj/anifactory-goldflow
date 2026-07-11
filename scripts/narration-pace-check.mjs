@@ -5,6 +5,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const DEFAULT_TARGET_WPM_MIN = 195;
+const DEFAULT_TARGET_WPM_MAX = 220;
 const flags = parseFlags(process.argv.slice(2));
 const mode = String(flags.mode ?? "script");
 const channel = flags.channel ?? "53rebirth";
@@ -17,13 +19,14 @@ const episodeDir = flags["episode-dir"]
 const scriptPath = flags.script ?? path.join(episodeDir, "script_clean.md");
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, mode === "audio" ? `narration_pace_report_${episode}.json` : "script_pace_report.json");
-const targetMinWpm = Number(flags["target-wpm-min"] ?? process.env.GOLDFLOW_TARGET_WPM_MIN ?? 210);
-const targetMaxWpm = Number(flags["target-wpm-max"] ?? process.env.GOLDFLOW_TARGET_WPM_MAX ?? 220);
+const targetMinWpm = Number(flags["target-wpm-min"] ?? process.env.GOLDFLOW_TARGET_WPM_MIN ?? DEFAULT_TARGET_WPM_MIN);
+const targetMaxWpm = Number(flags["target-wpm-max"] ?? process.env.GOLDFLOW_TARGET_WPM_MAX ?? DEFAULT_TARGET_WPM_MAX);
 const targetMidWpm = Number(((targetMinWpm + targetMaxWpm) / 2).toFixed(3));
 const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "enforced");
 const paceGateEnforced = pacePolicy !== "diagnostic";
 const allowHookWarnings = flags["allow-hook-warnings"] === "true"
   || process.env.GOLDFLOW_ALLOW_HOOK_WARNINGS === "true";
+const hookMilestonesPath = flags["hook-milestones"] ? path.resolve(flags["hook-milestones"]) : null;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -84,20 +87,11 @@ function spokenWordCount(text) {
     .match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
 }
 
-function spokenWordsWithOffsets(text) {
-  const rows = [];
-  const pattern = /[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu;
-  for (const match of String(text ?? "").matchAll(pattern)) {
-    rows.push({ word: match[0], index: match.index ?? 0 });
-  }
-  return rows;
-}
-
 function normalizePhrase(value) {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function estimatedPhraseTime(script, phrase, words, wpm) {
+function estimatedPhraseTime(script, phrase, wpm) {
   const normalizedScript = normalizePhrase(script);
   const normalizedPhrase = normalizePhrase(phrase);
   if (!normalizedPhrase) return null;
@@ -111,61 +105,73 @@ function estimatedPhraseTime(script, phrase, words, wpm) {
   };
 }
 
-function hookMilestoneReport(script, wpm) {
-  const words = spokenWordsWithOffsets(script);
-  const phraseGroups = [
-    { code: "system_activated", label: "system activation", patterns: ["system activated", "system awakened", "system opened", "system flashed"] },
-    { code: "first_quest_declared", label: "first quest declared", patterns: ["first quest"] },
-    { code: "first_quest_complete", label: "first quest complete", patterns: ["first quest complete", "quest complete"] },
-    { code: "core_mechanic", label: "core mechanic", patterns: ["gold was attention", "blue was truth", "authenticity", "clout"] },
-    { code: "next_arc", label: "next arc", patterns: ["analytics hall", "report to analytics hall", "agent00"] },
-  ];
+function hookTargetShape() {
+  return {
+    first_30_sec_words: [98, 110],
+    first_60_sec_words: [195, 220],
+    first_90_sec_words: [293, 330],
+    first_180_sec_words: [585, 660],
+  };
+}
+
+function normalizeHookConfig(config) {
+  const rows = Array.isArray(config) ? config : config?.milestones;
+  if (!Array.isArray(rows)) {
+    throw new Error(`Invalid hook milestone config at ${hookMilestonesPath}: expected an array or { "milestones": [...] }.`);
+  }
+  return rows.map((row, index) => {
+    const patterns = Array.isArray(row.patterns) ? row.patterns : [row.phrase ?? row.pattern].filter(Boolean);
+    const code = String(row.code ?? `hook_milestone_${index + 1}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return {
+      code,
+      label: row.label ?? code.replace(/_/g, " "),
+      patterns: patterns.map((pattern) => String(pattern ?? "").trim()).filter(Boolean),
+      target_sec: Number(row.target_sec ?? row.targetSec),
+      warning_code: row.warning_code ?? row.warningCode ?? `late_${code}`,
+      reason: row.reason ?? "Configured hook milestone landed later than its configured target.",
+    };
+  }).filter((row) => row.code && row.patterns.length);
+}
+
+async function hookMilestoneReport(script, wpm) {
+  if (!hookMilestonesPath) {
+    return {
+      target_shape: hookTargetShape(),
+      configured: false,
+      hook_milestones_path: null,
+      milestones: [],
+      warnings: [],
+      policy: "No built-in story-family hook phrases are used. Hook milestone checks require an explicit --hook-milestones config.",
+    };
+  }
+  const phraseGroups = normalizeHookConfig(await readJson(hookMilestonesPath, null));
   const milestones = [];
   for (const group of phraseGroups) {
     const match = group.patterns
-      .map((phrase) => estimatedPhraseTime(script, phrase, words, wpm))
+      .map((phrase) => estimatedPhraseTime(script, phrase, wpm))
       .filter(Boolean)
       .sort((a, b) => a.estimated_sec - b.estimated_sec)[0] ?? null;
     if (match) milestones.push({ code: group.code, label: group.label, ...match });
   }
   const warnings = [];
-  const firstQuestComplete = milestones.find((row) => row.code === "first_quest_complete");
-  if (firstQuestComplete && firstQuestComplete.estimated_sec > 60) {
+  for (const group of phraseGroups) {
+    const milestone = milestones.find((row) => row.code === group.code);
+    if (!milestone || !Number.isFinite(group.target_sec) || milestone.estimated_sec <= group.target_sec) continue;
     warnings.push({
-      code: "late_first_quest_completion",
+      code: group.warning_code,
       severity: "warning",
-      estimated_sec: firstQuestComplete.estimated_sec,
-      target_sec: 45,
-      reason: "Streamer/system hooks should usually complete the first live/system proof around 45 seconds when the premise supports it.",
-    });
-  }
-  const nextArc = milestones.find((row) => row.code === "next_arc");
-  if (nextArc && nextArc.estimated_sec > 90) {
-    warnings.push({
-      code: "late_next_arc_entry",
-      severity: "warning",
-      estimated_sec: nextArc.estimated_sec,
-      target_sec: 60,
-      reason: "The next major arc should usually start around 60 seconds for a compressed retention proof when the premise supports it.",
-    });
-  }
-  const systemActivated = milestones.find((row) => row.code === "system_activated");
-  if (systemActivated && systemActivated.estimated_sec > 30) {
-    warnings.push({
-      code: "late_hidden_power_spark",
-      severity: "warning",
-      estimated_sec: systemActivated.estimated_sec,
-      target_sec: 30,
-      reason: "The hidden-power spark should land in the first 30 seconds for title-promise retention hooks.",
+      estimated_sec: milestone.estimated_sec,
+      target_sec: group.target_sec,
+      reason: group.reason,
     });
   }
   return {
-    target_shape: {
-      first_30_sec_words: [105, 110],
-      first_60_sec_words: [210, 220],
-      first_90_sec_words: [315, 330],
-      first_180_sec_words: [630, 660],
-    },
+    target_shape: hookTargetShape(),
+    configured: true,
+    hook_milestones_path: hookMilestonesPath,
     milestones,
     warnings,
   };
@@ -198,7 +204,7 @@ async function main() {
     estimated_runtime_at_target_mid_sec: Number((scriptWordCount / targetMidWpm * 60).toFixed(3)),
     estimated_runtime_at_target_min_sec: Number((scriptWordCount / targetMinWpm * 60).toFixed(3)),
     estimated_runtime_at_target_max_sec: Number((scriptWordCount / targetMaxWpm * 60).toFixed(3)),
-    policy: "Goldflow narration pace target is 210-220 spoken words per minute for new production scripts.",
+    policy: `Goldflow narration pace target for this run is ${targetMinWpm}-${targetMaxWpm} spoken words per minute.`,
     source_hashes: await sourceHashesFor(mode === "audio" ? [scriptPath, wordTimingPath] : [scriptPath]),
     updated_at: new Date().toISOString(),
   };
@@ -232,10 +238,10 @@ async function main() {
     return;
   }
 
-  const hookReport = hookMilestoneReport(script, targetMidWpm);
+  const hookReport = await hookMilestoneReport(script, targetMidWpm);
   const hookWarnings = hookReport.warnings ?? [];
-  const hookGateEnforced = paceGateEnforced && !allowHookWarnings;
-  const measuredHookStatus = hookWarnings.length ? "blocked" : "passed";
+  const hookGateEnforced = hookReport.configured !== false && paceGateEnforced && !allowHookWarnings;
+  const measuredHookStatus = hookReport.configured === false ? "not_configured" : hookWarnings.length ? "blocked" : "passed";
   const status = hookWarnings.length && hookGateEnforced ? "blocked" : "passed";
   const report = {
     ...base,
@@ -246,9 +252,11 @@ async function main() {
     diagnostic_hook_status: measuredHookStatus,
     hook_milestone_report: hookReport,
     blocker: status === "passed" ? null : `Script hook timing has ${hookWarnings.length} blocker(s). Tighten the source/chatbot hook or rerun with --allow-hook-warnings true only for diagnostics.`,
-    note: hookGateEnforced
-      ? "Script-stage WPM is a target budget; hook milestone timing is enforced here when detected. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing."
-      : "Script-stage WPM and hook milestone timing are recorded diagnostically for this run policy. Actual spoken WPM is measured after Qwen stitch and local Whisper timing.",
+    note: hookReport.configured === false
+      ? "Script-stage WPM is a target budget. No built-in story-family hook phrase gate is active; hook milestone checks require an explicit --hook-milestones config. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing."
+      : hookGateEnforced
+        ? "Script-stage WPM is a target budget; configured hook milestone timing is enforced here. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing."
+        : "Script-stage WPM and configured hook milestone timing are recorded diagnostically for this run policy. Actual spoken WPM is measured after Qwen stitch and local Whisper timing.",
   };
   await writeJson(outputPath, report);
   console.log(JSON.stringify({ status: report.status, output_path: outputPath, target_wpm: `${targetMinWpm}-${targetMaxWpm}`, estimated_runtime_at_target_mid_sec: report.estimated_runtime_at_target_mid_sec }, null, 2));

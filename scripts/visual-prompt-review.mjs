@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
-import { beautyLanguageFindings, namedCharacterDuplicationFindings, negativePromptFindings } from "./lib/prompt-prose-findings.mjs";
+import { beautyLanguageFindings, namedCharacterDuplicationFindings, providerExclusionPayloadFindings } from "./lib/prompt-prose-findings.mjs";
 import {
   blockerImageIds,
   blockerSceneIds,
@@ -33,10 +33,13 @@ const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
 const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? null;
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
+const locationContractLedgerPath = flags.locationContractLedger ?? flags["location-contract-ledger"] ?? path.join(episodeDir, "location_contract_ledger.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
 const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `visual_prompt_review_${episode}.json`);
+const reviewValueReportPath = flags["review-value-output"] ?? path.join(episodeDir, `review_value_report_${episode}.json`);
 const autoResolveEnabled = flags["auto-resolve"] === "true";
+const blockersOnly = flags["blockers-only"] === "true" || flags.mode === "blockers_only";
 const resumeBlockedReview = flags["resume-blocked"] === "true" || flags.resume === "blocked";
 const maxResolveIterations = Math.max(1, Number(flags["max-resolve-iterations"] ?? 2));
 const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
@@ -233,16 +236,38 @@ function compactReferencePlan(plan, prompts = []) {
       kind: target.kind,
       subject: target.subject,
       scene_ids: compactSceneIdsForPrompt(target.scene_ids, relevantSceneIds),
+      location_contract_ids: target.location_contract_ids ?? [],
       scene_scope_total: Array.isArray(target.scene_ids) ? target.scene_ids.length : 0,
       priority: target.priority,
       generation_mode: target.generation_mode,
       required_before_imagegen: target.required_before_imagegen,
-      reference_image_path: target.reference_image_path ?? target.required_reference_path ?? null,
-      attachable_reference: Boolean(target.reference_image_path ?? target.required_reference_path ?? target.resolved_reference_image_path),
+      reference_image_path: target.conditioning_image_path ?? target.reference_image_path ?? target.required_reference_path ?? null,
+      attachable_reference: Boolean(target.conditioning_image_path ?? target.reference_image_path ?? target.required_reference_path ?? target.resolved_reference_image_path),
       reference_budget: target.reference_budget ?? null,
       prompt_anchor: target.prompt_anchor,
       risk_notes: (target.risk_notes ?? []).slice(0, 4),
     })),
+  };
+}
+
+function compactLocationContracts(ledger, prompts = []) {
+  const sceneIds = new Set((prompts ?? []).map((prompt) => String(prompt?.scene_id ?? "")).filter(Boolean));
+  const requestedIds = new Set((prompts ?? [])
+    .map((prompt) => String(prompt?.shot_manifest?.location_contract_id ?? ""))
+    .filter(Boolean));
+  return {
+    status: ledger?.status ?? null,
+    contracts: (ledger?.contracts ?? [])
+      .filter((contract) => requestedIds.has(String(contract.location_contract_id ?? ""))
+        || (contract.scene_ids ?? []).some((sceneId) => sceneIds.has(String(sceneId))))
+      .map((contract) => ({
+        location_contract_id: contract.location_contract_id,
+        description: contract.description ?? null,
+        prompt_anchor: contract.prompt_anchor ?? contract.description ?? null,
+        scene_ids: contract.scene_ids ?? [],
+        beat_ids: contract.beat_ids ?? [],
+        local_location_labels: contract.local_location_labels ?? [],
+      })),
   };
 }
 
@@ -280,19 +305,19 @@ function compactCharacterStateRefs(refs, prompts = []) {
       prompt_anchor: ref.prompt_anchor,
       scene_prompt_anchor: ref.scene_prompt_anchor ?? ref.scene_anchor ?? ref.prompt_anchor,
       definitive: ref.definitive,
-      reference_image_path: ref.reference_image_path ?? null,
+      reference_image_path: ref.conditioning_image_path ?? ref.reference_image_path ?? null,
       required_reference_path: ref.required_reference_path ?? null,
       resolved_reference_image_path: ref.resolved_reference_image_path ?? null,
       generation_mode: ref.generation_mode ?? null,
       required_before_imagegen: ref.required_before_imagegen ?? null,
-      attachable_reference: Boolean(ref.reference_image_path ?? ref.required_reference_path ?? ref.resolved_reference_image_path),
+      attachable_reference: Boolean(ref.conditioning_image_path ?? ref.reference_image_path ?? ref.required_reference_path ?? ref.resolved_reference_image_path),
       reference_budget: ref.reference_budget ?? null,
       source_ref_id: ref.source_ref_id ?? null,
     })),
   };
 }
 
-function buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts }) {
+function buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger, prompts }) {
   const scenesById = new Map((timedPlan.scenes ?? []).map((scene) => [scene.scene_id, compactScene(scene)]));
   const rows = prompts.map((prompt) => ({
     scene: scenesById.get(prompt.scene_id) ?? null,
@@ -314,7 +339,7 @@ Review for:
 - wardrobe contradiction against character state refs
 - stale neighboring-scene context
 - characters not visible in the current scene
-- separate negative-prompt payloads or embedded negative-prompt sections
+- separate provider-exclusion payloads or embedded provider-exclusion sections
 - vague multi-character action staging
 - prompt contradiction against current scene facts
 - reference-pose lock, where the prompt lets a character preserve a neutral reference pose during an action scene
@@ -325,17 +350,17 @@ Rules:
 - You are the creative visual reviewer. The downstream deterministic pass only sanitizes approved ref IDs, paths, forbidden refs, and the four-reference cap; it will not creatively infer missing locations, add characters, rewrite action, choose shot jobs, or fix narrative intent.
 - Use current scene facts only.
 - Write normal descriptive prompt prose and preserve story-faithful refusals, absence states, UI labels, and status language.
-- Do not create separate negative_prompt, avoid_list, or exclude_list payloads, and do not embed a "Negative prompt:" section inside prompt prose.
+- Do not create separate provider-exclusion payload fields such as negative_prompt, avoid_list, or exclude_list, and do not embed a "Negative prompt:" section inside prompt prose.
 - Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - For single-character shots, state the visible subject concretely, such as "one named character alone in frame," while preserving story-faithful absence language when the beat needs it.
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
 - Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
-- Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
+- Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, textual location contract, optional attachable location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person and use that named character's ref instead of a separate generic character.
 - If the beat or prompt shows a recognizable named person inside a replay clip, livestream panel, broadcast feed, video wall, chat avatar, dossier card, or phone screen, that person is visually present through media. Keep or add them in shot_manifest.visible_characters, include character_staging that says they are screen-visible or panel-visible, and attach their in-scope character_state ref when their likeness matters and reference slots allow.
 - Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
-- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. Only attach refs with attachable_reference true. Targets with generation_mode no_ref_needed, derive_from_best_cut, derive_from_first_clean_cut, or no reference_image_path are scoped prompt context only, not image inputs. If the cut physically occurs in a real environment such as an apartment, gym, office, street, shop, corridor, boardroom, lobby, stage, or courthouse area, choose the closest approved attachable location ref, set shot_manifest.location_ref_id, and attach that location ref unless all four slots are needed for visible characters. If no attachable location ref exists, leave shot_manifest.location_ref_id empty and describe the concrete current location directly from the beat excerpt. If location_ref_id is set, make the prompt and location reference match it.
+- If a character is mentioned_only in shot_manifest, remove that character's reference and keep them out of the visible prompt. If a ref_id appears in forbidden_ref_ids, remove it. Only attach refs with attachable_reference true. For a physical setting, preserve or select the exact in-scope textual contract in shot_manifest.location_contract_id and use its prompt_anchor in prose. Set shot_manifest.location_ref_id and attach a location reference only when a matching approved attachable location target exists. A text location contract never belongs in reference_requirements.
 - For cuts with two or more visible characters, shot_manifest.character_staging is required and must cover visible_characters in the same order.
 - shot_manifest.character_staging screen_position must use this fixed vocabulary only: ${CHARACTER_STAGING_POSITIONS.join(" | ")}.
 - For cuts with two or more visible characters, keep separate position-bound people clauses in the prompt. Each staged clause must bind screen position, character name, that character's copied scene_prompt_anchor wardrobe/state wording, and that character's pose.
@@ -349,7 +374,7 @@ Rules:
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. If it exists, review it for the same shot_manifest, visible subjects, action, location, and refs as image_prompt; preserve it when good and repair it only when needed.
-- Every scene prompt must explicitly request polished 2D anime/manhwa illustration style in text: clean line art, cel-shaded characters, cinematic webtoon/manhwa lighting, and non-photorealistic painted backgrounds. Add or preserve this style language without changing the beat's subject, action, location, references, or shot scale.
+- Every scene prompt should preserve concise anime/manhwa style intent without adding boilerplate. Prefer a short phrase such as "16:9 landscape anime/manhwa frame" only when style would otherwise be ambiguous. Do not add long repeated style phrases such as clean line art, cel-shaded characters, cinematic webtoon lighting, or non-photorealistic painted background to every cut.
 - Background extras are allowed only when the beat calls for them. If the shot_manifest and beat excerpt show one named subject in a lonely, private, or solo investigation beat, keep the prompt visibly empty except for that subject and necessary objects; remove anonymous customers, staff, crowds, or audience figures that were imported from generic location assumptions.
 - Composition is beat-authored, not globally defaulted. Preserve or repair close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when that shot scale serves the current visual job and narration excerpt. Do not impose a universal wide/full-frame/medium-wide default.
 - Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
@@ -389,6 +414,9 @@ ${JSON.stringify({
 VISUAL REFERENCES:
 ${JSON.stringify(compactReferencePlan(visualReferencePlan, prompts), null, 2)}
 
+TEXTUAL LOCATION CONTRACTS:
+${JSON.stringify(compactLocationContracts(locationContractLedger, prompts), null, 2)}
+
 CHARACTER STATE REFS:
 ${JSON.stringify(compactCharacterStateRefs(characterStateRefs, prompts), null, 2)}
 
@@ -419,6 +447,7 @@ Return JSON only:
         "primary_character": "...",
         "character_state_ref_ids": ["..."],
         "protagonist_state_ref_id": "...",
+        "location_contract_id": "...",
         "location_ref_id": "...",
         "foreground_action": "...",
         "visible_props": ["..."],
@@ -447,7 +476,7 @@ Return JSON only:
       "image_id": "ep_01-cut-001",
       "scene_id": "scene_001",
       "severity": "info|warning|blocker",
-      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|negative_prompt|beauty_language_risk|named_character_duplication_risk|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|other",
+      "code": "identity_blend|wrong_subject|unnecessary_ref|missing_ref|action_reversal|literalized_metaphor|wardrobe_contradiction|neighbor_context|unseen_character|provider_exclusion_payload|beauty_language_risk|named_character_duplication_risk|vague_action|scene_contradiction|reference_pose_lock|repeated_tableau|metadata_prompt|reference_layout_prompt|duplicated_reference_slot_text|contaminated_action_ref|character_attribute_bleed_risk|other",
       "message": "specific issue",
       "target_field": "optional span repair target such as people_clause",
       "resolved": true
@@ -544,7 +573,7 @@ function isOllamaNativeBaseURL(baseURL) {
   return /\/api\/?$/i.test(String(baseURL ?? ""));
 }
 
-async function readCachedCodexReview(callDir, stageName, { expectedPromptCount = null, minMtimeMs = 0 } = {}) {
+async function readCachedCodexReview(callDir, stageName, { expectedPromptCount = null, minMtimeMs = 0, promptHash = null } = {}) {
   if (flags["reuse-codex-review-cache"] === "false" || process.env.ANIFACTORY_REUSE_CODEX_REVIEW_CACHE === "false") return null;
   let names = [];
   try {
@@ -568,6 +597,12 @@ async function readCachedCodexReview(callDir, stageName, { expectedPromptCount =
   }
   candidates.sort((left, right) => right.mtime - left.mtime);
   for (const candidate of candidates) {
+    const metadata = await readCodexCallMetadata(candidate.filePath);
+    if (!isCodexCacheCompatible(metadata, {
+      model: flags.model ?? flags["llm-model"] ?? null,
+      reasoningEffort: flags["reasoning-effort"] ?? null,
+      promptHash,
+    })) continue;
     const content = await fs.readFile(candidate.filePath, "utf8").catch(() => "");
     try {
       const parsed = extractJson(content);
@@ -575,7 +610,10 @@ async function readCachedCodexReview(callDir, stageName, { expectedPromptCount =
       if (expectedPromptCount !== null && reviewedCount !== expectedPromptCount) continue;
       return {
         provider: "codex_cache",
-        model: "codex_cli_default",
+        model: metadata.model,
+        reasoning_effort: metadata.reasoning_effort,
+        codex_cli_path: metadata.codex_cli_path,
+        codex_cli_version: metadata.codex_cli_version,
         output_path: candidate.filePath,
         content,
         parsed,
@@ -589,19 +627,28 @@ async function readCachedCodexReview(callDir, stageName, { expectedPromptCount =
 async function callCodex(prompt, stageName, options = {}) {
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
-  const cached = await readCachedCodexReview(callDir, stageName, options);
+  const cached = await readCachedCodexReview(callDir, stageName, { ...options, promptHash: sha256(prompt) });
   if (cached) return cached;
   const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-output.txt`);
-  await new Promise((resolve, reject) => {
-    const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", reject);
-    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`codex visual review exited ${code}: ${compactProviderError(stderr)}`)));
-    child.stdin.end(prompt);
+  const call = await runCodexCli({
+    prompt,
+    stageName,
+    repoRoot,
+    outputPath,
+    model: flags.model ?? flags["llm-model"] ?? null,
+    reasoningEffort: flags["reasoning-effort"] ?? null,
+    timeoutMs: Number(process.env.ANIFACTORY_VISUAL_REVIEW_TIMEOUT_MS ?? 1_200_000),
   });
-  const content = await fs.readFile(outputPath, "utf8");
-  return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+  return {
+    provider: "codex",
+    model: call.model,
+    reasoning_effort: call.reasoning_effort,
+    codex_cli_path: call.codex_cli_path,
+    codex_cli_version: call.codex_cli_version,
+    output_path: outputPath,
+    content: call.content,
+    parsed: extractJson(call.content),
+  };
 }
 
 function chunkArray(items, size) {
@@ -675,6 +722,7 @@ function sanitizeShotManifest(value) {
     primary_character: value.primary_character ? String(value.primary_character) : null,
     character_state_ref_ids: arrayOfStrings("character_state_ref_ids"),
     protagonist_state_ref_id: value.protagonist_state_ref_id ? String(value.protagonist_state_ref_id) : null,
+    location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
     visible_props: arrayOfStrings("visible_props"),
@@ -855,7 +903,7 @@ function characterNamesMatch(left, right) {
 }
 
 function characterRefIsAttachable(ref) {
-  return Boolean(ref?.reference_image_path ?? ref?.required_reference_path ?? ref?.resolved_reference_image_path);
+  return Boolean(ref?.conditioning_image_path ?? ref?.reference_image_path ?? ref?.required_reference_path ?? ref?.resolved_reference_image_path);
 }
 
 function characterRefIds(ref) {
@@ -1383,12 +1431,12 @@ function assertReviewedPrompts(originalPrompts, reviewedPrompts, timedPlan) {
   }
 }
 
-async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts, chunkIndex = null, attemptIndex = 1, minCacheMtimeMs = 0 }) {
+async function reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger, prompts, chunkIndex = null, attemptIndex = 1, minCacheMtimeMs = 0 }) {
   const baseStageName = chunkIndex === null
     ? `${episode}_visual_review`
     : `${episode}_visual_review_chunk_${String(chunkIndex + 1).padStart(2, "0")}`;
   const stageName = attemptIndex > 1 ? `${baseStageName}_attempt_${attemptIndex}` : baseStageName;
-  const prompt = buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts });
+  const prompt = buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger, prompts });
   return isLocalLLMRoute(stageName)
     ? callLocal(prompt, stageName, Number(flags["visual-review-chunk-max-tokens"] ?? 9000))
     : callCodex(prompt, stageName, { expectedPromptCount: prompts.length, minMtimeMs: minCacheMtimeMs });
@@ -1408,22 +1456,167 @@ async function runPool(items, worker, limit) {
   return results;
 }
 
+function promptReviewDigest(prompt) {
+  return sha256(JSON.stringify({
+    image_prompt: prompt?.image_prompt ?? null,
+    modelslab_image_prompt: prompt?.modelslab_image_prompt ?? null,
+    codex_image_prompt: prompt?.codex_image_prompt ?? null,
+    shot_manifest: prompt?.shot_manifest ?? null,
+    reference_requirements: prompt?.reference_requirements ?? [],
+  }));
+}
+
+async function writeReviewValueReport({ startedAtMs, mode, inputPlan, outputPlan, inputBlockerCount = 0, outputBlockerCount = 0, llmCallCount = 0 }) {
+  const outputById = new Map((outputPlan?.prompts ?? []).map((prompt) => [String(prompt.image_id ?? ""), prompt]));
+  const changedIds = (inputPlan?.prompts ?? []).filter((prompt) => {
+    const output = outputById.get(String(prompt.image_id ?? ""));
+    return output && promptReviewDigest(prompt) !== promptReviewDigest(output);
+  }).map((prompt) => prompt.image_id);
+  await writeJson(reviewValueReportPath, {
+    schema: "goldflow_review_value_report_v1",
+    status: outputBlockerCount === 0 ? "passed" : "blocked",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    review_mode: mode,
+    wall_time_sec: Number(((Date.now() - startedAtMs) / 1000).toFixed(3)),
+    llm_call_count: llmCallCount,
+    input_prompt_count: inputPlan?.prompts?.length ?? 0,
+    changed_prompt_count: changedIds.length,
+    changed_image_ids: changedIds,
+    input_blocker_count: inputBlockerCount,
+    output_blocker_count: outputBlockerCount,
+    blockers_fixed_count: Math.max(0, inputBlockerCount - outputBlockerCount),
+    downstream_regenerations_avoided: null,
+    value_policy: "Review earns default-path value only when it fixes evidenced blockers or prevents measured downstream regeneration.",
+    updated_at: new Date().toISOString(),
+  });
+}
+
 async function main() {
-  const [promptPlan, timedPlan, visualReferencePlan, characterStateRefs] = await Promise.all([
+  const startedAtMs = Date.now();
+  const [promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger] = await Promise.all([
     readJson(promptPath, null),
     readJson(timedPlanPath, null),
     readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
+    readJson(locationContractLedgerPath, null),
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) throw new Error(`Missing passed visual prompt plan: ${promptPath}`);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (promptPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("section_image_prompts and timed_scene_plan script hashes do not match.");
   if (visualReferencePlan?.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
+  if (visualReferencePlan.reference_director_contract_version === "reference_director_v2"
+    && (locationContractLedger?.status !== "passed" || !Array.isArray(locationContractLedger?.contracts))) {
+    throw new Error(`Missing passed location contract ledger for reference_director_v2: ${locationContractLedgerPath}`);
+  }
   if (!["approved", "passed"].includes(characterStateRefs?.status) && flags["allow-draft-refs"] !== "true") {
     throw new Error(`character_state_refs must be approved before visual review. Current status: ${characterStateRefs?.status ?? "missing"}. Use --allow-draft-refs true only for diagnostics.`);
   }
   if (resumeBlockedReview) {
     await resumeBlockedReviewFromArtifacts({ promptPlan, timedPlan, characterStateRefs });
+    return;
+  }
+
+  if (blockersOnly) {
+    if (!autoResolveEnabled) throw new Error("--blockers-only requires --auto-resolve true.");
+    const hardenFeedbackReport = await readJson(hardenFeedbackPath, null);
+    const hardenFeedbackBlockers = compatibleHardenFeedbackBlockers({
+      hardenReport: hardenFeedbackReport,
+      promptPlan,
+      channel,
+      series,
+      week,
+      episode,
+      hardenReportPath: hardenFeedbackPath,
+    });
+    const now = new Date().toISOString();
+    if (!hardenFeedbackBlockers.length) {
+      const sourcePaths = [promptPath, timedPlanPath, visualReferencePlanPath, characterStateRefsPath, ...(locationContractLedger?.status === "passed" ? [locationContractLedgerPath] : []), hardenFeedbackPath];
+      const sourceHashes = Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash));
+      const passedPlan = {
+        ...promptPlan,
+        status: "passed",
+        source_artifact_paths: sourcePaths,
+        source_hashes: sourceHashes,
+        visual_review_mode: "blockers_only_no_llm_calls",
+        updated_at: now,
+      };
+      const passedReport = {
+        schema: "goldflow_visual_prompt_review_v1",
+        status: "passed",
+        channel,
+        series_slug: series,
+        week,
+        episode,
+        source_script_hash: promptPlan.source_script_hash,
+        source_artifact_paths: sourcePaths,
+        source_hashes: sourceHashes,
+        planner: { mode: "blockers_only", llm_call_count: 0 },
+        input_prompt_count: promptPlan.prompts.length,
+        reviewed_prompt_count: promptPlan.prompts.length,
+        findings: [],
+        warnings: [],
+        unresolved_blocker_count: 0,
+        reviewed_prompt_plan_path: outputPath,
+        harden_feedback_report_path: hardenFeedbackPath,
+        updated_at: now,
+      };
+      await writeJson(outputPath, passedPlan);
+      await writeJson(reviewReportPath, passedReport);
+      await writeReviewValueReport({ startedAtMs, mode: "blockers_only", inputPlan: promptPlan, outputPlan: passedPlan, llmCallCount: 0 });
+      console.log(JSON.stringify({ status: "passed", mode: "blockers_only", llm_call_count: 0, output_path: outputPath, review_report_path: reviewReportPath }, null, 2));
+      return;
+    }
+    const initialPlan = {
+      ...promptPlan,
+      status: "blocked",
+      harden_feedback_report_path: hardenFeedbackPath,
+      visual_review_mode: "blockers_only",
+      updated_at: now,
+    };
+    const initialReport = {
+      schema: "goldflow_visual_prompt_review_v1",
+      status: "blocked",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      source_script_hash: promptPlan.source_script_hash,
+      planner: { mode: "blockers_only", full_episode_review_skipped: true },
+      input_prompt_count: promptPlan.prompts.length,
+      reviewed_prompt_count: 0,
+      findings: hardenFeedbackBlockers,
+      warnings: [],
+      unresolved_blocker_count: hardenFeedbackBlockers.length,
+      reviewed_prompt_plan_path: outputPath,
+      harden_feedback_report_path: hardenFeedbackPath,
+      updated_at: now,
+    };
+    const resolved = await autoResolveBlockedReview({ reviewedPlan: initialPlan, reviewReport: initialReport });
+    await maybeClearResolvedDeadletter({ finalReviewReport: resolved.reviewReport, finalReviewedPlan: resolved.reviewedPlan });
+    await writeJson(outputPath, { ...resolved.reviewedPlan, visual_review_mode: "blockers_only" });
+    await writeJson(reviewReportPath, { ...resolved.reviewReport, visual_review_mode: "blockers_only" });
+    await writeReviewValueReport({
+      startedAtMs,
+      mode: "blockers_only",
+      inputPlan: promptPlan,
+      outputPlan: resolved.reviewedPlan,
+      inputBlockerCount: hardenFeedbackBlockers.length,
+      outputBlockerCount: resolved.reviewReport.unresolved_blocker_count ?? unresolvedBlockerFindings(resolved.reviewReport.findings ?? []).length,
+      llmCallCount: resolved.reviewReport.visual_resolution_iterations?.length ?? 0,
+    });
+    console.log(JSON.stringify({
+      status: resolved.reviewReport.status,
+      mode: "blockers_only",
+      full_episode_review_skipped: true,
+      blocker_image_ids: blockerImageIds(hardenFeedbackBlockers),
+      output_path: outputPath,
+      review_report_path: reviewReportPath,
+      unresolved_blocker_count: resolved.reviewReport.unresolved_blocker_count ?? unresolvedBlockerFindings(resolved.reviewReport.findings ?? []).length,
+    }, null, 2));
+    if (resolved.reviewReport.status !== "passed") process.exitCode = 1;
     return;
   }
 
@@ -1440,7 +1633,17 @@ async function main() {
   const findings = [];
   const warnings = [];
   const reviewConcurrency = Math.max(1, Math.min(12, Number(flags["visual-review-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REVIEW_CONCURRENCY ?? 6)));
-  const planner = { provider: isLocalLLMRoute(`${episode}_visual_review`) ? "local-qwen" : "codex", model: isLocalLLMRoute(`${episode}_visual_review`) ? getLLMModel(`${episode}_visual_review`) : "codex_cli_default", chunked: useChunking, chunk_count: chunks.length, concurrency: reviewConcurrency };
+  const reviewStageName = `${episode}_visual_review`;
+  const planner = {
+    provider: isLocalLLMRoute(reviewStageName) ? "local-qwen" : "codex",
+    model: isLocalLLMRoute(reviewStageName) ? getLLMModel(reviewStageName) : configuredCodexModel(),
+    reasoning_effort: null,
+    codex_cli_path: null,
+    codex_cli_version: null,
+    chunked: useChunking,
+    chunk_count: chunks.length,
+    concurrency: reviewConcurrency,
+  };
 
   const chunkResults = await runPool(chunks, async (chunk, index) => {
     if (useChunking) console.error(`visual review chunk ${index + 1}/${chunks.length}: ${chunk.length} prompts`);
@@ -1450,7 +1653,7 @@ async function main() {
     for (let attemptIndex = 1; attemptIndex <= maxAttempts; attemptIndex += 1) {
       let llm = null;
       try {
-        llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, prompts: chunk, chunkIndex: useChunking ? index : null, attemptIndex, minCacheMtimeMs });
+        llm = await reviewChunk({ promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger, prompts: chunk, chunkIndex: useChunking ? index : null, attemptIndex, minCacheMtimeMs });
       } catch (error) {
         lastError = error;
         if (attemptIndex < maxAttempts) {
@@ -1466,6 +1669,13 @@ async function main() {
           reviewed_prompts: chunkReviewed,
           findings: Array.isArray(llm.parsed.findings) ? llm.parsed.findings : [],
           warnings: Array.isArray(llm.parsed.warnings) ? llm.parsed.warnings : [],
+          llm: {
+            provider: llm.provider,
+            model: llm.model,
+            reasoning_effort: llm.reasoning_effort ?? null,
+            codex_cli_path: llm.codex_cli_path ?? null,
+            codex_cli_version: llm.codex_cli_version ?? null,
+          },
         };
       }
       if (attemptIndex < maxAttempts) {
@@ -1480,10 +1690,18 @@ async function main() {
     findings.push(...chunkResult.findings);
     warnings.push(...chunkResult.warnings);
   }
+  const firstChunkLlm = chunkResults[0]?.llm ?? null;
+  if (firstChunkLlm) {
+    planner.provider = firstChunkLlm.provider ?? planner.provider;
+    planner.model = firstChunkLlm.model ?? planner.model;
+    planner.reasoning_effort = firstChunkLlm.reasoning_effort;
+    planner.codex_cli_path = firstChunkLlm.codex_cli_path;
+    planner.codex_cli_version = firstChunkLlm.codex_cli_version;
+  }
 
   const reviewedPrompts = reviewedRows.map((row, index) => normalizeReviewedPrompt(row, promptPlan.prompts[index]));
   assertReviewedPrompts(promptPlan.prompts, reviewedPrompts, timedPlan);
-  findings.push(...negativePromptFindings(reviewedPrompts));
+  findings.push(...providerExclusionPayloadFindings(reviewedPrompts));
   findings.push(...beautyLanguageFindings(reviewedPrompts));
   findings.push(...namedCharacterDuplicationFindings(reviewedPrompts));
   findings.push(...scenePromptShapeFindings(reviewedPrompts));
@@ -1500,6 +1718,7 @@ async function main() {
   const unresolvedBlockers = unresolvedBlockerFindings(findings);
   const status = unresolvedBlockers.length ? "blocked" : "passed";
   const sourcePaths = [promptPath, timedPlanPath, visualReferencePlanPath, characterStateRefsPath];
+  if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   const sourceHashes = Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash));
   const reviewedPlan = {
     ...promptPlan,
@@ -1573,6 +1792,15 @@ async function main() {
   await maybeClearResolvedDeadletter({ finalReviewReport, finalReviewedPlan });
   await writeJson(outputPath, finalReviewedPlan);
   await writeJson(reviewReportPath, finalReviewReport);
+  await writeReviewValueReport({
+    startedAtMs,
+    mode: "full_diagnostic",
+    inputPlan: promptPlan,
+    outputPlan: finalReviewedPlan,
+    inputBlockerCount: unresolvedBlockers.length,
+    outputBlockerCount: finalReviewReport.unresolved_blocker_count ?? unresolvedBlockerFindings(finalReviewReport.findings ?? []).length,
+    llmCallCount: chunks.length + (finalReviewReport.visual_resolution_iterations?.length ?? 0),
+  });
   console.log(JSON.stringify({ status: finalReviewReport.status, output_path: outputPath, review_report_path: reviewReportPath, prompt_count: finalReviewedPlan.prompts?.length ?? reviewedPrompts.length, unresolved_blocker_count: finalReviewReport.unresolved_blocker_count ?? unresolvedBlockers.length }, null, 2));
   if (finalReviewReport.status !== "passed") process.exitCode = 1;
 }

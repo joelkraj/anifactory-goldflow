@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runCodexCli } from "./lib/codex-cli-runner.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -203,48 +203,25 @@ async function callCodex(prompt, stageName) {
   const promptPath = path.join(callDir, `${stamp}-${stageName}-prompt.md`);
   const outputPath = path.join(callDir, `${stamp}-${stageName}-output.txt`);
   await fs.writeFile(promptPath, prompt, "utf8");
-  const codexArgs = ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot];
-  if (model) codexArgs.push("-m", model);
-  codexArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`, "-c", 'model_verbosity="medium"', "-o", outputPath);
-  const output = await new Promise((resolve, reject) => {
-    const child = spawn("codex", codexArgs, {
-      env: { ...process.env, NO_COLOR: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
-      }
-      reject(new Error(`Codex score chunk ${stageName} timed out`));
-    }, Number(process.env.ANIFACTORY_SCORE_PLANNER_CODEX_TIMEOUT_MS ?? 900_000));
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("exit", async (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`Codex score chunk ${stageName} exited ${code}: ${stderr || stdout}`));
-        return;
-      }
-      const text = await fs.readFile(outputPath, "utf8").catch(() => stdout || stderr);
-      resolve(text);
-    });
-    child.stdin.end(prompt);
+  const call = await runCodexCli({
+    prompt,
+    stageName,
+    repoRoot,
+    outputPath,
+    model: model || null,
+    reasoningEffort,
+    timeoutMs: Number(process.env.ANIFACTORY_SCORE_PLANNER_CODEX_TIMEOUT_MS ?? 900_000),
+    detached: true,
   });
   return {
     provider: "codex",
-    model: model || "codex_cli_default",
+    model: call.model,
+    reasoning_effort: call.reasoning_effort,
+    codex_cli_path: call.codex_cli_path,
+    codex_cli_version: call.codex_cli_version,
     prompt_path: promptPath,
     output_path: outputPath,
-    parsed: extractJson(output),
+    parsed: extractJson(call.content),
   };
 }
 

@@ -7,6 +7,21 @@ import path from "node:path";
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
 const CURRENT_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
+const DEFAULT_TARGET_WPM_MIN = 195;
+const DEFAULT_TARGET_WPM_MAX = 220;
+const DEFAULT_TARGET_WPM_MID = 208;
+const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
+const DEFAULT_QWEN_NATIVE_SPEED = 1.25;
+const MANUAL_BLOCKER_TRIAGE_POLICY = {
+  mode: "agent_review_first",
+  summary: "For any blocked or missing gate, the active agent must inspect the blocker evidence and choose the narrowest valid recovery: manual structured repair, scoped rerun, recorded waiver/bypass with evidence, or operator hold.",
+  artifact_pattern: "manual_blocker_triage_<stage>_<episode>.json or a stage-specific manual triage artifact",
+  guardrails: [
+    "Do not skip upstream approvals or missing production assets.",
+    "Do not rewrite approved creative content through deterministic code.",
+    "Record manual waivers/bypasses with cut/stage evidence and rerun run status after the repair.",
+  ],
+};
 
 function parseFlags(parts) {
   const parsed = {};
@@ -101,6 +116,14 @@ function normalizeImageProvider(value) {
     "codex_opening_modelslab_rest",
   ].includes(normalized)) return "hybrid_codex_opening_modelslab_rest";
   if ([
+    "hybrid_codex_refs_opening_risky_modelslab_rest",
+    "hybrid_codex_refs_first10_risky_modelslab_rest",
+    "hybrid_codex_references_opening_risky_modelslab_rest",
+    "codex_refs_opening_risky_modelslab_rest",
+    "codex_refs_first10_risky_modelslab_rest",
+    "codex_references_opening_risky_modelslab_rest",
+  ].includes(normalized)) return "hybrid_codex_refs_opening_risky_modelslab_rest";
+  if ([
     "hybrid_modelslab_refs_codex_opening_modelslab_rest",
     "modelslab_refs_codex_opening_modelslab_rest",
     "modelslab_references_codex_opening_modelslab_rest",
@@ -122,14 +145,17 @@ function codexOpeningSec(identity) {
 
 function imagegenOpeningFlag(identity) {
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  return provider === "hybrid_codex_opening_modelslab_rest" || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? ` --codex-opening-sec ${codexOpeningSec(identity)}` : "";
+  return provider === "hybrid_codex_opening_modelslab_rest"
+    || provider === "hybrid_codex_refs_opening_risky_modelslab_rest"
+    || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? ` --codex-opening-sec ${codexOpeningSec(identity)}` : "";
 }
 
 function usesCodexReferences(identity) {
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
   return provider === "codex_imagegen"
     || provider === "hybrid_codex_refs_multichar"
-    || provider === "hybrid_codex_opening_modelslab_rest";
+    || provider === "hybrid_codex_opening_modelslab_rest"
+    || provider === "hybrid_codex_refs_opening_risky_modelslab_rest";
 }
 
 function usesCodexSceneCuts(identity) {
@@ -137,11 +163,51 @@ function usesCodexSceneCuts(identity) {
   return provider === "codex_imagegen"
     || provider === "hybrid_codex_refs_multichar"
     || provider === "hybrid_codex_opening_modelslab_rest"
+    || provider === "hybrid_codex_refs_opening_risky_modelslab_rest"
     || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest";
 }
 
 function paceDiagnosticOnly(identity) {
   return String(identity?.pace_policy ?? "").toLowerCase() === "diagnostic";
+}
+
+function imageOutputQaRequired(identity = {}) {
+  return identity.image_output_qa_required === true
+    || identity.production_gates?.image_output_qa_required_before_render === true;
+}
+
+function numberOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function targetWpmMin(identity = {}) {
+  return numberOr(identity.target_wpm_min ?? identity.pace_targets?.target_wpm_min ?? identity.pace_targets?.min, DEFAULT_TARGET_WPM_MIN);
+}
+
+function targetWpmMax(identity = {}) {
+  return numberOr(identity.target_wpm_max ?? identity.pace_targets?.target_wpm_max ?? identity.pace_targets?.max, DEFAULT_TARGET_WPM_MAX);
+}
+
+function targetWpmMid(identity = {}) {
+  return numberOr(
+    identity.target_wpm_midpoint ?? identity.pace_targets?.target_wpm_midpoint ?? identity.pace_targets?.mid,
+    Number(((targetWpmMin(identity) + targetWpmMax(identity)) / 2).toFixed(3)) || DEFAULT_TARGET_WPM_MID,
+  );
+}
+
+function targetWpmRange(identity = {}) {
+  return `${targetWpmMin(identity)}-${targetWpmMax(identity)}`;
+}
+
+function lockedQwenNativeSpeed(identity = {}) {
+  const raw = identity?.voice_provider_options?.qwen_native_speed ?? identity?.qwen_native_speed;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function qwenNativeSpeed(identity = {}) {
+  return lockedQwenNativeSpeed(identity) ?? DEFAULT_QWEN_NATIVE_SPEED;
 }
 
 function renderCommand(identity, base, episode) {
@@ -170,7 +236,7 @@ function visualRefsApproveCommand(identity) {
 
 function imagegenStartCommand(identity, extra = "") {
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json${extra}`;
+  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 15 --reference-concurrency 15${extra}`;
 }
 
 function imagegenPromoteDerivedRefsCommand(identity) {
@@ -183,18 +249,21 @@ function commandFor(stage, identity) {
   const narratorOnly = isNarratorOnlyAudio(identity);
   const paceFlag = paceDiagnosticOnly(identity) ? " --pace-policy diagnostic" : "";
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  const minWpm = targetWpmMin(identity);
+  const maxWpm = targetWpmMax(identity);
+  const midWpm = targetWpmMid(identity);
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
-    script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min 210 --target-wpm-max 220${paceFlag}${paceDiagnosticOnly(identity) ? " --allow-hook-warnings true" : ""}`,
+    script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${paceDiagnosticOnly(identity) ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
     semantic_scene_plan: `node bin/goldflow.mjs semantic plan ${base}`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
-    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base}`,
+    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${qwenNativeSpeed(identity)}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
-    audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min 210 --target-wpm-max 220${paceFlag}`,
-    audio_tempo_normalize: `node bin/goldflow.mjs audio tempo-normalize ${base} --target-wpm 215`,
+    audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
+    audio_tempo_normalize: `Emergency diagnostic only with operator approval: node bin/goldflow.mjs audio tempo-normalize ${base} --target-wpm ${midWpm} --operator-approved-emergency true`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
     sfx_score_plan: narratorOnly ? "skipped because run_identity.audio_target is narrator_only" : `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only --retention-mix true`,
     longform_audio_mix: narratorOnly
@@ -204,12 +273,13 @@ function commandFor(stage, identity) {
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
     reference_generation: usesCodexReferences(identity)
       ? `Stage reference PNGs with built-in Codex imagegen workers, then: node bin/goldflow.mjs imagegen import-staged-codex ${base} --references-only true --staging-dir <staging-dir> --reference-ids <ref_ids>`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --references-only true`,
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --references-only true --reference-concurrency 15`,
     visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base}`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly ? " --transition-sfx false" : ""}`,
     image_generation: usesCodexSceneCuts(identity)
-      ? `Stage Codex-routed cut PNGs with built-in Codex imagegen workers, import them with: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then generate the ModelsLab-routed remainder with: node bin/goldflow.mjs imagegen start ${base}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --provider-filter modelslab --output <episode-dir>/imagegen_report_${episode}.json`
+      ? `Stage Codex-routed cut PNGs with built-in Codex imagegen workers, import them with: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then generate the ModelsLab-routed remainder with: node bin/goldflow.mjs imagegen start ${base}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --provider-filter modelslab --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
       : imagegenStartCommand(identity),
+    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     premium_render: renderCommand(identity, base, episode),
     final_qa: `ffprobe <final-render.mp4> && ffmpeg -i <final-audio-or-render> -af volumedetect -f null -`,
     upload_packaging: "Generate title, thumbnail, and description hooks after story/render review.",
@@ -247,11 +317,12 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const reviewedStatus = String(reviewedPlan?.status ?? "").toLowerCase();
   const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
   const manualReviewPath = reviewedPlan?.visual_manual_agent_review_path ?? path.join(episodeDir, `visual_manual_agent_review_${episode}.json`);
-  const reviewCommand = `node bin/goldflow.mjs visual review ${base} --auto-resolve true --max-resolve-iterations 2`;
+  const blockerReviewCommand = `node bin/goldflow.mjs visual review ${base} --prompts <episode-dir>/section_image_prompts.json --blockers-only true --auto-resolve true --max-resolve-iterations 2 --harden-report <episode-dir>/visual_prompt_hardening_${episode}.json`;
   const scopedReviewCommand = `node bin/goldflow.mjs visual review ${base} --resume-blocked true --auto-resolve true --max-resolve-iterations 2`;
-  const hardenCommand = `node bin/goldflow.mjs visual harden ${base}`;
+  const hardenOriginalCommand = `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`;
+  const hardenReviewedCommand = `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts_reviewed.json`;
   if (hardenedPlan?.status === "passed" && Array.isArray(hardenedPlan.prompts) && hardenedPlan.prompts.length) {
-    return hardenCommand;
+    return hardenOriginalCommand;
   }
   if (reviewedStatus === "needs_manual_agent_review") {
     return `Manual agent review required: inspect ${manualReviewPath}; then patch detector/review logic or run a scoped visual review/replan for the listed cut ids before rerunning run status.`;
@@ -259,18 +330,15 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   if (["blocked", "blocked_deadletter"].includes(reviewedStatus)) {
     return scopedReviewCommand;
   }
-  if (reviewedStatus === "passed" && hardenStatus === "blocked") {
+  if (reviewedStatus === "passed") {
     const [reviewedMtime, hardenMtime] = await Promise.all([
       fileMtimeMs(reviewedPlanPath),
       fileMtimeMs(hardenReportPath),
     ]);
-    if (reviewedMtime > hardenMtime) return hardenCommand;
-    return scopedReviewCommand;
+    if (reviewedMtime > hardenMtime || !hardenStatus) return hardenReviewedCommand;
   }
-  if (reviewedStatus === "passed") {
-    return hardenCommand;
-  }
-  return reviewCommand;
+  if (hardenStatus === "blocked") return blockerReviewCommand;
+  return hardenOriginalCommand;
 }
 
 function isDerivedReferenceTarget(target) {
@@ -278,12 +346,71 @@ function isDerivedReferenceTarget(target) {
 }
 
 function referencePathValue(target) {
-  return target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
+  return target?.conditioning_image_path ?? target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
 }
 
 function promptStartSec(prompt) {
   const value = Number(prompt?.start_sec ?? prompt?.start ?? prompt?.timestamp_sec ?? 0);
   return Number.isFinite(value) ? value : 0;
+}
+
+function arrayOfStrings(value) {
+  return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+}
+
+function isLocationTarget(target) {
+  return String(target?.kind ?? "").toLowerCase() === "location";
+}
+
+function promptRequirementKind(prompt, kindPattern) {
+  return (prompt?.reference_requirements ?? []).some((requirement) => kindPattern.test(String(requirement?.kind ?? "").toLowerCase()));
+}
+
+function visibleCharacterCount(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  const names = new Set([
+    ...arrayOfStrings(prompt?.visible_characters),
+    ...arrayOfStrings(prompt?.visible_subjects),
+    ...arrayOfStrings(manifest.visible_characters),
+    ...arrayOfStrings(manifest.character_state_ref_ids),
+    ...arrayOfStrings(manifest.character_staging?.map?.((entry) => entry?.name) ?? []),
+    ...arrayOfStrings(manifest.character_staging?.map?.((entry) => entry?.ref_id) ?? []),
+  ]);
+  if (manifest.primary_character) names.add(String(manifest.primary_character));
+  if (manifest.protagonist_state_ref_id) names.add(String(manifest.protagonist_state_ref_id));
+  return [...names].filter(Boolean).length;
+}
+
+function promptHasPromotableLocationContamination(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  if (visibleCharacterCount(prompt) > 0) return true;
+  if (promptRequirementKind(prompt, /character/)) return true;
+  if (promptRequirementKind(prompt, /(?:prop|ui|action|effect)/)) return true;
+  if (arrayOfStrings(manifest.visible_props).length) return true;
+  if (arrayOfStrings(manifest.ui_elements).length) return true;
+  const text = [
+    prompt?.visual_job,
+    prompt?.suggested_shot_job,
+    manifest.shot_job,
+    prompt?.image_prompt,
+    prompt?.modelslab_image_prompt,
+    prompt?.codex_image_prompt,
+  ].filter(Boolean).join(" ");
+  return /\b(?:close[- ]?up|portrait|reaction|hand|phone|screen|panel|ui|sword|weapon|document|letter|book|cup|mug|tabletop|object insert|prop insert)\b/i.test(text);
+}
+
+function promptIsCleanLocationSeed(prompt, target) {
+  if (!isLocationTarget(target)) return true;
+  if (promptHasPromotableLocationContamination(prompt)) return false;
+  const text = [
+    prompt?.visual_job,
+    prompt?.suggested_shot_job,
+    prompt?.shot_manifest?.shot_job,
+    prompt?.image_prompt,
+    prompt?.modelslab_image_prompt,
+    prompt?.codex_image_prompt,
+  ].filter(Boolean).join(" ");
+  return /\b(?:environment|establishing|location|empty|no characters|architecture|interior|exterior|room|hall|corridor|courtyard|street|stage|arena|chapel|cathedral|academy|manor)\b/i.test(text);
 }
 
 function promptMentionsRef(prompt, refId) {
@@ -315,6 +442,7 @@ function candidateImageIdsForDerivedTarget(target, promptPlan) {
     ...prompts.filter((prompt) => promptMentionsRef(prompt, target.ref_id)),
     ...prompts.filter((prompt) => sceneIds.has(String(prompt.scene_id ?? "")) || sceneIds.has(String(prompt.parent_scene_id ?? ""))),
   ].filter((prompt) => prompt?.image_id)
+    .filter((prompt) => promptIsCleanLocationSeed(prompt, target))
     .sort((left, right) => promptStartSec(left) - promptStartSec(right) || String(left.image_id).localeCompare(String(right.image_id), undefined, { numeric: true }))
     .map((prompt) => String(prompt.image_id));
   return [...new Set(rows)];
@@ -486,9 +614,10 @@ async function referenceGenerationComplete(episodeDir, identity) {
     };
   }
   for (const target of required) {
-    if (target.reference_image_path && await exists(target.reference_image_path)) {
+    const targetPath = referencePathValue(target);
+    if (targetPath && await exists(targetPath)) {
       present += 1;
-      const hash = await fileSha256(target.reference_image_path);
+      const hash = await fileSha256(targetPath);
       if (hash) {
         const rows = byHash.get(hash) ?? [];
         rows.push(target.ref_id ?? target.id ?? "unknown_ref");
@@ -540,6 +669,29 @@ async function renderComplete(episodeDir, episode) {
   };
 }
 
+async function imageOutputQaComplete(episodeDir, episode, identity) {
+  if (!imageOutputQaRequired(identity)) return { done: true, evidence: "skipped for legacy run identity; new preflights require output QA" };
+  const reportPath = path.join(episodeDir, `image_output_qa_${episode}.json`);
+  const report = await readJson(reportPath, null);
+  if (!report) return { done: false, evidence: `image_output_qa_${episode}.json missing` };
+  const imagegenReportPath = path.join(episodeDir, `imagegen_report_${episode}.json`);
+  const [qaMtime, imagegenMtime] = await Promise.all([fileMtimeMs(reportPath), fileMtimeMs(imagegenReportPath)]);
+  if (imagegenMtime > qaMtime) {
+    return {
+      done: false,
+      evidence: `${path.basename(reportPath)} is stale after newer image generation`,
+      next_command_shape: commandFor("image_output_qa", identity),
+    };
+  }
+  const status = String(report.status ?? "").toLowerCase();
+  if (status === "passed") return { done: true, evidence: `${path.basename(reportPath)} passed; risk_cuts=${report.risk_cut_count ?? "?"}` };
+  return {
+    done: false,
+    evidence: `${path.basename(reportPath)} status=${status || "missing"}; blockers=${report.unresolved_blocker_count ?? "?"}`,
+    next_command_shape: report.next_command ?? commandFor("image_output_qa", identity),
+  };
+}
+
 async function scriptApprovalComplete(episodeDir, currentScriptHash) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const approvalPath = path.join(episodeDir, "operator_script_approval.json");
@@ -575,13 +727,16 @@ async function jsonArtifactHashComplete(filePath, currentScriptHash, label) {
   };
 }
 
-async function paceReportComplete(filePath, currentScriptHash, label) {
+async function paceReportComplete(filePath, currentScriptHash, label, identity = {}) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const report = await readJson(filePath, null);
   if (!report) return { done: false, evidence: `${label} missing` };
   const artifactHash = report.source_script_hash ?? report.script_clean_hash ?? report.script_hash ?? null;
   const min = Number(report.target_wpm_min);
   const max = Number(report.target_wpm_max);
+  const requiredMin = targetWpmMin(identity);
+  const requiredMax = targetWpmMax(identity);
+  const requiredRange = targetWpmRange(identity);
   const status = String(report.status ?? "").toLowerCase();
   const hookWarnings = Array.isArray(report.hook_milestone_report?.warnings)
     ? report.hook_milestone_report.warnings
@@ -597,15 +752,15 @@ async function paceReportComplete(filePath, currentScriptHash, label) {
       return actualHash && expectedHash && actualHash !== expectedHash ? `${path.basename(sourcePath)} stale` : null;
     }))).filter(Boolean)[0] ?? null
     : null;
-  const done = artifactHash === currentScriptHash && status === "passed" && min === 210 && max === 220 && !scriptHookBlocked && !staleSource;
+  const done = artifactHash === currentScriptHash && status === "passed" && min === requiredMin && max === requiredMax && !scriptHookBlocked && !staleSource;
   const wpm = Number.isFinite(Number(report.actual_wpm)) ? `; actual_wpm=${Number(report.actual_wpm).toFixed(3)}` : "";
   const hook = scriptHookBlocked ? `; hook_warnings=${hookWarnings.length}` : "";
   const sourceHashEvidence = sourceHashes ? (staleSource ? `; ${staleSource}` : "; source_hashes=current") : "; source_hashes=missing";
   return {
     done,
     evidence: done
-      ? `${label} -> ${currentScriptHash}; target_wpm=210-220${wpm}${sourceHashEvidence}`
-      : `${label} ${status || "missing"} for hash ${artifactHash ?? "none"} target ${Number.isFinite(min) ? min : "?"}-${Number.isFinite(max) ? max : "?"}; required hash ${currentScriptHash} target 210-220${wpm}${hook}${sourceHashEvidence}`,
+      ? `${label} -> ${currentScriptHash}; target_wpm=${requiredRange}${wpm}${sourceHashEvidence}`
+      : `${label} ${status || "missing"} for hash ${artifactHash ?? "none"} target ${Number.isFinite(min) ? min : "?"}-${Number.isFinite(max) ? max : "?"}; required hash ${currentScriptHash} target ${requiredRange}${wpm}${hook}${sourceHashEvidence}`,
   };
 }
 
@@ -615,7 +770,13 @@ async function audioPaceRecoveryCommand(episodeDir, identity) {
   const status = String(report?.status ?? "").toLowerCase();
   const actualWpm = Number(report?.actual_wpm);
   if (status !== "blocked" || !Number.isFinite(actualWpm) || actualWpm <= 0) return null;
-  return commandFor("audio_tempo_normalize", identity);
+  const currentSpeed = qwenNativeSpeed(identity);
+  const target = targetWpmMid(identity);
+  const recommendedSpeed = Math.max(0.75, Math.min(1.5, Number((currentSpeed * target / actualWpm).toFixed(3))));
+  if (Math.abs(recommendedSpeed - currentSpeed) < 0.01) {
+    return `Native Qwen speed ${currentSpeed} still produced ${actualWpm.toFixed(1)} WPM. Hold for operator choice of another approved TTS voice/model; post-tempo normalization is emergency-only.`;
+  }
+  return `Regenerate narration at provider-native speed, then rerun Whisper: node bin/goldflow.mjs tts qwen ${commandBase(identity)} --native-speed ${recommendedSpeed} --force true`;
 }
 
 async function whisperTimingComplete(episodeDir, episode, currentScriptHash) {
@@ -643,7 +804,48 @@ async function whisperTimingComplete(episodeDir, episode, currentScriptHash) {
   };
 }
 
-async function qwenTtsStitchComplete(episodeDir, episode, currentScriptHash) {
+function cleanOptionalId(value) {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
+function selectedQwenNarratorVoiceId(identity = {}) {
+  return cleanOptionalId(flags["qwen-narrator-voice-id"])
+    ?? cleanOptionalId(flags["narrator-voice-id"])
+    ?? cleanOptionalId(identity?.voice_provider_options?.qwen_narrator_voice_id)
+    ?? cleanOptionalId(identity?.qwen_narrator_voice_id)
+    ?? cleanOptionalId(identity?.narrator_voice_id)
+    ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
+}
+
+function narratorReferenceIdsFromPlan(plan) {
+  const ids = new Set();
+  for (const segment of plan?.segments ?? []) {
+    for (const unit of segment?.qwen_generation_units ?? []) {
+      const speaker = String(unit?.speaker ?? unit?.source_speaker ?? "NARRATOR").toUpperCase();
+      const role = String(unit?.role ?? "").toLowerCase();
+      if (!["NARRATOR", "MC_INTERNAL"].includes(speaker) && role !== "narrator") continue;
+      const referenceId = cleanOptionalId(unit?.reference_id) ?? cleanOptionalId(unit?.voice_id);
+      if (referenceId) ids.add(referenceId);
+    }
+  }
+  return ids;
+}
+
+function voiceIdsFromTtsArtifacts(ttsReport, stitchReport) {
+  const ids = new Set();
+  for (const row of ttsReport?.results ?? []) {
+    const voiceId = cleanOptionalId(row?.voice_id);
+    if (voiceId) ids.add(voiceId);
+  }
+  for (const segment of stitchReport?.segments ?? []) {
+    const voiceId = cleanOptionalId(segment?.voice_id);
+    if (voiceId) ids.add(voiceId);
+  }
+  return ids;
+}
+
+async function qwenTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const ttsReportPath = path.join(episodeDir, `modelslab_qwen_tts_report_${episode}.json`);
   const stitchReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
@@ -667,6 +869,30 @@ async function qwenTtsStitchComplete(episodeDir, episode, currentScriptHash) {
   if (stitchHash && stitchHash !== currentScriptHash) {
     return { done: false, evidence: `audio_stitch_report_${episode}-modelslab-qwen.json hash ${stitchHash}; required hash ${currentScriptHash}` };
   }
+  if (isNarratorOnlyAudio(identity)) {
+    const requiredVoiceId = selectedQwenNarratorVoiceId(identity);
+    const voiceIds = voiceIdsFromTtsArtifacts(ttsReport, stitchReport);
+    const staleVoiceIds = [...voiceIds].filter((voiceId) => voiceId !== requiredVoiceId);
+    if (staleVoiceIds.length > 0) {
+      return {
+        done: false,
+        evidence: `stitched Qwen narration voice_id=${staleVoiceIds.join(", ")}; required narrator voice ${requiredVoiceId}`,
+      };
+    }
+  }
+  const requiredNativeSpeed = lockedQwenNativeSpeed(identity);
+  if (requiredNativeSpeed !== null) {
+    const reportedNativeSpeed = Number(ttsReport?.native_speed ?? stitchReport?.native_speed);
+    if (!Number.isFinite(reportedNativeSpeed) || Math.abs(reportedNativeSpeed - requiredNativeSpeed) > 0.001) {
+      return {
+        done: false,
+        evidence: `stitched Qwen narration native_speed=${Number.isFinite(reportedNativeSpeed) ? reportedNativeSpeed : "missing"}; required ${requiredNativeSpeed}`,
+      };
+    }
+    if (ttsReport?.post_tempo_normalized === true || stitchReport?.tempo_normalized === true || stitchReport?.post_tempo_normalized === true) {
+      return { done: false, evidence: "stitched narration uses post tempo normalization; new runs require provider-native Qwen speed" };
+    }
+  }
   const outputPath = stitchReport.output_path ?? stitchReport.final_audio_path ?? stitchReport.final_wav_path ?? null;
   if (!outputPath) return { done: false, evidence: `audio_stitch_report_${episode}-modelslab-qwen.json missing output_path` };
   if (!(await exists(outputPath))) return { done: false, evidence: `stitched narration missing: ${outputPath}` };
@@ -677,11 +903,22 @@ async function qwenTtsStitchComplete(episodeDir, episode, currentScriptHash) {
   };
 }
 
-async function qwenVoicePlanComplete(episodeDir, currentScriptHash) {
+async function qwenVoicePlanComplete(episodeDir, currentScriptHash, identity) {
   const label = "qwen_generation_plan.json";
   const base = await jsonArtifactHashComplete(path.join(episodeDir, label), currentScriptHash, label);
   if (!base.done) return base;
   const plan = await readJson(path.join(episodeDir, label), null);
+  if (isNarratorOnlyAudio(identity)) {
+    const requiredVoiceId = selectedQwenNarratorVoiceId(identity);
+    const narratorReferenceIds = narratorReferenceIdsFromPlan(plan);
+    const staleReferenceIds = [...narratorReferenceIds].filter((voiceId) => voiceId !== requiredVoiceId);
+    if (staleReferenceIds.length > 0) {
+      return {
+        done: false,
+        evidence: `${label} narrator reference_id=${staleReferenceIds.join(", ")}; required narrator voice ${requiredVoiceId}`,
+      };
+    }
+  }
   const overrides = await readJson(path.join(episodeDir, "tts_spoken_overrides.json"), null);
   const loadedOverrideCount = Array.isArray(overrides?.replacements) ? overrides.replacements.length : 0;
   const audit = plan?.tts_override_application_audit ?? null;
@@ -892,6 +1129,28 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
       evidence: `${visual.evidence}; reference_inventory_ledger.json missing or invalid`,
     };
   }
+  let directorLedgerEvidence = "";
+  if (visualPlan?.reference_director_contract_version === "reference_director_v2") {
+    const evidenceLedgerPath = visualPlan.reference_evidence_ledger_path ?? path.join(episodeDir, "reference_evidence_ledger.json");
+    const locationContractLedgerPath = visualPlan.location_contract_ledger_path ?? path.join(episodeDir, "location_contract_ledger.json");
+    const [evidenceLedger, locationContractLedger] = await Promise.all([
+      readJson(evidenceLedgerPath, null),
+      readJson(locationContractLedgerPath, null),
+    ]);
+    if (evidenceLedger?.status !== "passed" || !Array.isArray(evidenceLedger?.assets)) {
+      return {
+        done: false,
+        evidence: `${visual.evidence}; reference_evidence_ledger.json missing or invalid for reference_director_v2`,
+      };
+    }
+    if (locationContractLedger?.status !== "passed" || !Array.isArray(locationContractLedger?.contracts)) {
+      return {
+        done: false,
+        evidence: `${visual.evidence}; location_contract_ledger.json missing, invalid, or blocked for reference_director_v2`,
+      };
+    }
+    directorLedgerEvidence = `; evidence_assets=${evidenceLedger.assets.length}; location_contracts=${locationContractLedger.contracts.length}`;
+  }
   const characterRefs = await readJson(characterRefsPath, null);
   if (!characterRefs) {
     return { done: false, evidence: `${visual.evidence}; character_state_refs.json missing` };
@@ -934,7 +1193,7 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
   }
   return {
     done: visual.done,
-    evidence: `${visual.evidence}; reference_inventory_ledger.json assets=${inventoryLedger.assets.length}; character_state_refs.json status=${characterStatus}${charSourceHashes ? "; source_hashes=current" : ""}`,
+    evidence: `${visual.evidence}; reference_inventory_ledger.json selected_assets=${inventoryLedger.assets.length}${directorLedgerEvidence}; character_state_refs.json status=${characterStatus}${charSourceHashes ? "; source_hashes=current" : ""}`,
   };
 }
 
@@ -957,19 +1216,28 @@ async function main() {
     audio_target: flags["audio-target"] ?? runIdentity.audio_target ?? "narrator_only",
     image_provider: flags["image-provider"] ?? flags.provider ?? runIdentity.image_provider ?? "modelslab",
     image_provider_options: runIdentity.image_provider_options ?? {},
+    voice_provider_options: runIdentity.voice_provider_options ?? {},
+    qwen_narrator_voice_id: flags["qwen-narrator-voice-id"] ?? flags["narrator-voice-id"] ?? runIdentity.voice_provider_options?.qwen_narrator_voice_id ?? runIdentity.qwen_narrator_voice_id ?? DEFAULT_QWEN_NARRATOR_VOICE_ID,
+    qwen_native_speed: flags["qwen-native-speed"] ?? flags["native-speed"] ?? runIdentity.voice_provider_options?.qwen_native_speed ?? runIdentity.qwen_native_speed ?? null,
+    image_output_qa_required: runIdentity.image_output_qa_required ?? runIdentity.production_gates?.image_output_qa_required_before_render ?? false,
+    production_gates: runIdentity.production_gates ?? {},
     pace_policy: flags["pace-policy"] ?? flags["wpm-policy"] ?? runIdentity.pace_policy ?? "enforced",
-    render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "fill_ken_burns",
+    target_wpm_min: flags["target-wpm-min"] ?? flags["wpm-min"] ?? runIdentity.target_wpm_min ?? runIdentity.pace_targets?.target_wpm_min ?? runIdentity.pace_targets?.min ?? DEFAULT_TARGET_WPM_MIN,
+    target_wpm_max: flags["target-wpm-max"] ?? flags["wpm-max"] ?? runIdentity.target_wpm_max ?? runIdentity.pace_targets?.target_wpm_max ?? runIdentity.pace_targets?.max ?? DEFAULT_TARGET_WPM_MAX,
+    target_wpm_midpoint: flags["target-wpm-mid"] ?? flags["wpm-mid"] ?? runIdentity.target_wpm_midpoint ?? runIdentity.pace_targets?.target_wpm_midpoint ?? runIdentity.pace_targets?.mid ?? DEFAULT_TARGET_WPM_MID,
+    pace_targets: runIdentity.pace_targets ?? null,
+    render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_fast_ken_burns",
   };
   const episode = identity.episode;
   const scriptHash = await fileSha256(path.join(episodeDir, "script_clean.md"));
   const scriptApproval = await scriptApprovalComplete(episodeDir, scriptHash);
-  const scriptPace = await paceReportComplete(path.join(episodeDir, "script_pace_report.json"), scriptHash, "script_pace_report.json");
+  const scriptPace = await paceReportComplete(path.join(episodeDir, "script_pace_report.json"), scriptHash, "script_pace_report.json", identity);
   const speakability = await jsonArtifactHashComplete(path.join(episodeDir, "script_speakability_report.json"), scriptHash, "script_speakability_report.json");
   const ttsOverrides = await jsonArtifactHashComplete(path.join(episodeDir, "tts_spoken_overrides.json"), scriptHash, "tts_spoken_overrides.json");
-  const qwenVoicePlan = await qwenVoicePlanComplete(episodeDir, scriptHash);
-  const qwenTtsStitch = await qwenTtsStitchComplete(episodeDir, episode, scriptHash);
+  const qwenVoicePlan = await qwenVoicePlanComplete(episodeDir, scriptHash, identity);
+  const qwenTtsStitch = await qwenTtsStitchComplete(episodeDir, episode, scriptHash, identity);
   const whisperTiming = await whisperTimingComplete(episodeDir, episode, scriptHash);
-  const audioPace = await paceReportComplete(path.join(episodeDir, `narration_pace_report_${episode}.json`), scriptHash, `narration_pace_report_${episode}.json`);
+  const audioPace = await paceReportComplete(path.join(episodeDir, `narration_pace_report_${episode}.json`), scriptHash, `narration_pace_report_${episode}.json`, identity);
   const audioPaceNextCommand = await audioPaceRecoveryCommand(episodeDir, identity);
   const semanticPlan = await jsonStatusComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
   const timedScenePlan = await jsonStatusComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
@@ -979,6 +1247,7 @@ async function main() {
   const longformMix = await longformMixComplete(episodeDir, episode);
   const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
   const imagegen = await imageReportComplete(episodeDir, episode, identity);
+  const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
   const render = await renderComplete(episodeDir, episode);
   const latestQa = await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
@@ -1006,11 +1275,12 @@ async function main() {
     stage("sfx_score_plan", narratorOnly ? "skipped for narrator_only audio target" : "local Whisper timing + timed scenes", narratorOnly ? "skipped" : `sfx_event_plan_${episode}.json + score_drop_plan_${episode}.json`, false, sfxScoreDone.done, sfxScoreDone.evidence, identity),
     stage("longform_audio_mix", narratorOnly ? "stitched narration/Qwen report" : "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
     stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, visualBeatPlan.done, visualBeatPlan.evidence, identity),
-    stage("visual_reference_plan", "visual beats + semantic facts", "reference_inventory_ledger.json + visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
+    stage("visual_reference_plan", "visual beats + semantic facts", "reference_evidence_ledger.json + location_contract_ledger.json + selected reference_inventory_ledger.json + visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
     stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity, referenceGeneration.next_command_shape),
     stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
     stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),
     stage("image_generation", "hardened prompt plan + generated refs", `imagegen_report_${episode}.json + assets/images`, false, imagegen.done, imagegen.evidence, identity, imagegen.next_command_shape),
+    stage("image_output_qa", "generated scene images + cut execution ledger", `image_output_qa_${episode}.json + review_samples/image_output_qa/*`, true, imageOutputQa.done, imageOutputQa.evidence, identity, imageOutputQa.next_command_shape),
     stage("premium_render", "hardened prompts + final longform mix", `render_report_${episode}*.json + final MP4`, false, render.done, render.evidence, identity),
     stage("final_qa", "final MP4", "ffprobe/loudness/spot-check QA report", true, Boolean(latestQa), latestQa?.name ?? null, identity),
     stage("upload_packaging", "story/render understanding", "title + thumbnail + description package", true, Boolean(latestPackaging), latestPackaging?.name ?? null, identity),
@@ -1027,6 +1297,7 @@ async function main() {
     next_output_artifact: next?.output_artifact ?? null,
     operator_approval_required: next?.operator_approval_required ?? false,
     next_command_shape: next?.next_command_shape ?? null,
+    manual_blocker_triage_policy: MANUAL_BLOCKER_TRIAGE_POLICY,
     stage_ledger: rows,
   };
 
@@ -1035,6 +1306,7 @@ async function main() {
     console.log(`Episode dir: ${episodeDir}`);
     console.log(`Current stage: ${result.current_stage}`);
     if (result.next_command_shape) console.log(`Next command shape: \`${result.next_command_shape}\``);
+    console.log(`Manual blocker triage: ${MANUAL_BLOCKER_TRIAGE_POLICY.summary}`);
     console.log("\n| Stage | Exists | Approval | Output |");
     console.log("| --- | --- | --- | --- |");
     for (const row of rows) {

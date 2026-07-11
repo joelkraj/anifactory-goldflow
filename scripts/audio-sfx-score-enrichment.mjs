@@ -8,6 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { runCodexCli } from "./lib/codex-cli-runner.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -286,11 +287,9 @@ async function callLocalQwenPlanner(prompt, stageName) {
 }
 
 async function callCodexPlanner(prompt, stageName) {
-  const policy = await modelPolicy();
   const model = flags.model
     ?? flags["llm-model"]
     ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_CODEX_MODEL
-    ?? policy.codex?.default_model
     ?? null;
   const reasoningEffort = flags.reasoning
     ?? flags["reasoning-effort"]
@@ -302,63 +301,27 @@ async function callCodexPlanner(prompt, stageName) {
   const promptPath = path.join(callDir, `${stamp}-${stageName}-prompt.md`);
   const outputPath = path.join(callDir, `${stamp}-${stageName}-output.txt`);
   await fs.writeFile(promptPath, prompt, "utf8");
-  const codexArgs = [
-    "exec",
-    "--ephemeral",
-    "--skip-git-repo-check",
-    "-C",
+  const call = await runCodexCli({
+    prompt,
+    stageName,
     repoRoot,
-  ];
-  if (model) codexArgs.push("-m", model);
-  codexArgs.push(
-    "-c",
-    `model_reasoning_effort="${reasoningEffort}"`,
-    "-c",
-    'model_verbosity="medium"',
-    "-o",
     outputPath,
-  );
-  const output = await new Promise((resolve, reject) => {
-    const child = spawn("codex", codexArgs, {
-      env: { ...process.env, NO_COLOR: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
-      }
-      reject(new Error(`Codex audio enrichment stage ${stageName} timed out`));
-    }, Number(process.env.ANIFACTORY_AUDIO_ENRICHMENT_CODEX_TIMEOUT_MS ?? 1_200_000));
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("exit", async (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`Codex audio enrichment stage ${stageName} exited ${code}: ${stderr || stdout}`));
-        return;
-      }
-      const text = await fs.readFile(outputPath, "utf8").catch(() => stdout || stderr);
-      resolve(text);
-    });
-    child.stdin.end(prompt);
+    model,
+    reasoningEffort,
+    timeoutMs: Number(process.env.ANIFACTORY_AUDIO_ENRICHMENT_CODEX_TIMEOUT_MS ?? 1_200_000),
+    detached: true,
   });
   return {
     provider: "codex",
-    model: model ?? "codex_cli_default",
+    model: call.model,
+    reasoning_effort: call.reasoning_effort,
+    codex_cli_path: call.codex_cli_path,
+    codex_cli_version: call.codex_cli_version,
     promptPath,
     outputPath,
     contentPath: outputPath,
-    content: output,
-    parsed: extractJson(output),
+    content: call.content,
+    parsed: extractJson(call.content),
     retry_attempt: 0,
   };
 }

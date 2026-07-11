@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
+const DEFAULT_QWEN_NARRATOR_VOICE_POLICY = "default_joel_owned_narrator_clone";
 const args = process.argv.slice(2);
 const flags = parseFlags(args);
 const channel = flags.channel ?? "53rebirth";
@@ -30,6 +32,20 @@ function narratorOnlyVoiceMode(dialogueContext = {}) {
   return !characterVoiceCastingEnabled()
     || dialogueContext?.voiceCastingLock?.voice_casting_mode === "narrator_only_default"
     || dialogueContext?.voiceCastingLock?.character_voice_casting_enabled === false;
+}
+
+function cleanVoiceId(value) {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
+function selectedQwenNarratorVoiceId(identity = {}) {
+  return cleanVoiceId(flags["qwen-narrator-voice-id"])
+    ?? cleanVoiceId(flags["narrator-voice-id"])
+    ?? cleanVoiceId(identity?.voice_provider_options?.qwen_narrator_voice_id)
+    ?? cleanVoiceId(identity?.qwen_narrator_voice_id)
+    ?? cleanVoiceId(identity?.narrator_voice_id)
+    ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 }
 
 function parseFlags(parts) {
@@ -306,17 +322,32 @@ function semanticVoiceRoleFromContext(speaker, segmentText = "", segment = null)
 async function loadDialogueContext() {
   const characterBible = await readJsonIfExists(path.join(seriesDir, "character_bible.json"), await readJsonIfExists(path.join(weekDir, "character_bible.json"), {}));
   const seriesPackage = await readJsonIfExists(path.join(seriesDir, "series_package.json"), await readJsonIfExists(path.join(weekDir, "series_package.json"), {}));
+  const runIdentity = await readJsonIfExists(path.join(episodeDir, "run_identity.json"), {});
+  const narratorVoiceId = selectedQwenNarratorVoiceId(runIdentity);
+  const narratorVoice = await readGlobalQwenVoice(narratorVoiceId);
   const rawVoiceCastingLock = await readJsonIfExists(path.join(episodeDir, `voice_casting_lock_${episode}.json`), await readJsonIfExists(path.join(episodeDir, "voice_casting_lock_ep_01.json"), {}));
+  const rawNarratorCast = rawVoiceCastingLock?.speaker_casting?.NARRATOR ?? rawVoiceCastingLock?.speaker_casting?.narrator ?? null;
+  const rawNarratorVoiceId = cleanVoiceId(rawNarratorCast?.reference_id) ?? cleanVoiceId(rawNarratorCast?.id);
+  const narratorCast = rawNarratorVoiceId === narratorVoiceId ? rawNarratorCast
+    ?? narratorVoice
+    ?? { id: narratorVoiceId, reference_id: narratorVoiceId }
+    : narratorVoice
+      ?? rawNarratorCast
+      ?? { id: narratorVoiceId, reference_id: narratorVoiceId };
   const voiceCastingLock = characterVoiceCastingEnabled()
     ? await applySeriesQwenCastingMap(rawVoiceCastingLock)
     : {
         ...(rawVoiceCastingLock ?? {}),
         status: rawVoiceCastingLock?.status ?? "passed",
         production_ready: rawVoiceCastingLock?.production_ready ?? true,
+        narrator_voice_id: rawVoiceCastingLock?.narrator_voice_id ?? narratorVoiceId,
+        requested_narrator_voice_id: rawVoiceCastingLock?.requested_narrator_voice_id ?? narratorVoiceId,
+        narrator_voice_policy: rawVoiceCastingLock?.narrator_voice_policy ?? runIdentity?.qwen_narrator_voice_policy ?? runIdentity?.voice_provider_options?.qwen_narrator_voice_policy ?? DEFAULT_QWEN_NARRATOR_VOICE_POLICY,
         voice_casting_mode: "narrator_only_default",
         character_voice_casting_enabled: false,
+        run_identity_path: path.join(episodeDir, "run_identity.json"),
         speaker_casting: {
-          NARRATOR: rawVoiceCastingLock?.speaker_casting?.NARRATOR ?? rawVoiceCastingLock?.speaker_casting?.narrator ?? { id: "joel_narrator", reference_id: "joel_narrator" },
+          NARRATOR: narratorCast,
         },
       };
   const bibleCharacters = Array.isArray(characterBible?.characters) ? characterBible.characters
@@ -1019,6 +1050,32 @@ function isExplicitSoundDesignCueText(text) {
   return /\b(?:glass shatter|crowd laughter|crowd gasp|loud bang|impact|crash|slam|beep|alarm|siren|room tone|silence|music|score)\b/i.test(cue);
 }
 
+const NON_SPOKEN_BRACKET_PREFIX = /^(?:SFX|SOUND|SOUND DESIGN|AMBIENCE|AMBIENT|ROOM TONE|MUSIC|SCORE|COMMENT_BAIT|BREATH_BEAT|MC_INTERNAL)\b\s*:*/i;
+const NON_SPOKEN_BRACKET_DIRECTION = /^(?:short\s+pause|pause|long\s+pause|micro-pause|beat|silence|laughs?|chuckles?|sighs?|gasps?|breathes?|whispers?|shouts?|screams?|music\s+(?:starts?|stops?|rises?|fades?)|fade\s+(?:in|out)|cut\s+to|scene\s+change|end(?:\s+episode)?|camera|close-up|wide\s+shot)\b/i;
+
+function standaloneSystemUiText(text) {
+  const clean = String(text ?? "").trim();
+  const match = clean.match(/^\[([^\]\n]+)\]$/);
+  if (!match) return null;
+  const body = match[1].trim();
+  if (!body || NON_SPOKEN_BRACKET_PREFIX.test(body) || NON_SPOKEN_BRACKET_DIRECTION.test(body)) return null;
+  if (isExplicitSoundDesignCueText(clean)) return null;
+  return body;
+}
+
+function systemUiUnit(text) {
+  const spoken = standaloneSystemUiText(text);
+  if (!spoken) return null;
+  return {
+    kind: "system_ui",
+    speaker: "SYSTEM",
+    text: spoken,
+    performed_text: spoken,
+    caption_text: String(text ?? "").trim(),
+    metadata_tags: ["SYSTEM_UI", "SPEAK_BRACKET_CONTENTS"],
+  };
+}
+
 function isOnomatopoeiaOnlyCue(text) {
   const clean = String(text ?? "")
     .trim()
@@ -1118,6 +1175,11 @@ function narrationPerformanceUnits(text) {
   }
   if (/^SFX\s*:/i.test(remaining)) {
     units.push(soundDesignUnit(remaining));
+    return units;
+  }
+  const interfaceUnit = systemUiUnit(remaining);
+  if (interfaceUnit) {
+    units.push(interfaceUnit);
     return units;
   }
   const weakLaugh = remaining.match(/^([A-Z][A-Za-z'’. -]{1,40}) gave a thin laugh, then swallowed the wheeze\.\s*/i);
@@ -1470,7 +1532,7 @@ function expectedFishDurationSec(text, { mode = "", hasDialogue = false, hasNarr
   if (hasDialogue && hasNarration) wpm = 120;
   else if (hasDialogue) wpm = 105;
   else if (/\b(SYSTEM|NOTICE|WARNING|UI)\b/.test(speakerText) || /system|warning/.test(modeText)) wpm = 100;
-  else wpm = 215;
+  else wpm = 208;
 
   if (/cliffhanger|dread|tender|memory|child|grief|shame|breath held|dangerous stillness/.test(modeText)) {
     wpm = Math.min(wpm, hasDialogue ? 105 : 145);
@@ -2372,19 +2434,7 @@ function qwenSpokenTextDetailed(value, speaker = "", ttsOverrides = {}) {
   ).replace(/\[[^\]]+\]/g, " ").replace(/\s+/g, " ").trim();
   const normalized = qwenPronunciationText(overridden);
   if (isInterfaceSpeaker) {
-    const protectedTokens = [];
-    const text = normalized.replace(/\b(?:[A-Z]\s+){1,}[A-Z]\b/g, (match) => {
-      const placeholder = `__qwen_letter_token_${protectedTokens.length}__`;
-      protectedTokens.push(match);
-      return placeholder;
-    });
-    let sentenceCase = text
-      .toLowerCase()
-      .replace(/(^|[.!?]\s+)([a-z])/g, (_match, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
-    protectedTokens.forEach((token, index) => {
-      sentenceCase = sentenceCase.replace(`__qwen_letter_token_${index}__`, token);
-    });
-    return { text: sentenceCase, applied_replacements: replacementResult.applied };
+    return { text: normalized, applied_replacements: replacementResult.applied };
   }
   return { text: normalized, applied_replacements: replacementResult.applied };
 }
@@ -2437,9 +2487,9 @@ function qwenIntensityFor(segment, unit) {
 
 function qwenPacingFor(unit) {
   if (unit?.kind === "mc_internal" || /^MC_INTERNAL$/i.test(String(unit?.speaker ?? ""))) return "close, steady internal monologue with no theatrical projection";
-  if (/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))) return "precise interface cadence near the episode target of 210-220 words per minute, slightly clearer on letter ranks and warnings without long pauses";
-  if (unit?.kind === "dialogue" || unit?.kind === "performance_action") return "tight speaker turn near 210-220 spoken words per minute, conversational but clipped, no long lead-in or tail";
-  return "forward anime recap narration around 215 spoken words per minute, energetic and clean, no slow dramatic gaps, no rushed endings";
+  if (/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))) return "precise interface cadence near the episode target of 195-220 words per minute, slightly clearer on letter ranks and warnings without long pauses";
+  if (unit?.kind === "dialogue" || unit?.kind === "performance_action") return "tight speaker turn near 195-220 spoken words per minute, conversational but clipped, no long lead-in or tail";
+  return "forward anime recap narration around 208 spoken words per minute, energetic and clean, no slow dramatic gaps, no rushed endings";
 }
 
 function qwenCharacterLine(speaker, role, cast = null) {
@@ -2508,7 +2558,7 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
         qwen_spoken_text: spokenText,
         caption_text: unit.caption_text ?? unit.text ?? "",
         source_text: unit.text ?? "",
-        qwen_instruct: qwenInstructForUnit({ segment, unit: { ...unit, speaker }, role, cast }),
+        qwen_instruct: qwenInstructForUnit({ segment, unit: { ...unit, speaker: sourceSpeaker }, role, cast }),
         reference_audio_path: cast?.source_audio_path ?? cast?.sample_path ?? null,
         reference_text: cast?.source_transcript ?? null,
         voice_source_policy: cast?.voice_source_policy ?? (speaker === "NARRATOR" ? "owned_qwen_narrator_reference_manifest" : "pending_voice_casting"),
@@ -2570,7 +2620,7 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
     status: "passed",
     provider: ttsProvider,
     generated_at: new Date().toISOString(),
-    policy: "Qwen local production plan: generate per speaker/per beat with clean spoken text, natural-language --instruct prompts, owned/consented reference audio, and stitched timing. Bracket emotion tags never enter spoken text.",
+    policy: "Qwen local production plan: generate per speaker/per beat with clean spoken text, natural-language --instruct prompts, owned/consented reference audio, and stitched timing. Standalone system/UI dialogue is spoken without its brackets; bracketed emotion, sound-design, and production-direction tags never enter spoken text.",
     qwen_config_policy: qwenConfig.prompting ?? null,
     pronunciation_protocol: {
       letter_ranks_are_spelled: true,
@@ -2587,7 +2637,40 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
     },
     segment_count: segmentRows.length,
     unit_count: unitRows.length,
+    system_ui_unit_count: unitRows.filter((unit) => /^SYSTEM$/i.test(String(unit.source_speaker ?? ""))).length,
     segments: segmentRows,
+  };
+}
+
+function systemUiSpeechCoverage(script, plan) {
+  const expected = [...String(script ?? "").matchAll(/^\[([^\]\n]+)\]$/gm)]
+    .map((match) => standaloneSystemUiText(match[0]))
+    .filter(Boolean);
+  const planned = (plan?.segments ?? [])
+    .flatMap((segment) => segment.qwen_generation_units ?? [])
+    .filter((unit) => /^SYSTEM$/i.test(String(unit.source_speaker ?? "")))
+    .map((unit) => String(unit.source_text ?? "").trim());
+  const remaining = new Map();
+  for (const text of planned) remaining.set(text, (remaining.get(text) ?? 0) + 1);
+  const missing = [];
+  for (const text of expected) {
+    const count = remaining.get(text) ?? 0;
+    if (count > 0) remaining.set(text, count - 1);
+    else missing.push(text);
+  }
+  const unexpected = [];
+  for (const [text, count] of remaining) {
+    for (let index = 0; index < count; index += 1) unexpected.push(text);
+  }
+  return {
+    status: missing.length || unexpected.length ? "blocked" : "passed",
+    expected_count: expected.length,
+    planned_count: planned.length,
+    missing_count: missing.length,
+    unexpected_count: unexpected.length,
+    missing,
+    unexpected,
+    policy: "Every standalone system/UI bracket line in the locked script must become one spoken SYSTEM source unit with only the outer brackets removed.",
   };
 }
 
@@ -2683,7 +2766,7 @@ function speakerRoleFor(speaker, segmentText = "", segment = null, dialogueConte
   if (/^(SYSTEM|SYSTEM UI|UI|NOTICE|WARNING)$/i.test(label)) return "system";
   const lockedCast = castForSpeaker(label, dialogueContext);
   const lockedRole = lockedCast?.id ?? lockedCast?.reference_id ?? lockedCast?.role ?? null;
-  if (lockedRole && !/^joel_narrator$/i.test(String(lockedRole))) return lockedRole;
+  if (lockedRole && !/^(joel_narrator|joel_owned_narrator_clone(?:_220wpm)?)$/i.test(String(lockedRole))) return lockedRole;
   const semanticRole = semanticVoiceRoleFromContext(speaker, segmentText, segment);
   if (semanticRole) return semanticRole;
   if (/^(MRS\.?|MS\.?|MISS|MADAM)\b/i.test(String(speaker ?? ""))) return "female";
@@ -2758,7 +2841,15 @@ function castForSpeaker(speaker, dialogueContext = {}) {
 }
 
 function referenceIdForSpeaker(speaker, role, ids, fishAudioConfig, warnings = null, dialogueContext = {}) {
-  if (narratorOnlyVoiceMode(dialogueContext)) return ids.narrator || fishAudioConfig.referenceId || "joel_narrator";
+  if (narratorOnlyVoiceMode(dialogueContext)) {
+    const lockedNarrator = dialogueContext.voiceCastingLock?.speaker_casting?.NARRATOR ?? {};
+    return lockedNarrator.reference_id
+      || lockedNarrator.id
+      || dialogueContext.voiceCastingLock?.narrator_voice_id
+      || ids.narrator
+      || fishAudioConfig.referenceId
+      || DEFAULT_QWEN_NARRATOR_VOICE_ID;
+  }
   const cast = castForSpeaker(speaker, dialogueContext);
   if (cast?.reference_id || cast?.id) return cast.reference_id ?? cast.id;
   return referenceIdForRole(role, ids, fishAudioConfig, warnings);
@@ -2979,6 +3070,8 @@ async function main() {
   qwenGenerationPlan.source_script_path = scriptPath;
   qwenGenerationPlan.script_speakability_report_path = path.join(episodeDir, "script_speakability_report.json");
   qwenGenerationPlan.tts_spoken_overrides_path = path.join(episodeDir, "tts_spoken_overrides.json");
+  const systemUiCoverage = systemUiSpeechCoverage(script, qwenGenerationPlan);
+  qwenGenerationPlan.system_ui_speech_coverage = systemUiCoverage;
   const qwenUnitsBySegment = new Map((qwenGenerationPlan.segments ?? []).map((segment) => [segment.segment_id, segment.qwen_generation_units ?? []]));
   const segments = baseSegments.map((segment) => ({
     ...segment,
@@ -3048,6 +3141,16 @@ async function main() {
     audio_performance_segments: segments,
   };
   const report = qualityReport(segments, { ttsProvider });
+  if (systemUiCoverage.status !== "passed") {
+    const systemUiFailure = {
+      code: "system_ui_speech_coverage_missing",
+      severity: "blocker",
+      ...systemUiCoverage,
+    };
+    report.status = "failed_repairable";
+    report.failures.push(systemUiFailure);
+    report.blockers.push(systemUiFailure);
+  }
   report.source_script_hash = sourceScriptHash;
   report.source_script_path = scriptPath;
   const dialogueAudit = auditDialoguePerformance(script, segments, speakabilityRules);
@@ -3184,6 +3287,13 @@ async function main() {
   strategy.status = report.status === "passed" ? "passed" : "failed_repairable";
   report.voice_artifact_contamination = voiceContaminationReport;
   await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), qwenGenerationPlan);
+  await writeJson(path.join(episodeDir, "system_ui_speech_coverage_report.json"), {
+    ...systemUiCoverage,
+    source_script_hash: sourceScriptHash,
+    source_script_path: scriptPath,
+    qwen_generation_plan_path: path.join(episodeDir, "qwen_generation_plan.json"),
+    generated_at: new Date().toISOString(),
+  });
   await writeJson(path.join(episodeDir, "audio_performance_plan.json"), audioPerformancePlan);
   await writeJson(path.join(episodeDir, "voice_artifact_contamination_report.json"), voiceContaminationReport);
   await writeJson(path.join(episodeDir, `voice_artifact_contamination_report_${episode}.json`), voiceContaminationReport);

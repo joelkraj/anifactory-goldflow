@@ -13,6 +13,8 @@ const height = Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_HEIGHT ?? 576);
 const fluxKleinStrength = Number(process.env.ANIFACTORY_FLUX_KLEIN_IMG2IMG_STRENGTH ?? 0.72);
 const fluxKleinGuidanceScale = Number(process.env.ANIFACTORY_FLUX_KLEIN_GUIDANCE_SCALE ?? 3.5);
 const modelslabImageSamples = Math.min(2, Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_SAMPLES ?? 1) || 1));
+const gptImage2Size = String(process.env.ANIFACTORY_MODELSLAB_GPT_IMAGE2_SIZE ?? "2048x1152").trim();
+const gptImage2AllowSquareFallback = process.env.ANIFACTORY_MODELSLAB_GPT_IMAGE2_ALLOW_SQUARE_FALLBACK === "true";
 
 export function nowIso() {
   return new Date().toISOString();
@@ -108,6 +110,67 @@ async function resolveModelslabImage(json, fetchEndpoint, label) {
   throw new Error(`${label} returned no output/id: ${JSON.stringify(json).slice(0, 1000)}`);
 }
 
+function isGptImage2Model(model) {
+  return /^gpt[-_]?image[-_]?2/i.test(String(model ?? ""));
+}
+
+function gptImage2ModelForRequest(model, referenceCount) {
+  if (!isGptImage2Model(model)) return model;
+  if (referenceCount > 0) return "gpt-image-2-i2i";
+  return "gpt-image-2-t2i";
+}
+
+function gptImage2OutputSize() {
+  const supported = new Set([
+    "1536x1024",
+    "2048x1152",
+    "3840x2160",
+  ]);
+  const normalized = gptImage2Size.replace(/\s+/g, "");
+  return supported.has(normalized) ? normalized : "2048x1152";
+}
+
+function prepareGptImage2Prompt(prompt) {
+  const text = String(prompt ?? "").trim();
+  return {
+    prompt: text,
+    compacted: false,
+    original_length: text.length,
+    submitted_length: text.length,
+  };
+}
+
+export function prepareGptImage2PromptForTests(prompt) {
+  return prepareGptImage2Prompt(prompt);
+}
+
+export function gptImage2OutputSizeForTests() {
+  return gptImage2OutputSize();
+}
+
+function estimatedModelslabCost(model) {
+  const normalized = String(model ?? "").trim().toLowerCase();
+  if (isGptImage2Model(normalized)) {
+    return {
+      estimated_cost_usd: 0.08,
+      cost_basis: "modelslab_model_detail_info_per_image_2026-07-09",
+      cost_confidence: "dashboard_confirmed",
+    };
+  }
+  if (normalized === "flux-klein" || normalized === "midjourney" || normalized.includes("diffusion") || normalized.includes("flux")) {
+    return {
+      estimated_cost_usd: 0.0047,
+      cost_basis: "modelslab_catalog_model_price_per_generation",
+      cost_confidence: "catalog",
+    };
+  }
+  return {
+    estimated_cost_usd: null,
+    cost_basis: "unknown_model_price",
+    cost_confidence: "unknown",
+  };
+}
+
 async function download(urls, outputPath) {
   let lastError = null;
   for (let round = 1; round <= 8; round += 1) {
@@ -150,6 +213,48 @@ async function assertLandscapeOutput(outputPath, requestedWidth, requestedHeight
   };
 }
 
+async function fitOutputToRequestedLandscape(outputPath, requestedWidth, requestedHeight) {
+  const metadata = await sharp(outputPath).metadata();
+  const actualWidth = Number(metadata.width ?? 0);
+  const actualHeight = Number(metadata.height ?? 0);
+  if (!(actualWidth > 0 && actualHeight > 0) || !(requestedWidth > requestedHeight)) return false;
+  const actualAspect = actualWidth / actualHeight;
+  const requestedAspect = requestedWidth / requestedHeight;
+  if (actualWidth > actualHeight && Math.abs(actualAspect - requestedAspect) <= 0.08) return false;
+
+  const original = await fs.readFile(outputPath);
+  const background = await sharp(original)
+    .resize({ width: requestedWidth, height: requestedHeight, fit: "cover" })
+    .blur(18)
+    .modulate({ brightness: 0.82, saturation: 0.85 })
+    .png()
+    .toBuffer();
+  const foreground = await sharp(original)
+    .resize({ width: requestedWidth, height: requestedHeight, fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png()
+    .toBuffer();
+  await sharp(background)
+    .composite([{ input: foreground, gravity: "center" }])
+    .png()
+    .toFile(`${outputPath}.landscape-fit.tmp.png`);
+  await fs.rename(`${outputPath}.landscape-fit.tmp.png`, outputPath);
+  return true;
+}
+
+async function imageGeometry(outputPath) {
+  const metadata = await sharp(outputPath).metadata();
+  const actualWidth = Number(metadata.width ?? 0);
+  const actualHeight = Number(metadata.height ?? 0);
+  if (!(actualWidth > 0 && actualHeight > 0)) {
+    throw new Error(`ModelsLab output has unreadable native dimensions: ${outputPath}`);
+  }
+  return {
+    width: actualWidth,
+    height: actualHeight,
+    aspect: Number((actualWidth / actualHeight).toFixed(6)),
+  };
+}
+
 async function prepareReferenceForUpload(filePath, uploadDir, {
   width: requestedWidth = width,
   height: requestedHeight = height,
@@ -189,6 +294,7 @@ export async function generateModelslabImage({
   model = process.env.ANIFACTORY_REFERENCE_MODEL || process.env.ANIFACTORY_IMAGE_MODEL || "flux-klein",
   width: requestedWidth = width,
   height: requestedHeight = height,
+  enhancePrompt = false,
 }) {
   const startedAtMs = Date.now();
   const outputDir = path.join(path.dirname(outputPath), ".modelslab-downloads", path.basename(outputPath, path.extname(outputPath)));
@@ -198,6 +304,62 @@ export async function generateModelslabImage({
   const maxReferences = 4;
   for (const refPath of referenceImagePaths.slice(0, maxReferences)) {
     referenceUrls.push(await uploadModelslabReference(refPath, uploadDir, { width: requestedWidth, height: requestedHeight }));
+  }
+  if (isGptImage2Model(model)) {
+    const selectedModel = gptImage2ModelForRequest(model, referenceUrls.length);
+    const endpoint = referenceUrls.length ? "/api/v7/images/image-to-image" : "/api/v7/images/text-to-image";
+    const submittedPrompt = prepareGptImage2Prompt(prompt);
+    const payload = {
+      model_id: selectedModel,
+      prompt: submittedPrompt.prompt,
+      size: gptImage2OutputSize(),
+      track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
+      ...(referenceUrls.length ? { init_image: referenceUrls } : {}),
+    };
+    const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, 2);
+    const resolved = await resolveModelslabImage(initial, "/api/v7/images/fetch", `${selectedModel} image`);
+    const imageUrl = await download(modelslabOutputs(resolved), outputPath);
+    const nativeGeometry = await imageGeometry(outputPath);
+    const requestedAspect = requestedWidth / requestedHeight;
+    const nativeLandscape = nativeGeometry.width > nativeGeometry.height;
+    const nativeAspectMatch = Math.abs(nativeGeometry.aspect - requestedAspect) <= 0.08;
+    if (!nativeLandscape && !gptImage2AllowSquareFallback) {
+      throw new Error(
+        `GPT Image 2 returned square or portrait output ${nativeGeometry.width}x${nativeGeometry.height} ` +
+        `for requested provider size ${payload.size}. Retry native landscape; set ` +
+        `ANIFACTORY_MODELSLAB_GPT_IMAGE2_ALLOW_SQUARE_FALLBACK=true only after a documented landscape failure.`,
+      );
+    }
+    const landscape_fit_applied = nativeAspectMatch
+      ? false
+      : await fitOutputToRequestedLandscape(outputPath, requestedWidth, requestedHeight);
+    const actualGeometry = await assertLandscapeOutput(outputPath, requestedWidth, requestedHeight);
+    return {
+      downloaded_path: outputPath,
+      image_url: imageUrl,
+      requested_width: requestedWidth,
+      requested_height: requestedHeight,
+      ...actualGeometry,
+      modelslab_output_dir: outputDir,
+      modelslab_elapsed_ms: Date.now() - startedAtMs,
+      modelslab_endpoint: endpoint,
+      modelslab_reference_count: referenceUrls.length,
+      modelslab_request_id: initial.id ?? resolved.id ?? null,
+      modelslab_model_id: selectedModel,
+      modelslab_size: payload.size,
+      modelslab_native_width: nativeGeometry.width,
+      modelslab_native_height: nativeGeometry.height,
+      modelslab_native_aspect: nativeGeometry.aspect,
+      modelslab_native_landscape: nativeLandscape,
+      modelslab_native_aspect_match: nativeAspectMatch,
+      modelslab_landscape_fit_applied: landscape_fit_applied,
+      modelslab_square_fallback_allowed: gptImage2AllowSquareFallback,
+      modelslab_submitted_prompt: submittedPrompt.prompt,
+      modelslab_prompt_compacted: submittedPrompt.compacted,
+      modelslab_original_prompt_length: submittedPrompt.original_length,
+      modelslab_submitted_prompt_length: submittedPrompt.submitted_length,
+      ...estimatedModelslabCost(selectedModel),
+    };
   }
   const endpoint = referenceUrls.length ? "/api/v6/images/img2img" : "/api/v6/images/text2img";
   if (model === "flux-klein" && referenceUrls.length && endpoint !== "/api/v6/images/img2img") {
@@ -210,7 +372,7 @@ export async function generateModelslabImage({
     height: requestedHeight,
     samples: modelslabImageSamples,
     base64: false,
-    enhance_prompt: false,
+    enhance_prompt: Boolean(enhancePrompt),
     guidance_scale: model === "flux-klein" ? fluxKleinGuidanceScale : Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_GUIDANCE_SCALE ?? 3.5),
     track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
   };
@@ -236,5 +398,7 @@ export async function generateModelslabImage({
     modelslab_endpoint: endpoint,
     modelslab_reference_count: referenceUrls.length,
     modelslab_request_id: initial.id ?? resolved.id ?? null,
+    modelslab_model_id: model,
+    ...estimatedModelslabCost(model),
   };
 }

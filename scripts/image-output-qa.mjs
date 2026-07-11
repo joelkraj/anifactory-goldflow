@@ -1,0 +1,366 @@
+#!/usr/bin/env node
+
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import sharp from "sharp";
+
+const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const flags = parseFlags(process.argv.slice(2));
+const channel = flags.channel ?? "53rebirth";
+const series = flags.series ?? flags.seriesSlug ?? "series";
+const week = flags.week ?? "current";
+const episode = flags.episode ?? "ep_01";
+const episodeDir = flags["episode-dir"]
+  ? path.resolve(flags["episode-dir"])
+  : path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
+const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
+const imagegenReportPath = flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
+const ledgerPath = flags.ledger ?? path.join(episodeDir, "cut_execution_ledger.json");
+const outputPath = flags.output ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
+const manualReviewPath = flags["manual-review-output"] ?? path.join(episodeDir, `image_output_manual_review_${episode}.json`);
+const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
+const reviewDir = flags["review-dir"] ?? path.join(episodeDir, "review_samples", "image_output_qa");
+const approve = flags.approve === "true" || flags["approve-risk"] === "true";
+const reviewer = String(flags.reviewer ?? "").trim();
+const reviewNote = String(flags.note ?? "").trim();
+const rejectedIds = new Set(parseList(flags["reject-cut-ids"] ?? flags["reject-image-ids"]));
+const openingReviewSec = Math.max(0, Number(flags["opening-review-sec"] ?? 180));
+const contactWindowSec = Math.max(60, Number(flags["contact-window-sec"] ?? 300));
+
+function parseFlags(parts) {
+  const parsed = {};
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part.startsWith("--")) continue;
+    const key = part.slice(2);
+    const value = parts[index + 1] && !parts[index + 1].startsWith("--") ? parts[index + 1] : "true";
+    parsed[key] = value;
+    if (value !== "true") index += 1;
+  }
+  return parsed;
+}
+
+function parseList(value) {
+  return String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function readJson(filePath, fallback = null) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJson(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function exists(filePath) {
+  return Boolean(filePath) && fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
+}
+
+async function hashFile(filePath) {
+  return sha256(await fs.readFile(filePath));
+}
+
+function visibleCharacterCount(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  return new Set([
+    ...(manifest.visible_characters ?? []),
+    ...(prompt.visible_characters ?? []),
+  ].map((value) => String(value ?? "").trim()).filter(Boolean)).size;
+}
+
+export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
+  const reasons = [];
+  if (Number(prompt?.start_sec ?? 0) < openingSec) reasons.push("opening_retention");
+  const job = String(prompt?.shot_manifest?.shot_job ?? prompt?.suggested_shot_job ?? "").toLowerCase();
+  const action = `${prompt?.shot_manifest?.foreground_action ?? ""} ${prompt?.visual_beat_action ?? ""}`;
+  if (job === "physical_action" || /\b(?:lift|carry|catch|pin|restrain|shield|stab|strike|hit|shove|grab|rescue|fight)\b/i.test(action)) reasons.push("physical_action_geometry");
+  if (visibleCharacterCount(prompt) >= 3) reasons.push("dense_cast");
+  const referenceCount = Math.max(prompt?.reference_slots?.length ?? 0, prompt?.reference_requirements?.length ?? 0);
+  if (referenceCount >= 4) reasons.push("four_reference_integration");
+  if (prompt?.image_provider_route === "codex_imagegen") reasons.push("provider_routed_hero_or_risky_cut");
+  return [...new Set(reasons)];
+}
+
+export function donorRecoveryFinding(metadata, imageId) {
+  const mode = String(metadata?.recovery_mode ?? metadata?.generated?.recovery_mode ?? "").toLowerCase();
+  const donorId = metadata?.donor_image_id ?? metadata?.copied_from_image_id ?? metadata?.source_image_id ?? null;
+  const perturbed = metadata?.hash_perturbation === true || metadata?.generated?.hash_perturbation === true;
+  if (!donorId && !/donor|nearest.?neighbor|copied.?scene|hash.?perturb/.test(mode) && !perturbed) return null;
+  return {
+    image_id: imageId,
+    severity: "blocker",
+    code: "scene_image_donor_recovery_forbidden",
+    message: `Scene image ${imageId} was recovered from donor ${donorId ?? "unknown"}; generate the actual cut instead of laundering a copied frame.`,
+  };
+}
+
+function svgEscape(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+async function contactTile(row, width = 400, imageHeight = 225, labelHeight = 70) {
+  const input = await sharp(row.image_path).resize({ width, height: imageHeight, fit: "contain", background: "#000000" }).png().toBuffer();
+  const label = `${row.image_id}  ${Number(row.start_sec ?? 0).toFixed(1)}s\n${String(row.visual_job ?? row.shot_job ?? "").slice(0, 46)}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${labelHeight}">
+    <rect width="100%" height="100%" fill="#111111"/>
+    <text x="12" y="25" fill="#ffffff" font-family="Arial" font-size="17" font-weight="700">${svgEscape(label.split("\n")[0])}</text>
+    <text x="12" y="51" fill="#d7d7d7" font-family="Arial" font-size="15">${svgEscape(label.split("\n")[1] ?? "")}</text>
+  </svg>`;
+  return sharp({ create: { width, height: imageHeight + labelHeight, channels: 3, background: "#111111" } })
+    .composite([{ input, top: 0, left: 0 }, { input: Buffer.from(svg), top: imageHeight, left: 0 }])
+    .jpeg({ quality: 88 })
+    .toBuffer();
+}
+
+async function writeContactSheet(rows, outputPath, { columns = 4, pageSize = 24 } = {}) {
+  const pages = [];
+  for (let offset = 0; offset < rows.length; offset += pageSize) {
+    const pageRows = rows.slice(offset, offset + pageSize);
+    const tileWidth = 400;
+    const tileHeight = 295;
+    const rowCount = Math.ceil(pageRows.length / columns);
+    const composites = [];
+    for (let index = 0; index < pageRows.length; index += 1) {
+      composites.push({
+        input: await contactTile(pageRows[index], tileWidth, 225, 70),
+        left: (index % columns) * tileWidth,
+        top: Math.floor(index / columns) * tileHeight,
+      });
+    }
+    const pagePath = rows.length <= pageSize
+      ? outputPath
+      : outputPath.replace(/\.jpg$/i, `-page-${String(Math.floor(offset / pageSize) + 1).padStart(2, "0")}.jpg`);
+    await fs.mkdir(path.dirname(pagePath), { recursive: true });
+    await sharp({ create: { width: columns * tileWidth, height: Math.max(tileHeight, rowCount * tileHeight), channels: 3, background: "#080808" } })
+      .composite(composites)
+      .jpeg({ quality: 88 })
+      .toFile(pagePath);
+    pages.push(pagePath);
+  }
+  return pages;
+}
+
+async function structuralAudit(promptPlan, imagegenReport) {
+  const resultById = new Map((imagegenReport?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const rows = [];
+  const findings = [];
+  const hashOwners = new Map();
+  for (const prompt of promptPlan.prompts ?? []) {
+    if (prompt.image_generation_required === false) continue;
+    const imageId = String(prompt.image_id ?? "");
+    const result = resultById.get(imageId);
+    const imagePath = result?.image_path ?? null;
+    if (!imagePath || !(await exists(imagePath))) {
+      findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_missing", message: `Missing generated image for ${imageId}.` });
+      continue;
+    }
+    let metadata;
+    try {
+      metadata = await sharp(imagePath).metadata();
+    } catch {
+      findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_unreadable", message: `Unreadable generated image for ${imageId}: ${imagePath}` });
+      continue;
+    }
+    const width = Number(metadata.width ?? 0);
+    const height = Number(metadata.height ?? 0);
+    const aspect = height > 0 ? width / height : 0;
+    if (!(width > height) || Math.abs(aspect - 16 / 9) > 0.08) {
+      findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_not_landscape", message: `${imageId} is ${width}x${height}; expected native 16:9 landscape.` });
+    }
+    const imageHash = await hashFile(imagePath);
+    const previousOwner = hashOwners.get(imageHash);
+    if (previousOwner && previousOwner !== imageId) {
+      findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_duplicate_hash", message: `${imageId} is byte-identical to ${previousOwner}.` });
+    } else {
+      hashOwners.set(imageHash, imageId);
+    }
+    const sidecar = await readJson(`${imagePath}.metadata.json`, null);
+    const donorFinding = donorRecoveryFinding(sidecar, imageId);
+    if (donorFinding) findings.push(donorFinding);
+    const reasons = imageRiskReasons(prompt, { openingSec: openingReviewSec });
+    rows.push({
+      image_id: imageId,
+      scene_id: prompt.scene_id ?? null,
+      visual_beat_id: prompt.visual_beat_id ?? null,
+      start_sec: Number(prompt.start_sec ?? 0),
+      duration_sec: Number(prompt.duration_sec ?? 0),
+      visual_job: prompt.visual_job ?? null,
+      shot_job: prompt.shot_manifest?.shot_job ?? null,
+      image_path: imagePath,
+      image_sha256: imageHash,
+      width,
+      height,
+      risk_reasons: reasons,
+      requires_manual_risk_review: reasons.length > 0,
+    });
+  }
+  return { rows, findings };
+}
+
+async function writeReviewPackets(rows) {
+  await fs.mkdir(reviewDir, { recursive: true });
+  const allSheets = [];
+  const maxStart = Math.max(0, ...rows.map((row) => row.start_sec));
+  for (let start = 0; start <= maxStart; start += contactWindowSec) {
+    const windowRows = rows.filter((row) => row.start_sec >= start && row.start_sec < start + contactWindowSec);
+    if (!windowRows.length) continue;
+    const name = `contact_${String(Math.floor(start / 60)).padStart(3, "0")}-${String(Math.ceil((start + contactWindowSec) / 60)).padStart(3, "0")}min.jpg`;
+    allSheets.push(...await writeContactSheet(windowRows, path.join(reviewDir, name)));
+  }
+  const riskRows = rows.filter((row) => row.requires_manual_risk_review);
+  const riskSheets = riskRows.length ? await writeContactSheet(riskRows, path.join(reviewDir, "risk_cuts.jpg")) : [];
+  return { all_sheets: allSheets, risk_sheets: riskSheets };
+}
+
+async function updateLedgerQa(rows, status, note) {
+  const ledger = await readJson(ledgerPath, null);
+  if (!ledger?.cuts?.length) return null;
+  const rowById = new Map(rows.map((row) => [row.image_id, row]));
+  const cuts = ledger.cuts.map((cut) => {
+    const row = rowById.get(String(cut.image_id ?? ""));
+    if (!row || cut.image_sha256 !== row.image_sha256) return cut;
+    const rejected = rejectedIds.has(row.image_id);
+    return {
+      ...cut,
+      image_qa_status: rejected ? "rejected" : status === "passed" ? (row.requires_manual_risk_review ? "passed_manual_risk" : "passed_structural") : "pending",
+      image_qa_note: rejected ? "Rejected during output QA; regenerate this cut only." : note,
+      image_qa_reviewed_at: status === "passed" || rejected ? new Date().toISOString() : null,
+    };
+  });
+  const updated = {
+    ...ledger,
+    image_output_qa_report_path: outputPath,
+    pending_image_qa_count: cuts.filter((cut) => !String(cut.image_qa_status ?? "").startsWith("passed")).length,
+    cuts,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(ledgerPath, updated);
+  return updated;
+}
+
+function isCodexRoute(value) {
+  return /codex/i.test(String(value ?? ""));
+}
+
+function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, runIdentity) {
+  const promptById = new Map((promptPlan.prompts ?? []).map((prompt) => [String(prompt.image_id ?? ""), prompt]));
+  const resultById = new Map((imagegenReport.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const codexIds = [];
+  const modelslabIds = [];
+  for (const imageId of imageIds) {
+    const route = resultById.get(imageId)?.image_provider
+      ?? resultById.get(imageId)?.image_provider_route
+      ?? promptById.get(imageId)?.image_provider_route
+      ?? promptById.get(imageId)?.provider
+      ?? "modelslab";
+    (isCodexRoute(route) ? codexIds : modelslabIds).push(imageId);
+  }
+  const provider = String(runIdentity?.image_provider ?? imagegenReport.image_provider ?? "modelslab");
+  const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
+  const commands = [];
+  if (codexIds.length) {
+    commands.push(`Stage fresh built-in Codex imagegen PNGs for ${codexIds.join(",")}, then run: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <isolated-qa-recovery-staging-dir> --output <episode-dir>/imagegen_report_${episode}.json --force true --qa-recovery true`);
+  }
+  if (modelslabIds.length) {
+    const providerFilter = /hybrid/i.test(provider) ? " --provider-filter modelslab" : "";
+    commands.push(`node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --cut-ids ${modelslabIds.join(",")} --force-images true --qa-recovery true${providerFilter} --concurrency 15`);
+  }
+  return commands.join("; then ");
+}
+
+async function main() {
+  const [promptPlan, imagegenReport, runIdentity] = await Promise.all([
+    readJson(promptPath, null),
+    readJson(imagegenReportPath, null),
+    readJson(runIdentityPath, {}),
+  ]);
+  if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
+  if (imagegenReport?.status !== "passed" || !Array.isArray(imagegenReport.results)) throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
+  if ((approve || rejectedIds.size) && (!reviewer || !reviewNote)) throw new Error("Approval or rejection requires --reviewer and --note so output QA has review provenance.");
+
+  const audit = await structuralAudit(promptPlan, imagegenReport);
+  const packets = await writeReviewPackets(audit.rows);
+  const structuralBlockers = audit.findings.filter((finding) => finding.severity === "blocker");
+  const unknownRejectedIds = [...rejectedIds].filter((imageId) => !audit.rows.some((row) => row.image_id === imageId));
+  if (unknownRejectedIds.length) throw new Error(`Unknown rejected cut ids: ${unknownRejectedIds.join(", ")}`);
+  const status = structuralBlockers.length || rejectedIds.size
+    ? "blocked"
+    : approve
+      ? "passed"
+      : "needs_manual_review";
+  const failedImageIds = [...new Set([...structuralBlockers.map((finding) => finding.image_id), ...rejectedIds])].filter(Boolean);
+  const reviewedHashes = approve ? Object.fromEntries(audit.rows.filter((row) => row.requires_manual_risk_review).map((row) => [row.image_id, row.image_sha256])) : {};
+  if (approve || rejectedIds.size) {
+    await writeJson(manualReviewPath, {
+      schema: "goldflow_image_output_manual_review_v1",
+      status: rejectedIds.size ? "blocked" : "approved",
+      reviewer,
+      note: reviewNote,
+      reviewed_scope: "first_three_minutes_plus_physical_action_dense_cast_four_reference_and_provider_routed_risk_cuts",
+      reviewed_image_hashes: reviewedHashes,
+      rejected_image_ids: [...rejectedIds],
+      contact_sheets: packets,
+      updated_at: new Date().toISOString(),
+    });
+  }
+  await updateLedgerQa(audit.rows, status, reviewNote || null);
+  const report = {
+    schema: "goldflow_image_output_qa_v1",
+    status,
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    prompt_plan_path: promptPath,
+    prompt_plan_sha256: await hashFile(promptPath),
+    imagegen_report_path: imagegenReportPath,
+    imagegen_report_sha256: await hashFile(imagegenReportPath),
+    image_generation_estimated_cost: imagegenReport.estimated_cost ?? null,
+    provider_health_report_path: imagegenReport.provider_health_report_path ?? null,
+    provider_circuit_open: imagegenReport.provider_circuit_open ?? false,
+    cut_execution_ledger_path: ledgerPath,
+    image_count: audit.rows.length,
+    structurally_valid_count: audit.rows.length - new Set(structuralBlockers.map((finding) => finding.image_id)).size,
+    risk_cut_count: audit.rows.filter((row) => row.requires_manual_risk_review).length,
+    opening_review_sec: openingReviewSec,
+    findings: audit.findings,
+    unresolved_blocker_count: structuralBlockers.length + rejectedIds.size,
+    rejected_image_ids: [...rejectedIds],
+    manual_review_required: !approve && !structuralBlockers.length,
+    manual_review_path: approve || rejectedIds.size ? manualReviewPath : null,
+    review_packets: packets,
+    accepted_image_hashes: status === "passed"
+      ? Object.fromEntries(audit.rows.map((row) => [row.image_id, row.image_sha256]))
+      : {},
+    generated_text_accuracy_checked: false,
+    generated_text_accuracy_policy: "out_of_scope_by_operator_direction",
+    next_command: structuralBlockers.length || rejectedIds.size
+      ? scopedQaRecoveryCommand(failedImageIds, promptPlan, imagegenReport, runIdentity)
+      : status === "needs_manual_review"
+        ? `Inspect ${packets.risk_sheets.join(", ")}; then rerun imagegen qa with --approve true --reviewer <name> --note <review-note>`
+        : null,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(outputPath, report);
+  console.log(JSON.stringify({ status, report_path: outputPath, image_count: report.image_count, risk_cut_count: report.risk_cut_count, unresolved_blocker_count: report.unresolved_blocker_count, review_packets: packets }, null, 2));
+  if (status !== "passed") process.exitCode = 1;
+}
+
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(outputPath, { schema: "goldflow_image_output_qa_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 1;
+  });
+}

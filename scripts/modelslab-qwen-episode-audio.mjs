@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
+const DEFAULT_QWEN_NARRATOR_VOICE_POLICY = "default_joel_owned_narrator_clone";
 const args = process.argv.slice(2);
 const flags = parseFlags(args);
 const channel = flags.channel ?? "53rebirth";
@@ -13,6 +15,7 @@ const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const episodeRoot = flags.episodeDir ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
+const runIdentityPath = path.join(episodeRoot, "run_identity.json");
 const reviewVoiceDir = flags.voiceDir ?? path.join(episodeRoot, "review_samples/modelslab_voice_design");
 const episodeJoelNarratorRequestPath = path.join(episodeRoot, "review_samples/modelslab_joel_narrator/joel_narrator_qwen_tts_request_v2.json");
 const joelNarratorRequestPath = flags.joelNarratorRequest
@@ -27,6 +30,7 @@ const maxDurationSec = Number(flags["max-duration-sec"] ?? 0);
 const maxSegments = Number(flags["max-segments"] ?? 0);
 const force = /^(1|true|yes)$/i.test(String(flags.force ?? "false"));
 const dryRun = /^(1|true|yes)$/i.test(String(flags["dry-run"] ?? "false"));
+const reuseUnchanged = /^(1|true|yes)$/i.test(String(flags["reuse-unchanged"] ?? "false"));
 const characterVoiceCasting = /^(?:true|1|yes|enabled|on)$/i.test(String(flags["character-voice-casting"] ?? process.env.ANIFACTORY_CHARACTER_VOICE_CASTING ?? "false").trim());
 const reportSuffix = dryRun || suffix !== "-modelslab-qwen" ? slug(suffix) : "";
 const regenerateSpeakers = new Set(String(flags["regenerate-speakers"] ?? "")
@@ -35,7 +39,8 @@ const regenerateSpeakers = new Set(String(flags["regenerate-speakers"] ?? "")
   .filter(Boolean));
 const maxChars = Number(flags["max-chars"] ?? 850);
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 8)));
-const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.22)));
+const unitGapSec = Math.max(0, Math.min(1.5, Number(flags["unit-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_GAP_SEC ?? 0.08)));
+const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.16)));
 const stitchSampleRate = Math.max(8000, Math.min(96000, Number(flags["stitch-sample-rate"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_SAMPLE_RATE ?? 24000)));
 const qwenFetchTimeoutMs = Math.max(30000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_TIMEOUT_MS ?? 120000));
 const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REFRESH_VOICES ?? "")
@@ -104,6 +109,31 @@ async function readJson(filePath, fallback = null) {
     return fallback;
   }
 }
+
+function cleanVoiceId(value) {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
+function selectedQwenNarratorVoiceId(identity = {}) {
+  return cleanVoiceId(flags["qwen-narrator-voice-id"])
+    ?? cleanVoiceId(flags["narrator-voice-id"])
+    ?? cleanVoiceId(identity?.voice_provider_options?.qwen_narrator_voice_id)
+    ?? cleanVoiceId(identity?.qwen_narrator_voice_id)
+    ?? cleanVoiceId(identity?.narrator_voice_id)
+    ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
+}
+
+const runIdentity = await readJson(runIdentityPath, {});
+const qwenNarratorVoiceId = selectedQwenNarratorVoiceId(runIdentity);
+const nativeSpeed = Math.max(0.75, Math.min(1.5, Number(
+  flags["native-speed"]
+    ?? flags["qwen-native-speed"]
+    ?? process.env.ANIFACTORY_MODELSLAB_QWEN_NATIVE_SPEED
+    ?? runIdentity?.voice_provider_options?.qwen_native_speed
+    ?? runIdentity?.qwen_native_speed
+    ?? 1.25,
+)));
 
 async function readGlobalQwenVoiceLibrary() {
   const voicesDir = path.join(dataRoot, "voice_bank/qwen/voices");
@@ -387,7 +417,7 @@ async function mediaDuration(filePath) {
 
 function cleanText(value) {
   return String(value ?? "")
-    .replace(/\[[^\]]+\]\s*/g, "")
+    .replace(/\[([^\]]+)\]/g, "$1")
     .replace(/^["“]|["”]$/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -478,6 +508,10 @@ function ttsSafeText(value) {
   return normalizeTtsDisfluencies(normalizeAllCapsForTts(normalized));
 }
 
+export function ttsSafeTextForTests(value) {
+  return ttsSafeText(value);
+}
+
 function slug(value) {
   return String(value ?? "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
@@ -504,20 +538,45 @@ function previousResultMap(report) {
   return map;
 }
 
+function unitContentReuseKey(unit) {
+  return [
+    String(unit.speaker ?? "NARRATOR").toUpperCase(),
+    String(unit.voice_id ?? ""),
+    String(unit.text ?? "").replace(/\s+/g, " ").trim(),
+  ].join("\u001f");
+}
+
+function previousContentResultMap(report) {
+  const map = new Map();
+  for (const row of report?.results ?? []) {
+    const key = unitContentReuseKey(row);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  }
+  return map;
+}
+
+function takePreviousContentResult(map, unit) {
+  const rows = map.get(unitContentReuseKey(unit)) ?? [];
+  return rows.shift() ?? null;
+}
+
 function speakerVoiceId(speaker, lock = null) {
   const normalized = String(speaker ?? "NARRATOR").toUpperCase();
-  if (!characterVoiceCasting) return "joel_narrator";
-  if (normalized === "MC_INTERNAL") return "joel_narrator";
+  const narratorVoiceId = lock?.narrator_voice_id ?? qwenNarratorVoiceId;
+  if (!characterVoiceCasting) return narratorVoiceId;
+  if (normalized === "MC_INTERNAL") return narratorVoiceId;
   const lockedVoice = lock?.speaker_casting?.[normalized]?.id ?? lock?.speaker_casting?.[normalized]?.reference_id;
   if (lockedVoice) return lockedVoice;
-  if (normalized === "NARRATOR") return "joel_narrator";
+  if (normalized === "NARRATOR") return narratorVoiceId;
   throw new Error(`Missing ModelsLab Qwen speaker casting for '${normalized}'. Run qwen-tts modelslab-voice-design or voice-casting before episode audio.`);
 }
 
 function assertProductionVoiceRoute(unit, lock) {
   const normalized = String(unit.speaker ?? "NARRATOR").toUpperCase();
-  if (normalized === "NARRATOR" && unit.voice_id !== "joel_narrator") {
-    throw new Error(`Refusing Qwen TTS: narrator routed to '${unit.voice_id}', expected Joel clone 'joel_narrator'.`);
+  const narratorVoiceId = lock?.narrator_voice_id ?? qwenNarratorVoiceId;
+  if ((normalized === "NARRATOR" || normalized === "MC_INTERNAL") && unit.voice_id !== narratorVoiceId) {
+    throw new Error(`Refusing Qwen TTS: narrator routed to '${unit.voice_id}', expected locked narrator voice '${narratorVoiceId}'.`);
   }
   const voice = lock.voices.find((item) => item.id === unit.voice_id);
   if (!voice?.init_audio) throw new Error(`Missing ModelsLab init_audio for voice ${unit.voice_id}`);
@@ -620,9 +679,14 @@ async function buildVoiceLock() {
     };
     voices.push(byId.joel_narrator);
   }
+  const narratorVoice = byId[qwenNarratorVoiceId]
+    ?? (qwenNarratorVoiceId === "joel_narrator" ? byId.joel_narrator ?? byId.narrator : null);
+  if (!narratorVoice) {
+    throw new Error(`Locked Qwen narrator voice '${qwenNarratorVoiceId}' was not found in ${reviewVoiceDir} or ${path.join(dataRoot, "voice_bank/qwen/voices")}. Promote the approved voice first or choose a known voice id.`);
+  }
   const activeVoices = characterVoiceCasting
     ? voices
-    : [byId.joel_narrator ?? byId.narrator].filter(Boolean);
+    : [narratorVoice].filter(Boolean);
   const manifestCasting = {};
   if (characterVoiceCasting) {
     for (const [speaker, cast] of Object.entries(manifest.speaker_casting ?? {})) {
@@ -643,19 +707,23 @@ async function buildVoiceLock() {
   }
   const lock = {
     status: activeVoices.length && activeVoices.every((voice) => voice.status === "passed" && voice.init_audio) ? "passed" : "warning",
-    production_ready: activeVoices.some((voice) => voice.id === "joel_narrator" && voice.status === "passed" && voice.init_audio),
+    production_ready: activeVoices.some((voice) => voice.id === narratorVoice.id && voice.status === "passed" && voice.init_audio),
     created_at: new Date().toISOString(),
     tts_provider: "modelslab_qwen",
     tts_model_id: "qwen-tts",
     tts_endpoint: "/api/v6/voice/text_to_audio",
     voice_design_model_id: "qwen-voice-design",
+    narrator_voice_id: narratorVoice.id,
+    requested_narrator_voice_id: qwenNarratorVoiceId,
+    narrator_voice_policy: runIdentity?.qwen_narrator_voice_policy ?? runIdentity?.voice_provider_options?.qwen_narrator_voice_policy ?? DEFAULT_QWEN_NARRATOR_VOICE_POLICY,
     voice_casting_mode: characterVoiceCasting ? "explicit_character_voice_casting" : "narrator_only_default",
     character_voice_casting_enabled: characterVoiceCasting,
+    run_identity_path: runIdentityPath,
     source_manifest_path: path.join(reviewVoiceDir, "voice_design_manifest.json"),
     voices: activeVoices,
     speaker_casting: {
       ...manifestCasting,
-      NARRATOR: byId.joel_narrator ?? byId.narrator,
+      NARRATOR: narratorVoice,
     },
   };
   for (const voice of lock.voices) {
@@ -672,7 +740,7 @@ async function buildVoiceLock() {
       : "uploaded_local_approved_voice_source_because_cached_url_missing_or_expired";
   }
   lock.status = lock.voices.every((voice) => voice.status === "passed" && voice.init_audio) ? "passed" : "warning";
-  lock.production_ready = lock.voices.some((voice) => voice.id === "joel_narrator" && voice.status === "passed" && voice.init_audio);
+  lock.production_ready = lock.voices.some((voice) => voice.id === lock.narrator_voice_id && voice.status === "passed" && voice.init_audio);
   await fs.writeFile(lockPath, JSON.stringify(lock, null, 2));
   await fs.writeFile(path.join(episodeRoot, `voice_casting_lock_${episode}.json`), JSON.stringify(lock, null, 2));
   if (episode === "ep_01") {
@@ -692,8 +760,10 @@ function collectUnits(plan, lock) {
         segment_id: segment.segment_id,
         unit_index: unit.unit_index,
         speaker: inline.speaker,
+        source_speaker: unit.source_speaker ?? unit.speaker ?? "NARRATOR",
         voice_id: speakerVoiceId(inline.speaker, lock),
         text,
+        caption_text: String(unit.caption_text ?? unit.source_text ?? unit.qwen_spoken_text ?? text).trim(),
         expected_duration_sec: Number(segment.expected_duration_sec ?? 0),
       });
     }
@@ -706,10 +776,12 @@ function collectUnits(plan, lock) {
     const canMergeNarrator = normalized === "NARRATOR"
       && last
       && String(last.speaker ?? "").toUpperCase() === "NARRATOR"
+      && String(last.source_speaker ?? "NARRATOR").toUpperCase() === String(unit.source_speaker ?? "NARRATOR").toUpperCase()
       && last.segment_id === unit.segment_id
       && `${last.text} ${unit.text}`.length <= maxChars;
     if (canMergeNarrator) {
       last.text = `${last.text} ${unit.text}`.replace(/\s+/g, " ").trim();
+      last.caption_text = `${last.caption_text ?? last.text} ${unit.caption_text ?? unit.text}`.replace(/\s+/g, " ").trim();
     } else {
       merged.push({ ...unit });
     }
@@ -727,13 +799,32 @@ function collectUnits(plan, lock) {
   return units;
 }
 
-async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
+async function synthesizeUnit(unit, lock, index, previousResults = new Map(), previousContentResults = new Map()) {
   const normalizedSpeaker = String(unit.speaker ?? "NARRATOR").toUpperCase();
+  if (reuseUnchanged) {
+    const previous = takePreviousContentResult(previousContentResults, unit);
+    if (previous?.wav && await exists(previous.wav)) {
+      if (previous.voice_id !== unit.voice_id) {
+        throw new Error(`Refusing unchanged Qwen TTS reuse for ${unit.segment_id}: previous voice '${previous.voice_id ?? "unknown"}' does not match current voice '${unit.voice_id}'.`);
+      }
+      return {
+        ...unit,
+        status: "reused_unchanged_previous_report",
+        wav: previous.wav,
+        duration_sec: await mediaDuration(previous.wav),
+        previous_segment_id: previous.segment_id ?? null,
+        previous_unit_index: previous.unit_index ?? null,
+      };
+    }
+  }
   const targetedRegeneration = regenerateSpeakers.size > 0;
   const shouldRegenerateThisSpeaker = !targetedRegeneration || regenerateSpeakers.has(normalizedSpeaker);
   if (targetedRegeneration && !shouldRegenerateThisSpeaker) {
     const previous = previousResults.get(unitReuseKey(unit));
     if (previous?.wav && await exists(previous.wav)) {
+      if (previous.voice_id !== unit.voice_id) {
+        throw new Error(`Refusing targeted Qwen TTS reuse for ${unit.segment_id}: previous voice '${previous.voice_id ?? "unknown"}' does not match current voice '${unit.voice_id}'.`);
+      }
       return {
         ...unit,
         status: "reused_previous_report",
@@ -755,7 +846,8 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
     && cachedMeta.unit?.text === unit.text
     && String(cachedMeta.unit?.speaker ?? "").toUpperCase() === normalizedSpeaker
     && cachedMeta.unit?.voice_id === unit.voice_id
-    && cachedMeta.voice?.init_audio === voice.init_audio;
+    && cachedMeta.voice?.init_audio === voice.init_audio
+    && Number(cachedMeta.tts_native_speed ?? cachedMeta.request_parameters?.speed ?? 1) === nativeSpeed;
   if (!force && !targetedRegeneration && await exists(wav)) {
     if (cacheMatchesUnit) {
       return { ...unit, status: "reused", wav, duration_sec: await mediaDuration(wav), meta };
@@ -770,6 +862,7 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
       init_audio: voice.init_audio,
       prompt: unit.text,
       language: "english",
+      speed: nativeSpeed,
       track_id: 12000 + index,
     });
   const previous = force || !cacheMatchesUnit ? null : cachedMeta;
@@ -785,12 +878,14 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
       attempt,
       unit,
       voice,
+      tts_native_speed: nativeSpeed,
+      request_parameters: { language: "english", speed: nativeSpeed },
     }, null, 2));
     try {
       resolved = await resolveAudioResponse(initial);
       const url = audioLinks(resolved)[0];
       if (!url) throw new Error(`ModelsLab Qwen returned no audio URL for ${unit.segment_id}`);
-      await fs.writeFile(meta, JSON.stringify({ request: initial, resolved, unit, voice }, null, 2));
+      await fs.writeFile(meta, JSON.stringify({ request: initial, resolved, unit, voice, tts_native_speed: nativeSpeed, request_parameters: { language: "english", speed: nativeSpeed } }, null, 2));
       const ok = await downloadWhenReady(url, wav);
       if (!ok) throw new Error(`Timed out downloading ${url}`);
       finalUrl = url;
@@ -807,12 +902,14 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map()) {
         attempt: attempt + 1,
         unit,
         voice,
+        tts_native_speed: nativeSpeed,
+        request_parameters: { language: "english", speed: nativeSpeed },
       }, null, 2));
     }
   }
   if (!resolved) throw lastError ?? new Error(`ModelsLab Qwen did not resolve ${unit.segment_id}`);
   if (!finalUrl) throw lastError ?? new Error(`ModelsLab Qwen did not download audio for ${unit.segment_id}`);
-  return { ...unit, status: "generated", wav, url: finalUrl, duration_sec: await mediaDuration(wav), meta };
+  return { ...unit, status: "generated", wav, url: finalUrl, duration_sec: await mediaDuration(wav), meta, native_speed: nativeSpeed };
 }
 
 function concatLine(filePath) {
@@ -838,11 +935,15 @@ async function stitchWavs(results, finalWav) {
   const usable = results.filter((row) => row.wav);
   if (!usable.length) return null;
   const concatPath = path.join(outDir, "concat.txt");
-  const gapPath = segmentGapSec > 0 ? await writeSilenceWav(path.join(outDir, `segment-gap-${Math.round(segmentGapSec * 1000)}ms.wav`), segmentGapSec) : null;
+  const unitGapPath = unitGapSec > 0 ? await writeSilenceWav(path.join(outDir, `unit-gap-${Math.round(unitGapSec * 1000)}ms.wav`), unitGapSec) : null;
+  const segmentGapPath = segmentGapSec > 0 ? await writeSilenceWav(path.join(outDir, `segment-gap-${Math.round(segmentGapSec * 1000)}ms.wav`), segmentGapSec) : null;
   const lines = [];
   for (let index = 0; index < usable.length; index += 1) {
     lines.push(concatLine(usable[index].wav));
-    if (gapPath && index < usable.length - 1) lines.push(concatLine(gapPath));
+    if (index >= usable.length - 1) continue;
+    const crossesSegment = String(usable[index].segment_id ?? "") !== String(usable[index + 1].segment_id ?? "");
+    const gapPath = crossesSegment ? segmentGapPath : unitGapPath;
+    if (gapPath) lines.push(concatLine(gapPath));
   }
   await fs.writeFile(concatPath, lines.join("\n"));
   await run("ffmpeg", [
@@ -856,6 +957,21 @@ async function stitchWavs(results, finalWav) {
     finalWav,
   ]);
   return concatPath;
+}
+
+function assertStitchVoiceIntegrity(results, lock) {
+  const narratorVoiceId = lock?.narrator_voice_id ?? qwenNarratorVoiceId;
+  const wrongRows = [];
+  for (const row of results) {
+    const speaker = String(row?.speaker ?? "NARRATOR").toUpperCase();
+    const narratorScoped = !characterVoiceCasting || speaker === "NARRATOR" || speaker === "MC_INTERNAL";
+    if (narratorScoped && row?.voice_id !== narratorVoiceId) {
+      wrongRows.push(`${row?.segment_id ?? "unknown"}:${row?.voice_id ?? "missing"}`);
+    }
+  }
+  if (wrongRows.length) {
+    throw new Error(`Refusing Qwen stitch: ${wrongRows.length} segment(s) do not match locked narrator voice '${narratorVoiceId}': ${wrongRows.slice(0, 8).join(", ")}`);
+  }
 }
 
 async function main() {
@@ -876,10 +992,14 @@ async function main() {
   }
   const previousReportPath = flags["previous-report"]
     ?? path.join(episodeRoot, `modelslab_qwen_tts_report_${episode}${reportSuffix ? `-${reportSuffix}` : ""}.json`);
-  const previousReport = regenerateSpeakers.size > 0 ? await readJson(previousReportPath, null) : null;
+  const previousReport = regenerateSpeakers.size > 0 || reuseUnchanged ? await readJson(previousReportPath, null) : null;
   const previousResults = previousResultMap(previousReport);
+  const previousContentResults = previousContentResultMap(previousReport);
   if (regenerateSpeakers.size > 0 && !previousResults.size) {
     throw new Error(`Targeted regeneration requested for ${[...regenerateSpeakers].join(", ")} but no previous TTS report was readable at ${previousReportPath}`);
+  }
+  if (reuseUnchanged && !previousContentResults.size) {
+    throw new Error(`Unchanged-unit Qwen TTS reuse requested but no previous TTS report was readable at ${previousReportPath}`);
   }
 
   const results = new Array(units.length);
@@ -890,7 +1010,7 @@ async function main() {
       const index = cursor;
       cursor += 1;
       console.log(`modelslab qwen ${index + 1}/${units.length} w${workerIndex} ${units[index].speaker}: ${units[index].text.slice(0, 70)}`);
-      results[index] = await synthesizeUnit(units[index], lock, index, previousResults);
+      results[index] = await synthesizeUnit(units[index], lock, index, previousResults, previousContentResults);
       completed += 1;
       if (completed % 25 === 0 || completed === units.length) {
         console.log(`modelslab qwen progress ${completed}/${units.length}`);
@@ -903,6 +1023,7 @@ async function main() {
   const finalM4a = finalWav.replace(/\.wav$/, ".m4a");
   let concatPath = null;
   if (!dryRun && results.some((row) => row.wav)) {
+    assertStitchVoiceIntegrity(results, lock);
     concatPath = await stitchWavs(results, finalWav);
     await run("ffmpeg", ["-y", "-i", finalWav, "-acodec", "aac", "-b:a", "160k", finalM4a]);
     await fs.writeFile(finalWav.replace(/\.wav$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
@@ -920,14 +1041,23 @@ async function main() {
     plan_path: planPath,
     out_dir: outDir,
     regenerate_speakers: [...regenerateSpeakers],
+    reuse_unchanged: reuseUnchanged,
     previous_report_path: previousReportPath,
     final_wav: dryRun ? null : finalWav,
     final_m4a: dryRun ? null : finalM4a,
     concat_path: concatPath,
     segment_gap_sec: segmentGapSec,
+    unit_gap_sec: unitGapSec,
+    native_speed: nativeSpeed,
+    pace_strategy: "provider_native_speed_no_post_tempo",
+    post_tempo_normalized: false,
     stitch_sample_rate: stitchSampleRate,
     unit_count: results.length,
-    duration_sec: dryRun ? null : await mediaDuration(finalWav).catch(() => results.reduce((sum, row) => sum + Number(row.duration_sec ?? 0), 0) + Math.max(0, results.length - 1) * segmentGapSec),
+    duration_sec: dryRun ? null : await mediaDuration(finalWav).catch(() => results.reduce((sum, row, index) => {
+      if (index >= results.length - 1) return sum + Number(row.duration_sec ?? 0);
+      const crossesSegment = String(row.segment_id ?? "") !== String(results[index + 1]?.segment_id ?? "");
+      return sum + Number(row.duration_sec ?? 0) + (crossesSegment ? segmentGapSec : unitGapSec);
+    }, 0)),
     results,
   };
   const reportPath = path.join(episodeRoot, `modelslab_qwen_tts_report_${episode}${reportSuffix ? `-${reportSuffix}` : ""}.json`);
@@ -943,20 +1073,27 @@ async function main() {
     output_path: report.final_wav,
     sound_design_mix_path: null,
     final_duration_sec: report.duration_sec,
+    native_speed: nativeSpeed,
+    pace_strategy: "provider_native_speed_no_post_tempo",
+    post_tempo_normalized: false,
     segments: results.map((row, index) => ({
       segment_id: row.segment_id,
       text: row.text,
       stripped_text: row.text,
-      caption_text: row.text,
+      caption_text: row.caption_text ?? row.text,
       speakers: [row.speaker],
       speaker_context: [row.speaker],
       delivery_mode: "modelslab_qwen_tts",
       raw_audio_duration_sec: row.duration_sec,
-      segment_gap_sec: index < results.length - 1 ? segmentGapSec : 0,
-      duration_sec: Number((Number(row.duration_sec ?? 0) + (index < results.length - 1 ? segmentGapSec : 0)).toFixed(6)),
+      segment_gap_sec: index < results.length - 1 && String(row.segment_id ?? "") !== String(results[index + 1]?.segment_id ?? "") ? segmentGapSec : 0,
+      unit_gap_sec: index < results.length - 1 && String(row.segment_id ?? "") === String(results[index + 1]?.segment_id ?? "") ? unitGapSec : 0,
+      duration_sec: Number((Number(row.duration_sec ?? 0) + (index < results.length - 1
+        ? String(row.segment_id ?? "") !== String(results[index + 1]?.segment_id ?? "") ? segmentGapSec : unitGapSec
+        : 0)).toFixed(6)),
       audio_path: row.wav,
       tts_provider: "modelslab_qwen",
       voice_id: row.voice_id,
+      native_speed: nativeSpeed,
     })),
     modelslab_qwen_tts_report_path: reportPath,
     modelslab_qwen_voice_lock_path: lockPath,
@@ -964,7 +1101,9 @@ async function main() {
   console.log(JSON.stringify({ status: report.status, unit_count: report.unit_count, duration_sec: report.duration_sec, final_m4a: report.final_m4a, report_path: reportPath }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 1;
+  });
+}

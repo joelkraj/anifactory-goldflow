@@ -1,4 +1,4 @@
-export function sanitizePositiveVisualPrompt(value) {
+export function stripEmbeddedProviderExclusionPayloadSyntax(value) {
   return String(value ?? "")
     .replace(/\bnegative\s+prompt\s*[:=]\s*/gi, "")
     .replace(/--no\b/gi, "")

@@ -22,16 +22,44 @@ import {
   routedProviderForPrompt,
   routedProviderForReference,
 } from "./lib/image-provider-routing.mjs";
-import { sanitizePositiveVisualPrompt } from "./lib/positive-prompt-sanitize.mjs";
+import { stripEmbeddedProviderExclusionPayloadSyntax } from "./lib/prompt-payload-sanitize.mjs";
 import { namedCharacterDuplicationFindings } from "./lib/prompt-prose-findings.mjs";
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  codexVersionSupportsModel,
+  compareCodexVersions,
+  isCodexCacheCompatible,
+  parseCodexVersion,
+} from "./lib/codex-cli-runner.mjs";
 import {
   attachReferencePathsToPromptsForTests,
   assertNoVisualResolutionDeadletterForTests,
   candidateImageIdsForDerivedTargetForTests,
+  referencePromptForTests,
+  referenceSlotInstructionForTests,
+  runPoolWithCircuitBreakerForTests,
+  scenePromptProductionContractFindingsForTests,
 } from "./imagegen.mjs";
+import { donorRecoveryFinding, imageRiskReasons } from "./image-output-qa.mjs";
+import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents } from "./render.mjs";
+import {
+  gptImage2OutputSizeForTests,
+  prepareGptImage2PromptForTests,
+} from "./modelslab-image-helper.mjs";
 import { localBeatFidelityFindingsForTests } from "./visual-plan.mjs";
+import {
+  referenceCharacterStateFindingsForTests,
+  referenceDirectorSelectionFindingsForTests,
+  referenceEvidenceLedgerForTests,
+  referenceLocationContractLedgerForTests,
+  referenceLocationScopeForTests,
+  selectedReferenceInventoryForTests,
+} from "./visual-reference-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
+import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
 import {
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
@@ -44,13 +72,64 @@ import {
   semanticBuildPromptForTests,
   semanticSceneAnchorFindingsForTests,
   semanticSceneQualityFindingsForTests,
+  semanticScriptChunksForTests,
+  semanticSnapSceneAnchorsForTests,
 } from "./semantic-scene-plan.mjs";
+import { visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function testPinnedCodexRuntimeContracts() {
+  assert.equal(DEFAULT_CODEX_MODEL, "gpt-5.6-sol");
+  assert.equal(DEFAULT_CODEX_REASONING_EFFORT, "medium");
+  const oldCli = parseCodexVersion("codex-cli 0.141.0");
+  const qualifyingBundledCli = parseCodexVersion("codex-cli 0.144.0-alpha.4");
+  assert.equal(codexVersionSupportsModel(oldCli, DEFAULT_CODEX_MODEL), false);
+  assert.equal(codexVersionSupportsModel(qualifyingBundledCli, DEFAULT_CODEX_MODEL), true);
+  assert.equal(compareCodexVersions(qualifyingBundledCli, oldCli) > 0, true);
+
+  const promptHash = sha256("fixture prompt");
+  const matchingMetadata = {
+    status: "passed",
+    model: DEFAULT_CODEX_MODEL,
+    reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT,
+    prompt_sha256: promptHash,
+  };
+  assert.equal(isCodexCacheCompatible(matchingMetadata, {
+    model: DEFAULT_CODEX_MODEL,
+    reasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+    promptHash,
+  }), true);
+  assert.equal(isCodexCacheCompatible({ ...matchingMetadata, model: "gpt-5.5" }, {
+    model: DEFAULT_CODEX_MODEL,
+    reasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+    promptHash,
+  }), false);
+  assert.equal(isCodexCacheCompatible({ ...matchingMetadata, reasoning_effort: "high" }, {
+    model: DEFAULT_CODEX_MODEL,
+    reasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+    promptHash,
+  }), false);
+  assert.equal(isCodexCacheCompatible({ ...matchingMetadata, prompt_sha256: "stale" }, {
+    model: DEFAULT_CODEX_MODEL,
+    reasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+    promptHash,
+  }), false);
+}
+
+async function testNestedCodexCallsUseSharedRunner() {
+  const scriptsDir = path.join(process.cwd(), "scripts");
+  const scriptFiles = (await fs.readdir(scriptsDir)).filter((name) => name.endsWith(".mjs"));
+  for (const scriptFile of scriptFiles) {
+    const source = await fs.readFile(path.join(scriptsDir, scriptFile), "utf8");
+    assert.doesNotMatch(source, /spawn\s*\(\s*["']codex["']/, `${scriptFile} must use lib/codex-cli-runner.mjs`);
+    assert.equal(source.includes(["codex", "cli", "default"].join("_")), false, `${scriptFile} must report the actual pinned Codex model`);
+  }
 }
 
 async function writeJson(filePath, value) {
@@ -163,6 +242,189 @@ function testSemanticPlannerPromptContracts() {
   assert.match(prompt, /Do not put rooms, doors, windows, desks, walls, stages, screens, dashboards, webpages, feeds, architecture/i);
   assert.match(prompt, /ui_text_on_screen should be concise/i);
   assert.match(prompt, /not automatic standalone image-generation orders/i);
+  assert.match(prompt, /Keep character state layers separate/i);
+  assert.match(prompt, /visible_state is for physical facts the camera can see/i);
+  assert.match(prompt, /financially, or emotionally ruined/i);
+  assert.match(prompt, /do not convert abstract phrases like broke, ruined, betrayed, humiliated, indebted, or emotionally collapsed/i);
+  assert.match(prompt, /do not summarize, paraphrase, remove clauses, or change quotation marks/i);
+}
+
+function testSemanticChunkingSplitsLongSingleParagraph() {
+  const sentence = "Joey entered the office and the screen changed before anyone spoke.";
+  const script = Array.from({ length: 80 }, (_item, index) => `${sentence} Scene ${index + 1} ended with a receipt.`).join(" ");
+  const chunks = semanticScriptChunksForTests(script, 120);
+  const totalWords = script.trim().split(/\s+/).length;
+  assert.equal(chunks.length > 1, true);
+  assert.equal(chunks.reduce((sum, chunk) => sum + chunk.words, 0), totalWords);
+  assert.equal(chunks.every((chunk) => chunk.words <= 140), true);
+}
+
+function testSemanticAnchorSnapsToExactScriptTokens() {
+  const script = [
+    "On Monday morning, Joey arrived with a U.S.B. drive in one hand.",
+    "\"I cared.\"",
+    "\"Systems outlast anger.\"",
+  ].join(" ");
+  const { scenes, snaps } = semanticSnapSceneAnchorsForTests([
+    {
+      scene_id: "scene_001",
+      script_excerpt_start: "On Monday morning, Joey arrived with a U. S. B. drive in one hand.",
+      script_excerpt_end: "He cared.",
+    },
+    {
+      scene_id: "scene_002",
+      script_excerpt_start: "Systems outlast anger.",
+      script_excerpt_end: "Systems outlast anger.",
+    },
+  ], script);
+  assert.equal(scenes[0].script_excerpt_start, "On Monday morning, Joey arrived with a U.S.B. drive in one hand");
+  assert.equal(scenes[0].script_excerpt_end, "cared");
+  assert.equal(scenes[1].script_excerpt_start, "Systems outlast anger");
+  assert.equal(snaps.some((snap) => snap.snap_type === "token_suffix"), true);
+}
+
+function testFirstPersonBeatKeepsProtagonistVisible() {
+  const scene = {
+    scene_id: "scene_015",
+    primary_subject: "Dorian Vale",
+    visible_subjects: ["Dorian Vale"],
+    ref_requirements: [
+      { kind: "character", ref_id: "joey_manhwa", reason: "recurring protagonist visible during punishment" },
+      { kind: "character", ref_id: "dorian_vale", reason: "named antagonist undergoes punishment" },
+    ],
+  };
+  const beatText = "Dorian looked at it, then at me. This is childish. I walked around the desk.";
+  const visible = visualBeatInternalsForTests.localVisibleCharacters(scene, beatText);
+  assert.deepEqual(visible, ["Joey Manhwa", "Dorian Vale"]);
+  const refNeeds = visualBeatInternalsForTests.localBeatReferenceNeeds(scene, {
+    scene_id: "scene_015",
+    parent_scene_id: "scene_015",
+    visual_beat_id: "scene_015_beat_02",
+    start_sec: 758.66,
+    visual_beat_script_excerpt: beatText,
+    visual_job: "interaction",
+    suggested_shot_job: "interaction",
+  }, { visibleCharacters: visible });
+  const characterRefIds = refNeeds.filter((need) => need.kind === "character").map((need) => need.ref_id);
+  assert.deepEqual(new Set(characterRefIds), new Set(["joey_manhwa", "dorian_vale"]));
+}
+
+function testWhisperExcerptAlignmentInterpolatesUnspokenUi() {
+  const result = alignExcerptRowsToWhisper([
+    { visual_beat_id: "beat_1", start_sec: 0, end_sec: 2, duration_sec: 2, visual_beat_script_excerpt: "Joey entered the academy gate in the rain." },
+    { visual_beat_id: "beat_2", start_sec: 2, end_sec: 4, duration_sec: 2, visual_beat_script_excerpt: "Role assigned Extra 418. Importance disposable." },
+    { visual_beat_id: "beat_3", start_sec: 4, end_sec: 6, duration_sec: 2, visual_beat_script_excerpt: "A knight screamed for every candidate to run left." },
+  ], [
+    { word: "Joey", start_sec: 0 }, { word: "entered", start_sec: 0.2 }, { word: "the", start_sec: 0.4 }, { word: "academy", start_sec: 0.6 }, { word: "gate", start_sec: 0.8 }, { word: "in", start_sec: 1 }, { word: "the", start_sec: 1.2 }, { word: "rain", start_sec: 1.4 },
+    { word: "A", start_sec: 3 }, { word: "knight", start_sec: 3.2 }, { word: "screamed", start_sec: 3.4 }, { word: "for", start_sec: 3.6 }, { word: "every", start_sec: 3.8 }, { word: "candidate", start_sec: 4 }, { word: "to", start_sec: 4.2 }, { word: "run", start_sec: 4.4 }, { word: "left", start_sec: 4.6 },
+  ], { minimumScore: 0.75 });
+  assert.equal(result.summary.matched_count, 2);
+  assert.equal(result.summary.interpolated_count, 1);
+  assert.equal(result.rows[0].start_sec, 0);
+  assert.equal(result.rows[1].start_sec > 0 && result.rows[1].start_sec < 3, true);
+  assert.equal(result.rows[2].start_sec, 3.2);
+  assert.equal(result.rows[1].whisper_excerpt_alignment.status, "interpolated_unspoken_or_low_confidence");
+}
+
+function testPhraseAwareSubtitleGrouping() {
+  const merged = mergeShortSubtitleEvents([
+    { start_sec: 0, end_sec: 0.45, text: "The" },
+    { start_sec: 0.46, end_sec: 1.75, text: "system opened" },
+    { start_sec: 1.9, end_sec: 2.2, text: "No!" },
+    { start_sec: 2.45, end_sec: 2.78, text: "And" },
+    { start_sec: 2.79, end_sec: 4.0, text: "then I ran" },
+  ]);
+  assert.deepEqual(merged.map((row) => row.text), ["The system opened", "No!", "And then I ran"]);
+  assert.equal(merged.filter((row) => row.text.split(/\s+/).length === 1).length, 1);
+}
+
+function testQwenKeepsBracketedUiDialogueSpeakable() {
+  const spoken = ttsSafeTextForTests("[CHAPTER ZERO ACTIVATED. SURVIVE THE CARRIAGE.]");
+  assert.match(spoken, /chapter zero activated/i);
+  assert.match(spoken, /survive the carriage/i);
+  assert.doesNotMatch(spoken, /[\[\]]/);
+}
+
+function testImageOutputQaRiskAndDonorPolicies() {
+  const reasons = imageRiskReasons({
+    start_sec: 420,
+    visual_beat_action: "Joey lifts the carriage and rescues Arielle",
+    shot_manifest: { visible_characters: ["Joey", "Arielle", "Guard"], shot_job: "physical_action" },
+    reference_requirements: [{}, {}, {}, {}],
+  });
+  assert.equal(reasons.includes("physical_action_geometry"), true);
+  assert.equal(reasons.includes("dense_cast"), true);
+  assert.equal(reasons.includes("four_reference_integration"), true);
+  assert.equal(donorRecoveryFinding({ donor_image_id: "cut_001", hash_perturbation: true }, "cut_002")?.code, "scene_image_donor_recovery_forbidden");
+}
+
+async function testProviderCircuitBreakerStopsUnclaimedWork() {
+  const items = Array.from({ length: 8 }, (_, index) => ({ image_id: `cut_${index + 1}` }));
+  const result = await runPoolWithCircuitBreakerForTests(items, async () => {
+    throw new Error("503 gateway unavailable");
+  }, 1);
+  assert.equal(result.circuit_open, true);
+  assert.equal(result.results.filter((row) => row.status === "failed").length, 3);
+  assert.equal(result.results.filter((row) => row.status === "skipped_provider_circuit_open").length, 5);
+}
+
+async function testRenderRequiresHashMatchedImageQa() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-render-qa-"));
+  const imagePath = path.join(tempDir, "cut_001.png");
+  await fs.writeFile(imagePath, Buffer.from("fixture image bytes"));
+  const imageHash = sha256(await fs.readFile(imagePath));
+  const promptPlan = { prompts: [{ image_id: "cut_001", image_generation_required: true }] };
+  const imagegenReport = { results: [{ image_id: "cut_001", image_path: imagePath }] };
+  const promptPlanPath = path.join(tempDir, "prompts.json");
+  const imagegenReportPath = path.join(tempDir, "imagegen.json");
+  await writeJson(promptPlanPath, promptPlan);
+  await writeJson(imagegenReportPath, imagegenReport);
+  const identity = { image_output_qa_required: true };
+  const imageOutputQa = {
+    status: "passed",
+    prompt_plan_sha256: sha256(await fs.readFile(promptPlanPath)),
+    imagegen_report_sha256: sha256(await fs.readFile(imagegenReportPath)),
+    accepted_image_hashes: { cut_001: imageHash },
+  };
+  const ledger = { cuts: [{ image_id: "cut_001", image_sha256: imageHash, image_qa_status: "passed_manual_risk" }] };
+  const options = { promptPlanPath, imagegenReportPath };
+  const result = await assertRenderImageIntegrityForTests(promptPlan, imagegenReport, identity, imageOutputQa, ledger, options);
+  assert.equal(result.checked_image_count, 1);
+  await fs.writeFile(imagePath, Buffer.from("changed after review"));
+  await assert.rejects(
+    () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, identity, imageOutputQa, ledger, options),
+    /changed after output QA/i,
+  );
+}
+
+async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  await execFileAsync(process.execPath, [
+    "scripts/run-preflight.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--title", "Fixture",
+    "--image-provider", "modelslab",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const identity = await readJson(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"));
+  assert.equal(identity.qwen_native_speed, 1.25);
+  assert.equal(identity.voice_provider_options.pace_strategy, "provider_native_speed_no_post_tempo");
+  assert.equal(identity.production_gates.post_tempo_normalization_default, false);
+  assert.equal(identity.render_profile, "smooth_fast_ken_burns");
+  assert.equal(identity.image_output_qa_required, true);
+}
+
+async function testPostTempoRequiresEmergencyApproval() {
+  let error = null;
+  try {
+    await execFileAsync(process.execPath, ["scripts/narration-tempo-normalize.mjs"], { cwd: process.cwd() });
+  } catch (caught) {
+    error = caught;
+  }
+  assert.notEqual(error, null);
+  assert.match(String(error.stderr ?? error.message), /emergency-only/i);
 }
 
 function testLocationSceneIdsDerivation() {
@@ -181,6 +443,109 @@ function testLocationSceneIdsDerivation() {
   const boardroom = targets.find((target) => target.ref_id === "loc_boardroom");
   assert.deepEqual(new Set(apartment.scene_ids), new Set(["scene_999", "scene_001", "scene_005"]));
   assert.deepEqual(new Set(boardroom.scene_ids), new Set(["scene_003"]));
+}
+
+function testReferenceDirectorV2EvidenceAndLocationContracts() {
+  const semanticPlan = {
+    status: "passed",
+    source_script_hash: "fixture_hash",
+    scenes: [{
+      scene_id: "scene_010",
+      location: "marble tribunal hall",
+      ref_requirements: [{
+        ref_id: "tribunal_hall_contract",
+        kind: "location",
+        reason: "mandatory scoped location coverage derived from semantic requirements",
+      }],
+    }],
+  };
+  const evidence = referenceEvidenceLedgerForTests(semanticPlan);
+  const locationAsset = evidence.assets.find((asset) => asset.kind === "location" && asset.semantic_ref_ids.includes("tribunal_hall_contract"));
+  assert.equal(locationAsset.subject, "marble tribunal hall");
+  assert.equal(Object.hasOwn(locationAsset, "generation_mode"), false);
+
+  const contracts = referenceLocationContractLedgerForTests(semanticPlan);
+  assert.equal(contracts.status, "passed");
+  assert.equal(contracts.contracts.length, 1);
+  assert.equal(contracts.contracts[0].description, "marble tribunal hall");
+  assert.equal(Object.hasOwn(contracts.contracts[0], "generation_mode"), false);
+
+  const scoped = referenceLocationScopeForTests([{
+    ref_id: "tribunal_clean_plate",
+    kind: "location",
+    scene_ids: [],
+    location_contract_ids: ["tribunal_hall_contract"],
+  }], contracts);
+  assert.deepEqual(scoped.targets[0].scene_ids, ["scene_010"]);
+  assert.equal(scoped.findings.length, 0);
+}
+
+function testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts() {
+  const baseOptions = {
+    llmTargetIds: new Set(["joey_identity_ref", "hall_ref"]),
+    knownSceneIds: new Set(["scene_001"]),
+  };
+  const findings = referenceDirectorSelectionFindingsForTests([
+    {
+      ref_id: "joey_identity_ref",
+      kind: "character_state",
+      scene_ids: ["scene_001"],
+      generation_mode: "standalone_ref",
+      canonical_subject_id: "joey",
+      evidence_asset_ids: ["character_state_joey"],
+      clean_plate_contract: "single-character plain-background identity card",
+    },
+    {
+      ref_id: "hall_ref",
+      kind: "location",
+      scene_ids: ["scene_001"],
+      generation_mode: "derive_from_best_cut",
+      canonical_subject_id: "hall",
+      evidence_asset_ids: ["location_hall"],
+      clean_plate_contract: "environment-only plate",
+    },
+    {
+      ref_id: "deterministically_restored_prop",
+      kind: "prop",
+      scene_ids: ["scene_001"],
+      generation_mode: "standalone_ref",
+      canonical_subject_id: "restored_prop",
+      evidence_asset_ids: ["prop_restored"],
+      clean_plate_contract: "clean prop plate",
+    },
+    {
+      ref_id: "operator_source_face",
+      kind: "character_state",
+      scene_ids: ["scene_001"],
+      generation_mode: "source_only",
+    },
+  ], baseOptions);
+  assert.equal(findings.some((finding) => finding.code === "director_selected_non_clean_reference_mode" && finding.ref_id === "hall_ref"), true);
+  assert.equal(findings.some((finding) => finding.code === "post_llm_reference_target_expansion" && finding.ref_id === "deterministically_restored_prop"), true);
+  assert.equal(findings.some((finding) => finding.code === "post_llm_reference_target_expansion" && finding.ref_id === "operator_source_face"), false);
+}
+
+function testSelectedReferenceInventoryContainsOnlyDirectorSelections() {
+  const inventory = selectedReferenceInventoryForTests([
+    { ref_id: "joey_ref", kind: "character_state", generation_mode: "standalone_ref", scene_ids: ["scene_001"] },
+    { ref_id: "source_face", kind: "character_state", generation_mode: "source_only", scene_ids: ["scene_001"] },
+  ]);
+  assert.equal(inventory.schema, "goldflow_reference_inventory_ledger_v2");
+  assert.deepEqual(inventory.assets.map((asset) => asset.ref_id), ["joey_ref", "source_face"]);
+}
+
+function testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates() {
+  const findings = referenceCharacterStateFindingsForTests([
+    { state_ref_id: "joey_state", character: "Joey", source_ref_id: "joey_ref" },
+    { state_ref_id: "dangling_state", character: "Mira", source_ref_id: "missing_mira_ref" },
+    { state_ref_id: "guild_masters_state", character: "guild masters", source_ref_id: "guild_uniform_ref" },
+  ], [
+    { ref_id: "joey_ref", kind: "character_state" },
+    { ref_id: "guild_uniform_ref", kind: "prop" },
+  ]);
+  assert.equal(findings.some((finding) => finding.code === "character_state_ref_missing_selected_source" && finding.state_ref_id === "dangling_state"), true);
+  assert.equal(findings.some((finding) => finding.code === "generic_group_character_state_ref" && finding.state_ref_id === "guild_masters_state"), true);
+  assert.equal(findings.some((finding) => finding.state_ref_id === "joey_state"), false);
 }
 
 function testLocationCandidateExclusion() {
@@ -292,6 +657,7 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
     if (scene.scene_id === "scene_004") scene.visible_subjects.push("restrained authority figure");
     scene.props = ["critical recurring poison ring", "one-scene signed receipt"];
     scene.ui_text_on_screen = ["signature system quest UI"];
+    if (scene.scene_id === "scene_002") scene.ui_text_on_screen.push("Unauthorized data leak");
   }
   await writeJson(path.join(episodeDir, "run_identity.json"), {
     channel: "test",
@@ -324,7 +690,9 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
         visible_characters: scene.visible_subjects,
         local_location: scene.location,
         local_props: scene.scene_id === "scene_002" ? ["one-scene signed receipt", "critical recurring poison ring"] : ["critical recurring poison ring"],
-        local_ui_elements: ["signature system quest UI"],
+        local_ui_elements: scene.scene_id === "scene_002"
+          ? ["signature system quest UI", "Unauthorized data leak"]
+          : ["signature system quest UI"],
         ref_needs: [],
       }));
     }),
@@ -347,6 +715,7 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
       { ref_id: "key_hall_ref", kind: "location", subject: "key recurring throne hall", scene_ids: ["scene_005", "scene_006", "scene_007"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_key_anchor_ref", kind: "location", subject: "late director-selected battle bridge", scene_ids: ["scene_008", "scene_009"], director_role: "key_location_anchor", generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "opening_system_ui_ref", kind: "ui", subject: "signature system quest UI", scene_ids: ["scene_001", "scene_002", "scene_003", "scene_004"], appearance_count: 4, generation_mode: "standalone_ref", required_before_imagegen: true },
+      { ref_id: "unauthorized_data_leak_ref", kind: "ui", subject: "Unauthorized data leak", scene_ids: ["scene_002"], generation_mode: "no_ref_needed", required_before_imagegen: false },
       { ref_id: "late_ui_ref", kind: "ui", subject: "one-scene hallway notice UI", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "late_prop_ref", kind: "prop", subject: "one-scene signed receipt", scene_ids: ["scene_002"], generation_mode: "standalone_ref", required_before_imagegen: true },
       { ref_id: "critical_prop_ref", kind: "prop", subject: "critical recurring poison ring", scene_ids: ["scene_002", "scene_003", "scene_004", "scene_005"], priority: "high", generation_mode: "standalone_ref", required_before_imagegen: true },
@@ -372,16 +741,18 @@ async function testCandidateReferenceBudgetDowngradesScopedOneOffRefs() {
   assert.equal(byId.has("char_joey"), false);
   assert.equal(byId.has("char_victor"), false);
   assert.equal(byId.has("restrained_authority_ref"), false);
-  assert.equal(byId.get("opening_room_ref").required_before_imagegen, true);
+  assert.equal(byId.get("opening_room_ref").required_before_imagegen, false);
+  assert.equal(byId.get("opening_room_ref").generation_mode, "derive_from_first_clean_wide_cut");
   assert.equal(byId.has("late_room_ref"), false);
   assert.equal(byId.has("late_ui_ref"), false);
   assert.equal(byId.has("late_prop_ref"), false);
   assert.equal(byId.get("minor_lobby_ref").generation_mode, "derive_from_first_clean_wide_cut");
   assert.equal(byId.get("key_hall_ref").required_before_imagegen, true);
-  assert.equal(byId.get("late_key_anchor_ref").required_before_imagegen, true);
-  assert.equal(byId.get("late_key_anchor_ref").generation_mode, "standalone_ref");
-  assert.equal(byId.get("late_key_anchor_ref").reference_budget.decision, "generate");
+  assert.equal(byId.get("late_key_anchor_ref").required_before_imagegen, false);
+  assert.match(byId.get("late_key_anchor_ref").generation_mode, /^derive_from_/);
+  assert.equal(byId.get("late_key_anchor_ref").reference_budget.decision, "text_only");
   assert.equal(byId.get("opening_system_ui_ref").required_before_imagegen, true);
+  assert.equal(byId.get("unauthorized_data_leak_ref").required_before_imagegen, true);
   assert.equal(byId.get("critical_prop_ref").required_before_imagegen, true);
   assert.equal(report.reference_targets.some((target) => target.generation_mode === "no_ref_needed"), false);
   const stateRefs = JSON.parse(await fs.readFile(path.join(episodeDir, "character_state_refs.json"), "utf8"));
@@ -536,7 +907,7 @@ async function testReferenceDirectorInventoryPreventsCollectorBloat() {
   assert.equal(byId.has("one_off_chamber_3_ref"), false);
   assert.equal(byId.has("one_off_relic_1_ref"), false);
   assert.equal(byId.get("poison_ring_ref").required_before_imagegen, true);
-  assert.equal(byId.get("system_ledger_ui_ref").required_before_imagegen, false);
+  assert.equal(byId.get("system_ledger_ui_ref").required_before_imagegen, true);
   assert.equal(report.reference_targets.some((target) => target.generation_mode === "no_ref_needed"), false);
   assert.deepEqual(stateRefs.character_state_refs.map((ref) => ref.state_ref_id), ["joey_base_state", "joey_plain_duplicate_state", "captain_harlan_voss_court_restrained_state"]);
   assert.equal(stateRefs.character_state_refs.find((ref) => ref.state_ref_id === "joey_plain_duplicate_state").source_ref_id, "joey_manhwa_base_identity_ref");
@@ -641,6 +1012,76 @@ function testProviderAwarePromptSelection() {
   assert.equal(promptTextForImageProvider({ ...prompt, codex_image_prompt: "" }, "codex_imagegen"), "generic production prompt");
 }
 
+function testGptImage2PreservesFullPromptAndUsesLandscapeDefault() {
+  const prompt = [
+    "Anime/manhwa fantasy frame.",
+    "Joey Manhwa strains beneath a shattered carriage wheel while Arielle Seorin, an adult silver-haired noble student, remains pinned under the axle.",
+    "Preserve Joey's dark academy uniform, Arielle's moon earrings, and the exact physical rescue staging.",
+  ].join(" ").repeat(8);
+  const prepared = prepareGptImage2PromptForTests(prompt);
+  assert.equal(prepared.prompt, prompt);
+  assert.equal(prepared.compacted, false);
+  assert.equal(prepared.original_length, prompt.length);
+  assert.equal(prepared.submitted_length, prompt.length);
+  const [width, height] = gptImage2OutputSizeForTests().split("x").map(Number);
+  assert.equal(width > height, true, "GPT Image 2 production request must default to native landscape");
+}
+
+function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
+  const broken = scenePromptProductionContractFindingsForTests([{
+    image_id: "ep_01-cut-044",
+    modelslab_image_prompt: "Joey runs toward the carriage.",
+    reference_requirements: [{
+      ref_id: "char_arielle_ref",
+      kind: "character_state",
+      required: true,
+      reference_image_path: "/tmp/arielle.png",
+    }],
+    reference_slots: [],
+    shot_manifest: { shot_job: "physical_action", foreground_action: "" },
+  }], { maxSceneReferences: 0 });
+  assert.equal(broken.some((finding) => finding.code === "required_scene_references_disabled"), true);
+  assert.equal(broken.some((finding) => finding.code === "required_reference_slot_missing"), true);
+  assert.equal(broken.some((finding) => finding.code === "scene_prompt_style_contract_missing"), true);
+  assert.equal(broken.some((finding) => finding.code === "physical_action_contract_missing"), true);
+
+  const passed = scenePromptProductionContractFindingsForTests([{
+    image_id: "ep_01-cut-044",
+    modelslab_image_prompt: "Anime/manhwa frame. Joey runs toward the carriage while silver-haired Arielle remains pinned under the axle.",
+    reference_requirements: [{
+      ref_id: "char_arielle_ref",
+      kind: "character_state",
+      required: true,
+      reference_image_path: "/tmp/arielle.png",
+    }],
+    reference_slots: [{ slot: 1, ref_id: "char_arielle_ref", kind: "character_state", path: "/tmp/arielle.png" }],
+    shot_manifest: { shot_job: "physical_action", foreground_action: "Joey runs toward pinned Arielle" },
+  }], { maxSceneReferences: 4 });
+  assert.deepEqual(passed, []);
+}
+
+function testGroupReferencePromptDoesNotDemandOnePerson() {
+  const prompt = referencePromptForTests({
+    ref_id: "senior_squad_ref",
+    kind: "character_state",
+    subject: "senior squad faction group",
+    prompt_anchor: "four distinct academy seniors in one shared armor design",
+  });
+  assert.match(prompt, /three to five clearly distinct visible people/i);
+  assert.doesNotMatch(prompt, /exactly one visible person/i);
+}
+
+function testConciseReferenceRoleContract() {
+  const instruction = referenceSlotInstructionForTests([
+    { slot: 1, ref_id: "char_joey_ref", kind: "character_state", purpose: "Joey identity" },
+    { slot: 2, ref_id: "char_arielle_ref", kind: "character_state", purpose: "Arielle identity" },
+  ], {}, { concise: true });
+  assert.match(instruction, /Reference mapping/i);
+  assert.match(instruction, /Image 1/i);
+  assert.match(instruction, /Image 2/i);
+  assert.doesNotMatch(instruction, /reference sheet/i);
+}
+
 function testLocalBeatFidelityEditorialCases() {
   const allowedFindings = localBeatFidelityFindingsForTests([
     {
@@ -680,6 +1121,23 @@ function testLocalBeatFidelityEditorialCases() {
     },
   ]);
   assert.deepEqual(allowedFindings, []);
+
+  const hyphenatedNameFindings = localBeatFidelityFindingsForTests([
+    {
+      image_id: "ep_01-cut-hyphenated",
+      image_prompt: "Joey Manhwa works beside Do-yun in a document-filled office while Mira watches from the doorway.",
+      shot_manifest: {
+        visible_characters: ["Joey Manhwa", "Do-yun", "Mira"],
+      },
+    },
+  ], [
+    {
+      primary_subject: "Joey Manhwa",
+      visible_subjects: ["Joey Manhwa", "Do-yun", "Mira"],
+      visual_beat_script_excerpt: "Do-yun placed the folder beside Joey while Mira watched from the doorway.",
+    },
+  ]);
+  assert.deepEqual(hyphenatedNameFindings, []);
 
   const blockedFindings = localBeatFidelityFindingsForTests([
     {
@@ -740,6 +1198,20 @@ function testHybridImageProviderRouting() {
     start_sec: 121,
     shot_manifest: { visible_characters: ["Joey", "Mira"], character_state_ref_ids: ["joey_ref", "mira_ref"] },
   }, "hybrid_codex_opening_modelslab_rest", { codexOpeningSec: 120 }), "modelslab");
+  assert.equal(normalizeImageProvider("codex refs first10 risky modelslab rest"), "hybrid_codex_refs_opening_risky_modelslab_rest");
+  assert.equal(routedProviderForReference("hybrid_codex_refs_opening_risky_modelslab_rest", { kind: "character_state", ref_id: "joey_ref" }), "codex_imagegen");
+  assert.equal(routedProviderForPrompt({
+    start_sec: 599.9,
+    shot_manifest: { visible_characters: ["Joey"], character_state_ref_ids: ["joey_ref"] },
+  }, "hybrid_codex_refs_opening_risky_modelslab_rest", { codexOpeningSec: 600 }), "codex_imagegen");
+  assert.equal(routedProviderForPrompt({
+    start_sec: 601,
+    shot_manifest: { visible_characters: ["Joey", "Mira"], character_state_ref_ids: ["joey_ref", "mira_ref"] },
+  }, "hybrid_codex_refs_opening_risky_modelslab_rest", { codexOpeningSec: 600 }), "codex_imagegen");
+  assert.equal(routedProviderForPrompt({
+    start_sec: 601,
+    shot_manifest: { visible_characters: ["Joey"], character_state_ref_ids: ["joey_ref"] },
+  }, "hybrid_codex_refs_opening_risky_modelslab_rest", { codexOpeningSec: 600 }), "modelslab");
   assert.equal(normalizeImageProvider("modelslab refs codex first 5 modelslab rest"), "hybrid_modelslab_refs_codex_opening_modelslab_rest");
   assert.equal(routedProviderForReference("hybrid_modelslab_refs_codex_opening_modelslab_rest", { kind: "character_state", ref_id: "joey_ref" }), "modelslab");
   assert.equal(routedProviderForReference("hybrid_modelslab_refs_codex_opening_modelslab_rest", { kind: "location", ref_id: "loc_stage" }), "modelslab");
@@ -814,6 +1286,33 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   assert.match(imageStage.next_command_shape, /imagegen import-staged-codex/);
   assert.match(imageStage.next_command_shape, /--codex-opening-sec 600/);
 
+  const combinedDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const combinedEpisodeDir = path.join(combinedDataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await execFileAsync(process.execPath, [
+    "scripts/run-preflight.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--image-provider", "hybrid_codex_refs_opening_risky_modelslab_rest",
+    "--codex-opening-sec", "600",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: combinedDataRoot } });
+  const combinedIdentity = JSON.parse(await fs.readFile(path.join(combinedEpisodeDir, "run_identity.json"), "utf8"));
+  assert.equal(combinedIdentity.image_provider, "hybrid_codex_refs_opening_risky_modelslab_rest");
+  assert.equal(combinedIdentity.image_provider_options.codex_opening_sec, 600);
+  const combinedStatusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", combinedEpisodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: combinedDataRoot } });
+  const combinedStatus = JSON.parse(combinedStatusResult.stdout);
+  const combinedReferenceStage = combinedStatus.stage_ledger.find((row) => row.stage === "reference_generation");
+  const combinedImageStage = combinedStatus.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.match(combinedReferenceStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(combinedReferenceStage.next_command_shape, /--references-only true/);
+  assert.match(combinedImageStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(combinedImageStage.next_command_shape, /--codex-opening-sec 600/);
+  assert.match(combinedImageStage.next_command_shape, /--provider-filter modelslab/);
+
   const mixedRefsDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const mixedRefsEpisodeDir = path.join(mixedRefsDataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   await execFileAsync(process.execPath, [
@@ -878,23 +1377,43 @@ async function testVisualPlannerDriftContracts() {
   assert.match(files["scripts/visual-reference-plan.mjs"], /source_only/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /applySourceFaceAnchors/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /Do not rely on text-only "inspired by" likeness prompts/i);
-  assert.match(files["scripts/visual-reference-plan.mjs"], /Semantic scene ref_requirements with kind "location" are binding target IDs/i);
-  assert.match(files["scripts/visual-reference-plan.mjs"], /Preserve exact semantic location ref_ids during merge/i);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /A location contract is not an image reference/i);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /sole episode-level reference director/i);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /never restores an asset you omit/i);
+  assert.doesNotMatch(files["scripts/visual-reference-plan.mjs"], /function applyReferenceBudgetProfile\b/);
+  assert.doesNotMatch(files["scripts/visual-reference-plan.mjs"], /function ensureRequiredDirectorAssets\b/);
+  assert.doesNotMatch(files["scripts/visual-reference-plan.mjs"], /termination papers|unauthorized data leak|proposal owner changed/i);
+  assert.match(files["scripts/visual-plan.mjs"], /location_contract_id/i);
+  assert.match(files["scripts/visual-prompt-review.mjs"], /location_contract_id/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /style refs dropped for this run; use style bible\/text guidance only/i);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /Keep narrative state separate from visible state/i);
+  assert.match(files["scripts/visual-reference-plan.mjs"], /abstract_status_as_physical_anchor_risk/i);
+  assert.match(files["AGENTS.md"], /Narrative states such as financially ruined, betrayed, humiliated, indebted, rejected, or emotionally broken are not physical costume\/body damage by default/i);
+  assert.match(files["docs/workflows/video_production_workflow.md"], /Separate narrative\/status state from visible character state/i);
+  assert.match(files["AGENTS.md"], /ANIFACTORY_IMAGE_MODEL=gpt-image-2-t2i/i);
+  assert.match(files["docs/workflows/video_production_workflow.md"], /GPT Image 2 through ModelsLab is an explicit premium\/spend-forward variant/i);
+  const modelslabImageHelper = await fs.readFile("scripts/modelslab-image-helper.mjs", "utf8");
+  assert.match(modelslabImageHelper, /gpt-image-2-i2i/i);
+  assert.equal(modelslabImageHelper.includes("/api/v7/images/image-to-image"), true);
+  assert.match(modelslabImageHelper, /ANIFACTORY_MODELSLAB_GPT_IMAGE2_SIZE/i);
 
   for (const file of ["scripts/visual-plan.mjs", "scripts/visual-prompt-review.mjs"]) {
-    assert.match(files[file], /polished 2D anime\/manhwa illustration style/i);
-    assert.match(files[file], /clean line art, cel-shaded characters, cinematic webtoon\/manhwa lighting/i);
+    assert.match(files[file], /16:9 landscape anime\/manhwa frame/i);
+    assert.match(files[file], /without (?:adding )?boilerplate/i);
     assert.match(files[file], /Do not impose a universal wide\/full-frame\/medium-wide default/i);
     assert.match(files[file], /Resolve role\/title aliases to canonical named characters/i);
   }
 
-  assert.match(files["scripts/imagegen.mjs"], /Preserve the shot scale, subject count, background population, and composition requested by the prompt/i);
+  assert.match(files["scripts/imagegen.mjs"], /Reference usage:/i);
+  assert.equal(/Reference image role contract for FLUX multi-image generation/i.test(files["scripts/imagegen.mjs"]), false);
+  assert.equal(/Preserve the shot scale, subject count, background population, and composition requested by the prompt/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/Wide 16:9 landscape YouTube frame/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/full-frame composition, keep complete heads/i.test(files["scripts/imagegen.mjs"]), false);
   assert.match(files["scripts/codex-image-manual-import.mjs"], /promptTextForImageProvider\(prompt, "codex_imagegen"\)/);
   assert.match(files["bin/goldflow.mjs"], /if \(key === "visual approve-refs"\) return "reference_generation"/);
-  assert.match(files["bin/goldflow.mjs"], /imagegen import-staged-codex"\) return isTrue\(parsedFlags\["references-only"\]\) \? "reference_generation" : "image_generation"/);
+  assert.match(files["bin/goldflow.mjs"], /key === "imagegen import-staged-codex"/);
+  assert.match(files["bin/goldflow.mjs"], /parsedFlags\["references-only"\].*return "reference_generation"/s);
+  assert.match(files["bin/goldflow.mjs"], /parsedFlags\["qa-recovery"\].*return "image_output_qa"/s);
 
   for (const file of ["AGENTS.md", "docs/workflows/video_production_workflow.md"]) {
     assert.match(files[file], /Real named public creators, streamers, celebrities, or influencers/i);
@@ -905,19 +1424,19 @@ async function testVisualPlannerDriftContracts() {
   }
 }
 
-function testPositivePromptSanitizerDoesNotInvertNegation() {
-  const textless = sanitizePositiveVisualPrompt("clean UI panel, no readable text, no text");
+function testPromptPayloadMarkerSanitizerPreservesNormalNegation() {
+  const textless = stripEmbeddedProviderExclusionPayloadSyntax("clean UI panel, no readable text, no text");
   assert.equal(/clean readable text/i.test(textless), false);
   assert.match(textless, /no readable text/i);
   assert.match(textless, /no text/i);
 
-  const alone = sanitizePositiveVisualPrompt("one man alone without a crowd");
+  const alone = stripEmbeddedProviderExclusionPayloadSyntax("one man alone without a crowd");
   assert.equal(/with a crowd/i.test(alone), false);
   assert.match(alone, /without a crowd/i);
 
-  assert.equal(sanitizePositiveVisualPrompt("no second character"), "no second character");
-  assert.match(sanitizePositiveVisualPrompt("no duplicate hero, no clone"), /no duplicate hero, no clone/i);
-  assert.equal(sanitizePositiveVisualPrompt("Negative prompt: photorealistic --no text"), "photorealistic text");
+  assert.equal(stripEmbeddedProviderExclusionPayloadSyntax("no second character"), "no second character");
+  assert.match(stripEmbeddedProviderExclusionPayloadSyntax("no duplicate hero, no clone"), /no duplicate hero, no clone/i);
+  assert.equal(stripEmbeddedProviderExclusionPayloadSyntax("Negative prompt: photorealistic --no text"), "photorealistic text");
 }
 
 function testNamedCharacterDuplicationAllowsReflections() {
@@ -966,6 +1485,30 @@ function testVoiceDirectionCharacterization() {
   const clean = voiceDirectionTransformForTests("The elevator doors opened with a soft chime.");
   assert.equal(clean.clean_narration_attribution, "The elevator doors opened with a soft chime.");
   assert.equal(clean.qwen_spoken_text, "The elevator doors opened with a soft chime.");
+
+  const systemStack = voiceDirectionTransformForTests([
+    "[Hidden skill awakened.]",
+    "",
+    "[Skill name: Chapter Zero.]",
+    "",
+    "[Rank: Sealed.]",
+    "",
+    "[Effect: Allows user to review a survived scene and identify one hidden cause-and-effect link.]",
+  ].join("\n\n"));
+  assert.deepEqual(systemStack.paragraph_units.map((unit) => ({
+    kind: unit.kind,
+    speaker: unit.speaker,
+    text: unit.text,
+    caption_text: unit.caption_text,
+  })), [
+    { kind: "system_ui", speaker: "SYSTEM", text: "Hidden skill awakened.", caption_text: "[Hidden skill awakened.]" },
+    { kind: "system_ui", speaker: "SYSTEM", text: "Skill name: Chapter Zero.", caption_text: "[Skill name: Chapter Zero.]" },
+    { kind: "system_ui", speaker: "SYSTEM", text: "Rank: Sealed.", caption_text: "[Rank: Sealed.]" },
+    { kind: "system_ui", speaker: "SYSTEM", text: "Effect: Allows user to review a survived scene and identify one hidden cause-and-effect link.", caption_text: "[Effect: Allows user to review a survived scene and identify one hidden cause-and-effect link.]" },
+  ]);
+
+  const nonSpokenDirection = voiceDirectionTransformForTests("[SFX: cold system ping]");
+  assert.deepEqual(nonSpokenDirection.paragraph_units.map((unit) => unit.kind), ["sound_design"]);
 }
 
 function testQwenPlanAuditsAppliedTtsOverrides() {
@@ -991,6 +1534,29 @@ function testQwenPlanAuditsAppliedTtsOverrides() {
   assert.deepEqual(plan.segments[0].qwen_generation_units[0].tts_override_replacements_applied.map((row) => row.from), ["live content"]);
 }
 
+function testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets() {
+  const plan = qwenGenerationPlanForTests([{
+    segment_id: "seg_system",
+    performance_units: voiceDirectionTransformForTests([
+      "[Hidden skill awakened.]",
+      "",
+      "[Skill name: Chapter Zero.]",
+    ].join("\n\n")).paragraph_units,
+  }]);
+  const units = plan.segments[0].qwen_generation_units;
+  assert.equal(plan.system_ui_unit_count, 2);
+  assert.deepEqual(units.map((unit) => unit.qwen_spoken_text), [
+    "Hidden skill awakened.",
+    "Skill name: Chapter Zero.",
+  ]);
+  assert.deepEqual(units.map((unit) => unit.caption_text), [
+    "[Hidden skill awakened.]",
+    "[Skill name: Chapter Zero.]",
+  ]);
+  assert.ok(units.every((unit) => unit.source_speaker === "SYSTEM"));
+  assert.ok(units.every((unit) => /precise interface cadence/i.test(unit.qwen_instruct)));
+}
+
 async function testNarrationPaceChecks() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -1005,7 +1571,7 @@ async function testNarrationPaceChecks() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const scriptReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
   assert.equal(scriptReport.status, "passed");
-  assert.equal(scriptReport.target_wpm_min, 210);
+  assert.equal(scriptReport.target_wpm_min, 195);
   assert.equal(scriptReport.target_wpm_max, 220);
   assert.equal(scriptReport.script_word_count, 7);
   assert.equal(scriptReport.source_hashes[path.join(episodeDir, "script_clean.md")], scriptReport.source_script_hash);
@@ -1065,35 +1631,60 @@ async function testNarrationPaceChecks() {
   assert.match(blocked?.stdout ?? "", /"status": "blocked"/);
 }
 
-async function testScriptPaceBlocksLateHookMilestones() {
+async function testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   const filler = Array.from({ length: 130 }, (_, index) => `filler${index + 1}`).join(" ");
   const scriptText = `${filler} system activated. first quest complete. report to analytics hall.`;
   await fs.mkdir(episodeDir, { recursive: true });
   await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await execFileAsync(process.execPath, [
+    "scripts/narration-pace-check.mjs",
+    "--mode", "script",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
+  assert.equal(report.status, "passed");
+  assert.equal(report.hook_gate_enforced, false);
+  assert.equal(report.diagnostic_hook_status, "not_configured");
+  assert.equal(report.hook_milestone_report.configured, false);
+  assert.deepEqual(report.hook_milestone_report.warnings, []);
+
+  const hookMilestonesPath = path.join(episodeDir, "hook_milestones.json");
+  await writeJson(hookMilestonesPath, {
+    milestones: [{
+      code: "configured_promise",
+      label: "configured promise",
+      patterns: ["configured promise"],
+      target_sec: 30,
+      reason: "Fixture-only configured hook promise is late.",
+    }],
+  });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), `${filler} configured promise.`, "utf8");
   let blocked = null;
   try {
     await execFileAsync(process.execPath, [
       "scripts/narration-pace-check.mjs",
       "--mode", "script",
       "--episode-dir", episodeDir,
+      "--hook-milestones", hookMilestonesPath,
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   } catch (error) {
     blocked = error;
   }
   assert.equal(blocked?.code, 1);
-  const report = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
-  assert.equal(report.status, "blocked");
-  assert.equal(report.hook_gate_enforced, true);
-  assert.equal(report.diagnostic_hook_status, "blocked");
-  assert.equal(report.hook_milestone_report.warnings.some((warning) => warning.code === "late_hidden_power_spark"), true);
-  assert.match(report.blocker, /Script hook timing/);
+  const configuredReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
+  assert.equal(configuredReport.status, "blocked");
+  assert.equal(configuredReport.hook_gate_enforced, true);
+  assert.equal(configuredReport.diagnostic_hook_status, "blocked");
+  assert.equal(configuredReport.hook_milestone_report.configured, true);
+  assert.equal(configuredReport.hook_milestone_report.warnings.some((warning) => warning.code === "late_configured_promise"), true);
 
   await execFileAsync(process.execPath, [
     "scripts/narration-pace-check.mjs",
     "--mode", "script",
     "--episode-dir", episodeDir,
+    "--hook-milestones", hookMilestonesPath,
     "--pace-policy", "diagnostic",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const diagnosticReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
@@ -2046,7 +2637,7 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash, replacements: [] });
   await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
@@ -2066,7 +2657,7 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
   await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), {
     status: "passed",
     source_script_hash: scriptHash,
-    target_wpm_min: 210,
+    target_wpm_min: 195,
     target_wpm_max: 220,
     actual_wpm: 215,
   });
@@ -2105,6 +2696,17 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
     { image_id: "ep_01-cut-002", scene_id: "scene_002", visual_beat_id: "beat_002", modelslab_image_prompt: "fixture prompt two", image_prompt: "fixture prompt two" },
   ];
   await writeJson(path.join(episodeDir, "section_image_prompts.json"), { status: "passed", source_script_hash: scriptHash, prompts });
+
+  const { stdout: initialStdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const initialStatus = JSON.parse(initialStdout);
+  assert.equal(initialStatus.current_stage, "visual_prompt_plan_review_harden");
+  assert.match(initialStatus.next_command_shape, /visual harden/);
+  assert.match(initialStatus.next_command_shape, /section_image_prompts\.json/);
+  assert.doesNotMatch(initialStatus.next_command_shape, /visual review/);
+
   await writeJson(path.join(episodeDir, "section_image_prompts_reviewed.json"), { status: "blocked", source_script_hash: scriptHash, prompts });
   await writeJson(path.join(episodeDir, "visual_prompt_review_ep_01.json"), {
     status: "blocked",
@@ -2205,7 +2807,7 @@ function testPassedReviewClearsDeadletterPayload() {
   );
 }
 
-async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraCharacterStateRefs = [] }) {
+async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraInventoryAssets = [], extraCharacterStateRefs = [], manualTriage = null, includeDefaultLocationRef = true, includeDefaultCharacterRef = true, locationContracts = null, referenceDirectorContractVersion = null }) {
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   const hash = "fixture_hash";
   await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
@@ -2213,20 +2815,42 @@ async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = 
     source_script_hash: hash,
     scenes: [{ scene_id: "scene_001", start_sec: 0, duration_sec: 5, location: "apartment kitchen" }],
   });
+  const referenceTargets = [
+    ...(includeDefaultLocationRef ? [{ ref_id: "loc_apartment", kind: "location", subject: "apartment kitchen", scene_ids: ["scene_001"], reference_image_path: "/tmp/loc_apartment.png" }] : []),
+    ...(includeDefaultCharacterRef ? [{ ref_id: "char_joey_ref", kind: "character_state", subject: "Joey", scene_ids: ["scene_001"], reference_image_path: "/tmp/char_joey_ref.png" }] : []),
+    ...extraReferenceTargets,
+  ];
+  const referenceInventoryPath = await writeFixtureReferenceInventory(episodeDir, hash, [
+    ...referenceTargets.map((target) => ({
+      asset_id: target.ref_id,
+      ...target,
+      recommended_generation_mode: target.generation_mode ?? (target.reference_image_path ? "standalone_ref" : "no_ref_needed"),
+      recommended_required_before_imagegen: target.required_before_imagegen ?? Boolean(target.reference_image_path),
+    })),
+    ...extraInventoryAssets,
+  ]);
+  const locationContractPath = path.join(episodeDir, "location_contract_ledger.json");
+  if (locationContracts) {
+    await writeJson(locationContractPath, {
+      schema: "goldflow_location_contract_ledger_v1",
+      status: "passed",
+      source_script_hash: hash,
+      contracts: locationContracts,
+    });
+  }
   await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
     status: "passed",
     source_script_hash: hash,
-    reference_targets: [
-      { ref_id: "loc_apartment", kind: "location", subject: "apartment kitchen", scene_ids: ["scene_001"], reference_image_path: "/tmp/loc_apartment.png" },
-      { ref_id: "char_joey_ref", kind: "character_state", subject: "Joey", scene_ids: ["scene_001"], reference_image_path: "/tmp/char_joey_ref.png" },
-      ...extraReferenceTargets,
-    ],
+    reference_director_contract_version: referenceDirectorContractVersion,
+    location_contract_ledger_path: locationContracts ? locationContractPath : null,
+    reference_inventory_ledger_path: referenceInventoryPath,
+    reference_targets: referenceTargets,
   });
   await writeJson(path.join(episodeDir, "character_state_refs.json"), {
     status: "approved",
     source_script_hash: hash,
     character_state_refs: [
-      { state_ref_id: "char_joey_state", source_ref_id: "char_joey_ref", character: "Joey", scene_ids: ["scene_001"], reference_image_path: "/tmp/char_joey_ref.png" },
+      ...(includeDefaultCharacterRef ? [{ state_ref_id: "char_joey_state", source_ref_id: "char_joey_ref", character: "Joey", scene_ids: ["scene_001"], reference_image_path: "/tmp/char_joey_ref.png" }] : []),
       ...extraCharacterStateRefs,
     ],
   });
@@ -2245,12 +2869,16 @@ async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = 
       shot_manifest: {
         visible_characters: ["Joey"],
         character_state_ref_ids: ["char_joey_state"],
+        location_contract_id: null,
         location_ref_id: "loc_apartment",
         forbidden_ref_ids: [],
         ...shotManifest,
       },
     }],
   });
+  if (manualTriage) {
+    await writeJson(path.join(episodeDir, "visual_manual_blocker_triage_ep_01.json"), manualTriage);
+  }
   let error = null;
   try {
     await execFileAsync(process.execPath, [
@@ -2259,6 +2887,7 @@ async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = 
       "--series", "series",
       "--week", "run",
       "--episode", "ep_01",
+      "--prompts", path.join(episodeDir, "section_image_prompts_reviewed.json"),
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   } catch (caught) {
     error = caught;
@@ -2283,7 +2912,7 @@ async function testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite() 
   assert.equal(plan.status, "passed");
   assert.equal(plan.prompts[0].modelslab_image_prompt, promptText);
   assert.equal(plan.prompts[0].image_prompt, promptText);
-  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt"), false);
+  assert.equal(report.findings.some((finding) => finding.code === "provider_exclusion_payload"), false);
 }
 
 async function testVisualHardenStripsNonAttachableScopedRefs() {
@@ -2309,8 +2938,65 @@ async function testVisualHardenStripsNonAttachableScopedRefs() {
   });
   assert.equal(error, null);
   assert.equal(plan.status, "passed");
-  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_ref"]);
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_state"]);
   assert.equal(report.findings.some((finding) => finding.code === "non_attachable_reference_stripped" && finding.ref_id === "late_ui_ref"), true);
+}
+
+async function testVisualHardenRetainsPendingDerivedRequirementWithoutSlot() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Anime/manhwa frame. Joey studies the massive black mirror in the academy courtyard.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    extraReferenceTargets: [{
+      ref_id: "obsidian_mirror_ref",
+      kind: "prop",
+      subject: "Obsidian Mirror",
+      scene_ids: ["scene_001"],
+      generation_mode: "derive_from_best_cut",
+      required_before_imagegen: false,
+      prompt_anchor: "massive vertical black mirror with an oil-like surface",
+    }],
+    referenceRequirements: [
+      { ref_id: "loc_apartment", kind: "location", slot_order: 1 },
+      { ref_id: "char_joey_ref", kind: "character_state", slot_order: 2 },
+      { ref_id: "obsidian_mirror_ref", kind: "prop", slot_order: 3 },
+    ],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  const pending = plan.prompts[0].reference_requirements.find((requirement) => requirement.ref_id === "obsidian_mirror_ref");
+  assert.equal(pending.pending_derived_reference, true);
+  assert.equal(pending.reference_image_path, null);
+  assert.equal(plan.prompts[0].reference_slots.some((slot) => slot.ref_id === "obsidian_mirror_ref"), false);
+  assert.equal(report.findings.some((finding) => finding.code === "pending_derived_reference_retained"), true);
+}
+
+async function testVisualHardenAcceptsInventoryOnlyLocationContract() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText: "Anime/manhwa frame. Joey stands at a rain-dark academy evacuation fork divided between a forest path and a smoke-covered wall.",
+    includeDefaultLocationRef: false,
+    extraInventoryAssets: [{
+      asset_id: "academy_evacuation_fork",
+      ref_id: "academy_evacuation_fork",
+      kind: "location",
+      subject: "rain-dark academy evacuation fork",
+      scene_ids: ["scene_001"],
+      recommended_generation_mode: "no_ref_needed",
+      recommended_required_before_imagegen: false,
+    }],
+    shotManifest: {
+      visible_characters: [],
+      location_ref_id: "academy_evacuation_fork",
+      foreground_action: "empty fork under rain",
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => finding.code === "unknown_manifest_location_ref"), false);
+  assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_text_only"), true);
 }
 
 async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs() {
@@ -2328,9 +3014,11 @@ async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs()
   assert.equal(plan.status, "passed");
   assert.equal(plan.prompts[0].modelslab_image_prompt, promptText);
   assert.equal(plan.prompts[0].image_prompt, promptText);
-  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_ref"]);
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_state"]);
   assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.slot_order), [1, 2]);
-  assert.equal(report.findings.some((finding) => finding.code === "negative_prompt"), false);
+  assert.deepEqual(plan.prompts[0].reference_slots.map((slot) => slot.ref_id), ["loc_apartment", "char_joey_state"]);
+  assert.deepEqual(plan.prompts[0].required_reference_paths, plan.prompts[0].reference_slots.map((slot) => slot.path));
+  assert.equal(report.findings.some((finding) => finding.code === "provider_exclusion_payload"), false);
 }
 
 async function testVisualHardenCanonicalizesStateRefRequirements() {
@@ -2346,8 +3034,177 @@ async function testVisualHardenCanonicalizesStateRefRequirements() {
   });
   assert.equal(error, null);
   assert.equal(plan.status, "passed");
-  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_ref"]);
-  assert.equal(plan.prompts[0].shot_manifest.character_state_ref_ids[0], "char_joey_ref");
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_state"]);
+  assert.equal(plan.prompts[0].shot_manifest.character_state_ref_ids[0], "char_joey_state");
+  assert.equal(report.findings.some((finding) => finding.code === "unknown_reference_id"), false);
+}
+
+async function testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey stands at the apartment desk holding a red ledger stamp while the room watches.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
+    shotManifest: {
+      visible_characters: ["Joey"],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+    },
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "visible_character_ref_not_attached"
+    && finding.character === "Joey"
+    && finding.available_ref_ids.includes("char_joey_ref")
+  )), true);
+}
+
+async function testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey swings the red paddle across a mahogany desk in the contract-sky office chamber.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [{
+      ref_id: "char_joey_ref",
+      kind: "character_state",
+      subject: "Joey",
+      scene_ids: ["scene_002"],
+      reference_image_path: "/tmp/char_joey_ref.png",
+    }],
+    extraCharacterStateRefs: [{
+      state_ref_id: "char_joey_state",
+      source_ref_id: "char_joey_ref",
+      character: "Joey",
+      scene_ids: ["scene_002"],
+      reference_image_path: "/tmp/char_joey_ref.png",
+      scene_prompt_anchor: "Joey, adult male protagonist in dark practical confrontation clothing",
+    }],
+    referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
+    shotManifest: {
+      visible_characters: ["Joey"],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+      foreground_action: "Joey swings the red paddle in the contract-sky office chamber",
+    },
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "visible_character_ref_scope_missing"
+    && finding.character === "Joey"
+    && finding.out_of_scope_ref_ids.includes("char_joey_ref")
+  )), true);
+}
+
+async function testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const vaguePromptText = "Frame-left, Joey in clean academy clothes watches the stage with a controlled expression.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText: vaguePromptText,
+    codexPromptText: vaguePromptText,
+    extraCharacterStateRefs: [{
+      state_ref_id: "char_joey_state",
+      source_ref_id: "char_joey_ref",
+      character: "Joey",
+      scene_ids: ["scene_001"],
+      reference_image_path: "/tmp/char_joey_ref.png",
+      scene_prompt_anchor: "Joey, dark practical confrontation clothing, controlled survivor-auditor presence, restrained but ready",
+    }],
+    referenceRequirements: [
+      { ref_id: "loc_apartment", kind: "location", slot_order: 1 },
+      { ref_id: "char_joey_ref", kind: "character_state", slot_order: 2 },
+    ],
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "character_ref_anchor_not_reaffirmed"
+    && finding.ref_id === "char_joey_state"
+    && finding.prompt_field === "modelslab_image_prompt"
+  )), true);
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "character_ref_anchor_not_reaffirmed"
+    && finding.ref_id === "char_joey_state"
+    && finding.prompt_field === "codex_image_prompt"
+  )), true);
+}
+
+async function testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Frame-left, Joey in dark practical confrontation clothing stands with controlled survivor-auditor presence, restrained but ready, watching the stage.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    codexPromptText: promptText,
+    extraCharacterStateRefs: [{
+      state_ref_id: "char_joey_state",
+      source_ref_id: "char_joey_ref",
+      character: "Joey",
+      scene_ids: ["scene_001"],
+      reference_image_path: "/tmp/char_joey_ref.png",
+      scene_prompt_anchor: "Joey, dark practical confrontation clothing, controlled survivor-auditor presence, restrained but ready",
+    }],
+    referenceRequirements: [
+      { ref_id: "loc_apartment", kind: "location", slot_order: 1 },
+      { ref_id: "char_joey_ref", kind: "character_state", slot_order: 2 },
+    ],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => finding.code === "character_ref_anchor_not_reaffirmed"), false);
+}
+
+async function testVisualHardenPreservesAttachableFaceOnlyStateRef() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey sits at the office workstation in open-collar work clothes, wrist mark visible, exhausted but steady.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    extraReferenceTargets: [
+      {
+        ref_id: "joey_office_worker_ref",
+        kind: "character_state",
+        subject: "Joey",
+        scene_ids: ["scene_001"],
+        identity_usage: "face_only",
+        base_identity_ref_id: "char_joey_ref",
+        reference_image_path: "/tmp/joey_office_worker_ref.png",
+        scene_prompt_anchor: "Joey in open-collar work clothes with wrist mark visible",
+      },
+    ],
+    extraCharacterStateRefs: [
+      {
+        state_ref_id: "joey_office_worker_ref",
+        source_ref_id: "char_joey_ref",
+        character: "Joey",
+        scene_ids: ["scene_001"],
+        identity_usage: "face_only",
+        base_identity_ref_id: "char_joey_ref",
+        reference_image_path: "/tmp/joey_office_worker_ref.png",
+        scene_prompt_anchor: "Joey in open-collar work clothes with wrist mark visible",
+      },
+    ],
+    referenceRequirements: [
+      { ref_id: "loc_apartment", kind: "location", slot_order: 1 },
+      { ref_id: "joey_office_worker_ref", kind: "character_state", slot_order: 2 },
+    ],
+    shotManifest: {
+      character_state_ref_ids: ["joey_office_worker_ref"],
+      protagonist_state_ref_id: "joey_office_worker_ref",
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "joey_office_worker_ref"]);
+  assert.equal(plan.prompts[0].reference_requirements[1].reference_image_path, "/tmp/joey_office_worker_ref.png");
+  assert.equal(plan.prompts[0].reference_requirements[1].base_identity_ref_id, "char_joey_ref");
+  assert.equal(plan.prompts[0].shot_manifest.character_state_ref_ids[0], "joey_office_worker_ref");
+  assert.equal(plan.prompts[0].shot_manifest.protagonist_state_ref_id, "joey_office_worker_ref");
   assert.equal(report.findings.some((finding) => finding.code === "unknown_reference_id"), false);
 }
 
@@ -2361,10 +3218,114 @@ async function testVisualHardenBlocksMissingManifestLocationWithoutAddingIt() {
   });
   assert.notEqual(error, null);
   assert.equal(plan.status, "blocked");
-  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["char_joey_ref"]);
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["char_joey_state"]);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_not_attached_report_only"), true);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_missing_after_sanitize" && finding.severity === "blocker"), true);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_added"), false);
+}
+
+async function testVisualHardenBlocksMissingPendingDerivedLocationContract() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey stands in the academy courtyard under the punishment pillar while students watch from the gate.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    includeDefaultLocationRef: false,
+    shotManifest: { location_ref_id: null },
+    extraReferenceTargets: [{
+      ref_id: "academy_courtyard_ref",
+      kind: "location",
+      subject: "academy courtyard",
+      scene_ids: ["scene_001"],
+      generation_mode: "derive_from_first_clean_wide_cut",
+      prompt_anchor: "academy courtyard punishment pillar and main gate",
+    }],
+    referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.findings.some((finding) => finding.code === "physical_location_ref_missing" && finding.severity === "blocker"), true);
+  assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_added"), false);
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["char_joey_state"]);
+}
+
+async function testVisualHardenV2AcceptsTextLocationContractWithoutImageRef() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey stands alone in the apartment kitchen beside the window in quiet morning light.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    referenceDirectorContractVersion: "reference_director_v2",
+    locationContracts: [{
+      location_contract_id: "apartment_kitchen_contract",
+      scene_ids: ["scene_001"],
+      description: "apartment kitchen",
+      prompt_anchor: "compact apartment kitchen with one window and dark counters",
+    }],
+    includeDefaultLocationRef: false,
+    shotManifest: {
+      location_contract_id: "apartment_kitchen_contract",
+      location_ref_id: null,
+    },
+    referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(plan.prompts[0].shot_manifest.location_contract_id, "apartment_kitchen_contract");
+  assert.equal(plan.prompts[0].shot_manifest.location_ref_id, null);
+  assert.equal(report.findings.some((finding) => finding.code === "physical_location_contract_missing"), false);
+}
+
+async function testVisualHardenV2BlocksUnknownLocationContract() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey stands alone in the apartment kitchen beside the window in quiet morning light.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    referenceDirectorContractVersion: "reference_director_v2",
+    locationContracts: [{
+      location_contract_id: "apartment_kitchen_contract",
+      scene_ids: ["scene_001"],
+      description: "apartment kitchen",
+      prompt_anchor: "compact apartment kitchen with one window and dark counters",
+    }],
+    includeDefaultLocationRef: false,
+    shotManifest: {
+      location_contract_id: "invented_location_contract",
+      location_ref_id: null,
+    },
+    referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.findings.some((finding) => finding.code === "unknown_location_contract_id" && finding.severity === "blocker"), true);
+}
+
+async function testVisualHardenManualTriageCanDisregardSpecificBlocker() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Joey at the apartment desk with bills spread across the table in quiet morning light.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    shotManifest: { location_ref_id: null },
+    referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
+    manualTriage: {
+      schema: "goldflow_visual_manual_blocker_triage_v1",
+      status: "approved",
+      dispositions: [{
+        image_id: "ep_01-cut-001",
+        scene_id: "scene_001",
+        code: "physical_location_ref_missing",
+        disposition: "manual_disregard",
+        rationale: "Fixture agent verified the available location ref is intentionally not applicable.",
+      }],
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.manual_triage_applied_count, 1);
+  assert.equal(report.findings.some((finding) => finding.code === "physical_location_ref_missing" && finding.manual_disposition === "manual_disregard"), true);
+  assert.equal(report.unresolved_blocker_count, 0);
 }
 
 async function testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation() {
@@ -2405,10 +3366,10 @@ async function testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation(
   assert.equal(error, null);
   assert.equal(plan.status, "passed");
   assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), [
-    "char_joey_ref",
-    "char_pookie_ref",
-    "char_kai_ref",
-    "char_jinx_ref",
+    "char_joey_state",
+    "char_pookie_state",
+    "char_kai_state",
+    "char_jinx_state",
   ]);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_omitted_for_reference_limit"), true);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_character_ref_dropped_for_location_ref_limit"), false);
@@ -2425,7 +3386,7 @@ async function testNarratorOnlyStatusAndMixer() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed" });
@@ -2446,7 +3407,7 @@ async function testNarratorOnlyStatusAndMixer() {
   await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), {
     status: "passed",
     source_script_hash: scriptHash,
-    target_wpm_min: 210,
+    target_wpm_min: 195,
     target_wpm_max: 220,
     actual_wpm: 214.286,
     source_hashes: {
@@ -2484,15 +3445,17 @@ async function testNarratorOnlyStatusAndMixer() {
   assert.match(staleAudioPace.evidence, /narration_word_timing_ep_01\.json stale/);
   await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 3, audio_duration_sec: 0.84 });
 
-  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "blocked", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220, actual_wpm: 167.54 });
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "blocked", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 167.54 });
   const blockedStatusResult = await execFileAsync(process.execPath, [
     "scripts/run-status.mjs",
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const blockedStatus = JSON.parse(blockedStatusResult.stdout);
   assert.equal(blockedStatus.current_stage, "audio_pace_check");
-  assert.match(blockedStatus.next_command_shape, /audio tempo-normalize/);
-  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220, actual_wpm: 214.286 });
+  assert.match(blockedStatus.next_command_shape, /tts qwen/);
+  assert.match(blockedStatus.next_command_shape, /--native-speed/);
+  assert.doesNotMatch(blockedStatus.next_command_shape, /audio tempo-normalize/);
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 214.286 });
 
   await execFileAsync(process.execPath, [
     "scripts/modelslab-longform-audio-bed.mjs",
@@ -2583,7 +3546,7 @@ async function testRunStatusBlocksLegacyScriptPaceHookWarnings() {
   await writeJson(path.join(episodeDir, "script_pace_report.json"), {
     status: "passed",
     source_script_hash: scriptHash,
-    target_wpm_min: 210,
+    target_wpm_min: 195,
     target_wpm_max: 220,
     hook_milestone_report: {
       warnings: [{ code: "late_hidden_power_spark", severity: "warning" }],
@@ -2611,7 +3574,7 @@ async function testRunStatusBlocksMissingQwenStitchedAudio() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash, replacements: [] });
   await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
@@ -2724,7 +3687,7 @@ async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
@@ -2735,7 +3698,7 @@ async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
   const narrationHash = sha256(await fs.readFile(narrationPath));
   await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), { status: "passed", output_path: narrationPath });
   await writeJson(path.join(episodeDir, "narration_word_timing_ep_01.json"), { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash });
-  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220, actual_wpm: 214.286 });
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 214.286 });
   const mixPath = path.join(episodeDir, "longform_mix.m4a");
   await fs.writeFile(mixPath, "fixture mix bytes");
   await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), { status: "completed", mix: { m4a_path: mixPath } });
@@ -2795,7 +3758,7 @@ async function testRunStatusBlocksStaleVisualReferenceSourceHashes() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash });
   const semanticPath = path.join(episodeDir, "semantic_scene_plan.json");
@@ -2807,7 +3770,7 @@ async function testRunStatusBlocksStaleVisualReferenceSourceHashes() {
   const narrationHash = sha256(await fs.readFile(narrationPath));
   await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), { status: "passed", output_path: narrationPath });
   await writeJson(path.join(episodeDir, "narration_word_timing_ep_01.json"), { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash });
-  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220, actual_wpm: 214.286 });
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 214.286 });
   const timedPath = path.join(episodeDir, "timed_scene_plan.json");
   await writeJson(timedPath, { status: "passed", source_script_hash: scriptHash, scenes: [{ scene_id: "scene_001" }] });
   const mixPath = path.join(episodeDir, "longform_mix.m4a");
@@ -2870,7 +3833,7 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash });
   const semanticPath = path.join(episodeDir, "semantic_scene_plan.json");
@@ -2882,7 +3845,7 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
   const narrationHash = sha256(await fs.readFile(narrationPath));
   await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), { status: "passed", output_path: narrationPath });
   await writeJson(path.join(episodeDir, "narration_word_timing_ep_01.json"), { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash });
-  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220, actual_wpm: 214.286 });
+  await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 214.286 });
   const timedPath = path.join(episodeDir, "timed_scene_plan.json");
   await writeJson(timedPath, { status: "passed", source_script_hash: scriptHash, scenes: [{ scene_id: "scene_001" }] });
   const mixPath = path.join(episodeDir, "longform_mix.m4a");
@@ -2949,7 +3912,7 @@ async function testRunStatusBlocksQwenPlanMissingOverrideAudit() {
   await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
   await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 210, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), {
     status: "passed",
@@ -3004,18 +3967,68 @@ async function testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan() 
   assert.match(imageStage.evidence, /section_image_prompts_hardened\.json missing or empty/);
 }
 
+async function testRunStatusIncludesManualBlockerTriagePolicy() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await fs.mkdir(episodeDir, { recursive: true });
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+  });
+  const { stdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const status = JSON.parse(stdout);
+  assert.equal(status.manual_blocker_triage_policy.mode, "agent_review_first");
+  assert.match(status.manual_blocker_triage_policy.summary, /narrowest valid recovery/);
+  assert.match(status.manual_blocker_triage_policy.artifact_pattern, /manual_blocker_triage/);
+
+  const { stdout: markdown } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+    "--format", "markdown",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  assert.match(markdown, /Manual blocker triage:/);
+  assert.match(markdown, /narrowest valid recovery/);
+}
+
 function testDerivedReferenceCandidateSelectionAndManifestAttach() {
   const promptPlan = {
     prompt_policy: "deterministic hardening",
     prompts: [
       {
+        image_id: "ep_01-cut-000",
+        scene_id: "scene_001",
+        start_sec: 10,
+        visual_job: "location_transition",
+        suggested_shot_job: "environment_establishing",
+        image_prompt: "empty anime manhwa audit hall environment establishing frame with no characters",
+        modelslab_image_prompt: "empty anime manhwa audit hall environment establishing frame with no characters",
+        shot_manifest: {
+          shot_job: "environment_establishing",
+          location_ref_id: "loc_audit_hall",
+        },
+        reference_requirements: [],
+      },
+      {
         image_id: "ep_01-cut-001",
         scene_id: "scene_001",
         start_sec: 12,
+        visual_job: "humiliation_image",
+        suggested_shot_job: "character_interaction",
+        image_prompt: "Joey and Selena arguing inside the audit hall",
+        modelslab_image_prompt: "Joey and Selena arguing inside the audit hall",
         shot_manifest: {
           location_ref_id: "loc_audit_hall",
           protagonist_state_ref_id: "joey_floor_state",
           character_state_ref_ids: ["selena_phone_state"],
+          visible_characters: ["Joey Manhwa", "Selena"],
+          visible_props: ["phone"],
         },
         reference_requirements: [],
       },
@@ -3029,7 +4042,12 @@ function testDerivedReferenceCandidateSelectionAndManifestAttach() {
     ],
   };
   const target = { ref_id: "loc_audit_hall", kind: "location", generation_mode: "derive_from_first_clean_cut", scene_ids: ["scene_001"] };
-  assert.deepEqual(candidateImageIdsForDerivedTargetForTests(target, promptPlan), ["ep_01-cut-001"]);
+  assert.deepEqual(candidateImageIdsForDerivedTargetForTests(target, promptPlan), ["ep_01-cut-000"]);
+  assert.deepEqual(
+    candidateImageIdsForDerivedTargetForTests(target, { ...promptPlan, prompts: promptPlan.prompts.filter((prompt) => prompt.image_id !== "ep_01-cut-000") }),
+    [],
+    "derived location refs must not promote contaminated character/prop cuts as location anchors"
+  );
 
   const attached = attachReferencePathsToPromptsForTests(
     promptPlan,
@@ -3044,7 +4062,7 @@ function testDerivedReferenceCandidateSelectionAndManifestAttach() {
     ],
     [target]
   );
-  const firstPrompt = attached.prompts[0];
+  const firstPrompt = attached.prompts.find((prompt) => prompt.image_id === "ep_01-cut-001");
   assert.deepEqual(new Set(firstPrompt.required_reference_paths), new Set(["/tmp/loc_audit_hall.png", "/tmp/joey.png", "/tmp/selena.png"]));
   assert.equal(firstPrompt.reference_requirements.every((requirement) => requirement.inferred_from_shot_manifest === true), true);
   assert.deepEqual(new Set(firstPrompt.reference_requirements.map((requirement) => requirement.ref_id)), new Set(["loc_audit_hall", "joey_base_ref", "selena_base_ref"]));
@@ -3339,29 +4357,49 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
 }
 
 async function run() {
+  testPinnedCodexRuntimeContracts();
+  await testNestedCodexCallsUseSharedRunner();
   testSemanticSceneAnchorValidation();
   testSemanticSceneQualityFindings();
   testSemanticPlannerPromptContracts();
+  testSemanticChunkingSplitsLongSingleParagraph();
+  testSemanticAnchorSnapsToExactScriptTokens();
+  testFirstPersonBeatKeepsProtagonistVisible();
+  testWhisperExcerptAlignmentInterpolatesUnspokenUi();
+  testPhraseAwareSubtitleGrouping();
+  testQwenKeepsBracketedUiDialogueSpeakable();
+  testImageOutputQaRiskAndDonorPolicies();
+  await testProviderCircuitBreakerStopsUnclaimedWork();
+  await testRenderRequiresHashMatchedImageQa();
+  await testPreflightLocksNativeTtsSpeedAndSmoothRender();
+  await testPostTempoRequiresEmergencyApproval();
   testLocationSceneIdsDerivation();
+  testReferenceDirectorV2EvidenceAndLocationContracts();
+  testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts();
+  testSelectedReferenceInventoryContainsOnlyDirectorSelections();
+  testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates();
   testLocationCandidateExclusion();
   testStarvationGate();
   testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement();
-  await testCandidateReferenceBudgetDowngradesScopedOneOffRefs();
-  await testReferenceDirectorInventoryPreventsCollectorBloat();
   testOutOfScopeRefDropping();
   testReferenceLimitOmissionIsNotForbidden();
   testOutOfScopeLocationMentionAssertion();
   testProviderAwarePromptSelection();
+  testGptImage2PreservesFullPromptAndUsesLandscapeDefault();
+  testSceneImageProductionContractBlocksDroppedRefsAndStyle();
+  testGroupReferencePromptDoesNotDemandOnePerson();
+  testConciseReferenceRoleContract();
   testLocalBeatFidelityEditorialCases();
   testHybridImageProviderRouting();
   await testHybridOpeningWindowPersistsInRunIdentity();
   await testVisualPlannerDriftContracts();
-  testPositivePromptSanitizerDoesNotInvertNegation();
+  testPromptPayloadMarkerSanitizerPreservesNormalNegation();
   testVoiceDirectionCharacterization();
   testQwenPlanAuditsAppliedTtsOverrides();
+  testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets();
   testCharacterStagingSanitizerAndReviewBlockers();
   await testNarrationPaceChecks();
-  await testScriptPaceBlocksLateHookMilestones();
+  await testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases();
   await testTargetedSpeakabilityLiveContentHomograph();
   await testVisualBeatDensityDefaults();
   await testVisualBeatQualityFindings();
@@ -3379,9 +4417,20 @@ async function run() {
   testPassedReviewClearsDeadletterPayload();
   await testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite();
   await testVisualHardenStripsNonAttachableScopedRefs();
+  await testVisualHardenRetainsPendingDerivedRequirementWithoutSlot();
+  await testVisualHardenAcceptsInventoryOnlyLocationContract();
   await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();
   await testVisualHardenCanonicalizesStateRefRequirements();
+  await testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted();
+  await testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists();
+  await testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored();
+  await testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed();
+  await testVisualHardenPreservesAttachableFaceOnlyStateRef();
   await testVisualHardenBlocksMissingManifestLocationWithoutAddingIt();
+  await testVisualHardenBlocksMissingPendingDerivedLocationContract();
+  await testVisualHardenV2AcceptsTextLocationContractWithoutImageRef();
+  await testVisualHardenV2BlocksUnknownLocationContract();
+  await testVisualHardenManualTriageCanDisregardSpecificBlocker();
   await testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation();
   await testImagegenDeadletterRefusal();
   await testNarratorOnlyStatusAndMixer();
@@ -3394,6 +4443,7 @@ async function run() {
   await testRunStatusSurfacesDraftReferenceApprovalCommand();
   await testRunStatusBlocksQwenPlanMissingOverrideAudit();
   await testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan();
+  await testRunStatusIncludesManualBlockerTriagePolicy();
   testDerivedReferenceCandidateSelectionAndManifestAttach();
   await testDerivedReferencePromotionFromSeedCut();
   await testImagegenReusesImportedCodexOpeningCut();

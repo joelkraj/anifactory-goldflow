@@ -74,7 +74,7 @@ async function main() {
   }
   const requiredTargets = (visualReferencePlan.reference_targets ?? []).filter((target) => target.required_before_imagegen === true);
   const missingReferencePaths = requiredTargets
-    .filter((target) => !target.reference_image_path)
+    .filter((target) => !(target.conditioning_image_path ?? target.reference_image_path))
     .map((target) => target.ref_id);
   if (missingReferencePaths.length && flags["allow-missing-reference-paths"] !== "true") {
     throw new Error(`Cannot approve: required references are missing image paths: ${missingReferencePaths.slice(0, 20).join(", ")}`);

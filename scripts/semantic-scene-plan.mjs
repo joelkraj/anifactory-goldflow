@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -117,19 +117,62 @@ function chunkSceneCountTargets(script) {
   return { words, target, minimum, maximum };
 }
 
+function splitWordsIntoChunks(text, targetWords) {
+  const words = String(text ?? "").trim().split(/\s+/).filter(Boolean);
+  const chunks = [];
+  for (let index = 0; index < words.length; index += targetWords) {
+    chunks.push(words.slice(index, index + targetWords).join(" "));
+  }
+  return chunks;
+}
+
+function splitOversizedChunkUnit(text, targetWords) {
+  const normalized = String(text ?? "").trim();
+  if (!normalized) return [];
+  if (wordCount(normalized) <= targetWords) return [normalized];
+  const sentences = normalized.match(/[^.!?]+(?:[.!?]+["'”’]*)?|[^.!?]+$/g)?.map((part) => part.trim()).filter(Boolean) ?? [];
+  if (sentences.length <= 1) return splitWordsIntoChunks(normalized, targetWords);
+  const units = [];
+  let current = [];
+  let currentWords = 0;
+  for (const sentence of sentences) {
+    const count = wordCount(sentence);
+    if (count > targetWords) {
+      if (current.length) {
+        units.push(current.join(" "));
+        current = [];
+        currentWords = 0;
+      }
+      units.push(...splitWordsIntoChunks(sentence, targetWords));
+      continue;
+    }
+    if (current.length && currentWords + count > targetWords) {
+      units.push(current.join(" "));
+      current = [];
+      currentWords = 0;
+    }
+    current.push(sentence);
+    currentWords += count;
+  }
+  if (current.length) units.push(current.join(" "));
+  return units;
+}
+
 function scriptChunks(script, targetWords = Number(flags["semantic-chunk-words"] ?? 1000)) {
+  const chunkTarget = Math.max(100, Math.floor(targetWords));
   const paragraphs = String(script ?? "").split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  const units = paragraphs.flatMap((paragraph) => splitOversizedChunkUnit(paragraph, chunkTarget));
   const chunks = [];
   let current = [];
   let currentWords = 0;
-  for (const paragraph of paragraphs) {
-    const count = wordCount(paragraph);
-    if (current.length && currentWords + count > targetWords) {
+  for (const unit of units) {
+    const count = wordCount(unit);
+    if (current.length && currentWords + count > chunkTarget) {
       chunks.push(current.join("\n\n"));
       current = [];
       currentWords = 0;
     }
-    current.push(paragraph);
+    current.push(unit);
     currentWords += count;
   }
   if (current.length) chunks.push(current.join("\n\n"));
@@ -159,6 +202,98 @@ export function semanticBuildPromptForTests(script, bibles, targets, chunk = nul
   return buildPrompt(script, bibles, targets, chunk);
 }
 
+export function semanticScriptChunksForTests(script, targetWords = 1000) {
+  return scriptChunks(script, targetWords);
+}
+
+function scriptTokenIndex(script) {
+  const rows = [];
+  const pattern = /[\p{L}\p{N}]+/gu;
+  for (const match of String(script ?? "").matchAll(pattern)) {
+    rows.push({
+      value: match[0].toLowerCase(),
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    });
+  }
+  return rows;
+}
+
+function anchorTokens(anchor) {
+  return [...String(anchor ?? "").matchAll(/[\p{L}\p{N}]+/gu)].map((match) => match[0].toLowerCase());
+}
+
+function findTokenSequence(tokens, sequence, charFrom) {
+  if (!sequence.length) return null;
+  for (let index = 0; index <= tokens.length - sequence.length; index += 1) {
+    if (tokens[index].start < charFrom) continue;
+    let matches = true;
+    for (let offset = 0; offset < sequence.length; offset += 1) {
+      if (tokens[index + offset].value !== sequence[offset]) {
+        matches = false;
+        break;
+      }
+    }
+    if (!matches) continue;
+    return {
+      start: tokens[index].start,
+      end: tokens[index + sequence.length - 1].end,
+      matched_token_count: sequence.length,
+    };
+  }
+  return null;
+}
+
+function findAnchorTokenMatch(anchor, tokens, charFrom) {
+  const sequence = anchorTokens(anchor);
+  if (!sequence.length) return null;
+  const exact = findTokenSequence(tokens, sequence, charFrom);
+  if (exact) return { ...exact, original_token_count: sequence.length, snap_type: "token_sequence" };
+  for (let length = sequence.length - 1; length >= 1; length -= 1) {
+    const suffix = sequence.slice(sequence.length - length);
+    if (suffix.join("").length < 5) continue;
+    const match = findTokenSequence(tokens, suffix, charFrom);
+    if (match) return { ...match, original_token_count: sequence.length, snap_type: "token_suffix" };
+  }
+  return null;
+}
+
+function snapSemanticSceneAnchors(scenes, script) {
+  const tokens = scriptTokenIndex(script);
+  const snaps = [];
+  let previousStart = 0;
+  const snappedScenes = scenes.map((scene) => {
+    const next = { ...scene };
+    const sceneId = String(scene?.scene_id ?? "");
+    for (const field of ["script_excerpt_start", "script_excerpt_end"]) {
+      const searchFrom = field === "script_excerpt_start" ? previousStart : previousStart;
+      const original = normalizeText(next[field]);
+      const match = findAnchorTokenMatch(original, tokens, searchFrom);
+      if (!match) continue;
+      const exact = script.slice(match.start, match.end);
+      if (field === "script_excerpt_start") previousStart = match.start;
+      if (exact && exact !== next[field]) {
+        next[field] = exact;
+        snaps.push({
+          scene_id: sceneId,
+          field,
+          snap_type: match.snap_type,
+          matched_token_count: match.matched_token_count,
+          original_token_count: match.original_token_count,
+          original_anchor: original.slice(0, 180),
+          snapped_anchor: exact.slice(0, 180),
+        });
+      }
+    }
+    return next;
+  });
+  return { scenes: snappedScenes, snaps };
+}
+
+export function semanticSnapSceneAnchorsForTests(scenes, script) {
+  return snapSemanticSceneAnchors(scenes, script);
+}
+
 function semanticSceneAnchorFindings(scenes, script) {
   const scriptText = normalizeText(script);
   const findings = [];
@@ -169,7 +304,14 @@ function semanticSceneAnchorFindings(scenes, script) {
     const title = String(scene?.title ?? "");
     const startAnchor = normalizeText(scene?.script_excerpt_start);
     const endAnchor = normalizeText(scene?.script_excerpt_end);
-    const startIndex = startAnchor ? scriptText.indexOf(startAnchor, cursor) : -1;
+    let startIndex = startAnchor ? scriptText.indexOf(startAnchor, cursor) : -1;
+    if (startIndex < 0 && previousStart >= 0) {
+      const orderedFallbackIndex = scriptText.indexOf(startAnchor, previousStart + 1);
+      if (orderedFallbackIndex >= 0) {
+        startIndex = orderedFallbackIndex;
+        findings.push({ severity: "warning", code: "semantic_start_anchor_ordered_fallback", scene_id: sceneId, title, anchor: startAnchor.slice(0, 180), message: "script_excerpt_start was found after the previous scene start but before the previous end cursor; this usually means an earlier end anchor was too common." });
+      }
+    }
     const endSearchIndex = startIndex >= 0 ? startIndex : cursor;
     const endIndex = endAnchor ? scriptText.indexOf(endAnchor, endSearchIndex) : -1;
     if (!startAnchor) {
@@ -354,6 +496,8 @@ Rules:
 - Do not collapse acts, montages, flashbacks, locations, or major emotional beats into broad summaries.
 - Prefer visual-production units of roughly 120-260 spoken words each; shorter is fine for fast action, reveals, UI inserts, or emotional turns.
 - Include production facts needed by visual prompts: location, visible_subjects, primary_subject, visual_intent, ui_text_on_screen, sfx_cues, character_states, wardrobe, props, ref_requirements, action_staging.
+- Keep character state layers separate. visible_state is for physical facts the camera can see: wet hair, torn sleeve, black suit, bandaged hand, posture, expression, age presentation, cleanliness, injury, body shape, grooming, and wardrobe condition. emotional_state, financial_state, and social_state are narrative/status facts; they should not be treated as costume or body damage unless the locked script explicitly says the character is dirty, ragged, injured, homeless, sick, or wearing damaged clothes.
+- When a character is socially, financially, or emotionally ruined, express that in semantic context without inventing visible grime. Use props, posture, expression, staging, witnesses, receipts, phones, screens, isolation, or power dynamics to make it visual. Do not convert abstract phrases like broke, ruined, betrayed, humiliated, indebted, or emotionally collapsed into filthy/ragged clothing, wounds, dumpster-like styling, or homelessness unless those physical details are explicitly in the script.
 - Resolve role/title aliases to canonical named characters when the script establishes that relationship. If a named person is introduced as the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions such as "the dean" or "the judge" should refer to that named person instead of creating a new generic character. In visible_subjects and character_states, use the named character and put the role in their state, for example "Kai Cenat, acting as dean and final judge." Only create a separate role character when the script clearly introduces a different person.
 - Use one canonical display name for each named person after the script establishes it. Do not alternate between a first name and a full name for the same character in visible_subjects, character_states, or character ref IDs; keep role/title aliases in the state or continuity notes.
 - Treat location as one visible physical environment for this scene, not merely the parent venue name and not a mixture of UI, overlays, phone views, document views, remote call locations, or montage destinations. If a passage moves through several physical environments, split it into separate semantic scenes whenever possible. If the passage is a communication or montage beat that cannot be split cleanly, set location to the camera's primary physical environment and describe remote/on-screen material in ui_text_on_screen, action_staging, or continuity_notes.
@@ -365,7 +509,7 @@ Rules:
 - Every scene with a concrete physical location must include at least one ref_requirements row with kind "location" and a stable location ref_id for that visible area. This is mandatory even when the location is one-scene, late, minor, or likely to become no_ref_needed later. Location ref requirements are scoped coverage, not standalone image orders.
 - Semantic ref_requirements are scoped target suggestions, not automatic standalone image-generation orders. Include refs for canonical recurring characters, major character states, distinct visible physical locations, signature recurring UI motifs, critical props, and high-risk one-scene close-contact characters. Do not create semantic refs for generic background groups, throwaway one-scene UI text, ordinary desks/doors/screens, or props that can be safely derived from the scene image.
 - Avoid editorial/package words in semantic fields, such as hook, retention, thumbnail, CTR, narrator, recap, or what the viewer should feel. Describe the story fact visible in the scene.
-- script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later.
+- script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later. Use short verbatim spans from the actual first and final sentence of the scene; do not summarize, paraphrase, remove clauses, or change quotation marks.
 
 BIBLES:
 ${JSON.stringify(bibles, null, 2).slice(0, bibleLimit)}
@@ -392,7 +536,7 @@ Return one valid JSON object:
       "visual_intent": "...",
       "ui_text_on_screen": ["..."],
       "sfx_cues": ["..."],
-      "character_states": [{"character":"...","state":"...","wardrobe":"..."}],
+      "character_states": [{"character":"...","state":"...","visible_state":"camera-visible body, grooming, wardrobe, cleanliness, posture, expression, and injury facts only","emotional_state":"...","financial_state":"...","social_state":"...","wardrobe":"..."}],
       "props": ["..."],
       "ref_requirements": [{"ref_id":"specific_visible_area_location_ref","kind":"location","required":true,"reason":"mandatory scoped location coverage for this concrete physical scene"}, {"ref_id":"...","kind":"character|prop|ui|style","required":true,"reason":"..."}],
       "action_staging": "...",
@@ -444,20 +588,60 @@ async function callCodex(prompt, stageName) {
   await fs.mkdir(callDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outputPath = path.join(callDir, `${stamp}-${stageName}-output.txt`);
-  await new Promise((resolve, reject) => {
-    const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], {
-      cwd: repoRoot,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1" },
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", reject);
-    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`codex semantic plan exited ${code}: ${stderr}`)));
-    child.stdin.end(prompt);
+  const call = await runCodexCli({
+    prompt,
+    stageName,
+    repoRoot,
+    outputPath,
+    model: flags.model ?? flags["llm-model"] ?? null,
+    reasoningEffort: flags["reasoning-effort"] ?? null,
+    timeoutMs: Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000),
   });
-  const content = await fs.readFile(outputPath, "utf8");
-  return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+  return {
+    provider: "codex",
+    model: call.model,
+    reasoning_effort: call.reasoning_effort,
+    codex_cli_path: call.codex_cli_path,
+    codex_cli_version: call.codex_cli_version,
+    output_path: outputPath,
+    content: call.content,
+    parsed: extractJson(call.content),
+  };
+}
+
+async function reusableCodexCall(stageName, prompt) {
+  if (flags["reuse-codex-calls"] !== "true") return null;
+  const callDir = path.join(weekDir, "_codex_calls");
+  let files = [];
+  try {
+    files = await fs.readdir(callDir);
+  } catch {
+    return null;
+  }
+  const suffix = `-${stageName}-output.txt`;
+  const candidates = files.filter((file) => file.endsWith(suffix)).sort().reverse();
+  for (const latest of candidates) {
+    const outputPath = path.join(callDir, latest);
+    const metadata = await readCodexCallMetadata(outputPath);
+    if (!isCodexCacheCompatible(metadata, {
+      model: flags.model ?? flags["llm-model"] ?? null,
+      reasoningEffort: flags["reasoning-effort"] ?? null,
+      promptHash: sha256(prompt),
+    })) continue;
+    const content = await fs.readFile(outputPath, "utf8");
+    return {
+      provider: "codex-cache",
+      model: metadata.model,
+      reasoning_effort: metadata.reasoning_effort,
+      codex_cli_path: metadata.codex_cli_path,
+      codex_cli_version: metadata.codex_cli_version,
+      output_path: outputPath,
+      content,
+      parsed: extractJson(content),
+      reused_output: true,
+    };
+  }
+  return null;
 }
 
 async function main() {
@@ -482,7 +666,8 @@ async function main() {
       const chunkStageName = `${stageName}_chunk_${String(chunk.chunk_index).padStart(2, "0")}`;
       const chunkLlm = isLocalLLMRoute(chunkStageName)
         ? await callLocal(chunkPrompt, chunkStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
-        : await callCodex(chunkPrompt, chunkStageName);
+        : await reusableCodexCall(chunkStageName, chunkPrompt) ?? await callCodex(chunkPrompt, chunkStageName);
+      if (chunkLlm.reused_output) console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: reused ${chunkLlm.output_path}`);
       const chunkScenes = Array.isArray(chunkLlm.parsed.scenes) ? chunkLlm.parsed.scenes : [];
       if (chunkScenes.length < chunkTargets.minimum) {
         throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} under-segmented: returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words.`);
@@ -498,7 +683,10 @@ async function main() {
     };
     llm = {
       provider: parsedChunks[0]?.llm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
-      model: parsedChunks[0]?.llm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : "codex_cli_default"),
+      model: parsedChunks[0]?.llm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel()),
+      reasoning_effort: parsedChunks[0]?.llm?.reasoning_effort ?? null,
+      codex_cli_path: parsedChunks[0]?.llm?.codex_cli_path ?? null,
+      codex_cli_version: parsedChunks[0]?.llm?.codex_cli_version ?? null,
       chunked: true,
       chunk_count: chunks.length,
     };
@@ -516,7 +704,8 @@ async function main() {
     throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
   }
   const normalizedScenes = normalizeScenes(scenes);
-  const anchorFindings = semanticSceneAnchorFindings(normalizedScenes, script);
+  const anchorSnapReport = snapSemanticSceneAnchors(normalizedScenes, script);
+  const anchorFindings = semanticSceneAnchorFindings(anchorSnapReport.scenes, script);
   const anchorBlockers = anchorFindings.filter((finding) => finding.severity === "blocker");
   if (anchorBlockers.length) {
     const preview = anchorBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.anchor ?? finding.message}`).join("\n");
@@ -542,13 +731,24 @@ async function main() {
     semantic_validation: {
       anchor_finding_count: anchorFindings.length,
       anchor_findings_by_code: countByCode(anchorFindings),
+      anchor_snap_count: anchorSnapReport.snaps.length,
       quality_finding_count: semanticQualityFindings.length,
       quality_findings_by_code: countByCode(semanticQualityFindings),
     },
+    semantic_anchor_snaps: anchorSnapReport.snaps,
     semantic_quality_findings: semanticQualityFindings,
-    planner: { provider: llm.provider, model: llm.model ?? null, output_path: llm.output_path ?? null, chunked: llm.chunked ?? false, chunk_count: llm.chunk_count ?? null },
+    planner: {
+      provider: llm.provider,
+      model: llm.model ?? null,
+      reasoning_effort: llm.reasoning_effort ?? null,
+      codex_cli_path: llm.codex_cli_path ?? null,
+      codex_cli_version: llm.codex_cli_version ?? null,
+      output_path: llm.output_path ?? null,
+      chunked: llm.chunked ?? false,
+      chunk_count: llm.chunk_count ?? null,
+    },
     ...semanticParsed,
-    scenes: normalizedScenes,
+    scenes: anchorSnapReport.scenes,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { runCodexCli } from "./lib/codex-cli-runner.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -312,20 +312,25 @@ async function callCodex(prompt, stageName) {
   await fs.mkdir(callDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outputPath = path.join(callDir, `${stamp}-${stageName}-output.txt`);
-  await new Promise((resolve, reject) => {
-    const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-C", repoRoot, "-o", outputPath], {
-      cwd: repoRoot,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1" },
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", reject);
-    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`codex speakability exited ${code}: ${stderr}`)));
-    child.stdin.end(prompt);
+  const call = await runCodexCli({
+    prompt,
+    stageName,
+    repoRoot,
+    outputPath,
+    model: flags.model ?? flags["llm-model"] ?? null,
+    reasoningEffort: flags["reasoning-effort"] ?? null,
+    timeoutMs: Number(process.env.ANIFACTORY_SPEAKABILITY_TIMEOUT_MS ?? 900_000),
   });
-  const content = await fs.readFile(outputPath, "utf8");
-  return { provider: "codex", model: "codex_cli_default", output_path: outputPath, content, parsed: extractJson(content) };
+  return {
+    provider: "codex",
+    model: call.model,
+    reasoning_effort: call.reasoning_effort,
+    codex_cli_path: call.codex_cli_path,
+    codex_cli_version: call.codex_cli_version,
+    output_path: outputPath,
+    content: call.content,
+    parsed: extractJson(call.content),
+  };
 }
 
 function normalizeReplacement(row) {

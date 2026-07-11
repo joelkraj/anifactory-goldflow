@@ -28,17 +28,22 @@ const characterStateRefsPath = flags.characterStateRefs ?? flags["character-stat
 const imageDir = path.join(episodeDir, "assets", "images");
 const referenceDir = path.join(imageDir, "references");
 const reportPath = flags.output ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
-const concurrency = Math.max(1, Math.min(24, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? 8)));
-const referenceConcurrency = Math.max(1, Math.min(8, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 3)));
+const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? 15)));
+const referenceConcurrency = Math.max(1, Math.min(15, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 15)));
 const force = flags.force === "true";
 const forceImages = force || flags["force-images"] === "true";
 const forceReferences = force || flags["force-references"] === "true";
 const skipReferenceGeneration = flags["skip-reference-generation"] === "true";
 const referencesOnly = flags["references-only"] === "true";
-const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? 4)));
 const allowUnhardenedPrompts = flags["allow-unhardened-prompts"] === "true";
-const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ?? null;
+const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? null;
+const referenceImageModelOverride = flags["reference-image-model-route"]
+  ?? flags["reference-image-model"]
+  ?? process.env.ANIFACTORY_REFERENCE_MODEL
+  ?? imageModelOverride
+  ?? null;
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
+const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? process.env.ANIFACTORY_MAX_SCENE_REFERENCES ?? 4)));
 const providerFilter = normalizeProviderFilter(flags["provider-filter"] ?? flags.providerFilter ?? "");
 const codexOpeningSecFlagRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? null;
 const codexOpeningSecEnvRaw = process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
@@ -48,12 +53,15 @@ const allowLegacyCodexExec = flags["allow-legacy-codex-exec"] === "true" || proc
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const visualResolutionDeadletterPath = flags.deadletter ?? flags["deadletter"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 const derivedRefPromotionReportPath = flags["derived-ref-report"] ?? path.join(episodeDir, `derived_reference_promotion_report_${episode}.json`);
+const providerHealthReportPath = flags["provider-health-report"] ?? path.join(episodeDir, `imagegen_provider_health_${episode}.json`);
+const cutExecutionLedgerPath = flags["cut-execution-ledger"] ?? path.join(episodeDir, "cut_execution_ledger.json");
 const sceneImageWidth = Number(flags["scene-image-width"] ?? process.env.ANIFACTORY_MODELSLAB_SCENE_IMAGE_WIDTH ?? 1024);
 const sceneImageHeight = Number(flags["scene-image-height"] ?? process.env.ANIFACTORY_MODELSLAB_SCENE_IMAGE_HEIGHT ?? 576);
 const referenceImageWidth = Number(flags["reference-image-width"] ?? process.env.ANIFACTORY_MODELSLAB_REFERENCE_IMAGE_WIDTH ?? process.env.ANIFACTORY_MODELSLAB_IMAGE_WIDTH ?? 1024);
 const referenceImageHeight = Number(flags["reference-image-height"] ?? process.env.ANIFACTORY_MODELSLAB_REFERENCE_IMAGE_HEIGHT ?? process.env.ANIFACTORY_MODELSLAB_IMAGE_HEIGHT ?? 576);
 const seedDerivedRefs = flags["seed-derived-refs"] === "true";
 const promoteDerivedRefs = flags["promote-derived-refs"] === "true";
+const providerCircuitFailureThreshold = Math.max(2, Number(flags["provider-circuit-failures"] ?? process.env.ANIFACTORY_IMAGE_PROVIDER_CIRCUIT_FAILURES ?? 3));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -173,21 +181,34 @@ function referencePathFor(target, provider = routedProviderForReference(imagePro
 
 function referencePrompt(target) {
   const kind = String(target.kind ?? "");
+  const targetText = `${target.subject ?? ""} ${target.prompt_anchor ?? ""} ${(target.risk_notes ?? []).join(" ")}`.toLowerCase();
+  const creatureCharacterState = kind === "character_state"
+    && /\b(creature|monster|monsters|hound|hounds|dragon|beast|beasts|wolf|wolves)\b/.test(targetText);
+  const groupCharacterState = kind === "character_state"
+    && /\b(group|squad|team|crowd|people|guards|soldiers|students|witnesses|faction|workforce)\b/.test(targetText);
   const kindInstruction = {
-    style: "16:9 landscape style reference card: polished 2D anime/manhwa rendering language, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
-    character_state: "16:9 landscape single-character identity reference card in polished 2D anime/manhwa style: exactly one visible person, full-body or three-quarter view centered with ample side breathing room, plain neutral studio background, clear face, hair, age, body type, wardrobe, expression, and material details; scene prompts will provide action pose",
-    location: "16:9 landscape unoccupied environment-only location plate in polished 2D anime/manhwa style: architecture, scale, lighting, materials, and readable geography, empty space ready for scene characters, non-photorealistic painted background design",
-    prop: "16:9 landscape prop reference card in polished 2D anime/manhwa style: one clear object or tightly grouped object set on a plain neutral surface, shape, surface, markings, scale, and material details",
-    ui: "16:9 landscape UI reference card in polished 2D anime/manhwa style: interface layout, typography, color, glow, panels, and exact display motif",
-    action: "16:9 landscape action and effect reference plate in polished 2D anime/manhwa style: one readable effect shape, movement path, energy color, interaction pattern, and spatial logic on a neutral staging field",
+    style: "16:9 landscape anime/manhwa rendering sample with one coherent frame, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
+    character_state: creatureCharacterState
+      ? "16:9 landscape creature conditioning image in polished 2D anime/manhwa style: exactly one canonical creature in one neutral pose on a plain studio background, clear full silhouette, anatomy, texture, markings, eyes, and material details"
+      : groupCharacterState
+        ? "16:9 landscape faction conditioning image in polished 2D anime/manhwa style: three to five clearly distinct visible people, separated full-body adults on a plain studio background, one shared uniform language, varied faces and silhouettes, readable insignia and equipment"
+      : "16:9 landscape character conditioning image in polished 2D anime/manhwa style: exactly one visible person in one neutral pose, full-body or three-quarter body centered with ample side breathing room, plain studio background, clear face, hair, age, body type, wardrobe, expression, and materials",
+    location: "16:9 landscape unoccupied environment-only conditioning image in polished 2D anime/manhwa style: one coherent view of the architecture, scale, lighting, materials, pathways, surfaces, and readable geography, with clean open space for later scene characters",
+    prop: "16:9 landscape prop conditioning image in polished 2D anime/manhwa style: exactly one object on a plain neutral surface, one coherent view, clear shape, materials, markings, scale, and silhouette",
+    ui: "16:9 landscape UI conditioning image in polished 2D anime/manhwa style: one coherent interface motif with clear panel geometry, color, glow, icon language, and hierarchy",
+    action: "16:9 landscape action/effect conditioning image in polished 2D anime/manhwa style: one readable effect shape, movement path, energy color, interaction pattern, and spatial logic on a neutral field",
   }[kind] ?? "production reference image";
   const parts = [
-    target.prompt_anchor,
     kindInstruction,
+    target.prompt_anchor,
     target.subject ? `subject: ${target.subject}` : "",
-    "clean production reference, stable visual design, polished 2D anime/manhwa longform frame, clean line art, non-photorealistic rendering, landscape canvas",
+    "single continuous image, stable visual design, no panel grid, no turnaround, no inset faces, no labels, no multiple views, landscape canvas",
   ].filter(Boolean);
   return parts.join(", ");
+}
+
+export function referencePromptForTests(target) {
+  return referencePrompt(target);
 }
 
 function isDerivedReferenceTarget(target) {
@@ -195,7 +216,7 @@ function isDerivedReferenceTarget(target) {
 }
 
 function referencePathValue(target) {
-  return target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
+  return target?.conditioning_image_path ?? target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
 }
 
 async function hasExistingReferencePath(target) {
@@ -218,6 +239,66 @@ function promptWideScore(prompt) {
   ].filter(Boolean).join(" ");
   if (/\b(?:wide|establishing|environment|location|exterior|interior|room|hall|lobby|street|plaza|stage|office)\b/i.test(text)) return 0;
   return 1;
+}
+
+function arrayOfStrings(value) {
+  return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+}
+
+function isLocationTarget(target) {
+  return String(target?.kind ?? "").toLowerCase() === "location";
+}
+
+function promptRequirementKind(prompt, kindPattern) {
+  return (prompt?.reference_requirements ?? []).some((requirement) => kindPattern.test(String(requirement?.kind ?? "").toLowerCase()));
+}
+
+function visibleCharacterCount(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  const names = new Set([
+    ...arrayOfStrings(prompt?.visible_characters),
+    ...arrayOfStrings(prompt?.visible_subjects),
+    ...arrayOfStrings(manifest.visible_characters),
+    ...arrayOfStrings(manifest.character_state_ref_ids),
+    ...arrayOfStrings(manifest.character_staging?.map?.((entry) => entry?.name) ?? []),
+    ...arrayOfStrings(manifest.character_staging?.map?.((entry) => entry?.ref_id) ?? []),
+  ]);
+  if (manifest.primary_character) names.add(String(manifest.primary_character));
+  if (manifest.protagonist_state_ref_id) names.add(String(manifest.protagonist_state_ref_id));
+  return [...names].filter(Boolean).length;
+}
+
+function promptHasPromotableLocationContamination(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  if (visibleCharacterCount(prompt) > 0) return true;
+  if (promptRequirementKind(prompt, /character/)) return true;
+  if (promptRequirementKind(prompt, /(?:prop|ui|action|effect)/)) return true;
+  if (arrayOfStrings(manifest.visible_props).length) return true;
+  if (arrayOfStrings(manifest.ui_elements).length) return true;
+  const text = [
+    prompt?.visual_job,
+    prompt?.suggested_shot_job,
+    manifest.shot_job,
+    prompt?.image_prompt,
+    prompt?.modelslab_image_prompt,
+    prompt?.codex_image_prompt,
+  ].filter(Boolean).join(" ");
+  if (/\b(?:close[- ]?up|portrait|reaction|hand|phone|screen|panel|ui|sword|weapon|document|letter|book|cup|mug|tabletop|object insert|prop insert)\b/i.test(text)) return true;
+  return false;
+}
+
+function promptIsCleanLocationSeed(prompt, target) {
+  if (!isLocationTarget(target)) return true;
+  if (promptHasPromotableLocationContamination(prompt)) return false;
+  const text = [
+    prompt?.visual_job,
+    prompt?.suggested_shot_job,
+    prompt?.shot_manifest?.shot_job,
+    prompt?.image_prompt,
+    prompt?.modelslab_image_prompt,
+    prompt?.codex_image_prompt,
+  ].filter(Boolean).join(" ");
+  return /\b(?:environment|establishing|location|empty|no characters|architecture|interior|exterior|room|hall|corridor|courtyard|street|stage|arena|chapel|cathedral|academy|manor)\b/i.test(text);
 }
 
 function promptMentionsRef(prompt, refId) {
@@ -249,6 +330,7 @@ function candidateImageIdsForDerivedTarget(target, promptPlan) {
   const inScene = prompts.filter((prompt) => sceneIds.has(String(prompt.scene_id ?? "")) || sceneIds.has(String(prompt.parent_scene_id ?? "")));
   const combined = [...mentioned, ...inScene]
     .filter((prompt) => prompt?.image_id)
+    .filter((prompt) => promptIsCleanLocationSeed(prompt, target))
     .sort((left, right) => {
       const mode = String(target?.generation_mode ?? "");
       const wideDelta = mode === "derive_from_first_clean_wide_cut" ? promptWideScore(left) - promptWideScore(right) : 0;
@@ -274,8 +356,8 @@ async function unresolvedDerivedTargets(referencePlan, promptPlan) {
   return unresolved;
 }
 
-function referenceFresh(target, outputPath) {
-  return promptFresh({ image_id: target.ref_id, prompt_hash: sha256(referencePrompt(target)), modelslab_image_prompt: referencePrompt(target) }, outputPath);
+function referenceFresh(target, outputPath, promptHash) {
+  return promptFresh({ image_id: target.ref_id, prompt_hash: promptHash, modelslab_image_prompt: referencePrompt(target) }, outputPath);
 }
 
 async function validateReferences(prompt) {
@@ -328,13 +410,105 @@ function referenceSlotPurpose(requirement) {
   return `visual reference for ${subject}`;
 }
 
-function slotWord(value) {
-  return ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"][Number(value)] ?? String(value);
+function slotNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : String(value ?? "").trim();
 }
 
-function referenceSlotInstruction(slots) {
+function stagingForSlot(prompt, slot) {
+  const refId = String(slot?.ref_id ?? "").trim();
+  if (!refId) return null;
+  const staging = Array.isArray(prompt?.shot_manifest?.character_staging) ? prompt.shot_manifest.character_staging : [];
+  return staging.find((entry) => {
+    const ids = [
+      entry?.ref_id,
+      String(entry?.wardrobe_from ?? "").replace(/^character_state_ref:/i, ""),
+    ].map((value) => String(value ?? "").trim()).filter(Boolean);
+    return ids.includes(refId);
+  }) ?? null;
+}
+
+function characterSlotSubtype(slot, staging = null) {
+  const text = `${slot?.subject ?? ""} ${slot?.ref_id ?? ""} ${slot?.purpose ?? ""} ${staging?.name ?? ""}`.toLowerCase();
+  if (/\b(?:creature|monster|hound|dragon|beast|wolf|spirit|demon|construct)\b/.test(text)) return "creature";
+  if (/\b(?:group|squad|team|crowd|guards|soldiers|students|witnesses|faction|workforce|guild masters)\b/.test(text)) return "group";
+  return "human";
+}
+
+function referenceSlotRole(slot, prompt) {
+  const slotNo = slotNumber(slot.slot);
+  const kind = String(slot.kind ?? "").toLowerCase();
+  const purpose = String(slot.purpose ?? referenceSlotPurpose(slot)).trim();
+  const staging = stagingForSlot(prompt, slot);
+
+  if (kind.includes("character")) {
+    const subject = staging?.name ?? slot.subject ?? slot.ref_id ?? "the referenced subject";
+    const position = staging?.screen_position ? ` Place ${subject} at ${staging.screen_position}.` : "";
+    const pose = staging?.pose ? ` Current action: ${staging.pose}.` : "";
+    const subtype = characterSlotSubtype(slot, staging);
+    if (subtype === "creature") return `Use Image ${slotNo} for ${subject}'s anatomy, silhouette, texture, markings, eyes, and identity.${position}${pose}`;
+    if (subtype === "group") return `Use Image ${slotNo} for ${subject}'s uniform palette, insignia, equipment, and silhouette variety.${position}${pose}`;
+    return `Use Image ${slotNo} for ${subject}'s face, hair, body type, wardrobe, and identity.${position}${pose}`;
+  }
+  if (kind.includes("location")) {
+    return `Use Image ${slotNo} for the setting's architecture, materials, lighting, surfaces, and spatial layout.`;
+  }
+  if (kind.includes("prop")) {
+    return `Use Image ${slotNo} for the prop's shape, material, color, and readable silhouette.`;
+  }
+  if (kind.includes("ui")) {
+    return `Use Image ${slotNo} for the UI style, panel shapes, glow language, icon style, and layout logic.`;
+  }
+  if (kind.includes("action") || kind.includes("effect")) {
+    return `Use Image ${slotNo} for the action/effect energy shape, motion language, color behavior, and interaction pattern.`;
+  }
+  if (kind.includes("style")) {
+    return `Use Image ${slotNo} for the overall anime/manhwa visual style, rendering finish, and color treatment.`;
+  }
+  return `Use Image ${slotNo} for ${purpose}.`;
+}
+
+function conciseReferenceSlotRole(slot, prompt, index) {
+  const kind = String(slot.kind ?? "").toLowerCase();
+  const staging = stagingForSlot(prompt, slot);
+  const subject = staging?.name ?? slot.character ?? slot.subject ?? slot.ref_id ?? `reference ${index + 1}`;
+  const source = `Image ${index + 1}`;
+  if (kind.includes("character")) {
+    const subtype = characterSlotSubtype(slot, staging);
+    if (subtype === "creature") return `${source} = exact ${subject} anatomy, silhouette, texture, and markings`;
+    if (subtype === "group") return `${source} = exact ${subject} uniform, insignia, and equipment language`;
+    return `${source} = exact ${subject} identity and wardrobe`;
+  }
+  if (kind.includes("location")) return `${source} = exact setting architecture and spatial layout`;
+  if (kind.includes("prop")) return `${source} = exact prop design and materials`;
+  if (kind.includes("ui")) return `${source} = exact UI design language`;
+  if (kind.includes("action") || kind.includes("effect")) return `${source} = exact action or effect design language`;
+  if (kind.includes("style")) return `${source} = exact anime/manhwa rendering style`;
+  return `${source} = ${subject}`;
+}
+
+function referenceSlotInstruction(slots, prompt = {}, { concise = false } = {}) {
   if (!slots.length) return "";
-  return slots.map((slot) => `Use image ${slotWord(slot.slot)} as ${slot.purpose}.`).join(" ");
+  const roles = slots.map((slot, index) => {
+    if (concise) return conciseReferenceSlotRole(slot, prompt, index);
+    return referenceSlotRole(slot, prompt);
+  }).join(" ");
+  if (concise) {
+    return [
+      "Reference mapping:",
+      `${roles}.`,
+      "Keep referenced subjects distinct; use the scene prompt for pose, position, action, setting, lighting, and composition.",
+    ].join(" ");
+  }
+  return [
+    "Reference usage:",
+    roles,
+    "Compose one unified final scene. Match the referenced subjects/settings while following the prompt's current action, position, lighting, and composition.",
+  ].filter(Boolean).join(" ");
+}
+
+export function referenceSlotInstructionForTests(slots, prompt = {}, options = {}) {
+  return referenceSlotInstruction(slots, prompt, options);
 }
 
 function normalizeName(value) {
@@ -382,7 +556,7 @@ function characterReferenceRequirements(prompt, characterRefs, existingIds) {
   for (const ref of characterRefs ?? []) {
     const character = normalizeName(ref.character ?? ref.subject ?? "");
     const sourceRefId = ref.source_ref_id ?? ref.ref_id ?? null;
-    if (!character || !sourceRefId || existingIds.has(sourceRefId) || !ref.reference_image_path) continue;
+    if (!character || !sourceRefId || existingIds.has(sourceRefId) || !referencePathValue(ref)) continue;
     if (coveredCharacters.has(character)) continue;
     if (Array.isArray(ref.scene_ids) && ref.scene_ids.length && sceneId && !ref.scene_ids.includes(sceneId)) continue;
     if (!visibleText.includes(character)) continue;
@@ -543,17 +717,92 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
       }),
     };
   });
-  return { ...plan, prompts, reference_paths_attached_at: new Date().toISOString(), max_scene_references: maxSceneReferences };
+  return {
+    ...plan,
+    prompts,
+    reference_paths_attached_at: new Date().toISOString(),
+    max_scene_references: maxSceneReferences,
+  };
 }
 
 export function attachReferencePathsToPromptsForTests(plan, referenceById, characterRefs = [], referenceTargets = []) {
   return attachReferencePathsToPrompts(plan, referenceById, characterRefs, referenceTargets);
 }
 
-function promptWithReferenceSlots(prompt, provider = imageProvider) {
+export function scenePromptProductionContractFindingsForTests(prompts, options = {}) {
+  const referenceLimit = Number(options.maxSceneReferences ?? maxSceneReferences);
+  const findings = [];
+  for (const prompt of prompts ?? []) {
+    const requirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+    const slots = Array.isArray(prompt.reference_slots) ? prompt.reference_slots : [];
+    const slotIds = new Set(slots.map((slot) => String(slot?.ref_id ?? "").trim()).filter(Boolean));
+    const attachableRequired = requirements.filter((requirement) => (
+      requirement?.required === true
+      && String(requirement?.reference_image_path ?? "").trim()
+    ));
+    if (referenceLimit === 0 && attachableRequired.length) {
+      findings.push({
+        image_id: prompt.image_id,
+        code: "required_scene_references_disabled",
+        message: `Scene references are disabled, but ${attachableRequired.length} required approved reference(s) are available.`,
+      });
+    }
+    for (const requirement of attachableRequired) {
+      if (!slotIds.has(String(requirement.ref_id))) {
+        findings.push({
+          image_id: prompt.image_id,
+          ref_id: requirement.ref_id,
+          code: "required_reference_slot_missing",
+          message: `Required approved ref ${requirement.ref_id} is not materialized in reference_slots.`,
+        });
+      }
+    }
+    const promptText = promptTextForImageProvider(prompt, "modelslab");
+    if (!/\b(?:anime|manhwa|webtoon|manga)\b/i.test(promptText)) {
+      findings.push({
+        image_id: prompt.image_id,
+        code: "scene_prompt_style_contract_missing",
+        message: "ModelsLab scene prompt must explicitly preserve anime/manhwa/webtoon/manga style.",
+      });
+    }
+    if (prompt?.shot_manifest?.shot_job === "physical_action" && !String(prompt?.shot_manifest?.foreground_action ?? "").trim()) {
+      findings.push({
+        image_id: prompt.image_id,
+        code: "physical_action_contract_missing",
+        message: "Physical-action cut is missing shot_manifest.foreground_action.",
+      });
+    }
+  }
+  return findings;
+}
+
+function assertGeneratedProviderContract(prompt, generated, submittedPrompt, referenceImagePaths, routedProvider) {
+  if (routedProvider !== "modelslab" || !/^gpt[-_]?image[-_]?2/i.test(String(generated?.modelslab_model_id ?? ""))) return;
+  if (String(generated.modelslab_submitted_prompt ?? "") !== String(submittedPrompt ?? "")) {
+    throw new Error(`GPT Image 2 provider prompt changed before submission for ${prompt.image_id}.`);
+  }
+  if (Number(generated.modelslab_submitted_prompt_length ?? -1) !== String(submittedPrompt ?? "").length
+    || Number(generated.modelslab_original_prompt_length ?? -1) !== String(submittedPrompt ?? "").length
+    || generated.modelslab_prompt_compacted === true) {
+    throw new Error(`GPT Image 2 prompt truncation/compaction detected for ${prompt.image_id}.`);
+  }
+  if (Number(generated.modelslab_reference_count ?? -1) !== referenceImagePaths.length) {
+    throw new Error(`GPT Image 2 reference-count mismatch for ${prompt.image_id}: expected ${referenceImagePaths.length}, provider recorded ${generated.modelslab_reference_count}.`);
+  }
+  if (referenceImagePaths.length && (!/image-to-image/i.test(String(generated.modelslab_endpoint ?? ""))
+    || !/i2i/i.test(String(generated.modelslab_model_id ?? "")))) {
+    throw new Error(`Referenced GPT Image 2 cut ${prompt.image_id} did not use the image-to-image route.`);
+  }
+}
+
+function promptWithReferenceSlots(prompt, provider = imageProvider, { concise = false } = {}) {
   const basePrompt = promptTextForImageProvider(prompt, provider);
-  const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? []);
+  const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? [], prompt, { concise });
   return [slotInstruction, basePrompt].filter(Boolean).join(" ");
+}
+
+function isGptImage2Route(model) {
+  return /^gpt[-_]?image[-_]?2/i.test(String(model ?? ""));
 }
 
 async function promptFresh(prompt, outputPath) {
@@ -573,6 +822,15 @@ async function reusableImportedCodexImage(prompt, outputPath) {
   if (metadata?.image_id && String(metadata.image_id) !== String(prompt.image_id)) return false;
   const sourcePromptPath = metadata?.source_prompt_path ? path.resolve(String(metadata.source_prompt_path)) : null;
   if (sourcePromptPath && sourcePromptPath !== path.resolve(promptPath)) return false;
+  if (metadata?.source_prompt_sha256) {
+    const currentPromptPlanHash = await hashFile(promptPath);
+    if (metadata.source_prompt_sha256 !== currentPromptPlanHash) return false;
+  }
+  if (Array.isArray(metadata?.reference_inputs)) {
+    for (const input of metadata.reference_inputs) {
+      if (!input?.path || !input?.sha256 || await hashFile(input.path) !== input.sha256) return false;
+    }
+  }
   return Boolean(metadata?.generated?.output_sha256 ?? metadata?.generated?.manual_source_sha256 ?? metadata?.prompt_hash);
 }
 
@@ -599,6 +857,127 @@ async function runPool(items, worker, limit) {
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
   return results;
+}
+
+function providerInfrastructureFailure(error) {
+  const message = String(error?.message ?? error ?? "");
+  return /\b(?:429|500|502|503|504|520|522|524)\b|gateway|rate.?limit|queue|timed?\s*out|timeout|service unavailable|temporarily unavailable|fetch failed|socket hang up/i.test(message);
+}
+
+async function runPoolWithCircuitBreaker(items, worker, limit) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  let consecutiveInfrastructureFailures = 0;
+  let circuitOpen = false;
+  let circuitReason = null;
+  async function next() {
+    while (true) {
+      if (circuitOpen) return;
+      const current = cursor;
+      if (current >= items.length) return;
+      cursor += 1;
+      try {
+        results[current] = await worker(items[current], current);
+        consecutiveInfrastructureFailures = 0;
+      } catch (error) {
+        const item = items[current] ?? {};
+        const infrastructureFailure = providerInfrastructureFailure(error);
+        consecutiveInfrastructureFailures = infrastructureFailure ? consecutiveInfrastructureFailures + 1 : 0;
+        results[current] = {
+          image_id: item.image_id,
+          ref_id: item.ref_id,
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+          provider_infrastructure_failure: infrastructureFailure,
+        };
+        if (infrastructureFailure && consecutiveInfrastructureFailures >= providerCircuitFailureThreshold) {
+          circuitOpen = true;
+          circuitReason = `provider circuit opened after ${consecutiveInfrastructureFailures} consecutive infrastructure failures`;
+        }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
+  if (circuitOpen) {
+    for (let index = 0; index < items.length; index += 1) {
+      if (results[index]) continue;
+      results[index] = {
+        image_id: items[index]?.image_id,
+        ref_id: items[index]?.ref_id,
+        status: "skipped_provider_circuit_open",
+        error: circuitReason,
+        provider_infrastructure_failure: true,
+      };
+    }
+  }
+  return {
+    results,
+    circuit_open: circuitOpen,
+    circuit_reason: circuitReason,
+    failure_threshold: providerCircuitFailureThreshold,
+  };
+}
+
+export async function runPoolWithCircuitBreakerForTests(items, worker, limit) {
+  return runPoolWithCircuitBreaker(items, worker, limit);
+}
+
+function promptReferenceCount(prompt) {
+  return Math.min(4, Array.isArray(prompt?.reference_slots)
+    ? prompt.reference_slots.length
+    : Array.isArray(prompt?.reference_requirements)
+      ? prompt.reference_requirements.filter((row) => row?.reference_image_path).length
+      : 0);
+}
+
+function providerHealthProbeEnabled(prompts) {
+  if (flags["provider-health-probe"] === "true") return true;
+  if (flags["provider-health-probe"] === "false") return false;
+  return prompts.some((prompt) => isGptImage2Route(imageModelOverride ?? prompt.image_model_route ?? "flux-klein"));
+}
+
+function representativeProviderProbePrompts(prompts) {
+  const selected = [];
+  const used = new Set();
+  for (const wanted of [0, 1, 2, 4]) {
+    const row = prompts.find((prompt) => !used.has(prompt.image_id) && promptReferenceCount(prompt) === wanted);
+    if (!row) continue;
+    selected.push(row);
+    used.add(row.image_id);
+  }
+  if (!selected.length && prompts[0]) selected.push(prompts[0]);
+  return selected;
+}
+
+async function runProviderHealthProbe(prompts) {
+  const selected = representativeProviderProbePrompts(prompts);
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const probe = await runPoolWithCircuitBreaker(selected, generateOne, Math.min(2, selected.length));
+  const passed = probe.results.every(imageResultPassed);
+  const report = {
+    schema: "goldflow_image_provider_health_v1",
+    status: passed ? "passed" : "failed",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    image_provider: imageProvider,
+    image_model: imageModelOverride ?? "prompt_routed_model",
+    representative_reference_counts: selected.map(promptReferenceCount),
+    representative_image_ids: selected.map((prompt) => prompt.image_id),
+    results: probe.results,
+    circuit_open: probe.circuit_open,
+    circuit_reason: probe.circuit_reason,
+    started_at: startedAt,
+    duration_sec: Number(((Date.now() - startedMs) / 1000).toFixed(3)),
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(providerHealthReportPath, report);
+  if (!passed) {
+    throw new Error(`Provider health probe failed for ${selected.map((prompt) => prompt.image_id).join(", ")}. Inspect ${providerHealthReportPath}; completed probe cuts remain reusable.`);
+  }
+  return report;
 }
 
 async function generateProviderImage({
@@ -641,17 +1020,26 @@ function modelslabReferenceGeometry(target) {
 }
 
 function sceneAspectInstruction(provider) {
-  if (normalizeImageProvider(provider) !== "modelslab") return "";
-  return `16:9 landscape YouTube image at ${sceneImageWidth}x${sceneImageHeight}. Polished 2D anime/manhwa illustration style, clean line art, cel-shaded characters, cinematic webtoon lighting, non-photorealistic painted backgrounds. Preserve the shot scale, subject count, background population, and composition requested by the prompt.`;
+  return "";
 }
 
 async function generateOne(prompt) {
   const routedProvider = promptRoute(prompt);
   const outputPath = imagePathFor(prompt, routedProvider);
   const referenceImagePaths = await validateReferences(prompt);
-  const modelPrompt = [sceneAspectInstruction(routedProvider), promptWithReferenceSlots(prompt, routedProvider)].filter(Boolean).join(" ");
   const sceneGeometry = routedProvider === "modelslab" ? modelslabSceneGeometry() : {};
-  const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, provider: routedProvider, model: imageModelOverride ?? prompt.image_model_route ?? "flux-klein", ...sceneGeometry }));
+  const sceneModel = imageModelOverride ?? prompt.image_model_route ?? "flux-klein";
+  const modelPrompt = [
+    sceneAspectInstruction(routedProvider),
+    promptWithReferenceSlots(prompt, routedProvider, {
+      concise: routedProvider === "modelslab" && isGptImage2Route(sceneModel),
+    }),
+  ].filter(Boolean).join(" ");
+  const referenceInputs = await Promise.all(referenceImagePaths.map(async (referencePath) => ({
+    path: referencePath,
+    sha256: await hashFile(referencePath),
+  })));
+  const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, provider: routedProvider, model: sceneModel, reference_inputs: referenceInputs, ...sceneGeometry }));
   if (routedProvider === "codex_imagegen" && !forceImages && await reusableImportedCodexImage(prompt, outputPath)) {
     return { image_id: prompt.image_id, status: "reused_imported_codex", image_path: outputPath, prompt_hash: promptHash, image_provider: routedProvider, image_provider_route: imageProvider };
   }
@@ -662,16 +1050,18 @@ async function generateOne(prompt) {
     prompt: modelPrompt,
     outputPath,
     referenceImagePaths,
-    model: imageModelOverride ?? prompt.image_model_route ?? "flux-klein",
+    model: sceneModel,
     provider: routedProvider,
     ...sceneGeometry,
   });
+  assertGeneratedProviderContract(prompt, generated, modelPrompt, referenceImagePaths, routedProvider);
   await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
   await writeJson(`${outputPath}.metadata.json`, {
     image_id: prompt.image_id,
     prompt_hash: promptHash,
     source_prompt_path: promptPath,
     reference_image_paths: referenceImagePaths,
+    reference_inputs: referenceInputs,
     reference_slots: prompt.reference_slots ?? [],
     image_prompt: modelPrompt,
     source_image_prompt: prompt.image_prompt ?? null,
@@ -681,7 +1071,7 @@ async function generateOne(prompt) {
     codex_prompt: routedProvider === "codex_imagegen" ? modelPrompt : null,
     image_provider: routedProvider,
     image_provider_route: imageProvider,
-    model: routedProvider === "codex_imagegen" ? generated.model : (imageModelOverride ?? prompt.image_model_route ?? "flux-klein"),
+    model: routedProvider === "codex_imagegen" ? generated.model : sceneModel,
     generated,
     requested_geometry: routedProvider === "modelslab" ? sceneGeometry : null,
     updated_at: new Date().toISOString(),
@@ -698,19 +1088,30 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
   const prompt = baseIdentityPath
     ? `${referencePrompt(target)}\n\nUse the first attached image as the exact facial likeness and identity anchor for ${stateRef?.character ?? target.subject}. Preserve the same face, age impression, hair color, hairline, and core facial structure; change only the requested wardrobe, posture, expression, and emotional state.`
     : referencePrompt(target);
-  const promptHash = sha256(prompt);
-  if (!forceReferences && await referenceFresh(target, outputPath)) {
-    return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
-  }
   const referenceImagePaths = [
     ...(baseIdentityPath ? [baseIdentityPath] : []),
     ...(target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : []),
   ].slice(0, 4);
+  const referenceModel = referenceImageModelOverride ?? target.image_model_route ?? "flux-klein";
+  const referenceInputs = await Promise.all(referenceImagePaths.map(async (referencePath) => ({
+    path: referencePath,
+    sha256: await hashFile(referencePath),
+  })));
+  const promptHash = sha256(JSON.stringify({
+    prompt,
+    provider: routedProvider,
+    model: referenceModel,
+    geometry: routedProvider === "modelslab" ? modelslabReferenceGeometry(target) : null,
+    reference_inputs: referenceInputs,
+  }));
+  if (!forceReferences && await referenceFresh(target, outputPath, promptHash)) {
+    return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
+  }
   const generated = await generateProviderImage({
     prompt,
     outputPath,
     referenceImagePaths,
-    model: target.image_model_route ?? "flux-klein",
+    model: referenceModel,
     provider: routedProvider,
     ...(routedProvider === "modelslab" ? modelslabReferenceGeometry(target) : {}),
   });
@@ -720,12 +1121,16 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
     kind: target.kind,
     subject: target.subject,
     prompt_hash: promptHash,
+    reference_master_prompt: target.prompt_anchor ?? null,
+    conditioning_prompt: prompt,
+    conditioning_image_path: generated.downloaded_path ?? outputPath,
     source_reference_plan_path: visualReferencePlanPath,
     reference_image_paths: referenceImagePaths,
+    reference_inputs: referenceInputs,
     base_identity_ref_id: baseIdentityRefId,
     image_provider: routedProvider,
     image_provider_route: imageProvider,
-    model: routedProvider === "codex_imagegen" ? generated.model : (target.image_model_route ?? "flux-klein"),
+    model: routedProvider === "codex_imagegen" ? generated.model : referenceModel,
     generated,
     updated_at: new Date().toISOString(),
   });
@@ -738,10 +1143,12 @@ async function generateReferences() {
   if (!referencePlan?.reference_targets?.length || skipReferenceGeneration) {
     const referenceEntries = [];
     for (const target of referencePlan?.reference_targets ?? []) {
-      if (target.ref_id && target.reference_image_path && await exists(target.reference_image_path)) referenceEntries.push([target.ref_id, target.reference_image_path]);
+      const targetPath = referencePathValue(target);
+      if (target.ref_id && targetPath && await exists(targetPath)) referenceEntries.push([target.ref_id, targetPath]);
     }
     for (const ref of characterRefs?.character_state_refs ?? []) {
-      if (ref.source_ref_id && ref.reference_image_path && await exists(ref.reference_image_path)) referenceEntries.push([ref.source_ref_id, ref.reference_image_path]);
+      const refPath = referencePathValue(ref);
+      if (ref.source_ref_id && refPath && await exists(refPath)) referenceEntries.push([ref.source_ref_id, refPath]);
     }
     return {
       referencePlan,
@@ -754,31 +1161,25 @@ async function generateReferences() {
   const referenceScope = requestedReferenceIds();
   const existingReferenceEntries = [];
   for (const target of referencePlan?.reference_targets ?? []) {
-    if (target.ref_id && target.reference_image_path && await exists(target.reference_image_path)) existingReferenceEntries.push([target.ref_id, target.reference_image_path]);
+    const targetPath = referencePathValue(target);
+    if (target.ref_id && targetPath && await exists(targetPath)) existingReferenceEntries.push([target.ref_id, targetPath]);
   }
   for (const ref of characterRefs?.character_state_refs ?? []) {
-    if (ref.source_ref_id && ref.reference_image_path && await exists(ref.reference_image_path)) existingReferenceEntries.push([ref.source_ref_id, ref.reference_image_path]);
+    const refPath = referencePathValue(ref);
+    if (ref.source_ref_id && refPath && await exists(refPath)) existingReferenceEntries.push([ref.source_ref_id, refPath]);
   }
   const requestedTargets = referencePlan.reference_targets
     .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true || referenceScope.has(target.ref_id))
     .filter((target) => !referenceScope.size || referenceScope.has(target.ref_id));
   const targets = [];
   for (const target of requestedTargets) {
-    if (
-      !forceReferences
-      && target.reference_image_path
-      && await exists(target.reference_image_path)
-      && await referenceFresh(target, target.reference_image_path)
-    ) {
-      continue;
-    }
     targets.push(target);
   }
   const styleTarget = targets.find((target) => isStyleReferenceTarget(target));
   const results = [];
-  const existingStyleTarget = referencePlan.reference_targets.find((target) => isStyleReferenceTarget(target) && target.reference_image_path);
-  let styleRefPath = existingStyleTarget && await exists(existingStyleTarget.reference_image_path)
-    ? existingStyleTarget.reference_image_path
+  const existingStyleTarget = referencePlan.reference_targets.find((target) => isStyleReferenceTarget(target) && referencePathValue(target));
+  let styleRefPath = existingStyleTarget && await exists(referencePathValue(existingStyleTarget))
+    ? referencePathValue(existingStyleTarget)
     : null;
   const referenceById = new Map(existingReferenceEntries);
   if (styleTarget) {
@@ -788,14 +1189,22 @@ async function generateReferences() {
     styleRefPath = result.image_path;
   }
   const remaining = targets.filter((target) => target.ref_id !== styleTarget?.ref_id);
-  const remainingResults = await runPool(remaining, (target) => generateReference(target, styleRefPath, referenceById, characterRefs?.character_state_refs ?? []), referenceConcurrency);
+  const referencePool = await runPoolWithCircuitBreaker(
+    remaining,
+    (target) => generateReference(target, styleRefPath, referenceById, characterRefs?.character_state_refs ?? []),
+    referenceConcurrency,
+  );
+  const remainingResults = referencePool.results;
   results.push(...remainingResults);
-  for (const row of remainingResults) referenceById.set(row.ref_id, row.image_path);
+  for (const row of remainingResults) {
+    if (row?.ref_id && row?.image_path && imageResultPassed(row)) referenceById.set(row.ref_id, row.image_path);
+  }
   const updatedReferencePlan = {
     ...referencePlan,
     reference_targets: referencePlan.reference_targets.map((target) => ({
       ...target,
-      reference_image_path: referenceById.get(target.ref_id) ?? target.reference_image_path ?? null,
+      reference_image_path: target.reference_image_path ?? referenceById.get(target.ref_id) ?? null,
+      conditioning_image_path: referenceById.get(target.ref_id) ?? target.conditioning_image_path ?? target.reference_image_path ?? null,
     })),
     reference_generation_updated_at: new Date().toISOString(),
   };
@@ -805,13 +1214,21 @@ async function generateReferences() {
       ...characterRefs,
       character_state_refs: characterRefs.character_state_refs.map((ref) => ({
         ...ref,
-        reference_image_path: referenceById.get(ref.source_ref_id) ?? ref.reference_image_path ?? null,
+        reference_image_path: ref.reference_image_path ?? referenceById.get(ref.source_ref_id) ?? null,
+        conditioning_image_path: referenceById.get(ref.source_ref_id) ?? ref.conditioning_image_path ?? ref.reference_image_path ?? null,
       })),
       reference_generation_updated_at: new Date().toISOString(),
     };
     await writeJson(characterStateRefsPath, updatedCharacterRefs);
   }
-  return { referencePlan: updatedReferencePlan, characterRefs, results, referenceById };
+  return {
+    referencePlan: updatedReferencePlan,
+    characterRefs,
+    results,
+    referenceById,
+    provider_circuit_open: referencePool.circuit_open,
+    provider_circuit_reason: referencePool.circuit_reason,
+  };
 }
 
 function successfulImageRows(report) {
@@ -873,7 +1290,11 @@ async function promoteDerivedReferences() {
         generation_mode: target.generation_mode,
         scene_ids: target.scene_ids ?? [],
         candidate_image_ids: candidateIds,
-        reason: candidateIds.length ? "candidate cuts are not generated yet" : "no candidate cuts found for derived ref target",
+        reason: candidateIds.length
+          ? "clean candidate cuts are not generated yet"
+          : isLocationTarget(target)
+            ? "no clean environment-only candidate cuts found for derived location ref target"
+            : "no candidate cuts found for derived ref target",
       });
       updatedTargets.push(target);
       continue;
@@ -983,6 +1404,108 @@ function imageResultPassed(row) {
   return ["generated", "reused_fresh", "reused_imported_codex", "existing_file"].includes(String(row?.status ?? "").toLowerCase());
 }
 
+function imagegenCostSummary(rows = []) {
+  const generatedRows = (rows ?? []).filter((row) => String(row?.status ?? "").toLowerCase() === "generated");
+  const estimatedRows = generatedRows.filter((row) => Number.isFinite(Number(row?.generated?.estimated_cost_usd)));
+  const estimatedCostUsd = estimatedRows.reduce((sum, row) => sum + Number(row.generated.estimated_cost_usd), 0);
+  const byModel = {};
+  for (const row of estimatedRows) {
+    const model = String(row.generated?.modelslab_model_id ?? row.generated?.model ?? row.generated?.model_id ?? "unknown");
+    if (!byModel[model]) byModel[model] = { generated_count: 0, estimated_cost_usd: 0 };
+    byModel[model].generated_count += 1;
+    byModel[model].estimated_cost_usd = Number((byModel[model].estimated_cost_usd + Number(row.generated.estimated_cost_usd)).toFixed(6));
+  }
+  return {
+    generated_count: generatedRows.length,
+    estimated_count: estimatedRows.length,
+    estimated_cost_usd: Number(estimatedCostUsd.toFixed(6)),
+    by_model: byModel,
+    note: "Estimated from ModelsLab catalog/model detail price fields; reused cached/imported images add zero incremental cost.",
+  };
+}
+
+async function writeCutExecutionLedger(plan, rows, promptPlanHash) {
+  const previous = await readJson(cutExecutionLedgerPath, null);
+  const previousById = new Map((previous?.cuts ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const resultById = new Map((rows ?? []).filter((row) => row?.image_id).map((row) => [String(row.image_id), row]));
+  const cuts = [];
+  for (const prompt of plan.prompts ?? []) {
+    if (prompt.image_generation_required === false) continue;
+    const imageId = String(prompt.image_id ?? "");
+    const result = resultById.get(imageId) ?? null;
+    const imagePath = result?.image_path ?? null;
+    const imageHash = imagePath && await exists(imagePath) ? await hashFile(imagePath) : null;
+    const metadata = imagePath ? await readJson(`${imagePath}.metadata.json`, null) : null;
+    const referencePaths = [...new Set((metadata?.reference_image_paths ?? prompt.reference_slots?.map((slot) => slot.reference_image_path) ?? []).filter(Boolean))];
+    const references = [];
+    for (const referencePath of referencePaths) {
+      references.push({
+        path: referencePath,
+        sha256: await hashFile(referencePath),
+      });
+    }
+    const beatHash = sha256(JSON.stringify({
+      scene_id: prompt.scene_id ?? null,
+      visual_beat_id: prompt.visual_beat_id ?? null,
+      start_sec: prompt.start_sec ?? null,
+      duration_sec: prompt.duration_sec ?? null,
+      visual_beat_script_excerpt: prompt.visual_beat_script_excerpt ?? null,
+      visual_beat_action: prompt.visual_beat_action ?? null,
+      visual_job: prompt.visual_job ?? null,
+    }));
+    const authoredPromptHash = sha256(JSON.stringify({
+      image_prompt: prompt.image_prompt ?? null,
+      modelslab_image_prompt: prompt.modelslab_image_prompt ?? null,
+      codex_image_prompt: prompt.codex_image_prompt ?? null,
+      shot_manifest: prompt.shot_manifest ?? null,
+      reference_requirements: prompt.reference_requirements ?? [],
+    }));
+    const prior = previousById.get(imageId);
+    const unchangedImage = Boolean(prior?.image_sha256 && imageHash && prior.image_sha256 === imageHash);
+    cuts.push({
+      image_id: imageId,
+      scene_id: prompt.scene_id ?? null,
+      visual_beat_id: prompt.visual_beat_id ?? null,
+      start_sec: Number(prompt.start_sec ?? 0),
+      duration_sec: Number(prompt.duration_sec ?? 0),
+      beat_hash: beatHash,
+      authored_prompt_hash: authoredPromptHash,
+      submitted_prompt_hash: result?.prompt_hash ?? metadata?.prompt_hash ?? null,
+      reference_ids: (prompt.reference_slots ?? prompt.reference_requirements ?? []).map((row) => row.ref_id).filter(Boolean),
+      references,
+      image_provider: result?.image_provider ?? metadata?.image_provider ?? null,
+      image_model: result?.generated?.modelslab_model_id ?? result?.generated?.model ?? metadata?.model ?? null,
+      image_path: imagePath,
+      image_sha256: imageHash,
+      generation_status: result?.status ?? "missing",
+      image_qa_status: unchangedImage ? prior.image_qa_status ?? "pending" : "pending",
+      image_qa_note: unchangedImage ? prior.image_qa_note ?? null : null,
+      motion_profile_hash: unchangedImage ? prior.motion_profile_hash ?? null : null,
+      motion_clip_path: unchangedImage ? prior.motion_clip_path ?? null : null,
+      motion_clip_sha256: unchangedImage ? prior.motion_clip_sha256 ?? null : null,
+    });
+  }
+  const complete = cuts.length > 0 && cuts.every((cut) => cut.image_sha256 && imageResultPassed(resultById.get(cut.image_id)));
+  const ledger = {
+    schema: "goldflow_cut_execution_ledger_v1",
+    status: complete ? "passed" : "partial",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    prompt_plan_path: promptPath,
+    prompt_plan_hash: promptPlanHash,
+    imagegen_report_path: reportPath,
+    cut_count: cuts.length,
+    completed_image_count: cuts.filter((cut) => cut.image_sha256).length,
+    pending_image_qa_count: cuts.filter((cut) => !String(cut.image_qa_status ?? "").startsWith("passed")).length,
+    cuts,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(cutExecutionLedgerPath, ledger);
+  return ledger;
+}
+
 export async function assertNoVisualResolutionDeadletterForTests(plan, selectedPrompts = [], options = {}) {
   const deadletterPath = options.deadletterPath ?? visualResolutionDeadletterPath;
   if (plan?.status === "blocked_deadletter") {
@@ -1031,9 +1554,12 @@ async function main() {
       image_dir: imageDir,
       reference_only: true,
       reference_concurrency: referenceConcurrency,
+      reference_provider_circuit_open: Boolean(referenceRun.provider_circuit_open),
+      reference_provider_circuit_reason: referenceRun.provider_circuit_reason ?? null,
       codex_opening_sec: codexOpeningSec,
       reference_count: referenceRun.results.length,
       reference_results: referenceRun.results,
+      estimated_cost: imagegenCostSummary(referenceRun.results),
       updated_at: new Date().toISOString(),
     };
     await writeJson(reportPath, report);
@@ -1067,11 +1593,31 @@ async function main() {
     .filter((prompt) => !scope.size || scope.has(prompt.image_id));
   if (!prompts.length) throw new Error("No image prompts selected for generation.");
   await assertNoVisualResolutionDeadletterForTests(plan, prompts);
+  const productionContractFindings = scenePromptProductionContractFindingsForTests(
+    prompts.filter((prompt) => promptRoute(prompt) === "modelslab"),
+    { maxSceneReferences },
+  );
+  if (productionContractFindings.length) {
+    throw new Error(
+      `Scene image production contract failed for ${productionContractFindings.length} finding(s): ` +
+      productionContractFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.code}`).join(", "),
+    );
+  }
   await fs.mkdir(imageDir, { recursive: true });
   const promptPlanHash = await hashFile(promptPath);
   const allPromptIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));
-  const results = await runPool(prompts, generateOne, concurrency);
+  let providerHealthReport = null;
+  let probeResults = [];
+  if (providerHealthProbeEnabled(prompts)) {
+    providerHealthReport = await runProviderHealthProbe(prompts);
+    probeResults = providerHealthReport.results ?? [];
+  }
+  const probedIds = new Set(probeResults.map((row) => String(row.image_id ?? "")).filter(Boolean));
+  const remainingPrompts = prompts.filter((prompt) => !probedIds.has(String(prompt.image_id ?? "")));
+  const pool = await runPoolWithCircuitBreaker(remainingPrompts, generateOne, concurrency);
+  const results = [...probeResults, ...pool.results];
   const mergedResults = await mergeImagegenResults({ currentResults: results, promptIds: allPromptIds, promptPlanHash });
+  const cutExecutionLedger = await writeCutExecutionLedger(plan, mergedResults, promptPlanHash);
   const report = {
     schema: "goldflow_imagegen_report_v1",
     status: results.every((row) => imageResultPassed(row)) ? "passed" : "failed",
@@ -1088,6 +1634,11 @@ async function main() {
     requested_reference_image_geometry: { width: referenceImageWidth, height: referenceImageHeight },
     image_dir: imageDir,
     concurrency,
+    provider_health_probe_enabled: Boolean(providerHealthReport),
+    provider_health_report_path: providerHealthReport ? providerHealthReportPath : null,
+    provider_circuit_open: pool.circuit_open,
+    provider_circuit_reason: pool.circuit_reason,
+    provider_circuit_failure_threshold: pool.failure_threshold,
     codex_opening_sec: codexOpeningSec,
     provider_filter: providerFilter,
     seed_derived_refs: seedDerivedRefs,
@@ -1097,7 +1648,15 @@ async function main() {
     current_batch_image_count: results.length,
     reference_count: referenceRun.results.length,
     reference_results: referenceRun.results,
+    reference_provider_circuit_open: Boolean(referenceRun.provider_circuit_open),
+    reference_provider_circuit_reason: referenceRun.provider_circuit_reason ?? null,
     results: mergedResults,
+    cut_execution_ledger_path: cutExecutionLedgerPath,
+    cut_execution_ledger_status: cutExecutionLedger.status,
+    estimated_cost: {
+      current_batch: imagegenCostSummary([...referenceRun.results, ...results]),
+      report_total: imagegenCostSummary([...referenceRun.results, ...mergedResults]),
+    },
     updated_at: new Date().toISOString(),
   };
   await writeJson(reportPath, report);

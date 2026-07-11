@@ -55,6 +55,7 @@ import {
   donorRecoveryFinding,
   imageRiskReasons,
   mergeRiskReviewDecisions,
+  scopedQaRecoveryCommand,
 } from "./image-output-qa.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
@@ -810,6 +811,15 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(ledgerResult.ledger.cuts[0].motion_clip_path, null);
   assert.equal(ledgerResult.ledger.cuts[1].motion_clip_path, "/tmp/b.mp4");
   assert.equal(ledgerResult.ledger.cuts[1].image_qa_status, "passed_structural");
+
+  const recoveryCommand = scopedQaRecoveryCommand(
+    ["cut_001"],
+    { prompts: [{ image_id: "cut_001", image_provider_route: "modelslab" }] },
+    { image_provider: "modelslab", results: [{ image_id: "cut_001", image_provider: "modelslab" }] },
+    { image_provider: "modelslab" },
+  );
+  assert.match(recoveryCommand, /--skip-reference-generation true/);
+  assert.match(recoveryCommand, /--cut-ids cut_001/);
 }
 
 async function testProviderCircuitBreakerStopsUnclaimedWork() {

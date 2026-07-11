@@ -322,7 +322,7 @@ function isCodexRoute(value) {
   return /codex/i.test(String(value ?? ""));
 }
 
-function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, runIdentity) {
+export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, runIdentity) {
   const promptById = new Map((promptPlan.prompts ?? []).map((prompt) => [String(prompt.image_id ?? ""), prompt]));
   const resultById = new Map((imagegenReport.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const codexIds = [];
@@ -343,7 +343,7 @@ function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, runIdenti
   }
   if (modelslabIds.length) {
     const providerFilter = /hybrid/i.test(provider) ? " --provider-filter modelslab" : "";
-    commands.push(`node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --cut-ids ${modelslabIds.join(",")} --force-images true --qa-recovery true${providerFilter} --concurrency 15`);
+    commands.push(`node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --cut-ids ${modelslabIds.join(",")} --force-images true --qa-recovery true${providerFilter} --concurrency 15`);
   }
   return commands.join("; then ");
 }

@@ -53,6 +53,7 @@ import {
 import {
   applyImageQaDecisionsToLedger,
   donorRecoveryFinding,
+  imageQaNeedsRecovery,
   imageRiskReasons,
   mergeRiskReviewDecisions,
   scopedQaRecoveryCommand,
@@ -824,6 +825,8 @@ function testImageOutputQaRiskAndDonorPolicies() {
   );
   assert.match(recoveryCommand, /--skip-reference-generation true/);
   assert.match(recoveryCommand, /--cut-ids cut_001/);
+  assert.equal(imageQaNeedsRecovery([], ["cut_001"]), true);
+  assert.equal(imageQaNeedsRecovery([], []), false);
 }
 
 async function testProviderCircuitBreakerStopsUnclaimedWork() {

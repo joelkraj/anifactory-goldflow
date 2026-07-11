@@ -348,6 +348,10 @@ export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, ru
   return commands.join("; then ");
 }
 
+export function imageQaNeedsRecovery(structuralBlockers = [], rejectedDecisionIds = []) {
+  return structuralBlockers.length > 0 || rejectedDecisionIds.length > 0;
+}
+
 async function main() {
   const [promptPlan, imagegenReport, runIdentity] = await Promise.all([
     readJson(promptPath, null),
@@ -382,6 +386,7 @@ async function main() {
   const structuralBlockerIds = new Set(structuralBlockers.map((finding) => finding.image_id).filter(Boolean));
   const rejectedDecisionIds = decisionLedger.decisions.filter((row) => row.decision === "rejected").map((row) => row.image_id);
   const notInspectedIds = decisionLedger.decisions.filter((row) => row.decision === "not_inspected").map((row) => row.image_id);
+  const recoveryRequired = imageQaNeedsRecovery(structuralBlockers, rejectedDecisionIds);
   const status = structuralBlockers.length || rejectedDecisionIds.length
     ? "blocked"
     : notInspectedIds.length
@@ -423,7 +428,7 @@ async function main() {
       : {},
     generated_text_accuracy_checked: false,
     generated_text_accuracy_policy: "out_of_scope_by_operator_direction",
-    next_command: structuralBlockers.length || rejectedIds.size
+    next_command: recoveryRequired
       ? scopedQaRecoveryCommand(failedImageIds, promptPlan, imagegenReport, runIdentity)
       : status === "needs_manual_review"
         ? `Inspect ${packets.risk_sheets.join(", ")}; record each risk-cut decision in ${reviewDecisionsPath}; then rerun imagegen qa`

@@ -647,7 +647,26 @@ function isHardenedPromptPlan(plan) {
   return Boolean(plan?.visual_prompt_hardening_report_path || String(plan?.prompt_policy ?? "").includes("deterministic hardening"));
 }
 
+function withCharacterReferenceAliases(referenceById, characterRefs = []) {
+  const resolved = new Map(referenceById);
+  for (const ref of characterRefs ?? []) {
+    const stateRefId = String(ref?.state_ref_id ?? "").trim();
+    const sourceRefId = String(ref?.source_ref_id ?? "").trim();
+    const baseIdentityRefId = String(ref?.base_identity_ref_id ?? "").trim();
+    const path = resolved.get(stateRefId)
+      ?? resolved.get(sourceRefId)
+      ?? resolved.get(baseIdentityRefId)
+      ?? null;
+    if (!path) continue;
+    if (stateRefId) resolved.set(stateRefId, path);
+    if (sourceRefId && !resolved.has(sourceRefId)) resolved.set(sourceRefId, path);
+    if (baseIdentityRefId && !resolved.has(baseIdentityRefId)) resolved.set(baseIdentityRefId, path);
+  }
+  return resolved;
+}
+
 function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], referenceTargets = []) {
+  const resolvedReferenceById = withCharacterReferenceAliases(referenceById, characterRefs);
   const inferVisibleSubjectRefs = !isHardenedPromptPlan(plan);
   const prompts = (plan.prompts ?? []).map((prompt) => {
     const stagingContext = stagedCharacterSlotContext(prompt, characterRefs);
@@ -657,14 +676,14 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
     const existingIds = new Set(authoredRequirements.map((requirement) => requirement.ref_id).filter(Boolean));
     const requirements = [
       ...authoredRequirements,
-      ...manifestReferenceRequirements(prompt, characterRefs, referenceById, referenceTargets, existingIds),
+      ...manifestReferenceRequirements(prompt, characterRefs, resolvedReferenceById, referenceTargets, existingIds),
       ...(inferVisibleSubjectRefs ? characterReferenceRequirements(prompt, characterRefs, existingIds) : []),
     ];
     const availableRows = requirements
       .map((requirement, index) => ({
         requirement,
         index,
-        path: referenceById.get(requirement.ref_id),
+        path: resolvedReferenceById.get(requirement.ref_id),
         sortKey: referenceSortKey(requirement, index),
         staging: stagingContext.get(String(requirement.ref_id)) ?? stagingContext.get(String(requirement.source_state_ref_id ?? "")) ?? null,
       }))
@@ -694,7 +713,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
       required_reference_paths: selected.map((row) => row.path),
       reference_slots: referenceSlots,
       reference_usage: requirements.map((requirement) => {
-        const refPath = referenceById.get(requirement.ref_id) ?? null;
+        const refPath = resolvedReferenceById.get(requirement.ref_id) ?? null;
         if (!refPath) {
           return {
             ref_id: requirement.ref_id,

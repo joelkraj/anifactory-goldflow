@@ -1731,6 +1731,34 @@ function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
     shot_manifest: { shot_job: "physical_action", foreground_action: "Joey runs toward pinned Arielle" },
   }], { maxSceneReferences: 4 });
   assert.deepEqual(passed, []);
+
+  const stateAliasPlan = attachReferencePathsToPromptsForTests({
+    prompt_policy: "deterministic hardening fixture",
+    prompts: [{
+      image_id: "ep_01-cut-state-alias",
+      modelslab_image_prompt: "Anime/manhwa frame of Arielle studying a curse on her wrist.",
+      reference_requirements: [{
+        ref_id: "arielle_curse_state",
+        base_identity_ref_id: "arielle_base",
+        kind: "character_state",
+        required: true,
+      }],
+      shot_manifest: { shot_job: "body_state_proof" },
+    }],
+  }, new Map([["arielle_base", "/tmp/arielle-base.png"]]), [{
+    state_ref_id: "arielle_curse_state",
+    source_ref_id: "arielle_base",
+    base_identity_ref_id: "arielle_base",
+  }]);
+  assert.deepEqual(stateAliasPlan.prompts[0].reference_slots, [{
+    slot: 1,
+    ref_id: "arielle_curse_state",
+    kind: "character_state",
+    path: "/tmp/arielle-base.png",
+    purpose: "character identity and wardrobe for arielle_curse_state",
+    reason: null,
+  }]);
+  assert.deepEqual(scenePromptProductionContractFindingsForTests(stateAliasPlan.prompts, { maxSceneReferences: 4 }), []);
 }
 
 function testGroupReferencePromptDoesNotDemandOnePerson() {

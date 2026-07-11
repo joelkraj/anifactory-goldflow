@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.2";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.3";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -300,7 +300,6 @@ export function commandStageFor(commandName, subcommandName, flags = {}) {
   if (key === "imagegen promote-derived-refs") return "image_generation";
   for (const entry of PIPELINE_STAGE_REGISTRY) {
     if (entry.commands.includes(key)) return entry.id;
-    if (entry.commands.includes(`${key}:references`)) return entry.id;
   }
   return null;
 }
@@ -422,8 +421,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
     image_generation: codexSceneCuts(identity)
-      ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --provider-filter modelslab --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 15 --reference-concurrency 15`,
+      ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion smooth_fast_ken_burns --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,

@@ -2095,6 +2095,8 @@ async function testVisualPlannerDriftContracts() {
   assert.equal(/full-frame composition, keep complete heads/i.test(files["scripts/imagegen.mjs"]), false);
   assert.match(files["scripts/codex-image-manual-import.mjs"], /promptTextForImageProvider\(prompt, "codex_imagegen"\)/);
   assert.equal(commandStageFor("visual", "approve-refs", {}), "reference_image_approval");
+  assert.equal(commandStageFor("imagegen", "start", {}), "image_generation");
+  assert.equal(commandStageFor("imagegen", "start", { "references-only": "true" }), "reference_generation");
   assert.equal(commandStageFor("imagegen", "import-staged-codex", { "references-only": "true" }), "reference_generation");
   assert.equal(commandStageFor("imagegen", "import-staged-codex", { "qa-recovery": "true" }), "image_output_qa");
   assert.equal(commandStageFor("visual", "plan", {}), "visual_prompt_plan");

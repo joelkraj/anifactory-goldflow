@@ -119,7 +119,12 @@ import {
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
 import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
-import { factLedgerMatchesScriptForTests, scriptPrefixForTimedWordsForTests, visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
+import {
+  closeVisualBeatTimelineForTests,
+  factLedgerMatchesScriptForTests,
+  scriptPrefixForTimedWordsForTests,
+  visualBeatInternalsForTests,
+} from "./visual-beat-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
@@ -532,9 +537,9 @@ function testEditorialBeatDirectorContracts() {
       preview_visible_entity_ids: [],
       mentioned_only_entity_ids: [],
       primary_entity_id: "joey",
-      entity_evidence: index === 3 ? { joey: "Joey", victor: "Victor" } : { joey: "Joey" },
-      props: [],
-      ui_elements: index === 1 ? ["blue system panel"] : [],
+      entity_evidence: index === 3 ? { joey: "JOEY", victor: "VICTOR" } : { joey: "JOEY" },
+      props: index === 0 ? [{ type: "personal_item", name: "silver key" }] : [],
+      ui_elements: index === 1 ? [{ type: "system_window", text: "blue system panel" }] : [],
       foreground_action: atom.text,
       composition_intent: "Keep the named action and spatial relationship readable.",
       continuity_note: "",
@@ -545,6 +550,8 @@ function testEditorialBeatDirectorContracts() {
   const normalized = normalizeEditorialGrouping(raw, atoms, ledger, "ep_01");
   assert.equal(normalized.beats[0].visual_beat_id.startsWith("beat_w"), true);
   assert.equal(normalized.beats[0].image_id_hint.startsWith("ep_01-w"), true);
+  assert.deepEqual(normalized.beats[0].local_props, ["silver key"]);
+  assert.deepEqual(normalized.beats[1].local_ui_elements, ["blue system panel"]);
   assert.deepEqual(editorialBeatCoverageFindings(normalized.beats, spoken.length), []);
   const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
   assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
@@ -557,6 +564,23 @@ function testEditorialBeatDirectorContracts() {
   assert.match(prompt, /Never merge across an atom with transition_barrier_before=true/i);
   assert.deepEqual(retentionRailForTime(0), { band: "0_30", min_sec: 2.2, max_sec: 4.5 });
   assert.deepEqual(retentionRailForTime(1300), { band: "1200_plus", min_sec: 7, max_sec: 15 });
+}
+
+function testEditorialBeatTimelineClosure() {
+  const closed = closeVisualBeatTimelineForTests([
+    { visual_beat_id: "beat_a", start_sec: 0, end_sec: 2.7, duration_sec: 2.7 },
+    { visual_beat_id: "beat_b", start_sec: 3, end_sec: 6.5, duration_sec: 3.5 },
+    { visual_beat_id: "beat_c", start_sec: 7, end_sec: 9.4, duration_sec: 2.4 },
+  ], 10);
+  assert.deepEqual(closed.map((beat) => [beat.start_sec, beat.end_sec, beat.duration_sec]), [
+    [0, 3, 3],
+    [3, 7, 4],
+    [7, 10, 3],
+  ]);
+  assert.throws(() => closeVisualBeatTimelineForTests([
+    { visual_beat_id: "beat_a", start_sec: 0 },
+    { visual_beat_id: "beat_b", start_sec: 0 },
+  ], 3), /non-increasing starts/i);
 }
 
 function testSemanticAnchorSnapsToExactScriptTokens() {
@@ -4913,6 +4937,7 @@ const FIXTURE_SUITES = {
     testBoundedProofBaselineScoping,
     testSemanticReconciliationEvidenceContract,
     testEditorialBeatDirectorContracts,
+    testEditorialBeatTimelineClosure,
     testSemanticAnchorSnapsToExactScriptTokens,
     testFirstPersonBeatKeepsProtagonistVisible,
     testWhisperExcerptAlignmentInterpolatesUnspokenUi,

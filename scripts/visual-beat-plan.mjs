@@ -968,6 +968,24 @@ function normalizeGlobalBeatTimeline(beats) {
   });
 }
 
+export function closeVisualBeatTimelineForTests(beats, timelineEndSec = null) {
+  const ordered = [...(beats ?? [])].sort((left, right) => Number(left.start_sec ?? 0) - Number(right.start_sec ?? 0));
+  return ordered.map((beat, index) => {
+    const start = Number(beat.start_sec ?? 0);
+    const nextStart = Number(ordered[index + 1]?.start_sec);
+    if (Number.isFinite(nextStart) && nextStart <= start) {
+      throw new Error(`Visual beat timeline has non-increasing starts at ${beat.visual_beat_id ?? beat.image_id_hint ?? index}.`);
+    }
+    const requestedEnd = Number.isFinite(nextStart)
+      ? nextStart
+      : Number.isFinite(Number(timelineEndSec))
+        ? Number(timelineEndSec)
+        : Number(beat.end_sec ?? (start + Number(beat.duration_sec ?? 0.25)));
+    const end = Number.isFinite(nextStart) ? nextStart : Math.max(start + 0.25, requestedEnd);
+    return { ...beat, end_sec: Number(end.toFixed(3)), duration_sec: Number((end - start).toFixed(3)) };
+  });
+}
+
 function assertRetentionBeatDensity(beats) {
   if (allowUnderTargetRetentionBeats) return;
   const ordered = [...beats].sort((a, b) => Number(a.start_sec ?? 0) - Number(b.start_sec ?? 0));
@@ -1440,7 +1458,7 @@ async function main() {
       console.log(JSON.stringify({ status: "passed", output_path: outputPath, reused_grouping_lock: true, visual_beat_count: editorialResult.report.visual_beat_count }, null, 2));
       return;
     }
-    numberedBeatsAll = editorialResult.beats;
+    numberedBeatsAll = closeVisualBeatTimelineForTests(editorialResult.beats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
     whisperAlignmentSummary = {
       mode: "exact_whisper_word_span_atoms",
       atom_count: editorialResult.atoms.length,

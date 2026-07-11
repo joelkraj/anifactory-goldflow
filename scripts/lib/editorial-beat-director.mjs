@@ -16,6 +16,16 @@ function unique(values) {
   return [...new Set((values ?? []).filter(Boolean).map(String))];
 }
 
+function assetLabel(value) {
+  if (typeof value === "string" || typeof value === "number") return normalizeText(value);
+  if (!value || typeof value !== "object") return "";
+  return normalizeText(value.text ?? value.label ?? value.display_name ?? value.name ?? value.ui_id ?? value.prop_id ?? value.type ?? "");
+}
+
+function assetLabels(values) {
+  return unique((values ?? []).map(assetLabel).filter(Boolean));
+}
+
 function editDistance(left, right) {
   const a = String(left ?? "");
   const b = String(right ?? "");
@@ -293,7 +303,7 @@ function groupingFindings(rows, atoms, factLedger) {
       findings.push({ severity: "blocker", code: "editorial_crossed_transition_barrier", row_index: rowIndex });
     }
     if (!locationIds.has(String(row.location_id ?? ""))) findings.push({ severity: "blocker", code: "editorial_unknown_location", row_index: rowIndex });
-    const groupedText = normalizeText(atomRows.map(({ atom }) => atom.text).join(" "));
+    const groupedText = normalizeText(atomRows.map(({ atom }) => atom.text).join(" ")).toLowerCase();
     for (const field of ["physically_visible_entity_ids", "screen_visible_entity_ids", "preview_visible_entity_ids", "mentioned_only_entity_ids"]) {
       for (const entityId of row[field] ?? []) {
         if (!entityIds.has(String(entityId))) findings.push({ severity: "blocker", code: "editorial_unknown_entity", row_index: rowIndex, entity_id: entityId });
@@ -305,7 +315,7 @@ function groupingFindings(rows, atoms, factLedger) {
       ...(row.preview_visible_entity_ids ?? []),
     ]);
     for (const entityId of visible) {
-      const evidence = normalizeText(row.entity_evidence?.[entityId]);
+      const evidence = normalizeText(row.entity_evidence?.[entityId]).toLowerCase();
       if (!evidence || !groupedText.includes(evidence)) findings.push({ severity: "blocker", code: "editorial_visible_entity_evidence_missing", row_index: rowIndex, entity_id: entityId });
     }
     const first = atomRows[0].atom;
@@ -374,8 +384,8 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
       preview_visible_characters: unique(row.preview_visible_entity_ids ?? []).map((id) => entityMap.get(id)?.display_name).filter(Boolean),
       mentioned_only_characters: mentionedIds.map((id) => entityMap.get(id)?.display_name).filter(Boolean),
       primary_subject: entityMap.get(String(row.primary_entity_id ?? ""))?.display_name ?? null,
-      local_props: unique(row.props ?? []),
-      local_ui_elements: unique(row.ui_elements ?? []),
+      local_props: assetLabels(row.props ?? []),
+      local_ui_elements: assetLabels(row.ui_elements ?? []),
       editorial_cues: unique(row.editorial_cues ?? []),
       visual_novelty_directive: normalizeText(row.composition_intent),
       local_continuity_note: normalizeText(row.continuity_note),

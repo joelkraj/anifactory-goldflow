@@ -4531,7 +4531,10 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
     source_hashes: {
       [semanticPath]: sha256(await fs.readFile(semanticPath)),
     },
-    reference_targets: [{ ref_id: "style_ref", kind: "style", generation_mode: "no_ref_needed", required_before_imagegen: false }],
+    reference_targets: [
+      { ref_id: "style_ref", kind: "style", generation_mode: "no_ref_needed", required_before_imagegen: false },
+      { ref_id: "optional_action_review", kind: "action", generation_mode: "manual_review", required_before_imagegen: false },
+    ],
     character_state_refs: [],
   });
   await writeJson(path.join(episodeDir, "character_state_refs.json"), {

@@ -580,8 +580,7 @@ async function referenceGenerationComplete(episodeDir, identity) {
   const required = targets.filter((target) => {
     const mode = String(target.generation_mode ?? "");
     return Boolean(target.required_before_imagegen)
-      || mode === "standalone_ref"
-      || mode === "manual_review";
+      || mode === "standalone_ref";
   });
   const missing = [];
   const byHash = new Map();

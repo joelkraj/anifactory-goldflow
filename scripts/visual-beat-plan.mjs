@@ -11,6 +11,7 @@ import {
   buildEditorialDirectorPrompt,
   buildTranscriptAtoms,
   editorialBeatCoverageFindings,
+  editorialRetentionRailFindings,
   groupingLockHash,
   normalizeEditorialGrouping,
   projectActiveStateConstraints,
@@ -1459,6 +1460,10 @@ async function main() {
       return;
     }
     numberedBeatsAll = closeVisualBeatTimelineForTests(editorialResult.beats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
+    const appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll);
+    if (appliedRailFindings.length) {
+      throw new Error(`Editorial applied hold rails failed: ${appliedRailFindings.slice(0, 12).map((finding) => `${finding.visual_beat_id}:${finding.duration_sec}s`).join(", ")}`);
+    }
     whisperAlignmentSummary = {
       mode: "exact_whisper_word_span_atoms",
       atom_count: editorialResult.atoms.length,

@@ -96,6 +96,7 @@ import {
   buildEditorialDirectorPrompt,
   buildTranscriptAtoms,
   editorialBeatCoverageFindings,
+  editorialRetentionRailFindings,
   normalizeEditorialGrouping,
   projectActiveStateConstraints,
   retentionRailForTime,
@@ -541,6 +542,7 @@ function testEditorialBeatDirectorContracts() {
       props: index === 0 ? [{ type: "personal_item", name: "silver key" }] : [],
       ui_elements: index === 1 ? [{ type: "system_window", text: "blue system panel" }] : [],
       foreground_action: atom.text,
+      foreground_action_evidence: atom.text,
       composition_intent: "Keep the named action and spatial relationship readable.",
       continuity_note: "",
       editorial_cues: [],
@@ -553,12 +555,20 @@ function testEditorialBeatDirectorContracts() {
   assert.deepEqual(normalized.beats[0].local_props, ["silver key"]);
   assert.deepEqual(normalized.beats[1].local_ui_elements, ["blue system panel"]);
   assert.deepEqual(editorialBeatCoverageFindings(normalized.beats, spoken.length), []);
+  assert.deepEqual(editorialRetentionRailFindings(closeVisualBeatTimelineForTests(normalized.beats, spoken.at(-1).end_sec)), []);
   const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
   assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
   assert.equal(projected[2].active_state_constraints.entities.joey.wardrobe, "black academy coat");
   const invalid = structuredClone(raw);
   invalid.beats = [raw.beats[0], { ...raw.beats[1], source_atom_ids: [atoms[1].atom_id, atoms[2].atom_id], rail_exception: "mandatory transition" }, raw.beats[3]];
   assert.throws(() => normalizeEditorialGrouping(invalid, atoms, ledger, "ep_01"), /editorial beat contract failed/i);
+  const missingActionEvidence = structuredClone(raw);
+  delete missingActionEvidence.beats[0].foreground_action_evidence;
+  assert.throws(() => normalizeEditorialGrouping(missingActionEvidence, atoms, ledger, "ep_01"), /editorial_foreground_action_evidence_missing/i);
+  const pauseInflated = structuredClone(atoms);
+  pauseInflated[1].start_sec = 5;
+  pauseInflated[1].end_sec = Math.max(5.4, pauseInflated[1].end_sec + 2);
+  assert.throws(() => normalizeEditorialGrouping(raw, pauseInflated, ledger, "ep_01"), /editorial_retention_rail_violation/i);
   const prompt = buildEditorialDirectorPrompt(atoms, ledger, timedScenes);
   assert.match(prompt, /You own visual job, depiction mode/i);
   assert.match(prompt, /Never merge across an atom with transition_barrier_before=true/i);

@@ -222,13 +222,13 @@ Hard rails:
 - Use every atom_id exactly once and in order. You may merge adjacent atoms into one beat.
 - Never reorder, overlap, omit, duplicate, or invent atoms.
 - Never merge across an atom with transition_barrier_before=true.
-- Retention holds: 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s. Merge adjacent atoms to fit when story truth allows. An indivisible atom or mandatory transition may use a concise rail_exception.
+- Retention holds: 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s. Measure a beat from its first atom start through the next unmerged atom start, because the image remains visible during the narration pause. Merge adjacent atoms to fit when story truth allows. An indivisible atom or mandatory transition may use a concise rail_exception.
 - Current reality, screen/replay, preview/hypothetical, memory/flashback, and mentioned-only are distinct depiction modes.
 - Mentioned-only entities stay offscreen. Every visible entity needs an exact evidence excerpt from the grouped atoms.
 - Resolve first-person I/me/my physical actions to the established narrator/protagonist entity when the fact ledger and scene context identify that person; do not make the acting protagonist disappear because their proper name is omitted locally.
 - Select only canonical entity_id and location_id values below. If the narration gives no supported visible person, an object/UI/environment beat is valid.
 - Composition is beat-specific. There is no global wide or close-up bias.
-- Each beat has one decisive visible job and foreground action.
+- Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 
 ATOMS:
 ${JSON.stringify(atoms.map((atom) => ({
@@ -236,6 +236,7 @@ ${JSON.stringify(atoms.map((atom) => ({
     scene_id: atom.scene_id,
     start_sec: atom.start_sec,
     end_sec: atom.end_sec,
+    next_atom_start_sec: atoms[atoms.indexOf(atom) + 1]?.start_sec ?? atom.end_sec,
     duration_sec: atom.duration_sec,
     text: atom.text,
     semantic_location: atom.semantic_location,
@@ -268,6 +269,7 @@ Return JSON only:
     "props": [],
     "ui_elements": [],
     "foreground_action": "specific visible present-tense action",
+    "foreground_action_evidence": "exact excerpt from grouped atoms",
     "composition_intent": "specific framing, focal subject, and spatial relationship",
     "continuity_note": "local continuity only",
     "editorial_cues": [],
@@ -304,6 +306,10 @@ function groupingFindings(rows, atoms, factLedger) {
     }
     if (!locationIds.has(String(row.location_id ?? ""))) findings.push({ severity: "blocker", code: "editorial_unknown_location", row_index: rowIndex });
     const groupedText = normalizeText(atomRows.map(({ atom }) => atom.text).join(" ")).toLowerCase();
+    const actionEvidence = normalizeText(row.foreground_action_evidence).toLowerCase();
+    if (!actionEvidence || !groupedText.includes(actionEvidence)) {
+      findings.push({ severity: "blocker", code: "editorial_foreground_action_evidence_missing", row_index: rowIndex });
+    }
     for (const field of ["physically_visible_entity_ids", "screen_visible_entity_ids", "preview_visible_entity_ids", "mentioned_only_entity_ids"]) {
       for (const entityId of row[field] ?? []) {
         if (!entityIds.has(String(entityId))) findings.push({ severity: "blocker", code: "editorial_unknown_entity", row_index: rowIndex, entity_id: entityId });
@@ -320,7 +326,9 @@ function groupingFindings(rows, atoms, factLedger) {
     }
     const first = atomRows[0].atom;
     const last = atomRows.at(-1).atom;
-    const duration = last.end_sec - first.start_sec;
+    const nextRowFirstId = rows[rowIndex + 1]?.source_atom_ids?.[0];
+    const nextRowFirst = nextRowFirstId ? atomMap.get(String(nextRowFirstId))?.atom : null;
+    const duration = (nextRowFirst?.start_sec ?? last.end_sec) - first.start_sec;
     const rail = retentionRailForTime(first.start_sec);
     if ((duration < rail.min_sec - 0.05 || duration > rail.max_sec + 0.05) && !normalizeText(row.rail_exception)) {
       findings.push({ severity: "blocker", code: "editorial_retention_rail_violation", row_index: rowIndex, duration_sec: duration, rail });
@@ -367,6 +375,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
       duration_sec: Number((last.end_sec - first.start_sec).toFixed(3)),
       visual_beat_script_excerpt: normalizeText(selected.map((atom) => atom.text).join(" ")),
       visual_beat_action: normalizeText(row.foreground_action),
+      visual_beat_action_evidence: normalizeText(row.foreground_action_evidence),
       visual_beat_focus: normalizeText(row.composition_intent),
       visual_job: String(row.visual_job),
       suggested_shot_job: String(row.shot_job),
@@ -396,6 +405,22 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
     };
   });
   return { beats, findings };
+}
+
+export function editorialRetentionRailFindings(beats) {
+  return (beats ?? []).flatMap((beat, index) => {
+    const rail = beat.retention_rail ?? retentionRailForTime(beat.start_sec);
+    const duration = Number(beat.duration_sec ?? (Number(beat.end_sec ?? 0) - Number(beat.start_sec ?? 0)));
+    if (normalizeText(beat.rail_exception) || duration >= rail.min_sec - 0.05 && duration <= rail.max_sec + 0.05) return [];
+    return [{
+      severity: "blocker",
+      code: "editorial_applied_hold_rail_violation",
+      beat_index: index,
+      visual_beat_id: beat.visual_beat_id ?? null,
+      duration_sec: Number(duration.toFixed(3)),
+      rail,
+    }];
+  });
 }
 
 function entityIdForName(name, factLedger) {

@@ -75,6 +75,14 @@ import {
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
 import {
+  buildEditorialDirectorPrompt,
+  buildTranscriptAtoms,
+  editorialBeatCoverageFindings,
+  normalizeEditorialGrouping,
+  projectActiveStateConstraints,
+  retentionRailForTime,
+} from "./lib/editorial-beat-director.mjs";
+import {
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
   hardenFeedbackBlockersNeedManualAgentReview,
@@ -422,6 +430,86 @@ function testSemanticReconciliationEvidenceContract() {
   const findings = storyFactEvidenceFindingsForTests(invalid, script);
   assert.equal(findings.some((finding) => finding.code === "fact_evidence_not_exact"), true);
   assert.equal(findings.some((finding) => finding.code === "fact_confidence_invalid"), true);
+}
+
+function testEditorialBeatDirectorContracts() {
+  const script = [
+    "Joey enters the hall with calm eyes.",
+    "Joey opens the blue system panel slowly.",
+    "Joey changes into a black academy coat.",
+    "Joey faces Victor beside the exam platform.",
+  ].join(" ");
+  const spoken = [...script.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)].map((match, index) => ({
+    index,
+    word: match[0],
+    normalized: match[0].toLowerCase(),
+    start_sec: Number((index * 0.4).toFixed(3)),
+    end_sec: Number(((index + 1) * 0.4).toFixed(3)),
+  }));
+  const timedScenes = [{
+    scene_id: "scene_001",
+    start_sec: 0,
+    end_sec: spoken.at(-1).end_sec,
+    location: "Academy Exam Hall",
+    visible_subjects: ["Joey", "Victor"],
+    character_states: [{ character: "Joey", wardrobe: "plain gray student shirt", visible_state: "calm eyes" }],
+  }];
+  const ledger = {
+    canonical_entities: [
+      { entity_id: "joey", display_name: "Joey", aliases: [] },
+      { entity_id: "victor", display_name: "Victor", aliases: [] },
+    ],
+    canonical_locations: [{ location_id: "academy_exam_hall", display_name: "Academy Exam Hall", aliases: [] }],
+    state_transitions: [{
+      entity_id: "joey",
+      state_kind: "wardrobe",
+      from_state: "plain gray student shirt",
+      to_state: "black academy coat",
+      evidence: [{ exact_excerpt: "Joey changes into a black academy coat.", confidence: 1 }],
+    }],
+  };
+  const atoms = buildTranscriptAtoms(script, spoken, timedScenes, ledger);
+  assert.equal(atoms.length, 4);
+  assert.equal(atoms[0].source_word_start_index, 0);
+  assert.equal(atoms.at(-1).source_word_end_index, spoken.length - 1);
+  assert.equal(atoms[2].transition_barrier_before, true);
+  const raw = {
+    beats: atoms.map((atom, index) => ({
+      source_atom_ids: [atom.atom_id],
+      visual_job: index === 1 ? "system_reveal" : "story_progression",
+      shot_job: index === 1 ? "ui_reveal" : "interaction",
+      depiction_mode: "current_reality",
+      location_id: "academy_exam_hall",
+      physically_visible_entity_ids: index === 3 ? ["joey", "victor"] : ["joey"],
+      screen_visible_entity_ids: [],
+      preview_visible_entity_ids: [],
+      mentioned_only_entity_ids: [],
+      primary_entity_id: "joey",
+      entity_evidence: index === 3 ? { joey: "Joey", victor: "Victor" } : { joey: "Joey" },
+      props: [],
+      ui_elements: index === 1 ? ["blue system panel"] : [],
+      foreground_action: atom.text,
+      composition_intent: "Keep the named action and spatial relationship readable.",
+      continuity_note: "",
+      editorial_cues: [],
+      rail_exception: null,
+    })),
+  };
+  const normalized = normalizeEditorialGrouping(raw, atoms, ledger, "ep_01");
+  assert.equal(normalized.beats[0].visual_beat_id.startsWith("beat_w"), true);
+  assert.equal(normalized.beats[0].image_id_hint.startsWith("ep_01-w"), true);
+  assert.deepEqual(editorialBeatCoverageFindings(normalized.beats, spoken.length), []);
+  const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
+  assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
+  assert.equal(projected[2].active_state_constraints.entities.joey.wardrobe, "black academy coat");
+  const invalid = structuredClone(raw);
+  invalid.beats = [raw.beats[0], { ...raw.beats[1], source_atom_ids: [atoms[1].atom_id, atoms[2].atom_id], rail_exception: "mandatory transition" }, raw.beats[3]];
+  assert.throws(() => normalizeEditorialGrouping(invalid, atoms, ledger, "ep_01"), /editorial beat contract failed/i);
+  const prompt = buildEditorialDirectorPrompt(atoms, ledger, timedScenes);
+  assert.match(prompt, /You own visual job, depiction mode/i);
+  assert.match(prompt, /Never merge across an atom with transition_barrier_before=true/i);
+  assert.deepEqual(retentionRailForTime(0), { band: "0_30", min_sec: 2.2, max_sec: 4.5 });
+  assert.deepEqual(retentionRailForTime(1300), { band: "1200_plus", min_sec: 7, max_sec: 15 });
 }
 
 function testSemanticAnchorSnapsToExactScriptTokens() {
@@ -4555,6 +4643,7 @@ async function run() {
   testSemanticPlannerPromptContracts();
   testSemanticChunkingSplitsLongSingleParagraph();
   testSemanticReconciliationEvidenceContract();
+  testEditorialBeatDirectorContracts();
   testSemanticAnchorSnapsToExactScriptTokens();
   testFirstPersonBeatKeepsProtagonistVisible();
   testWhisperExcerptAlignmentInterpolatesUnspokenUi();

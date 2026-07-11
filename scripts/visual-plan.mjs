@@ -271,7 +271,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     ? Number(scene.__visual_plan_absolute_index)
     : null;
   return {
-    target_image_id: absoluteIndex == null ? null : `${episode}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`,
+    target_image_id: scene.image_id_hint ?? (absoluteIndex == null ? null : `${episode}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`),
     scene_id: scene.scene_id,
     visual_beat_id: scene.visual_beat_id ?? null,
     parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
@@ -1055,6 +1055,7 @@ function assertPromptSize(prompt, stageName) {
 }
 
 function targetImageIdForRow(row, episodeId, fallbackIndex = 0) {
+  if (row?.image_id_hint) return String(row.image_id_hint);
   const absoluteIndex = Number.isFinite(Number(row?.__visual_plan_absolute_index))
     ? Number(row.__visual_plan_absolute_index)
     : fallbackIndex;

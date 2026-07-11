@@ -4,8 +4,19 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
+import { isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
+import {
+  buildEditorialDirectorPrompt,
+  buildTranscriptAtoms,
+  editorialBeatCoverageFindings,
+  groupingLockHash,
+  normalizeEditorialGrouping,
+  projectActiveStateConstraints,
+} from "./lib/editorial-beat-director.mjs";
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
 const channel = flags.channel ?? "53rebirth";
@@ -17,6 +28,9 @@ const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.jso
 const scriptPath = flags.script ?? path.join(episodeDir, "script_clean.md");
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, "visual_beat_plan.json");
+const storyFactLedgerPath = flags["story-fact-ledger"] ?? path.join(episodeDir, "story_fact_ledger.json");
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
+const visualBeatApprovalPath = flags["approval-output"] ?? path.join(episodeDir, "visual_beat_approval.json");
 const targetBeatSec = Number(flags["target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_TARGET_BEAT_SEC ?? 8.5);
 const maxBeatSec = Number(flags["max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_BEAT_SEC ?? 15);
 const minBeatSec = Number(flags["min-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MIN_BEAT_SEC ?? 3);
@@ -37,6 +51,7 @@ const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["sc
 const scopeEndSec = flags["scope-end-sec"] ?? flags["max-time-sec"] ?? flags["first-sec"];
 const scopeEndSecNumber = scopeEndSec == null ? null : Number(scopeEndSec);
 const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
+const EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v3";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -1178,11 +1193,194 @@ function scopeBeatsByTime(beats) {
   }));
 }
 
+function extractJson(content) {
+  const raw = String(content ?? "").trim();
+  try {
+    return JSON.parse(raw);
+  } catch {}
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    try {
+      return JSON.parse(fenced[1]);
+    } catch {}
+  }
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
+  throw new Error("Editorial beat director did not return valid JSON.");
+}
+
+async function runPool(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function runWorker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(items.length, Math.max(1, concurrency)) }, runWorker));
+  return results;
+}
+
+function editorialAtomChunks(atoms, maxAtoms = 40) {
+  const chunks = [];
+  let current = [];
+  for (const atom of atoms) {
+    if (current.length >= maxAtoms && atom.transition_barrier_before) {
+      chunks.push(current);
+      current = [];
+    }
+    current.push(atom);
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+async function callEditorialLlm(prompt, stageName) {
+  if (isLocalLLMRoute(stageName)) {
+    const response = await fetch(localLLMChatCompletionURL(stageName), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...localLLMAuthHeaders() },
+      body: JSON.stringify({
+        model: getLLMModel(stageName),
+        messages: [
+          { role: "system", content: "Return one valid JSON object only. You are an editorial beat director for timed manhwa recap narration." },
+          { role: "user", content: prompt },
+        ],
+        temperature: Number(flags["llm-temperature"] ?? 0.25),
+        max_tokens: Number(flags["editorial-chunk-max-tokens"] ?? 9000),
+      }),
+      signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_VISUAL_BEAT_LLM_TIMEOUT_MS ?? 1_200_000)),
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`Editorial beat local LLM HTTP ${response.status}: ${raw.slice(0, 800)}`);
+    const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
+    return { parsed: extractJson(content), provider: "local-qwen", model: getLLMModel(stageName), output_path: null };
+  }
+  const callDir = path.join(episodeDir, "_codex_calls", "visual-beat-director");
+  await fs.mkdir(callDir, { recursive: true });
+  const outputPath = path.join(callDir, `${stageName}-output.txt`);
+  const metadata = await readCodexCallMetadata(outputPath);
+  const cached = await fs.readFile(outputPath, "utf8").catch(() => null);
+  if (cached && flags["reuse-codex-calls"] !== "false" && isCodexCacheCompatible(metadata, {
+    model: flags.model ?? flags["llm-model"] ?? null,
+    reasoningEffort: flags["reasoning-effort"] ?? null,
+    promptHash: sha256(prompt),
+  })) {
+    return { parsed: extractJson(cached), provider: "codex", model: metadata.model, reasoning_effort: metadata.reasoning_effort, output_path: outputPath, reused: true };
+  }
+  const call = await runCodexCli({
+    prompt,
+    stageName,
+    repoRoot,
+    outputPath,
+    model: flags.model ?? flags["llm-model"] ?? null,
+    reasoningEffort: flags["reasoning-effort"] ?? null,
+    timeoutMs: Number(process.env.ANIFACTORY_VISUAL_BEAT_LLM_TIMEOUT_MS ?? 1_200_000),
+  });
+  return { parsed: extractJson(call.content), provider: "codex", model: call.model, reasoning_effort: call.reasoning_effort, output_path: outputPath, reused: false };
+}
+
+async function directEditorialBeats(atoms, factLedger, timedScenes) {
+  const chunks = editorialAtomChunks(atoms, Math.max(8, Number(flags["editorial-chunk-atoms"] ?? 40)));
+  const concurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 4)));
+  const results = await runPool(chunks, concurrency, async (chunk, index) => {
+    const basePrompt = buildEditorialDirectorPrompt(chunk, factLedger, timedScenes);
+    let lastError = null;
+    for (let attempt = 1; attempt <= Math.max(1, Number(flags["editorial-attempts"] ?? 2)); attempt += 1) {
+      const prompt = attempt === 1
+        ? basePrompt
+        : `${basePrompt}\n\nCorrection pass: the prior grouping failed deterministic validation with: ${lastError?.message}. Return complete corrected JSON satisfying atom coverage, transition barriers, evidence, and timing rails.`;
+      const call = await callEditorialLlm(prompt, `${episode}_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_${attempt}`);
+      try {
+        const normalized = normalizeEditorialGrouping(call.parsed, chunk, factLedger, episode);
+        return { ...normalized, call, atom_count: chunk.length };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? new Error(`Editorial beat chunk ${index + 1} failed.`);
+  });
+  return {
+    beats: results.flatMap((result) => result.beats),
+    planner: {
+      provider: results[0]?.call?.provider ?? null,
+      model: results[0]?.call?.model ?? null,
+      reasoning_effort: results[0]?.call?.reasoning_effort ?? null,
+      chunk_count: chunks.length,
+      concurrency,
+      reused_chunk_count: results.filter((result) => result.call.reused).length,
+      output_paths: results.map((result) => result.call.output_path).filter(Boolean),
+    },
+  };
+}
+
+function enrichEditorialBeat(beat, timedScenes) {
+  const scene = timedScenes.find((candidate) => candidate.scene_id === beat.parent_scene_id) ?? beat;
+  const visibleCharacters = beat.visible_characters ?? [];
+  const mentionedOnlyCharacters = beat.mentioned_only_characters ?? [];
+  const props = beat.local_props ?? [];
+  const uiElements = beat.local_ui_elements ?? [];
+  const refNeeds = localBeatReferenceNeeds(scene, beat, {
+    visibleCharacters,
+    mentionedOnlyCharacters,
+    props,
+    uiElements,
+  });
+  return {
+    ...beat,
+    visual_beat_contract_version: EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION,
+    ref_needs: refNeeds,
+    beat_ref_requirements: refNeeds,
+    hook_visual_intent: beat.hook_visual ? "opening retention cut with one decisive visible story payload" : null,
+    retention_ramp_intent: beat.retention_ramp_visual ? "retention cut with clear story movement and distinct visual job" : null,
+  };
+}
+
+async function existingGroupingLock() {
+  const approval = await readJson(visualBeatApprovalPath, null);
+  const plan = await readJson(outputPath, null);
+  if (!approval || !plan) return null;
+  const planHash = await hashFile(outputPath);
+  if (approval.status === "approved" && approval.visual_beat_plan_sha256 === planHash) return { approval, plan };
+  return null;
+}
+
+async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) {
+  const locked = await existingGroupingLock();
+  if (locked && flags["approve-regrouping"] !== "true") {
+    console.error(`visual beats: grouping lock current; reusing ${outputPath}`);
+    return { reused: true, report: locked.plan };
+  }
+  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true") {
+    throw new Error("Visual beat grouping was previously locked. Pass --approve-regrouping true only with explicit operator approval.");
+  }
+  const atoms = buildTranscriptAtoms(scriptText, wordTiming.words, timedPlan.scenes, factLedger);
+  const directed = await directEditorialBeats(atoms, factLedger, timedPlan.scenes);
+  const projectedBase = projectActiveStateConstraints(directed.beats, atoms, factLedger, timedPlan.scenes)
+    .map((beat) => enrichEditorialBeat(beat, timedPlan.scenes));
+  const projected = projectedBase.map((beat, index) => ({
+    ...beat,
+    beat_index: index + 1,
+    beat_count: projectedBase.length,
+    location_timeline_label: `${Math.floor(Number(beat.start_sec ?? 0) / 60)}:${String(Math.floor(Number(beat.start_sec ?? 0) % 60)).padStart(2, "0")} ${beat.local_location ?? beat.location ?? ""}`.trim(),
+  }));
+  const coverageFindings = editorialBeatCoverageFindings(projected, wordTiming.words.length);
+  if (coverageFindings.some((finding) => finding.severity === "blocker")) {
+    throw new Error(`Editorial beat Whisper coverage failed: ${coverageFindings.map((finding) => finding.code).join(", ")}`);
+  }
+  return { reused: false, atoms, beats: projected, planner: directed.planner, coverageFindings };
+}
+
 async function main() {
-  const [timedPlan, scriptText, wordTiming] = await Promise.all([
+  const [timedPlan, scriptText, wordTiming, runIdentity, factLedger] = await Promise.all([
     readJson(timedPlanPath, null),
     fs.readFile(scriptPath, "utf8").catch(() => ""),
     readJson(wordTimingPath, null),
+    readJson(runIdentityPath, {}),
+    readJson(storyFactLedgerPath, null),
   ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (!scriptText.trim()) throw new Error(`Missing script: ${scriptPath}`);
@@ -1190,21 +1388,44 @@ async function main() {
   const scriptHash = sha256(scriptText);
   if (timedPlan.source_script_hash && timedPlan.source_script_hash !== scriptHash) throw new Error("timed_scene_plan.json is stale for current script_clean.md.");
   if (wordTiming.source_script_hash && wordTiming.source_script_hash !== scriptHash) throw new Error("narration_word_timing is stale for current script_clean.md.");
-  const beats = [];
-  let scriptCursor = 0;
-  for (const scene of timedPlan.scenes) {
-    const result = splitScene(scene, scriptText, wordTiming, scriptCursor);
-    for (const beat of result.beats) beats.push(beat);
-    if (result.sceneText) {
-      const start = scriptText.indexOf(result.sceneText, scriptCursor);
-      if (start >= 0) scriptCursor = start + result.sceneText.length;
+  const useEditorialDirector = runIdentity.schema === "goldflow_run_identity_v2" && flags["legacy-deterministic-beats"] !== "true";
+  let numberedBeatsAll;
+  let whisperAlignmentSummary;
+  let editorialResult = null;
+  if (useEditorialDirector) {
+    if (factLedger?.status !== "passed" || factLedger.source_script_hash !== scriptHash) {
+      throw new Error(`Editorial beat direction requires current passed story_fact_ledger.json: ${storyFactLedgerPath}`);
     }
+    editorialResult = await editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger);
+    if (editorialResult.reused) {
+      console.log(JSON.stringify({ status: "passed", output_path: outputPath, reused_grouping_lock: true, visual_beat_count: editorialResult.report.visual_beat_count }, null, 2));
+      return;
+    }
+    numberedBeatsAll = editorialResult.beats;
+    whisperAlignmentSummary = {
+      mode: "exact_whisper_word_span_atoms",
+      atom_count: editorialResult.atoms.length,
+      covered_word_count: wordTiming.words.length,
+      finding_count: editorialResult.coverageFindings.length,
+    };
+  } else {
+    const beats = [];
+    let scriptCursor = 0;
+    for (const scene of timedPlan.scenes) {
+      const result = splitScene(scene, scriptText, wordTiming, scriptCursor);
+      for (const beat of result.beats) beats.push(beat);
+      if (result.sceneText) {
+        const start = scriptText.indexOf(result.sceneText, scriptCursor);
+        if (start >= 0) scriptCursor = start + result.sceneText.length;
+      }
+    }
+    const whisperAligned = alignExcerptRowsToWhisper(beats, wordTiming.words);
+    numberedBeatsAll = normalizeGlobalBeatTimeline(whisperAligned.rows).map((beat, index) => ({
+      ...beat,
+      image_id_hint: `${episode}-cut-${String(index + 1).padStart(3, "0")}`,
+    }));
+    whisperAlignmentSummary = whisperAligned.summary;
   }
-  const whisperAligned = alignExcerptRowsToWhisper(beats, wordTiming.words);
-  const numberedBeatsAll = normalizeGlobalBeatTimeline(whisperAligned.rows).map((beat, index) => ({
-    ...beat,
-    image_id_hint: `${episode}-cut-${String(index + 1).padStart(3, "0")}`,
-  }));
   const numberedBeats = scopeBeatsByTime(numberedBeatsAll);
   assertBeatExcerptQuality(numberedBeats);
   assertRetentionBeatDensity(numberedBeats);
@@ -1237,17 +1458,17 @@ async function main() {
       excerpt: beat.visual_beat_script_excerpt,
     }));
   const report = {
-    schema: "goldflow_visual_beat_plan_v1",
-    planner_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
-    visual_beat_contract_version: VISUAL_BEAT_CONTRACT_VERSION,
+    schema: useEditorialDirector ? "goldflow_visual_beat_plan_v2" : "goldflow_visual_beat_plan_v1",
+    planner_contract_version: useEditorialDirector ? EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION : VISUAL_BEAT_CONTRACT_VERSION,
+    visual_beat_contract_version: useEditorialDirector ? EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION : VISUAL_BEAT_CONTRACT_VERSION,
     status: "passed",
     channel,
     series_slug: series,
     week,
     episode,
     source_script_hash: scriptHash,
-    source_artifact_paths: [timedPlanPath, scriptPath, wordTimingPath],
-    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, scriptPath, wordTimingPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: [timedPlanPath, scriptPath, wordTimingPath, ...(useEditorialDirector ? [storyFactLedgerPath] : [])],
+    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, scriptPath, wordTimingPath, ...(useEditorialDirector ? [storyFactLedgerPath] : [])].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: timedPlan.timing_source,
     audio_duration_sec: timedPlan.audio_duration_sec,
     word_timing_path: wordTimingPath,
@@ -1278,8 +1499,22 @@ async function main() {
       ])),
     },
     location_timeline: locationTimeline,
-    policy: "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry exact local narration excerpt, local location, visible characters, mentioned-only characters, props/UI, visual job, and beat-level advisory reference hints before reference or prompt authoring. Beat ref_needs are local evidence, not official locked reference targets.",
-    whisper_excerpt_alignment: whisperAligned.summary,
+    policy: useEditorialDirector
+      ? "LLM editorial direction over clause/sentence atoms bound to exact Whisper word spans. The LLM owns depiction and composition; deterministic validation owns coverage, order, transition barriers, IDs, state projection, and timing rails."
+      : "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry exact local narration excerpt, local location, visible characters, mentioned-only characters, props/UI, visual job, and beat-level advisory reference hints before reference or prompt authoring. Beat ref_needs are local evidence, not official locked reference targets.",
+    whisper_excerpt_alignment: whisperAlignmentSummary,
+    editorial_director: useEditorialDirector ? {
+      ...editorialResult.planner,
+      atom_count: editorialResult.atoms.length,
+      grouping_lock_sha256: groupingLockHash(beatsWithQuality),
+      active_state_projection: "binding_per_beat",
+      retention_rails: {
+        sec_0_30: [2.2, 4.5],
+        sec_30_180: [3.2, 7],
+        sec_180_1200: [5, 12],
+        sec_1200_plus: [7, 15],
+      },
+    } : null,
     beat_settings: {
       target_beat_sec: targetBeatSec,
       max_beat_sec: maxBeatSec,
@@ -1297,6 +1532,21 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
+  if (useEditorialDirector) {
+    const planHash = await hashFile(outputPath);
+    await writeJson(visualBeatApprovalPath, {
+      schema: "goldflow_visual_beat_approval_v1",
+      status: "approved",
+      approval_kind: "grouping_lock",
+      visual_beat_plan_path: outputPath,
+      visual_beat_plan_sha256: planHash,
+      grouping_lock_sha256: report.editorial_director.grouping_lock_sha256,
+      approved_by: flags["approved-by"] ?? "codex-agent",
+      approval_note: flags.note ?? "LLM grouping passed exact Whisper coverage, transition, evidence, timing-rail, and active-state validation.",
+      regrouping_requires_explicit_operator_approval: true,
+      updated_at: new Date().toISOString(),
+    });
+  }
   console.log(JSON.stringify({ status: report.status, output_path: outputPath, scene_count: report.scene_count, visual_beat_count: report.visual_beat_count }, null, 2));
 }
 

@@ -13,7 +13,8 @@ import {
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
-const CURRENT_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
+const CURRENT_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v3";
+const LEGACY_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 const DEFAULT_TARGET_WPM_MIN = 195;
 const DEFAULT_TARGET_WPM_MAX = 220;
 const DEFAULT_TARGET_WPM_MID = 208;
@@ -1113,7 +1114,7 @@ async function jsonStatusWithSourceHashesComplete(filePath, label) {
   }
   if (label === "visual_beat_plan.json") {
     const contractVersion = artifact.visual_beat_contract_version ?? artifact.planner_contract_version ?? null;
-    if (contractVersion !== CURRENT_VISUAL_BEAT_CONTRACT_VERSION) {
+    if (![CURRENT_VISUAL_BEAT_CONTRACT_VERSION, LEGACY_VISUAL_BEAT_CONTRACT_VERSION].includes(contractVersion)) {
       return {
         done: false,
         evidence: `${label}; status=${status || "missing_status"}; stale planner_contract_version=${contractVersion ?? "missing"} required=${CURRENT_VISUAL_BEAT_CONTRACT_VERSION}`,
@@ -1288,7 +1289,24 @@ async function main() {
   const semanticPlan = await jsonStatusComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
   const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
   const timedScenePlan = await jsonStatusComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
-  const visualBeatPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "visual_beat_plan.json"), "visual_beat_plan.json");
+  const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");
+  let visualBeatPlan = await jsonStatusWithSourceHashesComplete(visualBeatPlanPath, "visual_beat_plan.json");
+  if (!legacyIdentity && visualBeatPlan.done) {
+    const [beatArtifact, beatApproval, beatPlanHash] = await Promise.all([
+      readJson(visualBeatPlanPath, null),
+      readJson(path.join(episodeDir, "visual_beat_approval.json"), null),
+      fileSha256(visualBeatPlanPath),
+    ]);
+    const contract = beatArtifact?.visual_beat_contract_version ?? beatArtifact?.planner_contract_version;
+    const approvalCurrent = beatApproval?.status === "approved" && beatApproval.visual_beat_plan_sha256 === beatPlanHash;
+    if (contract !== CURRENT_VISUAL_BEAT_CONTRACT_VERSION || !approvalCurrent) {
+      visualBeatPlan = {
+        done: false,
+        state: contract !== CURRENT_VISUAL_BEAT_CONTRACT_VERSION ? "stale" : "missing",
+        evidence: `visual_beat_plan.json requires ${CURRENT_VISUAL_BEAT_CONTRACT_VERSION} and current visual_beat_approval.json`,
+      };
+    }
+  }
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
   const visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");

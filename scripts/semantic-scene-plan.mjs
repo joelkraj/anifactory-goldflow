@@ -19,6 +19,9 @@ const episodeDir = path.join(weekDir, "episodes", episode);
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const outputPath = flags.output ?? path.join(episodeDir, "semantic_scene_plan.json");
 const storyFactLedgerPath = flags["fact-ledger-output"] ?? path.join(episodeDir, "story_fact_ledger.json");
+const proofBaselineTimingPath = flags["proof-baseline-word-timing"] ?? null;
+const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
+const scopeEndSec = flags["scope-end-sec"] == null ? null : Number(flags["scope-end-sec"]);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -100,6 +103,28 @@ async function biblePacket() {
 
 function wordCount(text) {
   return String(text ?? "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+export function semanticProofScopeForTests(script, timing, startSec, endSec, bufferWords = 24) {
+  if (!Number.isFinite(Number(startSec)) || !Number.isFinite(Number(endSec)) || Number(endSec) <= Number(startSec)) {
+    return { script, scoped: false, source_word_start: 0, source_word_end_exclusive: wordCount(script) };
+  }
+  if (Number(startSec) !== 0) throw new Error("Semantic proof baseline scoping currently requires scope-start-sec 0 so locked-script order remains exact.");
+  const timingWords = Array.isArray(timing?.words) ? timing.words : [];
+  const inScope = timingWords.filter((row) => Number(row?.start_sec ?? row?.start ?? 0) < Number(endSec));
+  if (!inScope.length) throw new Error("Semantic proof baseline timing contains no words inside the requested scope.");
+  const scriptWords = String(script ?? "").trim().split(/\s+/).filter(Boolean);
+  const endExclusive = Math.min(scriptWords.length, inScope.length + Math.max(0, Number(bufferWords) || 0));
+  return {
+    script: `${scriptWords.slice(0, endExclusive).join(" ")}\n`,
+    scoped: true,
+    source_word_start: 0,
+    source_word_end_exclusive: endExclusive,
+    baseline_timing_word_count: inScope.length,
+    buffer_words: Math.max(0, Number(bufferWords) || 0),
+    start_sec: Number(startSec),
+    end_sec: Number(endSec),
+  };
 }
 
 function sceneCountTargets(script) {
@@ -800,8 +825,16 @@ async function main() {
   if (!script.trim()) throw new Error(`Missing script_clean.md at ${scriptPath}`);
   const scriptHash = sha256(script);
   await requireApproval(scriptHash);
+  const baselineTiming = proofBaselineTimingPath ? await readJson(proofBaselineTimingPath, null) : null;
+  if (proofBaselineTimingPath && (!baselineTiming || baselineTiming.source_script_hash !== scriptHash)) {
+    throw new Error(`Semantic proof baseline timing is missing or does not match locked script hash: ${proofBaselineTimingPath}`);
+  }
+  const scope = proofBaselineTimingPath
+    ? semanticProofScopeForTests(script, baselineTiming, scopeStartSec, scopeEndSec, Number(flags["scope-buffer-words"] ?? 24))
+    : { script, scoped: false, source_word_start: 0, source_word_end_exclusive: wordCount(script) };
+  const planningScript = scope.script;
   const bibles = await biblePacket();
-  const targets = sceneCountTargets(script);
+  const targets = sceneCountTargets(planningScript);
   const stageName = `${episode}_semantic_scene_plan`;
   let llm;
   let scenes = [];
@@ -809,7 +842,7 @@ async function main() {
   let parsedChunks = [];
   const useChunking = flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
   if (useChunking) {
-    const chunks = scriptChunks(script);
+    const chunks = scriptChunks(planningScript);
     const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 4)));
     parsedChunks = await runPool(chunks, async (chunk) => {
       const chunkTargets = chunkSceneCountTargets(chunk.text);
@@ -838,7 +871,7 @@ async function main() {
       concurrency: semanticConcurrency,
     };
   } else {
-    const prompt = buildPrompt(script, bibles, targets);
+    const prompt = buildPrompt(planningScript, bibles, targets);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedChunks = [{
       chunk: {
@@ -853,7 +886,7 @@ async function main() {
       scenes: Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [],
     }];
   }
-  const reconciliation = await reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName);
+  const reconciliation = await reconcileSemanticPlan(planningScript, bibles, parsedChunks, targets, stageName);
   semanticParsed = reconciliation.parsed;
   scenes = Array.isArray(reconciliation.parsed.scenes) ? reconciliation.parsed.scenes : [];
   if (!scenes.length) throw new Error("Semantic scene planner returned no scenes.");
@@ -864,8 +897,8 @@ async function main() {
     throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
   }
   const normalizedScenes = normalizeScenes(scenes);
-  const anchorSnapReport = snapSemanticSceneAnchors(normalizedScenes, script);
-  const anchorFindings = semanticSceneAnchorFindings(anchorSnapReport.scenes, script);
+  const anchorSnapReport = snapSemanticSceneAnchors(normalizedScenes, planningScript);
+  const anchorFindings = semanticSceneAnchorFindings(anchorSnapReport.scenes, planningScript);
   const anchorBlockers = anchorFindings.filter((finding) => finding.severity === "blocker");
   if (anchorBlockers.length) {
     const preview = anchorBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.anchor ?? finding.message}`).join("\n");
@@ -881,7 +914,9 @@ async function main() {
     ...reconciliation.ledger,
     source_hashes: {
       [scriptPath]: scriptHash,
+      ...(proofBaselineTimingPath ? { [proofBaselineTimingPath]: sha256(await fs.readFile(proofBaselineTimingPath)) } : {}),
     },
+    proof_scope: scope.scoped ? scope : null,
     semantic_scene_count: anchorSnapReport.scenes.length,
     evidence_finding_count: reconciliation.evidenceFindings.length,
   };
@@ -898,9 +933,11 @@ async function main() {
     source_hashes: {
       [scriptPath]: scriptHash,
       [storyFactLedgerPath]: sha256(`${JSON.stringify(storyFactLedger, null, 2)}\n`),
+      ...(proofBaselineTimingPath ? { [proofBaselineTimingPath]: sha256(await fs.readFile(proofBaselineTimingPath)) } : {}),
     },
     story_fact_ledger_path: storyFactLedgerPath,
-    timing_dependency: "none_semantic_only",
+    timing_dependency: proofBaselineTimingPath ? "proof_baseline_word_timing_scope_only" : "none_semantic_only",
+    proof_scope: scope.scoped ? scope : null,
     scene_count_policy: targets,
     semantic_validation: {
       anchor_finding_count: anchorFindings.length,

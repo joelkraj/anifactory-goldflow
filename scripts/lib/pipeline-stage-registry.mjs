@@ -71,7 +71,7 @@ const stages = [
     output_artifact: "qwen_generation_plan.json",
     approval: "automatic",
     validator: "voice_plan_hashes",
-    commands: ["voice plan"],
+    commands: ["voice plan", "run import-proof-baseline"],
   },
   {
     id: "qwen_tts_stitch",

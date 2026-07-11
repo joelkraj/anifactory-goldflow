@@ -110,12 +110,14 @@ import {
 import {
   semanticBuildPromptForTests,
   semanticReconciliationPromptForTests,
+  semanticProofScopeForTests,
   semanticSceneAnchorFindingsForTests,
   semanticSceneQualityFindingsForTests,
   semanticScriptChunksForTests,
   semanticSnapSceneAnchorsForTests,
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
+import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
 import { visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -423,6 +425,23 @@ function testSemanticChunkingSplitsLongSingleParagraph() {
   assert.equal(chunks.every((chunk) => chunk.words <= 120), true);
   assert.equal(chunks.slice(1).every((chunk, index) => chunk.word_start_index < chunks[index].word_end_index_exclusive), true);
   assert.equal(chunks.slice(1).every((chunk) => chunk.overlap_words > 0), true);
+}
+
+function testBoundedProofBaselineScoping() {
+  const script = Array.from({ length: 20 }, (_, index) => `word${index}`).join(" ");
+  const timing = {
+    words: Array.from({ length: 10 }, (_, index) => ({ word: `word${index}`, start_sec: index, end_sec: index + 0.8 })),
+  };
+  const scope = semanticProofScopeForTests(script, timing, 0, 5, 2);
+  assert.equal(scope.scoped, true);
+  assert.equal(scope.baseline_timing_word_count, 5);
+  assert.equal(scope.source_word_end_exclusive, 7);
+  assert.equal(scope.script.trim().split(/\s+/).length, 7);
+  const words = scopedBaselineWordsForTests(timing.words, 2, 5);
+  assert.equal(words.length, 3);
+  assert.equal(words[0].start_sec, 0);
+  assert.equal(words.at(-1).end_sec, 2.8);
+  assert.equal(commandStageFor("run", "import-proof-baseline", {}), "voice_plan");
 }
 
 function testSemanticReconciliationEvidenceContract() {
@@ -4880,6 +4899,7 @@ const FIXTURE_SUITES = {
     testSemanticSceneQualityFindings,
     testSemanticPlannerPromptContracts,
     testSemanticChunkingSplitsLongSingleParagraph,
+    testBoundedProofBaselineScoping,
     testSemanticReconciliationEvidenceContract,
     testEditorialBeatDirectorContracts,
     testSemanticAnchorSnapsToExactScriptTokens,

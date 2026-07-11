@@ -182,6 +182,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("codex-runtime-doctor.mjs", flags);
 } else if (command === "run" && subcommand === "status") {
   run("run-status.mjs", flags);
+} else if (command === "run" && subcommand === "import-proof-baseline") {
+  run("proof-baseline-import.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {
   run("run-cleanup.mjs", flags);
 } else if (command === "ingest" && subcommand === "source") {

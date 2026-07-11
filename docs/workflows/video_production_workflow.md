@@ -55,6 +55,7 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
      `node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_02 --title <episode-title> --source <chatbot-output.md> --image-provider modelslab --audio-target narrator_only --run-intent production`
    - Ingest must refuse to run without a matching `run_identity.json` unless a diagnostic bypass is explicitly used.
    - A bounded proof uses `--run-intent proof --proof-scope 0-300` (or explicit start/end flags) and must write isolated proof artifacts.
+   - Audited narration/Whisper reuse is explicit: `goldflow run import-proof-baseline --baseline-episode-dir <dir>` is restricted to v2 bounded proofs, trims/re-hashes the locked window, re-times Whisper words, records source hashes, and reports zero provider calls. Scope semantic planning first with `--proof-baseline-word-timing`, `--scope-start-sec`, and `--scope-end-sec`; never analyze or regenerate the full episode for a bounded proof.
    - Before any resume or "continue" request, run the artifact-backed ledger:
      `node bin/goldflow.mjs run status --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --format markdown`
    - The agent must continue from the first missing stage in that ledger. If the next requested command would skip a missing upstream artifact or operator approval gate, stop and explain the missing gate.

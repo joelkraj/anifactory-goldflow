@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   allowedRefIdsForScene,
+  applyBeatLocationSceneIds,
   applyDeterministicLocationSceneIds,
   dropOutOfScopePromptRefs,
   locationCoverageFindings,
@@ -81,6 +82,7 @@ import {
   referenceEvidenceLedgerForTests,
   referenceLocationContractLedgerForTests,
   referenceLocationScopeForTests,
+  referenceOpeningIdentityFindingsForTests,
   selectedReferenceInventoryForTests,
 } from "./visual-reference-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
@@ -932,6 +934,11 @@ function testLocationSceneIdsDerivation() {
   const boardroom = targets.find((target) => target.ref_id === "loc_boardroom");
   assert.deepEqual(new Set(apartment.scene_ids), new Set(["scene_999", "scene_001", "scene_005"]));
   assert.deepEqual(new Set(boardroom.scene_ids), new Set(["scene_003"]));
+  const beatScoped = applyBeatLocationSceneIds([{ ref_id: "loc_gate", kind: "location", scene_ids: ["scene_012"] }], [
+    { scene_id: "scene_001", location_id: "loc_gate" },
+    { parent_scene_id: "scene_011", location_id: "loc_gate" },
+  ]);
+  assert.deepEqual(new Set(beatScoped.targets[0].scene_ids), new Set(["scene_012", "scene_001", "scene_011"]));
 }
 
 function testReferenceDirectorV2EvidenceAndLocationContracts() {
@@ -967,6 +974,17 @@ function testReferenceDirectorV2EvidenceAndLocationContracts() {
   }], contracts);
   assert.deepEqual(scoped.targets[0].scene_ids, ["scene_010"]);
   assert.equal(scoped.findings.length, 0);
+  const openingFindings = referenceOpeningIdentityFindingsForTests([{
+    ref_id: "hero_base",
+    kind: "character_state",
+    canonical_subject_id: "hero",
+    generation_mode: "manual_review",
+    required_before_imagegen: false,
+  }], {
+    status: "passed",
+    beats: [{ scene_id: "scene_001", start_sec: 15, preview_visible_entity_ids: ["hero"] }],
+  });
+  assert.equal(openingFindings.some((finding) => finding.code === "opening_visible_identity_not_generatable"), true);
 }
 
 function testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts() {

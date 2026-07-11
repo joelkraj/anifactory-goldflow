@@ -56,6 +56,25 @@ export function applyDeterministicLocationSceneIds(referenceTargets = [], semant
   return { targets, warnings };
 }
 
+export function applyBeatLocationSceneIds(referenceTargets = [], visualBeats = []) {
+  const beats = asArray(visualBeats);
+  const targets = asArray(referenceTargets).map((target) => {
+    if (normalizeRefKind(target?.kind) !== "location") return target;
+    const locationIds = new Set([
+      normalizeRefId(target?.ref_id),
+      ...asArray(target?.location_contract_ids).map(normalizeRefId),
+    ].filter(Boolean));
+    const sceneIds = new Set(asArray(target?.scene_ids).map(normalizeRefId).filter(Boolean));
+    for (const beat of beats) {
+      const beatLocationId = normalizeRefId(beat?.location_id);
+      const sceneId = sceneScopeId(beat);
+      if (sceneId && beatLocationId && locationIds.has(beatLocationId)) sceneIds.add(sceneId);
+    }
+    return { ...target, scene_ids: [...sceneIds] };
+  });
+  return { targets };
+}
+
 export function isPhysicalLocationScene(scene) {
   const location = String(scene?.location ?? "").trim();
   if (!location) return false;

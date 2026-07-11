@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import {
+  applyBeatLocationSceneIds,
   applyDeterministicLocationSceneIds,
 } from "./lib/visual-scope-utils.mjs";
 
@@ -872,6 +873,7 @@ Rules:
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
 - Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and low-value 2-3 occurrence assets should be omitted unless the story makes them truly critical.
 - Major recurring characters and visually sensitive major wardrobe/state changes should usually use standalone_ref or manual_review.
+- A selected recurring character identity that is visibly depicted in the first 30 seconds must be standalone_ref with required_before_imagegen true. manual_review is a planning hold, not a generatable opening identity.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; omit it unless distinct identity continuity is mission-critical.
 - Major recurring locations should use clean environment-only standalone plates. Do not upgrade every one-scene opening sublocation merely because it is early, and do not derive location refs from populated story cuts.
@@ -1036,6 +1038,7 @@ Rules:
   - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
 - Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
+- A selected recurring character identity that is visibly depicted in the first 30 seconds must be standalone_ref with required_before_imagegen true. manual_review is a planning hold, not a generatable opening identity.
 - Omit lower-priority entities entirely. Their facts remain available to scene prompting as text.
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
 - Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and low-value 2-3 occurrence assets should be omitted unless truly critical.
@@ -2208,6 +2211,34 @@ function finalDirectorSelectionFindings(referenceTargets, {
   return findings;
 }
 
+function openingSelectedIdentityFindings(referenceTargets, visualBeatPlan) {
+  const openingVisibleIds = new Set(visualBeatRows(visualBeatPlan)
+    .filter((beat) => Number(beat.start_sec ?? 0) < 30)
+    .flatMap((beat) => [
+      ...(beat.physically_visible_entity_ids ?? []),
+      ...(beat.screen_visible_entity_ids ?? []),
+      ...(beat.preview_visible_entity_ids ?? []),
+    ])
+    .map(slug)
+    .filter(Boolean));
+  return (referenceTargets ?? []).flatMap((target) => {
+    if (normalizeKind(target.kind) !== "character_state") return [];
+    const subjectId = slug(target.canonical_subject_id ?? "", "");
+    if (!subjectId || !openingVisibleIds.has(subjectId)) return [];
+    const mode = String(target.generation_mode ?? "").toLowerCase();
+    const generatable = mode === "standalone_ref" || target.required_before_imagegen === true || Boolean(target.reference_image_path ?? target.conditioning_image_path);
+    if (generatable) return [];
+    return [{
+      code: "opening_visible_identity_not_generatable",
+      severity: "blocker",
+      ref_id: target.ref_id,
+      canonical_subject_id: subjectId,
+      generation_mode: mode,
+      message: `Selected identity ${target.ref_id} is visibly used before 30 seconds but is not a generated, required, or approved source reference.`,
+    }];
+  });
+}
+
 function characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation = false } = {}) {
   if (legacyRevalidation) return [];
   const findings = [];
@@ -2301,6 +2332,10 @@ export function referenceCharacterStateFindingsForTests(characterStateRefs, refe
   return characterStateDirectorFindings(characterStateRefs, referenceTargets, options);
 }
 
+export function referenceOpeningIdentityFindingsForTests(referenceTargets, visualBeatPlan) {
+  return openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
+}
+
 async function main() {
   const [semanticPlan, visualBeatPlan, storyFactLedger, visualStyleBible, characterBible, episodeVisualDirection, runIdentity] = await Promise.all([
     readJson(semanticPlanPath, null),
@@ -2360,6 +2395,8 @@ async function main() {
   referenceTargets = deterministicLocationScope.targets;
   const locationContractScope = applyLocationContractSceneIds(referenceTargets, locationContractLedger);
   referenceTargets = locationContractScope.targets;
+  const beatLocationScope = applyBeatLocationSceneIds(referenceTargets, visualBeatRows(visualBeatPlan));
+  referenceTargets = beatLocationScope.targets;
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
   let characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
   const sourceFaceAnchoring = applySourceFaceAnchors({
@@ -2394,10 +2431,11 @@ async function main() {
     knownSceneIds: new Set(scopedSemantic.scenes.map((scene) => String(scene.scene_id ?? ""))),
     legacyRevalidation,
   });
+  const openingIdentityFindings = openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
   const characterStateFindings = characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation });
   const coverageFindings = locationContractLedger.findings ?? [];
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
-  const findings = [...coverageFindings, ...locationContractScope.findings, ...styleFindings, ...directorSelectionFindings, ...characterStateFindings];
+  const findings = [...coverageFindings, ...locationContractScope.findings, ...styleFindings, ...directorSelectionFindings, ...openingIdentityFindings, ...characterStateFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const referenceInventoryLedger = buildSelectedReferenceInventory(referenceTargets, {
     sourceScriptHash: semanticPlan.source_script_hash,

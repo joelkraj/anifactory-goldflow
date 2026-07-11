@@ -12,6 +12,14 @@ function normalizeText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeEvidenceText(value) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function unique(values) {
   return [...new Set((values ?? []).filter(Boolean).map(String))];
 }
@@ -329,8 +337,8 @@ function groupingFindings(rows, atoms, factLedger) {
       findings.push({ severity: "blocker", code: "editorial_crossed_transition_barrier", row_index: rowIndex });
     }
     if (!locationIds.has(String(row.location_id ?? ""))) findings.push({ severity: "blocker", code: "editorial_unknown_location", row_index: rowIndex });
-    const groupedText = normalizeText(atomRows.map(({ atom }) => atom.text).join(" ")).toLowerCase();
-    const actionEvidence = normalizeText(row.foreground_action_evidence).toLowerCase();
+    const groupedText = normalizeEvidenceText(atomRows.map(({ atom }) => atom.text).join(" "));
+    const actionEvidence = normalizeEvidenceText(row.foreground_action_evidence);
     if (!actionEvidence || !groupedText.includes(actionEvidence)) {
       findings.push({ severity: "blocker", code: "editorial_foreground_action_evidence_missing", row_index: rowIndex });
     }
@@ -345,7 +353,7 @@ function groupingFindings(rows, atoms, factLedger) {
       ...(row.preview_visible_entity_ids ?? []),
     ]);
     for (const entityId of visible) {
-      const evidence = normalizeText(row.entity_evidence?.[entityId]).toLowerCase();
+      const evidence = normalizeEvidenceText(row.entity_evidence?.[entityId]);
       if (!evidence || !groupedText.includes(evidence)) findings.push({ severity: "blocker", code: "editorial_visible_entity_evidence_missing", row_index: rowIndex, entity_id: entityId });
     }
     const first = atomRows[0].atom;
@@ -375,7 +383,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
   if (!rows.length) throw new Error("Editorial beat director returned no beats.");
   const findings = groupingFindings(rows, atoms, factLedger);
   const blockers = findings.filter((finding) => finding.severity === "blocker");
-  if (blockers.length) throw new Error(`Editorial beat contract failed: ${blockers.slice(0, 12).map((finding) => finding.code).join(", ")}`);
+  if (blockers.length) throw new Error(`Editorial beat contract failed: ${blockers.slice(0, 12).map((finding) => `${finding.code}[row=${finding.row_index ?? "?"}${finding.entity_id ? `,entity=${finding.entity_id}` : ""}]`).join(", ")}`);
   const atomMap = new Map(atoms.map((atom) => [atom.atom_id, atom]));
   const dictionaries = canonicalDictionaries(factLedger);
   const entityMap = new Map(dictionaries.entities.map((row) => [row.entity_id, row]));

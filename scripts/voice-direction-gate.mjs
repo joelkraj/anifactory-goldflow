@@ -2385,6 +2385,43 @@ function numberWord(value) {
   return lookup[Number(value)] ?? String(value);
 }
 
+function integerToSpokenWords(value) {
+  const number = Number(String(value ?? "").replace(/,/g, ""));
+  if (!Number.isSafeInteger(number) || number < 0) return String(value ?? "");
+  if (number < 21) return numberWord(number);
+  const ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+  const teens = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+  const underThousand = (amount) => {
+    if (amount < 10) return ones[amount];
+    if (amount < 20) return teens[amount - 10];
+    if (amount < 100) return `${tens[Math.floor(amount / 10)]}${amount % 10 ? `-${ones[amount % 10]}` : ""}`;
+    const remainder = amount % 100;
+    return `${ones[Math.floor(amount / 100)]} hundred${remainder ? ` and ${underThousand(remainder)}` : ""}`;
+  };
+  if (number < 1_000) return underThousand(number);
+  const scales = [[1_000_000_000, "billion"], [1_000_000, "million"], [1_000, "thousand"]];
+  const parts = [];
+  let remainder = number;
+  for (const [scale, label] of scales) {
+    if (remainder < scale) continue;
+    const count = Math.floor(remainder / scale);
+    parts.push(`${integerToSpokenWords(count)} ${label}`);
+    remainder %= scale;
+  }
+  if (remainder) parts.push(underThousand(remainder));
+  return parts.join(" ");
+}
+
+function numberToSpokenWords(value) {
+  const normalized = String(value ?? "").replace(/,/g, "");
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return String(value ?? "");
+  const [whole, decimal] = normalized.split(".");
+  const wholeWords = integerToSpokenWords(whole);
+  if (!decimal) return wholeWords;
+  return `${wholeWords} point ${[...decimal].map((digit) => numberWord(digit)).join(" ")}`;
+}
+
 function qwenPronunciationText(value) {
   const preserveInitialCase = (replacement) => (match) => /^[A-Z]/.test(match) ? `${replacement[0].toUpperCase()}${replacement.slice(1)}` : replacement;
   return String(value ?? "")
@@ -2405,6 +2442,9 @@ function qwenPronunciationText(value) {
     .replace(/\bLevel\s*[-:]\s*-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/\bLevel\s+-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/:\s*-\s*(\d{1,2})\b/g, (_match, value) => `, negative ${numberWord(value)}`)
+    .replace(/\b(\d[\d,]*(?:\.\d+)?)\s*\/\s*(\d[\d,]*(?:\.\d+)?)\b/g, (_match, left, right) => `${numberToSpokenWords(left)} out of ${numberToSpokenWords(right)}`)
+    .replace(/\b(\d[\d,]*(?:\.\d+)?)%/g, (_match, number) => `${numberToSpokenWords(number)} percent`)
+    .replace(/\b\d[\d,]*(?:\.\d+)?\b/g, (number) => numberToSpokenWords(number))
     .replace(/\s+/g, " ")
     .trim();
 }

@@ -2355,6 +2355,12 @@ function testVoiceDirectionCharacterization() {
   });
   assert.equal(pronounced.qwen_spoken_text, "Mahn-wah Capital showed an S S S rank warning.");
 
+  const cardinalNumbers = voiceDirectionTransformForTests("418 students connected to 4,812 shadows for 100,000 years.");
+  assert.equal(cardinalNumbers.qwen_spoken_text, "four hundred and eighteen students connected to four thousand eight hundred and twelve shadows for one hundred thousand years.");
+
+  const systemNumbers = voiceDirectionTransformForTests("BODY CLAIM: 41% SHARED BODY CLAIM: 50 / 50 HELL DURATION: 8.3 YEARS", { speaker: "SYSTEM" });
+  assert.equal(systemNumbers.qwen_spoken_text, "BODY CLAIM: forty-one percent SHARED BODY CLAIM: fifty out of fifty HELL DURATION: eight point three YEARS");
+
   const trailingAttribution = voiceDirectionTransformForTests("\"Run,\" he said.");
   assert.deepEqual(trailingAttribution.paragraph_units.map((unit) => unit.text), ["Run."]);
 

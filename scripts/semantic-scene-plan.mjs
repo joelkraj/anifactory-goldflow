@@ -113,10 +113,13 @@ export function semanticProofScopeForTests(script, timing, startSec, endSec, buf
   const timingWords = Array.isArray(timing?.words) ? timing.words : [];
   const inScope = timingWords.filter((row) => Number(row?.start_sec ?? row?.start ?? 0) < Number(endSec));
   if (!inScope.length) throw new Error("Semantic proof baseline timing contains no words inside the requested scope.");
-  const scriptWords = String(script ?? "").trim().split(/\s+/).filter(Boolean);
+  const source = String(script ?? "");
+  const scriptWords = [...source.matchAll(/\S+/g)];
   const endExclusive = Math.min(scriptWords.length, inScope.length + Math.max(0, Number(bufferWords) || 0));
+  const lastIncluded = scriptWords[Math.max(0, endExclusive - 1)];
+  const charEndExclusive = lastIncluded ? Number(lastIncluded.index ?? 0) + lastIncluded[0].length : 0;
   return {
-    script: `${scriptWords.slice(0, endExclusive).join(" ")}\n`,
+    script: source.slice(0, charEndExclusive),
     scoped: true,
     source_word_start: 0,
     source_word_end_exclusive: endExclusive,
@@ -800,38 +803,47 @@ export function storyFactEvidenceFindingsForTests(ledger, script) {
 }
 
 async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName) {
-  const prompt = buildReconciliationPrompt(script, bibles, parsedChunks, targets);
   const reconciliationStage = `${stageName}_global_reconciliation`;
-  const llm = isLocalLLMRoute(reconciliationStage)
-    ? await callLocal(prompt, reconciliationStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
-    : await reusableCodexCall(reconciliationStage, prompt) ?? await callCodex(prompt, reconciliationStage);
-  const parsed = llm.parsed ?? {};
-  const ledger = {
-    schema: "goldflow_story_fact_ledger_v2",
-    state_transition_contract: "exact_effective_evidence_v2",
-    status: "passed",
-    source_script_hash: sha256(script),
-    source_script_path: scriptPath,
-    canonical_entities: parsed.canonical_entities ?? [],
-    canonical_locations: parsed.canonical_locations ?? [],
-    canonical_props: parsed.canonical_props ?? [],
-    canonical_ui_motifs: parsed.canonical_ui_motifs ?? [],
-    state_transitions: parsed.state_transitions ?? [],
-    warnings: parsed.warnings ?? [],
-    planner: {
-      provider: llm.provider,
-      model: llm.model ?? null,
-      reasoning_effort: llm.reasoning_effort ?? null,
-      output_path: llm.output_path ?? null,
-    },
-    updated_at: new Date().toISOString(),
-  };
-  const evidenceFindings = storyFactEvidenceFindingsForTests(ledger, script);
-  if (evidenceFindings.some((finding) => finding.severity === "blocker")) {
-    const preview = evidenceFindings.slice(0, 10).map((finding) => `${finding.fact_id}:${finding.code}`).join(", ");
-    throw new Error(`Semantic reconciliation returned unsupported fact evidence: ${preview}`);
+  const basePrompt = buildReconciliationPrompt(script, bibles, parsedChunks, targets);
+  let lastFindings = [];
+  for (let attempt = 1; attempt <= Math.max(1, Number(flags["semantic-reconciliation-attempts"] ?? 2)); attempt += 1) {
+    const attemptStage = attempt === 1 ? reconciliationStage : `${reconciliationStage}_attempt_${attempt}`;
+    const prompt = attempt === 1
+      ? basePrompt
+      : `${basePrompt}\n\nCorrection pass: the previous response failed exact source-evidence validation with ${JSON.stringify(lastFindings.slice(0, 20))}. Return the complete JSON object again. Copy every exact_excerpt and transition_evidence_excerpt byte-for-byte from LOCKED SCRIPT, including punctuation and any internal line breaks.`;
+    const llm = isLocalLLMRoute(attemptStage)
+      ? await callLocal(prompt, attemptStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
+      : await reusableCodexCall(attemptStage, prompt) ?? await callCodex(prompt, attemptStage);
+    const parsed = llm.parsed ?? {};
+    const ledger = {
+      schema: "goldflow_story_fact_ledger_v2",
+      state_transition_contract: "exact_effective_evidence_v2",
+      status: "passed",
+      source_script_hash: sha256(script),
+      source_script_path: scriptPath,
+      canonical_entities: parsed.canonical_entities ?? [],
+      canonical_locations: parsed.canonical_locations ?? [],
+      canonical_props: parsed.canonical_props ?? [],
+      canonical_ui_motifs: parsed.canonical_ui_motifs ?? [],
+      state_transitions: parsed.state_transitions ?? [],
+      warnings: parsed.warnings ?? [],
+      planner: {
+        provider: llm.provider,
+        model: llm.model ?? null,
+        reasoning_effort: llm.reasoning_effort ?? null,
+        output_path: llm.output_path ?? null,
+        attempt,
+      },
+      updated_at: new Date().toISOString(),
+    };
+    const evidenceFindings = storyFactEvidenceFindingsForTests(ledger, script);
+    if (!evidenceFindings.some((finding) => finding.severity === "blocker")) {
+      return { llm, parsed, ledger, evidenceFindings };
+    }
+    lastFindings = evidenceFindings;
   }
-  return { llm, parsed, ledger, evidenceFindings };
+  const preview = lastFindings.slice(0, 10).map((finding) => `${finding.fact_id}:${finding.code}`).join(", ");
+  throw new Error(`Semantic reconciliation returned unsupported fact evidence: ${preview}`);
 }
 
 async function main() {

@@ -459,6 +459,19 @@ function testBoundedProofBaselineScoping() {
   );
   assert.equal(prefix.script.trim(), "One two three. [Opening death avoided.]");
   assert.equal(prefix.fallback, false);
+  const multilineScope = semanticProofScopeForTests(
+    "First line.\n\n[Exact UI line.]\nFinal line.",
+    { words: [
+      { word: "First", start_sec: 0 },
+      { word: "line", start_sec: 0.3 },
+      { word: "Exact", start_sec: 0.6 },
+      { word: "UI", start_sec: 0.9 },
+    ] },
+    0,
+    1,
+    0,
+  );
+  assert.equal(multilineScope.script, "First line.\n\n[Exact UI");
 }
 
 function testSemanticReconciliationEvidenceContract() {

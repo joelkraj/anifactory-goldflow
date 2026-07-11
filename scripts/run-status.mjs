@@ -1284,6 +1284,11 @@ async function main() {
     target_wpm_midpoint: flags["target-wpm-mid"] ?? flags["wpm-mid"] ?? runIdentity.target_wpm_midpoint ?? runIdentity.pace_targets?.target_wpm_midpoint ?? runIdentity.pace_targets?.mid ?? DEFAULT_TARGET_WPM_MID,
     pace_targets: runIdentity.pace_targets ?? null,
     render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_fast_ken_burns",
+    run_intent: runIdentity.run_intent ?? "production",
+    proof_scope: runIdentity.proof_scope ?? { mode: "full_episode", start_sec: 0, end_sec: null },
+    git: runIdentity.git ?? null,
+    provider_locks: runIdentity.provider_locks ?? null,
+    model_versions: runIdentity.model_versions ?? null,
     run_identity_schema: runIdentity.schema ?? "missing",
     stage_registry_version: runIdentity.stage_registry_version ?? null,
   };

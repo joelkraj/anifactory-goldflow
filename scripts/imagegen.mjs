@@ -870,37 +870,78 @@ function providerInfrastructureFailure(error) {
 async function runPoolWithCircuitBreaker(items, worker, limit) {
   const results = new Array(items.length);
   let cursor = 0;
+  let active = 0;
+  const configuredLimit = Math.max(1, Math.min(limit, items.length || 1));
+  let adaptiveLimit = configuredLimit;
+  let minimumAdaptiveLimit = adaptiveLimit;
+  let maximumObservedActive = 0;
+  let successesSinceAdjustment = 0;
   let consecutiveInfrastructureFailures = 0;
   let circuitOpen = false;
   let circuitReason = null;
-  async function next() {
-    while (true) {
-      if (circuitOpen) return;
-      const current = cursor;
-      if (current >= items.length) return;
-      cursor += 1;
-      try {
-        results[current] = await worker(items[current], current);
-        consecutiveInfrastructureFailures = 0;
-      } catch (error) {
-        const item = items[current] ?? {};
-        const infrastructureFailure = providerInfrastructureFailure(error);
-        consecutiveInfrastructureFailures = infrastructureFailure ? consecutiveInfrastructureFailures + 1 : 0;
-        results[current] = {
-          image_id: item.image_id,
-          ref_id: item.ref_id,
-          status: "failed",
-          error: error instanceof Error ? error.message : String(error),
-          provider_infrastructure_failure: infrastructureFailure,
-        };
-        if (infrastructureFailure && consecutiveInfrastructureFailures >= providerCircuitFailureThreshold) {
-          circuitOpen = true;
-          circuitReason = `provider circuit opened after ${consecutiveInfrastructureFailures} consecutive infrastructure failures`;
-        }
+  const concurrencyEvents = [];
+  await new Promise((resolve) => {
+    const finishIfDone = () => {
+      if ((cursor >= items.length || circuitOpen) && active === 0) resolve();
+    };
+    const launch = () => {
+      while (!circuitOpen && cursor < items.length && active < adaptiveLimit) {
+        const current = cursor;
+        cursor += 1;
+        active += 1;
+        maximumObservedActive = Math.max(maximumObservedActive, active);
+        Promise.resolve()
+          .then(() => worker(items[current], current))
+          .then((result) => {
+            results[current] = result;
+            consecutiveInfrastructureFailures = 0;
+            successesSinceAdjustment += 1;
+            if (adaptiveLimit < configuredLimit && successesSinceAdjustment >= Math.max(3, adaptiveLimit)) {
+              const previous = adaptiveLimit;
+              adaptiveLimit += 1;
+              successesSinceAdjustment = 0;
+              concurrencyEvents.push({ type: "recovery_ramp", from: previous, to: adaptiveLimit, after_index: current });
+            }
+          })
+          .catch((error) => {
+            const item = items[current] ?? {};
+            const infrastructureFailure = providerInfrastructureFailure(error);
+            consecutiveInfrastructureFailures = infrastructureFailure ? consecutiveInfrastructureFailures + 1 : 0;
+            successesSinceAdjustment = 0;
+            results[current] = {
+              image_id: item.image_id,
+              ref_id: item.ref_id,
+              status: "failed",
+              error: error instanceof Error ? error.message : String(error),
+              provider_infrastructure_failure: infrastructureFailure,
+            };
+            if (infrastructureFailure && adaptiveLimit > 1) {
+              const previous = adaptiveLimit;
+              adaptiveLimit = Math.max(1, Math.ceil(adaptiveLimit / 2));
+              minimumAdaptiveLimit = Math.min(minimumAdaptiveLimit, adaptiveLimit);
+              concurrencyEvents.push({
+                type: "provider_backoff",
+                from: previous,
+                to: adaptiveLimit,
+                after_index: current,
+                evidence: String(error instanceof Error ? error.message : error).slice(0, 240),
+              });
+            }
+            if (infrastructureFailure && consecutiveInfrastructureFailures >= providerCircuitFailureThreshold) {
+              circuitOpen = true;
+              circuitReason = `provider circuit opened after ${consecutiveInfrastructureFailures} consecutive infrastructure failures`;
+            }
+          })
+          .finally(() => {
+            active -= 1;
+            launch();
+            finishIfDone();
+          });
       }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
+      finishIfDone();
+    };
+    launch();
+  });
   if (circuitOpen) {
     for (let index = 0; index < items.length; index += 1) {
       if (results[index]) continue;
@@ -918,6 +959,13 @@ async function runPoolWithCircuitBreaker(items, worker, limit) {
     circuit_open: circuitOpen,
     circuit_reason: circuitReason,
     failure_threshold: providerCircuitFailureThreshold,
+    adaptive_concurrency: {
+      configured: configuredLimit,
+      minimum: minimumAdaptiveLimit,
+      final: adaptiveLimit,
+      maximum_observed_active: maximumObservedActive,
+      events: concurrencyEvents,
+    },
   };
 }
 
@@ -1231,6 +1279,7 @@ async function generateReferences() {
     referenceById,
     provider_circuit_open: referencePool.circuit_open,
     provider_circuit_reason: referencePool.circuit_reason,
+    adaptive_concurrency: referencePool.adaptive_concurrency,
   };
 }
 
@@ -1732,6 +1781,7 @@ async function main() {
     provider_circuit_open: pool.circuit_open,
     provider_circuit_reason: pool.circuit_reason,
     provider_circuit_failure_threshold: pool.failure_threshold,
+    adaptive_scene_concurrency: pool.adaptive_concurrency,
     codex_opening_sec: codexOpeningSec,
     provider_filter: providerFilter,
     seed_derived_refs: seedDerivedRefs,
@@ -1743,6 +1793,7 @@ async function main() {
     reference_results: referenceRun.results,
     reference_provider_circuit_open: Boolean(referenceRun.provider_circuit_open),
     reference_provider_circuit_reason: referenceRun.provider_circuit_reason ?? null,
+    adaptive_reference_concurrency: referenceRun.adaptive_concurrency ?? null,
     results: mergedResults,
     cut_execution_ledger_path: cutExecutionLedgerPath,
     cut_execution_ledger_status: cutExecutionLedger.status,

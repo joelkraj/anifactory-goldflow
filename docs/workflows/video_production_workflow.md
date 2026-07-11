@@ -292,7 +292,7 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
 21. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
-   - ModelsLab scene generation uses concurrency 15 by default. Lower concurrency only for a scoped retry when queue or rate-limit evidence warrants it.
+   - ModelsLab scene generation starts at concurrency 15. The active batch automatically backs off admission concurrency on queue, rate-limit, gateway, and timeout evidence, then ramps up after successful requests; scoped retries remain resumable.
    - Premium routes first run representative real-cut probes for text-only, one-ref, two-ref, and four-ref payloads. Three consecutive infrastructure failures open the provider circuit, preserve completed work, and leave unclaimed cut ids for retry.
    - `cut_execution_ledger.json` records per-cut beat/prompt/ref/provider/image hashes and later image-QA/motion hashes so invalidation stays cut scoped.
    - Donor-copy and hash-perturbation recovery are prohibited. Deliberate editorial image reuse requires explicit metadata naming the approved source cut.
@@ -329,7 +329,8 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
    - Run `goldflow imagegen qa` after the complete no-force imagegen report and before render.
    - Structural checks cover missing/unreadable files, native 16:9 landscape geometry, exact duplicate hashes, and forbidden donor/hash-perturbation recovery.
    - Review ordered five-minute contact sheets plus the dedicated risk sheet for the first three minutes, physical actions/contact geometry, dense casts, four-reference integrations, and explicitly risky/provider-routed cuts.
-   - Record a pass with `--approve true --reviewer <name> --note <evidence>`. Reject only failed cut ids and regenerate that scoped set.
+   - The first pass writes `image_output_review_decisions_<episode>.json` with the exact hash of every risk cut. Record `accepted`, `rejected`, or `not_inspected` per row plus top-level reviewer/note, then rerun QA. V2 runs do not permit bulk `--approve true`.
+   - Low-risk cuts may pass structural QA automatically. Reject only failed cut ids; regenerate that scoped set and invalidate only their motion clips.
    - Generated-image spelling and incidental text accuracy are explicitly outside this QA contract and do not block production.
 
 23. Render.
@@ -417,7 +418,8 @@ node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --wee
 node bin/goldflow.mjs imagegen promote-derived-refs --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 15 --reference-concurrency 15
 node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01
-node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01 --approve true --reviewer <reviewer> --note "first 3 minutes and risk cuts checked against exact beats"
+# Inspect contact sheets; edit image_output_review_decisions_ep_01.json with one hash-bound decision per risk cut, then rerun QA.
+node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01
 # Optional for direct/manual Codex/OpenAI proof batches:
 node bin/goldflow.mjs imagegen import-codex --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --image-id <image_id> --source <codex-generated-raster.png> --output <episode-dir>/imagegen_report_codex_manual_ep_01.json
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast

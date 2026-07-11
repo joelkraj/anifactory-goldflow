@@ -727,6 +727,19 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
     };
   }
   const status = String(report.status ?? "").toLowerCase();
+  if (status === "passed" && identity.run_identity_schema === "goldflow_run_identity_v2") {
+    const decisionsPath = report.review_decisions_path ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
+    const decisions = await readJson(decisionsPath, null);
+    const decisionsHash = await fileSha256(decisionsPath);
+    const rows = Array.isArray(decisions?.decisions) ? decisions.decisions : [];
+    const invalidDecision = rows.find((row) => String(row?.decision ?? "").toLowerCase() !== "accepted");
+    if (!decisionsHash || decisionsHash !== report.review_decisions_sha256) {
+      return { done: false, state: "stale", evidence: `${path.basename(reportPath)} review decisions hash stale`, next_command_shape: commandFor("image_output_qa", identity) };
+    }
+    if (String(decisions?.status ?? "").toLowerCase() !== "complete" || invalidDecision) {
+      return { done: false, state: "blocked", evidence: `${path.basename(decisionsPath)} has unresolved per-cut decisions`, next_command_shape: commandFor("image_output_qa", identity) };
+    }
+  }
   if (status === "passed") return { done: true, evidence: `${path.basename(reportPath)} passed; risk_cuts=${report.risk_cut_count ?? "?"}` };
   return {
     done: false,

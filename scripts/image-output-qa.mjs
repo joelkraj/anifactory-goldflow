@@ -19,13 +19,17 @@ const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts
 const imagegenReportPath = flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const ledgerPath = flags.ledger ?? path.join(episodeDir, "cut_execution_ledger.json");
 const outputPath = flags.output ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
-const manualReviewPath = flags["manual-review-output"] ?? path.join(episodeDir, `image_output_manual_review_${episode}.json`);
+const reviewDecisionsPath = flags.decisions
+  ?? flags["review-decisions"]
+  ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
 const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
 const reviewDir = flags["review-dir"] ?? path.join(episodeDir, "review_samples", "image_output_qa");
 const approve = flags.approve === "true" || flags["approve-risk"] === "true";
+const legacyBulkApproval = flags["legacy-bulk-approval"] === "true";
 const reviewer = String(flags.reviewer ?? "").trim();
 const reviewNote = String(flags.note ?? "").trim();
 const rejectedIds = new Set(parseList(flags["reject-cut-ids"] ?? flags["reject-image-ids"]));
+const acceptedIds = new Set(parseList(flags["accept-cut-ids"] ?? flags["accept-image-ids"]));
 const openingReviewSec = Math.max(0, Number(flags["opening-review-sec"] ?? 180));
 const contactWindowSec = Math.max(60, Number(flags["contact-window-sec"] ?? 300));
 
@@ -88,8 +92,54 @@ export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   if (visibleCharacterCount(prompt) >= 3) reasons.push("dense_cast");
   const referenceCount = Math.max(prompt?.reference_slots?.length ?? 0, prompt?.reference_requirements?.length ?? 0);
   if (referenceCount >= 4) reasons.push("four_reference_integration");
-  if (prompt?.image_provider_route === "codex_imagegen") reasons.push("provider_routed_hero_or_risky_cut");
+  const providerRoute = String(prompt?.target_provider_route ?? prompt?.image_provider_route ?? "");
+  const providerRisk = String(prompt?.provider_risk_tier ?? prompt?.risk_tier ?? "").toLowerCase();
+  if (providerRoute === "codex_imagegen" || /hero|high|risky/.test(providerRisk)) reasons.push("provider_routed_hero_or_risky_cut");
   return [...new Set(reasons)];
+}
+
+const REVIEW_DECISIONS = new Set(["accepted", "rejected", "not_inspected"]);
+
+function normalizedReviewDecision(value) {
+  const normalized = String(value ?? "not_inspected").trim().toLowerCase();
+  return REVIEW_DECISIONS.has(normalized) ? normalized : "not_inspected";
+}
+
+export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
+  const reviewerValue = String(options.reviewer ?? prior.reviewer ?? "").trim();
+  const noteValue = String(options.note ?? prior.note ?? "").trim();
+  const acceptIds = new Set(options.acceptedIds ?? []);
+  const rejectIds = new Set(options.rejectedIds ?? []);
+  const priorById = new Map((prior.decisions ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const decisions = rows.filter((row) => row.requires_manual_risk_review).map((row) => {
+    const previous = priorById.get(row.image_id);
+    const hashMatches = previous?.image_sha256 === row.image_sha256;
+    let decision = hashMatches ? normalizedReviewDecision(previous?.decision) : "not_inspected";
+    if (acceptIds.has(row.image_id)) decision = "accepted";
+    if (rejectIds.has(row.image_id)) decision = "rejected";
+    return {
+      image_id: row.image_id,
+      image_sha256: row.image_sha256,
+      image_path: row.image_path,
+      start_sec: row.start_sec,
+      risk_reasons: row.risk_reasons,
+      decision,
+      note: hashMatches ? previous?.note ?? "" : "",
+      focal_override: hashMatches ? previous?.focal_override ?? null : null,
+    };
+  });
+  const counts = Object.fromEntries([...REVIEW_DECISIONS].map((value) => [value, decisions.filter((row) => row.decision === value).length]));
+  const status = counts.rejected > 0 ? "blocked" : counts.not_inspected > 0 ? "pending_review" : "complete";
+  return {
+    schema: "goldflow_image_output_review_decisions_v2",
+    status,
+    reviewer: reviewerValue,
+    note: noteValue,
+    decision_contract: "Every listed hash-bound risk cut must be accepted, rejected, or not_inspected. Generated-image spelling is outside this review contract.",
+    counts,
+    decisions,
+    updated_at: new Date().toISOString(),
+  };
 }
 
 export function donorRecoveryFinding(metadata, imageId) {
@@ -223,19 +273,30 @@ async function writeReviewPackets(rows) {
   return { all_sheets: allSheets, risk_sheets: riskSheets };
 }
 
-async function updateLedgerQa(rows, status, note) {
-  const ledger = await readJson(ledgerPath, null);
-  if (!ledger?.cuts?.length) return null;
+export function applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, structuralBlockerIds, note, now = new Date().toISOString()) {
+  if (!ledger?.cuts?.length) return { ledger, invalidated_motion_image_ids: [] };
   const rowById = new Map(rows.map((row) => [row.image_id, row]));
+  const decisionById = new Map((decisionLedger?.decisions ?? []).map((row) => [row.image_id, row]));
+  const invalidatedMotionIds = [];
   const cuts = ledger.cuts.map((cut) => {
     const row = rowById.get(String(cut.image_id ?? ""));
     if (!row || cut.image_sha256 !== row.image_sha256) return cut;
-    const rejected = rejectedIds.has(row.image_id);
+    const decision = decisionById.get(row.image_id)?.decision ?? (row.requires_manual_risk_review ? "not_inspected" : "accepted");
+    const rejected = decision === "rejected" || structuralBlockerIds.has(row.image_id);
+    if (rejected && (cut.motion_profile_hash || cut.motion_clip_path || cut.motion_clip_sha256)) invalidatedMotionIds.push(row.image_id);
+    const imageQaStatus = rejected
+      ? "rejected"
+      : row.requires_manual_risk_review
+        ? decision === "accepted" ? "passed_manual_risk" : "pending_manual_risk"
+        : "passed_structural";
     return {
       ...cut,
-      image_qa_status: rejected ? "rejected" : status === "passed" ? (row.requires_manual_risk_review ? "passed_manual_risk" : "passed_structural") : "pending",
+      image_qa_status: imageQaStatus,
       image_qa_note: rejected ? "Rejected during output QA; regenerate this cut only." : note,
-      image_qa_reviewed_at: status === "passed" || rejected ? new Date().toISOString() : null,
+      image_qa_reviewed_at: imageQaStatus.startsWith("passed") || rejected ? now : null,
+      motion_profile_hash: rejected ? null : cut.motion_profile_hash ?? null,
+      motion_clip_path: rejected ? null : cut.motion_clip_path ?? null,
+      motion_clip_sha256: rejected ? null : cut.motion_clip_sha256 ?? null,
     };
   });
   const updated = {
@@ -243,10 +304,18 @@ async function updateLedgerQa(rows, status, note) {
     image_output_qa_report_path: outputPath,
     pending_image_qa_count: cuts.filter((cut) => !String(cut.image_qa_status ?? "").startsWith("passed")).length,
     cuts,
-    updated_at: new Date().toISOString(),
+    updated_at: now,
   };
+  return { ledger: updated, invalidated_motion_image_ids: [...new Set(invalidatedMotionIds)] };
+}
+
+async function updateLedgerQa(rows, decisionLedger, structuralBlockerIds, note) {
+  const ledger = await readJson(ledgerPath, null);
+  if (!ledger?.cuts?.length) return null;
+  const result = applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, structuralBlockerIds, note);
+  const updated = result.ledger;
   await writeJson(ledgerPath, updated);
-  return updated;
+  return result;
 }
 
 function isCodexRoute(value) {
@@ -287,36 +356,41 @@ async function main() {
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed" || !Array.isArray(imagegenReport.results)) throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
-  if ((approve || rejectedIds.size) && (!reviewer || !reviewNote)) throw new Error("Approval or rejection requires --reviewer and --note so output QA has review provenance.");
+  const isV2 = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";
+  if (approve && isV2 && !legacyBulkApproval) {
+    throw new Error(`Per-cut review required for v2 runs. Edit ${reviewDecisionsPath} or use --accept-cut-ids/--reject-cut-ids with --reviewer and --note. --approve true is legacy-only.`);
+  }
+  if ((approve || acceptedIds.size || rejectedIds.size) && (!reviewer || !reviewNote)) throw new Error("Image decisions require --reviewer and --note so output QA has review provenance.");
 
   const audit = await structuralAudit(promptPlan, imagegenReport);
   const packets = await writeReviewPackets(audit.rows);
   const structuralBlockers = audit.findings.filter((finding) => finding.severity === "blocker");
-  const unknownRejectedIds = [...rejectedIds].filter((imageId) => !audit.rows.some((row) => row.image_id === imageId));
-  if (unknownRejectedIds.length) throw new Error(`Unknown rejected cut ids: ${unknownRejectedIds.join(", ")}`);
-  const status = structuralBlockers.length || rejectedIds.size
-    ? "blocked"
-    : approve
-      ? "passed"
-      : "needs_manual_review";
-  const failedImageIds = [...new Set([...structuralBlockers.map((finding) => finding.image_id), ...rejectedIds])].filter(Boolean);
-  const reviewedHashes = approve ? Object.fromEntries(audit.rows.filter((row) => row.requires_manual_risk_review).map((row) => [row.image_id, row.image_sha256])) : {};
-  if (approve || rejectedIds.size) {
-    await writeJson(manualReviewPath, {
-      schema: "goldflow_image_output_manual_review_v1",
-      status: rejectedIds.size ? "blocked" : "approved",
-      reviewer,
-      note: reviewNote,
-      reviewed_scope: "first_three_minutes_plus_physical_action_dense_cast_four_reference_and_provider_routed_risk_cuts",
-      reviewed_image_hashes: reviewedHashes,
-      rejected_image_ids: [...rejectedIds],
-      contact_sheets: packets,
-      updated_at: new Date().toISOString(),
-    });
+  const riskIds = new Set(audit.rows.filter((row) => row.requires_manual_risk_review).map((row) => row.image_id));
+  const unknownDecisionIds = [...new Set([...acceptedIds, ...rejectedIds])].filter((imageId) => !riskIds.has(imageId));
+  if (unknownDecisionIds.length) throw new Error(`Decision ids are not current risk cuts: ${unknownDecisionIds.join(", ")}`);
+  const priorDecisions = await readJson(reviewDecisionsPath, {});
+  const decisionLedger = mergeRiskReviewDecisions(audit.rows, priorDecisions, {
+    reviewer,
+    note: reviewNote,
+    acceptedIds: approve && legacyBulkApproval ? [...riskIds] : [...acceptedIds],
+    rejectedIds: [...rejectedIds],
+  });
+  if (decisionLedger.decisions.some((row) => row.decision !== "not_inspected") && (!decisionLedger.reviewer || !decisionLedger.note)) {
+    throw new Error(`Accepted/rejected decisions in ${reviewDecisionsPath} require top-level reviewer and note.`);
   }
-  await updateLedgerQa(audit.rows, status, reviewNote || null);
+  await writeJson(reviewDecisionsPath, { ...decisionLedger, contact_sheets: packets });
+  const structuralBlockerIds = new Set(structuralBlockers.map((finding) => finding.image_id).filter(Boolean));
+  const rejectedDecisionIds = decisionLedger.decisions.filter((row) => row.decision === "rejected").map((row) => row.image_id);
+  const notInspectedIds = decisionLedger.decisions.filter((row) => row.decision === "not_inspected").map((row) => row.image_id);
+  const status = structuralBlockers.length || rejectedDecisionIds.length
+    ? "blocked"
+    : notInspectedIds.length
+      ? "needs_manual_review"
+      : "passed";
+  const failedImageIds = [...new Set([...structuralBlockerIds, ...rejectedDecisionIds])].filter(Boolean);
+  const ledgerUpdate = await updateLedgerQa(audit.rows, decisionLedger, structuralBlockerIds, decisionLedger.note || null);
   const report = {
-    schema: "goldflow_image_output_qa_v1",
+    schema: "goldflow_image_output_qa_v2",
     status,
     channel,
     series_slug: series,
@@ -335,10 +409,14 @@ async function main() {
     risk_cut_count: audit.rows.filter((row) => row.requires_manual_risk_review).length,
     opening_review_sec: openingReviewSec,
     findings: audit.findings,
-    unresolved_blocker_count: structuralBlockers.length + rejectedIds.size,
-    rejected_image_ids: [...rejectedIds],
-    manual_review_required: !approve && !structuralBlockers.length,
-    manual_review_path: approve || rejectedIds.size ? manualReviewPath : null,
+    unresolved_blocker_count: structuralBlockers.length + rejectedDecisionIds.length,
+    rejected_image_ids: rejectedDecisionIds,
+    not_inspected_image_ids: notInspectedIds,
+    manual_review_required: notInspectedIds.length > 0,
+    review_decisions_path: reviewDecisionsPath,
+    review_decisions_sha256: await hashFile(reviewDecisionsPath),
+    review_decision_counts: decisionLedger.counts,
+    invalidated_motion_image_ids: ledgerUpdate?.invalidated_motion_image_ids ?? [],
     review_packets: packets,
     accepted_image_hashes: status === "passed"
       ? Object.fromEntries(audit.rows.map((row) => [row.image_id, row.image_sha256]))
@@ -348,7 +426,7 @@ async function main() {
     next_command: structuralBlockers.length || rejectedIds.size
       ? scopedQaRecoveryCommand(failedImageIds, promptPlan, imagegenReport, runIdentity)
       : status === "needs_manual_review"
-        ? `Inspect ${packets.risk_sheets.join(", ")}; then rerun imagegen qa with --approve true --reviewer <name> --note <review-note>`
+        ? `Inspect ${packets.risk_sheets.join(", ")}; record each risk-cut decision in ${reviewDecisionsPath}; then rerun imagegen qa`
         : null,
     updated_at: new Date().toISOString(),
   };
@@ -359,7 +437,7 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(outputPath, { schema: "goldflow_image_output_qa_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    await writeJson(outputPath, { schema: "goldflow_image_output_qa_v2", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
     console.error(error instanceof Error ? error.stack || error.message : String(error));
     process.exitCode = 1;
   });

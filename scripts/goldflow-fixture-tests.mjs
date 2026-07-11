@@ -48,7 +48,12 @@ import {
   finishStageExecution,
   materializeProductionManifest,
 } from "./lib/execution-provenance.mjs";
-import { donorRecoveryFinding, imageRiskReasons } from "./image-output-qa.mjs";
+import {
+  applyImageQaDecisionsToLedger,
+  donorRecoveryFinding,
+  imageRiskReasons,
+  mergeRiskReviewDecisions,
+} from "./image-output-qa.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
 import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
@@ -613,6 +618,41 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(reasons.includes("dense_cast"), true);
   assert.equal(reasons.includes("four_reference_integration"), true);
   assert.equal(donorRecoveryFinding({ donor_image_id: "cut_001", hash_perturbation: true }, "cut_002")?.code, "scene_image_donor_recovery_forbidden");
+
+  const riskRows = [{
+    image_id: "cut_001",
+    image_sha256: "hash-a",
+    image_path: "/tmp/cut_001.png",
+    start_sec: 1,
+    risk_reasons: ["opening_retention"],
+    requires_manual_risk_review: true,
+  }];
+  const accepted = mergeRiskReviewDecisions(riskRows, {}, {
+    reviewer: "fixture",
+    note: "inspected exact image hash",
+    acceptedIds: ["cut_001"],
+  });
+  assert.equal(accepted.status, "complete");
+  assert.equal(accepted.decisions[0].decision, "accepted");
+  const stale = mergeRiskReviewDecisions([{ ...riskRows[0], image_sha256: "hash-b" }], accepted);
+  assert.equal(stale.status, "pending_review");
+  assert.equal(stale.decisions[0].decision, "not_inspected");
+
+  const ledgerResult = applyImageQaDecisionsToLedger({
+    cuts: [
+      { image_id: "cut_001", image_sha256: "hash-a", motion_profile_hash: "motion-a", motion_clip_path: "/tmp/a.mp4", motion_clip_sha256: "clip-a" },
+      { image_id: "cut_002", image_sha256: "hash-c", motion_profile_hash: "motion-b", motion_clip_path: "/tmp/b.mp4", motion_clip_sha256: "clip-b" },
+    ],
+  }, [
+    riskRows[0],
+    { ...riskRows[0], image_id: "cut_002", image_sha256: "hash-c", requires_manual_risk_review: false },
+  ], {
+    decisions: [{ image_id: "cut_001", image_sha256: "hash-a", decision: "rejected" }],
+  }, new Set(), "fixture", "2026-01-01T00:00:00.000Z");
+  assert.deepEqual(ledgerResult.invalidated_motion_image_ids, ["cut_001"]);
+  assert.equal(ledgerResult.ledger.cuts[0].motion_clip_path, null);
+  assert.equal(ledgerResult.ledger.cuts[1].motion_clip_path, "/tmp/b.mp4");
+  assert.equal(ledgerResult.ledger.cuts[1].image_qa_status, "passed_structural");
 }
 
 async function testProviderCircuitBreakerStopsUnclaimedWork() {
@@ -623,6 +663,23 @@ async function testProviderCircuitBreakerStopsUnclaimedWork() {
   assert.equal(result.circuit_open, true);
   assert.equal(result.results.filter((row) => row.status === "failed").length, 3);
   assert.equal(result.results.filter((row) => row.status === "skipped_provider_circuit_open").length, 5);
+}
+
+async function testProviderConcurrencyBacksOffAndRecovers() {
+  const items = Array.from({ length: 16 }, (_, index) => ({ image_id: `cut_${index + 1}` }));
+  let failedOnce = false;
+  const result = await runPoolWithCircuitBreakerForTests(items, async (item) => {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    if (!failedOnce) {
+      failedOnce = true;
+      throw new Error("429 provider queue rate limit");
+    }
+    return { image_id: item.image_id, status: "generated" };
+  }, 8);
+  assert.equal(result.circuit_open, false);
+  assert.equal(result.adaptive_concurrency.configured, 8);
+  assert.equal(result.adaptive_concurrency.minimum < 8, true);
+  assert.equal(result.adaptive_concurrency.events.some((row) => row.type === "provider_backoff"), true);
 }
 
 async function testRenderRequiresHashMatchedImageQa() {
@@ -4756,6 +4813,7 @@ async function run() {
   testQwenKeepsBracketedUiDialogueSpeakable();
   testImageOutputQaRiskAndDonorPolicies();
   await testProviderCircuitBreakerStopsUnclaimedWork();
+  await testProviderConcurrencyBacksOffAndRecovers();
   await testRenderRequiresHashMatchedImageQa();
   await testPreflightLocksNativeTtsSpeedAndSmoothRender();
   await testPostTempoRequiresEmergencyApproval();

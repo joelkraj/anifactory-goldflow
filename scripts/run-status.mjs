@@ -3,6 +3,13 @@
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import {
+  PIPELINE_STAGE_REGISTRY,
+  PIPELINE_STAGE_REGISTRY_VERSION,
+  buildStageCommand,
+  stageDefinition,
+  stageIsSatisfied,
+} from "./lib/pipeline-stage-registry.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -244,58 +251,35 @@ function imagegenPromoteDerivedRefsCommand(identity) {
 }
 
 function commandFor(stage, identity) {
-  const episode = identity.episode ?? "<episode>";
-  const base = commandBase(identity);
-  const narratorOnly = isNarratorOnlyAudio(identity);
-  const paceFlag = paceDiagnosticOnly(identity) ? " --pace-policy diagnostic" : "";
-  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  const minWpm = targetWpmMin(identity);
-  const maxWpm = targetWpmMax(identity);
-  const midWpm = targetWpmMid(identity);
-  const commands = {
-    run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
-    source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
-    script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
-    script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${paceDiagnosticOnly(identity) ? " --allow-hook-warnings true" : ""}`,
-    targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
-    semantic_scene_plan: `node bin/goldflow.mjs semantic plan ${base}`,
-    voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
-    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${qwenNativeSpeed(identity)}`,
-    local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
-    audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
-    audio_tempo_normalize: `Emergency diagnostic only with operator approval: node bin/goldflow.mjs audio tempo-normalize ${base} --target-wpm ${midWpm} --operator-approved-emergency true`,
-    timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
-    sfx_score_plan: narratorOnly ? "skipped because run_identity.audio_target is narrator_only" : `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only --retention-mix true`,
-    longform_audio_mix: narratorOnly
-      ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`
-      : `ANIFACTORY_SCORE_PROVIDER=local_ace_step node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --score-drop-boost-db 3 --signature-sfx-boost-db 2 --incidental-sfx-boost-db 2 --ambience-sfx-boost-db -2 --target-lufs -13 --true-peak-db -1`,
-    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --hook-duration-sec 30 --hook-target-beat-sec 3.2 --hook-max-beat-sec 4.2 --retention-ramp-sec 180 --ramp-target-beat-sec 5.2 --ramp-max-beat-sec 6.5`,
-    visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
-    reference_generation: usesCodexReferences(identity)
-      ? `Stage reference PNGs with built-in Codex imagegen workers, then: node bin/goldflow.mjs imagegen import-staged-codex ${base} --references-only true --staging-dir <staging-dir> --reference-ids <ref_ids>`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --references-only true --reference-concurrency 15`,
-    visual_prompt_plan_review_harden: `node bin/goldflow.mjs visual plan ${base}`,
-    transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly ? " --transition-sfx false" : ""}`,
-    image_generation: usesCodexSceneCuts(identity)
-      ? `Stage Codex-routed cut PNGs with built-in Codex imagegen workers, import them with: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then generate the ModelsLab-routed remainder with: node bin/goldflow.mjs imagegen start ${base}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --provider-filter modelslab --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
-      : imagegenStartCommand(identity),
-    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
-    premium_render: renderCommand(identity, base, episode),
-    final_qa: `ffprobe <final-render.mp4> && ffmpeg -i <final-audio-or-render> -af volumedetect -f null -`,
-    upload_packaging: "Generate title, thumbnail, and description hooks after story/render review.",
-  };
-  return commands[stage] ?? null;
+  return buildStageCommand(stage, identity);
 }
 
-function stage(stage, requiredInput, output, approvalRequired, done, evidence, identity, nextCommandOverride = null) {
+function inferredState(validation = {}) {
+  if (validation.state) return validation.state;
+  if (validation.done) return "passed";
+  const evidence = String(validation.evidence ?? "").toLowerCase();
+  if (evidence.includes("stale")) return "stale";
+  if (evidence.includes("blocked") || evidence.includes("deadletter")) return "blocked";
+  if (evidence.includes("failed") || evidence.includes("invalid")) return "failed";
+  return "missing";
+}
+
+function stage(stageId, validation, identity, nextCommandOverride = null) {
+  const definition = stageDefinition(stageId);
+  if (!definition) throw new Error(`Stage ${stageId} is missing from the pipeline registry.`);
+  const state = inferredState(validation);
   return {
-    stage,
-    required_input: requiredInput,
-    output_artifact: output,
-    operator_approval_required: approvalRequired,
-    exists: Boolean(done),
-    evidence: evidence ?? null,
-    next_command_shape: done ? null : nextCommandOverride ?? commandFor(stage, identity),
+    stage: stageId,
+    title: definition.title,
+    state,
+    required_input: definition.required_input,
+    output_artifact: definition.output_artifact,
+    operator_approval_required: definition.approval !== "automatic",
+    approval_policy: definition.approval,
+    validator: definition.validator,
+    exists: stageIsSatisfied(state),
+    evidence: validation.evidence ?? null,
+    next_command_shape: stageIsSatisfied(state) ? null : nextCommandOverride ?? validation.next_command_shape ?? commandFor(stageId, identity),
   };
 }
 
@@ -305,7 +289,7 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const week = identity.week ?? "<week>";
   const episode = identity.episode ?? "<episode>";
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
-  const planCommand = commandFor("visual_prompt_plan_review_harden", identity);
+  const planCommand = commandFor("visual_prompt_plan", identity);
   const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return planCommand;
   const reviewedPlanPath = path.join(episodeDir, "section_image_prompts_reviewed.json");
@@ -601,13 +585,6 @@ async function referenceGenerationComplete(episodeDir, identity) {
   const byHash = new Map();
   let present = 0;
   if (!required.length) {
-    if (characterStatus === "draft_needs_manual_review") {
-      return {
-        done: false,
-        evidence: "required refs=0/0; generated reference approval pending",
-        next_command_shape: visualRefsApproveCommand(identity),
-      };
-    }
     return {
       done: true,
       evidence: "required refs=0/0; no standalone reference images required",
@@ -629,16 +606,24 @@ async function referenceGenerationComplete(episodeDir, identity) {
   }
   const duplicates = [...byHash.values()].filter((rows) => rows.length > 1);
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
-  if (missing.length === 0 && duplicates.length === 0 && characterStatus === "draft_needs_manual_review") {
-    return {
-      done: false,
-      evidence: `required refs=${present}/${required.length}; generated reference approval pending`,
-      next_command_shape: visualRefsApproveCommand(identity),
-    };
-  }
   return {
     done: required.length > 0 && missing.length === 0 && duplicates.length === 0,
     evidence: `required refs=${present}/${required.length}${missing.length ? `; missing=${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ` +${missing.length - 8} more` : ""}` : ""}${duplicates.length ? `; duplicate_hashes=${duplicateSummary.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}`,
+  };
+}
+
+async function referenceImageApprovalComplete(episodeDir, episode) {
+  const characterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
+  const approval = await readJson(path.join(episodeDir, `visual_reference_approval_${episode}.json`), null);
+  const characterStatus = String(characterRefs?.status ?? "").toLowerCase();
+  const approvalStatus = String(approval?.status ?? "").toLowerCase();
+  const done = ["approved", "passed"].includes(characterStatus)
+    && ["approved", "passed"].includes(approvalStatus);
+  return {
+    done,
+    evidence: done
+      ? `visual_reference_approval_${episode}.json status=${approvalStatus}`
+      : `generated reference approval missing; character_state_refs status=${characterStatus || "missing"}`,
   };
 }
 
@@ -1227,7 +1212,10 @@ async function main() {
     target_wpm_midpoint: flags["target-wpm-mid"] ?? flags["wpm-mid"] ?? runIdentity.target_wpm_midpoint ?? runIdentity.pace_targets?.target_wpm_midpoint ?? runIdentity.pace_targets?.mid ?? DEFAULT_TARGET_WPM_MID,
     pace_targets: runIdentity.pace_targets ?? null,
     render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_fast_ken_burns",
+    run_identity_schema: runIdentity.schema ?? "missing",
+    stage_registry_version: runIdentity.stage_registry_version ?? null,
   };
+  const legacyIdentity = runIdentity.schema !== "goldflow_run_identity_v2";
   const episode = identity.episode;
   const scriptHash = await fileSha256(path.join(episodeDir, "script_clean.md"));
   const scriptApproval = await scriptApprovalComplete(episodeDir, scriptHash);
@@ -1240,12 +1228,17 @@ async function main() {
   const audioPace = await paceReportComplete(path.join(episodeDir, `narration_pace_report_${episode}.json`), scriptHash, `narration_pace_report_${episode}.json`, identity);
   const audioPaceNextCommand = await audioPaceRecoveryCommand(episodeDir, identity);
   const semanticPlan = await jsonStatusComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
+  const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
   const timedScenePlan = await jsonStatusComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "visual_beat_plan.json"), "visual_beat_plan.json");
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
+  const visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode);
   const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
+  const referenceImageApproval = await referenceImageApprovalComplete(episodeDir, episode);
+  const legacyCharacterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
+  const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
   const imagegen = await imageReportComplete(episodeDir, episode, identity);
   const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
   const render = await renderComplete(episodeDir, episode);
@@ -1260,39 +1253,91 @@ async function main() {
         evidence: `sfx_event_plan_${episode}.json`,
       };
 
-  const rows = [
-    stage("run_identity", "operator/run intent", "run_identity.json", false, await exists(runIdentityPath), "run_identity.json", identity),
-    stage("source_ingest", "run_identity.json + source story", "script_clean.md + source_story_ingest_report.json", false, await exists(path.join(episodeDir, "script_clean.md")) && await exists(path.join(episodeDir, "source_story_ingest_report.json")), "script_clean.md", identity),
-    stage("script_approval", "script_clean.md", "operator_script_approval.json + script_lock.json", true, scriptApproval.done, scriptApproval.evidence, identity),
-    stage("script_pace_check", "approved script hash", "script_pace_report.json", false, scriptPace.done, scriptPace.evidence, identity),
-    stage("targeted_speakability", "approved script hash", "script_speakability_report.json + tts_spoken_overrides.json", false, speakability.done && ttsOverrides.done, `${speakability.evidence}; ${ttsOverrides.evidence}`, identity),
-    stage("semantic_scene_plan", "approved script + bibles", "semantic_scene_plan.json", false, semanticPlan.done, semanticPlan.evidence, identity),
-    stage("voice_plan", "speakability report + overrides", "qwen_generation_plan.json", false, qwenVoicePlan.done, qwenVoicePlan.evidence, identity),
-    stage("qwen_tts_stitch", "voice plan + approved TTS text", `modelslab_qwen_tts_report_${episode}.json + stitched narration`, false, qwenTtsStitch.done, qwenTtsStitch.evidence, identity),
-    stage("local_whisper_word_timing", "final stitched narration", `narration_word_timing_${episode}.json`, false, whisperTiming.done, whisperTiming.evidence, identity),
-    stage("audio_pace_check", "local Whisper word timing", `narration_pace_report_${episode}.json`, false, audioPace.done, audioPace.evidence, identity, audioPaceNextCommand),
-    stage("timing_bind", "local Whisper word timing", "timed_scene_plan.json", false, timedScenePlan.done, timedScenePlan.evidence, identity),
-    stage("sfx_score_plan", narratorOnly ? "skipped for narrator_only audio target" : "local Whisper timing + timed scenes", narratorOnly ? "skipped" : `sfx_event_plan_${episode}.json + score_drop_plan_${episode}.json`, false, sfxScoreDone.done, sfxScoreDone.evidence, identity),
-    stage("longform_audio_mix", narratorOnly ? "stitched narration/Qwen report" : "locked SFX/score assets + narration", "longform_audio_bed_report_*.json + final mix", false, longformMix.done, longformMix.evidence, identity),
-    stage("visual_beat_plan", "timed scenes + Whisper timing", "visual_beat_plan.json", false, visualBeatPlan.done, visualBeatPlan.evidence, identity),
-    stage("visual_reference_plan", "visual beats + semantic facts", "reference_evidence_ledger.json + location_contract_ledger.json + selected reference_inventory_ledger.json + visual_reference_plan.json + character_state_refs.json", true, visualReferencePlan.done, visualReferencePlan.evidence, identity, visualReferencePlan.next_command_shape),
-    stage("reference_generation", "approved reference prompts", "assets/images/references/*", true, referenceGeneration.done, referenceGeneration.evidence, identity, referenceGeneration.next_command_shape),
-    stage("visual_prompt_plan_review_harden", "visual beats + approved refs", "section_image_prompts_hardened.json", false, hardenedPromptPlan.done, hardenedPromptPlan.evidence, identity, visualPromptNextCommand),
-    stage("transition_edit_plan", "hardened prompt plan", `transition_edit_plan_${episode}.json`, false, await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), `transition_edit_plan_${episode}.json`, identity),
-    stage("image_generation", "hardened prompt plan + generated refs", `imagegen_report_${episode}.json + assets/images`, false, imagegen.done, imagegen.evidence, identity, imagegen.next_command_shape),
-    stage("image_output_qa", "generated scene images + cut execution ledger", `image_output_qa_${episode}.json + review_samples/image_output_qa/*`, true, imageOutputQa.done, imageOutputQa.evidence, identity, imageOutputQa.next_command_shape),
-    stage("premium_render", "hardened prompts + final longform mix", `render_report_${episode}*.json + final MP4`, false, render.done, render.evidence, identity),
-    stage("final_qa", "final MP4", "ffprobe/loudness/spot-check QA report", true, Boolean(latestQa), latestQa?.name ?? null, identity),
-    stage("upload_packaging", "story/render understanding", "title + thumbnail + description package", true, Boolean(latestPackaging), latestPackaging?.name ?? null, identity),
-  ];
+  const referencePlanPath = path.join(episodeDir, "visual_reference_plan.json");
+  const referencePlanHash = await fileSha256(referencePlanPath);
+  const referencePlanApproval = await readJson(path.join(episodeDir, "reference_plan_approval.json"), null);
+  const referencePlanApprovalDone = Boolean(
+    referencePlanHash
+    && ["approved", "passed"].includes(String(referencePlanApproval?.status ?? "").toLowerCase())
+    && referencePlanApproval?.visual_reference_plan_sha256 === referencePlanHash
+  );
+  const hardenReport = await readJson(path.join(episodeDir, `visual_prompt_hardening_${episode}.json`), null);
+  const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
+  const transitionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `transition_edit_plan_${episode}.json`), `transition_edit_plan_${episode}.json`);
+  const motionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `motion_edit_plan_${episode}.json`), `motion_edit_plan_${episode}.json`);
+  const semanticValidation = legacyIdentity
+    ? { ...semanticPlan, evidence: `${semanticPlan.evidence ?? "semantic_scene_plan.json"}; legacy run: story_fact_ledger waived` }
+    : {
+        done: semanticPlan.done && storyFactLedger.done,
+        evidence: `${semanticPlan.evidence}; ${storyFactLedger.evidence}`,
+      };
+  const validationByStage = {
+    run_identity: { done: await exists(runIdentityPath), evidence: legacyIdentity ? "run_identity.json legacy adapter" : "run_identity.json v2" },
+    source_ingest: {
+      done: await exists(path.join(episodeDir, "script_clean.md")) && await exists(path.join(episodeDir, "source_story_ingest_report.json")),
+      evidence: "script_clean.md + source_story_ingest_report.json",
+    },
+    script_approval: scriptApproval,
+    script_pace_check: scriptPace,
+    targeted_speakability: { done: speakability.done && ttsOverrides.done, evidence: `${speakability.evidence}; ${ttsOverrides.evidence}` },
+    semantic_scene_plan: semanticValidation,
+    voice_plan: qwenVoicePlan,
+    qwen_tts_stitch: qwenTtsStitch,
+    local_whisper_word_timing: whisperTiming,
+    audio_pace_check: { ...audioPace, next_command_shape: audioPaceNextCommand },
+    timing_bind: timedScenePlan,
+    sfx_score_plan: narratorOnly
+      ? { state: "skipped_with_waiver", evidence: "audio_target narrator_only; audio design intentionally disabled" }
+      : sfxScoreDone,
+    longform_audio_mix: longformMix,
+    visual_beat_plan: visualBeatPlan,
+    visual_reference_plan: visualReferencePlan,
+    reference_plan_approval: legacyIdentity
+      ? { state: "skipped_with_waiver", evidence: "legacy run predates reference-plan hash approval" }
+      : { done: referencePlanApprovalDone, evidence: referencePlanApprovalDone ? "reference_plan_approval.json hash=current" : "reference plan hash approval missing or stale" },
+    reference_generation: referenceGeneration,
+    reference_image_approval: legacyIdentity && legacyCharacterRefStatus !== "draft_needs_manual_review" && !referenceImageApproval.done
+      ? { state: "skipped_with_waiver", evidence: "legacy run predates separate generated-reference approval report" }
+      : referenceImageApproval,
+    visual_prompt_plan: visualPromptPlan,
+    visual_prompt_harden: hardenStatus === "blocked" || /visual review|manual agent review/i.test(String(visualPromptNextCommand ?? ""))
+      ? { state: "blocked", evidence: `${hardenedPromptPlan.evidence ?? "hardened prompts"}; harden blockers present`, next_command_shape: visualPromptNextCommand }
+      : hardenedPromptPlan,
+    visual_prompt_blocker_repair: hardenedPromptPlan.done
+      ? { state: "skipped_with_waiver", evidence: "hardening passed with no unresolved prompt blockers" }
+      : { state: hardenStatus === "blocked" ? "missing" : "blocked", evidence: hardenStatus ? `hardening status=${hardenStatus}` : "awaiting hardening result", next_command_shape: visualPromptNextCommand },
+    transition_edit_plan: legacyIdentity
+      ? { done: await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), evidence: `transition_edit_plan_${episode}.json legacy adapter` }
+      : transitionPlan,
+    image_generation: imagegen,
+    image_output_qa: legacyIdentity && !imageOutputQaRequired(identity)
+      ? { state: "skipped_with_waiver", evidence: "legacy run predates required per-cut image QA" }
+      : imageOutputQa,
+    motion_edit_plan: legacyIdentity
+      ? { state: "skipped_with_waiver", evidence: "legacy run predates directed motion-plan contract" }
+      : motionPlan,
+    premium_render: render,
+    final_qa: { done: Boolean(latestQa), evidence: latestQa?.name ?? "final QA report missing" },
+    upload_packaging: { done: Boolean(latestPackaging), evidence: latestPackaging?.name ?? "upload packaging missing" },
+  };
 
-  const next = rows.find((row) => !row.exists) ?? null;
+  const rows = PIPELINE_STAGE_REGISTRY.map((definition) => {
+    const validation = validationByStage[definition.id] ?? { state: "missing", evidence: "validator not materialized" };
+    return stage(definition.id, validation, identity, validation.next_command_shape);
+  });
+
+  const next = rows.find((row) => !stageIsSatisfied(row.state)) ?? null;
   const result = {
-    schema: "goldflow_run_status_v1",
+    schema: "goldflow_run_status_v2",
+    stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
     episode_dir: episodeDir,
     identity,
     run_identity_path: await exists(runIdentityPath) ? runIdentityPath : null,
     current_stage: next?.stage ?? "complete",
+    current_stage_state: next?.state ?? "passed",
+    allowed_command_stages: next?.stage === "visual_prompt_harden" && next?.state === "blocked"
+      ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
+      : next?.stage ? [next.stage] : [],
     next_required_input: next?.required_input ?? null,
     next_output_artifact: next?.output_artifact ?? null,
     operator_approval_required: next?.operator_approval_required ?? false,
@@ -1307,10 +1352,10 @@ async function main() {
     console.log(`Current stage: ${result.current_stage}`);
     if (result.next_command_shape) console.log(`Next command shape: \`${result.next_command_shape}\``);
     console.log(`Manual blocker triage: ${MANUAL_BLOCKER_TRIAGE_POLICY.summary}`);
-    console.log("\n| Stage | Exists | Approval | Output |");
+    console.log("\n| Stage | State | Approval | Output |");
     console.log("| --- | --- | --- | --- |");
     for (const row of rows) {
-      console.log(`| ${row.stage} | ${row.exists ? "yes" : "no"} | ${row.operator_approval_required ? "yes" : "no"} | ${row.output_artifact} |`);
+      console.log(`| ${row.stage} | ${row.state} | ${row.operator_approval_required ? "yes" : "no"} | ${row.output_artifact} |`);
     }
   } else {
     console.log(JSON.stringify(result, null, 2));

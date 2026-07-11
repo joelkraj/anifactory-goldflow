@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import {
+  PIPELINE_STAGE_REGISTRY_VERSION,
+  stageChecklistFor,
+} from "./lib/pipeline-stage-registry.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -137,31 +141,6 @@ function impliedEpisodeNumber(value) {
   return null;
 }
 
-function stageChecklist(target) {
-  const narratorOnly = target === "narrator_only";
-  return [
-    ["source_story", "pending"],
-    ["script_clean", "pending"],
-    ["operator_script_hash_approval", "pending"],
-    ["targeted_speakability", "pending"],
-    ["semantic_scene_plan", "pending"],
-    ["voice_plan", "pending"],
-    ["qwen_tts_stitch", "pending"],
-    ["local_whisper_word_timing", "pending"],
-    ["timing_bound_sfx_score_plan", narratorOnly ? "skipped_audio_target_narrator_only" : "pending"],
-    ["longform_audio_mix", "pending"],
-    ["visual_beat_plan", "pending"],
-    ["visual_reference_plan_and_review", "pending"],
-    ["reference_generation_and_qa", "pending"],
-    ["visual_prompt_plan_review_harden", "pending"],
-    ["image_generation", "pending"],
-    ["image_output_qa", "pending"],
-    ["premium_render_from_continuous_mix", "pending"],
-    ["final_render_qa", "pending"],
-    ["upload_packaging", "pending"],
-  ].map(([stage, status]) => ({ stage, status }));
-}
-
 async function main() {
   requiredFlag("channel", channel);
   requiredFlag("series", series);
@@ -184,6 +163,7 @@ async function main() {
   const now = new Date().toISOString();
   const manifest = {
     schema: "goldflow_run_identity_v1",
+    stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
     status: "preflight_passed_pending_ingest",
     channel,
     series_slug: series,
@@ -227,7 +207,7 @@ async function main() {
       post_tempo_normalization_default: false,
       image_output_qa_required_before_render: true,
     },
-    stage_checklist: stageChecklist(audioTarget),
+    stage_checklist: stageChecklistFor({ audio_target: audioTarget }),
     episode_dir: episodeDir,
     updated_at: now,
   };

@@ -61,6 +61,11 @@ import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./v
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
 import {
+  PIPELINE_STAGE_REGISTRY,
+  commandStageFor,
+  stageChecklistFor,
+} from "./lib/pipeline-stage-registry.mjs";
+import {
   compatibleHardenFeedbackBlockers,
   hasHardenFeedbackFindings,
   hardenFeedbackBlockersNeedManualAgentReview,
@@ -82,6 +87,25 @@ const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function testAuthoritativeStageRegistry() {
+  const ids = PIPELINE_STAGE_REGISTRY.map((stage) => stage.id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(ids.slice(-7), [
+    "transition_edit_plan",
+    "image_generation",
+    "image_output_qa",
+    "motion_edit_plan",
+    "premium_render",
+    "final_qa",
+    "upload_packaging",
+  ]);
+  assert.equal(ids.includes("visual_prompt_plan_review_harden"), false);
+  assert.equal(ids.includes("reference_plan_approval"), true);
+  const narratorOnly = stageChecklistFor({ audio_target: "narrator_only" });
+  assert.equal(narratorOnly.find((row) => row.stage === "sfx_score_plan")?.status, "skipped_with_waiver");
+  assert.equal(narratorOnly.every((row) => row.validator), true);
 }
 
 function testPinnedCodexRuntimeContracts() {
@@ -1410,10 +1434,11 @@ async function testVisualPlannerDriftContracts() {
   assert.equal(/Wide 16:9 landscape YouTube frame/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/full-frame composition, keep complete heads/i.test(files["scripts/imagegen.mjs"]), false);
   assert.match(files["scripts/codex-image-manual-import.mjs"], /promptTextForImageProvider\(prompt, "codex_imagegen"\)/);
-  assert.match(files["bin/goldflow.mjs"], /if \(key === "visual approve-refs"\) return "reference_generation"/);
-  assert.match(files["bin/goldflow.mjs"], /key === "imagegen import-staged-codex"/);
-  assert.match(files["bin/goldflow.mjs"], /parsedFlags\["references-only"\].*return "reference_generation"/s);
-  assert.match(files["bin/goldflow.mjs"], /parsedFlags\["qa-recovery"\].*return "image_output_qa"/s);
+  assert.equal(commandStageFor("visual", "approve-refs", {}), "reference_image_approval");
+  assert.equal(commandStageFor("imagegen", "import-staged-codex", { "references-only": "true" }), "reference_generation");
+  assert.equal(commandStageFor("imagegen", "import-staged-codex", { "qa-recovery": "true" }), "image_output_qa");
+  assert.equal(commandStageFor("visual", "plan", {}), "visual_prompt_plan");
+  assert.equal(commandStageFor("visual", "harden", {}), "visual_prompt_harden");
 
   for (const file of ["AGENTS.md", "docs/workflows/video_production_workflow.md"]) {
     assert.match(files[file], /Real named public creators, streamers, celebrities, or influencers/i);
@@ -2702,7 +2727,7 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const initialStatus = JSON.parse(initialStdout);
-  assert.equal(initialStatus.current_stage, "visual_prompt_plan_review_harden");
+  assert.equal(initialStatus.current_stage, "visual_prompt_harden");
   assert.match(initialStatus.next_command_shape, /visual harden/);
   assert.match(initialStatus.next_command_shape, /section_image_prompts\.json/);
   assert.doesNotMatch(initialStatus.next_command_shape, /visual review/);
@@ -2719,7 +2744,7 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const status = JSON.parse(stdout);
-  assert.equal(status.current_stage, "visual_prompt_plan_review_harden");
+  assert.equal(status.current_stage, "visual_prompt_harden");
   assert.match(status.next_command_shape, /visual review/);
   assert.match(status.next_command_shape, /--resume-blocked true/);
   assert.doesNotMatch(status.next_command_shape, /visual plan/);
@@ -2747,7 +2772,7 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const repairedStatus = JSON.parse(repairedStdout);
-  assert.equal(repairedStatus.current_stage, "visual_prompt_plan_review_harden");
+  assert.equal(repairedStatus.current_stage, "visual_prompt_harden");
   assert.match(repairedStatus.next_command_shape, /visual harden/);
   assert.doesNotMatch(repairedStatus.next_command_shape, /--resume-blocked true/);
 
@@ -2768,8 +2793,8 @@ async function testRunStatusResumesBlockedVisualReviewWithoutFullReplan() {
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const manualStatus = JSON.parse(manualStdout);
-  const manualStage = manualStatus.stage_ledger.find((row) => row.stage === "visual_prompt_plan_review_harden");
-  assert.equal(manualStatus.current_stage, "visual_prompt_plan_review_harden");
+  const manualStage = manualStatus.stage_ledger.find((row) => row.stage === "visual_prompt_harden");
+  assert.equal(manualStatus.current_stage, "visual_prompt_harden");
   assert.equal(manualStage.exists, false);
   assert.match(manualStatus.next_command_shape, /Manual agent review required/);
   assert.match(manualStatus.next_command_shape, /visual_manual_agent_review_ep_01\.json/);
@@ -3893,12 +3918,14 @@ async function testRunStatusSurfacesDraftReferenceApprovalCommand() {
   const status = JSON.parse(stdout);
   const refStage = status.stage_ledger.find((row) => row.stage === "visual_reference_plan");
   const referenceGenerationStage = status.stage_ledger.find((row) => row.stage === "reference_generation");
-  assert.equal(status.current_stage, "reference_generation");
+  const referenceApprovalStage = status.stage_ledger.find((row) => row.stage === "reference_image_approval");
+  assert.equal(status.current_stage, "reference_image_approval");
   assert.equal(refStage.exists, true);
-  assert.equal(referenceGenerationStage.exists, false);
-  assert.match(referenceGenerationStage.evidence, /generated reference approval pending/);
+  assert.equal(referenceGenerationStage.exists, true);
+  assert.equal(referenceApprovalStage.exists, false);
+  assert.match(referenceApprovalStage.evidence, /generated reference approval missing/);
   assert.match(status.next_command_shape, /visual approve-refs/);
-  assert.match(referenceGenerationStage.next_command_shape, /visual approve-refs/);
+  assert.match(referenceApprovalStage.next_command_shape, /visual approve-refs/);
 }
 
 async function testRunStatusBlocksQwenPlanMissingOverrideAudit() {
@@ -4357,6 +4384,7 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
 }
 
 async function run() {
+  testAuthoritativeStageRegistry();
   testPinnedCodexRuntimeContracts();
   await testNestedCodexCallsUseSharedRunner();
   testSemanticSceneAnchorValidation();

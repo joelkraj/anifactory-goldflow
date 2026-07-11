@@ -3,6 +3,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  PIPELINE_STAGE_REGISTRY_VERSION,
+  commandStageFor,
+  helpCommandLines,
+  productionOrderSummary,
+} from "../scripts/lib/pipeline-stage-registry.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -28,45 +34,7 @@ function isTrue(value) {
 }
 
 function commandStage(commandName, subcommandName, parsedFlags) {
-  const key = `${commandName} ${subcommandName}`.trim();
-  if (key === "ingest source") return "source_ingest";
-  if (key === "script approve") return "script_approval";
-  if (key === "script pace-check") return "script_pace_check";
-  if (key === "script targeted") return "targeted_speakability";
-  if (key === "semantic plan") return "semantic_scene_plan";
-  if (key === "voice plan") return "voice_plan";
-  if (key === "tts qwen") return "qwen_tts_stitch";
-  if (key === "audio whisper-timing") return "local_whisper_word_timing";
-  if (key === "audio pace-check") return "audio_pace_check";
-  if (key === "audio tempo-normalize") return "audio_pace_check";
-  if (key === "timing bind") return "timing_bind";
-  if (key === "audio enrich-sfx-score") return "sfx_score_plan";
-  if (key === "audio score-drops-chunked") return "sfx_score_plan";
-  if (key === "audio repair-ambience") return "sfx_score_plan";
-  if (key === "audio longform-bed") return "longform_audio_mix";
-  if (key === "visual beats") return "visual_beat_plan";
-  if (key === "visual refs") return "visual_reference_plan";
-  if (key === "visual approve-refs") return "reference_generation";
-  if (key === "visual plan") return "visual_prompt_plan_review_harden";
-  if (key === "visual review") return "visual_prompt_plan_review_harden";
-  if (key === "visual harden") return "visual_prompt_plan_review_harden";
-  if (key === "visual engagement") return "transition_edit_plan";
-  if (key === "visual transitions") return "transition_edit_plan";
-  if (key === "imagegen start") {
-    if (isTrue(parsedFlags["references-only"])) return "reference_generation";
-    if (isTrue(parsedFlags["qa-recovery"])) return "image_output_qa";
-    return "image_generation";
-  }
-  if (key === "imagegen promote-derived-refs") return "image_generation";
-  if (key === "imagegen import-codex") return "image_generation";
-  if (key === "imagegen import-staged-codex") {
-    if (isTrue(parsedFlags["references-only"])) return "reference_generation";
-    if (isTrue(parsedFlags["qa-recovery"])) return "image_output_qa";
-    return "image_generation";
-  }
-  if (key === "imagegen qa") return "image_output_qa";
-  if (key === "render start") return "premium_render";
-  return null;
+  return commandStageFor(commandName, subcommandName, parsedFlags);
 }
 
 function statusArgsFor(parsedFlags) {
@@ -108,7 +76,10 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
     process.exit(1);
   }
   const currentStage = result.current_stage;
-  if (currentStage === expectedStage) return;
+  const allowedStages = Array.isArray(result.allowed_command_stages)
+    ? result.allowed_command_stages
+    : [currentStage];
+  if (allowedStages.includes(expectedStage)) return;
   console.error(`Workflow guard blocked: ${commandName} ${subcommandName}`);
   console.error(`Current stage is ${currentStage}; this command belongs to ${expectedStage}.`);
   if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
@@ -129,48 +100,21 @@ function run(script, scriptArgs = []) {
 }
 
 function help() {
+  const registryCommands = helpCommandLines().join("\n");
   console.log(`AniFactory Goldflow
 
 One production path. No legacy fallbacks.
 Production commands are guarded by the run-status ledger. Use --workflow-bypass true only for explicit diagnostic/recovery work.
+Stage registry: ${PIPELINE_STAGE_REGISTRY_VERSION}
 
 Commands:
-  goldflow run preflight           Lock run identity before ingest or folder creation
-  goldflow run codex-doctor        Show the pinned Codex model, reasoning effort, CLI path, and CLI version; add --probe true for a live call
-  goldflow run status              Print artifact-backed stage ledger before continuing
-  goldflow run cleanup             Audit/prune safe unused episode intermediates; use --apply true to delete
-  goldflow ingest source           Copy raw chatbot/script source into script_clean.md
-  goldflow script approve          Write exact-hash review/approval lock artifacts
-  goldflow script pace-check       Write approved-script 195-220 WPM target budget
-  goldflow script speakability     Review approved script for broad TTS speakability and spoken overrides
-  goldflow script targeted         Write targeted problem-area TTS overrides only
-  goldflow semantic plan           Extract semantic scene plan from locked script
-  goldflow voice plan              Build narrator-first Qwen generation plan
-  goldflow tts qwen                Generate/stitch ModelsLab Qwen narration at provider-native speed
-  goldflow audio whisper-timing    Run local Whisper word timing on stitched narration
-  goldflow audio pace-check        Verify stitched narration is 195-220 WPM from Whisper timing
-  goldflow audio tempo-normalize   Emergency diagnostic only; requires --operator-approved-emergency true
-  goldflow timing bind             Bind semantic scenes to Whisper timing
-  goldflow visual beats            Split timed semantic scenes into visual image beats
-  goldflow visual planner-ab       Diagnostic-only thin-ledger/editorial-beat A/B; writes sidecars and never regenerates production media
-  goldflow visual refs             Build evidence/location ledgers, then let the global LLM director select clean refs
-  goldflow visual approve-refs     Approve reviewed/generated refs for visual prompt planning
-  goldflow visual plan             Author current-scene-only image prompts from visual beats
-  goldflow visual review           Optional blocker-only/risk diagnostic prompt repair; not a default full-episode toll
-    use --resume-blocked true to continue an existing blocked review/harden repair without rerunning full visual plan
-  goldflow visual harden           Generic-only prompt/ref sanitation and pre-imagegen sample QA
-  goldflow visual engagement       Plan sparse render-layer comment/like/subscribe bubbles
-  goldflow visual transitions      Plan xfade transitions from hardened cuts; transition SFX is opt-in
-  goldflow imagegen start          Generate images from approved prompt plan
-  goldflow imagegen promote-derived-refs Promote successful seed cuts into derive-from-cut reference images
-  goldflow imagegen import-codex   Import one manually generated Codex/OpenAI scene-cut raster
-  goldflow imagegen import-staged-codex Import staged built-in Codex rasters for scene cuts or --references-only refs
-  goldflow imagegen qa             Build output contact sheets, audit image integrity, and record risk-cut approval
-  goldflow render start            Render final video from mixed audio, images, Whisper subtitles
-  goldflow audio enrich-sfx-score  Opt-in plan/generate Whisper-timed SFX and score
-  goldflow audio score-drops-chunked Plan score drops in smaller LLM chunks
-  goldflow audio repair-ambience   Add Codex-agent manual ambience beds when enrichment under-targets ambience
-  goldflow audio longform-bed      Build the continuous audio bed; narrator-only by default
+${registryCommands}
+  goldflow run codex-doctor        Inspect the pinned Codex runtime
+  goldflow run status              Print the artifact-backed stage ledger
+  goldflow run cleanup             Audit or prune safe intermediates
+  goldflow visual planner-ab       Run the diagnostic editorial A/B
+  goldflow script speakability     Run optional broad speakability review
+  goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
 
 Common flags:
   --channel <channel>
@@ -193,7 +137,7 @@ Validation-batch flags:
   --render-profile smooth_fast_ken_burns is the default; use --render-profile fill_ken_burns only for a deliberate legacy comparison.
 
 Production order:
-  run preflight -> source prompt workflow -> ingest source -> script approve -> script pace-check -> script targeted -> semantic plan -> voice plan -> tts qwen --native-speed <locked-speed> -> audio whisper-timing -> audio pace-check -> timing bind -> audio longform-bed --narration-only true -> visual beats -> visual refs (evidence ledger + location contracts + global LLM director + selected inventory) -> reference imagegen -> visual approve-refs -> visual plan -> visual harden -> blocker-only visual review only when harden blocks -> optional visual engagement -> visual transitions --transition-sfx false -> imagegen start -> imagegen qa -> render start
+  ${productionOrderSummary()}
 
 Prompt-repair migration guardrails:
   Part F ships before Part G.

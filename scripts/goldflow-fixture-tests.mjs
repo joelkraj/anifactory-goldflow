@@ -4172,7 +4172,9 @@ async function testRunStatusBlocksMissingQwenStitchedAudio() {
   await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash, replacements: [] });
-  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  const semanticPath = path.join(episodeDir, "semantic_scene_plan.json");
+  const semanticArtifact = { status: "passed", source_script_hash: scriptHash };
+  await writeJson(semanticPath, semanticArtifact);
   await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "modelslab_qwen_tts_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash });
   const missingAudioPath = path.join(episodeDir, "assets", "audio", "missing.wav");
@@ -4285,7 +4287,9 @@ async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
   await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
   await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash });
-  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  const semanticPath = path.join(episodeDir, "semantic_scene_plan.json");
+  const semanticArtifact = { status: "passed", source_script_hash: scriptHash };
+  await writeJson(semanticPath, semanticArtifact);
   await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", source_script_hash: scriptHash });
   await writeJson(path.join(episodeDir, "modelslab_qwen_tts_report_ep_01.json"), { status: "passed" });
   const narrationPath = path.join(episodeDir, "narration.wav");
@@ -4298,7 +4302,12 @@ async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
   await fs.writeFile(mixPath, "fixture mix bytes");
   await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), { status: "completed", mix: { m4a_path: mixPath } });
   const timedPath = path.join(episodeDir, "timed_scene_plan.json");
-  await writeJson(timedPath, { status: "passed", source_script_hash: scriptHash, scenes: [] });
+  await writeJson(timedPath, {
+    status: "passed",
+    source_script_hash: scriptHash,
+    source_hashes: { [semanticPath]: sha256(await fs.readFile(semanticPath)) },
+    scenes: [],
+  });
   const scriptPath = path.join(episodeDir, "script_clean.md");
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",
@@ -4318,6 +4327,18 @@ async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
   assert.equal(status.current_stage, "visual_beat_plan");
   assert.equal(visualBeatStage.exists, false);
   assert.match(visualBeatStage.evidence, /stale planner_contract_version=missing/);
+
+  await writeJson(semanticPath, { ...semanticArtifact, scenes: [{ scene_id: "scene_changed" }] });
+  statusResult = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  status = JSON.parse(statusResult.stdout);
+  const timingStage = status.stage_ledger.find((row) => row.stage === "timing_bind");
+  assert.equal(status.current_stage, "timing_bind");
+  assert.equal(timingStage.state, "stale");
+  assert.match(timingStage.evidence, /semantic_scene_plan\.json stale/);
+  await writeJson(semanticPath, semanticArtifact);
 
   await writeJson(path.join(episodeDir, "visual_beat_plan.json"), {
     status: "passed",

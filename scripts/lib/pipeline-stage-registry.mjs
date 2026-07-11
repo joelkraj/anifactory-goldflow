@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.1";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.2";
 
 export const STAGE_STATES = Object.freeze([
   "passed",

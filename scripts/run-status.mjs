@@ -1304,9 +1304,9 @@ async function main() {
   const whisperTiming = await whisperTimingComplete(episodeDir, episode, scriptHash);
   const audioPace = await paceReportComplete(path.join(episodeDir, `narration_pace_report_${episode}.json`), scriptHash, `narration_pace_report_${episode}.json`, identity);
   const audioPaceNextCommand = await audioPaceRecoveryCommand(episodeDir, identity);
-  const semanticPlan = await jsonStatusComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
+  const semanticPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
   const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
-  const timedScenePlan = await jsonStatusComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
+  const timedScenePlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");
   let visualBeatPlan = await jsonStatusWithSourceHashesComplete(visualBeatPlanPath, "visual_beat_plan.json");
   if (!legacyIdentity && visualBeatPlan.done) {

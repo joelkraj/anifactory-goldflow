@@ -121,6 +121,8 @@ Common flags:
   --series <series>
   --week <week>
   --episode ep_01
+  --run-intent proof --proof-scope 0-300 locks an isolated bounded proof
+  --allow-dirty-worktree true --dirty-reason <reason> is diagnostic/proof-only
 
 Render profiles:
   default premium: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
@@ -212,6 +214,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("image-output-qa.mjs", flags);
 } else if (command === "render" && subcommand === "start") {
   run("render.mjs", flags);
+} else if (command === "final" && subcommand === "qa") {
+  run("final-qa.mjs", flags);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {
   run("audio-sfx-score-enrichment.mjs", flags);
 } else if (command === "audio" && subcommand === "score-drops-chunked") {

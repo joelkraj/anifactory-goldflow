@@ -47,10 +47,12 @@ The approved narration script is production truth. The pipeline should extract, 
 
 0. Run identity preflight.
    - Before ingest, lock channel, stable series slug, stable run/week slug, episode id, title, source path, image provider intent, and proof-vs-production intent in `run_identity.json`.
+   - `goldflow_run_identity_v2` also records Git commit/branch/dirty-diff hash, the stage-registry version, provider/model locks, and an explicit full-episode or bounded proof scope. Production requires a clean worktree. Dirty execution is allowed only for an explicit diagnostic/proof with `--allow-dirty-worktree true --dirty-reason <reason>`.
    - Episode numbers live in `--episode`, not in `--week`. A sequel title such as "Part Two" implies `ep_02` by default. Do not create `part-2/episodes/ep_01` unless the operator explicitly approves a standalone run.
    - Required command shape:
      `node bin/goldflow.mjs run preflight --channel <channel> --series <series> --week <stable-run-slug> --episode ep_02 --title <episode-title> --source <chatbot-output.md> --image-provider modelslab --audio-target narrator_only --run-intent production`
    - Ingest must refuse to run without a matching `run_identity.json` unless a diagnostic bypass is explicitly used.
+   - A bounded proof uses `--run-intent proof --proof-scope 0-300` (or explicit start/end flags) and must write isolated proof artifacts.
    - Before any resume or "continue" request, run the artifact-backed ledger:
      `node bin/goldflow.mjs run status --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --format markdown`
    - The agent must continue from the first missing stage in that ledger. If the next requested command would skip a missing upstream artifact or operator approval gate, stop and explain the missing gate.

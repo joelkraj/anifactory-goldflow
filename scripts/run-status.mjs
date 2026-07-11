@@ -643,15 +643,72 @@ async function longformMixComplete(episodeDir, episode) {
   };
 }
 
-async function renderComplete(episodeDir, episode) {
+async function sourceHashState(sourceHashes = {}) {
+  const entries = Object.entries(sourceHashes ?? {}).filter(([sourcePath, hash]) => sourcePath && hash);
+  const stale = [];
+  for (const [sourcePath, expectedHash] of entries) {
+    const currentHash = await fileSha256(sourcePath);
+    if (currentHash !== expectedHash) stale.push(sourcePath);
+  }
+  return { count: entries.length, stale };
+}
+
+async function renderComplete(episodeDir, episode, identity) {
   const latest = await latestMatching(episodeDir, new RegExp(`^render_report_${episode}.*\\.json$`));
   if (!latest) return { done: false, evidence: null };
   const report = await readJson(latest.filePath, {});
   const finalVideo = report.final_video_path ?? report.output_path ?? report.render_path;
+  const status = String(report.status ?? "").toLowerCase();
+  if (status !== "passed") return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${latest.name} status=${status || "missing"}` };
+  if (!finalVideo || !(await exists(finalVideo))) return { done: false, evidence: `${latest.name}; final video missing` };
+  const expectedHash = report.final_video_sha256 ?? report.output_hash ?? null;
+  const currentHash = await fileSha256(finalVideo);
+  if (!expectedHash || currentHash !== expectedHash) {
+    return { done: false, state: "stale", evidence: `${latest.name}; final video hash missing or stale` };
+  }
+  const sourceState = await sourceHashState(report.source_hashes);
+  if (sourceState.stale.length) {
+    return { done: false, state: "stale", evidence: `${latest.name}; stale render sources=${sourceState.stale.slice(0, 4).join(", ")}` };
+  }
+  if (identity.run_identity_schema === "goldflow_run_identity_v2" && sourceState.count === 0) {
+    return { done: false, state: "stale", evidence: `${latest.name}; v2 render report has no source hashes` };
+  }
   return {
-    done: Boolean(finalVideo && await exists(finalVideo)),
-    evidence: `${latest.name}${finalVideo ? ` -> ${finalVideo}` : ""}`,
+    done: true,
+    evidence: `${latest.name} -> ${finalVideo}; source_hashes=${sourceState.count}`,
   };
+}
+
+async function finalQaComplete(episodeDir, episode, identity) {
+  const exactPath = path.join(episodeDir, `final_qa_${episode}.json`);
+  const legacyLatest = identity.run_identity_schema === "goldflow_run_identity_v2"
+    ? null
+    : await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
+  const reportPath = await exists(exactPath) ? exactPath : legacyLatest?.filePath ?? null;
+  if (!reportPath) return { done: false, evidence: `final_qa_${episode}.json missing` };
+  const report = await readJson(reportPath, null);
+  const status = String(report?.status ?? "").toLowerCase();
+  if (identity.run_identity_schema !== "goldflow_run_identity_v2") {
+    if (!status || ["passed", "approved", "complete", "completed"].includes(status)) {
+      return { done: true, evidence: `${path.basename(reportPath)} legacy adapter` };
+    }
+    return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status}` };
+  }
+  if (status !== "passed") return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status || "missing"}` };
+  const finalVideoPath = report.final_video_path;
+  const finalVideoHash = finalVideoPath ? await fileSha256(finalVideoPath) : null;
+  if (!finalVideoHash || finalVideoHash !== report.final_video_sha256) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} final video hash stale` };
+  }
+  const renderReportPath = report.render_report_path;
+  const renderReportHash = renderReportPath ? await fileSha256(renderReportPath) : null;
+  if (!renderReportHash || renderReportHash !== report.render_report_sha256) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} render report hash stale` };
+  }
+  if (Array.isArray(report.blockers) && report.blockers.length) {
+    return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} blockers=${report.blockers.join(",")}` };
+  }
+  return { done: true, evidence: `${path.basename(reportPath)} status=passed; hashes=current` };
 }
 
 async function imageOutputQaComplete(episodeDir, episode, identity) {
@@ -1241,8 +1298,8 @@ async function main() {
   const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
   const imagegen = await imageReportComplete(episodeDir, episode, identity);
   const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
-  const render = await renderComplete(episodeDir, episode);
-  const latestQa = await latestMatching(episodeDir, /^final_qa_.*\.json$|^upload_qa_.*\.json$|^qa_report_.*\.json$/);
+  const render = await renderComplete(episodeDir, episode, identity);
+  const finalQa = await finalQaComplete(episodeDir, episode, identity);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
   const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity);
   const narratorOnly = isNarratorOnlyAudio(identity);
@@ -1317,7 +1374,7 @@ async function main() {
       ? { state: "skipped_with_waiver", evidence: "legacy run predates directed motion-plan contract" }
       : motionPlan,
     premium_render: render,
-    final_qa: { done: Boolean(latestQa), evidence: latestQa?.name ?? "final QA report missing" },
+    final_qa: finalQa,
     upload_packaging: { done: Boolean(latestPackaging), evidence: latestPackaging?.name ?? "upload packaging missing" },
   };
 

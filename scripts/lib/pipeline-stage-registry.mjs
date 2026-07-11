@@ -419,7 +419,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion smooth_fast_ken_burns --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
-    final_qa: `node bin/goldflow.mjs final qa ${base}`,
+    final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,
     upload_packaging: "Generate upload packaging only after final QA passes.",
   };
   return options.override ?? commands[stageId] ?? null;

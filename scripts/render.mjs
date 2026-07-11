@@ -1645,15 +1645,32 @@ async function main() {
       ], { maxBuffer: 1024 * 1024 * 32 });
     }
   }
+  const sourceHashes = {};
+  for (const sourcePath of [
+    promptPlanPath,
+    imagegenReportPath,
+    imageIntegrity.qa_report_path,
+    wordTimingPath,
+    audioBedReportPath,
+    audioStitchReportPath,
+    usableTransitionPlan ? transitionEditPlanPath : null,
+    engagementOverlay.events.length ? engagementOverlayPlanPath : null,
+  ].filter(Boolean)) {
+    if (await exists(sourcePath)) sourceHashes[path.resolve(sourcePath)] = await hashFile(sourcePath);
+  }
+  const finalVideoSha256 = await hashFile(outputPath);
   const report = {
-    schema: "goldflow_render_report_v1",
+    schema: "goldflow_render_report_v2",
     status: "passed",
     channel,
     series_slug: series,
     week,
     episode,
     output_path: outputPath,
-    output_hash: await hashFile(outputPath),
+    output_hash: finalVideoSha256,
+    final_video_path: outputPath,
+    final_video_sha256: finalVideoSha256,
+    source_hashes: sourceHashes,
     output_duration_sec: await mediaDuration(outputPath),
     audio_path: audioPath,
     render_audio_path: renderAudio.audio_path,

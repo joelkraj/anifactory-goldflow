@@ -43,6 +43,8 @@ import {
 } from "./imagegen.mjs";
 import { donorRecoveryFinding, imageRiskReasons } from "./image-output-qa.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
+import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
 import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents } from "./render.mjs";
 import {
   gptImage2OutputSizeForTests,
@@ -106,6 +108,68 @@ function testAuthoritativeStageRegistry() {
   const narratorOnly = stageChecklistFor({ audio_target: "narrator_only" });
   assert.equal(narratorOnly.find((row) => row.stage === "sfx_score_plan")?.status, "skipped_with_waiver");
   assert.equal(narratorOnly.every((row) => row.validator), true);
+}
+
+function testRunIdentityV2Policies() {
+  assert.throws(
+    () => validateDirtyWorktreePolicy({ dirty: true, intent: "production", allowDirty: true, reason: "not allowed" }),
+    /clean Git worktree/i,
+  );
+  assert.throws(
+    () => validateDirtyWorktreePolicy({ dirty: true, intent: "proof", allowDirty: true, reason: "" }),
+    /dirty-reason/i,
+  );
+  assert.equal(validateDirtyWorktreePolicy({ dirty: true, intent: "proof", allowDirty: true, reason: "bounded fixture" }).waiver, "bounded fixture");
+  assert.deepEqual(parseProofScopeForTests({ "proof-scope": "0-300" }, "proof"), {
+    mode: "bounded",
+    start_sec: 0,
+    end_sec: 300,
+    label: "proof_0_300",
+  });
+  assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
+}
+
+async function testFinalQaSourceHashFreshness() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-final-qa-"));
+  const sourcePath = path.join(dir, "source.json");
+  await fs.writeFile(sourcePath, "first", "utf8");
+  const expected = sha256(await fs.readFile(sourcePath));
+  let result = await validateFinalQaSourceHashesForTests({ [sourcePath]: expected });
+  assert.deepEqual(result.stale, []);
+  await fs.writeFile(sourcePath, "changed", "utf8");
+  result = await validateFinalQaSourceHashesForTests({ [sourcePath]: expected });
+  assert.deepEqual(result.stale, [sourcePath]);
+}
+
+async function testRunStatusRejectsFalseGreenFinalQa() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-final-status-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await fs.mkdir(episodeDir, { recursive: true });
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+  });
+  await writeJson(path.join(episodeDir, "qa_report_looks_finished.json"), { status: "passed" });
+  let result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+    cwd: process.cwd(),
+    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+  });
+  let status = JSON.parse(result.stdout);
+  let finalStage = status.stage_ledger.find((row) => row.stage === "final_qa");
+  assert.equal(finalStage.state, "missing");
+  await writeJson(path.join(episodeDir, "final_qa_ep_01.json"), { status: "failed" });
+  result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+    cwd: process.cwd(),
+    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+  });
+  status = JSON.parse(result.stdout);
+  finalStage = status.stage_ledger.find((row) => row.stage === "final_qa");
+  assert.equal(finalStage.state, "failed");
 }
 
 function testPinnedCodexRuntimeContracts() {
@@ -431,6 +495,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     "--episode", "ep_01",
     "--title", "Fixture",
     "--image-provider", "modelslab",
+    "--run-intent", "diagnostic",
+    "--allow-dirty-worktree", "true",
+    "--dirty-reason", "fixture test",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const identity = await readJson(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"));
   assert.equal(identity.qwen_native_speed, 1.25);
@@ -438,6 +505,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_gates.post_tempo_normalization_default, false);
   assert.equal(identity.render_profile, "smooth_fast_ken_burns");
   assert.equal(identity.image_output_qa_required, true);
+  assert.equal(identity.schema, "goldflow_run_identity_v2");
+  assert.equal(typeof identity.git.commit, "string");
+  assert.equal(identity.git.commit.length, 40);
+  assert.equal(identity.stage_registry_version.length > 0, true);
+  assert.equal(identity.model_versions.planning_model, "gpt-5.6-sol");
 }
 
 async function testPostTempoRequiresEmergencyApproval() {
@@ -1260,6 +1332,9 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
     "--episode", "ep_01",
     "--image-provider", "hybrid_codex_opening_modelslab_rest",
     "--codex-opening-sec", "600",
+    "--run-intent", "diagnostic",
+    "--allow-dirty-worktree", "true",
+    "--dirty-reason", "fixture test",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const identity = JSON.parse(await fs.readFile(path.join(episodeDir, "run_identity.json"), "utf8"));
   assert.equal(identity.image_provider, "hybrid_codex_opening_modelslab_rest");
@@ -1320,6 +1395,9 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
     "--episode", "ep_01",
     "--image-provider", "hybrid_codex_refs_opening_risky_modelslab_rest",
     "--codex-opening-sec", "600",
+    "--run-intent", "diagnostic",
+    "--allow-dirty-worktree", "true",
+    "--dirty-reason", "fixture test",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: combinedDataRoot } });
   const combinedIdentity = JSON.parse(await fs.readFile(path.join(combinedEpisodeDir, "run_identity.json"), "utf8"));
   assert.equal(combinedIdentity.image_provider, "hybrid_codex_refs_opening_risky_modelslab_rest");
@@ -1349,6 +1427,9 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
     "--codex-opening-sec", "300",
     "--pace-policy", "diagnostic",
     "--render-profile", "smooth_fast_ken_burns",
+    "--run-intent", "diagnostic",
+    "--allow-dirty-worktree", "true",
+    "--dirty-reason", "fixture test",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: mixedRefsDataRoot } });
   const mixedIdentity = JSON.parse(await fs.readFile(path.join(mixedRefsEpisodeDir, "run_identity.json"), "utf8"));
   assert.equal(mixedIdentity.image_provider, "hybrid_modelslab_refs_codex_opening_modelslab_rest");
@@ -4385,6 +4466,9 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
 
 async function run() {
   testAuthoritativeStageRegistry();
+  testRunIdentityV2Policies();
+  await testFinalQaSourceHashFreshness();
+  await testRunStatusRejectsFalseGreenFinalQa();
   testPinnedCodexRuntimeContracts();
   await testNestedCodexCallsUseSharedRunner();
   testSemanticSceneAnchorValidation();

@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
   PIPELINE_STAGE_REGISTRY_VERSION,
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+} from "./lib/codex-cli-runner.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
 const DEFAULT_QWEN_NARRATOR_VOICE_POLICY = "default_joel_owned_narrator_clone";
 const flags = parseFlags(process.argv.slice(2));
@@ -24,6 +31,8 @@ const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "modelslab");
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
+const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
+const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
 const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "enforced");
 const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 195);
@@ -40,6 +49,7 @@ const qwenNativeSpeed = boundedNumber(
   0.75,
   1.5,
 );
+const proofScope = parseProofScope(flags, runIntent);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -90,6 +100,82 @@ function boundedNumber(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
+}
+
+function gitCommand(args) {
+  const result = spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 32,
+  });
+  if (result.status !== 0) throw new Error(result.stderr || `git ${args.join(" ")} failed`);
+  return String(result.stdout ?? "").trim();
+}
+
+async function gitSnapshot() {
+  const commit = gitCommand(["rev-parse", "HEAD"]);
+  const branch = gitCommand(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const status = gitCommand(["status", "--porcelain=v1", "--untracked-files=all"]);
+  const trackedDiff = gitCommand(["diff", "--binary", "HEAD"]);
+  const untrackedRaw = spawnSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 16,
+  });
+  if (untrackedRaw.status !== 0) throw new Error(untrackedRaw.stderr || "git ls-files failed");
+  const untracked = String(untrackedRaw.stdout ?? "").split("\0").filter(Boolean).sort();
+  const untrackedHashes = [];
+  for (const relativePath of untracked) {
+    const absolutePath = path.join(repoRoot, relativePath);
+    const stat = await fs.stat(absolutePath).catch(() => null);
+    if (!stat?.isFile()) continue;
+    untrackedHashes.push(`${relativePath}:${sha256(await fs.readFile(absolutePath))}`);
+  }
+  const dirty = Boolean(status);
+  return {
+    commit,
+    branch,
+    dirty,
+    dirty_diff_sha256: dirty ? sha256([status, trackedDiff, ...untrackedHashes].join("\n")) : null,
+    dirty_status: dirty ? status.split("\n").filter(Boolean) : [],
+  };
+}
+
+function parseProofScope(parsedFlags, intent) {
+  const explicit = String(parsedFlags["proof-scope"] ?? "").trim();
+  const match = /^(\d+(?:\.\d+)?)\s*[-:]\s*(\d+(?:\.\d+)?)$/.exec(explicit);
+  const start = Number(parsedFlags["proof-start-sec"] ?? parsedFlags["scope-start-sec"] ?? match?.[1] ?? 0);
+  const end = Number(parsedFlags["proof-end-sec"] ?? parsedFlags["scope-end-sec"] ?? match?.[2] ?? 0);
+  const bounded = Number.isFinite(end) && end > start;
+  if (String(intent).toLowerCase() === "proof" && !bounded) {
+    throw new Error("Proof preflight requires --proof-scope <start-end> or --proof-start-sec/--proof-end-sec.");
+  }
+  return {
+    mode: bounded ? "bounded" : "full_episode",
+    start_sec: bounded ? start : 0,
+    end_sec: bounded ? end : null,
+    label: String(parsedFlags["proof-label"] ?? parsedFlags["scope-label"] ?? (bounded ? `proof_${start}_${end}` : "full_episode")),
+  };
+}
+
+function lockedModelVersions() {
+  return {
+    planning_model: flags["planning-model"] ?? process.env.ANIFACTORY_CODEX_MODEL ?? DEFAULT_CODEX_MODEL,
+    planning_reasoning_effort: flags["planning-reasoning-effort"] ?? process.env.ANIFACTORY_CODEX_REASONING_EFFORT ?? DEFAULT_CODEX_REASONING_EFFORT,
+    tts_model: flags["tts-model"] ?? "qwen-tts",
+    image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
+    reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
+    render_profile: renderProfile,
+  };
+}
+
+function validateDirtyWorktreePolicy({ dirty, intent, allowDirty, reason }) {
+  if (!dirty) return { allowed: true, waiver: null };
+  const diagnosticIntent = ["diagnostic", "proof", "test"].includes(String(intent).toLowerCase());
+  if (!diagnosticIntent || !allowDirty || !String(reason ?? "").trim()) {
+    throw new Error("Production preflight requires a clean Git worktree. For an explicit diagnostic/proof only, pass --allow-dirty-worktree true --dirty-reason <reason>.");
+  }
+  return { allowed: true, waiver: String(reason).trim() };
 }
 
 function imageProviderOptions(provider) {
@@ -159,10 +245,12 @@ async function main() {
     throw new Error(`Episode identity mismatch: title/series/week implies episode ${implied}, but --episode is ${episode}. Use ep_${String(implied).padStart(2, "0")} or pass --confirm-episode-identity true with operator approval.`);
   }
   if (sourcePath && !(await exists(sourcePath))) throw new Error(`Missing source file: ${sourcePath}`);
+  const git = await gitSnapshot();
+  validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
   const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
   const now = new Date().toISOString();
   const manifest = {
-    schema: "goldflow_run_identity_v1",
+    schema: "goldflow_run_identity_v2",
     stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
     status: "preflight_passed_pending_ingest",
     channel,
@@ -191,6 +279,20 @@ async function main() {
     image_output_qa_required: true,
     visual_prompt_review_policy: "blockers_only_after_harden",
     run_intent: runIntent,
+    proof_scope: proofScope,
+    git,
+    dirty_worktree_waiver: git.dirty ? {
+      allowed: true,
+      reason: dirtyReason,
+      intent: runIntent,
+      recorded_at: now,
+    } : null,
+    provider_locks: {
+      image_provider: imageProvider,
+      audio_target: audioTarget,
+      qwen_narrator_voice_id: qwenNarratorVoiceId,
+    },
+    model_versions: lockedModelVersions(),
     source_path: sourcePath,
     source_sha256: sourcePath ? sha256(await fs.readFile(sourcePath)) : null,
     episode_identity_policy: {
@@ -216,7 +318,11 @@ async function main() {
   console.log(JSON.stringify({ status: "passed", run_identity_path: manifestPath, episode_dir: episodeDir, next_required_stage: "ingest source" }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
+
+export { parseProofScope as parseProofScopeForTests, validateDirtyWorktreePolicy };

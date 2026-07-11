@@ -72,6 +72,7 @@ import {
   motionIntentForPrompt,
   motionTraceFindings,
   motionTraceForIntent,
+  positionAnchorFromStaging,
 } from "./lib/motion-plan-utils.mjs";
 import {
   gptImage2OutputSizeForTests,
@@ -857,6 +858,9 @@ async function testProviderConcurrencyBacksOffAndRecovers() {
 }
 
 function testDirectedMotionAndFullTimelineTransitions() {
+  assert.deepEqual(positionAnchorFromStaging("small lower-left foreground"), { x: 0.3, y: 0.65 });
+  assert.deepEqual(positionAnchorFromStaging("frame-right deep background"), { x: 0.7, y: 0.42 });
+  assert.deepEqual(positionAnchorFromStaging("lower-center beneath the system display"), { x: 0.5, y: 0.65 });
   const prompt = {
     image_id: "cut_004",
     scene_id: "scene_002",
@@ -876,6 +880,23 @@ function testDirectedMotionAndFullTimelineTransitions() {
   const trace = motionTraceForIntent(intent, 60);
   assert.equal(trace.length, 480);
   assert.deepEqual(motionTraceFindings(trace), []);
+
+  const focusShift = motionIntentForPrompt({
+    image_id: "cut_focus",
+    duration_sec: 6,
+    shot_manifest: {
+      shot_job: "interaction",
+      primary_character: "Joey",
+      character_staging: [
+        { name: "Joey", screen_position: "frame-left foreground" },
+        { name: "Arielle", screen_position: "frame-right midground" },
+      ],
+    },
+  }, "hash-focus");
+  assert.equal(focusShift.behavior, "focus_shift");
+  assert.deepEqual(focusShift.start_anchor, { x: 0.7, y: 0.5 });
+  assert.deepEqual(focusShift.end_anchor, { x: 0.3, y: 0.58 });
+  assert.deepEqual(motionTraceFindings(motionTraceForIntent(focusShift, 60)), []);
 
   const staticIntent = motionIntentForPrompt({ image_id: "cut_005", duration_sec: 10, shot_manifest: {} }, "hash-5");
   assert.equal(staticIntent.behavior, "static_hold");

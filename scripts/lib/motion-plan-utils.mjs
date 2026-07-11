@@ -19,6 +19,34 @@ function anchor(value, fallback = { x: 0.5, y: 0.5 }) {
   return { x: clamp(value.x, 0, 1), y: clamp(value.y, 0, 1) };
 }
 
+function firstPositionValue(text, candidates, fallback) {
+  const matches = candidates
+    .map(({ pattern, value }) => ({ match: pattern.exec(text), value }))
+    .filter((row) => row.match)
+    .sort((left, right) => left.match.index - right.match.index);
+  return matches[0]?.value ?? fallback;
+}
+
+export function positionAnchorFromStaging(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text) return { x: 0.5, y: 0.5 };
+  const exact = POSITION_ANCHORS.get(text);
+  if (exact) return { ...exact };
+  const x = firstPositionValue(text, [
+    { pattern: /(?:frame[-\s]?left|lower[-\s]?left|upper[-\s]?left|background[-\s]?left|\bleft\b)/, value: 0.3 },
+    { pattern: /(?:frame[-\s]?right|lower[-\s]?right|upper[-\s]?right|background[-\s]?right|\bright\b)/, value: 0.7 },
+    { pattern: /(?:lower[-\s]?center|upper[-\s]?center|frame[-\s]?center|\bcenter(?:ed)?\b|\bmiddle\b)/, value: 0.5 },
+  ], 0.5);
+  const y = firstPositionValue(text, [
+    { pattern: /(?:\blower\b|\bbottom\b|beneath)/, value: 0.65 },
+    { pattern: /(?:\bupper\b|\btop\b|above)/, value: 0.35 },
+    { pattern: /(?:\bforeground\b|near plane)/, value: 0.58 },
+    { pattern: /(?:\bbackground\b|\brear\b|\bdeep\b|far plane)/, value: 0.42 },
+    { pattern: /(?:\bmidground\b|middle plane)/, value: 0.5 },
+  ], 0.5);
+  return { x, y };
+}
+
 export function easingProgress(value, easing = "linear") {
   const t = clamp(value, 0, 1);
   if (easing === "ease_in") return t * t;
@@ -32,14 +60,18 @@ function stagingForPrimary(prompt) {
   const stages = Array.isArray(manifest.character_staging) ? manifest.character_staging : [];
   const primary = String(manifest.primary_character ?? prompt?.primary_subject ?? stages[0]?.name ?? "").trim();
   const stage = stages.find((row) => String(row?.name ?? "").trim() === primary) ?? stages[0] ?? null;
-  return { primary: primary || stage?.name || null, stage };
+  return { primary: primary || stage?.name || null, stage, stages };
 }
 
 function derivedIntent(prompt) {
   const manifest = prompt?.shot_manifest ?? {};
   const shotJob = String(manifest.shot_job ?? prompt?.suggested_shot_job ?? prompt?.visual_job ?? "").toLowerCase();
-  const { primary, stage } = stagingForPrimary(prompt);
-  const focalAnchor = POSITION_ANCHORS.get(String(stage?.screen_position ?? "")) ?? { x: 0.5, y: 0.5 };
+  const { primary, stage, stages } = stagingForPrimary(prompt);
+  const focalAnchor = positionAnchorFromStaging(stage?.screen_position);
+  const secondaryStage = stages.find((row) => row !== stage) ?? null;
+  const secondaryAnchor = positionAnchorFromStaging(secondaryStage?.screen_position);
+  const stagedSubjectsSeparated = Boolean(secondaryStage)
+    && (Math.abs(secondaryAnchor.x - focalAnchor.x) > 0.12 || Math.abs(secondaryAnchor.y - focalAnchor.y) > 0.12);
   const hasAuthoredFocalIntent = Boolean(stage || manifest.primary_character || prompt?.primary_subject);
   if (!hasAuthoredFocalIntent && !shotJob) {
     return {
@@ -87,6 +119,30 @@ function derivedIntent(prompt) {
       end_scale: 1.065,
       easing: "ease_in_out",
       behavior: "slow_push_in",
+    };
+  }
+  if (/interaction|confront|dialogue|body.state|reaction/.test(shotJob) && stagedSubjectsSeparated) {
+    return {
+      focal_subject: `${secondaryStage?.name ?? "secondary subject"} to ${primary ?? "primary subject"}`,
+      focal_source: "shot_manifest.character_staging_pair",
+      start_anchor: secondaryAnchor,
+      end_anchor: focalAnchor,
+      start_scale: 1.02,
+      end_scale: 1.06,
+      easing: "ease_in_out",
+      behavior: "focus_shift",
+    };
+  }
+  if (/threat|reveal/.test(shotJob) && Math.abs(focalAnchor.x - 0.5) > 0.08) {
+    return {
+      focal_subject: primary,
+      focal_source: stage ? "shot_manifest.character_staging" : "shot_manifest.shot_job",
+      start_anchor: { x: 0.5, y: focalAnchor.y },
+      end_anchor: focalAnchor,
+      start_scale: 1.015,
+      end_scale: 1.065,
+      easing: "ease_in_out",
+      behavior: "focus_shift",
     };
   }
   return {
@@ -192,4 +248,3 @@ export function motionTraceFindings(traceRows) {
   }
   return findings;
 }
-

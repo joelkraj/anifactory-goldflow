@@ -115,12 +115,28 @@ function sceneForTime(timedScenes, startSec, endSec) {
   }) ?? (timedScenes ?? []).find((scene) => Number(scene.end_sec ?? 0) >= startSec) ?? null;
 }
 
+function evidenceAtomSpan(atoms, evidence, maxAtoms = 8) {
+  const target = normalizeText(evidence).toLowerCase();
+  if (!target) return null;
+  for (let start = 0; start < atoms.length; start += 1) {
+    let combined = "";
+    const firstAtomText = normalizeText(atoms[start].text).toLowerCase();
+    for (let end = start; end < Math.min(atoms.length, start + maxAtoms); end += 1) {
+      combined = normalizeText(`${combined} ${atoms[end].text}`).toLowerCase();
+      const matchIndex = combined.indexOf(target);
+      if (matchIndex >= 0 && matchIndex < firstAtomText.length) return { start_atom: atoms[start], end_atom: atoms[end] };
+      if (combined.length > target.length * 3 + 500) break;
+    }
+  }
+  return null;
+}
+
 function evidenceTransitionAtomIds(atoms, factLedger) {
   const barriers = new Set();
   for (const transition of factLedger?.state_transitions ?? []) {
     const excerpt = transitionEvidenceExcerpt(transition);
-    const atom = atoms.find((candidate) => excerpt && normalizeText(candidate.text).toLowerCase().includes(excerpt.toLowerCase()));
-    if (atom) barriers.add(atom.atom_id);
+    const span = evidenceAtomSpan(atoms, excerpt);
+    if (span) barriers.add(span.start_atom.atom_id);
   }
   return barriers;
 }
@@ -432,10 +448,10 @@ function transitionEvents(atoms, factLedger) {
   const events = [];
   for (const transition of factLedger?.state_transitions ?? []) {
     const evidence = transitionEvidenceExcerpt(transition);
-    const atom = atoms.find((candidate) => evidence && normalizeText(candidate.text).toLowerCase().includes(evidence.toLowerCase()));
-    if (!atom) continue;
+    const span = evidenceAtomSpan(atoms, evidence);
+    if (!span) continue;
     events.push({
-      source_word_index: atom.source_word_start_index,
+      source_word_index: span.end_atom.source_word_end_index,
       entity_id: transition.entity_id,
       field: transition.state_kind,
       value: transition.to_state,

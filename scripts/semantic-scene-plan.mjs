@@ -728,6 +728,8 @@ Hard rules:
 - Evidence excerpts must be short enough to audit but long enough to prove the fact. Never paraphrase evidence.
 - A fact without exact evidence must be omitted or placed in warnings as unresolved.
 - Do not manufacture costume damage, injury, grime, wealth, location, relationships, props, UI, or physical presence from emotional/social language.
+- Use injury for body injury or physical entrapment, possession for held objects, location for movement, wardrobe for clothing, and status for social/system role. Do not duplicate a physical condition as a generic status transition.
+- Temporary states need their later exact closure transition when the script reverses them; a trapped, armed, transformed, or role-assigned state must not remain active after explicit release, loss, reversion, or replacement evidence.
 - Preserve the semantic scene schema from the extracted rows, including mandatory location ref_requirements for concrete physical scenes.
 
 BIBLES:

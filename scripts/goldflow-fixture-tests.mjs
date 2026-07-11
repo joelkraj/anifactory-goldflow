@@ -539,8 +539,8 @@ function testEditorialBeatDirectorContracts() {
         state_kind: "wardrobe",
         from_state: "plain gray student shirt",
         to_state: "black academy coat",
-        transition_evidence_excerpt: "Joey changes into a black academy coat.",
-        evidence: [{ exact_excerpt: "Joey changes into a black academy coat.", confidence: 1 }],
+        transition_evidence_excerpt: "Joey opens the blue system panel slowly. Joey changes into a black academy coat.",
+        evidence: [{ exact_excerpt: "Joey opens the blue system panel slowly. Joey changes into a black academy coat.", confidence: 1 }],
       },
       {
         entity_id: "joey",
@@ -559,7 +559,8 @@ function testEditorialBeatDirectorContracts() {
   assert.equal(atoms.length, 4);
   assert.equal(atoms[0].source_word_start_index, 0);
   assert.equal(atoms.at(-1).source_word_end_index, spoken.length - 1);
-  assert.equal(atoms[2].transition_barrier_before, true);
+  assert.equal(atoms[1].transition_barrier_before, true);
+  assert.equal(atoms[3].transition_barrier_before, true);
   const raw = {
     beats: atoms.map((atom, index) => ({
       source_atom_ids: [atom.atom_id],
@@ -594,12 +595,13 @@ function testEditorialBeatDirectorContracts() {
   assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
   assert.equal(projected[0].active_state_constraints.entities.joey.visible_state, undefined);
   assert.equal(projected[0].active_state_constraints.entities.joey.status, "waiting for the exam challenge");
+  assert.equal(projected[1].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
   assert.equal(projected[2].active_state_constraints.entities.joey.wardrobe, "black academy coat");
   assert.equal(projected[3].active_state_constraints.entities.joey.status, "facing Victor at the exam platform");
   assert.equal(projected[0].active_state_constraints.entities.joey.state_evidence, undefined);
   assert.equal(projected[3].active_state_constraints.entities.joey.state_evidence.status, "Joey faces Victor beside the exam platform.");
   const invalid = structuredClone(raw);
-  invalid.beats = [raw.beats[0], { ...raw.beats[1], source_atom_ids: [atoms[1].atom_id, atoms[2].atom_id], rail_exception: "mandatory transition" }, raw.beats[3]];
+  invalid.beats = [{ ...raw.beats[0], source_atom_ids: [atoms[0].atom_id, atoms[1].atom_id], rail_exception: "mandatory transition" }, raw.beats[2], raw.beats[3]];
   assert.throws(() => normalizeEditorialGrouping(invalid, atoms, ledger, "ep_01"), /editorial beat contract failed/i);
   const missingActionEvidence = structuredClone(raw);
   delete missingActionEvidence.beats[0].foreground_action_evidence;

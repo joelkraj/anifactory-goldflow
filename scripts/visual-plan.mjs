@@ -1189,11 +1189,21 @@ export function normalizePromptPacketForTests(row, sourceUnit, options = {}) {
 function activeStateConstraintFindings(prompts, sourceRows) {
   const findings = [];
   const stop = new Set(["with", "from", "into", "wearing", "current", "same", "their", "visible", "state"]);
+  const entityIsVisiblyStaged = (prompt, entityId) => {
+    const expected = normalizeLabel(String(entityId ?? "").replace(/_/g, " "));
+    if (!expected) return false;
+    const visible = [
+      ...(prompt?.shot_manifest?.visible_characters ?? []),
+      ...(prompt?.shot_manifest?.character_staging ?? []).flatMap((row) => [row?.character_id, row?.character, row?.character_name]),
+    ].filter(Boolean).map((value) => normalizeLabel(value));
+    return visible.some((value) => value === expected || value.includes(expected) || expected.includes(value));
+  };
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const source = sourceRows[index];
     const text = normalizeLabel(prompt.provider_prompt ?? prompt.image_prompt ?? "");
     for (const [entityId, state] of Object.entries(source?.active_state_constraints?.entities ?? {})) {
+      if (!entityIsVisiblyStaged(prompt, entityId)) continue;
       for (const field of ["wardrobe", "injury", "visible_state", "possession"]) {
         const value = String(state?.[field] ?? "").trim();
         if (!value) continue;
@@ -1213,6 +1223,10 @@ function activeStateConstraintFindings(prompts, sourceRows) {
     }
   }
   return findings;
+}
+
+export function activeStateConstraintFindingsForTests(prompts, sourceRows) {
+  return activeStateConstraintFindings(prompts, sourceRows);
 }
 
 function sanitizeShotManifest(value) {

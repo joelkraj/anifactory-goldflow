@@ -76,6 +76,7 @@ import {
   prepareGptImage2PromptForTests,
 } from "./modelslab-image-helper.mjs";
 import {
+  activeStateConstraintFindingsForTests,
   adaptivePromptChunksForTests,
   localBeatFidelityFindingsForTests,
   normalizePromptPacketForTests,
@@ -1091,6 +1092,31 @@ async function testReferencePlanHashApproval() {
   assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), true);
   generatedPlan.reference_targets[0].prompt_anchor = "creatively changed identity";
   assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), false);
+}
+
+function testActiveStateValidationSkipsTextOnlyUiMentions() {
+  const source = [{
+    active_state_constraints: {
+      entities: {
+        joey_manhwa: { wardrobe: "archive robe" },
+      },
+    },
+  }];
+  const uiOnly = [{
+    image_id: "cut_ui",
+    image_prompt: "A blue system panel names Joey Manhwa as Extra #418.",
+    shot_manifest: {
+      visible_characters: [],
+      mentioned_only_characters: ["Joey Manhwa"],
+      character_staging: [],
+    },
+  }];
+  assert.deepEqual(activeStateConstraintFindingsForTests(uiOnly, source), []);
+  const visibleJoey = structuredClone(uiOnly);
+  visibleJoey[0].shot_manifest.visible_characters = ["Joey Manhwa"];
+  const findings = activeStateConstraintFindingsForTests(visibleJoey, source);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].field, "wardrobe");
 }
 
 function testAdaptiveProviderPromptPackets() {
@@ -5074,6 +5100,7 @@ const FIXTURE_SUITES = {
     testReferenceDirectorV2EvidenceAndLocationContracts,
     testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts,
     testReferencePlanHashApproval,
+    testActiveStateValidationSkipsTextOnlyUiMentions,
     testAdaptiveProviderPromptPackets,
     testSelectedReferenceInventoryContainsOnlyDirectorSelections,
     testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates,

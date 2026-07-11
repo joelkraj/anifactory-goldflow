@@ -66,6 +66,11 @@ import {
   referencePlanApprovalContractSha256,
   referencePlanApprovalMatches,
 } from "./lib/reference-plan-contract.mjs";
+import {
+  codexCreditFallbackEnabled,
+  creditExhaustedIdsFromReport,
+  isModelslabCreditExhaustion,
+} from "./lib/image-fallback-policy.mjs";
 import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import {
   motionIntentFindings,
@@ -1037,6 +1042,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     "--episode", "ep_01",
     "--title", "Fixture",
     "--image-provider", "modelslab",
+    "--image-model", "gpt-image-2-t2i",
+    "--reference-model", "gpt-image-2-i2i",
+    "--image-fallback-provider", "codex_imagegen",
+    "--image-fallback-condition", "modelslab_credit_exhausted",
     "--run-intent", "diagnostic",
     "--allow-dirty-worktree", "true",
     "--dirty-reason", "fixture test",
@@ -1052,6 +1061,30 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.git.commit.length, 40);
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "gpt-5.6-sol");
+  assert.equal(identity.model_versions.image_model, "gpt-image-2-t2i");
+  assert.equal(identity.model_versions.reference_model, "gpt-image-2-i2i");
+  assert.deepEqual(identity.image_provider_options.fallback, {
+    provider: "codex_imagegen",
+    condition: "modelslab_credit_exhausted",
+    operator_approved: true,
+    approval_source: "run_preflight_flags",
+  });
+  assert.equal(codexCreditFallbackEnabled(identity), true);
+  assert.match(buildStageCommand("reference_generation", identity), /--reference-image-model gpt-image-2-i2i/);
+  assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
+}
+
+function testModelslabCreditFallbackClassification() {
+  assert.equal(isModelslabCreditExhaustion("Insufficient credits. Please recharge your wallet."), true);
+  assert.equal(isModelslabCreditExhaustion("Cloudflare 524: A timeout occurred"), false);
+  assert.equal(isModelslabCreditExhaustion("rate limit, try again"), false);
+  assert.deepEqual(creditExhaustedIdsFromReport({
+    results: [
+      { image_id: "cut_credit", status: "failed", error: "Not enough balance" },
+      { image_id: "cut_timeout", status: "failed", error: "524 timeout" },
+      { image_id: "cut_pass", status: "generated" },
+    ],
+  }), ["cut_credit"]);
 }
 
 async function testPostTempoRequiresEmergencyApproval() {
@@ -4877,6 +4910,70 @@ async function testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan() 
   assert.match(imageStage.evidence, /section_image_prompts_hardened\.json missing or empty/);
 }
 
+async function testRunStatusRoutesOnlyCreditFailuresToCodexFallback() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-credit-fallback-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await fs.mkdir(episodeDir, { recursive: true });
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+    image_provider_options: {
+      fallback: {
+        provider: "codex_imagegen",
+        condition: "modelslab_credit_exhausted",
+        operator_approved: true,
+      },
+    },
+    model_versions: {
+      image_model: "gpt-image-2-t2i",
+      reference_model: "gpt-image-2-i2i",
+    },
+  });
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  await writeJson(promptPath, {
+    status: "passed",
+    prompts: [{ image_id: "cut_credit", image_generation_required: true }],
+  });
+  const promptHash = sha256(await fs.readFile(promptPath));
+  const reportPath = path.join(episodeDir, "imagegen_report_ep_01.json");
+  await writeJson(reportPath, {
+    status: "failed",
+    prompt_plan_hash: promptHash,
+    image_count: 0,
+    results: [{ image_id: "cut_credit", status: "failed", error: "Insufficient credits. Recharge wallet." }],
+  });
+  let result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+    cwd: process.cwd(),
+    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+  });
+  let status = JSON.parse(result.stdout);
+  let imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.match(imageStage.evidence, /modelslab_credit_exhausted=1/);
+  assert.match(imageStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(imageStage.next_command_shape, /--image-ids cut_credit/);
+
+  await writeJson(reportPath, {
+    status: "failed",
+    prompt_plan_hash: promptHash,
+    image_count: 0,
+    results: [{ image_id: "cut_credit", status: "failed", error: "Cloudflare 524 timeout" }],
+  });
+  result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+    cwd: process.cwd(),
+    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+  });
+  status = JSON.parse(result.stdout);
+  imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.doesNotMatch(imageStage.next_command_shape, /import-staged-codex/);
+  assert.match(imageStage.next_command_shape, /--image-model gpt-image-2-t2i/);
+  assert.match(imageStage.next_command_shape, /--cut-ids cut_credit/);
+}
+
 async function testRunStatusIncludesManualBlockerTriagePolicy() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -5279,6 +5376,7 @@ const FIXTURE_SUITES = {
     testPinnedCodexRuntimeContracts,
     testNestedCodexCallsUseSharedRunner,
     testPreflightLocksNativeTtsSpeedAndSmoothRender,
+    testModelslabCreditFallbackClassification,
     testPostTempoRequiresEmergencyApproval,
     testHybridImageProviderRouting,
     testHybridOpeningWindowPersistsInRunIdentity,
@@ -5290,6 +5388,7 @@ const FIXTURE_SUITES = {
     testRunStatusSurfacesDraftReferenceApprovalCommand,
     testRunStatusBlocksQwenPlanMissingOverrideAudit,
     testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan,
+    testRunStatusRoutesOnlyCreditFailuresToCodexFallback,
     testRunStatusIncludesManualBlockerTriagePolicy,
     testRunStatusDerivedReferenceSeedPromoteAndScopedRetry,
   ],

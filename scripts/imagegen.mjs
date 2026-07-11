@@ -41,8 +41,9 @@ const imageModelOverride = flags["image-model-route"] ?? flags["image-model"] ??
 const referenceImageModelOverride = flags["reference-image-model-route"]
   ?? flags["reference-image-model"]
   ?? process.env.ANIFACTORY_REFERENCE_MODEL
-  ?? imageModelOverride
   ?? null;
+let runIdentityImageModel = null;
+let runIdentityReferenceModel = null;
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
 const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? process.env.ANIFACTORY_MAX_SCENE_REFERENCES ?? 4)));
 const providerFilter = normalizeProviderFilter(flags["provider-filter"] ?? flags.providerFilter ?? "");
@@ -132,7 +133,23 @@ async function assertRunIdentityImageProvider() {
   if (lockedProvider !== imageProvider && !confirmImageProvider) {
     throw new Error(`Image provider mismatch: run_identity.json locks ${lockedProvider}, command requested ${imageProvider}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
   }
+  runIdentityImageModel = runIdentity?.model_versions?.image_model ?? runIdentity?.provider_locks?.image_model ?? null;
+  runIdentityReferenceModel = runIdentity?.model_versions?.reference_model ?? runIdentity?.provider_locks?.reference_model ?? null;
+  if (imageModelOverride && runIdentityImageModel && imageModelOverride !== runIdentityImageModel && !confirmImageProvider) {
+    throw new Error(`Image model mismatch: run_identity.json locks ${runIdentityImageModel}, command requested ${imageModelOverride}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
+  }
+  if (referenceImageModelOverride && runIdentityReferenceModel && referenceImageModelOverride !== runIdentityReferenceModel && !confirmImageProvider) {
+    throw new Error(`Reference model mismatch: run_identity.json locks ${runIdentityReferenceModel}, command requested ${referenceImageModelOverride}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
+  }
   return runIdentity;
+}
+
+function effectiveSceneImageModel(prompt = null) {
+  return imageModelOverride ?? runIdentityImageModel ?? prompt?.image_model_route ?? "flux-klein";
+}
+
+function effectiveReferenceImageModel(target = null) {
+  return referenceImageModelOverride ?? runIdentityReferenceModel ?? target?.image_model_route ?? effectiveSceneImageModel() ?? "flux-klein";
 }
 
 function runIdentityCodexOpeningSec(runIdentity) {
@@ -1011,7 +1028,7 @@ function promptReferenceCount(prompt) {
 function providerHealthProbeEnabled(prompts) {
   if (flags["provider-health-probe"] === "true") return true;
   if (flags["provider-health-probe"] === "false") return false;
-  return prompts.some((prompt) => isGptImage2Route(imageModelOverride ?? prompt.image_model_route ?? "flux-klein"));
+  return prompts.some((prompt) => isGptImage2Route(effectiveSceneImageModel(prompt)));
 }
 
 function representativeProviderProbePrompts(prompts) {
@@ -1041,7 +1058,7 @@ async function runProviderHealthProbe(prompts) {
     week,
     episode,
     image_provider: imageProvider,
-    image_model: imageModelOverride ?? "prompt_routed_model",
+    image_model: effectiveSceneImageModel(),
     representative_reference_counts: selected.map(promptReferenceCount),
     representative_image_ids: selected.map((prompt) => prompt.image_id),
     results: probe.results,
@@ -1106,7 +1123,7 @@ async function generateOne(prompt) {
   const outputPath = imagePathFor(prompt, routedProvider);
   const referenceImagePaths = await validateReferences(prompt);
   const sceneGeometry = routedProvider === "modelslab" ? modelslabSceneGeometry() : {};
-  const sceneModel = imageModelOverride ?? prompt.image_model_route ?? "flux-klein";
+  const sceneModel = effectiveSceneImageModel(prompt);
   const modelPrompt = [
     sceneAspectInstruction(routedProvider),
     promptWithReferenceSlots(prompt, routedProvider, {
@@ -1170,7 +1187,7 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
     ...(baseIdentityPath ? [baseIdentityPath] : []),
     ...(target.ref_id !== "style_ref" && styleRefPath ? [styleRefPath] : []),
   ].slice(0, 4);
-  const referenceModel = referenceImageModelOverride ?? target.image_model_route ?? "flux-klein";
+  const referenceModel = effectiveReferenceImageModel(target);
   const referenceInputs = await Promise.all(referenceImagePaths.map(async (referencePath) => ({
     path: referencePath,
     sha256: await hashFile(referencePath),

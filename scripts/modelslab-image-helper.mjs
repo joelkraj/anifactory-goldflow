@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
+import { isModelslabCreditExhaustion } from "./lib/image-fallback-policy.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,6 +81,7 @@ async function postModelslabJson(endpoint, body, label, retries = 2) {
     } catch (error) {
       clearTimeout(timeout);
       lastError = error;
+      if (isModelslabCreditExhaustion(error instanceof Error ? error.message : error)) throw error;
       if (attempt <= retries) await sleep(4000 * attempt);
     }
   }

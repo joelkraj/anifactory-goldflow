@@ -11,6 +11,11 @@ import {
   stageIsSatisfied,
 } from "./lib/pipeline-stage-registry.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
+import {
+  codexCreditFallbackEnabled,
+  creditExhaustedIdsFromReport,
+  creditExhaustedIdsFromRows,
+} from "./lib/image-fallback-policy.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -94,6 +99,17 @@ async function latestMatching(dirPath, pattern) {
   }
   matches.sort((left, right) => right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name));
   return matches[0] ?? null;
+}
+
+async function matchingJsonReports(dirPath, pattern) {
+  const reports = [];
+  for (const name of (await listFiles(dirPath)).filter((item) => pattern.test(item))) {
+    const filePath = path.join(dirPath, name);
+    const stat = await fs.stat(filePath).catch(() => null);
+    const report = await readJson(filePath, null);
+    if (stat?.isFile() && report) reports.push({ name, filePath, report, mtimeMs: stat.mtimeMs });
+  }
+  return reports.sort((left, right) => right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name));
 }
 
 function requiredFlag(name, value) {
@@ -245,7 +261,14 @@ function visualRefsApproveCommand(identity) {
 
 function imagegenStartCommand(identity, extra = "") {
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15${extra}`;
+  const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? "flux-klein";
+  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15${extra}`;
+}
+
+function codexCreditFallbackCommand(identity, ids, { references = false } = {}) {
+  const idFlag = references ? "--reference-ids" : "--image-ids";
+  const referenceFlag = references ? " --references-only true" : "";
+  return `ModelsLab credit exhaustion confirmed for ${ids.length} ${references ? "reference" : "scene"} asset(s). Stage only these IDs with built-in Codex Imagen workers, then run: node bin/goldflow.mjs imagegen import-staged-codex ${commandBase(identity)}${referenceFlag} --staging-dir <staging-dir> ${idFlag} ${ids.join(",")} --output <episode-dir>/imagegen_report_${identity.episode ?? "<episode>"}.json`;
 }
 
 function imagegenPromoteDerivedRefsCommand(identity) {
@@ -545,10 +568,13 @@ async function imageReportComplete(episodeDir, episode, identity) {
   const duplicates = latestReport ? await duplicateSummary(latestReport) : [];
   const failedIds = failedImageIdsFromReport(latestReport);
   if (failedIds.length) {
+    const creditIds = codexCreditFallbackEnabled(identity) ? creditExhaustedIdsFromReport(latestReport) : [];
     return {
       done: false,
-      evidence: `image files=${generated}/${promptCount || "unknown"}; failed cuts=${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? ` +${failedIds.length - 8} more` : ""}`,
-      next_command_shape: imagegenStartCommand(identity, ` --cut-ids ${failedIds.join(",")}`),
+      evidence: `image files=${generated}/${promptCount || "unknown"}; failed cuts=${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? ` +${failedIds.length - 8} more` : ""}${creditIds.length ? `; modelslab_credit_exhausted=${creditIds.length}; codex_fallback=approved` : ""}`,
+      next_command_shape: creditIds.length
+        ? codexCreditFallbackCommand(identity, creditIds)
+        : imagegenStartCommand(identity, ` --cut-ids ${failedIds.join(",")}`),
     };
   }
   const successIds = successfulImageIdsFromReport(latestReport);
@@ -607,9 +633,24 @@ async function referenceGenerationComplete(episodeDir, identity) {
   }
   const duplicates = [...byHash.values()].filter((rows) => rows.length > 1);
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
+  let fallbackCommand = null;
+  let fallbackEvidence = "";
+  if (missing.length && codexCreditFallbackEnabled(identity)) {
+    const reports = await matchingJsonReports(episodeDir, new RegExp(`^imagegen_report_${identity.episode ?? "ep_01"}.*\\.json$`));
+    const latestReferenceReport = reports
+      .filter(({ report }) => report?.reference_only === true)
+      .sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.report ?? null;
+    const creditRefIds = creditExhaustedIdsFromRows(latestReferenceReport?.reference_results ?? [], "ref_id")
+      .filter((refId) => missing.includes(refId));
+    if (creditRefIds.length) {
+      fallbackCommand = codexCreditFallbackCommand(identity, creditRefIds, { references: true });
+      fallbackEvidence = `; modelslab_credit_exhausted=${creditRefIds.length}; codex_fallback=approved`;
+    }
+  }
   return {
     done: required.length > 0 && missing.length === 0 && duplicates.length === 0,
-    evidence: `required refs=${present}/${required.length}${missing.length ? `; missing=${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ` +${missing.length - 8} more` : ""}` : ""}${duplicates.length ? `; duplicate_hashes=${duplicateSummary.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}`,
+    evidence: `required refs=${present}/${required.length}${missing.length ? `; missing=${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ` +${missing.length - 8} more` : ""}` : ""}${duplicates.length ? `; duplicate_hashes=${duplicateSummary.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}${fallbackEvidence}`,
+    next_command_shape: fallbackCommand,
   };
 }
 

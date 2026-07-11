@@ -7,6 +7,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
+  MODELSLAB_CREDIT_EXHAUSTED,
+  normalizeImageFallbackCondition,
+} from "./lib/image-fallback-policy.mjs";
+import {
   PIPELINE_STAGE_REGISTRY_VERSION,
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
@@ -29,6 +33,12 @@ const sourcePath = flags.source ? path.resolve(flags.source) : null;
 const allowPartInWeek = flags["allow-part-in-week"] === "true";
 const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "modelslab");
+const imageFallbackProvider = flags["image-fallback-provider"]
+  ? normalizeImageProvider(flags["image-fallback-provider"])
+  : null;
+const imageFallbackCondition = normalizeImageFallbackCondition(
+  flags["image-fallback-condition"] ?? (imageFallbackProvider ? MODELSLAB_CREDIT_EXHAUSTED : null),
+);
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
 const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
@@ -179,16 +189,43 @@ function validateDirtyWorktreePolicy({ dirty, intent, allowDirty, reason }) {
 }
 
 function imageProviderOptions(provider) {
+  const options = {};
   if (
     provider !== "hybrid_codex_opening_modelslab_rest"
     && provider !== "hybrid_codex_refs_opening_risky_modelslab_rest"
     && provider !== "hybrid_modelslab_refs_codex_opening_modelslab_rest"
-  ) return {};
-  const defaultOpeningSec = provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? 300 : 120;
-  const value = Number(codexOpeningSecRaw ?? defaultOpeningSec);
-  return {
-    codex_opening_sec: Number.isFinite(value) && value > 0 ? value : defaultOpeningSec,
-  };
+  ) {
+    // Non-hybrid providers may still carry an explicit conditional fallback.
+  } else {
+    const defaultOpeningSec = provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? 300 : 120;
+    const value = Number(codexOpeningSecRaw ?? defaultOpeningSec);
+    options.codex_opening_sec = Number.isFinite(value) && value > 0 ? value : defaultOpeningSec;
+  }
+  if (imageFallbackProvider) {
+    options.fallback = {
+      provider: imageFallbackProvider,
+      condition: imageFallbackCondition,
+      operator_approved: true,
+      approval_source: "run_preflight_flags",
+    };
+  }
+  return options;
+}
+
+function validateImageFallbackPolicy() {
+  if (!imageFallbackProvider && imageFallbackCondition) {
+    throw new Error("--image-fallback-condition requires --image-fallback-provider.");
+  }
+  if (!imageFallbackProvider) return;
+  if (imageProvider !== "modelslab") {
+    throw new Error("Conditional image fallback is supported only when the primary --image-provider is modelslab.");
+  }
+  if (imageFallbackProvider !== "codex_imagegen") {
+    throw new Error("The guarded image fallback currently supports only --image-fallback-provider codex_imagegen.");
+  }
+  if (imageFallbackCondition !== MODELSLAB_CREDIT_EXHAUSTED) {
+    throw new Error(`Codex fallback may trigger only on ${MODELSLAB_CREDIT_EXHAUSTED}.`);
+  }
 }
 
 function voiceProviderOptions() {
@@ -245,6 +282,7 @@ async function main() {
     throw new Error(`Episode identity mismatch: title/series/week implies episode ${implied}, but --episode is ${episode}. Use ep_${String(implied).padStart(2, "0")} or pass --confirm-episode-identity true with operator approval.`);
   }
   if (sourcePath && !(await exists(sourcePath))) throw new Error(`Missing source file: ${sourcePath}`);
+  validateImageFallbackPolicy();
   const git = await gitSnapshot();
   validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
   const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
@@ -289,6 +327,10 @@ async function main() {
     } : null,
     provider_locks: {
       image_provider: imageProvider,
+      image_model: lockedModelVersions().image_model,
+      reference_model: lockedModelVersions().reference_model,
+      image_fallback_provider: imageFallbackProvider,
+      image_fallback_condition: imageFallbackCondition,
       audio_target: audioTarget,
       qwen_narrator_voice_id: qwenNarratorVoiceId,
     },

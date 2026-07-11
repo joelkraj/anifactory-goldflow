@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.3";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.4";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -384,6 +384,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const base = identityBase(identity);
   const episode = identity.episode ?? "<episode>";
   const provider = identity.image_provider ?? "modelslab";
+  const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? "flux-klein";
+  const referenceModel = identity?.model_versions?.reference_model ?? identity?.provider_locks?.reference_model ?? imageModel;
   const minWpm = Number(identity.target_wpm_min ?? 195);
   const maxWpm = Number(identity.target_wpm_max ?? 220);
   const nativeSpeed = Number(identity.qwen_native_speed ?? identity.voice_provider_options?.qwen_native_speed ?? 1.25);
@@ -414,15 +416,15 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: codexReferences(identity)
       ? `Stage isolated built-in Codex reference rasters, then run: node bin/goldflow.mjs imagegen import-staged-codex ${base} --references-only true --staging-dir <staging-dir> --reference-ids <ref_ids>`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --references-only true --reference-concurrency 15`,
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency 15`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --note "<generated reference review notes>"`,
     visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base}`,
     visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
     visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
     image_generation: codexSceneCuts(identity)
-      ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
+      ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion smooth_fast_ken_burns --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,

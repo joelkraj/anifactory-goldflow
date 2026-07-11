@@ -71,6 +71,38 @@ export function factLedgerMatchesScriptForTests(factLedger, scriptPathValue, scr
   return factLedger?.status === "passed" && recordedHash === scriptHash;
 }
 
+function normalizedScopeToken(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9']+/g, "").replace(/^'+|'+$/g, "");
+}
+
+export function scriptPrefixForTimedWordsForTests(scriptText, timedWords) {
+  const sourceTokens = String(scriptText ?? "").trim().split(/\s+/).filter(Boolean);
+  const sourceNormalized = sourceTokens.map(normalizedScopeToken);
+  const timingNormalized = (timedWords ?? []).map((row) => normalizedScopeToken(row?.normalized ?? row?.word)).filter(Boolean);
+  for (let window = Math.min(18, timingNormalized.length); window >= Math.min(5, timingNormalized.length); window -= 1) {
+    const needle = timingNormalized.slice(-window);
+    const candidates = [];
+    for (let index = 0; index <= sourceNormalized.length - needle.length; index += 1) {
+      if (needle.every((token, offset) => sourceNormalized[index + offset] === token)) candidates.push(index + needle.length);
+    }
+    if (!candidates.length) continue;
+    const endExclusive = candidates.sort((left, right) => Math.abs(left - timingNormalized.length) - Math.abs(right - timingNormalized.length))[0];
+    return {
+      script: `${sourceTokens.slice(0, endExclusive).join(" ")}\n`,
+      source_word_end_exclusive: endExclusive,
+      matched_timing_tail_words: window,
+      fallback: false,
+    };
+  }
+  const endExclusive = Math.min(sourceTokens.length, timingNormalized.length);
+  return {
+    script: `${sourceTokens.slice(0, endExclusive).join(" ")}\n`,
+    source_word_end_exclusive: endExclusive,
+    matched_timing_tail_words: 0,
+    fallback: true,
+  };
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -1362,7 +1394,9 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) 
   if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true") {
     throw new Error("Visual beat grouping was previously locked. Pass --approve-regrouping true only with explicit operator approval.");
   }
-  const atoms = buildTranscriptAtoms(scriptText, wordTiming.words, timedPlan.scenes, factLedger);
+  const boundedScope = Number.isFinite(scopeEndSecNumber);
+  const scopedScript = boundedScope ? scriptPrefixForTimedWordsForTests(scriptText, wordTiming.words) : { script: scriptText, source_word_end_exclusive: null, matched_timing_tail_words: null, fallback: false };
+  const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger);
   const directed = await directEditorialBeats(atoms, factLedger, timedPlan.scenes);
   const projectedBase = projectActiveStateConstraints(directed.beats, atoms, factLedger, timedPlan.scenes)
     .map((beat) => enrichEditorialBeat(beat, timedPlan.scenes));
@@ -1376,7 +1410,7 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) 
   if (coverageFindings.some((finding) => finding.severity === "blocker")) {
     throw new Error(`Editorial beat Whisper coverage failed: ${coverageFindings.map((finding) => finding.code).join(", ")}`);
   }
-  return { reused: false, atoms, beats: projected, planner: directed.planner, coverageFindings };
+  return { reused: false, atoms, beats: projected, planner: { ...directed.planner, bounded_script_scope: boundedScope ? scopedScript : null }, coverageFindings };
 }
 
 async function main() {

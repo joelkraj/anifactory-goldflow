@@ -119,7 +119,7 @@ import {
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
 import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
-import { factLedgerMatchesScriptForTests, visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
+import { factLedgerMatchesScriptForTests, scriptPrefixForTimedWordsForTests, visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
@@ -447,6 +447,12 @@ function testBoundedProofBaselineScoping() {
   const identity = { channel: "c", series_slug: "s", week: "w", episode: "ep_01", proof_scope: { mode: "bounded", start_sec: 0, end_sec: 300 } };
   assert.match(buildStageCommand("semantic_scene_plan", identity), /--proof-baseline-word-timing .* --scope-start-sec 0 --scope-end-sec 300/);
   assert.match(buildStageCommand("visual_beat_plan", identity), /--scope-start-sec 0 --scope-end-sec 300/);
+  const prefix = scriptPrefixForTimedWordsForTests(
+    "One two three. [Opening death avoided.] Later unrelated story continues for hours.",
+    ["one", "two", "three", "opening", "death", "avoided"].map((word) => ({ word })),
+  );
+  assert.equal(prefix.script.trim(), "One two three. [Opening death avoided.]");
+  assert.equal(prefix.fallback, false);
 }
 
 function testSemanticReconciliationEvidenceContract() {

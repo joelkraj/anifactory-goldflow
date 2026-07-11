@@ -22,8 +22,9 @@ const outputPath = flags.output ?? path.join(episodeDir, mode === "audio" ? `nar
 const targetMinWpm = Number(flags["target-wpm-min"] ?? process.env.GOLDFLOW_TARGET_WPM_MIN ?? DEFAULT_TARGET_WPM_MIN);
 const targetMaxWpm = Number(flags["target-wpm-max"] ?? process.env.GOLDFLOW_TARGET_WPM_MAX ?? DEFAULT_TARGET_WPM_MAX);
 const targetMidWpm = Number(((targetMinWpm + targetMaxWpm) / 2).toFixed(3));
-const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "enforced");
-const paceGateEnforced = pacePolicy !== "diagnostic";
+const requestedPacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "diagnostic");
+const pacePolicy = "diagnostic";
+const paceGateEnforced = false;
 const allowHookWarnings = flags["allow-hook-warnings"] === "true"
   || process.env.GOLDFLOW_ALLOW_HOOK_WARNINGS === "true";
 const hookMilestonesPath = flags["hook-milestones"] ? path.resolve(flags["hook-milestones"]) : null;
@@ -199,12 +200,13 @@ async function main() {
     target_wpm_max: targetMaxWpm,
     target_wpm_midpoint: targetMidWpm,
     pace_policy: pacePolicy,
+    requested_pace_policy: requestedPacePolicy,
     pace_gate_enforced: paceGateEnforced,
     script_word_count: scriptWordCount,
     estimated_runtime_at_target_mid_sec: Number((scriptWordCount / targetMidWpm * 60).toFixed(3)),
     estimated_runtime_at_target_min_sec: Number((scriptWordCount / targetMinWpm * 60).toFixed(3)),
     estimated_runtime_at_target_max_sec: Number((scriptWordCount / targetMaxWpm * 60).toFixed(3)),
-    policy: `Goldflow narration pace target for this run is ${targetMinWpm}-${targetMaxWpm} spoken words per minute.`,
+    policy: `Goldflow records ${targetMinWpm}-${targetMaxWpm} spoken words per minute as a diagnostic target. WPM does not block production.`,
     source_hashes: await sourceHashesFor(mode === "audio" ? [scriptPath, wordTimingPath] : [scriptPath]),
     updated_at: new Date().toISOString(),
   };
@@ -230,7 +232,7 @@ async function main() {
       measured_word_count: wordCount,
       measured_duration_sec: durationSec,
       actual_wpm: Number.isFinite(actualWpm) ? Number(actualWpm.toFixed(3)) : null,
-      blocker: paceGateEnforced && status !== "passed" ? `Actual narration pace must be ${targetMinWpm}-${targetMaxWpm} WPM.` : null,
+      blocker: null,
     };
     await writeJson(outputPath, report);
     console.log(JSON.stringify({ status, output_path: outputPath, actual_wpm: report.actual_wpm }, null, 2));

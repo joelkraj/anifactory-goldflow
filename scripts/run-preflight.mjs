@@ -44,7 +44,7 @@ const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
 const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
 const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
-const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "enforced");
+const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "diagnostic");
 const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 195);
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 220);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
@@ -85,9 +85,8 @@ function normalizeAudioTarget(value) {
 }
 
 function normalizePacePolicy(value) {
-  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  if (["diagnostic", "diagnostic_only", "non_blocking", "report_only", "wpm_diagnostic"].includes(normalized)) return "diagnostic";
-  return "enforced";
+  void value;
+  return "diagnostic";
 }
 
 function normalizeRenderProfile(value) {

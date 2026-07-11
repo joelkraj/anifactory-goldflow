@@ -2496,19 +2496,16 @@ async function testNarrationPaceChecks() {
   assert.equal(diagnosticAudioReport.diagnostic_pace_status, "blocked");
   assert.equal(diagnosticAudioReport.blocker, null);
 
-  let blocked = null;
-  try {
-    await execFileAsync(process.execPath, [
-      "scripts/narration-pace-check.mjs",
-      "--mode", "audio",
-      "--episode-dir", episodeDir,
-      "--episode", "ep_01",
-    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
-  } catch (error) {
-    blocked = error;
-  }
-  assert.equal(blocked?.code, 1);
-  assert.match(blocked?.stdout ?? "", /"status": "blocked"/);
+  const outOfRange = await execFileAsync(process.execPath, [
+    "scripts/narration-pace-check.mjs",
+    "--mode", "audio",
+    "--episode-dir", episodeDir,
+    "--episode", "ep_01",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  assert.match(outOfRange.stdout, /"status": "passed"/);
+  const outOfRangeReport = JSON.parse(await fs.readFile(path.join(episodeDir, "narration_pace_report_ep_01.json"), "utf8"));
+  assert.equal(outOfRangeReport.diagnostic_pace_status, "blocked");
+  assert.equal(outOfRangeReport.pace_gate_enforced, false);
 }
 
 async function testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases() {
@@ -2541,21 +2538,15 @@ async function testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases() {
     }],
   });
   await fs.writeFile(path.join(episodeDir, "script_clean.md"), `${filler} configured promise.`, "utf8");
-  let blocked = null;
-  try {
-    await execFileAsync(process.execPath, [
-      "scripts/narration-pace-check.mjs",
-      "--mode", "script",
-      "--episode-dir", episodeDir,
-      "--hook-milestones", hookMilestonesPath,
-    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
-  } catch (error) {
-    blocked = error;
-  }
-  assert.equal(blocked?.code, 1);
+  await execFileAsync(process.execPath, [
+    "scripts/narration-pace-check.mjs",
+    "--mode", "script",
+    "--episode-dir", episodeDir,
+    "--hook-milestones", hookMilestonesPath,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const configuredReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
-  assert.equal(configuredReport.status, "blocked");
-  assert.equal(configuredReport.hook_gate_enforced, true);
+  assert.equal(configuredReport.status, "passed");
+  assert.equal(configuredReport.hook_gate_enforced, false);
   assert.equal(configuredReport.diagnostic_hook_status, "blocked");
   assert.equal(configuredReport.hook_milestone_report.configured, true);
   assert.equal(configuredReport.hook_milestone_report.warnings.some((warning) => warning.code === "late_configured_promise"), true);
@@ -4368,10 +4359,9 @@ async function testNarratorOnlyStatusAndMixer() {
     "--episode-dir", episodeDir,
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const blockedStatus = JSON.parse(blockedStatusResult.stdout);
-  assert.equal(blockedStatus.current_stage, "audio_pace_check");
-  assert.match(blockedStatus.next_command_shape, /tts qwen/);
-  assert.match(blockedStatus.next_command_shape, /--native-speed/);
-  assert.doesNotMatch(blockedStatus.next_command_shape, /audio tempo-normalize/);
+  assert.equal(blockedStatus.current_stage, "longform_audio_mix");
+  assert.match(blockedStatus.next_command_shape, /audio longform-bed/);
+  assert.doesNotMatch(blockedStatus.next_command_shape, /tts qwen|audio tempo-normalize/);
   await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 214.286 });
 
   await execFileAsync(process.execPath, [

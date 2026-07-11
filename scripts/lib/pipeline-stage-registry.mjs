@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.4";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.5";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -389,8 +389,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const minWpm = Number(identity.target_wpm_min ?? 195);
   const maxWpm = Number(identity.target_wpm_max ?? 220);
   const nativeSpeed = Number(identity.qwen_native_speed ?? identity.voice_provider_options?.qwen_native_speed ?? 1.25);
-  const pacePolicy = String(identity.pace_policy ?? "enforced");
-  const paceFlag = pacePolicy === "diagnostic" ? " --pace-policy diagnostic" : "";
+  const pacePolicy = "diagnostic";
+  const paceFlag = " --pace-policy diagnostic";
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,

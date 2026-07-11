@@ -5001,6 +5001,7 @@ async function testRunStatusDerivedReferenceSeedPromoteAndScopedRetry() {
   let imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
   assert.equal(referenceStage.exists, true);
   assert.match(referenceStage.evidence, /no standalone reference images required/);
+  assert.match(imageStage.next_command_shape, /--skip-reference-generation true/);
   assert.match(imageStage.next_command_shape, /--seed-derived-refs true/);
   assert.match(imageStage.next_command_shape, /--cut-ids ep_01-cut-001/);
 
@@ -5058,6 +5059,7 @@ async function testRunStatusDerivedReferenceSeedPromoteAndScopedRetry() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   status = JSON.parse(statusResult.stdout);
   imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.match(imageStage.next_command_shape, /--skip-reference-generation true/);
   assert.match(imageStage.next_command_shape, /--cut-ids ep_01-cut-002/);
   assert.doesNotMatch(imageStage.next_command_shape, /visual plan/);
 }

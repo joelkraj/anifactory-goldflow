@@ -245,7 +245,7 @@ function visualRefsApproveCommand(identity) {
 
 function imagegenStartCommand(identity, extra = "") {
   const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 15 --reference-concurrency 15${extra}`;
+  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15${extra}`;
 }
 
 function imagegenPromoteDerivedRefsCommand(identity) {

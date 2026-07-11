@@ -70,6 +70,8 @@ function sha256(value) {
 
 function slug(value, fallback = "ref") {
   const normalized = String(value ?? fallback)
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");

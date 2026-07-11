@@ -226,10 +226,44 @@ function scriptChunks(
   }));
 }
 
+export function sanitizeCanonicalIdForTests(value, fallback = "id") {
+  const sanitized = String(value ?? fallback)
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return sanitized || fallback;
+}
+
+function sanitizeCanonicalRows(rows, key) {
+  const byId = new Map();
+  for (const row of rows ?? []) {
+    const id = sanitizeCanonicalIdForTests(row?.[key]);
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, { ...row, [key]: id });
+      continue;
+    }
+    byId.set(id, {
+      ...existing,
+      aliases: [...new Set([...(existing.aliases ?? []), ...(row.aliases ?? [])])],
+      evidence: [...new Map([...(existing.evidence ?? []), ...(row.evidence ?? [])]
+        .map((item) => [JSON.stringify(item), item])).values()],
+    });
+  }
+  return [...byId.values()];
+}
+
 function normalizeScenes(scenes) {
   return scenes.map((scene, index) => ({
     ...scene,
     scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
+    location_id: scene.location_id ? sanitizeCanonicalIdForTests(scene.location_id) : scene.location_id,
+    ref_requirements: (scene.ref_requirements ?? []).map((requirement) => ({
+      ...requirement,
+      ref_id: requirement?.ref_id ? sanitizeCanonicalIdForTests(requirement.ref_id) : requirement?.ref_id,
+    })),
   }));
 }
 
@@ -817,17 +851,25 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
       ? await callLocal(prompt, attemptStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
       : await reusableCodexCall(attemptStage, prompt) ?? await callCodex(prompt, attemptStage);
     const parsed = llm.parsed ?? {};
+    const canonicalEntities = sanitizeCanonicalRows(parsed.canonical_entities, "entity_id");
+    const canonicalLocations = sanitizeCanonicalRows(parsed.canonical_locations, "location_id");
+    const canonicalProps = sanitizeCanonicalRows(parsed.canonical_props, "prop_id");
+    const canonicalUiMotifs = sanitizeCanonicalRows(parsed.canonical_ui_motifs, "ui_id");
+    const entityIdMap = new Map((parsed.canonical_entities ?? []).map((row) => [String(row.entity_id ?? ""), sanitizeCanonicalIdForTests(row.entity_id)]));
     const ledger = {
       schema: "goldflow_story_fact_ledger_v2",
       state_transition_contract: "exact_effective_evidence_v2",
       status: "passed",
       source_script_hash: sha256(script),
       source_script_path: scriptPath,
-      canonical_entities: parsed.canonical_entities ?? [],
-      canonical_locations: parsed.canonical_locations ?? [],
-      canonical_props: parsed.canonical_props ?? [],
-      canonical_ui_motifs: parsed.canonical_ui_motifs ?? [],
-      state_transitions: parsed.state_transitions ?? [],
+      canonical_entities: canonicalEntities,
+      canonical_locations: canonicalLocations,
+      canonical_props: canonicalProps,
+      canonical_ui_motifs: canonicalUiMotifs,
+      state_transitions: (parsed.state_transitions ?? []).map((transition) => ({
+        ...transition,
+        entity_id: entityIdMap.get(String(transition.entity_id ?? "")) ?? sanitizeCanonicalIdForTests(transition.entity_id),
+      })),
       warnings: parsed.warnings ?? [],
       planner: {
         provider: llm.provider,

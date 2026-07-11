@@ -16,6 +16,15 @@ function unique(values) {
   return [...new Set((values ?? []).filter(Boolean).map(String))];
 }
 
+function canonicalId(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function assetLabel(value) {
   if (typeof value === "string" || typeof value === "number") return normalizeText(value);
   if (!value || typeof value !== "object") return "";
@@ -202,13 +211,13 @@ export function buildTranscriptAtoms(script, words, timedScenes = [], factLedger
 
 function canonicalDictionaries(factLedger) {
   const entities = (factLedger?.canonical_entities ?? factLedger?.entities ?? []).map((row) => ({
-    entity_id: String(row.entity_id ?? ""),
+    entity_id: canonicalId(row.entity_id),
     display_name: row.display_name ?? row.label ?? row.entity_id,
     aliases: row.aliases ?? [],
     kind: row.kind ?? "person",
   })).filter((row) => row.entity_id);
   const locations = (factLedger?.canonical_locations ?? factLedger?.locations ?? []).map((row) => ({
-    location_id: String(row.location_id ?? ""),
+    location_id: canonicalId(row.location_id),
     display_name: row.display_name ?? row.label ?? row.location_id,
     aliases: row.aliases ?? [],
   })).filter((row) => row.location_id);
@@ -353,7 +362,16 @@ function groupingFindings(rows, atoms, factLedger) {
 }
 
 export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
-  const rows = Array.isArray(raw?.beats) ? raw.beats : [];
+  const rows = Array.isArray(raw?.beats) ? raw.beats.map((row) => ({
+    ...row,
+    location_id: canonicalId(row.location_id),
+    physically_visible_entity_ids: (row.physically_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
+    screen_visible_entity_ids: (row.screen_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
+    preview_visible_entity_ids: (row.preview_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
+    mentioned_only_entity_ids: (row.mentioned_only_entity_ids ?? []).map(canonicalId).filter(Boolean),
+    primary_entity_id: canonicalId(row.primary_entity_id) || null,
+    entity_evidence: Object.fromEntries(Object.entries(row.entity_evidence ?? {}).map(([id, evidence]) => [canonicalId(id), evidence])),
+  })) : [];
   if (!rows.length) throw new Error("Editorial beat director returned no beats.");
   const findings = groupingFindings(rows, atoms, factLedger);
   const blockers = findings.filter((finding) => finding.severity === "blocker");
@@ -440,8 +458,9 @@ export function editorialRetentionRailFindings(beats) {
 
 function entityIdForName(name, factLedger) {
   const normalized = normalizeText(name).toLowerCase();
-  return (factLedger?.canonical_entities ?? []).find((entity) => [entity.display_name, ...(entity.aliases ?? [])]
-    .some((value) => normalizeText(value).toLowerCase() === normalized))?.entity_id ?? null;
+  const entity = (factLedger?.canonical_entities ?? []).find((row) => [row.display_name, ...(row.aliases ?? [])]
+    .some((value) => normalizeText(value).toLowerCase() === normalized));
+  return entity?.entity_id ? canonicalId(entity.entity_id) : null;
 }
 
 function transitionEvents(atoms, factLedger) {
@@ -452,7 +471,7 @@ function transitionEvents(atoms, factLedger) {
     if (!span) continue;
     events.push({
       source_word_index: span.end_atom.source_word_end_index,
-      entity_id: transition.entity_id,
+      entity_id: canonicalId(transition.entity_id),
       field: transition.state_kind,
       value: transition.to_state,
       from_value: transition.from_state,

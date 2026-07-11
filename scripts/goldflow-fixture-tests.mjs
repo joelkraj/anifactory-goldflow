@@ -112,6 +112,7 @@ import {
 import {
   semanticBuildPromptForTests,
   semanticReconciliationPromptForTests,
+  sanitizeCanonicalIdForTests,
   semanticProofScopeForTests,
   semanticSceneAnchorFindingsForTests,
   semanticSceneQualityFindingsForTests,
@@ -483,6 +484,7 @@ function testSemanticReconciliationEvidenceContract() {
   assert.match(prompt, /evidence reconciliation, not story invention/i);
   assert.match(prompt, /exact_excerpt copied verbatim/i);
   assert.match(prompt, /Overlapping chunks intentionally repeat evidence/i);
+  assert.equal(sanitizeCanonicalIdForTests("academy_evacu\u200bation_fork"), "academy_evacuation_fork");
   const valid = {
     canonical_entities: [{ entity_id: "joey", evidence: [{ exact_excerpt: "Joey entered Analytics Hall.", confidence: 0.99 }] }],
     canonical_locations: [{ location_id: "analytics_hall", evidence: [{ exact_excerpt: "Analytics Hall", confidence: 0.95 }] }],
@@ -532,7 +534,7 @@ function testEditorialBeatDirectorContracts() {
       { entity_id: "joey", display_name: "Joey", aliases: [] },
       { entity_id: "victor", display_name: "Victor", aliases: [] },
     ],
-    canonical_locations: [{ location_id: "academy_exam_hall", display_name: "Academy Exam Hall", aliases: [] }],
+    canonical_locations: [{ location_id: "academy_exam\u200b_hall", display_name: "Academy Exam Hall", aliases: [] }],
     state_transitions: [
       {
         entity_id: "joey",
@@ -567,7 +569,7 @@ function testEditorialBeatDirectorContracts() {
       visual_job: index === 1 ? "system_reveal" : "story_progression",
       shot_job: index === 1 ? "ui_reveal" : "interaction",
       depiction_mode: "current_reality",
-      location_id: "academy_exam_hall",
+      location_id: "academy_exam\u200b_hall",
       physically_visible_entity_ids: index === 3 ? ["joey", "victor"] : ["joey"],
       screen_visible_entity_ids: [],
       preview_visible_entity_ids: [],
@@ -586,6 +588,7 @@ function testEditorialBeatDirectorContracts() {
   };
   const normalized = normalizeEditorialGrouping(raw, atoms, ledger, "ep_01");
   assert.equal(normalized.beats[0].visual_beat_id.startsWith("beat_w"), true);
+  assert.equal(normalized.beats[0].location_id, "academy_exam_hall");
   assert.equal(normalized.beats[0].image_id_hint.startsWith("ep_01-w"), true);
   assert.deepEqual(normalized.beats[0].local_props, ["silver key"]);
   assert.deepEqual(normalized.beats[1].local_ui_elements, ["blue system panel"]);

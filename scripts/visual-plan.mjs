@@ -359,7 +359,8 @@ function characterStateRefForTarget(target, scene, stateRefIndex = new Map()) {
 }
 
 function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = new Map()) {
-  let targets = referenceTargetsForScene(scene, visualReferencePlan);
+  let targets = referenceTargetsForScene(scene, visualReferencePlan)
+    .filter((target) => locationTargetMatchesSourceRow(target, scene));
   if (compactEditorialProof) {
     const visibleLabels = uniqueStrings([
       ...(scene.visible_characters ?? []),
@@ -1584,7 +1585,16 @@ function filterVisualSourceRows(rows, episodeId) {
 
 function locationTargetsForSourceRow(row, visualReferencePlan) {
   return referenceTargetsForScene(row, visualReferencePlan)
-    .filter((target) => String(target?.kind ?? "").toLowerCase() === "location");
+    .filter((target) => String(target?.kind ?? "").toLowerCase() === "location")
+    .filter((target) => locationTargetMatchesSourceRow(target, row));
+}
+
+function locationTargetMatchesSourceRow(target, row) {
+  if (String(target?.kind ?? "").toLowerCase() !== "location") return true;
+  const contractIds = (target.location_contract_ids ?? []).map((id) => String(id ?? "").trim()).filter(Boolean);
+  const rowLocationId = String(row?.location_id ?? row?.location_contract_id ?? "").trim();
+  if (!contractIds.length || !rowLocationId) return true;
+  return contractIds.includes(rowLocationId);
 }
 
 function forcedLocationRefId(row, visualReferencePlan) {

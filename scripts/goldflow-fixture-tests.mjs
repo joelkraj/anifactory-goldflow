@@ -84,10 +84,12 @@ import {
 } from "./lib/visual-resolution-utils.mjs";
 import {
   semanticBuildPromptForTests,
+  semanticReconciliationPromptForTests,
   semanticSceneAnchorFindingsForTests,
   semanticSceneQualityFindingsForTests,
   semanticScriptChunksForTests,
   semanticSnapSceneAnchorsForTests,
+  storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
 import { visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
 
@@ -391,8 +393,35 @@ function testSemanticChunkingSplitsLongSingleParagraph() {
   const chunks = semanticScriptChunksForTests(script, 120);
   const totalWords = script.trim().split(/\s+/).length;
   assert.equal(chunks.length > 1, true);
-  assert.equal(chunks.reduce((sum, chunk) => sum + chunk.words, 0), totalWords);
-  assert.equal(chunks.every((chunk) => chunk.words <= 140), true);
+  assert.equal(chunks[0].word_start_index, 0);
+  assert.equal(chunks.at(-1).word_end_index_exclusive, totalWords);
+  assert.equal(chunks.every((chunk) => chunk.words <= 120), true);
+  assert.equal(chunks.slice(1).every((chunk, index) => chunk.word_start_index < chunks[index].word_end_index_exclusive), true);
+  assert.equal(chunks.slice(1).every((chunk) => chunk.overlap_words > 0), true);
+}
+
+function testSemanticReconciliationEvidenceContract() {
+  const script = "Joey entered Analytics Hall. He carried the silver key. Joey left for the roof.";
+  const prompt = semanticReconciliationPromptForTests(script, {}, [{
+    chunk: { chunk_index: 1, word_start_index: 0, word_end_index_exclusive: 13, overlap_words: 0 },
+    llm: { parsed: { scenes: [] } },
+  }], { target: 2, minimum: 1, maximum: 3 });
+  assert.match(prompt, /evidence reconciliation, not story invention/i);
+  assert.match(prompt, /exact_excerpt copied verbatim/i);
+  assert.match(prompt, /Overlapping chunks intentionally repeat evidence/i);
+  const valid = {
+    canonical_entities: [{ entity_id: "joey", evidence: [{ exact_excerpt: "Joey entered Analytics Hall.", confidence: 0.99 }] }],
+    canonical_locations: [{ location_id: "analytics_hall", evidence: [{ exact_excerpt: "Analytics Hall", confidence: 0.95 }] }],
+    canonical_props: [{ prop_id: "silver_key", evidence: [{ exact_excerpt: "silver key", confidence: 0.9 }] }],
+    canonical_ui_motifs: [],
+    state_transitions: [{ entity_id: "joey", evidence: [{ exact_excerpt: "Joey left for the roof.", confidence: 0.9 }] }],
+  };
+  assert.deepEqual(storyFactEvidenceFindingsForTests(valid, script), []);
+  const invalid = structuredClone(valid);
+  invalid.canonical_props[0].evidence[0] = { exact_excerpt: "gold key", confidence: 2 };
+  const findings = storyFactEvidenceFindingsForTests(invalid, script);
+  assert.equal(findings.some((finding) => finding.code === "fact_evidence_not_exact"), true);
+  assert.equal(findings.some((finding) => finding.code === "fact_confidence_invalid"), true);
 }
 
 function testSemanticAnchorSnapsToExactScriptTokens() {
@@ -4525,6 +4554,7 @@ async function run() {
   testSemanticSceneQualityFindings();
   testSemanticPlannerPromptContracts();
   testSemanticChunkingSplitsLongSingleParagraph();
+  testSemanticReconciliationEvidenceContract();
   testSemanticAnchorSnapsToExactScriptTokens();
   testFirstPersonBeatKeepsProtagonistVisible();
   testWhisperExcerptAlignmentInterpolatesUnspokenUi();

@@ -18,6 +18,7 @@ const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const outputPath = flags.output ?? path.join(episodeDir, "semantic_scene_plan.json");
+const storyFactLedgerPath = flags["fact-ledger-output"] ?? path.join(episodeDir, "story_fact_ledger.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -158,25 +159,43 @@ function splitOversizedChunkUnit(text, targetWords) {
   return units;
 }
 
-function scriptChunks(script, targetWords = Number(flags["semantic-chunk-words"] ?? 1000)) {
-  const chunkTarget = Math.max(100, Math.floor(targetWords));
-  const paragraphs = String(script ?? "").split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
-  const units = paragraphs.flatMap((paragraph) => splitOversizedChunkUnit(paragraph, chunkTarget));
+function scriptChunks(
+  script,
+  targetWords = Number(flags["semantic-chunk-words"] ?? 1000),
+  overlapWords = Number(flags["semantic-overlap-words"] ?? 120),
+) {
+  const source = String(script ?? "");
+  const tokens = [...source.matchAll(/\S+/g)].map((match, index) => ({
+    index,
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
+  }));
+  if (!tokens.length) return [];
+  const target = Math.max(100, Math.floor(targetWords));
+  const overlap = Math.max(0, Math.min(target - 1, Math.floor(overlapWords)));
   const chunks = [];
-  let current = [];
-  let currentWords = 0;
-  for (const unit of units) {
-    const count = wordCount(unit);
-    if (current.length && currentWords + count > chunkTarget) {
-      chunks.push(current.join("\n\n"));
-      current = [];
-      currentWords = 0;
-    }
-    current.push(unit);
-    currentWords += count;
+  let startWord = 0;
+  while (startWord < tokens.length) {
+    const endWord = Math.min(tokens.length, startWord + target);
+    const charStart = tokens[startWord].start;
+    const charEnd = tokens[endWord - 1].end;
+    chunks.push({
+      text: source.slice(charStart, charEnd),
+      words: endWord - startWord,
+      word_start_index: startWord,
+      word_end_index_exclusive: endWord,
+      char_start: charStart,
+      char_end: charEnd,
+      overlap_words: chunks.length ? overlap : 0,
+    });
+    if (endWord >= tokens.length) break;
+    startWord = endWord - overlap;
   }
-  if (current.length) chunks.push(current.join("\n\n"));
-  return chunks.map((text, index) => ({ chunk_index: index + 1, chunk_count: chunks.length, text, words: wordCount(text) }));
+  return chunks.map((chunk, index) => ({
+    ...chunk,
+    chunk_index: index + 1,
+    chunk_count: chunks.length,
+  }));
 }
 
 function normalizeScenes(scenes) {
@@ -644,6 +663,138 @@ async function reusableCodexCall(stageName, prompt) {
   return null;
 }
 
+async function runPool(items, worker, concurrency = 4) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function runWorker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, runWorker));
+  return results;
+}
+
+function buildReconciliationPrompt(script, bibles, extractedChunks, targets) {
+  const chunkPacket = extractedChunks.map((item) => ({
+    chunk_index: item.chunk.chunk_index,
+    word_start_index: item.chunk.word_start_index,
+    word_end_index_exclusive: item.chunk.word_end_index_exclusive,
+    overlap_words: item.chunk.overlap_words,
+    extracted: item.llm.parsed,
+  }));
+  return `Reconcile overlapping semantic extractions into one factual continuity plan and one story fact ledger.
+
+Your job is evidence reconciliation, not story invention and not visual art direction.
+
+Hard rules:
+- The locked script is the only source of story facts. Bibles may resolve established identity/style naming but may not add events.
+- Merge aliases into one canonical entity when the script proves they are the same person. Keep distinct people distinct.
+- Canonicalize physical locations, props, recurring UI motifs, and character state transitions across chunk boundaries.
+- Overlapping chunks intentionally repeat evidence. Deduplicate repeated scenes and facts without deleting story coverage.
+- Preserve scene order and exact script anchors. Return ${targets.minimum}-${targets.maximum} scenes, aiming for ${targets.target}.
+- Every canonical fact row and every state transition must contain at least one evidence row with exact_excerpt copied verbatim from the locked script and confidence from 0 to 1.
+- Evidence excerpts must be short enough to audit but long enough to prove the fact. Never paraphrase evidence.
+- A fact without exact evidence must be omitted or placed in warnings as unresolved.
+- Do not manufacture costume damage, injury, grime, wealth, location, relationships, props, UI, or physical presence from emotional/social language.
+- Preserve the semantic scene schema from the extracted rows, including mandatory location ref_requirements for concrete physical scenes.
+
+BIBLES:
+${JSON.stringify(bibles, null, 2).slice(0, 20_000)}
+
+LOCKED SCRIPT:
+${script}
+
+OVERLAPPING EXTRACTIONS:
+${JSON.stringify(chunkPacket, null, 2)}
+
+Return one JSON object only:
+{
+  "episode_summary": "factual summary",
+  "canonical_entities": [{"entity_id":"snake_case","display_name":"...","kind":"person|group|organization","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.99}]}],
+  "canonical_locations": [{"location_id":"snake_case","display_name":"...","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.95}]}],
+  "canonical_props": [{"prop_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
+  "canonical_ui_motifs": [{"ui_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
+  "state_transitions": [{"entity_id":"snake_case","state_kind":"wardrobe|injury|possession|status|location","from_state":"...","to_state":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
+  "global_reference_requirements": [],
+  "scenes": [/* reconciled semantic scene objects using exact script_excerpt_start/end */],
+  "warnings": []
+}`;
+}
+
+export function semanticReconciliationPromptForTests(script, bibles, extractedChunks, targets) {
+  return buildReconciliationPrompt(script, bibles, extractedChunks, targets);
+}
+
+function storyFactRows(ledger) {
+  return [
+    ...(ledger.canonical_entities ?? []),
+    ...(ledger.canonical_locations ?? []),
+    ...(ledger.canonical_props ?? []),
+    ...(ledger.canonical_ui_motifs ?? []),
+    ...(ledger.state_transitions ?? []),
+  ];
+}
+
+export function storyFactEvidenceFindingsForTests(ledger, script) {
+  const findings = [];
+  for (const [index, row] of storyFactRows(ledger).entries()) {
+    const factId = row.entity_id ?? row.location_id ?? row.prop_id ?? row.ui_id ?? `fact_${index + 1}`;
+    const evidence = Array.isArray(row.evidence) ? row.evidence : [];
+    if (!evidence.length) {
+      findings.push({ severity: "blocker", code: "fact_missing_evidence", fact_id: factId });
+      continue;
+    }
+    for (const [evidenceIndex, item] of evidence.entries()) {
+      const exactExcerpt = String(item?.exact_excerpt ?? "");
+      const confidence = Number(item?.confidence);
+      if (!exactExcerpt || !String(script).includes(exactExcerpt)) {
+        findings.push({ severity: "blocker", code: "fact_evidence_not_exact", fact_id: factId, evidence_index: evidenceIndex });
+      }
+      if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+        findings.push({ severity: "blocker", code: "fact_confidence_invalid", fact_id: factId, evidence_index: evidenceIndex });
+      }
+    }
+  }
+  return findings;
+}
+
+async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName) {
+  const prompt = buildReconciliationPrompt(script, bibles, parsedChunks, targets);
+  const reconciliationStage = `${stageName}_global_reconciliation`;
+  const llm = isLocalLLMRoute(reconciliationStage)
+    ? await callLocal(prompt, reconciliationStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
+    : await reusableCodexCall(reconciliationStage, prompt) ?? await callCodex(prompt, reconciliationStage);
+  const parsed = llm.parsed ?? {};
+  const ledger = {
+    schema: "goldflow_story_fact_ledger_v1",
+    status: "passed",
+    source_script_hash: sha256(script),
+    source_script_path: scriptPath,
+    canonical_entities: parsed.canonical_entities ?? [],
+    canonical_locations: parsed.canonical_locations ?? [],
+    canonical_props: parsed.canonical_props ?? [],
+    canonical_ui_motifs: parsed.canonical_ui_motifs ?? [],
+    state_transitions: parsed.state_transitions ?? [],
+    warnings: parsed.warnings ?? [],
+    planner: {
+      provider: llm.provider,
+      model: llm.model ?? null,
+      reasoning_effort: llm.reasoning_effort ?? null,
+      output_path: llm.output_path ?? null,
+    },
+    updated_at: new Date().toISOString(),
+  };
+  const evidenceFindings = storyFactEvidenceFindingsForTests(ledger, script);
+  if (evidenceFindings.some((finding) => finding.severity === "blocker")) {
+    const preview = evidenceFindings.slice(0, 10).map((finding) => `${finding.fact_id}:${finding.code}`).join(", ");
+    throw new Error(`Semantic reconciliation returned unsupported fact evidence: ${preview}`);
+  }
+  return { llm, parsed, ledger, evidenceFindings };
+}
+
 async function main() {
   const script = await readText(scriptPath);
   if (!script.trim()) throw new Error(`Missing script_clean.md at ${scriptPath}`);
@@ -655,11 +806,12 @@ async function main() {
   let llm;
   let scenes = [];
   let semanticParsed = {};
+  let parsedChunks = [];
   const useChunking = flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
   if (useChunking) {
     const chunks = scriptChunks(script);
-    const parsedChunks = [];
-    for (const chunk of chunks) {
+    const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 4)));
+    parsedChunks = await runPool(chunks, async (chunk) => {
       const chunkTargets = chunkSceneCountTargets(chunk.text);
       const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
       console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: ${chunk.words} words, target ${chunkTargets.target} scenes`);
@@ -673,14 +825,8 @@ async function main() {
         throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} under-segmented: returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words.`);
       }
       console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
-      parsedChunks.push({ chunk, targets: chunkTargets, llm: chunkLlm, scenes: chunkScenes });
-      scenes.push(...chunkScenes.map((scene) => ({ ...scene, source_chunk_index: chunk.chunk_index })));
-    }
-    semanticParsed = {
-      episode_summary: parsedChunks.map((item) => item.llm.parsed.episode_summary).filter(Boolean).join(" "),
-      global_reference_requirements: parsedChunks.flatMap((item) => item.llm.parsed.global_reference_requirements ?? []),
-      warnings: parsedChunks.flatMap((item) => item.llm.parsed.warnings ?? []),
-    };
+      return { chunk, targets: chunkTargets, llm: chunkLlm, scenes: chunkScenes };
+    }, semanticConcurrency);
     llm = {
       provider: parsedChunks[0]?.llm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
       model: parsedChunks[0]?.llm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel()),
@@ -689,13 +835,27 @@ async function main() {
       codex_cli_version: parsedChunks[0]?.llm?.codex_cli_version ?? null,
       chunked: true,
       chunk_count: chunks.length,
+      concurrency: semanticConcurrency,
     };
   } else {
     const prompt = buildPrompt(script, bibles, targets);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
-    semanticParsed = llm.parsed;
-    scenes = Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [];
+    parsedChunks = [{
+      chunk: {
+        chunk_index: 1,
+        chunk_count: 1,
+        word_start_index: 0,
+        word_end_index_exclusive: targets.words,
+        overlap_words: 0,
+      },
+      targets,
+      llm,
+      scenes: Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [],
+    }];
   }
+  const reconciliation = await reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName);
+  semanticParsed = reconciliation.parsed;
+  scenes = Array.isArray(reconciliation.parsed.scenes) ? reconciliation.parsed.scenes : [];
   if (!scenes.length) throw new Error("Semantic scene planner returned no scenes.");
   if (scenes.length < targets.minimum) {
     throw new Error(`Semantic scene planner under-segmented locked script: returned ${scenes.length} scenes, minimum is ${targets.minimum} for ${targets.words} words.`);
@@ -717,8 +877,17 @@ async function main() {
     const preview = semanticQualityBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.message}`).join("\n");
     throw new Error(`Semantic scene planner returned blocking quality findings:\n${preview}`);
   }
+  const storyFactLedger = {
+    ...reconciliation.ledger,
+    source_hashes: {
+      [scriptPath]: scriptHash,
+    },
+    semantic_scene_count: anchorSnapReport.scenes.length,
+    evidence_finding_count: reconciliation.evidenceFindings.length,
+  };
+  await writeJson(storyFactLedgerPath, storyFactLedger);
   const report = {
-    schema: "goldflow_semantic_scene_plan_v1",
+    schema: "goldflow_semantic_scene_plan_v2",
     status: "passed",
     channel,
     series_slug: series,
@@ -726,6 +895,11 @@ async function main() {
     episode,
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
+    source_hashes: {
+      [scriptPath]: scriptHash,
+      [storyFactLedgerPath]: sha256(`${JSON.stringify(storyFactLedger, null, 2)}\n`),
+    },
+    story_fact_ledger_path: storyFactLedgerPath,
     timing_dependency: "none_semantic_only",
     scene_count_policy: targets,
     semantic_validation: {
@@ -746,6 +920,14 @@ async function main() {
       output_path: llm.output_path ?? null,
       chunked: llm.chunked ?? false,
       chunk_count: llm.chunk_count ?? null,
+      concurrency: llm.concurrency ?? 1,
+      overlap_words: useChunking ? Number(flags["semantic-overlap-words"] ?? 120) : 0,
+      reconciliation: {
+        provider: reconciliation.llm.provider,
+        model: reconciliation.llm.model ?? null,
+        reasoning_effort: reconciliation.llm.reasoning_effort ?? null,
+        output_path: reconciliation.llm.output_path ?? null,
+      },
     },
     ...semanticParsed,
     scenes: anchorSnapReport.scenes,

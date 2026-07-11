@@ -100,7 +100,9 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
    - Use for TTS-only risks: protected terms, ranks, UI text, numbers, currencies, pronunciations, and known problem phrases.
    - It must not mutate `script_clean.md`.
 
-8. Semantic scene plan.
+8. Semantic continuity plan.
+   - Extract overlapping script chunks concurrently at four workers, then run one global reconciliation pass over the locked script and chunk outputs.
+   - Write `story_fact_ledger.json` with canonical entities, locations, props, UI motifs, and state transitions. Every fact requires a verbatim script excerpt and confidence; unsupported facts block rather than being deterministically repaired.
    - Extracts semantic scenes from locked script and bibles.
    - This is story/visual meaning, not word timing.
 

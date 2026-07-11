@@ -1902,6 +1902,59 @@ async function main() {
     return;
   }
   assertScopedLocationCoverage(visualSourceRows, enrichedVisualReferencePlan);
+  if (flags["revalidate-existing"] === "true") {
+    if (scopedRepair) throw new Error("Existing prompt-plan revalidation must validate the complete plan; omit scoped cut/scene flags.");
+    const existingPlan = await readJson(outputPath, null);
+    const prompts = existingPlan?.prompts;
+    if (!Array.isArray(prompts) || prompts.length !== allVisualSourceRows.length) {
+      throw new Error(`Existing prompt-plan revalidation requires ${allVisualSourceRows.length} prompts at ${outputPath}.`);
+    }
+    assertPromptIdentityMatchesInputs(prompts, allVisualSourceRows, episode, "visual prompt revalidation");
+    assertScenePromptShape(prompts);
+    assertLocalBeatFidelity(prompts, allVisualSourceRows);
+    const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
+    const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
+    if (referencePlanApproval?.status === "approved") sourcePaths.push(referencePlanApprovalPath);
+    if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
+    if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
+    if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
+    const refreshed = {
+      ...existingPlan,
+      status: activeStateFindings.length ? "blocked" : "passed",
+      source_artifact_paths: sourcePaths,
+      source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+      planner: {
+        ...(existingPlan.planner ?? {}),
+        revalidated_without_llm: true,
+        revalidated_at: new Date().toISOString(),
+      },
+      visual_plan_scope: {
+        mode: "full_episode",
+        selected_visual_unit_count: allVisualSourceRows.length,
+        total_visual_unit_count: allVisualSourceRows.length,
+        cut_ids: prompts.map((prompt) => prompt.image_id),
+        untouched_prompt_count: prompts.length,
+        revalidated_existing: true,
+      },
+      active_state_findings: activeStateFindings,
+      findings: activeStateFindings,
+      warnings: [
+        ...(existingPlan.warnings ?? []),
+        ...providerExclusionPayloadMarkerWarnings(prompts),
+        ...assertShotFramingDistribution(prompts),
+        ...assertPromptVariety(prompts),
+        ...assertLocationSpanVariety(prompts),
+        ...assertRetentionShotJobVarietySoft(prompts),
+      ],
+      updated_at: new Date().toISOString(),
+    };
+    await writeJson(outputPath, refreshed);
+    if (activeStateFindings.length) {
+      throw new Error(`Existing visual prompt plan contradicted binding active state on ${activeStateFindings.length} cut(s).`);
+    }
+    console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, revalidated_without_llm: true }, null, 2));
+    return;
+  }
   let llm;
   let parsedPrompts = [];
   let styleSummary = "";

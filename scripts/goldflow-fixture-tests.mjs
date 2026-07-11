@@ -3099,6 +3099,43 @@ async function testOnlyScenesDryRun() {
   const report = JSON.parse(await fs.readFile(output, "utf8"));
   assert.equal(report.visual_plan_scope.selected_visual_unit_count, 1);
   assert.deepEqual(report.visual_plan_scope.cut_ids, ["ep_01-cut-002"]);
+
+  const existingOutput = path.join(episodeDir, "section_image_prompts.json");
+  await writeJson(existingOutput, {
+    schema: "goldflow_section_image_prompts_v1",
+    status: "passed",
+    prompts: [
+      {
+        image_id: "ep_01-cut-001",
+        scene_id: "scene_001",
+        visual_beat_id: "scene_001_beat_01",
+        provider_prompt: "16:9 landscape anime/manhwa view of the empty apartment.",
+        image_prompt: "16:9 landscape anime/manhwa view of the empty apartment.",
+        shot_manifest: { visible_characters: [], mentioned_only_characters: [], character_staging: [] },
+      },
+      {
+        image_id: "ep_01-cut-002",
+        scene_id: "scene_002",
+        visual_beat_id: "scene_002_beat_01",
+        provider_prompt: "16:9 landscape anime/manhwa view of the empty boardroom.",
+        image_prompt: "16:9 landscape anime/manhwa view of the empty boardroom.",
+        shot_manifest: { visible_characters: [], mentioned_only_characters: [], character_staging: [] },
+      },
+    ],
+  });
+  await execFileAsync(process.execPath, [
+    "scripts/visual-plan.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--revalidate-existing", "true",
+    "--output", existingOutput,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const revalidated = JSON.parse(await fs.readFile(existingOutput, "utf8"));
+  assert.equal(revalidated.status, "passed");
+  assert.equal(revalidated.prompts.length, 2);
+  assert.equal(revalidated.planner.revalidated_without_llm, true);
 }
 
 async function testOnlyCutIdsDryRun() {

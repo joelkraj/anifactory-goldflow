@@ -211,9 +211,11 @@ function referencePrompt(target) {
   return parts.join(", ");
 }
 
-export function referencePromptForTests(target) {
+export function referencePromptForTarget(target) {
   return referencePrompt(target);
 }
+
+export const referencePromptForTests = referencePromptForTarget;
 
 function isDerivedReferenceTarget(target) {
   return /^derive_from_/i.test(String(target?.generation_mode ?? ""));

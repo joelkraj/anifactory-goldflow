@@ -18,6 +18,7 @@ const imagegenReportPath = flags["imagegen-report"] ?? path.join(episodeDir, `im
 const imageQaPath = flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
 const decisionPath = flags.decisions ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
 const ledgerPath = flags.ledger ?? path.join(episodeDir, "cut_execution_ledger.json");
+const audioBedReportPath = flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`);
 
 function parseFlags(parts) {
@@ -51,16 +52,19 @@ async function writeJson(filePath, value) {
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, decisions, ledger] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, decisions, ledger, audioBedReport] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
     readJson(decisionPath, { decisions: [] }),
     readJson(ledgerPath),
+    readJson(audioBedReportPath),
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (imageQa?.status !== "passed") throw new Error(`Motion planning requires passed per-cut image QA: ${imageQaPath}`);
+  const audioTimelineEndSec = Number(audioBedReport?.mixed_duration_sec ?? audioBedReport?.mix?.duration_sec);
+  if (!Number.isFinite(audioTimelineEndSec) || audioTimelineEndSec <= 0) throw new Error(`Motion planning requires a valid mixed audio duration: ${audioBedReportPath}`);
   if (await hashFile(decisionPath) !== imageQa.review_decisions_sha256) throw new Error(`Motion planning refused stale image review decisions: ${decisionPath}`);
   const ledgerById = new Map((ledger?.cuts ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const decisionById = new Map((decisions?.decisions ?? []).map((row) => [String(row.image_id ?? ""), row]));
@@ -68,7 +72,7 @@ async function main() {
   const intents = (promptPlan.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false).map((prompt) => {
     const cut = ledgerById.get(String(prompt.image_id ?? ""));
     if (!String(cut?.image_qa_status ?? "").startsWith("passed")) throw new Error(`Motion planning refused unaccepted cut ${prompt.image_id}.`);
-    return motionIntentForPrompt(prompt, cut.image_sha256, decisionById.get(String(prompt.image_id ?? "")));
+    return motionIntentForPrompt(prompt, cut.image_sha256, decisionById.get(String(prompt.image_id ?? "")), { timelineEndSec: audioTimelineEndSec });
   });
   const findings = motionIntentFindings(intents, acceptedHashes);
   const blockers = findings.filter((row) => row.severity === "blocker");
@@ -80,7 +84,8 @@ async function main() {
     week,
     episode,
     policy: "Motion is derived from LLM-authored shot staging or explicit image-QA focal overrides. Missing intent becomes a smooth static hold; hash-random motion is forbidden.",
-    source_hashes: Object.fromEntries((await Promise.all([promptPath, imagegenReportPath, imageQaPath, decisionPath].map(async (filePath) => [path.resolve(filePath), await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_hashes: Object.fromEntries((await Promise.all([promptPath, imagegenReportPath, imageQaPath, decisionPath, audioBedReportPath].map(async (filePath) => [path.resolve(filePath), await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    timeline_end_sec: audioTimelineEndSec,
     accepted_cut_hashes: Object.fromEntries(intents.map((row) => [row.image_id, row.image_sha256])),
     motion_intent_count: intents.length,
     static_hold_count: intents.filter((row) => row.behavior === "static_hold").length,

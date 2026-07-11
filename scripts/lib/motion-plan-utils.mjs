@@ -157,20 +157,25 @@ function derivedIntent(prompt) {
   };
 }
 
-export function motionIntentForPrompt(prompt, imageSha256, decision = null) {
+export function motionIntentForPrompt(prompt, imageSha256, decision = null, options = {}) {
   const base = derivedIntent(prompt);
   const override = decision?.focal_override && typeof decision.focal_override === "object" ? decision.focal_override : null;
   const behavior = BEHAVIORS.has(String(override?.behavior ?? "")) ? String(override.behavior) : base.behavior;
   const easing = EASINGS.has(String(override?.easing ?? "")) ? String(override.easing) : base.easing;
   const startScale = clamp(override?.start_scale ?? base.start_scale, 1, 1.25);
   const endScale = clamp(override?.end_scale ?? base.end_scale, 1, 1.25);
+  const startSec = Number(prompt.start_sec ?? 0);
+  const authoredDurationSec = Math.max(1 / 60, Number(prompt.duration_sec ?? 6));
+  const timelineEndSec = Number(options.timelineEndSec);
+  const remainingTimelineSec = Number.isFinite(timelineEndSec) ? timelineEndSec - startSec : authoredDurationSec;
+  const durationSec = Math.max(1 / 60, Math.min(authoredDurationSec, remainingTimelineSec));
   return {
     image_id: prompt.image_id,
     image_sha256: imageSha256,
     scene_id: prompt.scene_id ?? null,
     visual_beat_id: prompt.visual_beat_id ?? null,
-    start_sec: Number(prompt.start_sec ?? 0),
-    duration_sec: Math.max(1 / 60, Number(prompt.duration_sec ?? 6)),
+    start_sec: startSec,
+    duration_sec: durationSec,
     focal_subject: String(override?.focal_subject ?? base.focal_subject ?? "").trim() || null,
     focal_source: override ? "image_qa_focal_override" : base.focal_source,
     start_anchor: anchor(override?.start_anchor, base.start_anchor),

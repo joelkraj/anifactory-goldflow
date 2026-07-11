@@ -898,6 +898,14 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.deepEqual(focusShift.end_anchor, { x: 0.3, y: 0.58 });
   assert.deepEqual(motionTraceFindings(motionTraceForIntent(focusShift, 60)), []);
 
+  const terminalIntent = motionIntentForPrompt({
+    image_id: "cut_terminal",
+    start_sec: 297.48,
+    duration_sec: 2.52,
+    shot_manifest: { shot_job: "ui_reveal", primary_character: "Joey" },
+  }, "hash-terminal", null, { timelineEndSec: 299.901995 });
+  assert.equal(Number(terminalIntent.duration_sec.toFixed(6)), 2.421995);
+
   const staticIntent = motionIntentForPrompt({ image_id: "cut_005", duration_sec: 10, shot_manifest: {} }, "hash-5");
   assert.equal(staticIntent.behavior, "static_hold");
   assert.equal(staticIntent.start_scale, staticIntent.end_scale);

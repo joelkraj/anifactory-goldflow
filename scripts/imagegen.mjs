@@ -62,6 +62,8 @@ const referenceImageHeight = Number(flags["reference-image-height"] ?? process.e
 const seedDerivedRefs = flags["seed-derived-refs"] === "true";
 const promoteDerivedRefs = flags["promote-derived-refs"] === "true";
 const providerCircuitFailureThreshold = Math.max(2, Number(flags["provider-circuit-failures"] ?? process.env.ANIFACTORY_IMAGE_PROVIDER_CIRCUIT_FAILURES ?? 3));
+const invocationStartedAt = new Date().toISOString();
+const invocationStartedMs = Date.now();
 
 function parseFlags(parts) {
   const parsed = {};
@@ -1384,7 +1386,7 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
   const priorReport = await readJson(reportPath, null);
   const mergedById = new Map();
   if (
-    priorReport?.schema === "goldflow_imagegen_report_v1"
+    ["goldflow_imagegen_report_v1", "goldflow_imagegen_report_v2"].includes(priorReport?.schema)
     && priorReport.prompt_plan_hash === promptPlanHash
     && Array.isArray(priorReport.results)
   ) {
@@ -1404,6 +1406,11 @@ function imageResultPassed(row) {
   return ["generated", "reused_fresh", "reused_imported_codex", "existing_file"].includes(String(row?.status ?? "").toLowerCase());
 }
 
+function episodeImageStatus(currentBatchStatus, cutLedgerStatus) {
+  if (currentBatchStatus === "failed") return "failed";
+  return cutLedgerStatus === "passed" ? "passed" : "partial";
+}
+
 function imagegenCostSummary(rows = []) {
   const generatedRows = (rows ?? []).filter((row) => String(row?.status ?? "").toLowerCase() === "generated");
   const estimatedRows = generatedRows.filter((row) => Number.isFinite(Number(row?.generated?.estimated_cost_usd)));
@@ -1421,6 +1428,78 @@ function imagegenCostSummary(rows = []) {
     estimated_cost_usd: Number(estimatedCostUsd.toFixed(6)),
     by_model: byModel,
     note: "Estimated from ModelsLab catalog/model detail price fields; reused cached/imported images add zero incremental cost.",
+  };
+}
+
+function imagegenBatchId(kind, currentRows) {
+  return sha256(JSON.stringify({
+    kind,
+    started_at: invocationStartedAt,
+    ids: (currentRows ?? []).map((row) => row.image_id ?? row.ref_id ?? null),
+    statuses: (currentRows ?? []).map((row) => row.status ?? null),
+  })).slice(0, 16);
+}
+
+async function immutableImagegenBatchReports() {
+  const dir = path.join(episodeDir, "reports", "imagegen-batches");
+  const names = await fs.readdir(dir).catch(() => []);
+  const reports = [];
+  for (const name of names.filter((value) => value.endsWith(".json")).sort()) {
+    const filePath = path.join(dir, name);
+    const report = await readJson(filePath, null);
+    if (report?.schema === "goldflow_imagegen_batch_report_v1") reports.push({ filePath, report });
+  }
+  return reports;
+}
+
+async function writeAuditableImagegenReport(report, { kind, currentRows }) {
+  const completedAt = new Date().toISOString();
+  const batchId = imagegenBatchId(kind, currentRows);
+  const batchDir = path.join(episodeDir, "reports", "imagegen-batches");
+  const safeTime = completedAt.replace(/[:.]/g, "-");
+  const batchPath = path.join(batchDir, `${safeTime}-${batchId}.json`);
+  const batchCost = imagegenCostSummary(currentRows);
+  const immutable = {
+    ...report,
+    schema: "goldflow_imagegen_batch_report_v1",
+    batch_id: batchId,
+    batch_kind: kind,
+    current_batch_status: report.current_batch_status ?? report.status,
+    episode_status: report.episode_status ?? report.status,
+    current_batch_results: currentRows,
+    current_batch_cost: batchCost,
+    started_at: invocationStartedAt,
+    completed_at: completedAt,
+    wall_time_sec: Number(((Date.now() - invocationStartedMs) / 1000).toFixed(3)),
+    materialized_report_path: reportPath,
+  };
+  await writeJson(batchPath, immutable);
+  const history = await immutableImagegenBatchReports();
+  const cumulative = {
+    batch_count: history.length,
+    generated_count: history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.generated_count ?? 0), 0),
+    estimated_count: history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.estimated_count ?? 0), 0),
+    estimated_cost_usd: Number(history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.estimated_cost_usd ?? 0), 0).toFixed(6)),
+    wall_time_sec: Number(history.reduce((sum, row) => sum + Number(row.report.wall_time_sec ?? 0), 0).toFixed(3)),
+    retry_batch_count: Math.max(0, history.length - 1),
+    immutable_batch_report_paths: history.map((row) => row.filePath),
+  };
+  const materialized = {
+    ...report,
+    schema: "goldflow_imagegen_report_v2",
+    immutable_batch_report_path: batchPath,
+    cumulative_history: cumulative,
+    updated_at: completedAt,
+  };
+  await writeJson(reportPath, materialized);
+  return materialized;
+}
+
+export async function cumulativeImagegenHistoryForTests(batchReports = []) {
+  return {
+    batch_count: batchReports.length,
+    estimated_cost_usd: Number(batchReports.reduce((sum, row) => sum + Number(row.current_batch_cost?.estimated_cost_usd ?? 0), 0).toFixed(6)),
+    wall_time_sec: Number(batchReports.reduce((sum, row) => sum + Number(row.wall_time_sec ?? 0), 0).toFixed(3)),
   };
 }
 
@@ -1562,9 +1641,11 @@ async function main() {
       estimated_cost: imagegenCostSummary(referenceRun.results),
       updated_at: new Date().toISOString(),
     };
-    await writeJson(reportPath, report);
-    console.log(JSON.stringify({ status: report.status, report_path: reportPath, reference_count: report.reference_count }, null, 2));
-    if (report.status !== "passed") process.exitCode = 1;
+    report.current_batch_status = report.status;
+    report.episode_status = report.status;
+    const materialized = await writeAuditableImagegenReport(report, { kind: "references", currentRows: referenceRun.results });
+    console.log(JSON.stringify({ status: materialized.status, report_path: reportPath, immutable_batch_report_path: materialized.immutable_batch_report_path, reference_count: materialized.reference_count }, null, 2));
+    if (materialized.status !== "passed") process.exitCode = 1;
     return;
   }
   let plan = await readJson(promptPath, null);
@@ -1618,9 +1699,13 @@ async function main() {
   const results = [...probeResults, ...pool.results];
   const mergedResults = await mergeImagegenResults({ currentResults: results, promptIds: allPromptIds, promptPlanHash });
   const cutExecutionLedger = await writeCutExecutionLedger(plan, mergedResults, promptPlanHash);
+  const currentBatchStatus = results.every((row) => imageResultPassed(row)) ? "passed" : "failed";
+  const episodeStatus = episodeImageStatus(currentBatchStatus, cutExecutionLedger.status);
   const report = {
     schema: "goldflow_imagegen_report_v1",
-    status: results.every((row) => imageResultPassed(row)) ? "passed" : "failed",
+    status: episodeStatus,
+    current_batch_status: currentBatchStatus,
+    episode_status: episodeStatus,
     channel,
     series_slug: series,
     week,
@@ -1659,14 +1744,27 @@ async function main() {
     },
     updated_at: new Date().toISOString(),
   };
-  await writeJson(reportPath, report);
-  console.log(JSON.stringify({ status: report.status, report_path: reportPath, image_count: report.image_count, current_batch_image_count: report.current_batch_image_count }, null, 2));
-  if (report.status !== "passed") process.exitCode = 1;
+  const materialized = await writeAuditableImagegenReport(report, {
+    kind: seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images",
+    currentRows: [...referenceRun.results, ...results],
+  });
+  console.log(JSON.stringify({ status: materialized.status, current_batch_status: materialized.current_batch_status, report_path: reportPath, immutable_batch_report_path: materialized.immutable_batch_report_path, image_count: materialized.image_count, current_batch_image_count: materialized.current_batch_image_count }, null, 2));
+  if (materialized.status === "failed") process.exitCode = 1;
 }
+
+export { episodeImageStatus as episodeImageStatusForTests };
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(reportPath, { schema: "goldflow_imagegen_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    const failureReport = {
+      schema: "goldflow_imagegen_report_v1",
+      status: "failed",
+      current_batch_status: "failed",
+      episode_status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+      updated_at: new Date().toISOString(),
+    };
+    await writeAuditableImagegenReport(failureReport, { kind: referencesOnly ? "references" : "scene_images", currentRows: [] }).catch(() => {});
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

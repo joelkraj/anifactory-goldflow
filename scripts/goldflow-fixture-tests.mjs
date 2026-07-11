@@ -36,11 +36,18 @@ import {
   attachReferencePathsToPromptsForTests,
   assertNoVisualResolutionDeadletterForTests,
   candidateImageIdsForDerivedTargetForTests,
+  cumulativeImagegenHistoryForTests,
+  episodeImageStatusForTests,
   referencePromptForTests,
   referenceSlotInstructionForTests,
   runPoolWithCircuitBreakerForTests,
   scenePromptProductionContractFindingsForTests,
 } from "./imagegen.mjs";
+import {
+  beginStageExecution,
+  finishStageExecution,
+  materializeProductionManifest,
+} from "./lib/execution-provenance.mjs";
 import { donorRecoveryFinding, imageRiskReasons } from "./image-output-qa.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
@@ -170,6 +177,47 @@ async function testRunStatusRejectsFalseGreenFinalQa() {
   status = JSON.parse(result.stdout);
   finalStage = status.stage_ledger.find((row) => row.stage === "final_qa");
   assert.equal(finalStage.state, "failed");
+}
+
+async function testAppendOnlyExecutionProvenance() {
+  const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-events-"));
+  await writeJson(path.join(episodeDir, "input.json"), { status: "passed", value: 1 });
+  const flags = { "episode-dir": episodeDir, "cut-ids": "cut_001" };
+  const first = await beginStageExecution({ stage: "image_generation", command: "imagegen start", flags });
+  await writeJson(path.join(episodeDir, "imagegen_report_ep_01.json"), {
+    status: "partial",
+    estimated_cost: { current_batch: { estimated_cost_usd: 0.08 } },
+  });
+  await finishStageExecution(first, { exitCode: 0 });
+  const second = await beginStageExecution({ stage: "image_generation", command: "imagegen start", flags });
+  await writeJson(path.join(episodeDir, "imagegen_report_ep_01.json"), {
+    status: "passed",
+    estimated_cost: { current_batch: { estimated_cost_usd: 0.04 } },
+  });
+  await finishStageExecution(second, { exitCode: 0 });
+  const events = (await fs.readFile(path.join(episodeDir, "execution_events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(events.filter((row) => row.event_type === "stage_started").length, 2);
+  assert.equal(events.filter((row) => row.event_type === "stage_completed").length, 2);
+  assert.equal(second.attempt, 2);
+  const manifest = await materializeProductionManifest(episodeDir);
+  assert.equal(manifest.telemetry.total_stage_calls, 2);
+  assert.equal(manifest.telemetry.retry_calls, 1);
+  assert.equal(manifest.telemetry.cumulative_cost_usd, 0.12);
+  const reportFiles = await fs.readdir(path.join(episodeDir, "reports", "stages", "image_generation"));
+  assert.equal(reportFiles.length, 2);
+}
+
+async function testCumulativeImagegenHistoryAndEpisodeTruth() {
+  const cumulative = await cumulativeImagegenHistoryForTests([
+    { current_batch_cost: { estimated_cost_usd: 0.08 }, wall_time_sec: 4 },
+    { current_batch_cost: { estimated_cost_usd: 0.04 }, wall_time_sec: 2 },
+  ]);
+  assert.equal(cumulative.batch_count, 2);
+  assert.equal(cumulative.estimated_cost_usd, 0.12);
+  assert.equal(cumulative.wall_time_sec, 6);
+  assert.equal(episodeImageStatusForTests("passed", "partial"), "partial");
+  assert.equal(episodeImageStatusForTests("passed", "passed"), "passed");
+  assert.equal(episodeImageStatusForTests("failed", "passed"), "failed");
 }
 
 function testPinnedCodexRuntimeContracts() {
@@ -4469,6 +4517,8 @@ async function run() {
   testRunIdentityV2Policies();
   await testFinalQaSourceHashFreshness();
   await testRunStatusRejectsFalseGreenFinalQa();
+  await testAppendOnlyExecutionProvenance();
+  await testCumulativeImagegenHistoryAndEpisodeTruth();
   testPinnedCodexRuntimeContracts();
   await testNestedCodexCallsUseSharedRunner();
   testSemanticSceneAnchorValidation();

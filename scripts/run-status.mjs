@@ -1250,6 +1250,7 @@ async function main() {
       })();
   const runIdentityPath = path.join(episodeDir, "run_identity.json");
   const runIdentity = await readJson(runIdentityPath, {});
+  const productionManifest = await readJson(path.join(episodeDir, "production_manifest.json"), null);
   const identity = {
     channel: flags.channel ?? runIdentity.channel,
     series_slug: flags.series ?? flags.seriesSlug ?? runIdentity.series_slug,
@@ -1400,6 +1401,8 @@ async function main() {
     operator_approval_required: next?.operator_approval_required ?? false,
     next_command_shape: next?.next_command_shape ?? null,
     manual_blocker_triage_policy: MANUAL_BLOCKER_TRIAGE_POLICY,
+    execution_telemetry: productionManifest?.telemetry ?? null,
+    production_manifest_path: productionManifest ? path.join(episodeDir, "production_manifest.json") : null,
     stage_ledger: rows,
   };
 

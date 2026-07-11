@@ -9,6 +9,10 @@ import {
   helpCommandLines,
   productionOrderSummary,
 } from "../scripts/lib/pipeline-stage-registry.mjs";
+import {
+  beginStageExecution,
+  finishStageExecution,
+} from "../scripts/lib/execution-provenance.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -89,13 +93,33 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
 
 function run(script, scriptArgs = []) {
   enforceWorkflowGuard(command, subcommand, scriptArgs);
-  const child = spawn(process.execPath, [path.join(repoRoot, "scripts", script), ...scriptArgs], {
-    cwd: repoRoot,
-    stdio: "inherit",
-    env: { ...process.env },
-  });
-  child.on("exit", (code) => {
-    process.exitCode = code ?? 1;
+  const parsedFlags = parseFlags(scriptArgs);
+  const stage = commandStage(command, subcommand, parsedFlags);
+  void (async () => {
+    const execution = stage ? await beginStageExecution({
+      stage,
+      command: `${command} ${subcommand}`.trim(),
+      flags: parsedFlags,
+      args: scriptArgs,
+      env: process.env,
+    }) : null;
+    const child = spawn(process.execPath, [path.join(repoRoot, "scripts", script), ...scriptArgs], {
+      cwd: repoRoot,
+      stdio: "inherit",
+      env: { ...process.env },
+    });
+    child.on("error", async (error) => {
+      if (execution) await finishStageExecution(execution, { exitCode: 1, error: error.message });
+      console.error(error.message);
+      process.exitCode = 1;
+    });
+    child.on("exit", async (code, signal) => {
+      if (execution) await finishStageExecution(execution, { exitCode: code ?? 1, signal });
+      process.exitCode = code ?? 1;
+    });
+  })().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
   });
 }
 

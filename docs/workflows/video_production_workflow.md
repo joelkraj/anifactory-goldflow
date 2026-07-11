@@ -43,6 +43,8 @@ Command order: `run preflight -> ingest source -> script approve -> script pace-
 
 The approved narration script is production truth. The pipeline should extract, time, voice, score, visualize, and render that truth. It should not creatively repair a weak source script after approval.
 
+Every guarded stage appends start/completion events to `execution_events.jsonl`, writes an immutable stage report, and refreshes `production_manifest.json`. Scoped retries retain their own cost, latency, cache, scope, and attempt records; the latest successful retry is never allowed to erase an incomplete episode state.
+
 ## Full Flow
 
 0. Run identity preflight.

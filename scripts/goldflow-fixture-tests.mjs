@@ -973,6 +973,13 @@ function testReferenceDirectorV2EvidenceAndLocationContracts() {
         kind: "location",
         reason: "mandatory scoped location coverage derived from semantic requirements",
       }],
+      visual_beats: [{
+        visual_beat_id: "beat_w000010_w000020",
+        parent_scene_id: "scene_002",
+        location_id: "tribunal_hall_contract",
+        local_location: "marble tribunal hall",
+        ref_needs: [{ kind: "location", ref_id: "tribunal_hall_contract" }],
+      }],
     }],
   };
   const evidence = referenceEvidenceLedgerForTests(semanticPlan);
@@ -984,6 +991,7 @@ function testReferenceDirectorV2EvidenceAndLocationContracts() {
   assert.equal(contracts.status, "passed");
   assert.equal(contracts.contracts.length, 1);
   assert.equal(contracts.contracts[0].description, "marble tribunal hall");
+  assert.deepEqual(new Set(contracts.contracts[0].scene_ids), new Set(["scene_010", "scene_002"]));
   assert.equal(Object.hasOwn(contracts.contracts[0], "generation_mode"), false);
 
   const scoped = referenceLocationScopeForTests([{
@@ -992,7 +1000,7 @@ function testReferenceDirectorV2EvidenceAndLocationContracts() {
     scene_ids: [],
     location_contract_ids: ["tribunal_hall_contract"],
   }], contracts);
-  assert.deepEqual(scoped.targets[0].scene_ids, ["scene_010"]);
+  assert.deepEqual(new Set(scoped.targets[0].scene_ids), new Set(["scene_010", "scene_002"]));
   assert.equal(scoped.findings.length, 0);
   const openingFindings = referenceOpeningIdentityFindingsForTests([{
     ref_id: "hero_base",

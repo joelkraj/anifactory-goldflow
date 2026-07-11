@@ -587,6 +587,37 @@ function buildLocationContractLedger(scopedSemantic, { outputPath: ledgerPath = 
       });
     }
   }
+  // A later editorial beat may intentionally use a location contract first
+  // declared by another broad semantic scene (preview, flashback, return, or
+  // mixed-location parent scene). Union that exact beat scope after every
+  // semantic contract exists; never invent a contract from prose or keywords.
+  for (const scene of scopedSemantic?.scenes ?? []) {
+    for (const beat of Array.isArray(scene.visual_beats) ? scene.visual_beats : []) {
+      const sceneId = String(beat.parent_scene_id ?? beat.scene_id ?? scene.scene_id ?? "").trim();
+      const beatId = String(beat.visual_beat_id ?? "").trim();
+      const contractIds = new Set([
+        slug(beat.location_id ?? ""),
+        ...(beat.ref_needs ?? beat.beat_ref_requirements ?? [])
+          .filter((need) => normalizeKind(need?.kind) === "location")
+          .map((need) => slug(need?.ref_id ?? "")),
+      ].filter(Boolean));
+      for (const contractId of contractIds) {
+        const contract = contracts.get(contractId);
+        if (!contract) continue;
+        const locationLabel = String(beat.local_location ?? beat.location ?? "").trim();
+        const updated = {
+          ...contract,
+          scene_ids: [...new Set([...contract.scene_ids, sceneId].filter(Boolean))],
+          beat_ids: [...new Set([...contract.beat_ids, beatId].filter(Boolean))],
+          local_location_labels: [...new Set([...contract.local_location_labels, locationLabel].filter(Boolean))],
+        };
+        contracts.set(contractId, updated);
+        if (sceneId && !sceneContracts.some((row) => row.scene_id === sceneId && row.location_contract_id === contractId)) {
+          sceneContracts.push({ scene_id: sceneId, location_contract_id: contractId, location: locationLabel || updated.description });
+        }
+      }
+    }
+  }
   const rows = [...contracts.values()].sort((left, right) => String(left.location_contract_id).localeCompare(String(right.location_contract_id)));
   return {
     schema: "goldflow_location_contract_ledger_v1",

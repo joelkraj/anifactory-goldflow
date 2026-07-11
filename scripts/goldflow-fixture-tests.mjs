@@ -66,11 +66,6 @@ import {
   referencePlanApprovalContractSha256,
   referencePlanApprovalMatches,
 } from "./lib/reference-plan-contract.mjs";
-import {
-  candidateSelectionCoverage,
-  referenceCandidateCount,
-  referenceCandidatePolicyActive,
-} from "./lib/reference-candidate-contract.mjs";
 import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import {
   motionIntentFindings,
@@ -164,7 +159,6 @@ function testAuthoritativeStageRegistry() {
   ]);
   assert.equal(ids.includes("visual_prompt_plan_review_harden"), false);
   assert.equal(ids.includes("reference_plan_approval"), true);
-  assert.equal(commandStageFor("visual", "cast-refs", {}), "reference_generation");
   const narratorOnly = stageChecklistFor({ audio_target: "narrator_only" });
   assert.equal(narratorOnly.find((row) => row.stage === "sfx_score_plan")?.status, "skipped_with_waiver");
   assert.equal(narratorOnly.every((row) => row.validator), true);
@@ -1231,116 +1225,8 @@ async function testReferencePlanHashApproval() {
     })),
   };
   assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), true);
-  generatedPlan.reference_candidate_selection_updated_at = "2026-07-11T12:01:00.000Z";
-  generatedPlan.reference_targets[0].candidate_selection = {
-    status: "selected",
-    selected_candidate_id: "joey_identity_ref-i01-c02",
-  };
-  assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), true);
   generatedPlan.reference_targets[0].prompt_anchor = "creatively changed identity";
   assert.equal(referencePlanApprovalMatches({ approval, plan: generatedPlan }), false);
-}
-
-async function testReferenceCandidateApprovalRequiresCurrentPromotionHash() {
-  const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-ref-candidate-approval-"));
-  const referencePath = path.join(episodeDir, "assets", "images", "references", "joey_base.png");
-  await fs.mkdir(path.dirname(referencePath), { recursive: true });
-  await fs.writeFile(referencePath, "selected-candidate-raster");
-  const referenceHash = sha256(await fs.readFile(referencePath));
-  await writeJson(path.join(episodeDir, "run_identity.json"), {
-    stage_registry_version: "2026-07-11.4",
-    image_provider: "modelslab",
-  });
-  await writeJson(path.join(episodeDir, "visual_reference_plan.json"), {
-    status: "passed",
-    reference_targets: [{
-      ref_id: "joey_base",
-      kind: "character_state",
-      generation_mode: "standalone_ref",
-      required_before_imagegen: true,
-      estimated_use_count: 24,
-      conditioning_image_path: referencePath,
-    }],
-  });
-  await writeJson(path.join(episodeDir, "character_state_refs.json"), {
-    status: "draft_needs_manual_review",
-    character_state_refs: [{ source_ref_id: "joey_base", character: "Joey" }],
-  });
-  await writeJson(path.join(episodeDir, "reference_candidate_selection_ep_01.json"), {
-    schema: "goldflow_reference_candidate_selection_v1",
-    status: "passed",
-    targets: [{
-      ref_id: "joey_base",
-      status: "selected",
-      promotion: {
-        official_reference_path: referencePath,
-        official_reference_sha256: referenceHash,
-      },
-    }],
-  });
-  await execFileAsync(process.execPath, [
-    "scripts/visual-reference-approve.mjs",
-    "--episode-dir", episodeDir,
-    "--note", "candidate fixture",
-  ], { cwd: process.cwd() });
-  const approval = await readJson(path.join(episodeDir, "visual_reference_approval_ep_01.json"));
-  assert.equal(approval.reference_candidate_policy_active, true);
-  assert.equal(approval.selected_candidate_reference_count, 1);
-  assert.equal(approval.candidate_selection_coverage.passed, true);
-
-  await fs.writeFile(referencePath, "stale-replacement-raster");
-  await assert.rejects(
-    execFileAsync(process.execPath, [
-      "scripts/visual-reference-approve.mjs",
-      "--episode-dir", episodeDir,
-      "--output", path.join(episodeDir, "stale-approval.json"),
-    ], { cwd: process.cwd() }),
-    /promoted candidate hash is missing or stale/i,
-  );
-}
-
-function testReferenceCandidateCastingPolicy() {
-  const coreCharacter = {
-    ref_id: "joey_base",
-    kind: "character_state",
-    generation_mode: "standalone_ref",
-    estimated_use_count: 46,
-    required_before_imagegen: true,
-  };
-  const majorCharacter = {
-    ref_id: "arielle_base",
-    kind: "character_state",
-    generation_mode: "standalone_ref",
-    estimated_use_count: 12,
-  };
-  const recurringLocation = {
-    ref_id: "academy_gate",
-    kind: "location",
-    generation_mode: "standalone_ref",
-    estimated_use_count: 6,
-  };
-  const minorProp = {
-    ref_id: "one_off_ring",
-    kind: "prop",
-    generation_mode: "standalone_ref",
-    estimated_use_count: 1,
-  };
-  assert.equal(referenceCandidateCount(coreCharacter), 4);
-  assert.equal(referenceCandidateCount(majorCharacter), 3);
-  assert.equal(referenceCandidateCount(recurringLocation), 2);
-  assert.equal(referenceCandidateCount(minorProp), 1);
-  assert.equal(referenceCandidateCount(coreCharacter, 5), 5);
-  assert.equal(candidateSelectionCoverage([coreCharacter, minorProp], { targets: [] }).passed, false);
-  assert.deepEqual(candidateSelectionCoverage([coreCharacter, minorProp], {
-    targets: [{
-      ref_id: "joey_base",
-      status: "selected",
-      promotion: { official_reference_sha256: "abc123" },
-    }],
-  }), { passed: true, missing_ref_ids: [] });
-  assert.equal(referenceCandidatePolicyActive({ stage_registry_version: "2026-07-11.4", image_provider: "modelslab" }), true);
-  assert.equal(referenceCandidatePolicyActive({ stage_registry_version: "2026-07-11.4", image_provider: "codex_imagegen" }), false);
-  assert.equal(referenceCandidatePolicyActive({ stage_registry_version: "2026-07-11.3", image_provider: "modelslab" }), false);
 }
 
 function testActiveStateValidationSkipsTextOnlyUiMentions() {
@@ -2301,9 +2187,9 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   const mixedRenderStage = mixedStatus.stage_ledger.find((row) => row.stage === "premium_render");
   assert.match(mixedScriptPaceStage.next_command_shape, /--pace-policy diagnostic/);
   assert.match(mixedScriptPaceStage.next_command_shape, /--allow-hook-warnings true/);
-  assert.match(mixedReferenceStage.next_command_shape, /visual cast-refs/);
-  assert.match(mixedReferenceStage.next_command_shape, /--reference-image-model flux-klein/);
-  assert.match(mixedReferenceStage.next_command_shape, /--auto-resolve true/);
+  assert.match(mixedReferenceStage.next_command_shape, /imagegen start/);
+  assert.match(mixedReferenceStage.next_command_shape, /--image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest/);
+  assert.match(mixedReferenceStage.next_command_shape, /--references-only true/);
   assert.doesNotMatch(mixedReferenceStage.next_command_shape, /import-staged-codex/);
   assert.match(mixedImageStage.next_command_shape, /imagegen import-staged-codex/);
   assert.match(mixedImageStage.next_command_shape, /--output <episode-dir>\/imagegen_report_ep_01\.json/);
@@ -5406,7 +5292,6 @@ const FIXTURE_SUITES = {
     testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan,
     testRunStatusIncludesManualBlockerTriagePolicy,
     testRunStatusDerivedReferenceSeedPromoteAndScopedRetry,
-    testReferenceCandidateApprovalRequiresCurrentPromotionHash,
   ],
   planner: [
     testSemanticSceneAnchorValidation,
@@ -5424,7 +5309,6 @@ const FIXTURE_SUITES = {
     testReferenceDirectorV2EvidenceAndLocationContracts,
     testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts,
     testReferencePlanHashApproval,
-    testReferenceCandidateCastingPolicy,
     testActiveStateValidationSkipsTextOnlyUiMentions,
     testAdaptiveProviderPromptPackets,
     testSelectedReferenceInventoryContainsOnlyDirectorSelections,

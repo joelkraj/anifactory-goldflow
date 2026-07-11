@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.4";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.3";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -157,12 +157,12 @@ const stages = [
   },
   {
     id: "reference_generation",
-    title: "Reference candidate casting",
+    title: "Reference generation",
     required_input: "approved reference plan",
-    output_artifact: "reference candidate reports + promoted assets/images/references/*",
+    output_artifact: "immutable reference batch reports + assets/images/references/*",
     approval: "automatic",
-    validator: "reference_candidate_selection_and_hashes",
-    commands: ["visual cast-refs", "imagegen start:references", "imagegen import-staged-codex:references"],
+    validator: "reference_batch_completeness",
+    commands: ["imagegen start:references", "imagegen import-staged-codex:references"],
   },
   {
     id: "reference_image_approval",
@@ -414,7 +414,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: codexReferences(identity)
       ? `Stage isolated built-in Codex reference rasters, then run: node bin/goldflow.mjs imagegen import-staged-codex ${base} --references-only true --staging-dir <staging-dir> --reference-ids <ref_ids>`
-      : `node bin/goldflow.mjs visual cast-refs ${base} --reference-image-model flux-klein --auto-resolve true --max-resolve-iterations 2`,
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --references-only true --reference-concurrency 15`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --note "<generated reference review notes>"`,
     visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base}`,
     visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,

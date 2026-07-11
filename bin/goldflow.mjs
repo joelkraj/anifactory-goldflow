@@ -220,8 +220,6 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-reference-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ref-plan") {
   run("visual-reference-plan-approve.mjs", flags);
-} else if (command === "visual" && subcommand === "cast-refs") {
-  run("reference-candidate-workflow.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-refs") {
   run("visual-reference-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "review") {

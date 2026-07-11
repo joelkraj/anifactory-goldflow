@@ -3,11 +3,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import {
-  candidateSelectionCoverage,
-  referenceCandidatePolicyActive,
-  referenceSelectionRequired,
-} from "./lib/reference-candidate-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -21,7 +16,6 @@ const episodeDir = flags["episode-dir"]
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
-const candidateSelectionReportPath = flags["candidate-selection-report"] ?? path.join(episodeDir, `reference_candidate_selection_${episode}.json`);
 const approvalOutputPath = flags.output ?? path.join(episodeDir, `visual_reference_approval_${episode}.json`);
 
 function parseFlags(parts) {
@@ -62,17 +56,11 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function referencePathValue(target) {
-  return target?.conditioning_image_path ?? target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
-}
-
 async function main() {
-  const [visualReferencePlan, characterStateRefs, imagegenReport, runIdentity, candidateSelectionReport] = await Promise.all([
+  const [visualReferencePlan, characterStateRefs, imagegenReport] = await Promise.all([
     readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
     readJson(imagegenReportPath, null),
-    readJson(path.join(episodeDir, "run_identity.json"), null),
-    readJson(candidateSelectionReportPath, null),
   ]);
   if (visualReferencePlan?.status !== "passed") {
     throw new Error(`visual_reference_plan.json must be passed before approval. Current status: ${visualReferencePlan?.status ?? "missing"}.`);
@@ -93,28 +81,6 @@ async function main() {
   }
   if (imagegenReport && imagegenReport.status && imagegenReport.status !== "passed") {
     throw new Error(`Cannot approve: imagegen report exists but status is ${imagegenReport.status}.`);
-  }
-  const candidatePolicyActive = referenceCandidatePolicyActive(runIdentity);
-  const attachableTargets = (visualReferencePlan.reference_targets ?? []).filter((target) => (
-    target.required_before_imagegen === true || target.generation_mode === "standalone_ref"
-  ));
-  let candidateCoverage = { passed: true, missing_ref_ids: [] };
-  let selectedCandidateCount = 0;
-  if (candidatePolicyActive) {
-    candidateCoverage = candidateSelectionCoverage(attachableTargets, candidateSelectionReport);
-    if (!candidateCoverage.passed) {
-      throw new Error(`Cannot approve: candidate selection is missing for reusable references: ${candidateCoverage.missing_ref_ids.slice(0, 20).join(", ")}`);
-    }
-    const selectedById = new Map((candidateSelectionReport?.targets ?? []).map((row) => [String(row.ref_id), row]));
-    for (const target of attachableTargets.filter(referenceSelectionRequired)) {
-      const selected = selectedById.get(String(target.ref_id));
-      const officialPath = referencePathValue(target);
-      const currentHash = officialPath ? await fileHash(officialPath) : null;
-      if (!currentHash || currentHash !== selected?.promotion?.official_reference_sha256) {
-        throw new Error(`Cannot approve: promoted candidate hash is missing or stale for ${target.ref_id}.`);
-      }
-      selectedCandidateCount += 1;
-    }
   }
   const visualReferencePlanHash = await fileHash(visualReferencePlanPath);
   const now = new Date().toISOString();
@@ -143,11 +109,6 @@ async function main() {
     visual_reference_plan_hash: visualReferencePlanHash,
     imagegen_report_path: imagegenReport ? imagegenReportPath : null,
     imagegen_status: imagegenReport?.status ?? null,
-    reference_candidate_policy_active: candidatePolicyActive,
-    reference_candidate_selection_report_path: candidatePolicyActive ? candidateSelectionReportPath : null,
-    reference_candidate_selection_status: candidateSelectionReport?.status ?? null,
-    selected_candidate_reference_count: selectedCandidateCount,
-    candidate_selection_coverage: candidateCoverage,
     required_reference_count: requiredTargets.length,
     character_state_ref_count: approvedRefs.character_state_refs.length,
     approved_by: approvedRefs.approved_by,

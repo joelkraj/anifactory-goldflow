@@ -10,11 +10,6 @@ import {
   stageDefinition,
   stageIsSatisfied,
 } from "./lib/pipeline-stage-registry.mjs";
-import {
-  candidateSelectionCoverage,
-  referenceCandidatePolicyActive,
-  referenceSelectionRequired,
-} from "./lib/reference-candidate-contract.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -612,47 +607,24 @@ async function referenceGenerationComplete(episodeDir, identity) {
   }
   const duplicates = [...byHash.values()].filter((rows) => rows.length > 1);
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
-  let candidateEvidence = "";
-  let candidateSelectionPassed = true;
-  if (referenceCandidatePolicyActive(identity)) {
-    const selectionPath = path.join(episodeDir, `reference_candidate_selection_${identity.episode ?? "ep_01"}.json`);
-    const selectionReport = await readJson(selectionPath, null);
-    const coverage = candidateSelectionCoverage(required, selectionReport);
-    const selectedById = new Map((selectionReport?.targets ?? []).map((row) => [String(row.ref_id), row]));
-    const stale = [];
-    for (const target of required.filter(referenceSelectionRequired)) {
-      const selected = selectedById.get(String(target.ref_id));
-      const targetPath = referencePathValue(target);
-      const currentHash = targetPath ? await fileSha256(targetPath) : null;
-      if (!currentHash || currentHash !== selected?.promotion?.official_reference_sha256) stale.push(String(target.ref_id));
-    }
-    candidateSelectionPassed = String(selectionReport?.status ?? "") === "passed" && coverage.passed && stale.length === 0;
-    candidateEvidence = `; candidate_selection=${candidateSelectionPassed ? "passed" : "blocked"}`
-      + `${coverage.missing_ref_ids.length ? ` missing=${coverage.missing_ref_ids.slice(0, 8).join(", ")}` : ""}`
-      + `${stale.length ? ` stale=${stale.slice(0, 8).join(", ")}` : ""}`;
-  }
   return {
-    done: required.length > 0 && missing.length === 0 && duplicates.length === 0 && candidateSelectionPassed,
-    evidence: `required refs=${present}/${required.length}${missing.length ? `; missing=${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ` +${missing.length - 8} more` : ""}` : ""}${duplicates.length ? `; duplicate_hashes=${duplicateSummary.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}${candidateEvidence}`,
+    done: required.length > 0 && missing.length === 0 && duplicates.length === 0,
+    evidence: `required refs=${present}/${required.length}${missing.length ? `; missing=${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ` +${missing.length - 8} more` : ""}` : ""}${duplicates.length ? `; duplicate_hashes=${duplicateSummary.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}`,
   };
 }
 
-async function referenceImageApprovalComplete(episodeDir, episode, identity) {
+async function referenceImageApprovalComplete(episodeDir, episode) {
   const characterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
   const approval = await readJson(path.join(episodeDir, `visual_reference_approval_${episode}.json`), null);
   const characterStatus = String(characterRefs?.status ?? "").toLowerCase();
   const approvalStatus = String(approval?.status ?? "").toLowerCase();
-  const candidateApprovalCurrent = !referenceCandidatePolicyActive(identity)
-    || (approval?.reference_candidate_policy_active === true
-      && approval?.candidate_selection_coverage?.passed === true);
   const done = ["approved", "passed"].includes(characterStatus)
-    && ["approved", "passed"].includes(approvalStatus)
-    && candidateApprovalCurrent;
+    && ["approved", "passed"].includes(approvalStatus);
   return {
     done,
     evidence: done
       ? `visual_reference_approval_${episode}.json status=${approvalStatus}`
-      : `generated reference approval missing or stale; character_state_refs status=${characterStatus || "missing"}${candidateApprovalCurrent ? "" : "; candidate selection approval missing"}`,
+      : `generated reference approval missing; character_state_refs status=${characterStatus || "missing"}`,
   };
 }
 
@@ -1358,7 +1330,7 @@ async function main() {
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode);
   const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
-  const referenceImageApproval = await referenceImageApprovalComplete(episodeDir, episode, identity);
+  const referenceImageApproval = await referenceImageApprovalComplete(episodeDir, episode);
   const legacyCharacterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
   const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
   const imagegen = await imageReportComplete(episodeDir, episode, identity);

@@ -5,7 +5,6 @@ import { createHash } from "node:crypto";
 // approved before spend.
 const MUTABLE_REFERENCE_OUTPUT_KEYS = new Set([
   "candidate_image_ids",
-  "candidate_selection",
   "conditioning_image_path",
   "derived_from_image_id",
   "derived_from_image_path",
@@ -13,7 +12,6 @@ const MUTABLE_REFERENCE_OUTPUT_KEYS = new Set([
   "derived_reference_promotion_updated_at",
   "derived_reference_status",
   "reference_generation_updated_at",
-  "reference_candidate_selection_updated_at",
   "reference_image_path",
   "updated_at",
 ]);

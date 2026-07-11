@@ -228,6 +228,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("engagement-overlay-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "transitions") {
   run("visual-transition-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "motion-plan") {
+  run("visual-motion-plan.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
 } else if (command === "imagegen" && subcommand === "promote-derived-refs") {

@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sharp from "sharp";
+import { motionTraceFindings, motionTraceForIntent } from "./lib/motion-plan-utils.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -30,6 +31,8 @@ const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_iden
 const imageOutputQaPath = flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
 const cutExecutionLedgerPath = flags["cut-execution-ledger"] ?? path.join(episodeDir, "cut_execution_ledger.json");
 const transitionEditPlanPath = flags.transitionPlan ?? flags["transition-plan"] ?? path.join(episodeDir, `transition_edit_plan_${episode}.json`);
+const motionEditPlanPath = flags.motionPlan ?? flags["motion-plan"] ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`);
+const motionTracePath = flags["motion-trace-output"] ?? path.join(episodeDir, `motion_trace_${episode}.jsonl`);
 const engagementOverlayPlanPath = flags.engagementPlan ?? flags["engagement-plan"] ?? path.join(episodeDir, `engagement_overlay_plan_${episode}.json`);
 const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-goldflow.mp4`);
 const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.join(episodeDir, `render_report_${episode}.json`);
@@ -88,6 +91,13 @@ async function readJson(filePath, fallback = null) {
 
 async function exists(filePath) {
   return Boolean(filePath) && fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
+}
+
+async function assertSourceHashesCurrent(report, label) {
+  for (const [filePath, expectedHash] of Object.entries(report?.source_hashes ?? {})) {
+    const actualHash = await hashFile(filePath).catch(() => null);
+    if (!actualHash || actualHash !== expectedHash) throw new Error(`${label} source hash is stale: ${filePath}`);
+  }
 }
 
 async function hashFile(filePath) {
@@ -1086,12 +1096,34 @@ function fadeFilters(duration) {
   return `,fade=t=in:st=0:d=${visualFadeSec},fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${visualFadeSec}`;
 }
 
-function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPrompt = null) {
+function directedMotionProfile(intent) {
+  if (!intent) return null;
+  return {
+    name: `directed_${intent.behavior ?? "static_hold"}`,
+    behavior: intent.behavior ?? "static_hold",
+    smooth_fast: true,
+    hook: false,
+    sceneStart: false,
+    directed: true,
+  };
+}
+
+function directedProgressExpr(frameCount, easing = "linear") {
+  const base = `(on/${Math.max(1, frameCount - 1)})`;
+  if (easing === "ease_in") return `pow(${base},2)`;
+  if (easing === "ease_out") return `(1-pow(1-${base},2))`;
+  if (easing === "ease_in_out") return `(${base}*${base}*(3-2*${base}))`;
+  return base;
+}
+
+function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPrompt = null, motionIntent = null) {
   const fgW = Math.round(width * Math.max(0.45, Math.min(1, foregroundScale)));
   const fgH = Math.round(height * Math.max(0.45, Math.min(1, foregroundScale)));
-  const profile = selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
-  const offsets = motionProfileOffsets(profile);
-  const transitionFilters = visualTransitionTreatment(duration, profile, prompt, startSec, previousPrompt, index);
+  const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
+  const offsets = motionIntent ? { startX: 0, endX: 0, startY: 0, endY: 0 } : motionProfileOffsets(profile);
+  const transitionFilters = motionIntent
+    ? "eq=contrast=1.018:saturation=1.028:brightness=0.002"
+    : visualTransitionTreatment(duration, profile, prompt, startSec, previousPrompt, index);
   const transitionPrefix = transitionFilters ? `${transitionFilters},` : "";
   const transitionSuffix = transitionFilters ? `,${transitionFilters}` : "";
   const fades = fadeFilters(duration);
@@ -1099,18 +1131,30 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,${transitionPrefix}fps=${fps},format=yuv420p${fades}`;
   }
   if (motionMode === "fill_ken_burns" || motionMode === "smooth_fast_ken_burns") {
-    const { startZoom, endZoom, curve } = zoomRange(profile);
-    const startXBias = offsets.startX / width;
-    const endXBias = offsets.endX / width;
-    const startYBias = offsets.startY / height;
-    const endYBias = offsets.endY / height;
     const frameCount = clipFrameCount(duration);
-    const progress = progressExpr(frameCount, curve);
-    const xBiasExpr = `${startXBias.toFixed(4)}+${(endXBias - startXBias).toFixed(4)}*${progress}`;
-    const yBiasExpr = `${startYBias.toFixed(4)}+${(endYBias - startYBias).toFixed(4)}*${progress}`;
-    const xExpr = `max(0,min(iw-iw/zoom,iw/2-(iw/zoom/2)+(${xBiasExpr})*iw))`;
-    const yExpr = `max(0,min(ih-ih/zoom,ih/2-(ih/zoom/2)+(${yBiasExpr})*ih))`;
-    const zoomExpr = `${startZoom.toFixed(4)}+${(endZoom - startZoom).toFixed(7)}*${progress}`;
+    let xExpr;
+    let yExpr;
+    let zoomExpr;
+    if (motionIntent) {
+      const progress = directedProgressExpr(frameCount, motionIntent.easing);
+      const xAnchorExpr = `${Number(motionIntent.start_anchor.x).toFixed(5)}+${(Number(motionIntent.end_anchor.x) - Number(motionIntent.start_anchor.x)).toFixed(7)}*${progress}`;
+      const yAnchorExpr = `${Number(motionIntent.start_anchor.y).toFixed(5)}+${(Number(motionIntent.end_anchor.y) - Number(motionIntent.start_anchor.y)).toFixed(7)}*${progress}`;
+      xExpr = `max(0,min(iw-iw/zoom,iw*(${xAnchorExpr})-(iw/zoom/2)))`;
+      yExpr = `max(0,min(ih-ih/zoom,ih*(${yAnchorExpr})-(ih/zoom/2)))`;
+      zoomExpr = `${Number(motionIntent.start_scale).toFixed(5)}+${(Number(motionIntent.end_scale) - Number(motionIntent.start_scale)).toFixed(7)}*${progress}`;
+    } else {
+      const { startZoom, endZoom, curve } = zoomRange(profile);
+      const startXBias = offsets.startX / width;
+      const endXBias = offsets.endX / width;
+      const startYBias = offsets.startY / height;
+      const endYBias = offsets.endY / height;
+      const progress = progressExpr(frameCount, curve);
+      const xBiasExpr = `${startXBias.toFixed(4)}+${(endXBias - startXBias).toFixed(4)}*${progress}`;
+      const yBiasExpr = `${startYBias.toFixed(4)}+${(endYBias - startYBias).toFixed(4)}*${progress}`;
+      xExpr = `max(0,min(iw-iw/zoom,iw/2-(iw/zoom/2)+(${xBiasExpr})*iw))`;
+      yExpr = `max(0,min(ih-ih/zoom,ih/2-(ih/zoom/2)+(${yBiasExpr})*ih))`;
+      zoomExpr = `${startZoom.toFixed(4)}+${(endZoom - startZoom).toFixed(7)}*${progress}`;
+    }
     const renderW = Math.ceil((width * renderScaleMultiplier) / 2) * 2;
     const renderH = Math.ceil((height * renderScaleMultiplier) / 2) * 2;
     return `scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,crop=${renderW}:${renderH},zoompan=z='${zoomExpr}':x='${xExpr}':y='${yExpr}':d=${frameCount}:s=${width}x${height}:fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
@@ -1139,9 +1183,35 @@ function transitionPlanByToImage(transitionEditPlan) {
   return new Map((transitionEditPlan?.transition_events ?? []).map((event) => [event.to_image_id, event]));
 }
 
-async function buildMotionClips(promptPlan, imagegenReport, audioDuration, transitionEditPlan = null) {
+function xfadeTimelineGroups(clipRows, selectedXfadeDurations) {
+  const groups = [];
+  let current = clipRows.length ? [clipRows[0]] : [];
+  for (let index = 0; index < clipRows.length - 1; index += 1) {
+    if (selectedXfadeDurations.has(clipRows[index].index)) current.push(clipRows[index + 1]);
+    else {
+      groups.push(current);
+      current = [clipRows[index + 1]];
+    }
+  }
+  if (current.length) groups.push(current);
+  return groups;
+}
+
+export function xfadeTimelineGroupsForTests(imageIds, selectedToImageIds) {
+  const rows = imageIds.map((imageId, index) => ({ index, prompt: { image_id: imageId } }));
+  const selected = new Set(selectedToImageIds);
+  const durations = new Map();
+  for (let index = 0; index < rows.length - 1; index += 1) {
+    if (selected.has(rows[index + 1].prompt.image_id)) durations.set(rows[index].index, 0.25);
+  }
+  return xfadeTimelineGroups(rows, durations).map((group) => group.map((row) => row.prompt.image_id));
+}
+
+async function buildMotionClips(promptPlan, imagegenReport, audioDuration, transitionEditPlan = null, motionEditPlan = null) {
   const imageById = new Map((imagegenReport.results ?? []).map((row) => [row.image_id, row.image_path]));
   const plannedTransitionByToImage = transitionPlanByToImage(transitionEditPlan);
+  const motionIntentByImage = new Map((motionEditPlan?.motion_intents ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const directedMotionRequired = motionEditPlan?.status === "passed";
   const prompts = (promptPlan.prompts ?? []).filter((prompt) => imageById.has(prompt.image_id));
   if (!prompts.length) throw new Error("No generated images found for prompt plan.");
   const totalPromptDuration = prompts.reduce((sum, prompt) => sum + Math.max(1, Number(prompt.duration_sec ?? 6)), 0);
@@ -1153,7 +1223,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
   const motionProfiles = {};
   const motionBehaviors = {};
   const transitionProfiles = {};
-  const hookXfadeTransitions = [];
+  const appliedXfadeTransitions = [];
   const hookClipIds = [];
   const transitionClipIds = [];
   const clipJobs = [];
@@ -1177,7 +1247,12 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
         : audioDuration - startSec
       : imageDuration(prompt, scale);
     const duration = Math.max(1 / fps, Math.min(plannedDuration, Math.max(1 / fps, audioDuration - startSec)));
-    const profile = selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
+    const motionIntent = motionIntentByImage.get(String(prompt.image_id ?? "")) ?? null;
+    if (directedMotionRequired && !motionIntent) throw new Error(`Directed motion plan missing intent for ${prompt.image_id}.`);
+    if (motionIntent && Math.abs(Number(motionIntent.duration_sec) - duration) > Math.max(0.08, duration * 0.03)) {
+      throw new Error(`Directed motion duration mismatch for ${prompt.image_id}: plan=${Number(motionIntent.duration_sec).toFixed(3)} render=${duration.toFixed(3)}.`);
+    }
+    const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
     const transition = transitionProfile(duration, profile, prompt, startSec, previousPrompt, index);
     motionProfiles[profile.name] = (motionProfiles[profile.name] ?? 0) + 1;
     motionBehaviors[profile.behavior ?? "unspecified"] = (motionBehaviors[profile.behavior ?? "unspecified"] ?? 0) + 1;
@@ -1185,30 +1260,35 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     if (profile.hook) hookClipIds.push(prompt.image_id);
     if (transition.name !== "polished_motion") transitionClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
-    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt });
+    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent });
   }
-  const hookRows = hookXfadeEnabled
-    ? clipRows.filter((row) => row.startSec < retentionXfadeSec)
-    : [];
-  const hookXfadeCount = hookRows.length >= 2 ? hookRows.length : 0;
-  const hookXfadeDurations = new Map();
-  if (hookXfadeCount) {
-    for (let index = 0; index < hookRows.length - 1; index += 1) {
-      const planned = plannedTransitionByToImage.get(hookRows[index + 1].prompt.image_id);
-      hookXfadeDurations.set(
-        hookRows[index].index,
-        planned?.xfade_duration_sec
-          ? clampXfadeDuration(planned.xfade_duration_sec, hookRows[index], hookRows[index + 1])
-          : xfadeDurationForBoundary(hookRows[index], hookRows[index + 1]),
-      );
-    }
+  const selectedXfadeDurations = new Map();
+  const selectedBoundaryRows = [];
+  for (let index = 0; index < clipRows.length - 1; index += 1) {
+    const current = clipRows[index];
+    const next = clipRows[index + 1];
+    const planned = plannedTransitionByToImage.get(next.prompt.image_id);
+    const legacySelected = !transitionEditPlan && hookXfadeEnabled && next.startSec < retentionXfadeSec;
+    if (!planned && !legacySelected) continue;
+    const duration = planned?.xfade_duration_sec
+      ? clampXfadeDuration(planned.xfade_duration_sec, current, next)
+      : xfadeDurationForBoundary(current, next);
+    selectedXfadeDurations.set(current.index, duration);
+    selectedBoundaryRows.push({ current, next, planned, duration });
+  }
+  const plannedTransitionCount = Array.isArray(transitionEditPlan?.transition_events) ? transitionEditPlan.transition_events.length : selectedBoundaryRows.length;
+  if (transitionEditPlan && selectedBoundaryRows.length !== plannedTransitionCount) {
+    throw new Error(`Transition plan contains ${plannedTransitionCount} events but ${selectedBoundaryRows.length} map to adjacent timeline boundaries.`);
   }
   for (const row of clipRows) {
-    const tailSec = hookXfadeDurations.get(row.index) ?? 0;
+    const tailSec = selectedXfadeDurations.get(row.index) ?? 0;
     const renderDuration = row.duration + tailSec;
     const frameCount = clipFrameCount(renderDuration);
-    const filter = motionClipFilter(renderDuration, row.index, row.prompt, row.startSec, row.previousPrompt);
+    const filter = motionClipFilter(renderDuration, row.index, row.prompt, row.startSec, row.previousPrompt, row.motionIntent);
     const imageSha256 = await hashFile(row.imagePath);
+    if (row.motionIntent?.image_sha256 && row.motionIntent.image_sha256 !== imageSha256) {
+      throw new Error(`Directed motion image hash stale for ${row.prompt.image_id}.`);
+    }
     const motionProfileHash = sha256(JSON.stringify({
       profile: row.profile,
       filter,
@@ -1303,24 +1383,32 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       updated_at: new Date().toISOString(),
     });
   }
-  if (hookXfadeCount) {
-    const hookXfadePath = path.join(clipDir, "00000-hook-xfade-segment.mp4");
+  const timelineGroups = xfadeTimelineGroups(clipRows, selectedXfadeDurations);
+  for (let groupIndex = 0; groupIndex < timelineGroups.length; groupIndex += 1) {
+    const group = timelineGroups[groupIndex];
+    if (group.length === 1) {
+      lines.push(`file '${concatEscape(group[0].clipPath)}'`);
+      continue;
+    }
+    const segmentPath = path.join(clipDir, `${String(groupIndex + 1).padStart(5, "0")}-xfade-segment.mp4`);
     const filterParts = [];
     let previousLabel = "0:v";
     let cumulative = 0;
-    for (let index = 0; index < hookRows.length - 1; index += 1) {
-      cumulative += hookRows[index].duration;
-      const duration = hookXfadeDurations.get(hookRows[index].index) ?? hookXfadeDurationSec;
+    for (let index = 0; index < group.length - 1; index += 1) {
+      const current = group[index];
+      const next = group[index + 1];
+      cumulative += current.duration;
+      const duration = selectedXfadeDurations.get(current.index);
       const offset = Math.max(0, cumulative - duration);
-      const planned = plannedTransitionByToImage.get(hookRows[index + 1].prompt.image_id);
-      const transition = xfadeTransitionForBoundary(hookRows[index].prompt, hookRows[index + 1].prompt, index, planned);
-      const outLabel = index === hookRows.length - 2 ? "hookout" : `xv${index + 1}`;
+      const planned = plannedTransitionByToImage.get(next.prompt.image_id);
+      const transition = xfadeTransitionForBoundary(current.prompt, next.prompt, current.index, planned);
+      const outLabel = index === group.length - 2 ? "segmentout" : `xv${index + 1}`;
       filterParts.push(`[${previousLabel}][${index + 1}:v]xfade=transition=${transition}:duration=${duration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`);
-      hookXfadeTransitions.push({
-        from_image_id: hookRows[index].prompt.image_id,
-        to_image_id: hookRows[index + 1].prompt.image_id,
-        cut_start_sec: Number(cumulative.toFixed(3)),
-        transition_offset_sec: Number(offset.toFixed(3)),
+      appliedXfadeTransitions.push({
+        from_image_id: current.prompt.image_id,
+        to_image_id: next.prompt.image_id,
+        cut_start_sec: Number((current.startSec + current.duration).toFixed(3)),
+        transition_offset_sec: Number((current.startSec + current.duration - duration).toFixed(3)),
         transition,
         duration_sec: Number(duration.toFixed(3)),
       });
@@ -1328,26 +1416,37 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     }
     await execFile(ffmpegBin, [
       "-y",
-      ...hookRows.flatMap((row) => ["-i", row.clipPath]),
+      ...group.flatMap((row) => ["-i", row.clipPath]),
       "-filter_complex", filterParts.join(";"),
-      "-map", "[hookout]",
+      "-map", "[segmentout]",
       "-an",
       "-c:v", "libx264",
       "-preset", clipPreset,
       "-crf", "20",
       "-pix_fmt", "yuv420p",
       "-r", String(fps),
-      hookXfadePath,
+      segmentPath,
     ], { maxBuffer: 1024 * 1024 * 64 });
-    const hookExpected = hookRows.reduce((sum, row) => sum + row.duration, 0);
-    const hookActual = await mediaDuration(hookXfadePath);
-    if (Math.abs(hookActual - hookExpected) > Math.max(0.12, hookExpected * 0.015)) {
-      throw new Error(`Rendered malformed hook xfade segment: expected ${hookExpected.toFixed(3)}s, got ${hookActual.toFixed(3)}s`);
+    const expected = group.reduce((sum, row) => sum + row.duration, 0);
+    const actual = await mediaDuration(segmentPath);
+    if (Math.abs(actual - expected) > Math.max(0.12, expected * 0.015)) {
+      throw new Error(`Rendered malformed xfade segment ${groupIndex + 1}: expected ${expected.toFixed(3)}s, got ${actual.toFixed(3)}s`);
     }
-    lines.push(`file '${concatEscape(hookXfadePath)}'`);
-    for (const row of clipRows.slice(hookRows.length)) lines.push(`file '${concatEscape(row.clipPath)}'`);
-  } else {
-    for (const row of clipRows) lines.push(`file '${concatEscape(row.clipPath)}'`);
+    lines.push(`file '${concatEscape(segmentPath)}'`);
+  }
+  if (appliedXfadeTransitions.length !== plannedTransitionCount) throw new Error(`Planned/applied transition mismatch: planned=${plannedTransitionCount}, applied=${appliedXfadeTransitions.length}.`);
+
+  const motionTraceRows = clipRows.flatMap((row) => {
+    if (!row.motionIntent) return [];
+    return motionTraceForIntent({ ...row.motionIntent, duration_sec: row.renderDuration }, fps).map((trace) => ({
+      ...trace,
+      absolute_time_sec: Number((row.startSec + trace.time_sec).toFixed(6)),
+    }));
+  });
+  const motionTraceBlockers = motionTraceFindings(motionTraceRows).filter((finding) => finding.severity === "blocker");
+  if (motionTraceBlockers.length) throw new Error(`Motion trace validation blocked ${motionTraceBlockers.length} finding(s): ${motionTraceBlockers.slice(0, 8).map((row) => `${row.image_id}:${row.code}`).join(", ")}`);
+  if (directedMotionRequired) {
+    await fs.writeFile(motionTracePath, `${motionTraceRows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
   }
   const concatPath = path.join(workDir, "motion-clips.concat.txt");
   await fs.mkdir(workDir, { recursive: true });
@@ -1362,10 +1461,16 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     motion_behaviors: motionBehaviors,
     transition_profiles: transitionProfiles,
     hook_xfade_enabled: hookXfadeEnabled,
-    hook_xfade_applied: Boolean(hookXfadeCount),
+    hook_xfade_applied: appliedXfadeTransitions.some((row) => row.cut_start_sec < retentionXfadeSec),
     hook_xfade_duration_sec: hookXfadeDurationSec,
-    hook_xfade_transition_count: hookXfadeTransitions.length,
-    hook_xfade_transitions: hookXfadeTransitions,
+    hook_xfade_transition_count: appliedXfadeTransitions.filter((row) => row.cut_start_sec < retentionXfadeSec).length,
+    hook_xfade_transitions: appliedXfadeTransitions.filter((row) => row.cut_start_sec < retentionXfadeSec),
+    planned_transition_count: plannedTransitionCount,
+    applied_transition_count: appliedXfadeTransitions.length,
+    applied_transitions: appliedXfadeTransitions,
+    motion_trace_path: directedMotionRequired ? motionTracePath : null,
+    motion_trace_frame_count: motionTraceRows.length,
+    motion_trace_blocker_count: motionTraceBlockers.length,
     hook_transition_sec: hookTransitionSec,
     retention_xfade_sec: retentionXfadeSec,
     transition_tail_sec: transitionTailSec,
@@ -1498,13 +1603,14 @@ async function runLimited(jobs, limit) {
 
 async function main() {
   await configureMediaTools();
-  const [promptPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
+  const [promptPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
     readJson(promptPlanPath, null),
     readJson(imagegenReportPath, null),
     readJson(wordTimingPath, null),
     readJson(audioBedReportPath, null),
     readJson(audioStitchReportPath, null),
     readJson(transitionEditPlanPath, null),
+    readJson(motionEditPlanPath, null),
     readJson(engagementOverlayPlanPath, null),
     readJson(runIdentityPath, {}),
     readJson(imageOutputQaPath, null),
@@ -1513,6 +1619,9 @@ async function main() {
   if (promptPlan?.status !== "passed") throw new Error(`Missing passed prompt plan: ${promptPlanPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
+  const v2Run = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";
+  if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
+  if (motionEditPlan?.status === "passed") await assertSourceHashesCurrent(motionEditPlan, "Directed motion plan");
   const imageIntegrity = await assertRenderImageIntegrity(promptPlan, imagegenReport, runIdentity, imageOutputQa, cutExecutionLedger);
   const audioPath = flags.audio ?? audioBedReport?.mix?.m4a_path ?? audioBedReport?.mix?.wav_path;
   if (!audioPath || !(await exists(audioPath))) throw new Error(`Missing final mixed audio from ${audioBedReportPath}`);
@@ -1526,7 +1635,7 @@ async function main() {
     : 0;
   const usableTransitionPlan = transitionSfxDisabledByAudio ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
   const renderAudio = await audioWithRenderTransitionSfx(audioPath, usableTransitionPlan, audioDuration);
-  const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration, usableTransitionPlan);
+  const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration, usableTransitionPlan, motionEditPlan?.status === "passed" ? motionEditPlan : null);
   const subtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport);
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
   const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), engagementOverlayPlan, audioDuration);
@@ -1654,6 +1763,7 @@ async function main() {
     audioBedReportPath,
     audioStitchReportPath,
     usableTransitionPlan ? transitionEditPlanPath : null,
+    motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
     engagementOverlay.events.length ? engagementOverlayPlanPath : null,
   ].filter(Boolean)) {
     if (await exists(sourcePath)) sourceHashes[path.resolve(sourcePath)] = await hashFile(sourcePath);
@@ -1681,6 +1791,7 @@ async function main() {
     silent_concat_stream: concatStream,
     silent_concat_reused_without_normalization_encode: concatStreamReusable,
     transition_edit_plan_path: usableTransitionPlan ? transitionEditPlanPath : null,
+    motion_edit_plan_path: motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
     transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudio,
     transition_sfx_stripped_count: strippedTransitionSfxCount,
     transition_sfx_applied: renderAudio.transition_sfx_applied,
@@ -1728,6 +1839,12 @@ async function main() {
       hook_xfade_duration_sec: concat.hook_xfade_duration_sec,
       hook_xfade_transition_count: concat.hook_xfade_transition_count,
       hook_xfade_transitions: concat.hook_xfade_transitions,
+      planned_transition_count: concat.planned_transition_count,
+      applied_transition_count: concat.applied_transition_count,
+      applied_transitions: concat.applied_transitions,
+      motion_trace_path: concat.motion_trace_path,
+      motion_trace_frame_count: concat.motion_trace_frame_count,
+      motion_trace_blocker_count: concat.motion_trace_blocker_count,
       motion_clip_cache_reused_count: concat.motion_clip_cache_reused_count,
       motion_clip_cache_generated_count: concat.motion_clip_cache_generated_count,
     },

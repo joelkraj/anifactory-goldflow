@@ -57,7 +57,13 @@ import {
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
 import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
-import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents } from "./render.mjs";
+import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents, xfadeTimelineGroupsForTests } from "./render.mjs";
+import {
+  motionIntentFindings,
+  motionIntentForPrompt,
+  motionTraceFindings,
+  motionTraceForIntent,
+} from "./lib/motion-plan-utils.mjs";
 import {
   gptImage2OutputSizeForTests,
   prepareGptImage2PromptForTests,
@@ -680,6 +686,38 @@ async function testProviderConcurrencyBacksOffAndRecovers() {
   assert.equal(result.adaptive_concurrency.configured, 8);
   assert.equal(result.adaptive_concurrency.minimum < 8, true);
   assert.equal(result.adaptive_concurrency.events.some((row) => row.type === "provider_backoff"), true);
+}
+
+function testDirectedMotionAndFullTimelineTransitions() {
+  const prompt = {
+    image_id: "cut_004",
+    scene_id: "scene_002",
+    visual_beat_id: "beat_004",
+    start_sec: 240,
+    duration_sec: 8,
+    shot_manifest: {
+      shot_job: "physical_action",
+      primary_character: "Joey",
+      character_staging: [{ name: "Joey", screen_position: "frame-left", pose: "lunges forward" }],
+    },
+  };
+  const intent = motionIntentForPrompt(prompt, "hash-4");
+  assert.equal(intent.behavior, "lateral_follow");
+  assert.equal(intent.end_anchor.x, 0.3);
+  assert.deepEqual(motionIntentFindings([intent], { cut_004: "hash-4" }), []);
+  const trace = motionTraceForIntent(intent, 60);
+  assert.equal(trace.length, 480);
+  assert.deepEqual(motionTraceFindings(trace), []);
+
+  const staticIntent = motionIntentForPrompt({ image_id: "cut_005", duration_sec: 10, shot_manifest: {} }, "hash-5");
+  assert.equal(staticIntent.behavior, "static_hold");
+  assert.equal(staticIntent.start_scale, staticIntent.end_scale);
+
+  const groups = xfadeTimelineGroupsForTests(
+    ["cut_001", "cut_002", "cut_003", "cut_004", "cut_005", "cut_006"],
+    ["cut_002", "cut_005"],
+  );
+  assert.deepEqual(groups, [["cut_001", "cut_002"], ["cut_003"], ["cut_004", "cut_005"], ["cut_006"]]);
 }
 
 async function testRenderRequiresHashMatchedImageQa() {
@@ -4814,6 +4852,7 @@ async function run() {
   testImageOutputQaRiskAndDonorPolicies();
   await testProviderCircuitBreakerStopsUnclaimedWork();
   await testProviderConcurrencyBacksOffAndRecovers();
+  testDirectedMotionAndFullTimelineTransitions();
   await testRenderRequiresHashMatchedImageQa();
   await testPreflightLocksNativeTtsSpeedAndSmoothRender();
   await testPostTempoRequiresEmergencyApproval();

@@ -333,11 +333,13 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
    - Low-risk cuts may pass structural QA automatically. Reject only failed cut ids; regenerate that scoped set and invalidate only their motion clips.
    - Generated-image spelling and incidental text accuracy are explicitly outside this QA contract and do not block production.
 
-23. Render.
+23. Directed motion and render.
+   - Run `goldflow visual motion-plan` after image QA. The plan is bound to exact accepted image hashes and derives focal anchors from authored shot staging or explicit per-cut QA overrides. Missing intent becomes a smooth static hold; production does not use hash-random motion directions.
+   - Render writes a per-frame motion trace and blocks direction reversals, discontinuities, malformed durations, and stale motion-plan inputs.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.
    - Optional engagement bait belongs in render-layer overlays only. If the operator asks for comment/like/subscribe prompts, run `goldflow visual engagement` after prompt hardening and before render, then let render apply exact animated bubbles from `engagement_overlay_plan_<episode>.json`.
    - Engagement overlays should be sparse and story-timed: one early comment question after the cold open, a few choice/prediction prompts on real dilemmas or reveals, and at most one or two direct like/subscribe CTAs near a high-retention beat or the end/cliffhanger. Do not bake engagement text into generated scene images, narration, subtitles, or SFX planning.
-   - `smooth_fast_ken_burns` is the default premium render profile. It uses 60 fps, no heavy oversampling, and the intentional hook/action/reveal/wide/emotional motion grammar. `fill_ken_burns` is an explicit legacy/diagnostic profile.
+   - `smooth_fast_ken_burns` is the default premium render profile. It uses 60 fps, no heavy oversampling, and the directed motion plan. `fill_ken_burns` is an explicit legacy/diagnostic profile.
    - Render timing is absolute. Preserve the `start_sec` timeline from `section_image_prompts_hardened.json` / `visual_beat_plan.json`; do not globally scale image durations to fill the audio. If the visual plan has a gap before the next cut, hold the current image until the next cut's real start time or add new visual beats/images in a planning pass.
    - Each generated motion clip must be duration-probed immediately. Abort on malformed clips rather than continuing a long render.
    - Motion clips are cached by image hash, exact timing, motion-profile/filter hash, dimensions, fps, and encode settings. A changed cut regenerates one clip; unchanged clips are reused and recorded in `cut_execution_ledger.json`.
@@ -348,7 +350,7 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
    - Transitions should be hand-picked by beat, not default fade-to-black. Use smooth FFmpeg transitions such as wipes, pushes, slides, flashes, and manga-panel swipes where they match the moment, while preserving absolute cut timing.
    - Default narrator-only runs use `visual transitions --transition-sfx false`; visual xfade/swipe/flash transitions still work, but transition SFX are disabled.
    - Opt-in transition SFX should be bound deterministically to the actual transition timestamp on selected cuts. The opening thirty seconds can use frequent noticeable transition cues such as swipe-up flash, swipe-down whoosh, scene-card whoosh, impact flash, and manga-panel slide; from 30-180 seconds, keep transition SFX selective but still active on scene changes, system/UI reveals, reversals, humiliations, status turns, and curiosity pivots. The LLM audio planner should not author generic edit-transition whooshes/pops/snaps as narrative SFX.
-   - Use the transition edit plan to choose true FFmpeg `xfade` transitions. For opt-in transition SFX, render/edit adds selected sounds at cut boundaries on top of the continuous mix; do not `acrossfade` the final audio between clips.
+   - Apply every selected FFmpeg `xfade` boundary across the full timeline in bounded contiguous groups and hard-cut every unselected boundary. Block planned/applied count mismatches. For opt-in transition SFX, render/edit adds selected sounds at cut boundaries on top of the continuous mix; do not `acrossfade` the final audio between clips.
    - Render strips transition SFX when the audio bed report disables audio design.
    - Opening retention QA checks visual cuts first on narrator-only runs, and checks visual cuts, transition SFX, and score drops together only on opted-in audio-design runs. In the first 30 seconds, expect visible cut changes every 2-4 seconds when narration supports it. From 30-180 seconds, expect cuts often enough to feel hand edited, usually every 4-7 seconds during escalation.
    - Subtitles should be yellow text with small black outline and no box/background. Phrase-aware grouping merges accidental one- and two-word fragments when the result stays under about ten words and 3.2 seconds, while preserving deliberate one-word emphasis.
@@ -420,9 +422,10 @@ node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --wee
 node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01
 # Inspect contact sheets; edit image_output_review_decisions_ep_01.json with one hash-bound decision per risk cut, then rerun QA.
 node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01
+node bin/goldflow.mjs visual motion-plan --channel <channel> --series <series> --week <week> --episode ep_01
 # Optional for direct/manual Codex/OpenAI proof batches:
 node bin/goldflow.mjs imagegen import-codex --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --image-id <image_id> --source <codex-generated-raster.png> --output <episode-dir>/imagegen_report_codex_manual_ep_01.json
-node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180 --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --motion-plan <episode-dir>/motion_edit_plan_ep_01.json --motion smooth_fast_ken_burns --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
 ```
 
 Opt-in SFX/score/ambience variant:

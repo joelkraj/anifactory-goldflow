@@ -242,14 +242,70 @@ async function testAppendOnlyExecutionProvenance() {
     estimated_cost: { current_batch: { estimated_cost_usd: 0.04 } },
   });
   await finishStageExecution(second, { exitCode: 0 });
+  const references = await beginStageExecution({
+    stage: "reference_generation",
+    command: "imagegen start",
+    flags: { "episode-dir": episodeDir, "references-only": "true" },
+  });
+  await writeJson(path.join(episodeDir, "visual_reference_generation_report.json"), {
+    status: "passed",
+    estimated_cost: { estimated_cost_usd: 0.07 },
+  });
+  const referenceEvent = await finishStageExecution(references, { exitCode: 0 });
+  assert.equal(referenceEvent.cost_usd, 0.07);
+  const render = await beginStageExecution({ stage: "premium_render", command: "render start", flags: { "episode-dir": episodeDir } });
+  await writeJson(path.join(episodeDir, "render_report_ep_01.json"), {
+    status: "passed",
+    render_motion: { motion_clip_cache_reused_count: 12 },
+  });
+  const renderEvent = await finishStageExecution(render, { exitCode: 0 });
+  assert.equal(renderEvent.cache_reuse_count, 12);
+
+  const batchDir = path.join(episodeDir, "reports", "imagegen-batches");
+  await writeJson(path.join(batchDir, "001-references.json"), {
+    schema: "goldflow_imagegen_batch_report_v1",
+    batch_id: "references-001",
+    batch_kind: "references",
+    current_batch_status: "passed",
+    current_batch_cost: { generated_count: 1, estimated_cost_usd: 0.07 },
+    wall_time_sec: 3,
+    image_provider: "modelslab",
+  });
+  await writeJson(path.join(batchDir, "002-scenes.json"), {
+    schema: "goldflow_imagegen_batch_report_v1",
+    batch_id: "scenes-001",
+    batch_kind: "scene_images",
+    current_batch_status: "passed",
+    current_batch_cost: { generated_count: 1, estimated_cost_usd: 0.08 },
+    wall_time_sec: 4,
+    image_provider: "modelslab",
+  });
+  await writeJson(path.join(batchDir, "003-retry.json"), {
+    schema: "goldflow_imagegen_batch_report_v1",
+    batch_id: "scenes-retry-001",
+    batch_kind: "scoped_scene_retry",
+    current_batch_status: "passed",
+    current_batch_cost: { generated_count: 1, estimated_cost_usd: 0.04 },
+    wall_time_sec: 2,
+    image_provider: "modelslab",
+  });
   const events = (await fs.readFile(path.join(episodeDir, "execution_events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(events.filter((row) => row.event_type === "stage_started").length, 2);
-  assert.equal(events.filter((row) => row.event_type === "stage_completed").length, 2);
+  assert.equal(events.filter((row) => row.event_type === "stage_started").length, 4);
+  assert.equal(events.filter((row) => row.event_type === "stage_completed").length, 4);
   assert.equal(second.attempt, 2);
   const manifest = await materializeProductionManifest(episodeDir);
-  assert.equal(manifest.telemetry.total_stage_calls, 2);
+  assert.equal(manifest.telemetry.total_stage_calls, 4);
   assert.equal(manifest.telemetry.retry_calls, 1);
-  assert.equal(manifest.telemetry.cumulative_cost_usd, 0.12);
+  assert.equal(manifest.telemetry.event_recorded_cost_usd, 0.19);
+  assert.equal(manifest.telemetry.imagegen_event_recorded_cost_usd, 0.19);
+  assert.equal(manifest.telemetry.imagegen_batch_cost_usd, 0.19);
+  assert.equal(manifest.telemetry.cumulative_cost_usd, 0.19);
+  assert.equal(manifest.telemetry.cache_reuse_count, 12);
+  assert.equal(manifest.imagegen_batches.batch_count, 3);
+  assert.equal(manifest.imagegen_batches.scoped_retry_batch_count, 1);
+  assert.equal(manifest.imagegen_batches.generated_count, 3);
+  assert.equal(manifest.imagegen_batches.wall_time_sec, 9);
+  assert.equal(manifest.imagegen_batches.by_kind.references.estimated_cost_usd, 0.07);
   const reportFiles = await fs.readdir(path.join(episodeDir, "reports", "stages", "image_generation"));
   assert.equal(reportFiles.length, 2);
 }

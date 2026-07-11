@@ -80,13 +80,101 @@ async function costAndReuseFromOutputs(episodeDir, outputHashes) {
     if (path.extname(relativePath) !== ".json") continue;
     const row = await fs.readFile(path.join(episodeDir, relativePath), "utf8").then(JSON.parse).catch(() => null);
     const cost = row?.estimated_cost?.current_batch?.estimated_cost_usd
+      ?? row?.estimated_cost?.estimated_cost_usd
+      ?? row?.current_batch_cost?.estimated_cost_usd
       ?? row?.current_batch_cost_usd
       ?? row?.batch_cost_usd
       ?? 0;
     if (Number.isFinite(Number(cost))) costUsd += Number(cost);
-    cacheReuseCount += Number(row?.current_batch_cache_reuse_count ?? row?.cache_reuse_count ?? 0) || 0;
+    cacheReuseCount += Number(
+      row?.current_batch_cache_reuse_count
+      ?? row?.cache_reuse_count
+      ?? row?.render_motion?.motion_clip_cache_reused_count
+      ?? 0,
+    ) || 0;
   }
   return { cost_usd: Number(costUsd.toFixed(6)), cache_reuse_count: cacheReuseCount };
+}
+
+function imagegenBatchCost(report = {}) {
+  return Number(
+    report?.current_batch_cost?.estimated_cost_usd
+    ?? report?.estimated_cost?.current_batch?.estimated_cost_usd
+    ?? report?.estimated_cost?.estimated_cost_usd
+    ?? 0,
+  ) || 0;
+}
+
+function imagegenBatchGeneratedCount(report = {}) {
+  return Number(
+    report?.current_batch_cost?.generated_count
+    ?? report?.current_batch_image_count
+    ?? report?.current_batch_results?.filter?.((row) => String(row?.status ?? "").toLowerCase() === "generated")?.length
+    ?? 0,
+  ) || 0;
+}
+
+async function immutableImagegenBatchSummary(episodeDir) {
+  const batchDir = path.join(episodeDir, "reports", "imagegen-batches");
+  const names = await fs.readdir(batchDir).catch(() => []);
+  const batches = [];
+  for (const name of names.filter((value) => value.endsWith(".json")).sort()) {
+    const filePath = path.join(batchDir, name);
+    const report = await fs.readFile(filePath, "utf8").then(JSON.parse).catch(() => null);
+    if (report?.schema !== "goldflow_imagegen_batch_report_v1") continue;
+    const status = String(report.current_batch_status ?? report.status ?? "unknown").toLowerCase();
+    batches.push({
+      batch_id: report.batch_id ?? path.basename(name, ".json"),
+      batch_kind: report.batch_kind ?? "unknown",
+      status,
+      generated_count: imagegenBatchGeneratedCount(report),
+      estimated_cost_usd: Number(imagegenBatchCost(report).toFixed(6)),
+      wall_time_sec: Number(Number(report.wall_time_sec ?? 0).toFixed(3)),
+      provider: report.image_provider ?? null,
+      report_path: filePath,
+      report_sha256: await fileSha256(filePath),
+    });
+  }
+
+  const byKind = {};
+  for (const batch of batches) {
+    const key = batch.batch_kind;
+    const current = byKind[key] ?? {
+      batch_count: 0,
+      passed_batch_count: 0,
+      failed_batch_count: 0,
+      generated_count: 0,
+      estimated_cost_usd: 0,
+      wall_time_sec: 0,
+    };
+    current.batch_count += 1;
+    if (batch.status === "passed") current.passed_batch_count += 1;
+    if (batch.status === "failed") current.failed_batch_count += 1;
+    current.generated_count += batch.generated_count;
+    current.estimated_cost_usd += batch.estimated_cost_usd;
+    current.wall_time_sec += batch.wall_time_sec;
+    byKind[key] = current;
+  }
+  for (const value of Object.values(byKind)) {
+    value.estimated_cost_usd = Number(value.estimated_cost_usd.toFixed(6));
+    value.wall_time_sec = Number(value.wall_time_sec.toFixed(3));
+  }
+
+  return {
+    batch_count: batches.length,
+    passed_batch_count: batches.filter((row) => row.status === "passed").length,
+    failed_batch_count: batches.filter((row) => row.status === "failed").length,
+    scoped_retry_batch_count: batches.filter((row) => /retry/i.test(row.batch_kind)).length,
+    generated_count: batches.reduce((sum, row) => sum + row.generated_count, 0),
+    estimated_cost_usd: Number(batches.reduce((sum, row) => sum + row.estimated_cost_usd, 0).toFixed(6)),
+    wall_time_sec: Number(batches.reduce((sum, row) => sum + row.wall_time_sec, 0).toFixed(3)),
+    by_kind: byKind,
+    batches,
+  };
+}
+
+function isImagegenExecution(event = {}) {
+  return /^imagegen(?:\s|$)/i.test(String(event.command ?? ""));
 }
 
 export async function beginStageExecution({ stage, command, flags = {}, args = [], env = process.env }) {
@@ -200,6 +288,15 @@ export async function materializeProductionManifest(episodeDir) {
   for (const event of completed) latestByStage[event.stage] = event;
   const cutLedgerPath = path.join(episodeDir, "cut_execution_ledger.json");
   const cutLedger = await fs.readFile(cutLedgerPath, "utf8").then(JSON.parse).catch(() => null);
+  const imagegenBatches = await immutableImagegenBatchSummary(episodeDir);
+  const eventRecordedCostUsd = completed.reduce((sum, row) => sum + Number(row.cost_usd ?? 0), 0);
+  const imagegenEventRecordedCostUsd = completed
+    .filter(isImagegenExecution)
+    .reduce((sum, row) => sum + Number(row.cost_usd ?? 0), 0);
+  const nonImagegenEventCostUsd = eventRecordedCostUsd - imagegenEventRecordedCostUsd;
+  const authoritativeImagegenCostUsd = imagegenBatches.batch_count > 0
+    ? imagegenBatches.estimated_cost_usd
+    : imagegenEventRecordedCostUsd;
   const manifest = {
     schema: "goldflow_production_manifest_v1",
     status: completed.some((row) => row.status === "failed") ? "has_failures" : "active",
@@ -217,9 +314,13 @@ export async function materializeProductionManifest(episodeDir) {
       failed_stage_calls: completed.filter((row) => row.status === "failed").length,
       retry_calls: completed.filter((row) => Number(row.attempt ?? 1) > 1).length,
       total_wall_time_sec: Number(completed.reduce((sum, row) => sum + Number(row.wall_time_sec ?? 0), 0).toFixed(3)),
-      cumulative_cost_usd: Number(completed.reduce((sum, row) => sum + Number(row.cost_usd ?? 0), 0).toFixed(6)),
+      cumulative_cost_usd: Number((nonImagegenEventCostUsd + authoritativeImagegenCostUsd).toFixed(6)),
+      event_recorded_cost_usd: Number(eventRecordedCostUsd.toFixed(6)),
+      imagegen_event_recorded_cost_usd: Number(imagegenEventRecordedCostUsd.toFixed(6)),
+      imagegen_batch_cost_usd: Number(imagegenBatches.estimated_cost_usd.toFixed(6)),
       cache_reuse_count: completed.reduce((sum, row) => sum + Number(row.cache_reuse_count ?? 0), 0),
     },
+    imagegen_batches: imagegenBatches,
     cut_execution: cutLedger ? {
       ledger_path: cutLedgerPath,
       ledger_sha256: await fileSha256(cutLedgerPath),

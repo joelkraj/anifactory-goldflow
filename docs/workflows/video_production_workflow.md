@@ -103,7 +103,7 @@ Every guarded stage appends start/completion events to `execution_events.jsonl`,
 
 8. Semantic continuity plan.
    - Extract overlapping script chunks concurrently at four workers, then run one global reconciliation pass over the locked script and chunk outputs.
-   - Write `story_fact_ledger.json` with canonical entities, locations, props, UI motifs, and state transitions. Every fact requires a verbatim script excerpt and confidence; unsupported facts block rather than being deterministically repaired.
+   - Write `story_fact_ledger.json` with canonical entities, locations, props, UI motifs, and state transitions. Every fact requires a verbatim script excerpt and confidence; each transition also names the exact `transition_evidence_excerpt` where its `to_state` first becomes true. Unsupported or temporally ambiguous facts block rather than being deterministically repaired.
    - Extracts semantic scenes from locked script and bibles.
    - This is story/visual meaning, not word timing.
 

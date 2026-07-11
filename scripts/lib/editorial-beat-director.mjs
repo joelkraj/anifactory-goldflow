@@ -118,11 +118,9 @@ function sceneForTime(timedScenes, startSec, endSec) {
 function evidenceTransitionAtomIds(atoms, factLedger) {
   const barriers = new Set();
   for (const transition of factLedger?.state_transitions ?? []) {
-    for (const evidence of transition.evidence ?? []) {
-      const excerpt = normalizeText(evidence.exact_excerpt);
-      const atom = atoms.find((candidate) => excerpt && normalizeText(candidate.text).includes(excerpt));
-      if (atom) barriers.add(atom.atom_id);
-    }
+    const excerpt = transitionEvidenceExcerpt(transition);
+    const atom = atoms.find((candidate) => excerpt && normalizeText(candidate.text).toLowerCase().includes(excerpt.toLowerCase()));
+    if (atom) barriers.add(atom.atom_id);
   }
   return barriers;
 }
@@ -227,6 +225,7 @@ Hard rails:
 - Mentioned-only entities stay offscreen. Every visible entity needs an exact evidence excerpt from the grouped atoms.
 - Resolve first-person I/me/my physical actions to the established narrator/protagonist entity when the fact ledger and scene context identify that person; do not make the acting protagonist disappear because their proper name is omitted locally.
 - Select only canonical entity_id and location_id values below. If the narration gives no supported visible person, an object/UI/environment beat is valid.
+- location_id is the physical camera setting of the foreground action. A destination, landmark, or room mentioned in the distance does not become the beat location until the narration places the visible subjects there.
 - Composition is beat-specific. There is no global wide or close-up bias.
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 
@@ -432,14 +431,15 @@ function entityIdForName(name, factLedger) {
 function transitionEvents(atoms, factLedger) {
   const events = [];
   for (const transition of factLedger?.state_transitions ?? []) {
-    const evidence = (transition.evidence ?? []).map((row) => normalizeText(row.exact_excerpt)).find(Boolean);
-    const atom = atoms.find((candidate) => evidence && normalizeText(candidate.text).includes(evidence));
+    const evidence = transitionEvidenceExcerpt(transition);
+    const atom = atoms.find((candidate) => evidence && normalizeText(candidate.text).toLowerCase().includes(evidence.toLowerCase()));
     if (!atom) continue;
     events.push({
       source_word_index: atom.source_word_start_index,
       entity_id: transition.entity_id,
       field: transition.state_kind,
       value: transition.to_state,
+      from_value: transition.from_state,
       evidence_excerpt: evidence,
     });
   }
@@ -449,28 +449,23 @@ function transitionEvents(atoms, factLedger) {
 export function projectActiveStateConstraints(beats, atoms, factLedger, timedScenes = []) {
   const events = transitionEvents(atoms, factLedger);
   const states = {};
+  for (const event of events) {
+    if (!event.entity_id || !event.field || !event.from_value || states[event.entity_id]?.[event.field] !== undefined) continue;
+    states[event.entity_id] = { ...(states[event.entity_id] ?? {}), [event.field]: event.from_value };
+  }
   let eventCursor = 0;
-  const orderedScenes = [...(timedScenes ?? [])].sort((a, b) => Number(a.start_sec ?? 0) - Number(b.start_sec ?? 0));
-  let sceneCursor = 0;
   return beats.map((beat) => {
-    while (sceneCursor < orderedScenes.length && Number(orderedScenes[sceneCursor].start_sec ?? 0) <= Number(beat.start_sec ?? 0) + 0.001) {
-      const scene = orderedScenes[sceneCursor];
-      for (const state of scene.character_states ?? []) {
-        const entityId = entityIdForName(state.character, factLedger);
-        if (!entityId) continue;
-        states[entityId] = {
-          ...(states[entityId] ?? {}),
-          ...(state.wardrobe ? { wardrobe: state.wardrobe } : {}),
-          ...(state.visible_state ? { visible_state: state.visible_state } : {}),
-          ...(state.state ? { status: state.state } : {}),
-        };
-      }
-      sceneCursor += 1;
-    }
     while (eventCursor < events.length && events[eventCursor].source_word_index <= Number(beat.source_word_end_index)) {
       const event = events[eventCursor];
       if (event.entity_id && event.field) {
-        states[event.entity_id] = { ...(states[event.entity_id] ?? {}), [event.field]: event.value, evidence_excerpt: event.evidence_excerpt };
+        states[event.entity_id] = {
+          ...(states[event.entity_id] ?? {}),
+          [event.field]: event.value,
+          state_evidence: {
+            ...(states[event.entity_id]?.state_evidence ?? {}),
+            [event.field]: event.evidence_excerpt,
+          },
+        };
       }
       eventCursor += 1;
     }
@@ -479,6 +474,13 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
       ...(beat.screen_visible_entity_ids ?? []),
       ...(beat.preview_visible_entity_ids ?? []),
     ]);
+    const scene = (timedScenes ?? []).find((row) => row.scene_id === (beat.parent_scene_id ?? beat.scene_id))
+      ?? sceneForTime(timedScenes, Number(beat.start_sec ?? 0), Number(beat.end_sec ?? beat.start_sec ?? 0));
+    for (const state of scene?.character_states ?? []) {
+      const entityId = entityIdForName(state.character, factLedger);
+      if (!entityId || !visibleIds.includes(entityId) || !state.wardrobe || states[entityId]?.wardrobe !== undefined) continue;
+      states[entityId] = { ...(states[entityId] ?? {}), wardrobe: state.wardrobe };
+    }
     return {
       ...beat,
       active_state_constraints: {
@@ -488,6 +490,13 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
       },
     };
   });
+}
+
+function transitionEvidenceExcerpt(transition) {
+  const explicit = normalizeText(transition?.transition_evidence_excerpt);
+  if (explicit) return explicit;
+  const legacyEvidence = (transition?.evidence ?? []).map((row) => normalizeText(row.exact_excerpt)).filter(Boolean);
+  return legacyEvidence.at(-1) ?? "";
 }
 
 export function editorialBeatCoverageFindings(beats, whisperWordCount) {

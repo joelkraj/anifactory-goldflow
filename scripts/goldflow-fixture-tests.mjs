@@ -475,7 +475,11 @@ function testSemanticReconciliationEvidenceContract() {
     canonical_locations: [{ location_id: "analytics_hall", evidence: [{ exact_excerpt: "Analytics Hall", confidence: 0.95 }] }],
     canonical_props: [{ prop_id: "silver_key", evidence: [{ exact_excerpt: "silver key", confidence: 0.9 }] }],
     canonical_ui_motifs: [],
-    state_transitions: [{ entity_id: "joey", evidence: [{ exact_excerpt: "Joey left for the roof.", confidence: 0.9 }] }],
+    state_transitions: [{
+      entity_id: "joey",
+      transition_evidence_excerpt: "Joey left for the roof.",
+      evidence: [{ exact_excerpt: "Joey left for the roof.", confidence: 0.9 }],
+    }],
   };
   assert.deepEqual(storyFactEvidenceFindingsForTests(valid, script), []);
   const invalid = structuredClone(valid);
@@ -483,6 +487,9 @@ function testSemanticReconciliationEvidenceContract() {
   const findings = storyFactEvidenceFindingsForTests(invalid, script);
   assert.equal(findings.some((finding) => finding.code === "fact_evidence_not_exact"), true);
   assert.equal(findings.some((finding) => finding.code === "fact_confidence_invalid"), true);
+  const missingBoundary = structuredClone(valid);
+  delete missingBoundary.state_transitions[0].transition_evidence_excerpt;
+  assert.equal(storyFactEvidenceFindingsForTests(missingBoundary, script).some((finding) => finding.code === "state_transition_evidence_not_exact"), true);
 }
 
 function testEditorialBeatDirectorContracts() {
@@ -513,13 +520,27 @@ function testEditorialBeatDirectorContracts() {
       { entity_id: "victor", display_name: "Victor", aliases: [] },
     ],
     canonical_locations: [{ location_id: "academy_exam_hall", display_name: "Academy Exam Hall", aliases: [] }],
-    state_transitions: [{
-      entity_id: "joey",
-      state_kind: "wardrobe",
-      from_state: "plain gray student shirt",
-      to_state: "black academy coat",
-      evidence: [{ exact_excerpt: "Joey changes into a black academy coat.", confidence: 1 }],
-    }],
+    state_transitions: [
+      {
+        entity_id: "joey",
+        state_kind: "wardrobe",
+        from_state: "plain gray student shirt",
+        to_state: "black academy coat",
+        transition_evidence_excerpt: "Joey changes into a black academy coat.",
+        evidence: [{ exact_excerpt: "Joey changes into a black academy coat.", confidence: 1 }],
+      },
+      {
+        entity_id: "joey",
+        state_kind: "status",
+        from_state: "waiting for the exam challenge",
+        to_state: "facing Victor at the exam platform",
+        transition_evidence_excerpt: "Joey faces Victor beside the exam platform.",
+        evidence: [
+          { exact_excerpt: "Joey enters the hall with calm eyes.", confidence: 1 },
+          { exact_excerpt: "Joey faces Victor beside the exam platform.", confidence: 1 },
+        ],
+      },
+    ],
   };
   const atoms = buildTranscriptAtoms(script, spoken, timedScenes, ledger);
   assert.equal(atoms.length, 4);
@@ -558,7 +579,12 @@ function testEditorialBeatDirectorContracts() {
   assert.deepEqual(editorialRetentionRailFindings(closeVisualBeatTimelineForTests(normalized.beats, spoken.at(-1).end_sec)), []);
   const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
   assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
+  assert.equal(projected[0].active_state_constraints.entities.joey.visible_state, undefined);
+  assert.equal(projected[0].active_state_constraints.entities.joey.status, "waiting for the exam challenge");
   assert.equal(projected[2].active_state_constraints.entities.joey.wardrobe, "black academy coat");
+  assert.equal(projected[3].active_state_constraints.entities.joey.status, "facing Victor at the exam platform");
+  assert.equal(projected[0].active_state_constraints.entities.joey.state_evidence, undefined);
+  assert.equal(projected[3].active_state_constraints.entities.joey.state_evidence.status, "Joey faces Victor beside the exam platform.");
   const invalid = structuredClone(raw);
   invalid.beats = [raw.beats[0], { ...raw.beats[1], source_atom_ids: [atoms[1].atom_id, atoms[2].atom_id], rail_exception: "mandatory transition" }, raw.beats[3]];
   assert.throws(() => normalizeEditorialGrouping(invalid, atoms, ledger, "ep_01"), /editorial beat contract failed/i);

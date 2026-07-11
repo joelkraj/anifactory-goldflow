@@ -721,6 +721,7 @@ Hard rules:
 - Overlapping chunks intentionally repeat evidence. Deduplicate repeated scenes and facts without deleting story coverage.
 - Preserve scene order and exact script anchors. Return ${targets.minimum}-${targets.maximum} scenes, aiming for ${targets.target}.
 - Every canonical fact row and every state transition must contain at least one evidence row with exact_excerpt copied verbatim from the locked script and confidence from 0 to 1.
+- Every state transition must also set transition_evidence_excerpt to the one exact evidence excerpt where to_state first becomes true. Earlier from-state evidence may remain in evidence, but it is not the transition boundary.
 - Evidence excerpts must be short enough to audit but long enough to prove the fact. Never paraphrase evidence.
 - A fact without exact evidence must be omitted or placed in warnings as unresolved.
 - Do not manufacture costume damage, injury, grime, wealth, location, relationships, props, UI, or physical presence from emotional/social language.
@@ -742,7 +743,7 @@ Return one JSON object only:
   "canonical_locations": [{"location_id":"snake_case","display_name":"...","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.95}]}],
   "canonical_props": [{"prop_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
   "canonical_ui_motifs": [{"ui_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
-  "state_transitions": [{"entity_id":"snake_case","state_kind":"wardrobe|injury|possession|status|location","from_state":"...","to_state":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
+  "state_transitions": [{"entity_id":"snake_case","state_kind":"wardrobe|injury|possession|status|location","from_state":"...","to_state":"...","transition_evidence_excerpt":"one verbatim evidence excerpt where to_state first becomes true","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
   "global_reference_requirements": [],
   "scenes": [/* reconciled semantic scene objects using exact script_excerpt_start/end */],
   "warnings": []
@@ -783,6 +784,18 @@ export function storyFactEvidenceFindingsForTests(ledger, script) {
       }
     }
   }
+  for (const [index, transition] of (ledger.state_transitions ?? []).entries()) {
+    const factId = transition.entity_id ?? `state_transition_${index + 1}`;
+    const transitionExcerpt = String(transition.transition_evidence_excerpt ?? "");
+    const evidence = Array.isArray(transition.evidence) ? transition.evidence : [];
+    if (!transitionExcerpt || !String(script).includes(transitionExcerpt)) {
+      findings.push({ severity: "blocker", code: "state_transition_evidence_not_exact", fact_id: factId, transition_index: index });
+      continue;
+    }
+    if (!evidence.some((item) => String(item?.exact_excerpt ?? "") === transitionExcerpt)) {
+      findings.push({ severity: "blocker", code: "state_transition_evidence_not_listed", fact_id: factId, transition_index: index });
+    }
+  }
   return findings;
 }
 
@@ -794,7 +807,8 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
     : await reusableCodexCall(reconciliationStage, prompt) ?? await callCodex(prompt, reconciliationStage);
   const parsed = llm.parsed ?? {};
   const ledger = {
-    schema: "goldflow_story_fact_ledger_v1",
+    schema: "goldflow_story_fact_ledger_v2",
+    state_transition_contract: "exact_effective_evidence_v2",
     status: "passed",
     source_script_hash: sha256(script),
     source_script_path: scriptPath,

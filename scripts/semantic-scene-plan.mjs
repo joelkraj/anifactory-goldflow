@@ -912,11 +912,13 @@ async function main() {
   }
   const storyFactLedger = {
     ...reconciliation.ledger,
+    planning_scope_script_hash: reconciliation.ledger.source_script_hash ?? null,
+    source_script_hash: scriptHash,
     source_hashes: {
       [scriptPath]: scriptHash,
       ...(proofBaselineTimingPath ? { [proofBaselineTimingPath]: sha256(await fs.readFile(proofBaselineTimingPath)) } : {}),
     },
-    proof_scope: scope.scoped ? scope : null,
+    proof_scope: scope.scoped ? { ...scope, script: undefined } : null,
     semantic_scene_count: anchorSnapReport.scenes.length,
     evidence_finding_count: reconciliation.evidenceFindings.length,
   };
@@ -937,7 +939,7 @@ async function main() {
     },
     story_fact_ledger_path: storyFactLedgerPath,
     timing_dependency: proofBaselineTimingPath ? "proof_baseline_word_timing_scope_only" : "none_semantic_only",
-    proof_scope: scope.scoped ? scope : null,
+    proof_scope: scope.scoped ? { ...scope, script: undefined } : null,
     scene_count_policy: targets,
     semantic_validation: {
       anchor_finding_count: anchorFindings.length,

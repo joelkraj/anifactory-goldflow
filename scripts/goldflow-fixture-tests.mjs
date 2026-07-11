@@ -88,6 +88,7 @@ import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
 import {
   PIPELINE_STAGE_REGISTRY,
+  buildStageCommand,
   commandStageFor,
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
@@ -118,7 +119,7 @@ import {
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
 import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
-import { visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
+import { factLedgerMatchesScriptForTests, visualBeatInternalsForTests } from "./visual-beat-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
@@ -442,6 +443,10 @@ function testBoundedProofBaselineScoping() {
   assert.equal(words[0].start_sec, 0);
   assert.equal(words.at(-1).end_sec, 2.8);
   assert.equal(commandStageFor("run", "import-proof-baseline", {}), "voice_plan");
+  assert.equal(factLedgerMatchesScriptForTests({ status: "passed", source_script_hash: "scoped-hash", source_hashes: { "/script.md": "locked-hash" } }, "/script.md", "locked-hash"), true);
+  const identity = { channel: "c", series_slug: "s", week: "w", episode: "ep_01", proof_scope: { mode: "bounded", start_sec: 0, end_sec: 300 } };
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--proof-baseline-word-timing .* --scope-start-sec 0 --scope-end-sec 300/);
+  assert.match(buildStageCommand("visual_beat_plan", identity), /--scope-start-sec 0 --scope-end-sec 300/);
 }
 
 function testSemanticReconciliationEvidenceContract() {

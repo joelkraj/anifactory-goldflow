@@ -356,6 +356,12 @@ function codexOpeningFlag(identity = {}) {
   return Number.isFinite(seconds) && seconds > 0 ? ` --codex-opening-sec ${seconds}` : "";
 }
 
+function boundedProofScopeFlag(identity = {}) {
+  const scope = identity?.proof_scope;
+  if (scope?.mode !== "bounded" || !Number.isFinite(Number(scope.start_sec)) || !Number.isFinite(Number(scope.end_sec))) return "";
+  return ` --scope-start-sec ${Number(scope.start_sec)} --scope-end-sec ${Number(scope.end_sec)}`;
+}
+
 function codexReferences(identity = {}) {
   return new Set([
     "codex",
@@ -390,7 +396,9 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
-    semantic_scene_plan: `node bin/goldflow.mjs semantic plan ${base} --concurrency 4`,
+    semantic_scene_plan: identity?.proof_scope?.mode === "bounded"
+      ? `node bin/goldflow.mjs semantic plan ${base} --concurrency 4 --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
+      : `node bin/goldflow.mjs semantic plan ${base} --concurrency 4`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
     qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
@@ -402,7 +410,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     longform_audio_mix: narratorOnly(identity)
       ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`
       : `node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`,
-    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base}`,
+    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base}${boundedProofScopeFlag(identity)}`,
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: codexReferences(identity)

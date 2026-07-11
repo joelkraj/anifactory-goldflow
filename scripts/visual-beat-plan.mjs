@@ -66,6 +66,11 @@ function parseFlags(parts) {
   return parsed;
 }
 
+export function factLedgerMatchesScriptForTests(factLedger, scriptPathValue, scriptHash) {
+  const recordedHash = factLedger?.source_hashes?.[scriptPathValue] ?? factLedger?.source_script_hash ?? null;
+  return factLedger?.status === "passed" && recordedHash === scriptHash;
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -1393,7 +1398,7 @@ async function main() {
   let whisperAlignmentSummary;
   let editorialResult = null;
   if (useEditorialDirector) {
-    if (factLedger?.status !== "passed" || factLedger.source_script_hash !== scriptHash) {
+    if (!factLedgerMatchesScriptForTests(factLedger, scriptPath, scriptHash)) {
       throw new Error(`Editorial beat direction requires current passed story_fact_ledger.json: ${storyFactLedgerPath}`);
     }
     editorialResult = await editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger);

@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   allowedRefIdsForScene,
@@ -55,6 +56,7 @@ import {
   mergeRiskReviewDecisions,
 } from "./image-output-qa.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
 import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
 import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
 import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents, xfadeTimelineGroupsForTests } from "./render.mjs";
@@ -611,6 +613,25 @@ function testQwenKeepsBracketedUiDialogueSpeakable() {
   assert.match(spoken, /chapter zero activated/i);
   assert.match(spoken, /survive the carriage/i);
   assert.doesNotMatch(spoken, /[\[\]]/);
+}
+
+async function testEpisodeLocalAmbienceSpecContract() {
+  const valid = {
+    status: "approved",
+    source_script_hash: "script-hash",
+    ambience_specs: [{
+      cue_id: "guild_hall_air",
+      scene_ids: ["scene_001"],
+      sound_description: "large stone guild hall room tone with distant boots and banner cloth",
+      beat_reason: "grounds the current scene",
+    }],
+  };
+  assert.deepEqual(validateAmbienceSpecForTests(valid, "script-hash", ["scene_001"]), []);
+  assert.equal(validateAmbienceSpecForTests(valid, "different-hash", ["scene_001"]).includes("ambience_spec_source_hash_mismatch"), true);
+  const runtime = await fs.readFile("scripts/audio-ambience-repair.mjs", "utf8");
+  assert.doesNotMatch(runtime, /Northbridge|Sarah|Damien|Vivienne/);
+  const historicalFixture = await fs.readFile("scripts/fixtures/audio/northbridge_ambience_spec.example.json", "utf8");
+  assert.match(historicalFixture, /Northbridge/);
 }
 
 function testImageOutputQaRiskAndDonorPolicies() {
@@ -4829,113 +4850,132 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
   }
 }
 
-async function run() {
-  testAuthoritativeStageRegistry();
-  testRunIdentityV2Policies();
-  await testFinalQaSourceHashFreshness();
-  await testRunStatusRejectsFalseGreenFinalQa();
-  await testAppendOnlyExecutionProvenance();
-  await testCumulativeImagegenHistoryAndEpisodeTruth();
-  testPinnedCodexRuntimeContracts();
-  await testNestedCodexCallsUseSharedRunner();
-  testSemanticSceneAnchorValidation();
-  testSemanticSceneQualityFindings();
-  testSemanticPlannerPromptContracts();
-  testSemanticChunkingSplitsLongSingleParagraph();
-  testSemanticReconciliationEvidenceContract();
-  testEditorialBeatDirectorContracts();
-  testSemanticAnchorSnapsToExactScriptTokens();
-  testFirstPersonBeatKeepsProtagonistVisible();
-  testWhisperExcerptAlignmentInterpolatesUnspokenUi();
-  testPhraseAwareSubtitleGrouping();
-  testQwenKeepsBracketedUiDialogueSpeakable();
-  testImageOutputQaRiskAndDonorPolicies();
-  await testProviderCircuitBreakerStopsUnclaimedWork();
-  await testProviderConcurrencyBacksOffAndRecovers();
-  testDirectedMotionAndFullTimelineTransitions();
-  await testRenderRequiresHashMatchedImageQa();
-  await testPreflightLocksNativeTtsSpeedAndSmoothRender();
-  await testPostTempoRequiresEmergencyApproval();
-  testLocationSceneIdsDerivation();
-  testReferenceDirectorV2EvidenceAndLocationContracts();
-  testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts();
-  await testReferencePlanHashApproval();
-  testAdaptiveProviderPromptPackets();
-  testSelectedReferenceInventoryContainsOnlyDirectorSelections();
-  testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates();
-  testLocationCandidateExclusion();
-  testStarvationGate();
-  testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement();
-  testOutOfScopeRefDropping();
-  testReferenceLimitOmissionIsNotForbidden();
-  testOutOfScopeLocationMentionAssertion();
-  testProviderAwarePromptSelection();
-  testGptImage2PreservesFullPromptAndUsesLandscapeDefault();
-  testSceneImageProductionContractBlocksDroppedRefsAndStyle();
-  testGroupReferencePromptDoesNotDemandOnePerson();
-  testConciseReferenceRoleContract();
-  testLocalBeatFidelityEditorialCases();
-  testHybridImageProviderRouting();
-  await testHybridOpeningWindowPersistsInRunIdentity();
-  await testVisualPlannerDriftContracts();
-  testPromptPayloadMarkerSanitizerPreservesNormalNegation();
-  testVoiceDirectionCharacterization();
-  testQwenPlanAuditsAppliedTtsOverrides();
-  testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets();
-  testCharacterStagingSanitizerAndReviewBlockers();
-  await testNarrationPaceChecks();
-  await testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases();
-  await testTargetedSpeakabilityLiveContentHomograph();
-  await testVisualBeatDensityDefaults();
-  await testVisualBeatQualityFindings();
-  await testCrossGenreVisualBeatFixtures();
-  testLongLocationSpanCrossingRetentionBoundary();
-  testRepeatedRetentionShotJobRunFindings();
-  await testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm();
-  await testVisualPlanAllowsSameLocationLabelAliases();
-  await testOnlyScenesDryRun();
-  await testOnlyCutIdsDryRun();
-  testNamedCharacterDuplicationAllowsReflections();
-  testVisualResolveScopePrefersCutIds();
-  testHardenFeedbackBlockersMapToReviewResolveInput();
-  await testRunStatusResumesBlockedVisualReviewWithoutFullReplan();
-  testPassedReviewClearsDeadletterPayload();
-  await testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite();
-  await testVisualHardenStripsNonAttachableScopedRefs();
-  await testVisualHardenRetainsPendingDerivedRequirementWithoutSlot();
-  await testVisualHardenAcceptsInventoryOnlyLocationContract();
-  await testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs();
-  await testVisualHardenCanonicalizesStateRefRequirements();
-  await testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted();
-  await testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists();
-  await testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored();
-  await testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed();
-  await testVisualHardenPreservesAttachableFaceOnlyStateRef();
-  await testVisualHardenBlocksMissingManifestLocationWithoutAddingIt();
-  await testVisualHardenBlocksMissingPendingDerivedLocationContract();
-  await testVisualHardenV2AcceptsTextLocationContractWithoutImageRef();
-  await testVisualHardenV2BlocksUnknownLocationContract();
-  await testVisualHardenManualTriageCanDisregardSpecificBlocker();
-  await testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation();
-  await testImagegenDeadletterRefusal();
-  await testNarratorOnlyStatusAndMixer();
-  await testRunCleanupPrunesNarratorOnlyLongformWav();
-  await testRunStatusBlocksLegacyScriptPaceHookWarnings();
-  await testRunStatusBlocksMissingQwenStitchedAudio();
-  await testTimingBindMatchesPossessiveAnchorsAfterCursor();
-  await testRunStatusBlocksStaleVisualBeatSourceHashes();
-  await testRunStatusBlocksStaleVisualReferenceSourceHashes();
-  await testRunStatusSurfacesDraftReferenceApprovalCommand();
-  await testRunStatusBlocksQwenPlanMissingOverrideAudit();
-  await testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan();
-  await testRunStatusIncludesManualBlockerTriagePolicy();
-  testDerivedReferenceCandidateSelectionAndManifestAttach();
-  await testDerivedReferencePromotionFromSeedCut();
-  await testImagegenReusesImportedCodexOpeningCut();
-  await testRunStatusDerivedReferenceSeedPromoteAndScopedRetry();
-  await testSilentTransitionsWithoutSfxBank();
-  await testGlobalStylePromptDoesNotInjectCrowdExtras();
-  console.log("goldflow fixture tests passed");
+const FIXTURE_SUITES = {
+  "stage-contract": [
+    testAuthoritativeStageRegistry,
+    testRunIdentityV2Policies,
+    testFinalQaSourceHashFreshness,
+    testRunStatusRejectsFalseGreenFinalQa,
+    testAppendOnlyExecutionProvenance,
+    testCumulativeImagegenHistoryAndEpisodeTruth,
+    testPinnedCodexRuntimeContracts,
+    testNestedCodexCallsUseSharedRunner,
+    testPreflightLocksNativeTtsSpeedAndSmoothRender,
+    testPostTempoRequiresEmergencyApproval,
+    testHybridImageProviderRouting,
+    testHybridOpeningWindowPersistsInRunIdentity,
+    testRunStatusResumesBlockedVisualReviewWithoutFullReplan,
+    testRunStatusBlocksLegacyScriptPaceHookWarnings,
+    testRunStatusBlocksMissingQwenStitchedAudio,
+    testRunStatusBlocksStaleVisualBeatSourceHashes,
+    testRunStatusBlocksStaleVisualReferenceSourceHashes,
+    testRunStatusSurfacesDraftReferenceApprovalCommand,
+    testRunStatusBlocksQwenPlanMissingOverrideAudit,
+    testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan,
+    testRunStatusIncludesManualBlockerTriagePolicy,
+    testRunStatusDerivedReferenceSeedPromoteAndScopedRetry,
+  ],
+  planner: [
+    testSemanticSceneAnchorValidation,
+    testSemanticSceneQualityFindings,
+    testSemanticPlannerPromptContracts,
+    testSemanticChunkingSplitsLongSingleParagraph,
+    testSemanticReconciliationEvidenceContract,
+    testEditorialBeatDirectorContracts,
+    testSemanticAnchorSnapsToExactScriptTokens,
+    testFirstPersonBeatKeepsProtagonistVisible,
+    testWhisperExcerptAlignmentInterpolatesUnspokenUi,
+    testLocationSceneIdsDerivation,
+    testReferenceDirectorV2EvidenceAndLocationContracts,
+    testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts,
+    testReferencePlanHashApproval,
+    testAdaptiveProviderPromptPackets,
+    testSelectedReferenceInventoryContainsOnlyDirectorSelections,
+    testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates,
+    testLocationCandidateExclusion,
+    testStarvationGate,
+    testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement,
+    testOutOfScopeRefDropping,
+    testReferenceLimitOmissionIsNotForbidden,
+    testOutOfScopeLocationMentionAssertion,
+    testProviderAwarePromptSelection,
+    testSceneImageProductionContractBlocksDroppedRefsAndStyle,
+    testGroupReferencePromptDoesNotDemandOnePerson,
+    testConciseReferenceRoleContract,
+    testLocalBeatFidelityEditorialCases,
+    testVisualPlannerDriftContracts,
+    testPromptPayloadMarkerSanitizerPreservesNormalNegation,
+    testCharacterStagingSanitizerAndReviewBlockers,
+    testVisualBeatDensityDefaults,
+    testVisualBeatQualityFindings,
+    testCrossGenreVisualBeatFixtures,
+    testLongLocationSpanCrossingRetentionBoundary,
+    testRepeatedRetentionShotJobRunFindings,
+    testVisualPlanBlocksOverbroadLocationRefCoverageBeforeLlm,
+    testVisualPlanAllowsSameLocationLabelAliases,
+    testOnlyScenesDryRun,
+    testOnlyCutIdsDryRun,
+    testNamedCharacterDuplicationAllowsReflections,
+    testVisualResolveScopePrefersCutIds,
+    testHardenFeedbackBlockersMapToReviewResolveInput,
+    testPassedReviewClearsDeadletterPayload,
+    testVisualHardenAllowsStoryFaithfulNegativeWordsWithoutRewrite,
+    testVisualHardenStripsNonAttachableScopedRefs,
+    testVisualHardenRetainsPendingDerivedRequirementWithoutSlot,
+    testVisualHardenAcceptsInventoryOnlyLocationContract,
+    testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs,
+    testVisualHardenCanonicalizesStateRefRequirements,
+    testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
+    testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists,
+    testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored,
+    testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed,
+    testVisualHardenPreservesAttachableFaceOnlyStateRef,
+    testVisualHardenBlocksMissingManifestLocationWithoutAddingIt,
+    testVisualHardenBlocksMissingPendingDerivedLocationContract,
+    testVisualHardenV2AcceptsTextLocationContractWithoutImageRef,
+    testVisualHardenV2BlocksUnknownLocationContract,
+    testVisualHardenManualTriageCanDisregardSpecificBlocker,
+    testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation,
+    testGlobalStylePromptDoesNotInjectCrowdExtras,
+  ],
+  media: [
+    testPhraseAwareSubtitleGrouping,
+    testQwenKeepsBracketedUiDialogueSpeakable,
+    testEpisodeLocalAmbienceSpecContract,
+    testImageOutputQaRiskAndDonorPolicies,
+    testProviderCircuitBreakerStopsUnclaimedWork,
+    testProviderConcurrencyBacksOffAndRecovers,
+    testDirectedMotionAndFullTimelineTransitions,
+    testRenderRequiresHashMatchedImageQa,
+    testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
+    testVoiceDirectionCharacterization,
+    testQwenPlanAuditsAppliedTtsOverrides,
+    testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets,
+    testNarrationPaceChecks,
+    testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases,
+    testTargetedSpeakabilityLiveContentHomograph,
+    testImagegenDeadletterRefusal,
+    testNarratorOnlyStatusAndMixer,
+    testRunCleanupPrunesNarratorOnlyLongformWav,
+    testTimingBindMatchesPossessiveAnchorsAfterCursor,
+    testDerivedReferenceCandidateSelectionAndManifestAttach,
+    testDerivedReferencePromotionFromSeedCut,
+    testImagegenReusesImportedCodexOpeningCut,
+    testSilentTransitionsWithoutSfxBank,
+  ],
+  integration: [],
+};
+
+export async function runFixtureSuite(name = "all") {
+  const selected = name === "all" ? Object.entries(FIXTURE_SUITES) : [[name, FIXTURE_SUITES[name]]];
+  if (selected.some(([, tests]) => !tests)) throw new Error(`Unknown fixture suite ${name}. Expected: ${Object.keys(FIXTURE_SUITES).join(", ")}, all.`);
+  for (const [suiteName, tests] of selected) {
+    for (const test of tests) await test();
+    console.log(`goldflow ${suiteName} fixture suite passed (${tests.length} tests)`);
+  }
 }
 
-await run();
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  const suiteIndex = process.argv.indexOf("--suite");
+  await runFixtureSuite(suiteIndex >= 0 ? process.argv[suiteIndex + 1] : "all");
+}

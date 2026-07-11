@@ -31,8 +31,9 @@ const wordTimingPath = path.join(episodeDir, `narration_word_timing_${episode}.j
 const timedScenePlanPath = path.join(episodeDir, "timed_scene_plan.json");
 const scoreDropPlanPath = path.join(episodeDir, `score_drop_plan_${episode}.json`);
 const repairReportPath = path.join(episodeDir, `audio_ambience_repair_report_${episode}.json`);
+const ambienceSpecPath = flags["ambience-spec"] ?? path.join(episodeDir, `ambience_repair_spec_${episode}.json`);
 
-const repairPlanner = "codex_agent_manual_ambience_repair_v1";
+const repairPlanner = "episode_local_ambience_spec_v1";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -314,38 +315,32 @@ function segmentAtTime(spans, seconds) {
   return spans.find((span) => seconds >= span.start && seconds < span.end) ?? spans.at(-1) ?? { id: "voice_seg_01", start: 0 };
 }
 
-function manualAmbienceSpecs() {
-  return [
-    { scene_ids: ["scene_002"], cue_id: "northbridge_stadium_afterglow", gain_db: -33, sound_description: "cool empty stadium night air with distant crowd hush, torn banner cloth flutter, faint arena HVAC", palette_note: "Northbridge aftermath stadium bed", beat_reason: "keeps the post-board-collapse human consequence grounded" },
-    { scene_ids: ["scene_003", "scene_004"], cue_id: "wet_curb_black_car_night", gain_db: -32, sound_description: "wet pavement curb tone, soft rain sheen, distant stadium ventilation, quiet idling luxury car engine", palette_note: "curbside black-car recruitment bed", beat_reason: "grounds Montgomery's recruitment in a tense night exterior" },
-    { scene_ids: ["scene_007"], cue_id: "capital_arrival_station_city_air", gain_db: -32, sound_description: "large capital train-station air, distant footsteps, clean public address texture without words, soft city electrical hum", palette_note: "arrival into the Royal Capital", beat_reason: "establishes the Capital as a living stage" },
-    { scene_ids: ["scene_008"], cue_id: "capital_kiosk_street_bed", gain_db: -31, sound_description: "busy capital sidewalk ambience with soft nonverbal crowd texture, kiosk electronics, distant bid chimes", palette_note: "offering kiosk street bed", beat_reason: "supports the boy at the kiosk without literal Foley under every line" },
-    { scene_ids: ["scene_009"], cue_id: "city_screens_watch_back", gain_db: -32, sound_description: "thousand-screen city hum, faint synchronized display buzz, crowd hush wave with no words", palette_note: "the city looks back ambience", beat_reason: "makes the throne's surveillance feel environmental" },
-    { scene_ids: ["scene_010"], cue_id: "capital_hotel_room_neon", gain_db: -34, sound_description: "quiet expensive hotel room tone, muted city neon outside glass, soft air conditioning, paper cards on carpet", palette_note: "hotel summons room bed", beat_reason: "leaves room for narration while placing the summons in a real room" },
-    { scene_ids: ["scene_011"], cue_id: "aurelia_glass_plaza_crowd_line", gain_db: -31, sound_description: "open glass plaza air with restrained nonverbal crowd line, polished floor footsteps, distant fountain-like city texture", palette_note: "Aurelia public-refusal plaza", beat_reason: "keeps the public refusal surrounded by social pressure" },
-    { scene_ids: ["scene_012", "scene_013"], cue_id: "quiet_cafe_table_city_edge", gain_db: -34, sound_description: "quiet cafe terrace room tone, porcelain clinks far away, soft city edge air, no conversation", palette_note: "Mira cafe trap ambience", beat_reason: "supports Mira's subtle trap without music-like ambience" },
-    { scene_ids: ["scene_014"], cue_id: "screenless_side_street_night", gain_db: -34, sound_description: "screenless empty side street at night, distant traffic smear, low building air, no voices", palette_note: "black card investigation street", beat_reason: "marks the sudden absence of screens before the gym reveal" },
-    { scene_ids: ["scene_015", "scene_016", "scene_017", "scene_018"], cue_id: "screenless_gym_room_tone", gain_db: -32, sound_description: "indoor gym room tone, rubber floor air, distant weight rack clink, heavy training breaths as texture only", palette_note: "Damien screenless gym bed", beat_reason: "places Damien's movement in a physical masculine space without crowd chants overpowering narration" },
-    { scene_ids: ["scene_019", "scene_020"], cue_id: "hotel_room_private_night", gain_db: -35, sound_description: "small hotel room night tone, low ventilation, distant city through sealed window, intimate quiet", palette_note: "Lily test and unperformed affection", beat_reason: "lets the quiet ally test and hand connection breathe" },
-    { scene_ids: ["scene_021"], cue_id: "citywide_screen_attack_hum", gain_db: -31, sound_description: "citywide propaganda screen hum, cold digital glitch bed, distant crowd unease with no words", palette_note: "frame-theft broadcast attack", beat_reason: "turns the smear campaign into an ambient pressure layer" },
-    { scene_ids: ["scene_022", "scene_023", "scene_024"], cue_id: "damaged_hotel_strategy_room", gain_db: -34, sound_description: "damaged hotel room tone with broken window air, faint glass tick, laptop fan, distant city siren smear", palette_note: "truth-strategy and tower invitation", beat_reason: "grounds Caleb's damaged room and the tower strategy" },
-    { scene_ids: ["scene_025", "scene_026"], cue_id: "procession_light_path_city", gain_db: -32, sound_description: "wide city night procession air, low electric light shimmer, restrained crowd hush, no speech", palette_note: "path of light to the throne tower", beat_reason: "gives the walk to the tower ceremonial scale" },
-    { scene_ids: ["scene_027"], cue_id: "glass_lift_tower_air", gain_db: -34, sound_description: "glass elevator tower air, cable-soft motion, high-altitude building hum, distant city below", palette_note: "glass lift ascent", beat_reason: "keeps the climb quiet and tense before Vivienne" },
-    { scene_ids: ["scene_028", "scene_029", "scene_030", "scene_031"], cue_id: "throne_room_screen_wall_air", gain_db: -32, sound_description: "vast throne room made of screens, cold display wall hum, polished stone air, faint electrical pressure", palette_note: "Vivienne gentle offer throne room", beat_reason: "holds the final-boss room under the quiet logical temptation" },
-    { scene_ids: ["scene_032", "scene_033", "scene_034", "scene_035"], cue_id: "national_broadcast_silence", gain_db: -33, sound_description: "massive broadcast silence, billion-screen electrical bed, distant crowd held breath, no words", palette_note: "nation decides and third option", beat_reason: "supports the national trap without turning it into score" },
-    { scene_ids: ["scene_036", "scene_037", "scene_038"], cue_id: "belief_collapse_screen_flicker", gain_db: -31, sound_description: "screen-wall flicker and belief collapse ambience, soft glitch waves, tired room air, no voices", palette_note: "Sarah confession and Vivienne becomes human", beat_reason: "makes belief failure audible while staying nonmusical" },
-    { scene_ids: ["scene_039", "scene_040"], cue_id: "capital_after_throne_street_air", gain_db: -32, sound_description: "capital street after midnight, screens dimming, people murmuring nonverbally at distance, cool city air", palette_note: "city learning to look at itself", beat_reason: "shows the city remains alive after the throne is abandoned" },
-    { scene_ids: ["scene_041"], cue_id: "damien_warning_empty_street", gain_db: -34, sound_description: "empty capital street night tone, distant footsteps, cold tower wind, low urban hush", palette_note: "Damien diminished warning", beat_reason: "isolates Damien's warning after the crowd leaves him" },
-    { scene_ids: ["scene_042", "scene_043"], cue_id: "hotel_rooftop_stars_city", gain_db: -35, sound_description: "hotel rooftop night air, soft wind, distant quiet city, stars over dim screens", palette_note: "Sarah becomes nobody on the roof", beat_reason: "supports the reflective roof ending before the next hook" },
-    { scene_ids: ["scene_044", "scene_045"], cue_id: "federation_cliffhanger_system_air", gain_db: -32, sound_description: "distant futuristic system hum under night sky, far-off tower resonance, cold digital horizon air", palette_note: "Federation and other transmigrator tease", beat_reason: "extends the final cliffhanger into the next arc" },
-  ];
+export function validateAmbienceSpecForTests(document, sourceScriptHash, knownSceneIds = []) {
+  const findings = [];
+  const rows = Array.isArray(document?.ambience_specs) ? document.ambience_specs : [];
+  const known = new Set(knownSceneIds.map(String));
+  if (!document || !["approved", "passed"].includes(String(document.status ?? "").toLowerCase())) findings.push("ambience_spec_not_approved");
+  if (!document?.source_script_hash || (sourceScriptHash && document.source_script_hash !== sourceScriptHash)) findings.push("ambience_spec_source_hash_mismatch");
+  if (!rows.length) findings.push("ambience_spec_empty");
+  const cueIds = new Set();
+  for (const [index, row] of rows.entries()) {
+    if (!row?.cue_id || cueIds.has(row.cue_id)) findings.push(`ambience_spec_cue_id_missing_or_duplicate:${index}`);
+    cueIds.add(row?.cue_id);
+    if (!Array.isArray(row?.scene_ids) || !row.scene_ids.length) findings.push(`ambience_spec_scene_ids_missing:${row?.cue_id ?? index}`);
+    for (const sceneId of row?.scene_ids ?? []) {
+      if (known.size && !known.has(String(sceneId))) findings.push(`ambience_spec_unknown_scene:${sceneId}`);
+    }
+    if (!String(row?.sound_description ?? "").trim()) findings.push(`ambience_spec_sound_description_missing:${row?.cue_id ?? index}`);
+    if (!String(row?.beat_reason ?? "").trim()) findings.push(`ambience_spec_beat_reason_missing:${row?.cue_id ?? index}`);
+  }
+  return findings;
 }
 
-function buildRepairEvents({ timedScenePlan, qwenReport, wordTiming, sfxPlan }) {
+function buildRepairEvents({ timedScenePlan, qwenReport, wordTiming, sfxPlan, ambienceSpecs }) {
   const scenes = sceneMap(timedScenePlan);
   const spans = segmentSpans(qwenReport);
   const sourceScriptHash = sfxPlan.source_script_hash ?? wordTiming?.source_script_hash ?? null;
-  return manualAmbienceSpecs().map((spec, index) => {
+  return ambienceSpecs.map((spec, index) => {
     const span = spanForScenes(scenes, spec.scene_ids);
     if (!span) return null;
     const segment = segmentAtTime(spans, span.start);
@@ -443,13 +438,14 @@ async function runLimited(items, limit, worker) {
 }
 
 async function main() {
-  const [sfxPlan, enrichmentReport, qwenReport, wordTiming, timedScenePlan, scoreDropPlan] = await Promise.all([
+  const [sfxPlan, enrichmentReport, qwenReport, wordTiming, timedScenePlan, scoreDropPlan, ambienceSpec] = await Promise.all([
     readJson(sfxPlanPath, null),
     readJson(enrichmentReportPath, null),
     readJson(qwenReportPath, null),
     readJson(wordTimingPath, null),
     readJson(timedScenePlanPath, null),
     readJson(scoreDropPlanPath, null),
+    readJson(ambienceSpecPath, null),
   ]);
   if (!sfxPlan) throw new Error(`Missing SFX plan: ${sfxPlanPath}`);
   if (sfxPlan.timing_source !== "local_whisper_word_timing" || sfxPlan.timing_gate?.status !== "passed") {
@@ -457,10 +453,14 @@ async function main() {
   }
   if (!qwenReport?.segments?.length) throw new Error(`Missing Qwen stitch report segments: ${qwenReportPath}`);
   if (!timedScenePlan) throw new Error(`Missing timed scene plan: ${timedScenePlanPath}`);
+  const knownSceneIds = (timedScenePlan?.scenes ?? timedScenePlan?.timed_scenes ?? []).map((scene) => String(scene.scene_id ?? "")).filter(Boolean);
+  const sourceScriptHash = sfxPlan.source_script_hash ?? wordTiming?.source_script_hash ?? null;
+  const ambienceSpecFindings = validateAmbienceSpecForTests(ambienceSpec, sourceScriptHash, knownSceneIds);
+  if (ambienceSpecFindings.length) throw new Error(`Episode-local ambience spec blocked: ${ambienceSpecFindings.join(", ")}. Create and approve ${ambienceSpecPath}.`);
 
   const existingEvents = (sfxPlan.events ?? []).filter((event) => event?.manual_repair?.planner !== repairPlanner);
   const existingResolved = (sfxPlan.resolved_events ?? []).filter((event) => event?.manual_repair?.planner !== repairPlanner);
-  const repairEvents = buildRepairEvents({ timedScenePlan, qwenReport, wordTiming, sfxPlan });
+  const repairEvents = buildRepairEvents({ timedScenePlan, qwenReport, wordTiming, sfxPlan, ambienceSpecs: ambienceSpec.ambience_specs });
   const manifest = await loadManifest();
   const generated = await runLimited(repairEvents, concurrency, async (event) => {
     const generation = await generateAmbienceAsset(event);
@@ -546,6 +546,8 @@ async function main() {
     planner: repairPlanner,
     timing_source: "local_whisper_word_timing",
     source_script_hash: nextSfxPlan.source_script_hash ?? null,
+    ambience_spec_path: ambienceSpecPath,
+    ambience_spec_sha256: await hashFile(ambienceSpecPath),
     sfx_plan_path: sfxPlanPath,
     enrichment_report_path: enrichmentReportPath,
     added_event_count: generated.length,
@@ -569,8 +571,10 @@ async function main() {
   console.log(JSON.stringify({ status: qualityGate.status, added_event_count: generated.length, ambience_event_count: qualityGate.ambience_event_count, repair_report_path: repairReportPath }, null, 2));
 }
 
-main().catch(async (error) => {
-  await writeJson(repairReportPath, { schema: "goldflow_audio_ambience_repair_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: nowIso() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(repairReportPath, { schema: "goldflow_audio_ambience_repair_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: nowIso() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

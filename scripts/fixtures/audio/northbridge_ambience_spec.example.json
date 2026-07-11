@@ -1,0 +1,40 @@
+{
+  "schema": "goldflow_episode_ambience_repair_spec_v1",
+  "status": "fixture_only",
+  "source_script_hash": "fixture-northbridge-script-hash",
+  "note": "Historical story-specific ambience examples retained for tests and documentation only. Never load this fixture as a production default.",
+  "ambience_specs": [
+    {
+      "scene_ids": ["scene_002"],
+      "cue_id": "northbridge_stadium_afterglow",
+      "gain_db": -33,
+      "sound_description": "cool empty stadium night air with distant crowd hush, torn banner cloth flutter, faint arena HVAC",
+      "palette_note": "Northbridge aftermath stadium bed",
+      "beat_reason": "keeps the post-board-collapse human consequence grounded"
+    },
+    {
+      "scene_ids": ["scene_015", "scene_016", "scene_017", "scene_018"],
+      "cue_id": "screenless_gym_room_tone",
+      "gain_db": -32,
+      "sound_description": "indoor gym room tone, rubber floor air, distant weight rack clink, heavy training breaths as texture only",
+      "palette_note": "Damien screenless gym bed",
+      "beat_reason": "places Damien's movement in a physical training space without chants overpowering narration"
+    },
+    {
+      "scene_ids": ["scene_028", "scene_029", "scene_030", "scene_031"],
+      "cue_id": "throne_room_screen_wall_air",
+      "gain_db": -32,
+      "sound_description": "vast throne room made of screens, cold display wall hum, polished stone air, faint electrical pressure",
+      "palette_note": "Vivienne throne room",
+      "beat_reason": "holds the final confrontation under the quiet logical temptation"
+    },
+    {
+      "scene_ids": ["scene_036", "scene_037", "scene_038"],
+      "cue_id": "belief_collapse_screen_flicker",
+      "gain_db": -31,
+      "sound_description": "screen-wall flicker and belief collapse ambience, soft glitch waves, tired room air, no voices",
+      "palette_note": "Sarah confession and throne collapse",
+      "beat_reason": "makes belief failure audible while staying nonmusical"
+    }
+  ]
+}

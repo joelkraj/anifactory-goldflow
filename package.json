@@ -9,7 +9,11 @@
   "scripts": {
     "check": "node scripts/check-syntax.mjs && node scripts/generate-workflow-guidance.mjs --check",
     "status": "git status --short",
-    "test:fixtures": "node scripts/goldflow-fixture-tests.mjs",
+    "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
+    "test:planner": "node scripts/tests/planner-tests.mjs",
+    "test:media": "node scripts/tests/media-tests.mjs",
+    "test:integration": "node scripts/tests/integration-tests.mjs",
+    "test:fixtures": "npm run test:stage-contract && npm run test:planner && npm run test:media && npm run test:integration",
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
     "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check"
   },

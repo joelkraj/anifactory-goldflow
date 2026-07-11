@@ -66,7 +66,7 @@ import {
   referencePlanApprovalContractSha256,
   referencePlanApprovalMatches,
 } from "./lib/reference-plan-contract.mjs";
-import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import {
   motionIntentFindings,
   motionIntentForPrompt,
@@ -915,6 +915,13 @@ function testDirectedMotionAndFullTimelineTransitions() {
     ["cut_002", "cut_005"],
   );
   assert.deepEqual(groups, [["cut_001", "cut_002"], ["cut_003"], ["cut_004", "cut_005"], ["cut_006"]]);
+  const xfadeTiming = xfadeSegmentTimingForTests([4, 5, 6], [0.25, 0.3]);
+  assert.deepEqual(xfadeTiming.boundaries, [
+    { offset_sec: 3.75, transition_duration_sec: 0.25, incoming_start_padding_sec: 0.25 },
+    { offset_sec: 8.7, transition_duration_sec: 0.3, incoming_start_padding_sec: 0.3 },
+  ]);
+  assert.equal(xfadeTiming.expected_duration_sec, 15);
+  assert.equal(xfadeTiming.duration_after_xfade_sec, 15);
 }
 
 async function testRenderRequiresHashMatchedImageQa() {

@@ -1207,6 +1207,29 @@ export function xfadeTimelineGroupsForTests(imageIds, selectedToImageIds) {
   return xfadeTimelineGroups(rows, durations).map((group) => group.map((row) => row.prompt.image_id));
 }
 
+export function xfadeSegmentTimingForTests(clipDurations, transitionDurations) {
+  let cumulative = 0;
+  const boundaries = [];
+  for (let index = 0; index < clipDurations.length - 1; index += 1) {
+    cumulative += Number(clipDurations[index]);
+    const transitionDuration = Number(transitionDurations[index]);
+    boundaries.push({
+      offset_sec: cumulative - transitionDuration,
+      transition_duration_sec: transitionDuration,
+      incoming_start_padding_sec: transitionDuration,
+    });
+  }
+  const expectedDurationSec = clipDurations.reduce((sum, value) => sum + Number(value), 0);
+  const paddedInputDurationSec = Number(clipDurations[0] ?? 0)
+    + clipDurations.slice(1).reduce((sum, value, index) => sum + Number(value) + Number(transitionDurations[index]), 0);
+  const appliedOverlapSec = transitionDurations.reduce((sum, value) => sum + Number(value), 0);
+  return {
+    boundaries,
+    expected_duration_sec: expectedDurationSec,
+    duration_after_xfade_sec: paddedInputDurationSec - appliedOverlapSec,
+  };
+}
+
 async function buildMotionClips(promptPlan, imagegenReport, audioDuration, transitionEditPlan = null, motionEditPlan = null) {
   const imageById = new Map((imagegenReport.results ?? []).map((row) => [row.image_id, row.image_path]));
   const plannedTransitionByToImage = transitionPlanByToImage(transitionEditPlan);
@@ -1403,7 +1426,9 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       const planned = plannedTransitionByToImage.get(next.prompt.image_id);
       const transition = xfadeTransitionForBoundary(current.prompt, next.prompt, current.index, planned);
       const outLabel = index === group.length - 2 ? "segmentout" : `xv${index + 1}`;
-      filterParts.push(`[${previousLabel}][${index + 1}:v]xfade=transition=${transition}:duration=${duration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`);
+      const incomingLabel = `xin${index + 1}`;
+      filterParts.push(`[${index + 1}:v]tpad=start_mode=clone:start_duration=${duration.toFixed(3)},setpts=PTS-STARTPTS[${incomingLabel}]`);
+      filterParts.push(`[${previousLabel}][${incomingLabel}]xfade=transition=${transition}:duration=${duration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`);
       appliedXfadeTransitions.push({
         from_image_id: current.prompt.image_id,
         to_image_id: next.prompt.image_id,
@@ -1411,6 +1436,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
         transition_offset_sec: Number((current.startSec + current.duration - duration).toFixed(3)),
         transition,
         duration_sec: Number(duration.toFixed(3)),
+        incoming_start_padding_sec: Number(duration.toFixed(3)),
       });
       previousLabel = outLabel;
     }

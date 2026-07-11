@@ -97,7 +97,7 @@ function derivedIntent(prompt) {
       behavior: "reveal_zoom_out",
     };
   }
-  if (/action|contact|fight|chase|impact|movement/.test(shotJob)) {
+  if (/physical.action|(?:^|[^a-z])action(?:[^a-z]|$)|contact|fight|chase|impact|movement/.test(shotJob)) {
     return {
       focal_subject: primary,
       focal_source: stage ? "shot_manifest.character_staging" : "shot_manifest.shot_job",

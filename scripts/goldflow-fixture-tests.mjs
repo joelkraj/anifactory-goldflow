@@ -66,7 +66,7 @@ import {
   referencePlanApprovalContractSha256,
   referencePlanApprovalMatches,
 } from "./lib/reference-plan-contract.mjs";
-import { assertRenderImageIntegrityForTests, mergeShortSubtitleEvents, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import {
   motionIntentFindings,
   motionIntentForPrompt,
@@ -739,6 +739,24 @@ function testPhraseAwareSubtitleGrouping() {
   ]);
   assert.deepEqual(merged.map((row) => row.text), ["The system opened", "No!", "And then I ran"]);
   assert.equal(merged.filter((row) => row.text.split(/\s+/).length === 1).length, 1);
+
+  const lockedCaptionRows = buildSubtitleEventsForTests({
+    words: ["The", "system", "gave", "Joey", "Manwa", "Roll", "assigned."].map((word, index) => ({
+      index,
+      word,
+      start_sec: index * 0.25,
+      end_sec: (index + 1) * 0.25,
+    })),
+  }, null, {
+    status: "passed",
+    beats: [
+      { source_word_start_index: 0, source_word_end_index: 4, visual_beat_script_excerpt: "The system gave Joey Manhwa" },
+      { source_word_start_index: 5, source_word_end_index: 6, visual_beat_script_excerpt: "Role assigned." },
+    ],
+  });
+  assert.equal(lockedCaptionRows.source, "approved_visual_beat_script_text_timed_by_whisper");
+  assert.equal(lockedCaptionRows.events.map((row) => row.text).join(" "), "The system gave Joey Manhwa Role assigned.");
+  assert.doesNotMatch(lockedCaptionRows.events.map((row) => row.text).join(" "), /Manwa|Roll/);
 }
 
 function testQwenKeepsBracketedUiDialogueSpeakable() {

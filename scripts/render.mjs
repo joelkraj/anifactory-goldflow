@@ -23,6 +23,7 @@ const assetsDir = path.join(episodeDir, "assets");
 const renderDir = path.join(assetsDir, "renders");
 const workDir = path.join(assetsDir, "render-work");
 const promptPlanPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
+const visualBeatPlanPath = flags.visualBeatPlan ?? flags["visual-beat-plan"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const audioBedReportPath = flags.audioBedReport ?? flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
@@ -414,6 +415,52 @@ function subtitleEventsFromScript(words, stitchReport) {
   return mergeShortSubtitleEvents(events.filter((row) => row.text && row.end_sec > row.start_sec));
 }
 
+function subtitleEventsFromVisualBeats(words, visualBeatPlan) {
+  if (visualBeatPlan?.status !== "passed" || !Array.isArray(visualBeatPlan.beats) || !visualBeatPlan.beats.length) return null;
+  const indexedWords = words.map((word, index) => ({ ...word, resolved_index: Number.isInteger(Number(word?.index)) ? Number(word.index) : index }));
+  const wordByIndex = new Map(indexedWords.map((word) => [word.resolved_index, word]));
+  const sortedWords = [...indexedWords].sort((left, right) => left.resolved_index - right.resolved_index);
+  const beats = [...visualBeatPlan.beats].sort((left, right) => Number(left.source_word_start_index) - Number(right.source_word_start_index));
+  if (!sortedWords.length) return null;
+  let expectedIndex = sortedWords[0].resolved_index;
+  const events = [];
+  const expectedCaptionTokens = [];
+  for (const beat of beats) {
+    const startIndex = Number(beat?.source_word_start_index);
+    const endIndex = Number(beat?.source_word_end_index);
+    const captionText = String(beat?.visual_beat_script_excerpt ?? "").trim();
+    if (!Number.isInteger(startIndex) || !Number.isInteger(endIndex) || startIndex !== expectedIndex || endIndex < startIndex || !captionText) return null;
+    const beatWords = [];
+    for (let index = startIndex; index <= endIndex; index += 1) {
+      const word = wordByIndex.get(index);
+      if (!word) return null;
+      beatWords.push(word);
+    }
+    const groups = whisperSubtitleGroups(beatWords);
+    const tokens = captionTokens(captionText);
+    if (!groups.length || !tokens.length) return null;
+    expectedCaptionTokens.push(...tokens);
+    let tokenCursor = 0;
+    let wordCursor = 0;
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = groups[index];
+      wordCursor += group.length;
+      const targetTokenEnd = index === groups.length - 1
+        ? tokens.length
+        : Math.max(tokenCursor + 1, Math.round((wordCursor / beatWords.length) * tokens.length));
+      const text = tokens.slice(tokenCursor, Math.min(tokens.length, targetTokenEnd)).join(" ").replace(/\s+/g, " ").trim();
+      tokenCursor = Math.min(tokens.length, targetTokenEnd);
+      if (text) events.push({ start_sec: Number(group[0].start_sec), end_sec: Number(group.at(-1).end_sec), text });
+    }
+    expectedIndex = endIndex + 1;
+  }
+  if (expectedIndex !== sortedWords.at(-1).resolved_index + 1) return null;
+  const merged = mergeShortSubtitleEvents(events.filter((row) => row.text && row.end_sec > row.start_sec));
+  const actualCaptionTokens = merged.flatMap((event) => captionTokens(event.text));
+  if (actualCaptionTokens.join("\n") !== expectedCaptionTokens.join("\n")) return null;
+  return merged;
+}
+
 function subtitleEvents(words, stitchReport = null) {
   const scriptEvents = subtitleEventsFromScript(words, stitchReport);
   if (scriptEvents?.length) return scriptEvents;
@@ -424,7 +471,14 @@ function subtitleEvents(words, stitchReport = null) {
   })).filter((row) => row.text && row.end_sec > row.start_sec));
 }
 
-function buildSubtitleEvents(wordTiming, audioStitchReport = null) {
+function buildSubtitleEvents(wordTiming, audioStitchReport = null, visualBeatPlan = null) {
+  const beatEvents = subtitleEventsFromVisualBeats(wordTiming.words ?? [], visualBeatPlan);
+  if (beatEvents?.length) {
+    return {
+      events: beatEvents,
+      source: "approved_visual_beat_script_text_timed_by_whisper",
+    };
+  }
   const scriptEvents = subtitleEventsFromScript(wordTiming.words ?? [], audioStitchReport);
   if (scriptEvents?.length) {
     return {
@@ -438,8 +492,8 @@ function buildSubtitleEvents(wordTiming, audioStitchReport = null) {
   };
 }
 
-export function buildSubtitleEventsForTests(wordTiming, audioStitchReport = null) {
-  return buildSubtitleEvents(wordTiming, audioStitchReport);
+export function buildSubtitleEventsForTests(wordTiming, audioStitchReport = null, visualBeatPlan = null) {
+  return buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
 }
 
 async function writeAss(filePath, events) {
@@ -1629,8 +1683,9 @@ async function runLimited(jobs, limit) {
 
 async function main() {
   await configureMediaTools();
-  const [promptPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
+  const [promptPlan, visualBeatPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
     readJson(promptPlanPath, null),
+    readJson(visualBeatPlanPath, null),
     readJson(imagegenReportPath, null),
     readJson(wordTimingPath, null),
     readJson(audioBedReportPath, null),
@@ -1646,6 +1701,8 @@ async function main() {
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   const v2Run = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";
+  if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
+  if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
   if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
   if (motionEditPlan?.status === "passed") await assertSourceHashesCurrent(motionEditPlan, "Directed motion plan");
   const imageIntegrity = await assertRenderImageIntegrity(promptPlan, imagegenReport, runIdentity, imageOutputQa, cutExecutionLedger);
@@ -1662,7 +1719,8 @@ async function main() {
   const usableTransitionPlan = transitionSfxDisabledByAudio ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
   const renderAudio = await audioWithRenderTransitionSfx(audioPath, usableTransitionPlan, audioDuration);
   const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration, usableTransitionPlan, motionEditPlan?.status === "passed" ? motionEditPlan : null);
-  const subtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport);
+  const subtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
+  if (v2Run && subtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
   const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), engagementOverlayPlan, audioDuration);
   const videoPath = path.join(workDir, "silent_video.mp4");
@@ -1783,6 +1841,7 @@ async function main() {
   const sourceHashes = {};
   for (const sourcePath of [
     promptPlanPath,
+    visualBeatPlanPath,
     imagegenReportPath,
     imageIntegrity.qa_report_path,
     wordTimingPath,
@@ -1830,6 +1889,7 @@ async function main() {
     engagement_overlay_frame_count: engagementOverlay.frame_count,
     engagement_overlays: engagementOverlay.events,
     prompt_plan_path: promptPlanPath,
+    visual_beat_plan_path: visualBeatPlanPath,
     imagegen_report_path: imagegenReportPath,
     image_output_integrity: imageIntegrity,
     word_timing_path: wordTimingPath,

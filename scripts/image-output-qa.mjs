@@ -106,8 +106,8 @@ function normalizedReviewDecision(value) {
 }
 
 export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
-  const reviewerValue = String(options.reviewer ?? prior.reviewer ?? "").trim();
-  const noteValue = String(options.note ?? prior.note ?? "").trim();
+  const reviewerValue = String(options.reviewer || prior.reviewer || "").trim();
+  const noteValue = String(options.note || prior.note || "").trim();
   const acceptIds = new Set(options.acceptedIds ?? []);
   const rejectIds = new Set(options.rejectedIds ?? []);
   const priorById = new Map((prior.decisions ?? []).map((row) => [String(row.image_id ?? ""), row]));

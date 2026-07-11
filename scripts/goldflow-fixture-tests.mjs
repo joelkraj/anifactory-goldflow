@@ -792,6 +792,10 @@ function testImageOutputQaRiskAndDonorPolicies() {
   });
   assert.equal(accepted.status, "complete");
   assert.equal(accepted.decisions[0].decision, "accepted");
+  const resumed = mergeRiskReviewDecisions(riskRows, accepted, { reviewer: "", note: "" });
+  assert.equal(resumed.reviewer, "fixture");
+  assert.equal(resumed.note, "inspected exact image hash");
+  assert.equal(resumed.decisions[0].decision, "accepted");
   const stale = mergeRiskReviewDecisions([{ ...riskRows[0], image_sha256: "hash-b" }], accepted);
   assert.equal(stale.status, "pending_review");
   assert.equal(stale.decisions[0].decision, "not_inspected");

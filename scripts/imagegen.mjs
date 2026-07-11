@@ -631,6 +631,13 @@ function manifestReferenceRequirements(prompt, characterRefs, referenceById, ref
   for (const manifestId of manifestCharacterIds) {
     const ref = characterByStateId.get(manifestId) ?? characterBySourceId.get(manifestId) ?? null;
     const sourceRefId = ref?.source_ref_id ?? manifestId;
+    const equivalentRefIds = [
+      manifestId,
+      ref?.state_ref_id,
+      ref?.source_ref_id,
+      ref?.base_identity_ref_id,
+    ].map((id) => String(id ?? "").trim()).filter(Boolean);
+    if (equivalentRefIds.some((id) => existingIds.has(id))) continue;
     add(
       sourceRefId,
       "character_state",

@@ -1743,7 +1743,11 @@ function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
         kind: "character_state",
         required: true,
       }],
-      shot_manifest: { shot_job: "body_state_proof" },
+      shot_manifest: {
+        shot_job: "body_state_proof",
+        protagonist_state_ref_id: "arielle_curse_state",
+        character_state_ref_ids: ["arielle_curse_state"],
+      },
     }],
   }, new Map([["arielle_base", "/tmp/arielle-base.png"]]), [{
     state_ref_id: "arielle_curse_state",
@@ -1758,6 +1762,7 @@ function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
     purpose: "character identity and wardrobe for arielle_curse_state",
     reason: null,
   }]);
+  assert.equal(stateAliasPlan.prompts[0].reference_requirements.length, 1);
   assert.deepEqual(scenePromptProductionContractFindingsForTests(stateAliasPlan.prompts, { maxSceneReferences: 4 }), []);
 }
 

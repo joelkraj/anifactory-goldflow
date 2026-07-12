@@ -200,8 +200,13 @@ function characterAliases(ref) {
   const n = normalize(character);
   const aliases = new Set([n, compactWords(character)]);
   const parts = n.split(/\s+/).filter(Boolean);
-  if (parts.length > 1) aliases.add(parts[0]);
-  if (parts.length > 1) aliases.add(parts.at(-1));
+  const genericRoleWords = new Set([
+    "academy", "captain", "chairman", "chief", "commander", "dean", "director", "doctor",
+    "father", "headmaster", "instructor", "king", "lady", "lord", "manager", "master", "mother",
+    "officer", "president", "prince", "princess", "professor", "queen", "student", "teacher",
+  ]);
+  if (parts.length > 1 && !genericRoleWords.has(parts[0])) aliases.add(parts[0]);
+  if (parts.length > 1 && !genericRoleWords.has(parts.at(-1))) aliases.add(parts.at(-1));
   return [...aliases].filter(Boolean);
 }
 
@@ -780,6 +785,21 @@ function sanitizePrompt(prompt, indexes) {
           resolved: false,
         });
       }
+      continue;
+    }
+    const staging = (shotManifest?.character_staging ?? []).find((row) => normalize(row?.name) === normalize(visibleName));
+    const isPrimary = normalize(shotManifest?.primary_character) === normalize(visibleName);
+    if (accepted.length >= maxRefs && !isPrimary && staging?.screen_position && staging?.pose) {
+      findings.push({
+        image_id: prompt.image_id,
+        scene_id: prompt.scene_id,
+        severity: "warning",
+        code: "visible_character_text_authored_at_reference_cap",
+        message: `Shot manifest shows ${visibleName} as a staged non-primary subject, but all ${maxRefs} reference slots are occupied by higher-priority authored refs. Preserve the explicit text staging and review this cut during image QA.`,
+        character: visibleName,
+        available_ref_ids: availableRefs.map((ref) => ref.ref_id),
+        resolved: true,
+      });
       continue;
     }
     findings.push({

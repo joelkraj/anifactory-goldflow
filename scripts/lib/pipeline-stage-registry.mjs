@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-12.1";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-12.2";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -218,6 +218,15 @@ const stages = [
     approval: "automatic",
     validator: "episode_image_manifest",
     commands: ["imagegen start", "imagegen import-codex", "imagegen import-staged-codex"],
+  },
+  {
+    id: "image_focal_analysis",
+    title: "Image focal and composition analysis",
+    required_input: "generated images + hardened prompts",
+    output_artifact: "image_focal_analysis_<episode>.json",
+    approval: "automatic",
+    validator: "image_hash_bound_focal_analysis",
+    commands: ["imagegen analyze"],
   },
   {
     id: "image_output_qa",
@@ -451,6 +460,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     image_generation: codexSceneCuts(identity)
       ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
+    image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency 8`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,

@@ -23,6 +23,7 @@ const reviewDecisionsPath = flags.decisions
   ?? flags["review-decisions"]
   ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
 const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
+const focalAnalysisPath = flags["focal-analysis"] ?? path.join(episodeDir, `image_focal_analysis_${episode}.json`);
 const reviewDir = flags["review-dir"] ?? path.join(episodeDir, "review_samples", "image_output_qa");
 const approve = flags.approve === "true" || flags["approve-risk"] === "true";
 const legacyBulkApproval = flags["legacy-bulk-approval"] === "true";
@@ -32,6 +33,8 @@ const rejectedIds = new Set(parseList(flags["reject-cut-ids"] ?? flags["reject-i
 const acceptedIds = new Set(parseList(flags["accept-cut-ids"] ?? flags["accept-image-ids"]));
 const openingReviewSec = Math.max(0, Number(flags["opening-review-sec"] ?? 180));
 const contactWindowSec = Math.max(60, Number(flags["contact-window-sec"] ?? 300));
+const integrationSampleRate = Math.max(0, Math.min(1, Number(flags["integration-sample-rate"] ?? 0.08)));
+const writeFullContactSheets = flags["write-full-contact-sheets"] === "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -96,6 +99,29 @@ export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   const providerRisk = String(prompt?.provider_risk_tier ?? prompt?.risk_tier ?? "").toLowerCase();
   if (providerRoute === "codex_imagegen" || /hero|high|risky/.test(providerRisk)) reasons.push("provider_routed_hero_or_risky_cut");
   return [...new Set(reasons)];
+}
+
+function deterministicSampleSelected(imageId, rate) {
+  if (rate <= 0) return false;
+  const bucket = Number.parseInt(sha256(String(imageId)).slice(0, 8), 16) / 0xffffffff;
+  return bucket < rate;
+}
+
+export function imageManualReviewPolicy(prompt, compositionFindings = [], options = {}) {
+  const reasons = imageRiskReasons(prompt, { openingSec: options.openingSec ?? 180 });
+  const mandatoryReasons = reasons.filter((reason) => reason !== "four_reference_integration");
+  for (const finding of compositionFindings) {
+    if (String(finding?.severity ?? "").toLowerCase() === "needs_review") mandatoryReasons.push(`composition:${finding.code}`);
+  }
+  if (mandatoryReasons.length) {
+    return { tier: "mandatory_exception_review", requires_manual_review: true, reasons: [...new Set(mandatoryReasons)], sampled: false };
+  }
+  const sampleCandidate = reasons.includes("four_reference_integration");
+  const sampled = sampleCandidate && deterministicSampleSelected(prompt?.image_id, Number(options.integrationSampleRate ?? 0.08));
+  if (sampled) {
+    return { tier: "deterministic_integration_sample", requires_manual_review: true, reasons: ["sampled_four_reference_integration"], sampled: true };
+  }
+  return { tier: "structural_auto_pass", requires_manual_review: false, reasons: [], sampled: false };
 }
 
 const REVIEW_DECISIONS = new Set(["accepted", "rejected", "not_inspected"]);
@@ -202,8 +228,9 @@ async function writeContactSheet(rows, outputPath, { columns = 4, pageSize = 24 
   return pages;
 }
 
-async function structuralAudit(promptPlan, imagegenReport) {
+async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null) {
   const resultById = new Map((imagegenReport?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const focalById = new Map((focalAnalysis?.analyses ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const rows = [];
   const findings = [];
   const hashOwners = new Map();
@@ -243,7 +270,11 @@ async function structuralAudit(promptPlan, imagegenReport) {
     }
     const donorFinding = donorRecoveryFinding(sidecar, imageId);
     if (donorFinding) findings.push(donorFinding);
-    const reasons = imageRiskReasons(prompt, { openingSec: openingReviewSec });
+    const focal = focalById.get(imageId) ?? null;
+    const reviewPolicy = imageManualReviewPolicy(prompt, focal?.findings ?? [], {
+      openingSec: openingReviewSec,
+      integrationSampleRate,
+    });
     rows.push({
       image_id: imageId,
       scene_id: prompt.scene_id ?? null,
@@ -256,8 +287,13 @@ async function structuralAudit(promptPlan, imagegenReport) {
       image_sha256: imageHash,
       width,
       height,
-      risk_reasons: reasons,
-      requires_manual_risk_review: reasons.length > 0,
+      risk_reasons: reviewPolicy.reasons,
+      qa_tier: reviewPolicy.tier,
+      deterministic_sample: reviewPolicy.sampled,
+      requires_manual_risk_review: reviewPolicy.requires_manual_review,
+      focal_anchor: focal?.focal_anchor ?? null,
+      focal_confidence: focal?.confidence ?? null,
+      composition_findings: focal?.findings ?? [],
     });
   }
   return { rows, findings };
@@ -266,12 +302,14 @@ async function structuralAudit(promptPlan, imagegenReport) {
 async function writeReviewPackets(rows) {
   await fs.mkdir(reviewDir, { recursive: true });
   const allSheets = [];
-  const maxStart = Math.max(0, ...rows.map((row) => row.start_sec));
-  for (let start = 0; start <= maxStart; start += contactWindowSec) {
-    const windowRows = rows.filter((row) => row.start_sec >= start && row.start_sec < start + contactWindowSec);
-    if (!windowRows.length) continue;
-    const name = `contact_${String(Math.floor(start / 60)).padStart(3, "0")}-${String(Math.ceil((start + contactWindowSec) / 60)).padStart(3, "0")}min.jpg`;
-    allSheets.push(...await writeContactSheet(windowRows, path.join(reviewDir, name)));
+  if (writeFullContactSheets) {
+    const maxStart = Math.max(0, ...rows.map((row) => row.start_sec));
+    for (let start = 0; start <= maxStart; start += contactWindowSec) {
+      const windowRows = rows.filter((row) => row.start_sec >= start && row.start_sec < start + contactWindowSec);
+      if (!windowRows.length) continue;
+      const name = `contact_${String(Math.floor(start / 60)).padStart(3, "0")}-${String(Math.ceil((start + contactWindowSec) / 60)).padStart(3, "0")}min.jpg`;
+      allSheets.push(...await writeContactSheet(windowRows, path.join(reviewDir, name)));
+    }
   }
   const riskRows = rows.filter((row) => row.requires_manual_risk_review);
   const riskSheets = riskRows.length ? await writeContactSheet(riskRows, path.join(reviewDir, "risk_cuts.jpg")) : [];
@@ -360,20 +398,28 @@ export function imageQaNeedsRecovery(structuralBlockers = [], rejectedDecisionId
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, runIdentity] = await Promise.all([
+  const [promptPlan, imagegenReport, runIdentity, focalAnalysis] = await Promise.all([
     readJson(promptPath, null),
     readJson(imagegenReportPath, null),
     readJson(runIdentityPath, {}),
+    readJson(focalAnalysisPath, null),
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed" || !Array.isArray(imagegenReport.results)) throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   const isV2 = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";
+  const focalRequired = isV2 && String(runIdentity.stage_registry_version ?? "") >= "2026-07-12.2";
+  if (focalRequired && focalAnalysis?.status !== "passed") throw new Error(`Image QA requires passed hash-bound focal analysis: ${focalAnalysisPath}`);
+  if (focalAnalysis?.status === "passed") {
+    if (focalAnalysis.prompt_plan_sha256 !== await hashFile(promptPath) || focalAnalysis.imagegen_report_sha256 !== await hashFile(imagegenReportPath)) {
+      throw new Error(`Image focal analysis is stale; rerun imagegen analyze: ${focalAnalysisPath}`);
+    }
+  }
   if (approve && isV2 && !legacyBulkApproval) {
     throw new Error(`Per-cut review required for v2 runs. Edit ${reviewDecisionsPath} or use --accept-cut-ids/--reject-cut-ids with --reviewer and --note. --approve true is legacy-only.`);
   }
   if ((approve || acceptedIds.size || rejectedIds.size) && (!reviewer || !reviewNote)) throw new Error("Image decisions require --reviewer and --note so output QA has review provenance.");
 
-  const audit = await structuralAudit(promptPlan, imagegenReport);
+  const audit = await structuralAudit(promptPlan, imagegenReport, focalAnalysis);
   const packets = await writeReviewPackets(audit.rows);
   const structuralBlockers = audit.findings.filter((finding) => finding.severity === "blocker");
   const riskIds = new Set(audit.rows.filter((row) => row.requires_manual_risk_review).map((row) => row.image_id));
@@ -412,6 +458,8 @@ async function main() {
     prompt_plan_sha256: await hashFile(promptPath),
     imagegen_report_path: imagegenReportPath,
     imagegen_report_sha256: await hashFile(imagegenReportPath),
+    focal_analysis_path: focalAnalysis?.status === "passed" ? focalAnalysisPath : null,
+    focal_analysis_sha256: focalAnalysis?.status === "passed" ? await hashFile(focalAnalysisPath) : null,
     image_generation_estimated_cost: imagegenReport.estimated_cost ?? null,
     provider_health_report_path: imagegenReport.provider_health_report_path ?? null,
     provider_circuit_open: imagegenReport.provider_circuit_open ?? false,
@@ -419,6 +467,19 @@ async function main() {
     image_count: audit.rows.length,
     structurally_valid_count: audit.rows.length - new Set(structuralBlockers.map((finding) => finding.image_id)).size,
     risk_cut_count: audit.rows.filter((row) => row.requires_manual_risk_review).length,
+    qa_policy: {
+      mode: "exception_driven_v1",
+      opening_review_sec: openingReviewSec,
+      integration_sample_rate: integrationSampleRate,
+      full_contact_sheets_enabled: writeFullContactSheets,
+      manual_review_tiers: ["mandatory_exception_review", "deterministic_integration_sample"],
+      structural_auto_pass_count: audit.rows.filter((row) => row.qa_tier === "structural_auto_pass").length,
+      mandatory_exception_review_count: audit.rows.filter((row) => row.qa_tier === "mandatory_exception_review").length,
+      deterministic_sample_count: audit.rows.filter((row) => row.qa_tier === "deterministic_integration_sample").length,
+      review_reason_counts: audit.rows.flatMap((row) => row.risk_reasons ?? []).reduce((counts, reason) => ({ ...counts, [reason]: (counts[reason] ?? 0) + 1 }), {}),
+    },
+    unique_raster_count: new Set(audit.rows.map((row) => row.image_sha256)).size,
+    editorial_reuse_cut_count: audit.rows.length - new Set(audit.rows.map((row) => row.image_sha256)).size,
     opening_review_sec: openingReviewSec,
     findings: audit.findings,
     unresolved_blocker_count: structuralBlockers.length + rejectedDecisionIds.length,

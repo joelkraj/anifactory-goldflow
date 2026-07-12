@@ -55,10 +55,12 @@ import {
   applyImageQaDecisionsToLedger,
   donorRecoveryFinding,
   imageQaNeedsRecovery,
+  imageManualReviewPolicy,
   imageRiskReasons,
   mergeRiskReviewDecisions,
   scopedQaRecoveryCommand,
 } from "./image-output-qa.mjs";
+import { focalAnalysisFromPixelsForTests } from "./image-focal-analysis.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
 import { finalizeRenderReport } from "./render-report-finalize.mjs";
@@ -76,6 +78,7 @@ import {
 } from "./lib/image-fallback-policy.mjs";
 import { assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import { promoteEditorialMotionPlans } from "./editorial-motion-promote-proof.mjs";
+import { applyAutomaticFocalAnchorForTests } from "./visual-motion-plan.mjs";
 import {
   editorialMotionDistributionFindings,
   motionIntentFindings,
@@ -177,7 +180,8 @@ function sha256(value) {
 function testAuthoritativeStageRegistry() {
   const ids = PIPELINE_STAGE_REGISTRY.map((stage) => stage.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual(ids.slice(-7), [
+  assert.deepEqual(ids.slice(-8), [
+    "image_focal_analysis",
     "image_output_qa",
     "parallax_asset_generation",
     "parallax_asset_approval",
@@ -192,6 +196,7 @@ function testAuthoritativeStageRegistry() {
   assert.equal(narratorOnly.find((row) => row.stage === "sfx_score_plan")?.status, "skipped_with_waiver");
   assert.equal(stageChecklistFor({ audio_target: "narrator_only", parallax_policy: "disabled" }).find((row) => row.stage === "parallax_asset_generation")?.status, "skipped_with_waiver");
   assert.equal(commandStageFor("visual", "parallax-assets"), "parallax_asset_generation");
+  assert.equal(commandStageFor("imagegen", "analyze"), "image_focal_analysis");
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
@@ -1091,6 +1096,52 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.match(recoveryCommand, /--cut-ids cut_001/);
   assert.equal(imageQaNeedsRecovery([], ["cut_001"]), true);
   assert.equal(imageQaNeedsRecovery([], []), false);
+}
+
+function testExceptionDrivenQaAndAutomaticFocalAnalysis() {
+  const width = 32;
+  const height = 18;
+  const pixels = Buffer.alloc(width * height * 3, 24);
+  for (let y = 5; y < 14; y += 1) {
+    for (let x = 21; x < 30; x += 1) {
+      const offset = (y * width + x) * 3;
+      pixels[offset] = 245;
+      pixels[offset + 1] = 190;
+      pixels[offset + 2] = 40;
+    }
+  }
+  const analysis = focalAnalysisFromPixelsForTests(pixels, width, height, 3);
+  assert.equal(analysis.focal_anchor.x > 0.55, true);
+  assert.equal(analysis.confidence > 0.3, true);
+
+  const fourRefPrompt = {
+    image_id: "cut_sample",
+    start_sec: 500,
+    shot_manifest: { visible_characters: ["Joey"], shot_job: "emotional_reaction" },
+    reference_requirements: [{}, {}, {}, {}],
+  };
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 0 }).tier, "structural_auto_pass");
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 1 }).tier, "deterministic_integration_sample");
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [{ severity: "needs_review", code: "focal_anchor_near_frame_edge" }], { openingSec: 180, integrationSampleRate: 0 }).tier, "mandatory_exception_review");
+
+  const intent = {
+    image_id: "cut_sample",
+    image_sha256: "hash",
+    behavior: "slow_push_in",
+    start_anchor: { x: 0.5, y: 0.5 },
+    end_anchor: { x: 0.5, y: 0.5 },
+    start_scale: 1.01,
+    end_scale: 1.1,
+    motion_keyframes: [
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1.01, easing_to_next: "ease_in_out" },
+      { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1.1, easing_to_next: "linear" },
+    ],
+  };
+  const shifted = applyAutomaticFocalAnchorForTests(intent, { image_sha256: "hash", analysis_source: "fixture", confidence: 0.9, focal_anchor: { x: 0.8, y: 0.45 } });
+  assert.equal(shifted.focal_source, "automatic_image_saliency");
+  assert.equal(shifted.end_anchor.x > 0.65, true);
+  assert.equal(shifted.motion_keyframes[1].anchor.x > 0.65, true);
+  assert.equal(applyAutomaticFocalAnchorForTests(intent, { confidence: 0.9, focal_anchor: { x: 0.8, y: 0.45 } }, { focal_override: { start_anchor: { x: 0.2, y: 0.2 } } }), intent);
 }
 
 async function testProviderCircuitBreakerStopsUnclaimedWork() {
@@ -6115,6 +6166,7 @@ const FIXTURE_SUITES = {
     testQwenKeepsBracketedUiDialogueSpeakable,
     testEpisodeLocalAmbienceSpecContract,
     testImageOutputQaRiskAndDonorPolicies,
+    testExceptionDrivenQaAndAutomaticFocalAnalysis,
     testProviderCircuitBreakerStopsUnclaimedWork,
     testProviderConcurrencyBacksOffAndRecovers,
     testDirectedMotionAndFullTimelineTransitions,

@@ -282,6 +282,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("codex-image-import-staged.mjs", flags);
 } else if (command === "imagegen" && subcommand === "qa") {
   run("image-output-qa.mjs", flags);
+} else if (command === "imagegen" && subcommand === "analyze") {
+  run("image-focal-analysis.mjs", flags);
 } else if (command === "render" && subcommand === "start") {
   run("render.mjs", flags);
 } else if (command === "render" && subcommand === "finalize-report") {

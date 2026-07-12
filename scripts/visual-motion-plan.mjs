@@ -22,6 +22,7 @@ const episodeDir = flags["episode-dir"] ? path.resolve(flags["episode-dir"]) : p
 const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const imagegenReportPath = flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const imageQaPath = flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
+const focalAnalysisPath = flags["focal-analysis"] ?? path.join(episodeDir, `image_focal_analysis_${episode}.json`);
 const decisionPath = flags.decisions ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
 const ledgerPath = flags.ledger ?? path.join(episodeDir, "cut_execution_ledger.json");
 const audioBedReportPath = flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
@@ -69,11 +70,54 @@ function countBy(rows, selector) {
   return counts;
 }
 
+function clamp(value, min = 0.1, max = 0.9) {
+  return Math.max(min, Math.min(max, Number(value)));
+}
+
+export function applyAutomaticFocalAnchorForTests(intent, analysis, decision = null) {
+  if (!intent || decision?.focal_override || !analysis || Number(analysis.confidence ?? 0) < 0.48) return intent;
+  const detected = analysis.focal_anchor;
+  if (!Number.isFinite(Number(detected?.x)) || !Number.isFinite(Number(detected?.y))) return intent;
+  const target = { x: clamp(detected.x), y: clamp(detected.y) };
+  const end = intent.end_anchor ?? { x: 0.5, y: 0.5 };
+  const delta = {
+    x: Math.max(-0.28, Math.min(0.28, (target.x - Number(end.x ?? 0.5)) * 0.7)),
+    y: Math.max(-0.24, Math.min(0.24, (target.y - Number(end.y ?? 0.5)) * 0.7)),
+  };
+  if (Math.hypot(delta.x, delta.y) < 0.025) return intent;
+  const shift = (anchor) => ({ x: clamp(Number(anchor?.x ?? 0.5) + delta.x), y: clamp(Number(anchor?.y ?? 0.5) + delta.y) });
+  const edgeDistance = Math.min(target.x, 1 - target.x, target.y, 1 - target.y);
+  const maxScale = edgeDistance < 0.18 ? 1.065 : 1.12;
+  return {
+    ...intent,
+    focal_source: "automatic_image_saliency",
+    start_anchor: shift(intent.start_anchor),
+    end_anchor: shift(intent.end_anchor),
+    start_scale: Math.min(Number(intent.start_scale ?? 1), maxScale),
+    end_scale: Math.min(Number(intent.end_scale ?? 1), maxScale),
+    ...(Array.isArray(intent.motion_keyframes) ? {
+      motion_keyframes: intent.motion_keyframes.map((keyframe) => ({
+        ...keyframe,
+        anchor: shift(keyframe.anchor),
+        scale: Math.min(Number(keyframe.scale ?? 1), maxScale),
+      })),
+    } : {}),
+    auto_focal_override: {
+      algorithm: analysis.analysis_source ?? "sharp_local_contrast_saliency_v1",
+      confidence: Number(analysis.confidence),
+      detected_anchor: target,
+      applied_delta: delta,
+      source_image_sha256: analysis.image_sha256 ?? null,
+    },
+  };
+}
+
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, decisions, ledger, audioBedReport, identity, parallaxReport, parallaxApproval] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, focalAnalysis, decisions, ledger, audioBedReport, identity, parallaxReport, parallaxApproval] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
+    readJson(focalAnalysisPath, null),
     readJson(decisionPath, { decisions: [] }),
     readJson(ledgerPath),
     readJson(audioBedReportPath),
@@ -84,16 +128,22 @@ async function main() {
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (imageQa?.status !== "passed") throw new Error(`Motion planning requires passed per-cut image QA: ${imageQaPath}`);
+  const focalRequired = identity?.schema === "goldflow_run_identity_v2" && String(identity.stage_registry_version ?? "") >= "2026-07-12.2";
+  if (focalRequired && focalAnalysis?.status !== "passed") throw new Error(`Motion planning requires passed image focal analysis: ${focalAnalysisPath}`);
+  if (focalAnalysis?.status === "passed" && await hashFile(focalAnalysisPath) !== imageQa.focal_analysis_sha256) throw new Error(`Motion planning refused stale focal analysis: ${focalAnalysisPath}`);
   const audioTimelineEndSec = Number(audioBedReport?.mixed_duration_sec ?? audioBedReport?.mix?.duration_sec);
   if (!Number.isFinite(audioTimelineEndSec) || audioTimelineEndSec <= 0) throw new Error(`Motion planning requires a valid mixed audio duration: ${audioBedReportPath}`);
   if (await hashFile(decisionPath) !== imageQa.review_decisions_sha256) throw new Error(`Motion planning refused stale image review decisions: ${decisionPath}`);
   const ledgerById = new Map((ledger?.cuts ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const decisionById = new Map((decisions?.decisions ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const focalById = new Map((focalAnalysis?.analyses ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const acceptedHashes = imageQa.accepted_image_hashes ?? {};
   let intents = (promptPlan.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false).map((prompt) => {
     const cut = ledgerById.get(String(prompt.image_id ?? ""));
     if (!String(cut?.image_qa_status ?? "").startsWith("passed")) throw new Error(`Motion planning refused unaccepted cut ${prompt.image_id}.`);
-    return motionIntentForPrompt(prompt, cut.image_sha256, decisionById.get(String(prompt.image_id ?? "")), { timelineEndSec: audioTimelineEndSec });
+    const decision = decisionById.get(String(prompt.image_id ?? ""));
+    const base = motionIntentForPrompt(prompt, cut.image_sha256, decision, { timelineEndSec: audioTimelineEndSec });
+    return applyAutomaticFocalAnchorForTests(base, focalById.get(String(prompt.image_id ?? "")), decision);
   });
   const parallaxPolicy = String(identity?.parallax_policy ?? "disabled");
   let parallaxSourcePaths = [];
@@ -157,6 +207,7 @@ async function main() {
     promptPath,
     imagegenReportPath,
     imageQaPath,
+    ...(focalAnalysis?.status === "passed" ? [focalAnalysisPath] : []),
     decisionPath,
     audioBedReportPath,
     identityPath,
@@ -169,7 +220,7 @@ async function main() {
     series_slug: series,
     week,
     episode,
-    policy: "LLM-authored shot_manifest.motion_intent is the baseline. Explicit image-QA focal overrides supersede it after inspecting the generated frame. Legacy prompts without authored motion use conservative shot-staging fallback; missing focal intent becomes a smooth static hold. Hash-random motion is forbidden. Only reviewed, hash-bound parallax candidates may add layered depth.",
+    policy: "LLM-authored shot_manifest.motion_intent is the baseline. Explicit image-QA focal overrides supersede it; otherwise hash-bound automatic image saliency may translate authored anchors without changing behavior. Legacy prompts without authored motion use conservative shot-staging fallback; missing focal intent becomes a smooth static hold. Hash-random motion is forbidden. Only reviewed, hash-bound parallax candidates may add layered depth.",
     motion_policy: identity?.motion_policy ?? "legacy",
     parallax_policy: parallaxPolicy,
     parallax_asset_report_path: parallaxPolicy === "selective_inspected" ? parallaxReportPath : null,
@@ -182,6 +233,7 @@ async function main() {
     layered_parallax_count: intents.filter((row) => row.depth_treatment?.mode === "layered_parallax").length,
     approved_parallax_candidate_count: approvedParallaxById.size,
     qa_override_count: intents.filter((row) => row.qa_override).length,
+    auto_focal_override_count: intents.filter((row) => row.auto_focal_override).length,
     llm_authored_intent_count: intents.filter((row) => row.focal_source === "llm_authored_shot_manifest_motion_intent").length,
     legacy_fallback_intent_count: intents.filter((row) => !row.qa_override && row.focal_source !== "llm_authored_shot_manifest_motion_intent").length,
     behavior_distribution: countBy(intents, (row) => row.behavior),

@@ -797,6 +797,26 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
   };
 }
 
+async function imageFocalAnalysisComplete(episodeDir, episode) {
+  const reportPath = path.join(episodeDir, `image_focal_analysis_${episode}.json`);
+  const report = await readJson(reportPath, null);
+  if (!report) return { done: false, evidence: `${path.basename(reportPath)} missing` };
+  const status = String(report.status ?? "").toLowerCase();
+  if (status !== "passed") {
+    return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} status=${status || "missing"}` };
+  }
+  const promptPath = report.prompt_plan_path ?? path.join(episodeDir, "section_image_prompts_hardened.json");
+  const imagegenPath = report.imagegen_report_path ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
+  const [promptHash, imagegenHash] = await Promise.all([fileSha256(promptPath), fileSha256(imagegenPath)]);
+  if (!promptHash || promptHash !== report.prompt_plan_sha256 || !imagegenHash || imagegenHash !== report.imagegen_report_sha256) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale`, next_command_shape: `node bin/goldflow.mjs imagegen analyze --episode-dir ${episodeDir}` };
+  }
+  if (!Array.isArray(report.analyses) || report.analyses.length !== Number(report.image_count ?? -1)) {
+    return { done: false, state: "failed", evidence: `${path.basename(reportPath)} analysis count mismatch` };
+  }
+  return { done: true, evidence: `${path.basename(reportPath)} passed; images=${report.image_count}; exceptions=${report.composition_exception_count ?? 0}` };
+}
+
 async function parallaxAssetGenerationComplete(episodeDir, episode) {
   const reportPath = path.join(episodeDir, `parallax_asset_report_${episode}.json`);
   const report = await readJson(reportPath, null);
@@ -1454,6 +1474,8 @@ async function main() {
   const legacyCharacterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
   const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
   const imagegen = await imageReportComplete(episodeDir, episode, identity);
+  const focalAnalysisContractCurrent = String(identity.stage_registry_version ?? "") >= "2026-07-12.2";
+  const imageFocalAnalysis = focalAnalysisContractCurrent ? await imageFocalAnalysisComplete(episodeDir, episode) : null;
   const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
   const parallaxPolicyCurrent = identity.parallax_policy === "selective_inspected";
   const parallaxGeneration = parallaxPolicyCurrent ? await parallaxAssetGenerationComplete(episodeDir, episode) : null;
@@ -1528,6 +1550,9 @@ async function main() {
       ? { done: await exists(path.join(episodeDir, `transition_edit_plan_${episode}.json`)), evidence: `transition_edit_plan_${episode}.json legacy adapter` }
       : transitionPlan,
     image_generation: imagegen,
+    image_focal_analysis: focalAnalysisContractCurrent
+      ? imageFocalAnalysis
+      : { state: "skipped_with_waiver", evidence: "run predates hash-bound image focal analysis contract" },
     image_output_qa: legacyIdentity && !imageOutputQaRequired(identity)
       ? { state: "skipped_with_waiver", evidence: "legacy run predates required per-cut image QA" }
       : imageOutputQa,

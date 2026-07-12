@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sharp from "sharp";
+import { sha256File } from "./lib/file-hash.mjs";
 import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
 
 const execFile = promisify(execFileCb);
@@ -107,11 +108,7 @@ async function assertSourceHashesCurrent(report, label) {
 }
 
 async function hashFile(filePath) {
-  try {
-    return sha256(await fs.readFile(filePath));
-  } catch {
-    return null;
-  }
+  return sha256File(filePath);
 }
 
 async function writeJson(filePath, value) {

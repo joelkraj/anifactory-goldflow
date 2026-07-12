@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { sha256File } from "./lib/file-hash.mjs";
 
 const execFileAsync = promisify(execFile);
 const flags = parseFlags(process.argv.slice(2));
@@ -28,12 +28,8 @@ function requiredFlag(name, value) {
   if (!value) throw new Error(`Missing required --${name}.`);
 }
 
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 async function fileSha256(filePath) {
-  return sha256(await fs.readFile(filePath));
+  return sha256File(filePath);
 }
 
 async function readJson(filePath, fallback = null) {

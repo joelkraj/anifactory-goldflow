@@ -60,6 +60,8 @@ import {
 } from "./image-output-qa.mjs";
 import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
+import { finalizeRenderReport } from "./render-report-finalize.mjs";
+import { sha256File } from "./lib/file-hash.mjs";
 import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
 import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
 import {
@@ -72,6 +74,7 @@ import {
   isModelslabCreditExhaustion,
 } from "./lib/image-fallback-policy.mjs";
 import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { promoteEditorialMotionPlans } from "./editorial-motion-promote-proof.mjs";
 import {
   motionIntentFindings,
   motionIntentForPrompt,
@@ -1168,6 +1171,42 @@ function testDirectedMotionAndFullTimelineTransitions() {
   const foregroundTrace = motionTraceForIntent({ image_id: "cut_depth", duration_sec: 4, motion_keyframes: foregroundKeyframes }, 60).map((row) => ({ ...row, layer: "foreground" }));
   assert.deepEqual(motionTraceFindings([...backgroundTrace, ...foregroundTrace]), []);
 
+  const baseFullMotionIntents = [
+    { image_id: "cut_a", scene_id: "scene_1", visual_beat_id: "beat_0", start_sec: 0, duration_sec: 2, behavior: "slow_push_in" },
+    { image_id: "cut_open", scene_id: "scene_1", visual_beat_id: "beat_1", start_sec: 2, duration_sec: 4, behavior: "slow_push_in" },
+    { image_id: "cut_later", scene_id: "scene_2", visual_beat_id: "beat_2", start_sec: 6, duration_sec: 5, behavior: "lateral_follow" },
+  ];
+  const promotedEditorial = promoteEditorialMotionPlans({
+    baseMotionPlan: { status: "passed", motion_intents: baseFullMotionIntents },
+    proofMotionPlan: {
+      status: "passed",
+      motion_intents: [
+        baseFullMotionIntents[0],
+        { ...baseFullMotionIntents[1], duration_sec: 3.5, behavior: "static_hold" },
+      ],
+    },
+    baseTransitionPlan: {
+      status: "passed",
+      transition_events: [
+        { from_image_id: "cut_a", to_image_id: "cut_open", start_sec: 2, transition_sfx: false },
+        { from_image_id: "cut_open", to_image_id: "cut_later", start_sec: 6, transition_sfx: false },
+      ],
+    },
+    proofTransitionPlan: {
+      status: "passed",
+      transition_events: [{ from_image_id: "cut_a", to_image_id: "cut_open", start_sec: 2, transition_sfx: true }],
+    },
+    scopeEndSec: 6,
+    variantLabel: "fixture-proof",
+  });
+  assert.equal(promotedEditorial.motionPlan.motion_intents[1].behavior, "static_hold");
+  assert.equal(promotedEditorial.motionPlan.motion_intents[1].duration_sec, 4);
+  assert.deepEqual(promotedEditorial.motionPlan.motion_intents[2], baseFullMotionIntents[2]);
+  assert.equal(promotedEditorial.transitionPlan.transition_event_count, 2);
+  assert.equal(promotedEditorial.transitionPlan.transition_sfx_enabled, true);
+  assert.equal(promotedEditorial.metrics.restored_full_timeline_timing_count, 1);
+  assert.equal(promotedEditorial.metrics.untouched_motion_intent_count, 1);
+
   const transitionManifest = {
     cues: [
       {
@@ -1193,6 +1232,29 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.equal(resolvedSwipe.asset_trim_start_sec, 0.55);
   assert.equal(resolvedSwipe.sfx_offset_sec, -0.25);
   assert.equal(transitionSfxFamilyGuide().some((row) => row.family === "system_scan"), true);
+}
+
+async function testStreamingRenderHashFinalization() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-stream-hash-"));
+  const outputPath = path.join(tempDir, "longform.mp4");
+  const fixtureBytes = Buffer.alloc(3 * 1024 * 1024, 0x5a);
+  await fs.writeFile(outputPath, fixtureBytes);
+  const expectedHash = createHash("sha256").update(fixtureBytes).digest("hex");
+  assert.equal(await sha256File(outputPath), expectedHash);
+
+  const reportPath = path.join(tempDir, "render_report.json");
+  await writeJson(reportPath, {
+    schema: "goldflow_render_report_v2",
+    status: "passed",
+    output_path: outputPath,
+    output_hash: null,
+    final_video_sha256: null,
+  });
+  const finalized = await finalizeRenderReport({ reportPath });
+  assert.equal(finalized.report.output_hash, expectedHash);
+  assert.equal(finalized.report.final_video_sha256, expectedHash);
+  assert.equal(finalized.report.output_size_bytes, fixtureBytes.length);
+  assert.equal(finalized.report.output_hash_method, "streaming_sha256");
 }
 
 async function testRenderRequiresHashMatchedImageQa() {
@@ -5654,6 +5716,7 @@ const FIXTURE_SUITES = {
     testProviderCircuitBreakerStopsUnclaimedWork,
     testProviderConcurrencyBacksOffAndRecovers,
     testDirectedMotionAndFullTimelineTransitions,
+    testStreamingRenderHashFinalization,
     testRenderRequiresHashMatchedImageQa,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,

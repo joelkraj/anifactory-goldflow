@@ -139,6 +139,8 @@ ${registryCommands}
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual parallax-assets Build inspected foreground/background layers for a bounded hero-shot proof
   goldflow visual motion-proof-plan Build isolated image-aware motion/transition proof plans
+  goldflow visual motion-promote-proof Promote an approved bounded motion proof into a full-timeline variant
+  goldflow render finalize-report  Stream-hash and finalize an existing passed render report
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
 
@@ -241,6 +243,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("editorial-parallax-assets.mjs", flags);
 } else if (command === "visual" && subcommand === "motion-proof-plan") {
   run("editorial-motion-proof-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "motion-promote-proof") {
+  run("editorial-motion-promote-proof.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
 } else if (command === "imagegen" && subcommand === "promote-derived-refs") {
@@ -253,6 +257,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("image-output-qa.mjs", flags);
 } else if (command === "render" && subcommand === "start") {
   run("render.mjs", flags);
+} else if (command === "render" && subcommand === "finalize-report") {
+  run("render-report-finalize.mjs", flags);
 } else if (command === "final" && subcommand === "qa") {
   run("final-qa.mjs", flags);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {

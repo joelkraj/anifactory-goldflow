@@ -434,9 +434,17 @@ node bin/goldflow.mjs visual motion-plan --channel <channel> --series <series> -
 node bin/goldflow.mjs visual parallax-assets --image <accepted-hero-image.png> --output-dir <episode-dir>/review_samples/editorial_motion_v4/parallax-assets --slug <hero-slug> --workflow-bypass true
 node bin/goldflow.mjs visual motion-proof-plan --episode-dir <episode-dir> --episode ep_01 --scope-end-sec 60 --recipe <recipe.json> --output-dir <episode-dir>/review_samples/editorial_motion_v4 --proof-label editorial-v4 --workflow-bypass true
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --transition-plan <episode-dir>/review_samples/editorial_motion_v4/transition_edit_plan_ep_01-editorial-v4.json --motion-plan <episode-dir>/review_samples/editorial_motion_v4/motion_edit_plan_ep_01-editorial-v4.json --motion smooth_subpixel_ken_burns --diagnostic-proof true --proof-scope-end-sec 60 --allow-transition-sfx-on-narrator-only true --work-dir <episode-dir>/review_samples/editorial_motion_v4/render-work --motion-trace-output <episode-dir>/review_samples/editorial_motion_v4/motion_trace.jsonl --output <episode-dir>/review_samples/editorial_motion_v4/editorial_motion_v4_first_60.mp4 --report-output <episode-dir>/review_samples/editorial_motion_v4/render_report.json --workflow-bypass true
+# Promote an explicitly approved proof without carrying its truncated boundary duration into the full timeline:
+node bin/goldflow.mjs visual motion-promote-proof --episode-dir <episode-dir> --episode ep_01 --scope-end-sec 60 --proof-motion-plan <episode-dir>/review_samples/editorial_motion_v4/motion_edit_plan_ep_01-editorial-v4.json --proof-transition-plan <episode-dir>/review_samples/editorial_motion_v4/transition_edit_plan_ep_01-editorial-v4.json --output-dir <episode-dir>/review_samples/editorial_motion_v4_full --variant-label editorial-v4 --workflow-bypass true
 # Optional for direct/manual Codex/OpenAI proof batches:
 node bin/goldflow.mjs imagegen import-codex --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --image-id <image_id> --source <codex-generated-raster.png> --output <episode-dir>/imagegen_report_codex_manual_ep_01.json
 node bin/goldflow.mjs render start --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-plan <episode-dir>/transition_edit_plan_ep_01.json --motion-plan <episode-dir>/motion_edit_plan_ep_01.json --motion smooth_fast_ken_burns --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+```
+
+Render and final-QA hashing are streaming and support multi-gigabyte longform MP4s. For a passed legacy or variant report created before streaming hashing, repair only the report with:
+
+```bash
+node bin/goldflow.mjs render finalize-report --report <render-report.json>
 ```
 
 Opt-in SFX/score/ambience variant:

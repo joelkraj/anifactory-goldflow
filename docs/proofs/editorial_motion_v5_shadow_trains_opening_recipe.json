@@ -1,0 +1,230 @@
+{
+  "schema": "goldflow_editorial_motion_recipe_v3",
+  "scope_end_sec": 60,
+  "editorial_policy": {
+    "static_hold_target_share": 0.375,
+    "restrained_single_move_target_share": 0.4375,
+    "layered_parallax_target_count": 3,
+    "selected_transition_target_count": 8,
+    "note": "Stillness is intentional punctuation. Motion is reserved for a visual job, and three manually inspected hero frames use clearly readable opposing-plane depth while preserving foreground cover."
+  },
+  "motion_overrides": {
+    "ep_01-w000000-w000012": {
+      "behavior": "focus_shift",
+      "focal_subject": "Nox behind sleeping Joey, then the vulnerable host",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.37 }, "scale": 1.01, "easing_to_next": "linear" },
+        { "at": 0.18, "anchor": { "x": 0.5, "y": 0.37 }, "scale": 1.01, "easing_to_next": "ease_in_out" },
+        { "at": 0.82, "anchor": { "x": 0.38, "y": 0.57 }, "scale": 1.035, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.38, "y": 0.57 }, "scale": 1.035, "easing_to_next": "linear" }
+      ],
+      "reason": "A single restrained handoff introduces the impossible shadow and lands on the exposed host."
+    },
+    "ep_01-w000013-w000023": {
+      "behavior": "static_hold",
+      "focal_subject": "Joey's eyes opening",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.48 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.48 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The hard cut supplies the wake-up impact; a true still lets the reaction register."
+    },
+    "ep_01-w000024-w000030": {
+      "behavior": "reveal_zoom_out",
+      "focal_subject": "Nox's exhausted silhouette separated from the ancient arena",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "depth_treatment": {
+        "mode": "layered_parallax",
+        "asset_report": "parallax-assets/nox-reveal-parallax-assets.json",
+        "background_keyframes": [
+          { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.025, "easing_to_next": "ease_in_out" },
+          { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.005, "easing_to_next": "linear" }
+        ],
+        "foreground_keyframes": [
+          { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.025, "easing_to_next": "ease_in_out" },
+          { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.075, "easing_to_next": "linear" }
+        ]
+      },
+      "reason": "Readable opposing-plane separation makes the first full Nox reveal dimensional while identical anchors preserve clean foreground cover."
+    },
+    "ep_01-w000031-w000043": {
+      "behavior": "lateral_follow",
+      "focal_subject": "Kael's spear traveling toward kneeling Joey",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.34, "y": 0.49 }, "scale": 1.01, "easing_to_next": "linear" },
+        { "at": 0.14, "anchor": { "x": 0.34, "y": 0.49 }, "scale": 1.01, "easing_to_next": "ease_in_out" },
+        { "at": 0.82, "anchor": { "x": 0.63, "y": 0.51 }, "scale": 1.045, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.63, "y": 0.51 }, "scale": 1.045, "easing_to_next": "linear" }
+      ],
+      "reason": "One directional move follows the attack line and stops before the impact cut."
+    },
+    "ep_01-w000044-w000054": {
+      "behavior": "aftermath_reveal",
+      "focal_subject": "The arena-wide panic and shaking stands",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.43, "y": 0.54 }, "scale": 1.04, "easing_to_next": "ease_in_out" },
+        { "at": 0.72, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.005, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.005, "easing_to_next": "linear" }
+      ],
+      "reason": "A restrained zoom-out reveals the consequence and then leaves the arena scale alone."
+    },
+    "ep_01-w000055-w000066": {
+      "behavior": "static_hold",
+      "focal_subject": "Joey's knees against the arena stone",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.61 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.61 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The physical evidence is already composed clearly; stillness gives it weight."
+    },
+    "ep_01-w000067-w000081": {
+      "behavior": "reveal_zoom_out",
+      "focal_subject": "Sleeping Joey exposed on the active arena floor",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.6 }, "scale": 1.045, "easing_to_next": "ease_in_out" },
+        { "at": 0.74, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The only move is a context reveal showing how exposed he is."
+    },
+    "ep_01-w000082-w000092": {
+      "behavior": "focus_shift",
+      "focal_subject": "Kneeling Joey, then Kael's confident dominance",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.35, "y": 0.59 }, "scale": 1.015, "easing_to_next": "linear" },
+        { "at": 0.16, "anchor": { "x": 0.35, "y": 0.59 }, "scale": 1.015, "easing_to_next": "ease_in_out" },
+        { "at": 0.82, "anchor": { "x": 0.62, "y": 0.43 }, "scale": 1.04, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.62, "y": 0.43 }, "scale": 1.04, "easing_to_next": "linear" }
+      ],
+      "reason": "The move transfers apparent control from Joey to the opponent who thinks the duel is over."
+    },
+    "ep_01-w000093-w000100": {
+      "behavior": "reveal_zoom_out",
+      "focal_subject": "The descending arena barrier",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.04, "easing_to_next": "ease_in_out" },
+        { "at": 0.72, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The zoom-out exposes the barrier geometry while its directional transition supplies the drop."
+    },
+    "ep_01-w000101-w000112": {
+      "behavior": "static_hold",
+      "focal_subject": "Joey alone in the lethal attack lane",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.58 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.58 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "A true hold creates tension before the hand gesture and stopped-spear payoff."
+    },
+    "ep_01-w000113-w000125": {
+      "behavior": "slow_push_in",
+      "focal_subject": "Joey's two raised fingers",
+      "easing": "ease_in_out",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.005, "easing_to_next": "linear" },
+        { "at": 0.14, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.005, "easing_to_next": "ease_in_out" },
+        { "at": 0.62, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.05, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1.05, "easing_to_next": "linear" }
+      ],
+      "reason": "A single push isolates the involuntary gesture, then freezes before impact."
+    },
+    "ep_01-w000126-w000141": {
+      "behavior": "aftermath_reveal",
+      "focal_subject": "Joey and the spearhead stopped between his fingers",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "depth_treatment": {
+        "mode": "layered_parallax",
+        "asset_report": "parallax-assets/spear-stop-parallax-assets.json",
+        "background_keyframes": [
+          { "at": 0, "anchor": { "x": 0.52, "y": 0.48 }, "scale": 1.02, "easing_to_next": "ease_in_out" },
+          { "at": 1, "anchor": { "x": 0.52, "y": 0.48 }, "scale": 1.005, "easing_to_next": "linear" }
+        ],
+        "foreground_keyframes": [
+          { "at": 0, "anchor": { "x": 0.52, "y": 0.48 }, "scale": 1.02, "easing_to_next": "ease_in_out" },
+          { "at": 1, "anchor": { "x": 0.52, "y": 0.48 }, "scale": 1.065, "easing_to_next": "linear" }
+        ]
+      },
+      "reason": "The hero impact uses visible opposing-plane separation between Joey, the stopped spear, and the arena rather than a generic impact zoom."
+    },
+    "ep_01-w000142-w000152": {
+      "behavior": "static_hold",
+      "focal_subject": "Joey's intact fingers and Kael's pale reaction",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.55, "y": 0.49 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.55, "y": 0.49 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The two-subject reaction composition reads best without another camera handoff."
+    },
+    "ep_01-w000153-w000168": {
+      "behavior": "ui_focus",
+      "focal_subject": "The black system panel floating separately from Joey and the arena",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "depth_treatment": {
+        "mode": "layered_parallax",
+        "asset_report": "parallax-assets/system-reveal-parallax-assets.json",
+        "background_keyframes": [
+          { "at": 0, "anchor": { "x": 0.43, "y": 0.5 }, "scale": 1.015, "easing_to_next": "ease_in_out" },
+          { "at": 1, "anchor": { "x": 0.43, "y": 0.5 }, "scale": 1.005, "easing_to_next": "linear" }
+        ],
+        "foreground_keyframes": [
+          { "at": 0, "anchor": { "x": 0.43, "y": 0.5 }, "scale": 1.015, "easing_to_next": "ease_in_out" },
+          { "at": 1, "anchor": { "x": 0.43, "y": 0.5 }, "scale": 1.055, "easing_to_next": "linear" }
+        ]
+      },
+      "reason": "The system panel gains a clearly readable floating plane while Joey and the arena recede beneath it."
+    },
+    "ep_01-w000169-w000173": {
+      "behavior": "static_hold",
+      "focal_subject": "The 2,000 YEARS value",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.5, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The short UI insert stays completely still so the number is instantly readable."
+    },
+    "ep_01-w000174-w000185": {
+      "behavior": "static_hold",
+      "focal_subject": "The completed system readout beside Joey",
+      "easing": "linear",
+      "motion_keyframes": [
+        { "at": 0, "anchor": { "x": 0.48, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" },
+        { "at": 1, "anchor": { "x": 0.48, "y": 0.5 }, "scale": 1, "easing_to_next": "linear" }
+      ],
+      "reason": "The final proof beat becomes a calm reading hold after the system reveal."
+    }
+  },
+  "transition_overrides": [
+    { "to_image_id": "ep_01-w000024-w000030", "xfade_transition": "hblur", "xfade_duration_sec": 0.26, "sfx_family": "memory_wash", "gain_db": -20, "edit_reason": "A brief temporal wash earns the ancient-shadow reveal." },
+    { "to_image_id": "ep_01-w000031-w000043", "xfade_transition": "slideleft", "xfade_duration_sec": 0.18, "sfx_family": "impact", "gain_db": -15, "edit_reason": "Fast lateral entry follows the spear attack direction." },
+    { "to_image_id": "ep_01-w000044-w000054", "xfade_transition": "rectcrop", "xfade_duration_sec": 0.2, "sfx_family": "impact", "gain_db": -15, "edit_reason": "Impact expansion opens into the arena-wide consequence." },
+    { "to_image_id": "ep_01-w000067-w000081", "xfade_transition": "fadegrays", "xfade_duration_sec": 0.3, "sfx_family": "none", "edit_reason": "A quiet desaturated bridge separates the injury proof from the absurd sleep reveal." },
+    { "to_image_id": "ep_01-w000093-w000100", "xfade_transition": "wipedown", "xfade_duration_sec": 0.21, "sfx_family": "swipe_down", "gain_db": -18, "edit_reason": "The transition direction mirrors the barrier lowering." },
+    { "to_image_id": "ep_01-w000113-w000125", "xfade_transition": "wipeup", "xfade_duration_sec": 0.22, "sfx_family": "swipe_up", "gain_db": -18, "edit_reason": "The upward sweep is earned by Joey raising two fingers." },
+    { "to_image_id": "ep_01-w000126-w000141", "xfade_transition": "fadefast", "xfade_duration_sec": 0.18, "sfx_family": "impact", "gain_db": -13, "edit_reason": "The strongest opening accent lands on the stopped spear." },
+    { "to_image_id": "ep_01-w000153-w000168", "xfade_transition": "pixelize", "xfade_duration_sec": 0.25, "sfx_family": "system_scan", "gain_db": -18, "edit_reason": "A digital transition and scan accent announce the system window." }
+  ]
+}

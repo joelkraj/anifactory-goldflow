@@ -281,6 +281,11 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     : null;
   return {
     target_image_id: scene.image_id_hint ?? (absoluteIndex == null ? null : `${episode}-cut-${String(absoluteIndex + 1).padStart(3, "0")}`),
+    editorial_reuse: {
+      eligible: Array.isArray(scene.__editorial_reuse_candidate_image_ids) && scene.__editorial_reuse_candidate_image_ids.length > 0,
+      candidate_image_ids: scene.__editorial_reuse_candidate_image_ids ?? [],
+      policy: "After 20 minutes only, reuse one earlier fresh image only when it genuinely serves this stable continuity beat; otherwise author a fresh image.",
+    },
     scene_id: scene.scene_id,
     visual_beat_id: scene.visual_beat_id ?? null,
     parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
@@ -331,6 +336,9 @@ function compactNeighborContext(scene) {
   if (!scene) return null;
   return {
     visual_beat_id: scene.visual_beat_id ?? null,
+    target_image_id: scene.image_id_hint ?? (Number.isFinite(Number(scene.__visual_plan_absolute_index))
+      ? `${episode}-cut-${String(Number(scene.__visual_plan_absolute_index) + 1).padStart(3, "0")}`
+      : null),
     parent_scene_id: scene.parent_scene_id ?? scene.scene_id,
     beat_index: scene.beat_index ?? null,
     visual_beat_focus: scene.visual_beat_focus ?? null,
@@ -540,6 +548,8 @@ Core contract:
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
 - Background extras appear only when the local beat asks for them. Keep private, lonely, or solo beats visibly clear of unrelated people.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
+- Keep image_strategy as fresh unless editorial_reuse.eligible is true and one listed candidate image genuinely depicts the same stable location, cast, state, and emotional purpose. For deliberate reuse, set image_strategy to reuse_prior_approved and copy one exact candidate id into reuse_source_image_id. Still author the full current-beat provider_prompt and motion_intent so the cut can safely fall back to fresh generation and receive its own edit movement.
+- Editorial reuse is a late-video efficiency tool for stable explanation, analysis, aftermath, or low-risk dialogue. Never use it for the opening, action, a new location, a state change, UI/system reveal, status turn, payoff, threat, or cliffhanger.
 - Do not create standalone negative_prompt, avoid_list, or exclude_list fields. Normal story-faithful prose may freely state absences, refusals, and contrast.
 - Correction directives are binding only for their matching image_id or scene_id.
 ${riskRules.map((rule) => `- ${rule}`).join("\n")}
@@ -562,6 +572,8 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
     "visual_beat_id": "copy visual_beat_id when present",
     "start_sec": 0,
     "duration_sec": 6,
+    "image_strategy": "fresh|reuse_prior_approved",
+    "reuse_source_image_id": null,
     "provider_prompt": "one production prompt optimized for target_provider_route",
     "image_provider_route": "copy target_provider_route",
     "shot_manifest": {
@@ -1175,6 +1187,10 @@ function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label
 
 function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
+  const reuseCandidates = new Set((sourceUnit?.__editorial_reuse_candidate_image_ids ?? []).map(String));
+  const requestedReuseSource = String(row.reuse_source_image_id ?? "").trim();
+  const requestedReuse = String(row.image_strategy ?? "fresh").toLowerCase() === "reuse_prior_approved";
+  const validEditorialReuse = requestedReuse && requestedReuseSource && reuseCandidates.has(requestedReuseSource);
   const manifest = sanitizeShotManifest(row.shot_manifest);
   if (manifest && !manifest.reference_slots.length && Array.isArray(row.reference_requirements)) {
     manifest.reference_slots = row.reference_requirements.map((slot, slotIndex) => ({
@@ -1215,6 +1231,10 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     active_state_constraints: sourceUnit?.active_state_constraints ?? null,
     start_sec: Number(sourceUnit?.start_sec ?? row.start_sec ?? 0),
     duration_sec: Math.max(0.25, Number(sourceUnit?.duration_sec ?? row.duration_sec ?? 6)),
+    image_strategy: validEditorialReuse ? "reuse_prior_approved" : "fresh",
+    reuse_source_image_id: validEditorialReuse ? requestedReuseSource : null,
+    editorial_reuse_approved: validEditorialReuse,
+    editorial_reuse_candidate_image_ids: [...reuseCandidates],
     provider_prompt: providerPrompt,
     image_prompt: providerPrompt,
     modelslab_image_prompt: route === "modelslab" ? providerPrompt : "",
@@ -1251,6 +1271,71 @@ export function normalizePromptPacketForTests(row, sourceUnit, options = {}) {
     activeImageProvider: options.activeImageProvider ?? "modelslab",
     activeImageProviderOptions: options.activeImageProviderOptions ?? {},
   });
+}
+
+function enforceEditorialReusePolicy(prompts = [], options = {}) {
+  const thresholdSec = Math.max(0, Number(options.thresholdSec ?? 1200));
+  const maxShare = Math.max(0, Math.min(0.5, Number(options.maxShare ?? 0.18)));
+  const latePromptCount = prompts.filter((prompt) => Number(prompt.start_sec ?? 0) >= thresholdSec).length;
+  const maxReuseCount = Math.floor(latePromptCount * maxShare);
+  const findings = [];
+  let acceptedReuseCount = 0;
+  let priorVisualSource = null;
+  let priorWasReuse = false;
+  const byId = new Map();
+  const normalized = prompts.map((prompt) => {
+    const imageId = String(prompt.image_id ?? "");
+    let row = { ...prompt };
+    if (row.editorial_reuse_approved === true) {
+      const sourceId = String(row.reuse_source_image_id ?? "");
+      const source = byId.get(sourceId);
+      let reason = null;
+      if (Number(row.start_sec ?? 0) < thresholdSec) reason = "before_reuse_window";
+      else if (!source) reason = "source_not_earlier_in_plan";
+      else if (source.editorial_reuse_approved === true) reason = "reuse_chain_forbidden";
+      else if (priorWasReuse && priorVisualSource === sourceId) reason = "adjacent_duplicate_hold_forbidden";
+      else if (acceptedReuseCount >= maxReuseCount) reason = "episode_reuse_cap_reached";
+      if (reason) {
+        row = {
+          ...row,
+          image_strategy: "fresh",
+          reuse_source_image_id: null,
+          editorial_reuse_approved: false,
+          editorial_reuse_downgraded_reason: reason,
+        };
+        findings.push({
+          severity: "warning",
+          code: "editorial_reuse_downgraded_to_fresh",
+          image_id: imageId,
+          reason,
+        });
+      } else {
+        acceptedReuseCount += 1;
+      }
+    }
+    priorVisualSource = row.editorial_reuse_approved === true ? String(row.reuse_source_image_id) : imageId;
+    priorWasReuse = row.editorial_reuse_approved === true;
+    byId.set(imageId, row);
+    return row;
+  });
+  return {
+    prompts: normalized,
+    findings,
+    policy: {
+      threshold_sec: thresholdSec,
+      max_share: maxShare,
+      late_prompt_count: latePromptCount,
+      max_reuse_count: maxReuseCount,
+      accepted_reuse_count: acceptedReuseCount,
+      fresh_image_count: normalized.length - acceptedReuseCount,
+      visual_beat_count: normalized.length,
+      unique_image_count_planned: normalized.length - acceptedReuseCount,
+    },
+  };
+}
+
+export function enforceEditorialReusePolicyForTests(prompts = [], options = {}) {
+  return enforceEditorialReusePolicy(prompts, options);
 }
 
 function activeStateConstraintFindings(prompts, sourceRows) {
@@ -1558,16 +1643,60 @@ function chunkByParentScene(items, targetSize) {
   return chunks;
 }
 
-function visualUnitRiskClass(unit, visualReferencePlan, stateRefIndex) {
-  const visibleCount = (unit.visible_characters ?? unit.visible_subjects ?? []).length;
-  const referenceCount = relevantReferenceTargets(unit, visualReferencePlan, stateRefIndex).length;
+function estimatedAttachedReferenceNeed(unit, visualReferencePlan, stateRefIndex) {
+  const targets = relevantReferenceTargets(unit, visualReferencePlan, stateRefIndex);
+  const visibleLabels = [...new Set([
+    ...stableEntityIds(unit),
+    ...(unit.visible_characters ?? unit.visible_subjects ?? []).map(normalizeLabel),
+  ].filter(Boolean))];
+  const characterTargets = targets.filter((target) => {
+    if (!/character/.test(String(target.kind ?? "").toLowerCase())) return false;
+    const labels = [target.subject, target.character, target.ref_id].map(normalizeLabel).filter(Boolean);
+    return labels.some((label) => visibleLabels.some((visible) => label === visible || label.includes(visible) || visible.includes(label)));
+  });
+  const hasPhysicalLocation = Boolean(unit.location_id ?? unit.active_state_constraints?.location_id ?? unit.local_location ?? unit.location);
+  const locationNeed = hasPhysicalLocation && targets.some((target) => String(target.kind ?? "").toLowerCase() === "location") ? 1 : 0;
+  const job = `${unit.visual_job ?? ""} ${unit.suggested_shot_job ?? ""}`;
+  const localUi = (unit.local_ui_elements ?? []).length > 0 || /system_reveal|ui_reveal|ui_insert/i.test(job);
+  const localProp = (unit.local_props ?? []).length > 0 && /object_insert|physical_action|consequence|interaction/i.test(job);
+  const uiNeed = localUi && targets.some((target) => String(target.kind ?? "").toLowerCase() === "ui") ? 1 : 0;
+  const propNeed = localProp && targets.some((target) => /prop|action|effect/.test(String(target.kind ?? "").toLowerCase())) ? 1 : 0;
+  return {
+    estimated_count: Math.min(4, characterTargets.length + locationNeed + uiNeed + propNeed),
+    character_count: characterTargets.length,
+    location_count: locationNeed,
+    ui_count: uiNeed,
+    prop_action_count: propNeed,
+    candidate_count: targets.length,
+  };
+}
+
+function visualUnitRiskAssessment(unit, visualReferencePlan, stateRefIndex) {
+  const visibleCount = stableEntityIds(unit).length || (unit.visible_characters ?? unit.visible_subjects ?? []).length;
+  const referenceNeed = estimatedAttachedReferenceNeed(unit, visualReferencePlan, stateRefIndex);
   const job = `${unit.visual_job ?? ""} ${unit.suggested_shot_job ?? ""} ${unit.visual_beat_action ?? ""}`;
-  if (Number(unit.start_sec ?? 0) < 180
-    || visibleCount >= 3
-    || referenceCount >= 4
-    || /physical_action|fight|strike|grab|carry|rescue|impact|shove|restrain/i.test(job)) return "high";
-  if (visibleCount >= 2 || referenceCount >= 2 || /system_reveal|ui_reveal|interaction|reaction|consequence/i.test(job)) return "medium";
-  return "simple";
+  const reasons = [];
+  if (Number(unit.start_sec ?? 0) < 180) reasons.push("opening_retention");
+  if (visibleCount >= 3) reasons.push("dense_cast");
+  if (/physical_action|\b(?:fight|strike|hit|grab|carry|catch|lift|pin|rescue|shove|restrain|stab|shield)\b/i.test(job)) reasons.push("physical_action_geometry");
+  if (reasons.length) return { risk_class: "high", reasons, visible_count: visibleCount, reference_need: referenceNeed };
+  if (visibleCount >= 2) reasons.push("two_visible_characters");
+  if (referenceNeed.estimated_count >= 3) reasons.push(referenceNeed.estimated_count >= 4 ? "four_likely_attached_refs" : "three_likely_attached_refs");
+  if (/system_reveal|ui_reveal|interaction|consequence/i.test(job)) reasons.push("interaction_or_reveal");
+  return {
+    risk_class: reasons.length ? "medium" : "simple",
+    reasons,
+    visible_count: visibleCount,
+    reference_need: referenceNeed,
+  };
+}
+
+function visualUnitRiskClass(unit, visualReferencePlan, stateRefIndex) {
+  return visualUnitRiskAssessment(unit, visualReferencePlan, stateRefIndex).risk_class;
+}
+
+export function visualUnitRiskAssessmentForTests(unit, options = {}) {
+  return visualUnitRiskAssessment(unit, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map());
 }
 
 function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex) {
@@ -1597,7 +1726,16 @@ function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex) {
 
 export function adaptivePromptChunksForTests(items, options = {}) {
   return adaptivePromptChunks(items, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map())
-    .map((chunk) => ({ risk_class: chunk.risk_class, target_chunk_size: chunk.target_chunk_size, ids: chunk.map((row) => row.visual_beat_id ?? row.scene_id) }));
+    .map((chunk) => ({
+      risk_class: chunk.risk_class,
+      target_chunk_size: chunk.target_chunk_size,
+      ids: chunk.map((row) => row.visual_beat_id ?? row.scene_id),
+      risk_reasons: [...new Set(chunk.flatMap((row) => visualUnitRiskAssessment(
+        row,
+        options.visualReferencePlan ?? { reference_targets: [] },
+        options.stateRefIndex ?? new Map(),
+      ).reasons))],
+    }));
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
@@ -1631,10 +1769,76 @@ async function loadCorrectionDirectives(filePath) {
   return [];
 }
 
+function stableEntityIds(row = {}) {
+  const ids = [
+    ...(row.physically_visible_entity_ids ?? []),
+    ...(row.screen_visible_entity_ids ?? []),
+    ...(row.preview_visible_entity_ids ?? []),
+  ].map((value) => String(value ?? "").trim()).filter(Boolean);
+  if (ids.length) return [...new Set(ids)].sort();
+  return [...new Set((row.visible_characters ?? row.visible_subjects ?? [])
+    .map((value) => normalizeLabel(value))
+    .filter(Boolean))].sort();
+}
+
+function editorialReuseUnsafe(row = {}) {
+  const job = `${row.visual_job ?? ""} ${row.suggested_shot_job ?? ""}`;
+  const action = `${row.visual_beat_action ?? ""} ${row.visual_beat_script_excerpt ?? ""}`;
+  return /physical_action|environment_establishing|location_transition|transition|system_reveal|ui_reveal|status_turn|payoff|cliffhanger|threat_reveal|body_state_proof/i.test(job)
+    || /\b(?:arrive|enter|leave|return|relocate|transform|reveal|attack|fight|strike|hit|lift|carry|catch|pin|restrain|shield|stab|shove|grab|rescue|explode|collapse|die|kill)\b/i.test(action)
+    || (row.local_ui_elements ?? []).length > 0;
+}
+
+function activeStateSignature(row = {}) {
+  const state = row.active_state_constraints ?? {};
+  return sha256(JSON.stringify({
+    location_id: state.location_id ?? row.location_id ?? normalizeLabel(row.local_location ?? row.location ?? ""),
+    entities: state.entities ?? {},
+  }));
+}
+
+function continuitySignature(row = {}) {
+  return sha256(JSON.stringify({
+    parent_scene_id: row.parent_scene_id ?? row.scene_id ?? null,
+    location_id: row.location_id ?? row.active_state_constraints?.location_id ?? normalizeLabel(row.local_location ?? row.location ?? ""),
+    visible_entities: stableEntityIds(row),
+    depiction_mode: row.depiction_mode ?? "current_reality",
+    active_state: activeStateSignature(row),
+  }));
+}
+
+function editorialReuseCandidates(rows = [], episodeId = "ep_01", options = {}) {
+  const thresholdSec = Math.max(0, Number(options.thresholdSec ?? 1200));
+  const lookbackCuts = Math.max(1, Number(options.lookbackCuts ?? 5));
+  const lookbackSec = Math.max(1, Number(options.lookbackSec ?? 75));
+  return rows.map((row, index) => {
+    if (Number(row.start_sec ?? 0) < thresholdSec || editorialReuseUnsafe(row)) return [];
+    const signature = continuitySignature(row);
+    const candidates = [];
+    for (let priorIndex = index - 1; priorIndex >= 0 && priorIndex >= index - lookbackCuts; priorIndex -= 1) {
+      const prior = rows[priorIndex];
+      if (Number(row.start_sec ?? 0) - Number(prior.start_sec ?? 0) > lookbackSec) break;
+      if (editorialReuseUnsafe(prior) || continuitySignature(prior) !== signature) continue;
+      candidates.push(prior.image_id_hint ?? `${episodeId}-cut-${String(priorIndex + 1).padStart(3, "0")}`);
+    }
+    return candidates;
+  });
+}
+
+export function editorialReuseCandidatesForTests(rows = [], episodeId = "ep_01", options = {}) {
+  return editorialReuseCandidates(rows, episodeId, options);
+}
+
 function filterVisualSourceRows(rows, episodeId) {
+  const reuseCandidates = editorialReuseCandidates(rows, episodeId, {
+    thresholdSec: Number(flags["editorial-reuse-after-sec"] ?? 1200),
+    lookbackCuts: Number(flags["editorial-reuse-lookback-cuts"] ?? 5),
+    lookbackSec: Number(flags["editorial-reuse-lookback-sec"] ?? 75),
+  });
   const annotated = rows.map((row, index, allRows) => ({
     ...row,
     __visual_plan_absolute_index: index,
+    __editorial_reuse_candidate_image_ids: reuseCandidates[index],
     __previous_visual_context: compactNeighborContext(allRows[index - 1]),
     __next_visual_context: compactNeighborContext(allRows[index + 1]),
   }));
@@ -1961,7 +2165,14 @@ async function main() {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
         const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
-        promptSizes.push({ chunk_index: index + 1, risk_class: sceneChunks[index].risk_class, target_chunk_size: sceneChunks[index].target_chunk_size, visual_unit_count: sceneChunks[index].length, prompt_chars: chunkPrompt.length });
+        promptSizes.push({
+          chunk_index: index + 1,
+          risk_class: sceneChunks[index].risk_class,
+          risk_reasons: [...new Set(sceneChunks[index].flatMap((row) => visualUnitRiskAssessment(row, enrichedVisualReferencePlan, stateRefIndex).reasons))],
+          target_chunk_size: sceneChunks[index].target_chunk_size,
+          visual_unit_count: sceneChunks[index].length,
+          prompt_chars: chunkPrompt.length,
+        });
       }
     } else {
       const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
@@ -2060,6 +2271,7 @@ async function main() {
     adaptiveChunkTelemetry = sceneChunks.map((chunk, index) => ({
       chunk_index: index + 1,
       risk_class: chunk.risk_class,
+      risk_reasons: [...new Set(chunk.flatMap((row) => visualUnitRiskAssessment(row, enrichedVisualReferencePlan, stateRefIndex).reasons))],
       target_chunk_size: chunk.target_chunk_size,
       visual_unit_count: chunk.length,
       beat_ids: chunk.map((row) => row.visual_beat_id ?? null).filter(Boolean),
@@ -2123,6 +2335,11 @@ async function main() {
   if (scopedRepair) {
     prompts = mergeScopedPromptReplacements(basePromptPlan.prompts, scopedPrompts, { image_ids: scopedImageIds });
   }
+  const editorialReuse = enforceEditorialReusePolicy(prompts, {
+    thresholdSec: Number(flags["editorial-reuse-after-sec"] ?? 1200),
+    maxShare: Number(flags["editorial-reuse-max-share"] ?? 0.18),
+  });
+  prompts = editorialReuse.prompts;
   const providerExclusionPayloadWarnings = providerExclusionPayloadMarkerWarnings(prompts);
   const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
   const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
@@ -2170,6 +2387,7 @@ async function main() {
       chunk_count: llm.chunk_count ?? null,
       adaptive_chunks: adaptiveChunkTelemetry,
     },
+    editorial_reuse_policy: editorialReuse.policy,
     style_summary: styleSummary,
     prompt_policy: "shot_manifest-authoritative provider-aware prompt packets; the LLM authors one active provider_prompt and deterministic compatibility fields are derived without changing depicted content",
     image_provider: activeImageProvider,
@@ -2195,6 +2413,7 @@ async function main() {
       ...promptVarietyWarnings,
       ...locationSpanWarnings,
       ...retentionShotJobWarnings,
+      ...editorialReuse.findings,
       ...motionEditorialFindings.filter((finding) => finding.severity !== "blocker"),
     ],
     updated_at: new Date().toISOString(),

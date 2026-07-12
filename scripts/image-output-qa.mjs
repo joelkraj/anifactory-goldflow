@@ -143,6 +143,7 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
 }
 
 export function donorRecoveryFinding(metadata, imageId) {
+  if (metadata?.editorial_reuse_approved === true && metadata?.reuse_source_image_id) return null;
   const mode = String(metadata?.recovery_mode ?? metadata?.generated?.recovery_mode ?? "").toLowerCase();
   const donorId = metadata?.donor_image_id ?? metadata?.copied_from_image_id ?? metadata?.source_image_id ?? null;
   const perturbed = metadata?.hash_perturbation === true || metadata?.generated?.hash_perturbation === true;
@@ -229,13 +230,17 @@ async function structuralAudit(promptPlan, imagegenReport) {
       findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_not_landscape", message: `${imageId} is ${width}x${height}; expected native 16:9 landscape.` });
     }
     const imageHash = await hashFile(imagePath);
+    const sidecar = await readJson(`${imagePath}.metadata.json`, null);
     const previousOwner = hashOwners.get(imageHash);
     if (previousOwner && previousOwner !== imageId) {
-      findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_duplicate_hash", message: `${imageId} is byte-identical to ${previousOwner}.` });
+      const approvedReuse = sidecar?.editorial_reuse_approved === true
+        && String(sidecar?.reuse_source_image_id ?? "") === String(previousOwner);
+      if (!approvedReuse) {
+        findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_duplicate_hash", message: `${imageId} is byte-identical to ${previousOwner}.` });
+      }
     } else {
       hashOwners.set(imageHash, imageId);
     }
-    const sidecar = await readJson(`${imagePath}.metadata.json`, null);
     const donorFinding = donorRecoveryFinding(sidecar, imageId);
     if (donorFinding) findings.push(donorFinding);
     const reasons = imageRiskReasons(prompt, { openingSec: openingReviewSec });

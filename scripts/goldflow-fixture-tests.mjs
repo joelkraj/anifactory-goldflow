@@ -104,8 +104,11 @@ import {
 import {
   activeStateConstraintFindingsForTests,
   adaptivePromptChunksForTests,
+  editorialReuseCandidatesForTests,
+  enforceEditorialReusePolicyForTests,
   localBeatFidelityFindingsForTests,
   normalizePromptPacketForTests,
+  visualUnitRiskAssessmentForTests,
   visualPromptCodexCacheEnabledForTests,
 } from "./visual-plan.mjs";
 import {
@@ -1028,6 +1031,7 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(reasons.includes("dense_cast"), true);
   assert.equal(reasons.includes("four_reference_integration"), true);
   assert.equal(donorRecoveryFinding({ donor_image_id: "cut_001", hash_perturbation: true }, "cut_002")?.code, "scene_image_donor_recovery_forbidden");
+  assert.equal(donorRecoveryFinding({ editorial_reuse_approved: true, reuse_source_image_id: "cut_001" }, "cut_002"), null);
 
   const riskRows = [{
     image_id: "cut_001",
@@ -1955,6 +1959,55 @@ function testAdaptiveProviderPromptPackets() {
   assert.equal(normalized.codex_image_prompt, null);
   assert.deepEqual(normalized.visible_subjects, ["Joey"]);
   assert.deepEqual(normalized.reference_requirements.map((row) => row.ref_id), ["joey_ref"]);
+}
+
+function testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse() {
+  const referenceTargets = [
+    { ref_id: "joey_ref", kind: "character_state", subject: "Joey", scene_ids: ["scene_001"] },
+    { ref_id: "hall_ref", kind: "location", subject: "Academy Hall", scene_ids: ["scene_001"] },
+    { ref_id: "unrelated_ui", kind: "ui", subject: "Ranking UI", scene_ids: ["scene_001"] },
+    { ref_id: "unrelated_prop", kind: "prop", subject: "Ceremonial Spear", scene_ids: ["scene_001"] },
+  ];
+  const steady = {
+    visual_beat_id: "steady",
+    scene_id: "scene_001",
+    parent_scene_id: "scene_001",
+    start_sec: 600,
+    location_id: "academy_hall",
+    local_location: "Academy Hall",
+    physically_visible_entity_ids: ["joey"],
+    visible_characters: ["Joey"],
+    visual_job: "story_progression",
+    suggested_shot_job: "emotional_reaction",
+    local_ui_elements: [],
+    local_props: [],
+  };
+  const assessment = visualUnitRiskAssessmentForTests(steady, { visualReferencePlan: { reference_targets: referenceTargets } });
+  assert.equal(assessment.risk_class, "medium");
+  assert.equal(assessment.reference_need.candidate_count, 4);
+  assert.equal(assessment.reference_need.estimated_count, 2);
+  assert.equal(assessment.reasons.includes("four_likely_attached_refs"), false);
+  assert.equal(visualUnitRiskAssessmentForTests({ ...steady, start_sec: 20 }, { visualReferencePlan: { reference_targets: referenceTargets } }).risk_class, "high");
+  assert.equal(visualUnitRiskAssessmentForTests({ ...steady, visual_job: "physical_action", visual_beat_action: "Joey catches the spear" }, { visualReferencePlan: { reference_targets: referenceTargets } }).risk_class, "high");
+
+  const rows = [
+    { ...steady, image_id_hint: "cut_001", start_sec: 1200, active_state_constraints: { location_id: "academy_hall", entities: { joey: { wardrobe: "blue robe" } } } },
+    { ...steady, image_id_hint: "cut_002", start_sec: 1210, active_state_constraints: { location_id: "academy_hall", entities: { joey: { wardrobe: "blue robe" } } } },
+    { ...steady, image_id_hint: "cut_003", start_sec: 1220, location_id: "courtyard", local_location: "Courtyard", active_state_constraints: { location_id: "courtyard", entities: { joey: { wardrobe: "blue robe" } } } },
+  ];
+  const candidates = editorialReuseCandidatesForTests(rows, "ep_01", { thresholdSec: 1200 });
+  assert.deepEqual(candidates[0], []);
+  assert.deepEqual(candidates[1], ["cut_001"]);
+  assert.deepEqual(candidates[2], []);
+  const policy = enforceEditorialReusePolicyForTests([
+    { image_id: "cut_001", start_sec: 1200, image_strategy: "fresh", editorial_reuse_approved: false },
+    { image_id: "cut_002", start_sec: 1210, image_strategy: "reuse_prior_approved", editorial_reuse_approved: true, reuse_source_image_id: "cut_001" },
+    { image_id: "cut_003", start_sec: 1220, image_strategy: "reuse_prior_approved", editorial_reuse_approved: true, reuse_source_image_id: "cut_001" },
+  ], { thresholdSec: 1200, maxShare: 0.5 });
+  assert.equal(policy.policy.accepted_reuse_count, 1);
+  assert.equal(policy.prompts[1].editorial_reuse_approved, true);
+  assert.equal(policy.prompts[2].editorial_reuse_approved, false);
+  assert.equal(policy.prompts[2].editorial_reuse_downgraded_reason, "adjacent_duplicate_hold_forbidden");
 }
 
 function testSelectedReferenceInventoryContainsOnlyDirectorSelections() {
@@ -6008,6 +6061,7 @@ const FIXTURE_SUITES = {
     testReferencePlanHashApproval,
     testActiveStateValidationSkipsTextOnlyUiMentions,
     testAdaptiveProviderPromptPackets,
+    testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse,
     testSelectedReferenceInventoryContainsOnlyDirectorSelections,
     testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates,
     testLocationCandidateExclusion,

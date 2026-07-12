@@ -1174,6 +1174,89 @@ async function generateOne(prompt) {
   return { image_id: prompt.image_id, status: "generated", image_path: generated.downloaded_path ?? outputPath, prompt_hash: promptHash, image_provider: routedProvider, image_provider_route: imageProvider, generated };
 }
 
+function isEditorialReusePrompt(prompt = {}) {
+  return prompt.editorial_reuse_approved === true
+    && String(prompt.image_strategy ?? "").toLowerCase() === "reuse_prior_approved"
+    && Boolean(prompt.reuse_source_image_id);
+}
+
+async function materializeEditorialReuse(prompt, availableById) {
+  const sourceId = String(prompt.reuse_source_image_id ?? "");
+  const source = availableById.get(sourceId);
+  if (!source?.image_path || !(await exists(source.image_path))) {
+    return {
+      image_id: prompt.image_id,
+      status: "failed",
+      image_path: null,
+      error: `Approved editorial reuse source ${sourceId} is unavailable.`,
+      image_provider: "editorial_reuse",
+    };
+  }
+  const outputPath = imagePathFor(prompt, promptRoute(prompt));
+  const sourceHash = await hashFile(source.image_path);
+  const reuseHash = sha256(JSON.stringify({
+    source_image_id: sourceId,
+    source_image_sha256: sourceHash,
+    target_image_id: prompt.image_id,
+    prompt_hash: prompt.prompt_hash ?? sha256(prompt.provider_prompt ?? prompt.image_prompt ?? ""),
+  }));
+  const priorMetadata = await readJson(`${outputPath}.metadata.json`, null);
+  const reusable = !forceImages
+    && await exists(outputPath)
+    && priorMetadata?.editorial_reuse_approved === true
+    && priorMetadata?.reuse_source_image_id === sourceId
+    && priorMetadata?.source_image_sha256 === sourceHash;
+  if (!reusable) {
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.unlink(outputPath).catch(() => {});
+    try {
+      await fs.link(source.image_path, outputPath);
+    } catch {
+      await fs.copyFile(source.image_path, outputPath);
+    }
+    await fs.writeFile(`${outputPath}.prompt.sha256`, reuseHash, "utf8");
+    await writeJson(`${outputPath}.metadata.json`, {
+      image_id: prompt.image_id,
+      editorial_reuse_approved: true,
+      reuse_source_image_id: sourceId,
+      source_image_path: source.image_path,
+      source_image_sha256: sourceHash,
+      prompt_hash: reuseHash,
+      source_prompt_path: promptPath,
+      image_prompt: prompt.provider_prompt ?? prompt.image_prompt ?? null,
+      image_provider: "editorial_reuse",
+      image_provider_route: imageProvider,
+      model: source.generated?.modelslab_model_id ?? source.generated?.model ?? null,
+      updated_at: new Date().toISOString(),
+    });
+  }
+  return {
+    image_id: prompt.image_id,
+    status: "editorial_reuse",
+    image_path: outputPath,
+    prompt_hash: reuseHash,
+    image_provider: "editorial_reuse",
+    image_provider_route: imageProvider,
+    generated: {
+      editorial_reuse_approved: true,
+      reuse_source_image_id: sourceId,
+      source_image_sha256: sourceHash,
+      estimated_cost_usd: 0,
+    },
+  };
+}
+
+async function materializeEditorialReuses(prompts = [], availableRows = []) {
+  const availableById = new Map(availableRows.filter((row) => row?.image_id).map((row) => [String(row.image_id), row]));
+  const results = [];
+  for (const prompt of prompts) {
+    const result = await materializeEditorialReuse(prompt, availableById);
+    results.push(result);
+    if (imageResultPassed(result)) availableById.set(String(result.image_id), result);
+  }
+  return results;
+}
+
 async function generateReference(target, styleRefPath = null, referenceLookup = new Map(), characterStateRefs = []) {
   const routedProvider = routedProviderForReference(imageProvider, target);
   const outputPath = referencePathFor(target, routedProvider);
@@ -1544,7 +1627,7 @@ async function mergeImagegenResults({ currentResults, promptIds, promptPlanHash 
 }
 
 function imageResultPassed(row) {
-  return ["generated", "reused_fresh", "reused_imported_codex", "existing_file"].includes(String(row?.status ?? "").toLowerCase());
+  return ["generated", "reused_fresh", "reused_imported_codex", "existing_file", "editorial_reuse"].includes(String(row?.status ?? "").toLowerCase());
 }
 
 function episodeImageStatus(currentBatchStatus, cutLedgerStatus) {
@@ -1695,6 +1778,8 @@ async function writeCutExecutionLedger(plan, rows, promptPlanHash) {
       references,
       image_provider: result?.image_provider ?? metadata?.image_provider ?? null,
       image_model: result?.generated?.modelslab_model_id ?? result?.generated?.model ?? metadata?.model ?? null,
+      editorial_reuse_approved: metadata?.editorial_reuse_approved === true || result?.generated?.editorial_reuse_approved === true,
+      reuse_source_image_id: metadata?.reuse_source_image_id ?? result?.generated?.reuse_source_image_id ?? null,
       image_path: imagePath,
       image_sha256: imageHash,
       generation_status: result?.status ?? "missing",
@@ -1823,8 +1908,10 @@ async function main() {
     .filter((prompt) => !scope.size || scope.has(prompt.image_id));
   if (!prompts.length) throw new Error("No image prompts selected for generation.");
   await assertNoVisualResolutionDeadletterForTests(plan, prompts);
+  const editorialReusePrompts = prompts.filter(isEditorialReusePrompt);
+  const generationPrompts = prompts.filter((prompt) => !isEditorialReusePrompt(prompt));
   const productionContractFindings = scenePromptProductionContractFindingsForTests(
-    prompts.filter((prompt) => promptRoute(prompt) === "modelslab"),
+    generationPrompts.filter((prompt) => promptRoute(prompt) === "modelslab"),
     { maxSceneReferences },
   );
   if (productionContractFindings.length) {
@@ -1838,14 +1925,19 @@ async function main() {
   const allPromptIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));
   let providerHealthReport = null;
   let probeResults = [];
-  if (providerHealthProbeEnabled(prompts)) {
-    providerHealthReport = await runProviderHealthProbe(prompts);
+  if (generationPrompts.length && providerHealthProbeEnabled(generationPrompts)) {
+    providerHealthReport = await runProviderHealthProbe(generationPrompts);
     probeResults = providerHealthReport.results ?? [];
   }
   const probedIds = new Set(probeResults.map((row) => String(row.image_id ?? "")).filter(Boolean));
-  const remainingPrompts = prompts.filter((prompt) => !probedIds.has(String(prompt.image_id ?? "")));
-  const pool = await runPoolWithCircuitBreaker(remainingPrompts, generateOne, concurrency);
-  const results = [...probeResults, ...pool.results];
+  const remainingPrompts = generationPrompts.filter((prompt) => !probedIds.has(String(prompt.image_id ?? "")));
+  const pool = remainingPrompts.length
+    ? await runPoolWithCircuitBreaker(remainingPrompts, generateOne, concurrency)
+    : { results: [], circuit_open: false, circuit_reason: null, adaptive_concurrency: null };
+  const generatedResults = [...probeResults, ...pool.results];
+  const availableBeforeReuse = await mergeImagegenResults({ currentResults: generatedResults, promptIds: allPromptIds, promptPlanHash });
+  const editorialReuseResults = await materializeEditorialReuses(editorialReusePrompts, availableBeforeReuse);
+  const results = [...generatedResults, ...editorialReuseResults];
   const mergedResults = await mergeImagegenResults({ currentResults: results, promptIds: allPromptIds, promptPlanHash });
   const cutExecutionLedger = await writeCutExecutionLedger(plan, mergedResults, promptPlanHash);
   const currentBatchStatus = results.every((row) => imageResultPassed(row)) ? "passed" : "failed";
@@ -1862,6 +1954,13 @@ async function main() {
     prompt_plan_path: promptPath,
     prompt_plan_hash: promptPlanHash,
     image_provider: imageProvider,
+    editorial_reuse: {
+      requested_count: editorialReusePrompts.length,
+      materialized_count: editorialReuseResults.filter(imageResultPassed).length,
+      failed_count: editorialReuseResults.filter((row) => !imageResultPassed(row)).length,
+      unique_image_count: plan.prompts.length - editorialReuseResults.filter(imageResultPassed).length,
+      visual_cut_count: plan.prompts.length,
+    },
     run_identity_path: runIdentityPath,
     run_identity_image_provider: runIdentity.image_provider ?? null,
     requested_scene_image_geometry: { width: sceneImageWidth, height: sceneImageHeight },

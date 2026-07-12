@@ -1038,7 +1038,7 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
   assertPromptSize(prompt, stageName);
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
-  if (flags["codex-reuse-latest"] === "true" || flags["codex-reuse-cache"] === "true") {
+  if (visualPromptCodexCacheEnabled(flags)) {
     const cached = await findLatestCodexOutput(callDir, stageName, expectedBeatIds, prompt);
     if (cached) return cached;
     console.error(`visual ${stageName}: no reusable cached Codex output found; calling Codex`);
@@ -1074,6 +1074,14 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
     }
   }
   throw lastError ?? new Error(`codex visual plan failed for ${stageName}`);
+}
+
+function visualPromptCodexCacheEnabled(inputFlags = {}) {
+  return inputFlags["codex-reuse-latest"] !== "false" && inputFlags["codex-reuse-cache"] !== "false";
+}
+
+export function visualPromptCodexCacheEnabledForTests(inputFlags = {}) {
+  return visualPromptCodexCacheEnabled(inputFlags);
 }
 
 async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null, prompt = "") {

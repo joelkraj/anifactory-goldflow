@@ -691,7 +691,7 @@ async function callCodex(prompt, stageName) {
 }
 
 async function reusableCodexCall(stageName, prompt) {
-  if (flags["reuse-codex-calls"] !== "true") return null;
+  if (!semanticCodexCacheEnabled(flags)) return null;
   const callDir = path.join(weekDir, "_codex_calls");
   let files = [];
   try {
@@ -723,6 +723,14 @@ async function reusableCodexCall(stageName, prompt) {
     };
   }
   return null;
+}
+
+function semanticCodexCacheEnabled(inputFlags = {}) {
+  return inputFlags["reuse-codex-calls"] !== "false";
+}
+
+export function semanticCodexCacheEnabledForTests(inputFlags = {}) {
+  return semanticCodexCacheEnabled(inputFlags);
 }
 
 async function runPool(items, worker, concurrency = 4) {

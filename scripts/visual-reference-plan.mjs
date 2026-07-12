@@ -1184,8 +1184,8 @@ async function callLocal(prompt, stageName, maxTokens = null) {
 async function callCodex(prompt, stageName) {
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
-  const reuseChunks = flags["visual-ref-reuse-codex-chunks"] === "true";
-  if (reuseChunks && /_chunk_\d+$/i.test(stageName)) {
+  const reuseCachedOutput = visualReferenceCodexCacheEnabled(flags);
+  if (reuseCachedOutput) {
     const entries = (await fs.readdir(callDir).catch(() => []))
       .filter((name) => name.endsWith(`-${stageName}-output.txt`))
       .sort()
@@ -1202,7 +1202,7 @@ async function callCodex(prompt, stageName) {
       if (!content.trim()) continue;
       try {
         const parsed = extractJson(content);
-        console.error(`visual refs ${stageName}: reused cached Codex chunk output ${cachedPath}`);
+        console.error(`visual refs ${stageName}: reused compatible cached Codex output ${cachedPath}`);
         return {
           provider: "codex-cache",
           model: metadata.model,
@@ -1237,6 +1237,14 @@ async function callCodex(prompt, stageName) {
     content: call.content,
     parsed: extractJson(call.content),
   };
+}
+
+function visualReferenceCodexCacheEnabled(inputFlags = {}) {
+  return inputFlags["visual-ref-reuse-codex-chunks"] !== "false";
+}
+
+export function visualReferenceCodexCacheEnabledForTests(inputFlags = {}) {
+  return visualReferenceCodexCacheEnabled(inputFlags);
 }
 
 function normalizeTarget(target, index) {

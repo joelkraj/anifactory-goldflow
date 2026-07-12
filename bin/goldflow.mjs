@@ -105,16 +105,39 @@ function run(script, scriptArgs = []) {
     }) : null;
     const child = spawn(process.execPath, [path.join(repoRoot, "scripts", script), ...scriptArgs], {
       cwd: repoRoot,
-      stdio: "inherit",
+      stdio: ["inherit", "pipe", "pipe"],
       env: { ...process.env },
     });
-    child.on("error", async (error) => {
-      if (execution) await finishStageExecution(execution, { exitCode: 1, error: error.message });
-      console.error(error.message);
-      process.exitCode = 1;
+    const maxTailChars = 32 * 1024;
+    let stdoutTail = "";
+    let stderrTail = "";
+    let spawnError = null;
+    let finalized = false;
+    const appendTail = (current, chunk) => `${current}${chunk}`.slice(-maxTailChars);
+    child.stdout.on("data", (chunk) => {
+      process.stdout.write(chunk);
+      stdoutTail = appendTail(stdoutTail, chunk.toString("utf8"));
     });
-    child.on("exit", async (code, signal) => {
-      if (execution) await finishStageExecution(execution, { exitCode: code ?? 1, signal });
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      stderrTail = appendTail(stderrTail, chunk.toString("utf8"));
+    });
+    child.on("error", async (error) => {
+      spawnError = error;
+      console.error(error.message);
+    });
+    child.on("close", async (code, signal) => {
+      if (finalized) return;
+      finalized = true;
+      const failureDetail = spawnError?.message
+        ?? ((code ?? 1) !== 0 ? stderrTail.trim().split("\n").filter(Boolean).at(-1) ?? `Child exited ${code ?? 1}` : null);
+      if (execution) await finishStageExecution(execution, {
+        exitCode: code ?? 1,
+        signal,
+        error: failureDetail,
+        stdoutTail,
+        stderrTail,
+      });
       process.exitCode = code ?? 1;
     });
   })().catch((error) => {

@@ -24,13 +24,20 @@ export function episodeDirForFlags(flags = {}, env = process.env) {
 }
 
 function scopeFromFlags(flags = {}) {
-  const list = (name) => String(flags[name] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  const list = (...names) => [...new Set(names
+    .flatMap((name) => String(flags[name] ?? "").split(","))
+    .map((value) => value.trim())
+    .filter(Boolean))].sort();
   return {
-    cut_ids: list("cut-ids"),
-    scene_ids: list("only-scenes"),
-    reference_ids: list("reference-ids"),
-    proof_start_sec: Number.isFinite(Number(flags["proof-start-sec"])) ? Number(flags["proof-start-sec"]) : null,
-    proof_end_sec: Number.isFinite(Number(flags["proof-end-sec"])) ? Number(flags["proof-end-sec"]) : null,
+    cut_ids: list("cut-ids", "cut-id", "image-ids", "image-id", "only-cut-ids"),
+    scene_ids: list("only-scenes", "scene-ids", "scene-id"),
+    reference_ids: list("reference-ids", "reference-id"),
+    proof_start_sec: Number.isFinite(Number(flags["proof-start-sec"] ?? flags["scope-start-sec"]))
+      ? Number(flags["proof-start-sec"] ?? flags["scope-start-sec"])
+      : null,
+    proof_end_sec: Number.isFinite(Number(flags["proof-end-sec"] ?? flags["scope-end-sec"]))
+      ? Number(flags["proof-end-sec"] ?? flags["scope-end-sec"])
+      : null,
     references_only: /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")),
   };
 }
@@ -216,7 +223,14 @@ export async function beginStageExecution({ stage, command, flags = {}, args = [
   return execution;
 }
 
-export async function finishStageExecution(execution, { exitCode, signal = null, error = null, env = process.env } = {}) {
+export async function finishStageExecution(execution, {
+  exitCode,
+  signal = null,
+  error = null,
+  stdoutTail = null,
+  stderrTail = null,
+  env = process.env,
+} = {}) {
   let episodeDir = execution.episode_dir;
   if (!episodeDir) episodeDir = episodeDirForFlags(execution.flags, env);
   if (!episodeDir || !(await fs.stat(episodeDir).catch(() => null))) return null;
@@ -240,6 +254,8 @@ export async function finishStageExecution(execution, { exitCode, signal = null,
     exit_code: exitCode,
     signal,
     error,
+    stdout_tail: stdoutTail || null,
+    stderr_tail: stderrTail || null,
     wall_time_sec: Number(((completedAt.getTime() - execution.started_ms) / 1000).toFixed(3)),
     cost_usd: cost.cost_usd,
     cache_reuse_count: cost.cache_reuse_count,
@@ -297,9 +313,27 @@ export async function materializeProductionManifest(episodeDir) {
   const authoritativeImagegenCostUsd = imagegenBatches.batch_count > 0
     ? imagegenBatches.estimated_cost_usd
     : imagegenEventRecordedCostUsd;
+  const latestFailures = Object.values(latestByStage).filter((row) => row.status === "failed");
+  const historicalFailures = completed.filter((row) => row.status === "failed");
+  const finalQaPassed = latestByStage.final_qa?.status === "passed";
+  const manifestStatus = finalQaPassed
+    ? (historicalFailures.length ? "completed_with_retries" : "completed")
+    : latestFailures.length
+      ? "blocked"
+      : historicalFailures.length
+        ? "active_with_retries"
+        : "active";
+  const cuts = Array.isArray(cutLedger?.cuts) ? cutLedger.cuts : [];
+  const cutsWithImages = cuts.filter((row) => row?.image_path && row?.image_sha256);
+  const cutsWithPassedQa = cutsWithImages.filter((row) => /^(?:passed|accepted)/i.test(String(row?.image_qa_status ?? "")));
+  const pendingQaCuts = cutsWithImages.filter((row) => !/^(?:passed|accepted)/i.test(String(row?.image_qa_status ?? "")));
+  const recoveredImportCuts = cutsWithPassedQa.filter((row) => String(row?.generation_status ?? "").toLowerCase() === "failed");
+  const derivedCutStatus = cuts.length && cutsWithImages.length === cuts.length
+    ? (cutsWithPassedQa.length === cuts.length ? "passed" : "images_complete_qa_pending")
+    : (cuts.length ? "partial" : (cutLedger?.status ?? "unknown"));
   const manifest = {
     schema: "goldflow_production_manifest_v1",
-    status: completed.some((row) => row.status === "failed") ? "has_failures" : "active",
+    status: manifestStatus,
     execution_event_path: eventPath,
     stage_latest: Object.fromEntries(Object.entries(latestByStage).map(([stage, row]) => [stage, {
       status: row.status,
@@ -311,8 +345,16 @@ export async function materializeProductionManifest(episodeDir) {
     }])),
     telemetry: {
       total_stage_calls: completed.length,
-      failed_stage_calls: completed.filter((row) => row.status === "failed").length,
+      failed_stage_calls: historicalFailures.length,
+      unresolved_latest_stage_failures: latestFailures.length,
       retry_calls: completed.filter((row) => Number(row.attempt ?? 1) > 1).length,
+      same_scope_retry_calls: completed.filter((row) => Number(row.attempt ?? 1) > 1).length,
+      scoped_execution_calls: completed.filter((row) => [
+        ...(row.scope?.cut_ids ?? []),
+        ...(row.scope?.scene_ids ?? []),
+        ...(row.scope?.reference_ids ?? []),
+      ].length > 0).length,
+      manual_image_import_calls: completed.filter((row) => /^imagegen import-(?:codex|staged-codex)$/i.test(String(row.command ?? ""))).length,
       total_wall_time_sec: Number(completed.reduce((sum, row) => sum + Number(row.wall_time_sec ?? 0), 0).toFixed(3)),
       cumulative_cost_usd: Number((nonImagegenEventCostUsd + authoritativeImagegenCostUsd).toFixed(6)),
       event_recorded_cost_usd: Number(eventRecordedCostUsd.toFixed(6)),
@@ -324,10 +366,15 @@ export async function materializeProductionManifest(episodeDir) {
     cut_execution: cutLedger ? {
       ledger_path: cutLedgerPath,
       ledger_sha256: await fileSha256(cutLedgerPath),
-      status: cutLedger.status ?? "unknown",
-      cut_count: Number(cutLedger.cut_count ?? cutLedger.cuts?.length ?? 0),
-      completed_image_count: Number(cutLedger.completed_image_count ?? 0),
-      pending_image_qa_count: Number(cutLedger.pending_image_qa_count ?? 0),
+      status: derivedCutStatus,
+      cut_count: Number(cutLedger.cut_count ?? cuts.length ?? 0),
+      completed_image_count: cutsWithImages.length,
+      accepted_image_count: cutsWithPassedQa.length,
+      pending_image_qa_count: pendingQaCuts.length,
+      recovered_manual_import_count: recoveredImportCuts.length,
+      ledger_reported_status: cutLedger.status ?? "unknown",
+      ledger_reported_completed_image_count: Number(cutLedger.completed_image_count ?? 0),
+      ledger_reported_pending_image_qa_count: Number(cutLedger.pending_image_qa_count ?? 0),
     } : null,
     updated_at: new Date().toISOString(),
   };

@@ -47,6 +47,7 @@ import {
 } from "./imagegen.mjs";
 import {
   beginStageExecution,
+  executionScopeForTests,
   finishStageExecution,
   materializeProductionManifest,
 } from "./lib/execution-provenance.mjs";
@@ -105,6 +106,7 @@ import {
   adaptivePromptChunksForTests,
   localBeatFidelityFindingsForTests,
   normalizePromptPacketForTests,
+  visualPromptCodexCacheEnabledForTests,
 } from "./visual-plan.mjs";
 import {
   referenceCharacterStateFindingsForTests,
@@ -114,6 +116,7 @@ import {
   referenceLocationScopeForTests,
   referenceOpeningIdentityFindingsForTests,
   selectedReferenceInventoryForTests,
+  visualReferenceCodexCacheEnabledForTests,
 } from "./visual-reference-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
@@ -150,6 +153,7 @@ import {
   semanticSceneQualityFindingsForTests,
   semanticScriptChunksForTests,
   semanticSnapSceneAnchorsForTests,
+  semanticCodexCacheEnabledForTests,
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
 import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
@@ -387,6 +391,93 @@ async function testAppendOnlyExecutionProvenance() {
   assert.equal(manifest.imagegen_batches.by_kind.references.estimated_cost_usd, 0.07);
   const reportFiles = await fs.readdir(path.join(episodeDir, "reports", "stages", "image_generation"));
   assert.equal(reportFiles.length, 2);
+}
+
+async function testExecutionProvenanceScopesAndTruthfulCompletion() {
+  assert.deepEqual(executionScopeForTests({
+    "image-id": "cut_002",
+    "cut-ids": "cut_001,cut_002",
+    "reference-id": "ref_001",
+    "scene-id": "scene_001",
+  }), {
+    cut_ids: ["cut_001", "cut_002"],
+    scene_ids: ["scene_001"],
+    reference_ids: ["ref_001"],
+    proof_start_sec: null,
+    proof_end_sec: null,
+    references_only: false,
+  });
+
+  const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-provenance-truth-"));
+  await writeJson(path.join(episodeDir, "cut_execution_ledger.json"), {
+    status: "partial",
+    cut_count: 2,
+    completed_image_count: 1,
+    pending_image_qa_count: 1,
+    cuts: [
+      {
+        image_id: "cut_001",
+        image_path: path.join(episodeDir, "cut_001.png"),
+        image_sha256: "hash_001",
+        generation_status: "generated",
+        image_qa_status: "passed_structural",
+      },
+      {
+        image_id: "cut_002",
+        image_path: path.join(episodeDir, "cut_002.png"),
+        image_sha256: "hash_002",
+        generation_status: "failed",
+        image_qa_status: "passed_manual_risk",
+      },
+    ],
+  });
+  const failed = await beginStageExecution({
+    stage: "image_generation",
+    command: "imagegen import-codex",
+    flags: { "episode-dir": episodeDir, "image-id": "cut_001" },
+  });
+  await finishStageExecution(failed, { exitCode: 1, error: "provider timeout", stderrTail: "provider timeout" });
+  const repaired = await beginStageExecution({
+    stage: "image_generation",
+    command: "imagegen import-codex",
+    flags: { "episode-dir": episodeDir, "image-id": "cut_002" },
+  });
+  assert.equal(failed.attempt, 1);
+  assert.equal(repaired.attempt, 1);
+  await finishStageExecution(repaired, { exitCode: 0, stdoutTail: "imported cut_002" });
+  const finalQa = await beginStageExecution({
+    stage: "final_qa",
+    command: "final qa",
+    flags: { "episode-dir": episodeDir },
+  });
+  await finishStageExecution(finalQa, { exitCode: 0 });
+  const manifest = await materializeProductionManifest(episodeDir);
+  assert.equal(manifest.status, "completed_with_retries");
+  assert.equal(manifest.cut_execution.status, "passed");
+  assert.equal(manifest.cut_execution.completed_image_count, 2);
+  assert.equal(manifest.cut_execution.accepted_image_count, 2);
+  assert.equal(manifest.cut_execution.recovered_manual_import_count, 1);
+  assert.equal(manifest.telemetry.retry_calls, 0);
+  assert.equal(manifest.telemetry.scoped_execution_calls, 2);
+  const failedReport = JSON.parse(await fs.readFile(
+    (await fs.readdir(path.join(episodeDir, "reports", "stages", "image_generation")))
+      .map((name) => path.join(episodeDir, "reports", "stages", "image_generation", name))
+      .sort()[0],
+    "utf8",
+  ));
+  assert.equal(failedReport.error, "provider timeout");
+  assert.equal(failedReport.stderr_tail, "provider timeout");
+}
+
+function testPlannerCachesDefaultOn() {
+  for (const enabled of [
+    semanticCodexCacheEnabledForTests,
+    visualReferenceCodexCacheEnabledForTests,
+    visualPromptCodexCacheEnabledForTests,
+  ]) {
+    assert.equal(enabled({}), true);
+    assert.equal(enabled({ "reuse-codex-calls": "false", "visual-ref-reuse-codex-chunks": "false", "codex-reuse-cache": "false" }), false);
+  }
 }
 
 async function testCumulativeImagegenHistoryAndEpisodeTruth() {
@@ -5877,6 +5968,8 @@ const FIXTURE_SUITES = {
     testRunStatusRejectsFalseGreenFinalQa,
     testRunStatusParallaxDecisionStages,
     testAppendOnlyExecutionProvenance,
+    testExecutionProvenanceScopesAndTruthfulCompletion,
+    testPlannerCachesDefaultOn,
     testCumulativeImagegenHistoryAndEpisodeTruth,
     testPinnedCodexRuntimeContracts,
     testNestedCodexCallsUseSharedRunner,

@@ -40,7 +40,7 @@ const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.jo
 const width = Number(flags.width ?? 1920);
 const height = Number(flags.height ?? 1080);
 const motionMode = normalizeMotionMode(flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "smooth_fast_ken_burns");
-const fps = Number(flags.fps ?? process.env.ANIFACTORY_RENDER_FPS ?? (motionMode === "smooth_fast_ken_burns" ? 60 : 30));
+const fps = Number(flags.fps ?? process.env.ANIFACTORY_RENDER_FPS ?? (["smooth_fast_ken_burns", "smooth_subpixel_ken_burns"].includes(motionMode) ? 60 : 30));
 const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTORY_RENDER_FOREGROUND_SCALE ?? 0.93);
 const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.75);
 const visualFadeSec = Number(flags["visual-fade-sec"] ?? process.env.ANIFACTORY_RENDER_VISUAL_FADE_SEC ?? 0);
@@ -75,6 +75,7 @@ function parseFlags(parts) {
 function normalizeMotionMode(value) {
   const key = String(value ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
   if (key === "smooth_fast" || key === "smooth_ken_burns" || key === "smooth_fast_kenburns") return "smooth_fast_ken_burns";
+  if (["smooth_subpixel", "subpixel", "subpixel_ken_burns", "smooth_subpixel_kenburns"].includes(key)) return "smooth_subpixel_ken_burns";
   return key || "smooth_fast_ken_burns";
 }
 
@@ -910,7 +911,7 @@ function smoothFastMotionProfile(profile, duration, startSec = 0) {
 
 function selectMotionProfile(prompt, index, duration, startSec = 0, previousPrompt = null) {
   const profile = motionProfile(prompt, index, startSec, previousPrompt);
-  return motionMode === "smooth_fast_ken_burns" ? smoothFastMotionProfile(profile, duration, startSec) : profile;
+  return ["smooth_fast_ken_burns", "smooth_subpixel_ken_burns"].includes(motionMode) ? smoothFastMotionProfile(profile, duration, startSec) : profile;
 }
 
 function zoomRange(profile) {
@@ -1170,7 +1171,26 @@ function directedProgressExpr(frameCount, easing = "linear") {
   return base;
 }
 
-function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPrompt = null, motionIntent = null) {
+function subpixelPerspectiveCore(zoomExpr, horizontalExpr, verticalExpr, coordinateMode = "anchor") {
+  const leftExpr = coordinateMode === "anchor"
+    ? `clip((${horizontalExpr})*W-W/(2*(${zoomExpr})),0,W-W/(${zoomExpr}))`
+    : `clip(W/2-W/(2*(${zoomExpr}))+(${horizontalExpr})*W,0,W-W/(${zoomExpr}))`;
+  const topExpr = coordinateMode === "anchor"
+    ? `clip((${verticalExpr})*H-H/(2*(${zoomExpr})),0,H-H/(${zoomExpr}))`
+    : `clip(H/2-H/(2*(${zoomExpr}))+(${verticalExpr})*H,0,H-H/(${zoomExpr}))`;
+  const x0 = `-((${leftExpr})*(${zoomExpr}))`;
+  const y0 = `-((${topExpr})*(${zoomExpr}))`;
+  const x1 = `(W-(${leftExpr}))*(${zoomExpr})`;
+  const y2 = `(H-(${topExpr}))*(${zoomExpr})`;
+  return `perspective=x0='${x0}':y0='${y0}':x1='${x1}':y1='${y0}':x2='${x0}':y2='${y2}':x3='${x1}':y3='${y2}':sense=destination:eval=frame:interpolation=cubic`;
+}
+
+export function subpixelPerspectiveCoreForTests(zoomExpr, horizontalExpr, verticalExpr, coordinateMode = "anchor") {
+  return subpixelPerspectiveCore(zoomExpr, horizontalExpr, verticalExpr, coordinateMode);
+}
+
+function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPrompt = null, motionIntent = null, modeOverride = null) {
+  const clipMotionMode = modeOverride ?? motionMode;
   const fgW = Math.round(width * Math.max(0.45, Math.min(1, foregroundScale)));
   const fgH = Math.round(height * Math.max(0.45, Math.min(1, foregroundScale)));
   const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
@@ -1181,14 +1201,15 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
   const transitionPrefix = transitionFilters ? `${transitionFilters},` : "";
   const transitionSuffix = transitionFilters ? `,${transitionFilters}` : "";
   const fades = fadeFilters(duration);
-  if (motionMode === "fit_static" || motionMode === "full_frame") {
+  if (clipMotionMode === "fit_static" || clipMotionMode === "full_frame") {
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,${transitionPrefix}fps=${fps},format=yuv420p${fades}`;
   }
-  if (motionMode === "fill_ken_burns" || motionMode === "smooth_fast_ken_burns") {
+  if (["fill_ken_burns", "smooth_fast_ken_burns", "smooth_subpixel_ken_burns"].includes(clipMotionMode)) {
     const frameCount = clipFrameCount(duration);
     let xExpr;
     let yExpr;
     let zoomExpr;
+    let coordinateMode;
     if (motionIntent) {
       const progress = directedProgressExpr(frameCount, motionIntent.easing);
       const xAnchorExpr = `${Number(motionIntent.start_anchor.x).toFixed(5)}+${(Number(motionIntent.end_anchor.x) - Number(motionIntent.start_anchor.x)).toFixed(7)}*${progress}`;
@@ -1196,6 +1217,11 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
       xExpr = `max(0,min(iw-iw/zoom,iw*(${xAnchorExpr})-(iw/zoom/2)))`;
       yExpr = `max(0,min(ih-ih/zoom,ih*(${yAnchorExpr})-(ih/zoom/2)))`;
       zoomExpr = `${Number(motionIntent.start_scale).toFixed(5)}+${(Number(motionIntent.end_scale) - Number(motionIntent.start_scale)).toFixed(7)}*${progress}`;
+      coordinateMode = "anchor";
+      if (clipMotionMode === "smooth_subpixel_ken_burns") {
+        xExpr = xAnchorExpr;
+        yExpr = yAnchorExpr;
+      }
     } else {
       const { startZoom, endZoom, curve } = zoomRange(profile);
       const startXBias = offsets.startX / width;
@@ -1208,12 +1234,21 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
       xExpr = `max(0,min(iw-iw/zoom,iw/2-(iw/zoom/2)+(${xBiasExpr})*iw))`;
       yExpr = `max(0,min(ih-ih/zoom,ih/2-(ih/zoom/2)+(${yBiasExpr})*ih))`;
       zoomExpr = `${startZoom.toFixed(4)}+${(endZoom - startZoom).toFixed(7)}*${progress}`;
+      coordinateMode = "bias";
+      if (clipMotionMode === "smooth_subpixel_ken_burns") {
+        xExpr = xBiasExpr;
+        yExpr = yBiasExpr;
+      }
+    }
+    if (clipMotionMode === "smooth_subpixel_ken_burns") {
+      const perspective = subpixelPerspectiveCore(zoomExpr, xExpr, yExpr, coordinateMode);
+      return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=${fps},${perspective},${transitionPrefix}format=yuv420p${fades}`;
     }
     const renderW = Math.ceil((width * renderScaleMultiplier) / 2) * 2;
     const renderH = Math.ceil((height * renderScaleMultiplier) / 2) * 2;
     return `scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,crop=${renderW}:${renderH},zoompan=z='${zoomExpr}':x='${xExpr}':y='${yExpr}':d=${frameCount}:s=${width}x${height}:fps=${fps},${transitionPrefix}format=yuv420p${fades}`;
   }
-  if (motionMode === "fill_pan") {
+  if (clipMotionMode === "fill_pan") {
     const renderW = Math.ceil((width * renderScaleMultiplier) / 2) * 2;
     const renderH = Math.ceil((height * renderScaleMultiplier) / 2) * 2;
     const maxX = Math.max(0, Math.floor((renderW - width) / 2));
@@ -1231,6 +1266,10 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
   const xExpr = `(W-w)/2+${offsets.startX}+(${offsets.endX - offsets.startX})*${progress}`;
   const yExpr = `(H-h)/2+${offsets.startY}+(${offsets.endY - offsets.startY})*${progress}`;
   return `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=34,eq=brightness=-0.055:saturation=0.92[bg];[0:v]scale=${fgW}:${fgH}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=x='${xExpr}':y='${yExpr}'${transitionSuffix}${fades},fps=${fps},format=yuv420p`;
+}
+
+export function motionClipFilterForTests(duration, index, prompt = {}, startSec = 0, previousPrompt = null, motionIntent = null, modeOverride = null) {
+  return motionClipFilter(duration, index, prompt, startSec, previousPrompt, motionIntent, modeOverride);
 }
 
 function transitionPlanByToImage(transitionEditPlan) {

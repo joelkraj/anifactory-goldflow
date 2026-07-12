@@ -150,6 +150,7 @@ Common flags:
 
 Render profiles:
   default premium: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  subpixel smooth: --motion smooth_subpixel_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
   legacy diagnostic: --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
   Motion clips are hash cached; compliant concat streams skip the redundant normalization encode.
 

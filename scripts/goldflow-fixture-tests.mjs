@@ -71,13 +71,14 @@ import {
   creditExhaustedIdsFromReport,
   isModelslabCreditExhaustion,
 } from "./lib/image-fallback-policy.mjs";
-import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import {
   motionIntentFindings,
   motionIntentForPrompt,
   motionTraceFindings,
   motionTraceForIntent,
   positionAnchorFromStaging,
+  sanitizeAuthoredMotionIntent,
 } from "./lib/motion-plan-utils.mjs";
 import {
   gptImage2OutputSizeForTests,
@@ -969,6 +970,30 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.equal(trace.length, 480);
   assert.deepEqual(motionTraceFindings(trace), []);
 
+  const authoredMotion = {
+    behavior: "diagonal_follow",
+    focal_subject: "Joey's hand toward the falling blade",
+    start_anchor: { x: 0.28, y: 0.62 },
+    end_anchor: { x: 0.72, y: 0.34 },
+    start_scale: 1.01,
+    end_scale: 1.08,
+    easing: "ease_in_out",
+    reason: "Follow the interception into the visible impact point.",
+  };
+  assert.deepEqual(sanitizeAuthoredMotionIntent(authoredMotion), authoredMotion);
+  assert.equal(sanitizeAuthoredMotionIntent({ ...authoredMotion, end_anchor: { x: 1.4, y: 0.3 } }), null);
+  assert.equal(sanitizeAuthoredMotionIntent({ ...authoredMotion, behavior: "random_wobble" }), null);
+  const authoredIntent = motionIntentForPrompt({
+    image_id: "cut_authored",
+    duration_sec: 7,
+    shot_manifest: { motion_intent: authoredMotion },
+  }, "hash-authored");
+  assert.equal(authoredIntent.behavior, "diagonal_follow");
+  assert.deepEqual(authoredIntent.start_anchor, authoredMotion.start_anchor);
+  assert.deepEqual(authoredIntent.end_anchor, authoredMotion.end_anchor);
+  assert.equal(authoredIntent.intent_reason, authoredMotion.reason);
+  assert.equal(authoredIntent.focal_source, "llm_authored_shot_manifest_motion_intent");
+
   const focusShift = motionIntentForPrompt({
     image_id: "cut_focus",
     duration_sec: 6,
@@ -986,6 +1011,31 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.deepEqual(focusShift.end_anchor, { x: 0.3, y: 0.58 });
   assert.deepEqual(motionTraceFindings(motionTraceForIntent(focusShift, 60)), []);
 
+  const reactionIntent = motionIntentForPrompt({
+    image_id: "cut_reaction",
+    duration_sec: 5,
+    visual_job: "reaction_shot",
+    shot_manifest: {
+      shot_job: "emotional_reaction",
+      primary_character: "Joey",
+      character_staging: [{ name: "Joey", screen_position: "frame-right" }],
+    },
+  }, "hash-reaction");
+  assert.equal(reactionIntent.behavior, "reaction_hold");
+
+  const consequenceIntent = motionIntentForPrompt({
+    image_id: "cut_consequence",
+    duration_sec: 8,
+    visual_job: "consequence",
+    shot_manifest: {
+      shot_job: "consequence",
+      primary_character: "Joey",
+      character_staging: [{ name: "Joey", screen_position: "frame-left foreground" }],
+    },
+  }, "hash-consequence");
+  assert.equal(consequenceIntent.behavior, "aftermath_reveal");
+  assert.equal(consequenceIntent.end_scale < consequenceIntent.start_scale, true);
+
   const terminalIntent = motionIntentForPrompt({
     image_id: "cut_terminal",
     start_sec: 297.48,
@@ -993,6 +1043,8 @@ function testDirectedMotionAndFullTimelineTransitions() {
     shot_manifest: { shot_job: "ui_reveal", primary_character: "Joey" },
   }, "hash-terminal", null, { timelineEndSec: 299.901995 });
   assert.equal(Number(terminalIntent.duration_sec.toFixed(6)), 2.421995);
+  assert.equal(terminalIntent.focal_subject, "authored insert focal point");
+  assert.deepEqual(terminalIntent.end_anchor, { x: 0.5, y: 0.5 });
 
   const staticIntent = motionIntentForPrompt({ image_id: "cut_005", duration_sec: 10, shot_manifest: {} }, "hash-5");
   assert.equal(staticIntent.behavior, "static_hold");
@@ -1010,6 +1062,23 @@ function testDirectedMotionAndFullTimelineTransitions() {
   ]);
   assert.equal(xfadeTiming.expected_duration_sec, 15);
   assert.equal(xfadeTiming.duration_after_xfade_sec, 15);
+
+  const subpixel = subpixelPerspectiveCoreForTests(
+    "1.02+0.04*(on/599)",
+    "0.7-0.4*(on/599)",
+    "0.5+0.08*(on/599)",
+    "anchor",
+  );
+  assert.match(subpixel, /^perspective=/);
+  assert.match(subpixel, /eval=frame/);
+  assert.match(subpixel, /interpolation=cubic/);
+  assert.match(subpixel, /clip\(/);
+  assert.match(subpixel, /on\/599/);
+  assert.doesNotMatch(subpixel, /zoompan/);
+  const exactFilter = motionClipFilterForTests(10, 0, {}, 0, null, authoredIntent, "smooth_subpixel_ken_burns");
+  assert.match(exactFilter, /perspective=/);
+  assert.match(exactFilter, /eval=frame/);
+  assert.doesNotMatch(exactFilter, /zoompan=/);
 }
 
 async function testRenderRequiresHashMatchedImageQa() {
@@ -2207,7 +2276,7 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
     "--image-provider", "hybrid_modelslab_refs_codex_opening_modelslab_rest",
     "--codex-opening-sec", "300",
     "--pace-policy", "diagnostic",
-    "--render-profile", "smooth_fast_ken_burns",
+    "--render-profile", "smooth_subpixel_ken_burns",
     "--run-intent", "diagnostic",
     "--allow-dirty-worktree", "true",
     "--dirty-reason", "fixture test",
@@ -2216,7 +2285,7 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   assert.equal(mixedIdentity.image_provider, "hybrid_modelslab_refs_codex_opening_modelslab_rest");
   assert.equal(mixedIdentity.image_provider_options.codex_opening_sec, 300);
   assert.equal(mixedIdentity.pace_policy, "diagnostic");
-  assert.equal(mixedIdentity.render_profile, "smooth_fast_ken_burns");
+  assert.equal(mixedIdentity.render_profile, "smooth_subpixel_ken_burns");
   const mixedStatusResult = await execFileAsync(process.execPath, [
     "scripts/run-status.mjs",
     "--episode-dir", mixedRefsEpisodeDir,
@@ -2238,7 +2307,7 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   assert.match(mixedImageStage.next_command_shape, /--provider-filter modelslab/);
   assert.match(mixedImageStage.next_command_shape, /--codex-opening-sec 300/);
   assert.match(mixedAudioPaceStage.next_command_shape, /--pace-policy diagnostic/);
-  assert.match(mixedRenderStage.next_command_shape, /--motion smooth_fast_ken_burns/);
+  assert.match(mixedRenderStage.next_command_shape, /--motion smooth_subpixel_ken_burns/);
   assert.doesNotMatch(mixedRenderStage.next_command_shape, /fill_ken_burns/);
 }
 

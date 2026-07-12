@@ -92,6 +92,7 @@ function normalizePacePolicy(value) {
 function normalizeRenderProfile(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (["fill", "fill_ken_burns", "oversampled_ken_burns", "legacy_premium"].includes(normalized)) return "fill_ken_burns";
+  if (["smooth_subpixel", "subpixel", "subpixel_ken_burns", "smooth_subpixel_ken_burns"].includes(normalized)) return "smooth_subpixel_ken_burns";
   return "smooth_fast_ken_burns";
 }
 

@@ -6,6 +6,7 @@ import path from "node:path";
 import { sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, providerExclusionPayloadFindings } from "./lib/prompt-prose-findings.mjs";
 import { outOfScopeLocationRefMentions } from "./lib/visual-scope-utils.mjs";
+import { sanitizeAuthoredMotionIntent } from "./lib/motion-plan-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -168,6 +169,7 @@ function sanitizeShotManifest(value) {
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
     reference_slots: referenceSlots,
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
+    motion_intent: sanitizeAuthoredMotionIntent(value.motion_intent),
     character_staging: sanitizeCharacterStaging(value.character_staging),
   };
 }
@@ -609,7 +611,18 @@ function looksLikePhysicalLocation(prompt, promptTextValue) {
 
 function sanitizePrompt(prompt, indexes) {
   const findings = [];
+  const rawMotionIntent = prompt?.shot_manifest?.motion_intent;
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
+  if (rawMotionIntent !== undefined && rawMotionIntent !== null && !shotManifest?.motion_intent) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "blocker",
+      code: "authored_motion_intent_invalid",
+      message: "The LLM-authored motion_intent is malformed. Repair this cut's motion contract without changing its depicted content or references.",
+      resolved: false,
+    });
+  }
   const forbiddenRefs = new Set((shotManifest?.forbidden_ref_ids ?? []).map(String));
   const mentionedOnly = manifestNameSet(shotManifest?.mentioned_only_characters);
   const visibleNames = manifestNameSet(shotManifest?.visible_characters);

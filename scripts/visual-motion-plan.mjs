@@ -51,6 +51,15 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function countBy(rows, selector) {
+  const counts = {};
+  for (const row of rows) {
+    const key = String(selector(row) ?? "unknown");
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
+
 async function main() {
   const [promptPlan, imagegenReport, imageQa, decisions, ledger, audioBedReport] = await Promise.all([
     readJson(promptPath),
@@ -83,13 +92,18 @@ async function main() {
     series_slug: series,
     week,
     episode,
-    policy: "Motion is derived from LLM-authored shot staging or explicit image-QA focal overrides. Missing intent becomes a smooth static hold; hash-random motion is forbidden.",
+    policy: "LLM-authored shot_manifest.motion_intent is the baseline. Explicit image-QA focal overrides supersede it after inspecting the generated frame. Legacy prompts without authored motion use conservative shot-staging fallback; missing focal intent becomes a smooth static hold. Hash-random motion is forbidden.",
     source_hashes: Object.fromEntries((await Promise.all([promptPath, imagegenReportPath, imageQaPath, decisionPath, audioBedReportPath].map(async (filePath) => [path.resolve(filePath), await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timeline_end_sec: audioTimelineEndSec,
     accepted_cut_hashes: Object.fromEntries(intents.map((row) => [row.image_id, row.image_sha256])),
     motion_intent_count: intents.length,
     static_hold_count: intents.filter((row) => row.behavior === "static_hold").length,
     qa_override_count: intents.filter((row) => row.qa_override).length,
+    llm_authored_intent_count: intents.filter((row) => row.focal_source === "llm_authored_shot_manifest_motion_intent").length,
+    legacy_fallback_intent_count: intents.filter((row) => !row.qa_override && row.focal_source !== "llm_authored_shot_manifest_motion_intent").length,
+    behavior_distribution: countBy(intents, (row) => row.behavior),
+    easing_distribution: countBy(intents, (row) => row.easing),
+    focal_source_distribution: countBy(intents, (row) => row.focal_source),
     motion_intents: intents,
     findings,
     blocker_count: blockers.length,

@@ -7,7 +7,18 @@ const POSITION_ANCHORS = new Map([
   ["background-right", { x: 0.7, y: 0.42 }],
 ]);
 
-const BEHAVIORS = new Set(["static_hold", "slow_push_in", "reveal_zoom_out", "lateral_follow", "focus_shift"]);
+const BEHAVIORS = new Set([
+  "static_hold",
+  "slow_push_in",
+  "reveal_zoom_out",
+  "lateral_follow",
+  "diagonal_follow",
+  "focus_shift",
+  "impact_push",
+  "reaction_hold",
+  "ui_focus",
+  "aftermath_reveal",
+]);
 const EASINGS = new Set(["linear", "ease_in", "ease_out", "ease_in_out"]);
 
 function clamp(value, min, max) {
@@ -17,6 +28,44 @@ function clamp(value, min, max) {
 function anchor(value, fallback = { x: 0.5, y: 0.5 }) {
   if (!value || !Number.isFinite(Number(value.x)) || !Number.isFinite(Number(value.y))) return { ...fallback };
   return { x: clamp(value.x, 0, 1), y: clamp(value.y, 0, 1) };
+}
+
+function validAnchor(value) {
+  return value
+    && Number.isFinite(Number(value.x))
+    && Number.isFinite(Number(value.y))
+    && Number(value.x) >= 0
+    && Number(value.x) <= 1
+    && Number(value.y) >= 0
+    && Number(value.y) <= 1;
+}
+
+export function sanitizeAuthoredMotionIntent(value) {
+  if (!value || typeof value !== "object") return null;
+  const behavior = String(value.behavior ?? "").trim();
+  const easing = String(value.easing ?? "").trim();
+  const startScale = Number(value.start_scale);
+  const endScale = Number(value.end_scale);
+  if (!BEHAVIORS.has(behavior)
+    || !EASINGS.has(easing)
+    || !validAnchor(value.start_anchor)
+    || !validAnchor(value.end_anchor)
+    || !Number.isFinite(startScale)
+    || !Number.isFinite(endScale)
+    || startScale < 1
+    || startScale > 1.25
+    || endScale < 1
+    || endScale > 1.25) return null;
+  return {
+    behavior,
+    focal_subject: String(value.focal_subject ?? "").trim() || null,
+    start_anchor: anchor(value.start_anchor),
+    end_anchor: anchor(value.end_anchor),
+    start_scale: startScale,
+    end_scale: endScale,
+    easing,
+    reason: String(value.reason ?? "").trim() || null,
+  };
 }
 
 function firstPositionValue(text, candidates, fallback) {
@@ -66,6 +115,7 @@ function stagingForPrimary(prompt) {
 function derivedIntent(prompt) {
   const manifest = prompt?.shot_manifest ?? {};
   const shotJob = String(manifest.shot_job ?? prompt?.suggested_shot_job ?? prompt?.visual_job ?? "").toLowerCase();
+  const visualJob = String(prompt?.visual_job ?? "").toLowerCase();
   const { primary, stage, stages } = stagingForPrimary(prompt);
   const focalAnchor = positionAnchorFromStaging(stage?.screen_position);
   const secondaryStage = stages.find((row) => row !== stage) ?? null;
@@ -73,6 +123,14 @@ function derivedIntent(prompt) {
   const stagedSubjectsSeparated = Boolean(secondaryStage)
     && (Math.abs(secondaryAnchor.x - focalAnchor.x) > 0.12 || Math.abs(secondaryAnchor.y - focalAnchor.y) > 0.12);
   const hasAuthoredFocalIntent = Boolean(stage || manifest.primary_character || prompt?.primary_subject);
+  const authoredMotion = sanitizeAuthoredMotionIntent(manifest.motion_intent);
+  if (authoredMotion) {
+    return {
+      ...authoredMotion,
+      focal_source: "llm_authored_shot_manifest_motion_intent",
+      intent_reason: authoredMotion.reason,
+    };
+  }
   if (!hasAuthoredFocalIntent && !shotJob) {
     return {
       focal_subject: null,
@@ -83,9 +141,10 @@ function derivedIntent(prompt) {
       end_scale: 1,
       easing: "linear",
       behavior: "static_hold",
+      intent_reason: "Preserve the full composition because no trustworthy focal movement was authored.",
     };
   }
-  if (/establish|location|environment|arrival|transition/.test(shotJob)) {
+  if (/establish|location|environment|arrival|transition/.test(shotJob) || /location.transition/.test(visualJob)) {
     return {
       focal_subject: primary,
       focal_source: stage ? "shot_manifest.character_staging" : "shot_manifest.shot_job",
@@ -95,9 +154,23 @@ function derivedIntent(prompt) {
       end_scale: 1,
       easing: "ease_out",
       behavior: "reveal_zoom_out",
+      intent_reason: "Expose the authored environment and spatial context.",
     };
   }
   if (/physical.action|(?:^|[^a-z])action(?:[^a-z]|$)|contact|fight|chase|impact|movement/.test(shotJob)) {
+    if (stagedSubjectsSeparated) {
+      return {
+        focal_subject: `${primary ?? "primary subject"} toward ${secondaryStage?.name ?? "impact subject"}`,
+        focal_source: "shot_manifest.character_staging_action_pair",
+        start_anchor: focalAnchor,
+        end_anchor: secondaryAnchor,
+        start_scale: 1.015,
+        end_scale: 1.07,
+        easing: "ease_in_out",
+        behavior: Math.abs(secondaryAnchor.y - focalAnchor.y) > 0.08 ? "diagonal_follow" : "lateral_follow",
+        intent_reason: "Track the authored action from its primary subject toward the visible impact or opponent.",
+      };
+    }
     return {
       focal_subject: primary,
       focal_source: stage ? "shot_manifest.character_staging" : "shot_manifest.shot_job",
@@ -106,22 +179,43 @@ function derivedIntent(prompt) {
       start_scale: 1.015,
       end_scale: 1.075,
       easing: "ease_in_out",
-      behavior: Math.abs(focalAnchor.x - 0.5) > 0.08 ? "lateral_follow" : "slow_push_in",
+      behavior: Math.abs(focalAnchor.x - 0.5) > 0.08 ? "lateral_follow" : "impact_push",
+      intent_reason: "Drive toward the authored action focal point without inventing a second target.",
     };
   }
   if (/ui|insert|detail|system|prop/.test(shotJob)) {
+    const insertSubject = (manifest.ui_elements ?? [])[0]
+      ?? (manifest.visible_props ?? [])[0]
+      ?? "authored insert focal point";
+    const insertSource = (manifest.ui_elements ?? []).length
+      ? "shot_manifest.ui_elements"
+      : (manifest.visible_props ?? []).length ? "shot_manifest.visible_props" : "shot_manifest.shot_job";
     return {
-      focal_subject: primary ?? "authored insert focal point",
+      focal_subject: insertSubject,
+      focal_source: insertSource,
+      start_anchor: { x: 0.5, y: 0.5 },
+      end_anchor: { x: 0.5, y: 0.5 },
+      start_scale: 1.01,
+      end_scale: 1.045,
+      easing: "ease_in_out",
+      behavior: "ui_focus",
+      intent_reason: "Settle attention on the authored UI or prop without over-cropping it.",
+    };
+  }
+  if (/emotional.reaction|reaction/.test(shotJob)) {
+    return {
+      focal_subject: primary,
       focal_source: stage ? "shot_manifest.character_staging" : "shot_manifest.shot_job",
       start_anchor: focalAnchor,
       end_anchor: focalAnchor,
       start_scale: 1.01,
-      end_scale: 1.065,
-      easing: "ease_in_out",
-      behavior: "slow_push_in",
+      end_scale: 1.035,
+      easing: "ease_out",
+      behavior: "reaction_hold",
+      intent_reason: "Hold the authored reaction long enough to read the face and body language.",
     };
   }
-  if (/interaction|confront|dialogue|body.state|reaction/.test(shotJob) && stagedSubjectsSeparated) {
+  if (/interaction|confront|dialogue|body.state/.test(shotJob) && stagedSubjectsSeparated) {
     return {
       focal_subject: `${secondaryStage?.name ?? "secondary subject"} to ${primary ?? "primary subject"}`,
       focal_source: "shot_manifest.character_staging_pair",
@@ -131,6 +225,20 @@ function derivedIntent(prompt) {
       end_scale: 1.06,
       easing: "ease_in_out",
       behavior: "focus_shift",
+      intent_reason: "Move attention between the two separately staged subjects.",
+    };
+  }
+  if (/consequence/.test(shotJob) || /consequence/.test(visualJob)) {
+    return {
+      focal_subject: primary,
+      focal_source: stage ? "shot_manifest.character_staging" : "shot_manifest.shot_job",
+      start_anchor: focalAnchor,
+      end_anchor: { x: 0.5, y: 0.5 },
+      start_scale: 1.065,
+      end_scale: 1.005,
+      easing: "ease_out",
+      behavior: "aftermath_reveal",
+      intent_reason: "Reveal the authored aftermath around the focal subject.",
     };
   }
   if (/threat|reveal/.test(shotJob) && Math.abs(focalAnchor.x - 0.5) > 0.08) {
@@ -143,6 +251,7 @@ function derivedIntent(prompt) {
       end_scale: 1.065,
       easing: "ease_in_out",
       behavior: "focus_shift",
+      intent_reason: "Shift from context into the authored off-center threat.",
     };
   }
   return {
@@ -154,6 +263,7 @@ function derivedIntent(prompt) {
     end_scale: 1.05,
     easing: "ease_in_out",
     behavior: "slow_push_in",
+    intent_reason: "Use a restrained push toward the authored primary focal subject.",
   };
 }
 
@@ -184,6 +294,7 @@ export function motionIntentForPrompt(prompt, imageSha256, decision = null, opti
     end_scale: endScale,
     easing,
     behavior,
+    intent_reason: String(override?.reason ?? base.intent_reason ?? "").trim() || null,
     qa_override: override ?? null,
   };
 }
@@ -204,6 +315,30 @@ export function motionIntentFindings(intents, acceptedHashes = {}) {
     if (!Number.isFinite(Number(row.start_scale)) || !Number.isFinite(Number(row.end_scale)) || row.start_scale < 1 || row.end_scale < 1) findings.push({ severity: "blocker", code: "motion_scale_invalid", image_id: row.image_id });
     if (!BEHAVIORS.has(String(row.behavior ?? ""))) findings.push({ severity: "blocker", code: "motion_behavior_invalid", image_id: row.image_id });
     if (!EASINGS.has(String(row.easing ?? ""))) findings.push({ severity: "blocker", code: "motion_easing_invalid", image_id: row.image_id });
+  }
+  let streakStart = 0;
+  const direction = (value, epsilon = 0.015) => value > epsilon ? "positive" : value < -epsilon ? "negative" : "still";
+  const signature = (row) => [
+    row?.behavior ?? "unknown",
+    direction(Number(row?.end_anchor?.x) - Number(row?.start_anchor?.x)),
+    direction(Number(row?.end_anchor?.y) - Number(row?.start_anchor?.y)),
+    direction(Number(row?.end_scale) - Number(row?.start_scale), 0.004),
+  ].join(":");
+  for (let index = 1; index <= (intents ?? []).length; index += 1) {
+    const samePattern = index < intents.length && signature(intents[index]) === signature(intents[streakStart]);
+    if (samePattern) continue;
+    const streakLength = index - streakStart;
+    if (streakLength >= 4) {
+      findings.push({
+        severity: "warning",
+        code: "motion_pattern_repeated_local_sequence",
+        image_id: intents[streakStart]?.image_id ?? null,
+        end_image_id: intents[index - 1]?.image_id ?? null,
+        behavior: intents[streakStart]?.behavior ?? null,
+        repeated_cut_count: streakLength,
+      });
+    }
+    streakStart = index;
   }
   return findings;
 }

@@ -386,6 +386,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const provider = identity.image_provider ?? "modelslab";
   const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? "flux-klein";
   const referenceModel = identity?.model_versions?.reference_model ?? identity?.provider_locks?.reference_model ?? imageModel;
+  const renderProfile = identity.render_profile ?? "smooth_fast_ken_burns";
   const minWpm = Number(identity.target_wpm_min ?? 195);
   const maxWpm = Number(identity.target_wpm_max ?? 220);
   const nativeSpeed = Number(identity.qwen_native_speed ?? identity.voice_provider_options?.qwen_native_speed ?? 1.25);
@@ -427,7 +428,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
-    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion smooth_fast_ken_burns --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
+    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,
     upload_packaging: "Generate upload packaging only after final QA passes.",
   };

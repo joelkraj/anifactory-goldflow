@@ -237,9 +237,12 @@ function qwenNativeSpeed(identity = {}) {
 }
 
 function renderCommand(identity, base, episode) {
-  const smooth = String(identity?.render_profile ?? "").toLowerCase() === "smooth_fast_ken_burns";
+  const profile = String(identity?.render_profile ?? "smooth_fast_ken_burns").toLowerCase();
   const common = `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180`;
-  if (smooth) {
+  if (profile === "smooth_subpixel_ken_burns") {
+    return `${common} --motion smooth_subpixel_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`;
+  }
+  if (profile === "smooth_fast_ken_burns") {
     return `${common} --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`;
   }
   return [

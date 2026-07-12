@@ -1007,16 +1007,16 @@ function testDirectedMotionAndFullTimelineTransitions() {
     focal_subject: "Joey's stopped spear",
     easing: "ease_out",
     motion_keyframes: [
-      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "ease_out" },
-      { at: 0.16, anchor: { x: 0.52, y: 0.49 }, scale: 1.11, easing_to_next: "ease_in_out" },
-      { at: 0.34, anchor: { x: 0.52, y: 0.49 }, scale: 1.075, easing_to_next: "linear" },
-      { at: 1, anchor: { x: 0.52, y: 0.49 }, scale: 1.075, easing_to_next: "linear" },
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "ease_in_out" },
+      { at: 0.28, anchor: { x: 0.52, y: 0.49 }, scale: 1.08, easing_to_next: "ease_in_out" },
+      { at: 0.52, anchor: { x: 0.52, y: 0.49 }, scale: 1.065, easing_to_next: "linear" },
+      { at: 1, anchor: { x: 0.52, y: 0.49 }, scale: 1.065, easing_to_next: "linear" },
     ],
     reason: "Punch into the impact, settle, and hold the evidence.",
   };
   const sanitizedKeyframedMotion = sanitizeAuthoredMotionIntent(keyframedMotion);
   assert.equal(sanitizedKeyframedMotion.start_scale, 1);
-  assert.equal(sanitizedKeyframedMotion.end_scale, 1.075);
+  assert.equal(sanitizedKeyframedMotion.end_scale, 1.065);
   assert.deepEqual(sanitizedKeyframedMotion.start_anchor, { x: 0.5, y: 0.5 });
   assert.equal(sanitizeMotionKeyframes([{ at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" }]), null);
   assert.equal(sanitizeAuthoredMotionIntent({ ...keyframedMotion, motion_keyframes: [...keyframedMotion.motion_keyframes].reverse() }), null);
@@ -1024,6 +1024,15 @@ function testDirectedMotionAndFullTimelineTransitions() {
   const keyframedTrace = motionTraceForIntent(keyframedIntent, 60);
   assert.equal(keyframedTrace.some((row, index) => index > 0 && row.scale < keyframedTrace[index - 1].scale), true);
   assert.deepEqual(motionTraceFindings(keyframedTrace), []);
+  const aggressiveTrace = motionTraceForIntent({
+    ...keyframedIntent,
+    motion_keyframes: [
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "ease_out" },
+      { at: 0.08, anchor: { x: 0.5, y: 0.5 }, scale: 1.12, easing_to_next: "ease_in_out" },
+      { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1.08, easing_to_next: "linear" },
+    ],
+  }, 60);
+  assert.equal(motionTraceFindings(aggressiveTrace).some((row) => row.code === "motion_keyframe_velocity_excessive"), true);
 
   const focusShift = motionIntentForPrompt({
     image_id: "cut_focus",

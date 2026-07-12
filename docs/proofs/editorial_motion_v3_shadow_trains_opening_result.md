@@ -22,6 +22,7 @@
 - 14 selected visual transitions; one opening boundary deliberately remains a hard cut.
 - 12 transition SFX, resolved from seven calibrated SFX families to approved available bank assets.
 - 3,784 traced motion frames with zero motion blockers.
+- Maximum traced anchor travel is `0.0037234` normalized units per frame; maximum scale change is `0.0012128` per frame.
 - 14 planned transitions and 14 applied transitions.
 - Output: 1920x1080, 60 fps, H.264, `yuv420p`, AAC, 60.0 seconds.
 - Final measured audio: `-13.0 LUFS`, approximately `-2.1 dBFS` sample peak.
@@ -32,10 +33,11 @@
 - Spear cuts track the attacker toward the impact point instead of applying generic centered pushes.
 - Arena and barrier cuts use real zoom-outs that reveal more canvas.
 - Reaction and UI cuts land quickly, settle, and hold long enough to read.
+- After operator review, the initial snap-and-settle scale reversals were removed. Active camera travel now uses quintic ease-in-out between still holds; scale velocity is about 83 percent lower than the first proof and peak anchor velocity is about 38 percent lower.
 - The one-second contact sheet shows no incoherent head crops or focal drift introduced by motion.
 - The first transition-SFX mix exposed an `amix` normalization defect that attenuated narration as sparse inputs were added. The renderer now uses `normalize=0` and measured two-pass loudnorm.
 - Bank assets with long internal lead-ins are now family-calibrated with trim and pre-cut offsets so their audible peak lands near the selected transition instead of after it.
 
 ## Promotion Boundary
 
-The reusable contracts and guards are production-ready, but this proof does not replace the approved full episode. Operator review of the proof and A/B decides whether to apply image-aware keyframe direction to a future full render.
+The reusable contracts and smoothness guards are production-ready, but this proof does not replace the approved full episode. Operator review of the revised proof and A/B decides whether to apply image-aware keyframe direction to a future full render.

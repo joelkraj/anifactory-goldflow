@@ -1184,7 +1184,7 @@ function directedMotionProfile(intent) {
 function easedExpression(rawExpression, easing = "linear") {
   if (easing === "ease_in") return `pow(${rawExpression},2)`;
   if (easing === "ease_out") return `(1-pow(1-${rawExpression},2))`;
-  if (easing === "ease_in_out") return `((${rawExpression})*(${rawExpression})*(3-2*(${rawExpression})))`;
+  if (easing === "ease_in_out") return `((${rawExpression})*(${rawExpression})*(${rawExpression})*(((${rawExpression})*(6*(${rawExpression})-15))+10))`;
   return rawExpression;
 }
 

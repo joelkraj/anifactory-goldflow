@@ -150,7 +150,7 @@ export function easingProgress(value, easing = "linear") {
   const t = clamp(value, 0, 1);
   if (easing === "ease_in") return t * t;
   if (easing === "ease_out") return 1 - ((1 - t) * (1 - t));
-  if (easing === "ease_in_out") return t * t * (3 - (2 * t));
+  if (easing === "ease_in_out") return t * t * t * ((t * ((t * 6) - 15)) + 10);
   return t;
 }
 
@@ -423,6 +423,7 @@ export function motionTraceForIntent(intent, fps = 60) {
       frame,
       time_sec: Number((frame / fps).toFixed(6)),
       segment_index: segmentIndex,
+      keyframe_count: keyframes.length,
       x: Number((current.anchor.x + ((next.anchor.x - current.anchor.x) * progress)).toFixed(7)),
       y: Number((current.anchor.y + ((next.anchor.y - current.anchor.y) * progress)).toFixed(7)),
       scale: Number((current.scale + ((next.scale - current.scale) * progress)).toFixed(7)),
@@ -461,6 +462,10 @@ export function motionTraceFindings(traceRows) {
         const delta = values[index] - values[index - 1];
         const maxDelta = field === "scale" ? 0.012 : 0.025;
         if (Math.abs(delta) > maxDelta) findings.push({ severity: "blocker", code: "motion_frame_discontinuity", image_id: imageId, field, frame: index, delta });
+        const keyframeVelocityLimit = field === "scale" ? 0.0045 : 0.004;
+        if (Number(rows[index].keyframe_count ?? 2) > 2 && Math.abs(delta) > keyframeVelocityLimit) {
+          findings.push({ severity: "blocker", code: "motion_keyframe_velocity_excessive", image_id: imageId, field, frame: index, delta, limit: keyframeVelocityLimit });
+        }
       }
     }
   }

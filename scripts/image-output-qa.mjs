@@ -280,7 +280,7 @@ export function applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, stru
   const invalidatedMotionIds = [];
   const cuts = ledger.cuts.map((cut) => {
     const row = rowById.get(String(cut.image_id ?? ""));
-    if (!row || cut.image_sha256 !== row.image_sha256) return cut;
+    if (!row || (cut.image_sha256 && cut.image_sha256 !== row.image_sha256)) return cut;
     const decision = decisionById.get(row.image_id)?.decision ?? (row.requires_manual_risk_review ? "not_inspected" : "accepted");
     const rejected = decision === "rejected" || structuralBlockerIds.has(row.image_id);
     if (rejected && (cut.motion_profile_hash || cut.motion_clip_path || cut.motion_clip_sha256)) invalidatedMotionIds.push(row.image_id);
@@ -291,6 +291,8 @@ export function applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, stru
         : "passed_structural";
     return {
       ...cut,
+      image_path: row.image_path,
+      image_sha256: row.image_sha256,
       image_qa_status: imageQaStatus,
       image_qa_note: rejected ? "Rejected during output QA; regenerate this cut only." : note,
       image_qa_reviewed_at: imageQaStatus.startsWith("passed") || rejected ? now : null,

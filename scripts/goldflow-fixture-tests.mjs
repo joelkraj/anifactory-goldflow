@@ -885,10 +885,14 @@ function testImageOutputQaRiskAndDonorPolicies() {
     cuts: [
       { image_id: "cut_001", image_sha256: "hash-a", motion_profile_hash: "motion-a", motion_clip_path: "/tmp/a.mp4", motion_clip_sha256: "clip-a" },
       { image_id: "cut_002", image_sha256: "hash-c", motion_profile_hash: "motion-b", motion_clip_path: "/tmp/b.mp4", motion_clip_sha256: "clip-b" },
+      { image_id: "cut_003", image_sha256: null, image_path: null, image_qa_status: "pending" },
+      { image_id: "cut_004", image_sha256: "stale-hash", image_path: "/tmp/stale.png", image_qa_status: "pending" },
     ],
   }, [
     riskRows[0],
     { ...riskRows[0], image_id: "cut_002", image_sha256: "hash-c", requires_manual_risk_review: false },
+    { ...riskRows[0], image_id: "cut_003", image_sha256: "fresh-hash", image_path: "/tmp/fresh.png", requires_manual_risk_review: false },
+    { ...riskRows[0], image_id: "cut_004", image_sha256: "different-hash", image_path: "/tmp/different.png", requires_manual_risk_review: false },
   ], {
     decisions: [{ image_id: "cut_001", image_sha256: "hash-a", decision: "rejected" }],
   }, new Set(), "fixture", "2026-01-01T00:00:00.000Z");
@@ -896,6 +900,11 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(ledgerResult.ledger.cuts[0].motion_clip_path, null);
   assert.equal(ledgerResult.ledger.cuts[1].motion_clip_path, "/tmp/b.mp4");
   assert.equal(ledgerResult.ledger.cuts[1].image_qa_status, "passed_structural");
+  assert.equal(ledgerResult.ledger.cuts[2].image_sha256, "fresh-hash");
+  assert.equal(ledgerResult.ledger.cuts[2].image_path, "/tmp/fresh.png");
+  assert.equal(ledgerResult.ledger.cuts[2].image_qa_status, "passed_structural");
+  assert.equal(ledgerResult.ledger.cuts[3].image_sha256, "stale-hash");
+  assert.equal(ledgerResult.ledger.cuts[3].image_qa_status, "pending");
 
   const recoveryCommand = scopedQaRecoveryCommand(
     ["cut_001"],

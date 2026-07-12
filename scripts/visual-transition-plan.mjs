@@ -5,6 +5,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCodexCli } from "./lib/codex-cli-runner.mjs";
+import {
+  availableTransitionCueById,
+  resolveTransitionSfxFamily,
+  transitionSfxFamilyGuide,
+} from "./lib/transition-sfx-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -75,40 +80,6 @@ function extractJson(text) {
   throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 500)}`);
 }
 
-function preferredAsset(cue) {
-  return cue?.assets?.find((asset) => asset.asset_id === cue.preferred_asset_id && asset.status === "available")
-    ?? [...(cue?.assets ?? [])].reverse().find((asset) => asset?.path && asset.status === "available")
-    ?? null;
-}
-
-function transitionCuePriority(cue, asset) {
-  const text = [cue?.cue_id, cue?.generation_prompt, ...(cue?.aliases ?? []), asset?.prompt].filter(Boolean).join(" ").toLowerCase();
-  let score = 0;
-  for (const term of ["whoosh", "swipe", "sweep", "pop", "snap", "zip", "flash", "impact", "scene", "manga", "scan", "system", "glitch", "hush", "sub", "thud"]) {
-    if (text.includes(term)) score += 10;
-  }
-  if (/ambience|room tone|music|voice|speech|crowd dialogue/.test(text)) score -= 40;
-  return score;
-}
-
-function transitionCueBank(manifest) {
-  const cues = Array.isArray(manifest?.cues) ? manifest.cues : Object.values(manifest?.cues ?? {});
-  return cues
-    .map((cue) => ({ cue, asset: preferredAsset(cue) }))
-    .filter((row) => row.asset?.path)
-    .map((row) => ({ ...row, priority: transitionCuePriority(row.cue, row.asset) }))
-    .filter((row) => row.priority > 0)
-    .sort((left, right) => right.priority - left.priority || String(left.cue.cue_id).localeCompare(String(right.cue.cue_id)))
-    .slice(0, 80)
-    .map(({ cue, asset }) => ({
-      cue_id: cue.cue_id,
-      aliases: cue.aliases ?? [],
-      prompt: asset.prompt ?? cue.generation_prompt ?? "",
-      asset_id: asset.asset_id ?? null,
-      asset_path: asset.path,
-    }));
-}
-
 function promptTextBundle(prompt) {
   return [
     prompt.image_id,
@@ -153,7 +124,7 @@ function buildBoundaries(prompts) {
   return boundaries;
 }
 
-function buildPrompt(boundaries, cueBank) {
+function buildPrompt(boundaries) {
   return `You are the human-feel edit planner for an AniFactory manhwa recap.
 
 Return one valid JSON object only. Do not include markdown.
@@ -162,15 +133,15 @@ Goal:
 - Decide which visual cut boundaries deserve true editorial transition treatment${transitionSfxEnabled ? " and transition SFX" : ""}.
 - Especially in the first 3 minutes, make the edit feel hand placed. Use the first 30 seconds as the densest cold open, then keep the 30-180 second ramp visually alive with selective sweeps, drop-ins, swipe-up/down, manga snaps, system scans, impact flashes, and quieter wipes.
 - Do NOT place SFX on every cut after the hook. Be selective after 30 seconds.
-${transitionSfxEnabled ? "- Transition SFX should land exactly on the cut boundary, not float under narration." : "- Transition SFX are disabled for this run. Set transition_sfx false, cue_id null, gain_db null, and sfx_offset_sec 0 on every event."}
+${transitionSfxEnabled ? "- Transition SFX should land exactly on the cut boundary, not float under narration. Choose an editorial SFX family; deterministic code resolves that family to an approved available bank asset and supplies calibrated trim, lead-in, fade, and gain." : "- Transition SFX are disabled for this run. Set transition_sfx false and sfx_family none on every event."}
 - Score drops are handled by the score planner; here you may only add a note when a boundary should be considered a score-drop anchor.
-${transitionSfxEnabled ? "- Use only cue_id values from the SFX cue bank below." : "- Do not reference cue_id values or SFX assets."}
+${transitionSfxEnabled ? "- Do not choose cue ids or asset paths. Choose only one family from the compact family guide below." : "- Do not reference cue ids, SFX families other than none, or SFX assets."}
 
 Allowed xfade transitions:
 fade, dissolve, distance, wipeleft, wiperight, wipeup, wipedown, slideleft, slideright, slideup, slidedown, smoothleft, smoothright, smoothup, smoothdown, circlecrop, rectcrop, pixelize, hblur, fadegrays, wipetl, wipetr, wipebl, wipebr, squeezeh, squeezev, zoomin, fadefast, fadeslow, hlwind, hrwind, vuwind, vdwind, coverleft, coverright, coverup, coverdown, revealleft, revealright, revealup, revealdown.
 
-Transition cue bank:
-${JSON.stringify(cueBank, null, 2)}
+Transition SFX family guide:
+${JSON.stringify(transitionSfxFamilyGuide(), null, 2)}
 
 Candidate boundaries:
 ${JSON.stringify(boundaries, null, 2)}
@@ -184,9 +155,7 @@ Return:
       "xfade_transition": "slideup",
       "xfade_duration_sec": 0.28,
       "transition_sfx": ${transitionSfxEnabled ? "true" : "false"},
-      "cue_id": ${transitionSfxEnabled ? "\"hook_swipe_up_flash\"" : "null"},
-      "gain_db": ${transitionSfxEnabled ? "-16" : "null"},
-      "sfx_offset_sec": ${transitionSfxEnabled ? "-0.015" : "0"},
+      "sfx_family": ${transitionSfxEnabled ? "\"swipe_up\"" : "\"none\""},
       "score_drop_anchor": false,
       "edit_reason": "why this transition/SFX earns attention here"
     }
@@ -198,9 +167,9 @@ Rules:
 - First 30 seconds: most boundaries should have vivid visual transitions when the narration beat supports it.
 - 30-180 seconds: use stronger transition families on scene changes, system/UI reveals, reversals, humiliations, status turns, impact, memory shifts, and strong curiosity pivots. It should still feel designed, but less constant than the first 30 seconds.
 - After 180 seconds: reserve strong transitions for scene changes, system/UI reveals, reversals, impact, memory shifts, cliffhangers, or strong emotional pivots.
-${transitionSfxEnabled ? "- When transition_sfx is true, cue_id must come from the cue bank." : "- transition_sfx must be false for every event in this silent-transition run."}
+${transitionSfxEnabled ? "- When transition_sfx is true, sfx_family must be one of: swipe_up, swipe_down, lateral_whoosh, manga_snap, impact, system_scan, memory_wash. Use none when the boundary should stay silent." : "- transition_sfx must be false and sfx_family must be none for every event in this silent-transition run."}
 - xfade_duration_sec should usually be 0.18-0.34 seconds. Use shorter for impact cuts, longer for memory/dissolve.
-${transitionSfxEnabled ? "- gain_db should usually be -18 to -14 in hook, -24 to -18 later.\n- sfx_offset_sec should be between -0.04 and 0.02 so the attack lands on the cut." : "- gain_db should be null and sfx_offset_sec should be 0."}
+${transitionSfxEnabled ? "- Do not author gain, asset trim, fade, or timing offsets; those come from the calibrated family policy." : "- Do not author SFX gain, asset trim, fade, or timing offsets."}
 `;
 }
 
@@ -235,12 +204,27 @@ async function callCodex(prompt, stageName) {
   };
 }
 
-function normalizeEvent(event, boundariesById, cueById) {
+function normalizeEvent(event, boundariesById, sfxManifest) {
   const boundary = boundariesById.get(String(event.boundary_id ?? ""));
   if (!boundary) return null;
-  const cueId = String(event.cue_id ?? "");
-  const cue = cueById.get(cueId);
-  const transitionSfx = transitionSfxEnabled && event.transition_sfx === true && cue;
+  const family = String(event.sfx_family ?? "none").trim().toLowerCase();
+  const familyResolution = transitionSfxEnabled && event.transition_sfx === true
+    ? resolveTransitionSfxFamily(sfxManifest, family, { inHook: boundary.in_hook })
+    : null;
+  const legacyResolution = !familyResolution && transitionSfxEnabled && event.transition_sfx === true && event.cue_id
+    ? availableTransitionCueById(sfxManifest, event.cue_id)
+    : null;
+  const resolved = familyResolution ?? (legacyResolution ? {
+    ...legacyResolution,
+    sfx_family: "legacy_exact_cue",
+    asset_trim_start_sec: 0,
+    sfx_offset_sec: -0.015,
+    duration_sec: 0.65,
+    fade_out_sec: 0.12,
+    gain_db: boundary.in_hook ? -16 : -22,
+    resolution_source: "legacy_exact_cue",
+  } : null);
+  const transitionSfx = Boolean(resolved);
   return {
     boundary_id: boundary.boundary_id,
     from_image_id: boundary.from_image_id,
@@ -249,12 +233,17 @@ function normalizeEvent(event, boundariesById, cueById) {
     start_sec: boundary.start_sec,
     xfade_transition: String(event.xfade_transition ?? "dissolve").replace(/[^a-z0-9]/gi, "").toLowerCase() || "dissolve",
     xfade_duration_sec: Math.max(0.08, Math.min(0.5, Number(event.xfade_duration_sec ?? 0.28) || 0.28)),
-    transition_sfx: Boolean(transitionSfx),
-    cue_id: transitionSfx ? cueId : null,
-    asset_path: transitionSfx ? cue.asset_path : null,
-    asset_id: transitionSfx ? cue.asset_id : null,
-    gain_db: transitionSfx ? Math.max(-36, Math.min(-10, Number(event.gain_db ?? (boundary.in_hook ? -16 : -22)) || (boundary.in_hook ? -16 : -22))) : null,
-    sfx_offset_sec: transitionSfx ? Math.max(-0.08, Math.min(0.05, Number(event.sfx_offset_sec ?? -0.015) || -0.015)) : 0,
+    transition_sfx: transitionSfx,
+    sfx_family: transitionSfx ? resolved.sfx_family : "none",
+    cue_id: transitionSfx ? resolved.cue_id : null,
+    asset_path: transitionSfx ? resolved.asset_path : null,
+    asset_id: transitionSfx ? resolved.asset_id : null,
+    asset_trim_start_sec: transitionSfx ? resolved.asset_trim_start_sec : null,
+    duration_sec: transitionSfx ? resolved.duration_sec : null,
+    fade_out_sec: transitionSfx ? resolved.fade_out_sec : null,
+    sfx_resolution_source: transitionSfx ? resolved.resolution_source : null,
+    gain_db: transitionSfx ? resolved.gain_db : null,
+    sfx_offset_sec: transitionSfx ? resolved.sfx_offset_sec : 0,
     score_drop_anchor: event.score_drop_anchor === true,
     in_hook: boundary.in_hook,
     in_retention_ramp: boundary.in_retention_ramp,
@@ -270,15 +259,12 @@ async function main() {
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPlanPath}`);
   const boundaries = buildBoundaries(promptPlan.prompts);
-  const cueBank = transitionCueBank(sfxManifest);
-  if (transitionSfxEnabled && !cueBank.length) throw new Error(`No available transition SFX cue bank entries in ${sfxManifestPath}`);
   const boundariesById = new Map(boundaries.map((boundary) => [boundary.boundary_id, boundary]));
-  const cueById = new Map(cueBank.map((cue) => [cue.cue_id, cue]));
   const llm = dryRun
-    ? { provider: "dry_run", model: "none", prompt_path: null, output_path: null, parsed: { transition_events: boundaries.filter((row) => row.in_hook).map((row, index) => ({ boundary_id: row.boundary_id, to_image_id: row.to_image_id, xfade_transition: index % 2 ? "slideup" : "smoothup", transition_sfx: transitionSfxEnabled, cue_id: transitionSfxEnabled ? cueBank[index % cueBank.length].cue_id : null, gain_db: transitionSfxEnabled ? -16 : null, sfx_offset_sec: transitionSfxEnabled ? -0.015 : 0, edit_reason: "dry run hook transition" })), warnings: [] } }
-    : await callCodex(buildPrompt(boundaries, cueBank), `${episode}_transition_edit_plan`);
+    ? { provider: "dry_run", model: "none", prompt_path: null, output_path: null, parsed: { transition_events: boundaries.filter((row) => row.in_hook).map((row, index) => ({ boundary_id: row.boundary_id, to_image_id: row.to_image_id, xfade_transition: index % 2 ? "slideup" : "smoothup", transition_sfx: transitionSfxEnabled, sfx_family: transitionSfxEnabled ? (index % 2 ? "swipe_up" : "manga_snap") : "none", edit_reason: "dry run hook transition" })), warnings: [] } }
+    : await callCodex(buildPrompt(boundaries), `${episode}_transition_edit_plan`);
   const events = (Array.isArray(llm.parsed.transition_events) ? llm.parsed.transition_events : [])
-    .map((event) => normalizeEvent(event, boundariesById, cueById))
+    .map((event) => normalizeEvent(event, boundariesById, sfxManifest))
     .filter(Boolean);
   const report = {
     schema: "goldflow_transition_edit_plan_v1",

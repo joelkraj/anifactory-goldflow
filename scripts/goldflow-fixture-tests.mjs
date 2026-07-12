@@ -79,7 +79,9 @@ import {
   motionTraceForIntent,
   positionAnchorFromStaging,
   sanitizeAuthoredMotionIntent,
+  sanitizeMotionKeyframes,
 } from "./lib/motion-plan-utils.mjs";
+import { resolveTransitionSfxFamily, transitionSfxFamilyGuide } from "./lib/transition-sfx-policy.mjs";
 import {
   gptImage2OutputSizeForTests,
   prepareGptImage2PromptForTests,
@@ -801,6 +803,12 @@ function testPhraseAwareSubtitleGrouping() {
   ]);
   assert.deepEqual(merged.map((row) => row.text), ["The system opened", "No!", "And then I ran"]);
   assert.equal(merged.filter((row) => row.text.split(/\s+/).length === 1).length, 1);
+  const completedPhrases = mergeShortSubtitleEvents([
+    { start_sec: 0, end_sec: 1.8, text: "The impact cracked the arena from one side" },
+    { start_sec: 1.8, end_sec: 2.4, text: "to the other," },
+    { start_sec: 2.8, end_sec: 3.55, text: "Two fingers rose." },
+  ]);
+  assert.deepEqual(completedPhrases.map((row) => row.text), ["The impact cracked the arena from one side to the other,", "Two fingers rose."]);
 
   const lockedCaptionRows = buildSubtitleEventsForTests({
     words: ["The", "system", "gave", "Joey", "Manwa", "Roll", "assigned."].map((word, index) => ({
@@ -994,6 +1002,29 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.equal(authoredIntent.intent_reason, authoredMotion.reason);
   assert.equal(authoredIntent.focal_source, "llm_authored_shot_manifest_motion_intent");
 
+  const keyframedMotion = {
+    behavior: "impact_push",
+    focal_subject: "Joey's stopped spear",
+    easing: "ease_out",
+    motion_keyframes: [
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "ease_out" },
+      { at: 0.16, anchor: { x: 0.52, y: 0.49 }, scale: 1.11, easing_to_next: "ease_in_out" },
+      { at: 0.34, anchor: { x: 0.52, y: 0.49 }, scale: 1.075, easing_to_next: "linear" },
+      { at: 1, anchor: { x: 0.52, y: 0.49 }, scale: 1.075, easing_to_next: "linear" },
+    ],
+    reason: "Punch into the impact, settle, and hold the evidence.",
+  };
+  const sanitizedKeyframedMotion = sanitizeAuthoredMotionIntent(keyframedMotion);
+  assert.equal(sanitizedKeyframedMotion.start_scale, 1);
+  assert.equal(sanitizedKeyframedMotion.end_scale, 1.075);
+  assert.deepEqual(sanitizedKeyframedMotion.start_anchor, { x: 0.5, y: 0.5 });
+  assert.equal(sanitizeMotionKeyframes([{ at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" }]), null);
+  assert.equal(sanitizeAuthoredMotionIntent({ ...keyframedMotion, motion_keyframes: [...keyframedMotion.motion_keyframes].reverse() }), null);
+  const keyframedIntent = motionIntentForPrompt({ image_id: "cut_keyframed", duration_sec: 4, shot_manifest: { motion_intent: keyframedMotion } }, "hash-keyframed");
+  const keyframedTrace = motionTraceForIntent(keyframedIntent, 60);
+  assert.equal(keyframedTrace.some((row, index) => index > 0 && row.scale < keyframedTrace[index - 1].scale), true);
+  assert.deepEqual(motionTraceFindings(keyframedTrace), []);
+
   const focusShift = motionIntentForPrompt({
     image_id: "cut_focus",
     duration_sec: 6,
@@ -1079,6 +1110,35 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.match(exactFilter, /perspective=/);
   assert.match(exactFilter, /eval=frame/);
   assert.doesNotMatch(exactFilter, /zoompan=/);
+  const keyframedFilter = motionClipFilterForTests(4, 0, {}, 0, null, keyframedIntent, "smooth_subpixel_ken_burns");
+  assert.match(keyframedFilter, /if\(lte\(/);
+  assert.match(keyframedFilter, /perspective=/);
+
+  const transitionManifest = {
+    cues: [
+      {
+        cue_id: "hook_impact_flash_with_muted_sub_thud",
+        preferred_asset_id: "impact-good",
+        assets: [
+          { asset_id: "impact-bad", status: "needs_review", path: "/tmp/bad.wav" },
+          { asset_id: "impact-good", status: "available", path: "/tmp/good.wav" },
+        ],
+      },
+      {
+        cue_id: "hook_swipe_down_whoosh",
+        preferred_asset_id: "swipe-good",
+        assets: [{ asset_id: "swipe-good", status: "available", path: "/tmp/swipe.wav" }],
+      },
+    ],
+  };
+  const resolvedImpact = resolveTransitionSfxFamily(transitionManifest, "impact", { inHook: true });
+  assert.equal(resolvedImpact.asset_id, "impact-good");
+  assert.equal(resolvedImpact.asset_path, "/tmp/good.wav");
+  assert.equal(resolvedImpact.gain_db, -14);
+  const resolvedSwipe = resolveTransitionSfxFamily(transitionManifest, "swipe_down", { inHook: true });
+  assert.equal(resolvedSwipe.asset_trim_start_sec, 0.55);
+  assert.equal(resolvedSwipe.sfx_offset_sec, -0.25);
+  assert.equal(transitionSfxFamilyGuide().some((row) => row.family === "system_scan"), true);
 }
 
 async function testRenderRequiresHashMatchedImageQa() {

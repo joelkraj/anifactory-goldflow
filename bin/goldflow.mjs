@@ -137,6 +137,7 @@ ${registryCommands}
   goldflow run status              Print the artifact-backed stage ledger
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
+  goldflow visual motion-proof-plan Build isolated image-aware motion/transition proof plans
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
 
@@ -235,6 +236,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-transition-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "motion-plan") {
   run("visual-motion-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "motion-proof-plan") {
+  run("editorial-motion-proof-plan.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
 } else if (command === "imagegen" && subcommand === "promote-derived-refs") {

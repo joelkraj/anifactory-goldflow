@@ -20,6 +20,8 @@ const BEHAVIORS = new Set([
   "aftermath_reveal",
 ]);
 const EASINGS = new Set(["linear", "ease_in", "ease_out", "ease_in_out"]);
+const MIN_KEYFRAMES = 2;
+const MAX_KEYFRAMES = 5;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, Number(value)));
@@ -40,16 +42,63 @@ function validAnchor(value) {
     && Number(value.y) <= 1;
 }
 
+export function sanitizeMotionKeyframes(value) {
+  if (!Array.isArray(value) || value.length < MIN_KEYFRAMES || value.length > MAX_KEYFRAMES) return null;
+  const rows = value.map((row, index) => {
+    const at = Number(row?.at);
+    const scale = Number(row?.scale);
+    const easingToNext = String(row?.easing_to_next ?? "linear").trim();
+    if (!Number.isFinite(at)
+      || at < 0
+      || at > 1
+      || !validAnchor(row?.anchor)
+      || !Number.isFinite(scale)
+      || scale < 1
+      || scale > 1.25
+      || !EASINGS.has(easingToNext)) return null;
+    if (index > 0 && at <= Number(value[index - 1]?.at)) return null;
+    return {
+      at,
+      anchor: anchor(row.anchor),
+      scale,
+      easing_to_next: easingToNext,
+    };
+  });
+  if (rows.some((row) => !row) || Math.abs(rows[0].at) > 1e-8 || Math.abs(rows.at(-1).at - 1) > 1e-8) return null;
+  return rows;
+}
+
+export function motionKeyframesForIntent(value) {
+  const authored = sanitizeMotionKeyframes(value?.motion_keyframes);
+  if (authored) return authored;
+  if (!validAnchor(value?.start_anchor)
+    || !validAnchor(value?.end_anchor)
+    || !Number.isFinite(Number(value?.start_scale))
+    || !Number.isFinite(Number(value?.end_scale))) return null;
+  const easing = EASINGS.has(String(value?.easing ?? "")) ? String(value.easing) : "linear";
+  return [
+    { at: 0, anchor: anchor(value.start_anchor), scale: Number(value.start_scale), easing_to_next: easing },
+    { at: 1, anchor: anchor(value.end_anchor), scale: Number(value.end_scale), easing_to_next: "linear" },
+  ];
+}
+
 export function sanitizeAuthoredMotionIntent(value) {
   if (!value || typeof value !== "object") return null;
   const behavior = String(value.behavior ?? "").trim();
-  const easing = String(value.easing ?? "").trim();
-  const startScale = Number(value.start_scale);
-  const endScale = Number(value.end_scale);
+  const hasKeyframes = value.motion_keyframes !== undefined && value.motion_keyframes !== null;
+  const motionKeyframes = hasKeyframes ? sanitizeMotionKeyframes(value.motion_keyframes) : null;
+  if (hasKeyframes && !motionKeyframes) return null;
+  const firstKeyframe = motionKeyframes?.[0] ?? null;
+  const lastKeyframe = motionKeyframes?.at(-1) ?? null;
+  const easing = String(value.easing ?? firstKeyframe?.easing_to_next ?? "").trim();
+  const startAnchor = firstKeyframe?.anchor ?? value.start_anchor;
+  const endAnchor = lastKeyframe?.anchor ?? value.end_anchor;
+  const startScale = Number(firstKeyframe?.scale ?? value.start_scale);
+  const endScale = Number(lastKeyframe?.scale ?? value.end_scale);
   if (!BEHAVIORS.has(behavior)
     || !EASINGS.has(easing)
-    || !validAnchor(value.start_anchor)
-    || !validAnchor(value.end_anchor)
+    || !validAnchor(startAnchor)
+    || !validAnchor(endAnchor)
     || !Number.isFinite(startScale)
     || !Number.isFinite(endScale)
     || startScale < 1
@@ -59,12 +108,13 @@ export function sanitizeAuthoredMotionIntent(value) {
   return {
     behavior,
     focal_subject: String(value.focal_subject ?? "").trim() || null,
-    start_anchor: anchor(value.start_anchor),
-    end_anchor: anchor(value.end_anchor),
+    start_anchor: anchor(startAnchor),
+    end_anchor: anchor(endAnchor),
     start_scale: startScale,
     end_scale: endScale,
     easing,
     reason: String(value.reason ?? "").trim() || null,
+    ...(motionKeyframes ? { motion_keyframes: motionKeyframes } : {}),
   };
 }
 
@@ -272,8 +322,12 @@ export function motionIntentForPrompt(prompt, imageSha256, decision = null, opti
   const override = decision?.focal_override && typeof decision.focal_override === "object" ? decision.focal_override : null;
   const behavior = BEHAVIORS.has(String(override?.behavior ?? "")) ? String(override.behavior) : base.behavior;
   const easing = EASINGS.has(String(override?.easing ?? "")) ? String(override.easing) : base.easing;
-  const startScale = clamp(override?.start_scale ?? base.start_scale, 1, 1.25);
-  const endScale = clamp(override?.end_scale ?? base.end_scale, 1, 1.25);
+  const overrideKeyframes = sanitizeMotionKeyframes(override?.motion_keyframes);
+  const hasSinglePointOverride = Boolean(override)
+    && ["start_anchor", "end_anchor", "start_scale", "end_scale", "easing"].some((field) => override[field] !== undefined);
+  const selectedKeyframes = overrideKeyframes ?? (!hasSinglePointOverride ? sanitizeMotionKeyframes(base.motion_keyframes) : null);
+  const startScale = clamp(selectedKeyframes?.[0]?.scale ?? override?.start_scale ?? base.start_scale, 1, 1.25);
+  const endScale = clamp(selectedKeyframes?.at(-1)?.scale ?? override?.end_scale ?? base.end_scale, 1, 1.25);
   const startSec = Number(prompt.start_sec ?? 0);
   const authoredDurationSec = Math.max(1 / 60, Number(prompt.duration_sec ?? 6));
   const timelineEndSec = Number(options.timelineEndSec);
@@ -288,14 +342,15 @@ export function motionIntentForPrompt(prompt, imageSha256, decision = null, opti
     duration_sec: durationSec,
     focal_subject: String(override?.focal_subject ?? base.focal_subject ?? "").trim() || null,
     focal_source: override ? "image_qa_focal_override" : base.focal_source,
-    start_anchor: anchor(override?.start_anchor, base.start_anchor),
-    end_anchor: anchor(override?.end_anchor, base.end_anchor),
+    start_anchor: anchor(selectedKeyframes?.[0]?.anchor ?? override?.start_anchor, base.start_anchor),
+    end_anchor: anchor(selectedKeyframes?.at(-1)?.anchor ?? override?.end_anchor, base.end_anchor),
     start_scale: startScale,
     end_scale: endScale,
     easing,
     behavior,
     intent_reason: String(override?.reason ?? base.intent_reason ?? "").trim() || null,
     qa_override: override ?? null,
+    ...(selectedKeyframes ? { motion_keyframes: selectedKeyframes } : {}),
   };
 }
 
@@ -312,9 +367,11 @@ export function motionIntentFindings(intents, acceptedHashes = {}) {
       }
     }
     if (!Number.isFinite(Number(row.duration_sec)) || row.duration_sec <= 0) findings.push({ severity: "blocker", code: "motion_duration_invalid", image_id: row.image_id });
-    if (!Number.isFinite(Number(row.start_scale)) || !Number.isFinite(Number(row.end_scale)) || row.start_scale < 1 || row.end_scale < 1) findings.push({ severity: "blocker", code: "motion_scale_invalid", image_id: row.image_id });
+    if (!Number.isFinite(Number(row.start_scale)) || !Number.isFinite(Number(row.end_scale)) || row.start_scale < 1 || row.end_scale < 1 || row.start_scale > 1.25 || row.end_scale > 1.25) findings.push({ severity: "blocker", code: "motion_scale_invalid", image_id: row.image_id });
     if (!BEHAVIORS.has(String(row.behavior ?? ""))) findings.push({ severity: "blocker", code: "motion_behavior_invalid", image_id: row.image_id });
     if (!EASINGS.has(String(row.easing ?? ""))) findings.push({ severity: "blocker", code: "motion_easing_invalid", image_id: row.image_id });
+    if (row.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_keyframes_invalid", image_id: row.image_id });
+    if (row.qa_override?.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.qa_override.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_qa_override_keyframes_invalid", image_id: row.image_id });
   }
   let streakStart = 0;
   const direction = (value, epsilon = 0.015) => value > epsilon ? "positive" : value < -epsilon ? "negative" : "still";
@@ -345,17 +402,30 @@ export function motionIntentFindings(intents, acceptedHashes = {}) {
 
 export function motionTraceForIntent(intent, fps = 60) {
   const frameCount = Math.max(1, Math.round(Number(intent.duration_sec) * fps));
+  const keyframes = motionKeyframesForIntent(intent);
+  if (!keyframes) return [];
   const rows = [];
   for (let frame = 0; frame < frameCount; frame += 1) {
     const raw = frameCount === 1 ? 1 : frame / (frameCount - 1);
-    const progress = easingProgress(raw, intent.easing);
+    let segmentIndex = Math.max(0, keyframes.length - 2);
+    for (let index = 0; index < keyframes.length - 1; index += 1) {
+      if (raw <= keyframes[index + 1].at + 1e-10) {
+        segmentIndex = index;
+        break;
+      }
+    }
+    const current = keyframes[segmentIndex];
+    const next = keyframes[segmentIndex + 1];
+    const localRaw = next.at === current.at ? 1 : (raw - current.at) / (next.at - current.at);
+    const progress = easingProgress(localRaw, current.easing_to_next);
     rows.push({
       image_id: intent.image_id,
       frame,
       time_sec: Number((frame / fps).toFixed(6)),
-      x: Number((intent.start_anchor.x + ((intent.end_anchor.x - intent.start_anchor.x) * progress)).toFixed(7)),
-      y: Number((intent.start_anchor.y + ((intent.end_anchor.y - intent.start_anchor.y) * progress)).toFixed(7)),
-      scale: Number((intent.start_scale + ((intent.end_scale - intent.start_scale) * progress)).toFixed(7)),
+      segment_index: segmentIndex,
+      x: Number((current.anchor.x + ((next.anchor.x - current.anchor.x) * progress)).toFixed(7)),
+      y: Number((current.anchor.y + ((next.anchor.y - current.anchor.y) * progress)).toFixed(7)),
+      scale: Number((current.scale + ((next.scale - current.scale) * progress)).toFixed(7)),
     });
   }
   return rows;
@@ -376,11 +446,19 @@ export function motionTraceFindings(traceRows) {
   for (const [imageId, rows] of byImage) {
     rows.sort((left, right) => left.frame - right.frame);
     for (const field of ["x", "y", "scale"]) {
+      const segmentIds = [...new Set(rows.map((row) => Number(row.segment_index ?? 0)))];
+      for (const segmentId of segmentIds) {
+        const segmentRows = rows.filter((row) => Number(row.segment_index ?? 0) === segmentId);
+        const values = segmentRows.map((row) => Number(row[field]));
+        const expectedDirection = direction(values);
+        for (let index = 1; index < values.length; index += 1) {
+          const delta = values[index] - values[index - 1];
+          if (expectedDirection && Math.sign(delta) && Math.sign(delta) !== expectedDirection) findings.push({ severity: "blocker", code: "motion_direction_reversal", image_id: imageId, field, frame: segmentRows[index].frame, segment_index: segmentId });
+        }
+      }
       const values = rows.map((row) => Number(row[field]));
-      const expectedDirection = direction(values);
       for (let index = 1; index < values.length; index += 1) {
         const delta = values[index] - values[index - 1];
-        if (expectedDirection && Math.sign(delta) && Math.sign(delta) !== expectedDirection) findings.push({ severity: "blocker", code: "motion_direction_reversal", image_id: imageId, field, frame: index });
         const maxDelta = field === "scale" ? 0.012 : 0.025;
         if (Math.abs(delta) > maxDelta) findings.push({ severity: "blocker", code: "motion_frame_discontinuity", image_id: imageId, field, frame: index, delta });
       }

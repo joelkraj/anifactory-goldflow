@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sharp from "sharp";
-import { motionTraceFindings, motionTraceForIntent } from "./lib/motion-plan-utils.mjs";
+import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent } from "./lib/motion-plan-utils.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -21,7 +21,8 @@ const episode = flags.episode ?? "ep_01";
 const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const assetsDir = path.join(episodeDir, "assets");
 const renderDir = path.join(assetsDir, "renders");
-const workDir = path.join(assetsDir, "render-work");
+const defaultWorkDir = path.join(assetsDir, "render-work");
+const workDir = flags["work-dir"] ?? defaultWorkDir;
 const promptPlanPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const visualBeatPlanPath = flags.visualBeatPlan ?? flags["visual-beat-plan"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
@@ -58,6 +59,9 @@ const finalAudioLoudnormEnabled = flags["final-audio-loudnorm"] !== "false" && !
 const finalAudioTargetLufsFlag = flags["final-audio-target-lufs"] ?? process.env.ANIFACTORY_RENDER_FINAL_AUDIO_TARGET_LUFS;
 const finalAudioTruePeakFlag = flags["final-audio-true-peak-db"] ?? process.env.ANIFACTORY_RENDER_FINAL_AUDIO_TRUE_PEAK_DB;
 const finalAudioLraFlag = flags["final-audio-lra"] ?? process.env.ANIFACTORY_RENDER_FINAL_AUDIO_LRA;
+const proofScopeEndSec = Number(flags["proof-scope-end-sec"] ?? NaN);
+const diagnosticProof = /^(true|1|yes)$/i.test(String(flags["diagnostic-proof"] ?? "false"));
+const allowTransitionSfxOnNarratorOnly = /^(true|1|yes)$/i.test(String(flags["allow-transition-sfx-on-narrator-only"] ?? "false"));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -325,7 +329,16 @@ function canMergeSubtitleEvents(left, right) {
   const gap = Number(right.start_sec) - Number(left.end_sec);
   const duration = Number(right.end_sec) - Number(left.start_sec);
   const words = subtitleWordCount(left.text) + subtitleWordCount(right.text);
-  return gap <= 0.35 && duration <= 3.2 && words <= 10;
+  return gap <= 0.4 && duration <= 3.4 && words <= 12;
+}
+
+function weakSubtitleFragment(event) {
+  const count = subtitleWordCount(event?.text);
+  if (count <= 2) return !intentionalSingleWordEvent(event);
+  if (count > 4) return false;
+  const text = String(event?.text ?? "").trim();
+  const firstWord = normalizedSubtitleWord(captionTokens(text)[0]);
+  return ORPHAN_SUBTITLE_WORDS.has(firstWord) || /[,;:]$/.test(text) || !/[.!?]$/.test(text);
 }
 
 function joinedSubtitleEvent(left, right) {
@@ -341,20 +354,25 @@ export function mergeShortSubtitleEvents(events) {
   const merged = [];
   for (let index = 0; index < rows.length; index += 1) {
     const current = rows[index];
-    const count = subtitleWordCount(current.text);
-    if (count > 2 || intentionalSingleWordEvent(current)) {
+    const previous = merged.at(-1) ?? null;
+    const completesOpenPhrase = subtitleWordCount(current.text) <= 4
+      && !intentionalSingleWordEvent(current)
+      && previous
+      && !/[.!?]$/.test(String(previous.text ?? ""))
+      && canMergeSubtitleEvents(previous, current);
+    if (!weakSubtitleFragment(current) && !completesOpenPhrase) {
       merged.push(current);
       continue;
     }
     const firstWord = normalizedSubtitleWord(captionTokens(current.text)[0]);
-    const preferNext = ORPHAN_SUBTITLE_WORDS.has(firstWord) || (merged.length && /[.!?]$/.test(String(merged.at(-1)?.text ?? "")));
+    const previousPhraseClosed = !previous || /[.!?]$/.test(String(previous.text ?? ""));
+    const preferNext = previousPhraseClosed && (ORPHAN_SUBTITLE_WORDS.has(firstWord) || Boolean(previous));
     const next = rows[index + 1] ?? null;
     if (preferNext && canMergeSubtitleEvents(current, next)) {
       merged.push(joinedSubtitleEvent(current, next));
       index += 1;
       continue;
     }
-    const previous = merged.at(-1) ?? null;
     if (canMergeSubtitleEvents(previous, current)) {
       merged[merged.length - 1] = joinedSubtitleEvent(previous, current);
       continue;
@@ -1163,12 +1181,41 @@ function directedMotionProfile(intent) {
   };
 }
 
-function directedProgressExpr(frameCount, easing = "linear") {
-  const base = `(on/${Math.max(1, frameCount - 1)})`;
-  if (easing === "ease_in") return `pow(${base},2)`;
-  if (easing === "ease_out") return `(1-pow(1-${base},2))`;
-  if (easing === "ease_in_out") return `(${base}*${base}*(3-2*${base}))`;
-  return base;
+function easedExpression(rawExpression, easing = "linear") {
+  if (easing === "ease_in") return `pow(${rawExpression},2)`;
+  if (easing === "ease_out") return `(1-pow(1-${rawExpression},2))`;
+  if (easing === "ease_in_out") return `((${rawExpression})*(${rawExpression})*(3-2*(${rawExpression})))`;
+  return rawExpression;
+}
+
+function directedKeyframeValueExpr(frameCount, keyframes, selector) {
+  const timeline = `(on/${Math.max(1, frameCount - 1)})`;
+  let expression = Number(selector(keyframes.at(-1))).toFixed(7);
+  for (let index = keyframes.length - 2; index >= 0; index -= 1) {
+    const current = keyframes[index];
+    const next = keyframes[index + 1];
+    const start = Number(current.at);
+    const end = Number(next.at);
+    const span = Math.max(1e-7, end - start);
+    const local = `max(0,min(1,((${timeline})-${start.toFixed(7)})/${span.toFixed(7)}))`;
+    const progress = easedExpression(local, current.easing_to_next);
+    const from = Number(selector(current));
+    const delta = Number(selector(next)) - from;
+    const segment = `${from.toFixed(7)}+${delta.toFixed(7)}*(${progress})`;
+    expression = `if(lte(${timeline},${end.toFixed(7)}),${segment},${expression})`;
+  }
+  return expression;
+}
+
+function directedMotionExpressions(frameCount, motionIntent) {
+  const keyframes = motionKeyframesForIntent(motionIntent);
+  if (!keyframes) throw new Error(`Directed motion intent has no usable keyframes for ${motionIntent?.image_id ?? "unknown image"}.`);
+  return {
+    x: directedKeyframeValueExpr(frameCount, keyframes, (row) => row.anchor.x),
+    y: directedKeyframeValueExpr(frameCount, keyframes, (row) => row.anchor.y),
+    scale: directedKeyframeValueExpr(frameCount, keyframes, (row) => row.scale),
+    keyframe_count: keyframes.length,
+  };
 }
 
 function subpixelPerspectiveCore(zoomExpr, horizontalExpr, verticalExpr, coordinateMode = "anchor") {
@@ -1211,12 +1258,12 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
     let zoomExpr;
     let coordinateMode;
     if (motionIntent) {
-      const progress = directedProgressExpr(frameCount, motionIntent.easing);
-      const xAnchorExpr = `${Number(motionIntent.start_anchor.x).toFixed(5)}+${(Number(motionIntent.end_anchor.x) - Number(motionIntent.start_anchor.x)).toFixed(7)}*${progress}`;
-      const yAnchorExpr = `${Number(motionIntent.start_anchor.y).toFixed(5)}+${(Number(motionIntent.end_anchor.y) - Number(motionIntent.start_anchor.y)).toFixed(7)}*${progress}`;
+      const expressions = directedMotionExpressions(frameCount, motionIntent);
+      const xAnchorExpr = expressions.x;
+      const yAnchorExpr = expressions.y;
       xExpr = `max(0,min(iw-iw/zoom,iw*(${xAnchorExpr})-(iw/zoom/2)))`;
       yExpr = `max(0,min(ih-ih/zoom,ih*(${yAnchorExpr})-(ih/zoom/2)))`;
-      zoomExpr = `${Number(motionIntent.start_scale).toFixed(5)}+${(Number(motionIntent.end_scale) - Number(motionIntent.start_scale)).toFixed(7)}*${progress}`;
+      zoomExpr = expressions.scale;
       coordinateMode = "anchor";
       if (clipMotionMode === "smooth_subpixel_ken_burns") {
         xExpr = xAnchorExpr;
@@ -1608,6 +1655,8 @@ function renderTransitionSfxEvents(transitionEditPlan, audioDuration) {
       ...event,
       start_sec: Math.max(0, Math.min(audioDuration, Number(event.start_sec ?? 0) + Number(event.sfx_offset_sec ?? 0))),
       duration_sec: Math.max(0.12, Math.min(1.4, Number(event.duration_sec ?? 0.85) || 0.85)),
+      asset_trim_start_sec: Math.max(0, Math.min(2.5, Number(event.asset_trim_start_sec ?? 0) || 0)),
+      fade_out_sec: Math.max(0.02, Math.min(0.35, Number(event.fade_out_sec ?? 0.12) || 0.12)),
       gain_db: Math.max(-36, Math.min(-8, Number(event.gain_db ?? -20) || -20)),
     }))
     .filter((event) => event.start_sec < audioDuration);
@@ -1653,10 +1702,12 @@ async function audioWithRenderTransitionSfx(audioPath, transitionEditPlan, audio
     const input = index + 1;
     const delayMs = Math.max(0, Math.round(event.start_sec * 1000));
     const label = `sfx${index}`;
-    filters.push(`[${input}:a]atrim=0:${event.duration_sec.toFixed(3)},asetpts=PTS-STARTPTS,volume=${event.gain_db.toFixed(2)}dB,adelay=${delayMs}|${delayMs}[${label}]`);
+    const trimEnd = event.asset_trim_start_sec + event.duration_sec;
+    const fadeStart = Math.max(0, event.duration_sec - Math.min(event.fade_out_sec, event.duration_sec * 0.8));
+    filters.push(`[${input}:a]atrim=start=${event.asset_trim_start_sec.toFixed(3)}:end=${trimEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=out:st=${fadeStart.toFixed(3)}:d=${Math.min(event.fade_out_sec, event.duration_sec * 0.8).toFixed(3)},volume=${event.gain_db.toFixed(2)}dB,adelay=${delayMs}|${delayMs}[${label}]`);
     labels.push(`[${label}]`);
   });
-  filters.push(`${labels.join("")}amix=inputs=${labels.length}:duration=first:dropout_transition=0,alimiter=limit=0.98[aout]`);
+  filters.push(`${labels.join("")}amix=inputs=${labels.length}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.98[aout]`);
   await execFile(ffmpegBin, [
     ...args,
     "-filter_complex", filters.join(";"),
@@ -1666,6 +1717,75 @@ async function audioWithRenderTransitionSfx(audioPath, transitionEditPlan, audio
     output,
   ], { maxBuffer: 1024 * 1024 * 64 });
   return { audio_path: output, transition_sfx_events: events, transition_sfx_applied: true };
+}
+
+function validateDiagnosticProofScope() {
+  if (!Number.isFinite(proofScopeEndSec)) return;
+  if (!diagnosticProof) throw new Error("--proof-scope-end-sec requires --diagnostic-proof true.");
+  if (!(proofScopeEndSec > 0)) throw new Error("--proof-scope-end-sec must be greater than zero.");
+  for (const required of ["output", "report-output", "work-dir", "motion-trace-output"]) {
+    if (!flags[required]) throw new Error(`Diagnostic proof requires explicit --${required} so official render artifacts remain untouched.`);
+  }
+  const officialOutput = path.join(renderDir, `${episode}-${channel}-goldflow.mp4`);
+  const officialReport = path.join(episodeDir, `render_report_${episode}.json`);
+  if (path.resolve(outputPath) === path.resolve(officialOutput)
+    || path.resolve(renderReportPath) === path.resolve(officialReport)
+    || path.resolve(workDir) === path.resolve(defaultWorkDir)) {
+    throw new Error("Diagnostic proof paths must be isolated from official render output, report, and work directories.");
+  }
+}
+
+function scopedPromptPlan(promptPlan, scopeEndSec) {
+  if (!Number.isFinite(scopeEndSec)) return promptPlan;
+  return {
+    ...promptPlan,
+    prompts: (promptPlan?.prompts ?? [])
+      .filter((prompt) => Number(prompt.start_sec ?? 0) < scopeEndSec)
+      .map((prompt) => ({
+        ...prompt,
+        duration_sec: Math.max(1 / fps, Math.min(Number(prompt.duration_sec ?? 0), scopeEndSec - Number(prompt.start_sec ?? 0))),
+      })),
+  };
+}
+
+function scopedTransitionPlan(plan, selectedImageIds, scopeEndSec) {
+  if (!plan || !Number.isFinite(scopeEndSec)) return plan;
+  const events = (plan.transition_events ?? []).filter((event) => selectedImageIds.has(String(event.from_image_id ?? ""))
+    && selectedImageIds.has(String(event.to_image_id ?? ""))
+    && Number(event.start_sec ?? 0) < scopeEndSec);
+  return { ...plan, transition_events: events, transition_event_count: events.length, diagnostic_proof_scope_end_sec: scopeEndSec };
+}
+
+function scopedMotionPlan(plan, selectedPrompts, scopeEndSec) {
+  if (!plan || !Number.isFinite(scopeEndSec)) return plan;
+  const promptById = new Map(selectedPrompts.map((prompt) => [String(prompt.image_id ?? ""), prompt]));
+  const intents = (plan.motion_intents ?? []).filter((intent) => promptById.has(String(intent.image_id ?? ""))).map((intent) => {
+    const prompt = promptById.get(String(intent.image_id ?? ""));
+    return {
+      ...intent,
+      duration_sec: Math.max(1 / fps, Math.min(Number(intent.duration_sec ?? prompt.duration_sec), scopeEndSec - Number(prompt.start_sec ?? 0))),
+    };
+  });
+  return { ...plan, motion_intents: intents, motion_intent_count: intents.length, diagnostic_proof_scope_end_sec: scopeEndSec };
+}
+
+function scopedSubtitleRows(rows, scopeEndSec) {
+  if (!Number.isFinite(scopeEndSec)) return rows;
+  return {
+    ...rows,
+    events: (rows.events ?? []).filter((event) => Number(event.start_sec ?? event.start ?? 0) < scopeEndSec).map((event) => {
+      if (Number.isFinite(Number(event.end_sec))) return { ...event, end_sec: Math.min(Number(event.end_sec), scopeEndSec) };
+      if (Number.isFinite(Number(event.end))) return { ...event, end: Math.min(Number(event.end), scopeEndSec) };
+      return event;
+    }),
+  };
+}
+
+async function scopedAudioForProof(audioPath, scopeEndSec) {
+  if (!Number.isFinite(scopeEndSec)) return audioPath;
+  const output = path.join(workDir, "proof_scoped_narration.m4a");
+  await execFile(ffmpegBin, ["-y", "-i", audioPath, "-t", scopeEndSec.toFixed(3), "-vn", "-c:a", "aac", "-b:a", "192k", output], { maxBuffer: 1024 * 1024 * 32 });
+  return output;
 }
 
 function numericOrNull(value) {
@@ -1697,15 +1817,38 @@ async function prepareFinalMuxAudio(inputAudioPath, settings) {
     return { applied: false, audio_path: inputAudioPath };
   }
   const outputAudioPath = path.join(workDir, "final_audio_loudnorm.m4a");
+  const analysisFilter = `loudnorm=I=${settings.target_lufs}:TP=${settings.true_peak_db}:LRA=${settings.loudness_range}:print_format=json`;
+  const analysis = await execFile(ffmpegBin, [
+    "-hide_banner",
+    "-i", inputAudioPath,
+    "-af", analysisFilter,
+    "-f", "null",
+    "-",
+  ], { maxBuffer: 1024 * 1024 * 32 });
+  const measurementMatch = String(analysis.stderr ?? "").match(/\{\s*"input_i"[\s\S]*?"target_offset"\s*:\s*"[^"]+"\s*\}/g)?.at(-1);
+  if (!measurementMatch) throw new Error("Final audio loudnorm analysis did not return a usable measurement block.");
+  const measurement = JSON.parse(measurementMatch);
+  const measuredFilter = [
+    `loudnorm=I=${settings.target_lufs}`,
+    `TP=${settings.true_peak_db}`,
+    `LRA=${settings.loudness_range}`,
+    `measured_I=${measurement.input_i}`,
+    `measured_TP=${measurement.input_tp}`,
+    `measured_LRA=${measurement.input_lra}`,
+    `measured_thresh=${measurement.input_thresh}`,
+    `offset=${measurement.target_offset}`,
+    "linear=true",
+    "print_format=summary",
+  ].join(":");
   await execFile(ffmpegBin, [
     "-y",
     "-i", inputAudioPath,
-    "-af", `loudnorm=I=${settings.target_lufs}:TP=${settings.true_peak_db}:LRA=${settings.loudness_range}:print_format=summary`,
+    "-af", measuredFilter,
     "-c:a", "aac",
     "-b:a", "192k",
     outputAudioPath,
   ], { maxBuffer: 1024 * 1024 * 32 });
-  return { applied: true, audio_path: outputAudioPath, source_audio_path: inputAudioPath, ...settings };
+  return { applied: true, mode: "measured_two_pass", audio_path: outputAudioPath, source_audio_path: inputAudioPath, measurement, ...settings };
 }
 
 async function runLimited(jobs, limit) {
@@ -1722,6 +1865,7 @@ async function runLimited(jobs, limit) {
 
 async function main() {
   await configureMediaTools();
+  validateDiagnosticProofScope();
   const [promptPlan, visualBeatPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
     readJson(promptPlanPath, null),
     readJson(visualBeatPlanPath, null),
@@ -1749,19 +1893,25 @@ async function main() {
   if (!audioPath || !(await exists(audioPath))) throw new Error(`Missing final mixed audio from ${audioBedReportPath}`);
   await fs.mkdir(renderDir, { recursive: true });
   await fs.mkdir(workDir, { recursive: true });
-  const audioDuration = await mediaDuration(audioPath);
-  const transitionSfxDisabledByAudio = audioReportDisablesTransitionSfx(audioBedReport);
-  const rawTransitionPlan = transitionEditPlan?.status === "passed" ? transitionEditPlan : null;
-  const strippedTransitionSfxCount = transitionSfxDisabledByAudio
+  const sourceAudioDuration = await mediaDuration(audioPath);
+  const audioDuration = Number.isFinite(proofScopeEndSec) ? Math.min(sourceAudioDuration, proofScopeEndSec) : sourceAudioDuration;
+  const proofAudioPath = await scopedAudioForProof(audioPath, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
+  const proofPromptPlan = scopedPromptPlan(promptPlan, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
+  const selectedImageIds = new Set((proofPromptPlan.prompts ?? []).map((prompt) => String(prompt.image_id ?? "")));
+  const proofMotionPlan = scopedMotionPlan(motionEditPlan?.status === "passed" ? motionEditPlan : null, proofPromptPlan.prompts ?? [], Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
+  const transitionSfxDisabledByAudioReport = audioReportDisablesTransitionSfx(audioBedReport);
+  const transitionSfxDisabledForRender = transitionSfxDisabledByAudioReport && !allowTransitionSfxOnNarratorOnly;
+  const rawTransitionPlan = scopedTransitionPlan(transitionEditPlan?.status === "passed" ? transitionEditPlan : null, selectedImageIds, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
+  const strippedTransitionSfxCount = transitionSfxDisabledForRender
     ? (rawTransitionPlan?.transition_events ?? []).filter((event) => event.transition_sfx === true).length
     : 0;
-  const usableTransitionPlan = transitionSfxDisabledByAudio ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
-  const renderAudio = await audioWithRenderTransitionSfx(audioPath, usableTransitionPlan, audioDuration);
-  const concat = await buildMotionClips(promptPlan, imagegenReport, audioDuration, usableTransitionPlan, motionEditPlan?.status === "passed" ? motionEditPlan : null);
-  const subtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
+  const usableTransitionPlan = transitionSfxDisabledForRender ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
+  const renderAudio = await audioWithRenderTransitionSfx(proofAudioPath, usableTransitionPlan, audioDuration);
+  const concat = await buildMotionClips(proofPromptPlan, imagegenReport, audioDuration, usableTransitionPlan, proofMotionPlan);
+  const subtitleRows = scopedSubtitleRows(buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan), Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   if (v2Run && subtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
-  const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), engagementOverlayPlan, audioDuration);
+  const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), Number.isFinite(proofScopeEndSec) ? null : engagementOverlayPlan, audioDuration);
   const videoPath = path.join(workDir, "silent_video.mp4");
   await execFile(ffmpegBin, [
     "-y",
@@ -1907,6 +2057,7 @@ async function main() {
     source_hashes: sourceHashes,
     output_duration_sec: await mediaDuration(outputPath),
     audio_path: audioPath,
+    scoped_render_audio_source_path: proofAudioPath,
     render_audio_path: renderAudio.audio_path,
     final_mux_audio_path: finalMuxAudioPath,
     final_audio_loudnorm: finalAudioNormalization,
@@ -1916,7 +2067,9 @@ async function main() {
     silent_concat_reused_without_normalization_encode: concatStreamReusable,
     transition_edit_plan_path: usableTransitionPlan ? transitionEditPlanPath : null,
     motion_edit_plan_path: motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
-    transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudio,
+    transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudioReport,
+    transition_sfx_disabled_for_render: transitionSfxDisabledForRender,
+    transition_sfx_narrator_only_override: allowTransitionSfxOnNarratorOnly,
     transition_sfx_stripped_count: strippedTransitionSfxCount,
     transition_sfx_applied: renderAudio.transition_sfx_applied,
     transition_sfx_event_count: renderAudio.transition_sfx_events.length,
@@ -1941,6 +2094,9 @@ async function main() {
     subtitle_overlay_frame_count: subtitleOverlay?.frame_count ?? null,
     subtitle_count: ass.subtitle_count,
     image_count: concat.prompt_count,
+    diagnostic_proof: diagnosticProof,
+    proof_scope_end_sec: Number.isFinite(proofScopeEndSec) ? audioDuration : null,
+    official_artifacts_untouched: Number.isFinite(proofScopeEndSec) ? true : null,
     render_motion: {
       mode: concat.motion_mode,
       clip_dir: concat.clip_dir,

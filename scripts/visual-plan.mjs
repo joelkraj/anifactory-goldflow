@@ -528,9 +528,9 @@ Core contract:
 - For every attached character state, reaffirm the supplied scene_prompt_anchor in that person's own clause, then add current screen position and action. If the anchor already begins with the character's name, do not repeat the name a second time.
 - Put ordered reference-role metadata once in shot_manifest.reference_slots. Do not duplicate it in top-level compatibility fields and do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
 - active_state_constraints is binding. Preserve its current wardrobe, injury, possession, status, visible state, and location facts for every visible entity; never reset a character to a base/default state merely because an older ref exists.
-- Author one motion_intent that serves the beat instead of adding decorative drift. Name the focal subject, normalized start/end anchors, restrained start/end scale, easing, and the editorial reason for the move.
+- Author one motion_intent that serves the beat instead of adding decorative drift. Name the focal subject, normalized start/end anchors, restrained start/end scale, easing, and the editorial reason for the move. For an impact, reveal, focus shift, or UI entrance that benefits from hand-edited timing, add 2-5 motion_keyframes so the move can begin with a hold, land quickly, settle, and finish with a readable hold.
 - Match motion to the visual job: reveal environment with a useful zoom-out; follow an actor toward visible action or impact; shift between separately staged subjects in an interaction; hold or gently push on readable reactions; settle on a UI panel or critical object without losing context; reveal the surrounding aftermath after a consequence. Use a static hold when the composition already carries strong action or the cut is too short for a meaningful move.
-- Motion anchors must correspond to authored screen positions and remain between 0 and 1. Keep normal scales between 1.0 and 1.12 so the move does not crop away the evidence the cut was built to show.
+- Motion anchors must correspond to authored screen positions and remain between 0 and 1. Keep normal scales between 1.0 and 1.12 so the move does not crop away the evidence the cut was built to show. motion_keyframes use normalized at values from exactly 0 to exactly 1 in strict order; each row carries anchor, scale, and easing_to_next. Use keyframes selectively, not as compulsory motion on every cut.
 - Vary behavior and direction across the local chunk. Do not repeat the same motion pattern more than twice in succession unless the repeated hold is an intentional continuity choice.
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
 - Background extras appear only when the local beat asks for them. Keep private, lonely, or solo beats visibly clear of unrelated people.
@@ -574,7 +574,7 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
       "forbidden_ref_ids": [],
       "reference_slots": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
       "continuity_notes": "current-beat continuity",
-      "motion_intent": {"behavior":"static_hold|slow_push_in|reveal_zoom_out|lateral_follow|diagonal_follow|focus_shift|impact_push|reaction_hold|ui_focus|aftermath_reveal","focal_subject":"visible focal subject","start_anchor":{"x":0.5,"y":0.5},"end_anchor":{"x":0.5,"y":0.5},"start_scale":1.0,"end_scale":1.06,"easing":"linear|ease_in|ease_out|ease_in_out","reason":"what this movement reveals, tracks, or emphasizes"},
+      "motion_intent": {"behavior":"static_hold|slow_push_in|reveal_zoom_out|lateral_follow|diagonal_follow|focus_shift|impact_push|reaction_hold|ui_focus|aftermath_reveal","focal_subject":"visible focal subject","start_anchor":{"x":0.5,"y":0.5},"end_anchor":{"x":0.5,"y":0.5},"start_scale":1.0,"end_scale":1.06,"easing":"linear|ease_in|ease_out|ease_in_out","motion_keyframes":[{"at":0,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"ease_out"},{"at":0.3,"anchor":{"x":0.5,"y":0.5},"scale":1.07,"easing_to_next":"ease_in_out"},{"at":1,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"}],"reason":"what this movement reveals, tracks, or emphasizes"},
       "character_staging": [{"name":"Name","ref_id":"state_ref","screen_position":"frame-left","wardrobe_from":"character_state_ref:state_ref","pose":"current pose/action"}]
     }
   }],
@@ -734,8 +734,8 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
 - Across beats in the same parent scene, vary the visible action progression: establish, object/UI close-up, character interaction, impact, reaction, consequence, and transition as appropriate to the beat excerpt.
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
-- Author one shot_manifest.motion_intent for the exact composition you requested. The move must serve the cut's visual job rather than drift randomly: reveal a location with a useful zoom-out, follow visible action toward its impact, shift between separately staged subjects, hold or gently push on a readable reaction, settle on UI or a critical object, or reveal the aftermath. Static hold is valid when the still composition already carries the beat.
-- motion_intent anchors are normalized screen coordinates from 0 to 1 and must match character_staging or the visible object/UI position. Keep normal scales between 1.0 and 1.12. Include a concrete reason naming what the viewer should notice. Vary behavior and direction across adjacent cuts; do not repeat the same pattern more than twice unless continuity specifically benefits from it.
+- Author one shot_manifest.motion_intent for the exact composition you requested. The move must serve the cut's visual job rather than drift randomly: reveal a location with a useful zoom-out, follow visible action toward its impact, shift between separately staged subjects, hold or gently push on a readable reaction, settle on UI or a critical object, or reveal the aftermath. Static hold is valid when the still composition already carries the beat. For a cut that earns stronger editorial timing, add 2-5 motion_keyframes to create a purposeful hold, move, impact/overshoot, settle, and final readable hold instead of one continuous drift.
+- motion_intent anchors are normalized screen coordinates from 0 to 1 and must match character_staging or the visible object/UI position. Keep normal scales between 1.0 and 1.12. motion_keyframes must begin at 0, end at 1, and increase strictly, with anchor, scale, and easing_to_next on every row. Include a concrete reason naming what the viewer should notice. Vary behavior and direction across adjacent cuts; do not repeat the same pattern more than twice unless continuity specifically benefits from it. Use keyframes selectively; calm or already-readable compositions should remain still or use one restrained move.
 - Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, textual location contract, optional attachable location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. Only attach refs with attachable_reference true. For physical locations, choose the matching in-scope LOCATION CONTRACT LEDGER entry and set shot_manifest.location_contract_id. Describe its prompt_anchor architecture, materials, and layout in prose. Set shot_manifest.location_ref_id and add a location reference_requirement only when a matching approved attachable location image target exists. Never use a text-only contract id as an image ref id.
 - Every input unit includes target_image_id. Copy target_image_id exactly into output image_id. Do not restart image_id numbering inside chunks, and do not invent sequential IDs from the schema example.
@@ -822,6 +822,12 @@ ${JSON.stringify({
         start_scale: 1.01,
         end_scale: 1.035,
         easing: "ease_out",
+        motion_keyframes: [
+          { at: 0, anchor: { x: 0.3, y: 0.48 }, scale: 1.01, easing_to_next: "linear" },
+          { at: 0.28, anchor: { x: 0.3, y: 0.48 }, scale: 1.01, easing_to_next: "ease_out" },
+          { at: 0.78, anchor: { x: 0.3, y: 0.48 }, scale: 1.035, easing_to_next: "linear" },
+          { at: 1, anchor: { x: 0.3, y: 0.48 }, scale: 1.035, easing_to_next: "linear" },
+        ],
         reason: "Let the viewer read the instant of recognition without cropping the elevator reveal.",
       },
     },
@@ -850,6 +856,12 @@ ${JSON.stringify({
         start_scale: 1.015,
         end_scale: 1.055,
         easing: "ease_in_out",
+        motion_keyframes: [
+          { at: 0, anchor: { x: 0.7, y: 0.5 }, scale: 1.015, easing_to_next: "linear" },
+          { at: 0.18, anchor: { x: 0.7, y: 0.5 }, scale: 1.015, easing_to_next: "ease_in_out" },
+          { at: 0.72, anchor: { x: 0.3, y: 0.5 }, scale: 1.055, easing_to_next: "linear" },
+          { at: 1, anchor: { x: 0.3, y: 0.5 }, scale: 1.055, easing_to_next: "linear" },
+        ],
         reason: "Move attention from the challenger to the protagonist who owns the reaction beat.",
       },
       character_staging: [
@@ -954,6 +966,7 @@ Return JSON only:
           "start_scale": 1.0,
           "end_scale": 1.06,
           "easing": "linear|ease_in|ease_out|ease_in_out",
+          "motion_keyframes": [{"at":0,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"ease_out"},{"at":0.3,"anchor":{"x":0.5,"y":0.5},"scale":1.07,"easing_to_next":"ease_in_out"},{"at":1,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"}],
           "reason": "what the move reveals, follows, or emphasizes for this beat"
         },
         "character_staging": [

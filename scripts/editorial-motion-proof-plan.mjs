@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { sanitizeAuthoredMotionIntent } from "./lib/motion-plan-utils.mjs";
+import { sanitizeAuthoredMotionIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
 import { resolveTransitionSfxFamily } from "./lib/transition-sfx-policy.mjs";
 
 const flags = parseFlags(process.argv.slice(2));
@@ -13,14 +13,15 @@ const scopeEndSec = Number(flags["scope-end-sec"] ?? 60);
 const recipePath = path.resolve(flags.recipe ?? "");
 const outputDir = path.resolve(flags["output-dir"] ?? path.join(episodeDir, "review_samples", "editorial_motion_v3"));
 const episode = flags.episode ?? path.basename(episodeDir) ?? "ep_01";
+const proofLabel = String(flags["proof-label"] ?? "editorial-v3").trim().replace(/[^a-zA-Z0-9._-]+/g, "-");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const promptPlanPath = path.resolve(flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json"));
 const baseMotionPlanPath = path.resolve(flags["motion-plan"] ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`));
 const baseTransitionPlanPath = path.resolve(flags["transition-plan"] ?? path.join(episodeDir, `transition_edit_plan_${episode}.json`));
 const sfxManifestPath = path.resolve(flags["sfx-manifest"] ?? path.join(dataRoot, "sfx_bank", "sfx_manifest.json"));
-const motionOutputPath = path.join(outputDir, `motion_edit_plan_${episode}-editorial-v3.json`);
-const transitionOutputPath = path.join(outputDir, `transition_edit_plan_${episode}-editorial-v3.json`);
-const reportOutputPath = path.join(outputDir, "editorial_motion_v3_plan_report.json");
+const motionOutputPath = path.join(outputDir, `motion_edit_plan_${episode}-${proofLabel}.json`);
+const transitionOutputPath = path.join(outputDir, `transition_edit_plan_${episode}-${proofLabel}.json`);
+const reportOutputPath = path.join(outputDir, proofLabel === "editorial-v3" ? "editorial_motion_v3_plan_report.json" : `${proofLabel}_plan_report.json`);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -52,7 +53,7 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, Number(value)));
 }
 
-function mergedMotionIntent(base, override, prompt) {
+function mergedMotionIntent(base, override, prompt, depthTreatment = null) {
   const authored = sanitizeAuthoredMotionIntent({
     behavior: override?.behavior ?? base?.behavior,
     focal_subject: override?.focal_subject ?? base?.focal_subject,
@@ -82,8 +83,30 @@ function mergedMotionIntent(base, override, prompt) {
     behavior: authored.behavior,
     intent_reason: authored.reason,
     motion_keyframes: authored.motion_keyframes,
+    ...(depthTreatment ? { depth_treatment: depthTreatment } : {}),
     proof_override: override ?? null,
   };
+}
+
+async function resolveDepthTreatment(override) {
+  const config = override?.depth_treatment;
+  if (!config) return null;
+  if (String(config.mode ?? "") !== "layered_parallax") throw new Error("Only layered_parallax depth treatment is supported.");
+  const reportPath = path.resolve(outputDir, String(config.asset_report ?? ""));
+  const report = await readJson(reportPath);
+  if (report?.status !== "passed") throw new Error(`Missing passed parallax asset report: ${reportPath}`);
+  const treatment = sanitizeLayeredParallaxTreatment({
+    mode: "layered_parallax",
+    source_image_sha256: report.image_sha256,
+    background_path: report.background_path,
+    background_sha256: report.background_sha256,
+    foreground_path: report.foreground_path,
+    foreground_sha256: report.foreground_sha256,
+    background_keyframes: config.background_keyframes,
+    foreground_keyframes: config.foreground_keyframes,
+  });
+  if (!treatment) throw new Error(`Invalid layered parallax treatment in ${reportPath}.`);
+  return { treatment, reportPath };
 }
 
 function transitionEvent(recipeEvent, prompts, baseByToImage, sfxManifest) {
@@ -140,14 +163,27 @@ async function main() {
   if (!prompts.length) throw new Error("No prompt cuts fall inside the requested proof scope.");
   const baseMotionById = new Map((baseMotionPlan.motion_intents ?? []).map((row) => [String(row.image_id), row]));
   const motionOverrides = recipe.motion_overrides ?? {};
+  const resolvedDepthByImage = new Map();
+  for (const prompt of prompts) {
+    const override = motionOverrides[prompt.image_id] ?? null;
+    const resolved = await resolveDepthTreatment(override);
+    if (resolved) resolvedDepthByImage.set(String(prompt.image_id), resolved);
+  }
   const motionIntents = prompts.map((prompt) => {
     const base = baseMotionById.get(String(prompt.image_id));
     if (!base) throw new Error(`Base motion plan is missing ${prompt.image_id}.`);
-    return mergedMotionIntent(base, motionOverrides[prompt.image_id] ?? null, prompt);
+    return mergedMotionIntent(base, motionOverrides[prompt.image_id] ?? null, prompt, resolvedDepthByImage.get(String(prompt.image_id))?.treatment ?? null);
   });
   const baseTransitionByTo = new Map((baseTransitionPlan.transition_events ?? []).map((row) => [String(row.to_image_id), row]));
   const transitionEvents = (recipe.transition_overrides ?? []).map((event) => transitionEvent(event, prompts, baseTransitionByTo, sfxManifest));
-  const sourcePaths = [promptPlanPath, baseMotionPlanPath, baseTransitionPlanPath, sfxManifestPath, recipePath];
+  const sourcePaths = [
+    promptPlanPath,
+    baseMotionPlanPath,
+    baseTransitionPlanPath,
+    sfxManifestPath,
+    recipePath,
+    ...[...resolvedDepthByImage.values()].map((row) => row.reportPath),
+  ];
   const sourceHashes = Object.fromEntries(await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)])));
   const now = new Date().toISOString();
   const motionPlan = {
@@ -156,9 +192,11 @@ async function main() {
     status: "passed",
     scope: { kind: "diagnostic_proof", start_sec: 0, end_sec: scopeEndSec },
     source_hashes: sourceHashes,
-    policy: "Image-aware editorial proof recipe with multi-phase keyframes. Unchanged in-scope cuts inherit the approved base motion plan.",
+    policy: "Image-aware editorial proof recipe with selective static holds, restrained keyframed moves, and optional hash-bound layered parallax. Unchanged in-scope cuts inherit the approved base motion plan.",
     motion_intent_count: motionIntents.length,
     keyframed_motion_intent_count: motionIntents.filter((row) => Array.isArray(row.motion_keyframes)).length,
+    static_hold_count: motionIntents.filter((row) => row.behavior === "static_hold").length,
+    layered_parallax_count: motionIntents.filter((row) => row.depth_treatment?.mode === "layered_parallax").length,
     motion_intents: motionIntents,
     updated_at: now,
   };
@@ -169,7 +207,7 @@ async function main() {
     scope: { kind: "diagnostic_proof", start_sec: 0, end_sec: scopeEndSec },
     source_hashes: sourceHashes,
     transition_sfx_enabled: transitionEvents.some((event) => event.transition_sfx),
-    policy: "Human-selected proof boundaries and xfade families; transition SFX families resolve deterministically to approved available bank assets.",
+    policy: "Human-selected proof boundaries and xfade families; unselected boundaries remain hard cuts and transition SFX families resolve deterministically to approved available bank assets.",
     transition_event_count: transitionEvents.length,
     transition_events: transitionEvents,
     updated_at: now,
@@ -186,6 +224,8 @@ async function main() {
     transition_plan_path: transitionOutputPath,
     motion_intent_count: motionIntents.length,
     keyframed_motion_intent_count: motionPlan.keyframed_motion_intent_count,
+    static_hold_count: motionPlan.static_hold_count,
+    layered_parallax_count: motionPlan.layered_parallax_count,
     transition_event_count: transitionEvents.length,
     transition_sfx_event_count: transitionEvents.filter((event) => event.transition_sfx).length,
     source_hashes: sourceHashes,

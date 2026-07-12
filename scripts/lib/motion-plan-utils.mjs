@@ -68,6 +68,46 @@ export function sanitizeMotionKeyframes(value) {
   return rows;
 }
 
+export function sanitizeLayeredParallaxTreatment(value) {
+  if (!value || typeof value !== "object" || String(value.mode ?? "") !== "layered_parallax") return null;
+  const backgroundKeyframes = sanitizeMotionKeyframes(value.background_keyframes);
+  const foregroundKeyframes = sanitizeMotionKeyframes(value.foreground_keyframes);
+  const sourceImageSha256 = String(value.source_image_sha256 ?? "").trim().toLowerCase();
+  const backgroundPath = String(value.background_path ?? "").trim();
+  const foregroundPath = String(value.foreground_path ?? "").trim();
+  const backgroundSha256 = String(value.background_sha256 ?? "").trim().toLowerCase();
+  const foregroundSha256 = String(value.foreground_sha256 ?? "").trim().toLowerCase();
+  const validHash = (hash) => /^[a-f0-9]{64}$/.test(hash);
+  if (!backgroundKeyframes
+    || !foregroundKeyframes
+    || !backgroundPath
+    || !foregroundPath
+    || !validHash(sourceImageSha256)
+    || !validHash(backgroundSha256)
+    || !validHash(foregroundSha256)) return null;
+  const foregroundCoverSafe = backgroundKeyframes.length === foregroundKeyframes.length
+    && backgroundKeyframes.every((background, index) => {
+      const foreground = foregroundKeyframes[index];
+      return Math.abs(background.at - foreground.at) < 1e-8
+        && Math.abs(background.anchor.x - foreground.anchor.x) < 1e-8
+        && Math.abs(background.anchor.y - foreground.anchor.y) < 1e-8
+        && background.easing_to_next === foreground.easing_to_next
+        && foreground.scale >= background.scale;
+    });
+  if (!foregroundCoverSafe) return null;
+  return {
+    mode: "layered_parallax",
+    occlusion_contract: "foreground_cover",
+    source_image_sha256: sourceImageSha256,
+    background_path: backgroundPath,
+    background_sha256: backgroundSha256,
+    foreground_path: foregroundPath,
+    foreground_sha256: foregroundSha256,
+    background_keyframes: backgroundKeyframes,
+    foreground_keyframes: foregroundKeyframes,
+  };
+}
+
 export function motionKeyframesForIntent(value) {
   const authored = sanitizeMotionKeyframes(value?.motion_keyframes);
   if (authored) return authored;
@@ -372,6 +412,7 @@ export function motionIntentFindings(intents, acceptedHashes = {}) {
     if (!EASINGS.has(String(row.easing ?? ""))) findings.push({ severity: "blocker", code: "motion_easing_invalid", image_id: row.image_id });
     if (row.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_keyframes_invalid", image_id: row.image_id });
     if (row.qa_override?.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.qa_override.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_qa_override_keyframes_invalid", image_id: row.image_id });
+    if (row.depth_treatment !== undefined && !sanitizeLayeredParallaxTreatment(row.depth_treatment)) findings.push({ severity: "blocker", code: "motion_depth_treatment_invalid", image_id: row.image_id });
   }
   let streakStart = 0;
   const direction = (value, epsilon = 0.015) => value > epsilon ? "positive" : value < -epsilon ? "negative" : "still";
@@ -441,10 +482,13 @@ export function motionTraceFindings(traceRows) {
   const findings = [];
   const byImage = new Map();
   for (const row of traceRows ?? []) {
-    if (!byImage.has(row.image_id)) byImage.set(row.image_id, []);
-    byImage.get(row.image_id).push(row);
+    const layer = String(row.layer ?? "camera");
+    const key = `${row.image_id}::${layer}`;
+    if (!byImage.has(key)) byImage.set(key, []);
+    byImage.get(key).push(row);
   }
-  for (const [imageId, rows] of byImage) {
+  for (const [key, rows] of byImage) {
+    const [imageId, layer] = key.split("::");
     rows.sort((left, right) => left.frame - right.frame);
     for (const field of ["x", "y", "scale"]) {
       const segmentIds = [...new Set(rows.map((row) => Number(row.segment_index ?? 0)))];
@@ -454,17 +498,17 @@ export function motionTraceFindings(traceRows) {
         const expectedDirection = direction(values);
         for (let index = 1; index < values.length; index += 1) {
           const delta = values[index] - values[index - 1];
-          if (expectedDirection && Math.sign(delta) && Math.sign(delta) !== expectedDirection) findings.push({ severity: "blocker", code: "motion_direction_reversal", image_id: imageId, field, frame: segmentRows[index].frame, segment_index: segmentId });
+          if (expectedDirection && Math.sign(delta) && Math.sign(delta) !== expectedDirection) findings.push({ severity: "blocker", code: "motion_direction_reversal", image_id: imageId, layer, field, frame: segmentRows[index].frame, segment_index: segmentId });
         }
       }
       const values = rows.map((row) => Number(row[field]));
       for (let index = 1; index < values.length; index += 1) {
         const delta = values[index] - values[index - 1];
         const maxDelta = field === "scale" ? 0.012 : 0.025;
-        if (Math.abs(delta) > maxDelta) findings.push({ severity: "blocker", code: "motion_frame_discontinuity", image_id: imageId, field, frame: index, delta });
+        if (Math.abs(delta) > maxDelta) findings.push({ severity: "blocker", code: "motion_frame_discontinuity", image_id: imageId, layer, field, frame: index, delta });
         const keyframeVelocityLimit = field === "scale" ? 0.0045 : 0.004;
         if (Number(rows[index].keyframe_count ?? 2) > 2 && Math.abs(delta) > keyframeVelocityLimit) {
-          findings.push({ severity: "blocker", code: "motion_keyframe_velocity_excessive", image_id: imageId, field, frame: index, delta, limit: keyframeVelocityLimit });
+          findings.push({ severity: "blocker", code: "motion_keyframe_velocity_excessive", image_id: imageId, layer, field, frame: index, delta, limit: keyframeVelocityLimit });
         }
       }
     }

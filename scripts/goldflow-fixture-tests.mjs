@@ -79,6 +79,7 @@ import {
   motionTraceForIntent,
   positionAnchorFromStaging,
   sanitizeAuthoredMotionIntent,
+  sanitizeLayeredParallaxTreatment,
   sanitizeMotionKeyframes,
 } from "./lib/motion-plan-utils.mjs";
 import { resolveTransitionSfxFamily, transitionSfxFamilyGuide } from "./lib/transition-sfx-policy.mjs";
@@ -1122,6 +1123,50 @@ function testDirectedMotionAndFullTimelineTransitions() {
   const keyframedFilter = motionClipFilterForTests(4, 0, {}, 0, null, keyframedIntent, "smooth_subpixel_ken_burns");
   assert.match(keyframedFilter, /if\(lte\(/);
   assert.match(keyframedFilter, /perspective=/);
+  const staticFilter = motionClipFilterForTests(4, 0, {}, 0, null, {
+    ...staticIntent,
+    motion_keyframes: [
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" },
+      { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" },
+    ],
+  }, "smooth_subpixel_ken_burns");
+  assert.doesNotMatch(staticFilter, /perspective=/);
+  assert.match(staticFilter, /force_original_aspect_ratio=decrease/);
+
+  const hash = "a".repeat(64);
+  const backgroundKeyframes = [
+    { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1.01, easing_to_next: "ease_in_out" },
+    { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1.02, easing_to_next: "linear" },
+  ];
+  const foregroundKeyframes = [
+    { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1.015, easing_to_next: "ease_in_out" },
+    { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1.035, easing_to_next: "linear" },
+  ];
+  const parallaxTreatment = sanitizeLayeredParallaxTreatment({
+    mode: "layered_parallax",
+    source_image_sha256: hash,
+    background_path: "/tmp/background.png",
+    background_sha256: hash,
+    foreground_path: "/tmp/foreground.png",
+    foreground_sha256: hash,
+    background_keyframes: backgroundKeyframes,
+    foreground_keyframes: foregroundKeyframes,
+  });
+  assert.equal(parallaxTreatment.occlusion_contract, "foreground_cover");
+  assert.equal(sanitizeLayeredParallaxTreatment({
+    ...parallaxTreatment,
+    foreground_keyframes: foregroundKeyframes.map((row) => ({ ...row, anchor: { x: 0.52, y: 0.5 } })),
+  }), null);
+  const parallaxFilter = motionClipFilterForTests(4, 0, {}, 0, null, {
+    ...staticIntent,
+    depth_treatment: parallaxTreatment,
+  }, "smooth_subpixel_ken_burns");
+  assert.match(parallaxFilter, /\[depth_bg\]\[depth_fg\]overlay=/);
+  assert.equal((parallaxFilter.match(/perspective=/g) ?? []).length, 2);
+  assert.doesNotMatch(parallaxFilter, /zoompan=/);
+  const backgroundTrace = motionTraceForIntent({ image_id: "cut_depth", duration_sec: 4, motion_keyframes: backgroundKeyframes }, 60).map((row) => ({ ...row, layer: "background" }));
+  const foregroundTrace = motionTraceForIntent({ image_id: "cut_depth", duration_sec: 4, motion_keyframes: foregroundKeyframes }, 60).map((row) => ({ ...row, layer: "foreground" }));
+  assert.deepEqual(motionTraceFindings([...backgroundTrace, ...foregroundTrace]), []);
 
   const transitionManifest = {
     cues: [

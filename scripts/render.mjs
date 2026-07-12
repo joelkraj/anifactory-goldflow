@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sharp from "sharp";
-import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent } from "./lib/motion-plan-utils.mjs";
+import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -1232,6 +1232,31 @@ function subpixelPerspectiveCore(zoomExpr, horizontalExpr, verticalExpr, coordin
   return `perspective=x0='${x0}':y0='${y0}':x1='${x1}':y1='${y0}':x2='${x0}':y2='${y2}':x3='${x1}':y3='${y2}':sense=destination:eval=frame:interpolation=cubic`;
 }
 
+function isTrueStaticIntent(motionIntent) {
+  const keyframes = motionKeyframesForIntent(motionIntent);
+  if (!keyframes?.length) return false;
+  const first = keyframes[0];
+  return keyframes.every((row) => Math.abs(row.anchor.x - first.anchor.x) < 1e-8
+    && Math.abs(row.anchor.y - first.anchor.y) < 1e-8
+    && Math.abs(row.scale - first.scale) < 1e-8);
+}
+
+function layeredParallaxClipFilter(duration, motionIntent) {
+  const treatment = sanitizeLayeredParallaxTreatment(motionIntent?.depth_treatment);
+  if (!treatment) throw new Error(`Invalid layered parallax treatment for ${motionIntent?.image_id ?? "unknown image"}.`);
+  const frameCount = clipFrameCount(duration);
+  const backgroundExpressions = directedMotionExpressions(frameCount, { motion_keyframes: treatment.background_keyframes });
+  const foregroundExpressions = directedMotionExpressions(frameCount, { motion_keyframes: treatment.foreground_keyframes });
+  const backgroundPerspective = subpixelPerspectiveCore(backgroundExpressions.scale, backgroundExpressions.x, backgroundExpressions.y, "anchor");
+  const foregroundPerspective = subpixelPerspectiveCore(foregroundExpressions.scale, foregroundExpressions.x, foregroundExpressions.y, "anchor");
+  const fades = fadeFilters(duration);
+  return [
+    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=${fps},${backgroundPerspective},format=rgba[depth_bg]`,
+    `[1:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=${fps},${foregroundPerspective},format=rgba[depth_fg]`,
+    `[depth_bg][depth_fg]overlay=x=0:y=0:format=auto,eq=contrast=1.018:saturation=1.028:brightness=0.002,format=yuv420p${fades}`,
+  ].join(";");
+}
+
 export function subpixelPerspectiveCoreForTests(zoomExpr, horizontalExpr, verticalExpr, coordinateMode = "anchor") {
   return subpixelPerspectiveCore(zoomExpr, horizontalExpr, verticalExpr, coordinateMode);
 }
@@ -1248,6 +1273,13 @@ function motionClipFilter(duration, index, prompt = {}, startSec = 0, previousPr
   const transitionPrefix = transitionFilters ? `${transitionFilters},` : "";
   const transitionSuffix = transitionFilters ? `,${transitionFilters}` : "";
   const fades = fadeFilters(duration);
+  if (motionIntent?.depth_treatment) {
+    if (clipMotionMode !== "smooth_subpixel_ken_burns") throw new Error("Layered parallax requires smooth_subpixel_ken_burns motion.");
+    return layeredParallaxClipFilter(duration, motionIntent);
+  }
+  if (motionIntent && isTrueStaticIntent(motionIntent)) {
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,${transitionPrefix}fps=${fps},format=yuv420p${fades}`;
+  }
   if (clipMotionMode === "fit_static" || clipMotionMode === "full_frame") {
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,${transitionPrefix}fps=${fps},format=yuv420p${fades}`;
   }
@@ -1397,6 +1429,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     return prompts.slice(0, index).reduce((sum, row) => sum + imageDuration(row, scale), 0);
   });
   const clipRows = [];
+  let layeredParallaxClipCount = 0;
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const imagePath = imageById.get(prompt.image_id);
@@ -1415,6 +1448,9 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     if (motionIntent && Math.abs(Number(motionIntent.duration_sec) - duration) > Math.max(0.08, duration * 0.03)) {
       throw new Error(`Directed motion duration mismatch for ${prompt.image_id}: plan=${Number(motionIntent.duration_sec).toFixed(3)} render=${duration.toFixed(3)}.`);
     }
+    const depthTreatment = motionIntent?.depth_treatment ? sanitizeLayeredParallaxTreatment(motionIntent.depth_treatment) : null;
+    if (motionIntent?.depth_treatment && !depthTreatment) throw new Error(`Invalid layered parallax contract for ${prompt.image_id}.`);
+    if (depthTreatment) layeredParallaxClipCount += 1;
     const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
     const transition = transitionProfile(duration, profile, prompt, startSec, previousPrompt, index);
     motionProfiles[profile.name] = (motionProfiles[profile.name] ?? 0) + 1;
@@ -1423,7 +1459,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     if (profile.hook) hookClipIds.push(prompt.image_id);
     if (transition.name !== "polished_motion") transitionClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
-    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent });
+    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent, depthTreatment });
   }
   const selectedXfadeDurations = new Map();
   const selectedBoundaryRows = [];
@@ -1452,6 +1488,19 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     if (row.motionIntent?.image_sha256 && row.motionIntent.image_sha256 !== imageSha256) {
       throw new Error(`Directed motion image hash stale for ${row.prompt.image_id}.`);
     }
+    let depthSourceHashes = null;
+    if (row.depthTreatment) {
+      if (row.depthTreatment.source_image_sha256 !== imageSha256) throw new Error(`Layered parallax source image hash is stale for ${row.prompt.image_id}.`);
+      for (const layerPath of [row.depthTreatment.background_path, row.depthTreatment.foreground_path]) {
+        if (!(await exists(layerPath))) throw new Error(`Layered parallax asset is missing for ${row.prompt.image_id}: ${layerPath}`);
+      }
+      const backgroundSha256 = await hashFile(row.depthTreatment.background_path);
+      const foregroundSha256 = await hashFile(row.depthTreatment.foreground_path);
+      if (backgroundSha256 !== row.depthTreatment.background_sha256 || foregroundSha256 !== row.depthTreatment.foreground_sha256) {
+        throw new Error(`Layered parallax asset hash is stale for ${row.prompt.image_id}.`);
+      }
+      depthSourceHashes = { background_sha256: backgroundSha256, foreground_sha256: foregroundSha256 };
+    }
     const motionProfileHash = sha256(JSON.stringify({
       profile: row.profile,
       filter,
@@ -1461,9 +1510,11 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       render_scale_multiplier: renderScaleMultiplier,
       motion_strength: motionStrength,
       foreground_scale: foregroundScale,
+      depth_treatment: row.depthTreatment,
     }));
     const cacheKey = sha256(JSON.stringify({
       image_sha256: imageSha256,
+      depth_source_hashes: depthSourceHashes,
       motion_profile_hash: motionProfileHash,
       start_sec: Number(row.startSec.toFixed(6)),
       duration_sec: Number(renderDuration.toFixed(6)),
@@ -1472,7 +1523,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       crf: 20,
     }));
     const cachePath = `${row.clipPath}.cache.json`;
-    Object.assign(row, { renderDuration, frameCount, filter, imageSha256, motionProfileHash, cacheKey, cachePath });
+    Object.assign(row, { renderDuration, frameCount, filter, imageSha256, depthSourceHashes, motionProfileHash, cacheKey, cachePath });
     clipJobs.push(async () => {
       const cache = await readJson(cachePath, null);
       if (cache?.cache_key === cacheKey && await exists(row.clipPath)) {
@@ -1487,9 +1538,12 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
       }
       await execFile(ffmpegBin, [
         "-y",
-        "-loop", "1",
-        "-t", renderDuration.toFixed(3),
-        "-i", row.imagePath,
+        ...(row.depthTreatment
+          ? [
+              "-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.depthTreatment.background_path,
+              "-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.depthTreatment.foreground_path,
+            ]
+          : ["-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.imagePath]),
         "-filter_complex", filter,
         "-an",
         "-c:v", "libx264",
@@ -1514,6 +1568,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
         image_id: row.prompt.image_id,
         image_path: row.imagePath,
         image_sha256: imageSha256,
+        depth_source_hashes: depthSourceHashes,
         motion_profile_hash: motionProfileHash,
         motion_clip_path: row.clipPath,
         motion_clip_sha256: row.motionClipSha256,
@@ -1524,8 +1579,8 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     });
   }
   await runLimited(clipJobs, renderConcurrency);
-  const cutLedger = await readJson(cutExecutionLedgerPath, null);
-  if (Array.isArray(cutLedger?.cuts)) {
+  const cutLedger = diagnosticProof ? null : await readJson(cutExecutionLedgerPath, null);
+  if (!diagnosticProof && Array.isArray(cutLedger?.cuts)) {
     const motionById = new Map(clipRows.map((row) => [String(row.prompt.image_id ?? ""), row]));
     const updatedCuts = cutLedger.cuts.map((cut) => {
       const row = motionById.get(String(cut.image_id ?? ""));
@@ -1604,10 +1659,25 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
 
   const motionTraceRows = clipRows.flatMap((row) => {
     if (!row.motionIntent) return [];
-    return motionTraceForIntent({ ...row.motionIntent, duration_sec: row.renderDuration }, fps).map((trace) => ({
+    const cameraRows = motionTraceForIntent({ ...row.motionIntent, duration_sec: row.renderDuration }, fps).map((trace) => ({
       ...trace,
+      layer: "camera",
       absolute_time_sec: Number((row.startSec + trace.time_sec).toFixed(6)),
     }));
+    if (!row.depthTreatment) return cameraRows;
+    const layerRows = [
+      ["background", row.depthTreatment.background_keyframes],
+      ["foreground", row.depthTreatment.foreground_keyframes],
+    ].flatMap(([layer, motionKeyframes]) => motionTraceForIntent({
+      image_id: row.prompt.image_id,
+      duration_sec: row.renderDuration,
+      motion_keyframes: motionKeyframes,
+    }, fps).map((trace) => ({
+      ...trace,
+      layer,
+      absolute_time_sec: Number((row.startSec + trace.time_sec).toFixed(6)),
+    })));
+    return [...cameraRows, ...layerRows];
   });
   const motionTraceBlockers = motionTraceFindings(motionTraceRows).filter((finding) => finding.severity === "blocker");
   if (motionTraceBlockers.length) throw new Error(`Motion trace validation blocked ${motionTraceBlockers.length} finding(s): ${motionTraceBlockers.slice(0, 8).map((row) => `${row.image_id}:${row.code}`).join(", ")}`);
@@ -1637,6 +1707,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     motion_trace_path: directedMotionRequired ? motionTracePath : null,
     motion_trace_frame_count: motionTraceRows.length,
     motion_trace_blocker_count: motionTraceBlockers.length,
+    layered_parallax_clip_count: layeredParallaxClipCount,
     hook_transition_sec: hookTransitionSec,
     retention_xfade_sec: retentionXfadeSec,
     transition_tail_sec: transitionTailSec,
@@ -2126,6 +2197,7 @@ async function main() {
       motion_trace_path: concat.motion_trace_path,
       motion_trace_frame_count: concat.motion_trace_frame_count,
       motion_trace_blocker_count: concat.motion_trace_blocker_count,
+      layered_parallax_clip_count: concat.layered_parallax_clip_count,
       motion_clip_cache_reused_count: concat.motion_clip_cache_reused_count,
       motion_clip_cache_generated_count: concat.motion_clip_cache_generated_count,
     },

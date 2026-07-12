@@ -477,6 +477,11 @@ function transitionEvents(atoms, factLedger) {
     const evidence = transitionEvidenceExcerpt(transition);
     const span = evidenceAtomSpan(atoms, evidence);
     if (!span) continue;
+    const stateValue = String(transition.to_state ?? "");
+    const explicitTransient = /\b(?:brief|briefly|temporary|temporarily|momentary|momentarily)\b/i.test(stateValue);
+    const collisionActionMisclassifiedAsInjury = String(transition.state_kind ?? "").toLowerCase() === "injury"
+      && /^(?:thrown|knocked|slammed|crashed|hurled|sent)\b/i.test(stateValue)
+      && /\b(?:through|into|against|across)\b/i.test(stateValue);
     events.push({
       source_word_index: span.end_atom.source_word_end_index,
       entity_id: canonicalId(transition.entity_id),
@@ -484,7 +489,7 @@ function transitionEvents(atoms, factLedger) {
       value: transition.to_state,
       from_value: transition.from_state,
       evidence_excerpt: evidence,
-      transient: /\b(?:temporary|temporarily|momentary|momentarily)\b/i.test(String(transition.to_state ?? "")),
+      transient: explicitTransient || collisionActionMisclassifiedAsInjury,
     });
   }
   return events.sort((a, b) => a.source_word_index - b.source_word_index);

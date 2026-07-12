@@ -528,8 +528,7 @@ export function projectActiveStateConstraints(beats, atoms, factLedger, timedSce
     }
     const visibleIds = unique([
       ...(beat.physically_visible_entity_ids ?? []),
-      ...(beat.screen_visible_entity_ids ?? []),
-      ...(beat.preview_visible_entity_ids ?? []),
+      ...(String(beat.depiction_mode ?? "") === "current_reality" ? beat.screen_visible_entity_ids ?? [] : []),
     ]);
     const scene = (timedScenes ?? []).find((row) => row.scene_id === (beat.parent_scene_id ?? beat.scene_id))
       ?? sceneForTime(timedScenes, Number(beat.start_sec ?? 0), Number(beat.end_sec ?? beat.start_sec ?? 0));

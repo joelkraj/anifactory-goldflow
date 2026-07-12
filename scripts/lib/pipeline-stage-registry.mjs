@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-11.5";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-12.1";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -229,9 +229,29 @@ const stages = [
     commands: ["imagegen qa"],
   },
   {
+    id: "parallax_asset_generation",
+    title: "Selective parallax assets",
+    required_input: "accepted image hashes + LLM-authored depth candidates",
+    output_artifact: "parallax_asset_report_<episode>.json + assets/motion/parallax/*",
+    approval: "automatic",
+    validator: "parallax_assets_hashes_and_candidate_scope",
+    skip: "parallax_policy_disabled_or_legacy",
+    commands: ["visual parallax-assets"],
+  },
+  {
+    id: "parallax_asset_approval",
+    title: "Parallax asset approval",
+    required_input: "hash-bound parallax layers + review sheet",
+    output_artifact: "parallax_asset_approval_<episode>.json or no-suitable waiver",
+    approval: "operator_or_agent",
+    validator: "parallax_asset_decisions_and_hashes",
+    skip: "parallax_policy_disabled_or_legacy",
+    commands: ["visual approve-parallax"],
+  },
+  {
     id: "motion_edit_plan",
     title: "Directed motion plan",
-    required_input: "accepted image hashes + authored staging",
+    required_input: "accepted image hashes + authored staging + parallax decisions",
     output_artifact: "motion_edit_plan_<episode>.json",
     approval: "automatic",
     validator: "motion_plan_hashes_and_geometry",
@@ -306,9 +326,14 @@ export function commandStageFor(commandName, subcommandName, flags = {}) {
 
 export function stageChecklistFor(identity = {}) {
   const narratorOnly = String(identity.audio_target ?? "narrator_only") === "narrator_only";
+  const parallaxDisabled = String(identity.parallax_policy ?? "selective_inspected") !== "selective_inspected";
   return PIPELINE_STAGE_REGISTRY.map((entry) => ({
     stage: entry.id,
-    status: entry.id === "sfx_score_plan" && narratorOnly ? "skipped_with_waiver" : "missing",
+    status: entry.id === "sfx_score_plan" && narratorOnly
+      ? "skipped_with_waiver"
+      : ["parallax_asset_generation", "parallax_asset_approval"].includes(entry.id) && parallaxDisabled
+        ? "skipped_with_waiver"
+        : "missing",
     approval_policy: entry.approval,
     validator: entry.validator,
   }));
@@ -386,7 +411,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const provider = identity.image_provider ?? "modelslab";
   const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? "flux-klein";
   const referenceModel = identity?.model_versions?.reference_model ?? identity?.provider_locks?.reference_model ?? imageModel;
-  const renderProfile = identity.render_profile ?? "smooth_fast_ken_burns";
+  const renderProfile = identity.render_profile ?? "smooth_subpixel_ken_burns";
   const minWpm = Number(identity.target_wpm_min ?? 195);
   const maxWpm = Number(identity.target_wpm_max ?? 220);
   const nativeSpeed = Number(identity.qwen_native_speed ?? identity.voice_provider_options?.qwen_native_speed ?? 1.25);
@@ -427,6 +452,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
+    parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
+    parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,

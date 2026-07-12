@@ -20,6 +20,7 @@ const BEHAVIORS = new Set([
   "aftermath_reveal",
 ]);
 const EASINGS = new Set(["linear", "ease_in", "ease_out", "ease_in_out"]);
+const DEPTH_CONFIDENCE = new Set(["high", "medium", "low"]);
 const MIN_KEYFRAMES = 2;
 const MAX_KEYFRAMES = 5;
 
@@ -108,6 +109,41 @@ export function sanitizeLayeredParallaxTreatment(value) {
   };
 }
 
+export function sanitizeDepthCandidate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const eligible = value.eligible === true;
+  if (!eligible) {
+    return {
+      eligible: false,
+      priority: 0,
+      separation_confidence: "low",
+      foreground_subject: null,
+      background_plane: null,
+      editorial_reason: String(value.editorial_reason ?? "").trim() || null,
+    };
+  }
+  const priority = Number(value.priority);
+  const separationConfidence = String(value.separation_confidence ?? "").trim().toLowerCase();
+  const foregroundSubject = String(value.foreground_subject ?? "").trim();
+  const backgroundPlane = String(value.background_plane ?? "").trim();
+  const editorialReason = String(value.editorial_reason ?? "").trim();
+  if (!Number.isFinite(priority)
+    || priority < 0
+    || priority > 100
+    || !DEPTH_CONFIDENCE.has(separationConfidence)
+    || !foregroundSubject
+    || !backgroundPlane
+    || !editorialReason) return null;
+  return {
+    eligible: true,
+    priority: Number(priority.toFixed(3)),
+    separation_confidence: separationConfidence,
+    foreground_subject: foregroundSubject,
+    background_plane: backgroundPlane,
+    editorial_reason: editorialReason,
+  };
+}
+
 export function motionKeyframesForIntent(value) {
   const authored = sanitizeMotionKeyframes(value?.motion_keyframes);
   if (authored) return authored;
@@ -135,6 +171,17 @@ export function sanitizeAuthoredMotionIntent(value) {
   const endAnchor = lastKeyframe?.anchor ?? value.end_anchor;
   const startScale = Number(firstKeyframe?.scale ?? value.start_scale);
   const endScale = Number(lastKeyframe?.scale ?? value.end_scale);
+  const hasDepthCandidate = value.depth_candidate !== undefined && value.depth_candidate !== null;
+  const depthCandidate = hasDepthCandidate ? sanitizeDepthCandidate(value.depth_candidate) : null;
+  const staticRows = motionKeyframes ?? [
+    { anchor: startAnchor, scale: startScale },
+    { anchor: endAnchor, scale: endScale },
+  ];
+  const staticContractValid = behavior !== "static_hold" || staticRows.every((row) => (
+    Math.abs(Number(row.anchor?.x) - Number(staticRows[0].anchor?.x)) < 1e-8
+    && Math.abs(Number(row.anchor?.y) - Number(staticRows[0].anchor?.y)) < 1e-8
+    && Math.abs(Number(row.scale) - Number(staticRows[0].scale)) < 1e-8
+  ));
   if (!BEHAVIORS.has(behavior)
     || !EASINGS.has(easing)
     || !validAnchor(startAnchor)
@@ -144,7 +191,9 @@ export function sanitizeAuthoredMotionIntent(value) {
     || startScale < 1
     || startScale > 1.25
     || endScale < 1
-    || endScale > 1.25) return null;
+    || endScale > 1.25
+    || !staticContractValid
+    || (hasDepthCandidate && !depthCandidate)) return null;
   return {
     behavior,
     focal_subject: String(value.focal_subject ?? "").trim() || null,
@@ -155,6 +204,7 @@ export function sanitizeAuthoredMotionIntent(value) {
     easing,
     reason: String(value.reason ?? "").trim() || null,
     ...(motionKeyframes ? { motion_keyframes: motionKeyframes } : {}),
+    ...(depthCandidate ? { depth_candidate: depthCandidate } : {}),
   };
 }
 
@@ -391,7 +441,83 @@ export function motionIntentForPrompt(prompt, imageSha256, decision = null, opti
     intent_reason: String(override?.reason ?? base.intent_reason ?? "").trim() || null,
     qa_override: override ?? null,
     ...(selectedKeyframes ? { motion_keyframes: selectedKeyframes } : {}),
+    ...(base.depth_candidate ? { depth_candidate: base.depth_candidate } : {}),
   };
+}
+
+function behaviorForEditorialRow(row) {
+  return String(row?.behavior ?? row?.shot_manifest?.motion_intent?.behavior ?? "").trim();
+}
+
+export function editorialMotionDistributionFindings(rows, options = {}) {
+  const ordered = (rows ?? [])
+    .filter((row) => row?.image_generation_required !== false)
+    .map((row) => ({
+      image_id: row?.image_id ?? null,
+      start_sec: Number(row?.start_sec ?? 0),
+      behavior: behaviorForEditorialRow(row),
+    }))
+    .filter((row) => row.behavior)
+    .sort((left, right) => left.start_sec - right.start_sec || String(left.image_id).localeCompare(String(right.image_id)));
+  const findings = [];
+  const minimumCuts = Math.max(1, Number(options.minimumCuts ?? 8));
+  if (ordered.length < minimumCuts) return findings;
+  const minimumStaticShare = Math.max(0, Math.min(1, Number(options.minimumStaticShare ?? 0.12)));
+  const maximumStaticShare = Math.max(minimumStaticShare, Math.min(1, Number(options.maximumStaticShare ?? 0.55)));
+  const staticCount = ordered.filter((row) => row.behavior === "static_hold").length;
+  const staticShare = staticCount / ordered.length;
+  if (staticShare < minimumStaticShare) {
+    findings.push({
+      severity: "blocker",
+      code: "motion_static_hold_share_too_low",
+      image_id: ordered[0]?.image_id ?? null,
+      cut_count: ordered.length,
+      static_hold_count: staticCount,
+      static_hold_share: Number(staticShare.toFixed(4)),
+      minimum_static_hold_share: minimumStaticShare,
+    });
+  } else if (staticShare > maximumStaticShare) {
+    findings.push({
+      severity: "warning",
+      code: "motion_static_hold_share_high",
+      image_id: ordered[0]?.image_id ?? null,
+      cut_count: ordered.length,
+      static_hold_count: staticCount,
+      static_hold_share: Number(staticShare.toFixed(4)),
+      maximum_recommended_static_hold_share: maximumStaticShare,
+    });
+  }
+  const openingEndSec = Math.max(0, Number(options.openingEndSec ?? 60));
+  const opening = ordered.filter((row) => row.start_sec < openingEndSec);
+  if (opening.length >= 6 && !opening.some((row) => row.behavior === "static_hold")) {
+    findings.push({
+      severity: "blocker",
+      code: "motion_opening_has_no_static_contrast",
+      image_id: opening[0]?.image_id ?? null,
+      opening_end_sec: openingEndSec,
+      opening_cut_count: opening.length,
+    });
+  }
+  const maxAnimatedStreak = Math.max(2, Number(options.maxAnimatedStreak ?? 8));
+  let streak = [];
+  for (const row of [...ordered, { behavior: "static_hold" }]) {
+    if (row.behavior !== "static_hold") {
+      streak.push(row);
+      continue;
+    }
+    if (streak.length >= maxAnimatedStreak) {
+      findings.push({
+        severity: "blocker",
+        code: "motion_continuous_movement_streak_too_long",
+        image_id: streak[0]?.image_id ?? null,
+        end_image_id: streak.at(-1)?.image_id ?? null,
+        animated_cut_count: streak.length,
+        maximum_animated_streak: maxAnimatedStreak - 1,
+      });
+    }
+    streak = [];
+  }
+  return findings;
 }
 
 export function motionIntentFindings(intents, acceptedHashes = {}) {
@@ -409,6 +535,17 @@ export function motionIntentFindings(intents, acceptedHashes = {}) {
     if (!Number.isFinite(Number(row.duration_sec)) || row.duration_sec <= 0) findings.push({ severity: "blocker", code: "motion_duration_invalid", image_id: row.image_id });
     if (!Number.isFinite(Number(row.start_scale)) || !Number.isFinite(Number(row.end_scale)) || row.start_scale < 1 || row.end_scale < 1 || row.start_scale > 1.25 || row.end_scale > 1.25) findings.push({ severity: "blocker", code: "motion_scale_invalid", image_id: row.image_id });
     if (!BEHAVIORS.has(String(row.behavior ?? ""))) findings.push({ severity: "blocker", code: "motion_behavior_invalid", image_id: row.image_id });
+    if (row.behavior === "static_hold") {
+      const keyframes = motionKeyframesForIntent(row);
+      const first = keyframes?.[0];
+      const moves = !first || keyframes.some((keyframe) => (
+        Math.abs(Number(keyframe.anchor?.x) - Number(first.anchor?.x)) >= 1e-8
+        || Math.abs(Number(keyframe.anchor?.y) - Number(first.anchor?.y)) >= 1e-8
+        || Math.abs(Number(keyframe.scale) - Number(first.scale)) >= 1e-8
+      ));
+      if (moves) findings.push({ severity: "blocker", code: "motion_static_hold_is_not_static", image_id: row.image_id });
+      if (row.depth_treatment) findings.push({ severity: "blocker", code: "motion_static_hold_has_depth_movement", image_id: row.image_id });
+    }
     if (!EASINGS.has(String(row.easing ?? ""))) findings.push({ severity: "blocker", code: "motion_easing_invalid", image_id: row.image_id });
     if (row.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_keyframes_invalid", image_id: row.image_id });
     if (row.qa_override?.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.qa_override.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_qa_override_keyframes_invalid", image_id: row.image_id });

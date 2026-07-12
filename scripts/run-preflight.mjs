@@ -48,6 +48,10 @@ const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy
 const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 195);
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 220);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
+const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
+const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
+const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 3, 0, 5);
+const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 6, 0, 120);
 const operatorQwenNarratorVoiceId = cleanOptionalId(flags["qwen-narrator-voice-id"] ?? flags["narrator-voice-id"] ?? null);
 const qwenNarratorVoiceId = operatorQwenNarratorVoiceId ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 const qwenNarratorVoicePolicy = operatorQwenNarratorVoiceId
@@ -93,7 +97,21 @@ function normalizeRenderProfile(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (["fill", "fill_ken_burns", "oversampled_ken_burns", "legacy_premium"].includes(normalized)) return "fill_ken_burns";
   if (["smooth_subpixel", "subpixel", "subpixel_ken_burns", "smooth_subpixel_ken_burns"].includes(normalized)) return "smooth_subpixel_ken_burns";
-  return "smooth_fast_ken_burns";
+  if (["smooth_fast", "smooth_ken_burns", "smooth_fast_kenburns", "smooth_fast_ken_burns"].includes(normalized)) return "smooth_fast_ken_burns";
+  if (!normalized || normalized === "premium") return "smooth_subpixel_ken_burns";
+  throw new Error(`Unknown render profile: ${value}`);
+}
+
+function normalizeMotionPolicy(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["selective_editorial_v1", "legacy"].includes(normalized)) return normalized;
+  throw new Error(`Unknown motion policy: ${value}`);
+}
+
+function normalizeParallaxPolicy(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["selective_inspected", "disabled"].includes(normalized)) return normalized;
+  throw new Error(`Unknown parallax policy: ${value}`);
 }
 
 function cleanOptionalId(value) {
@@ -110,6 +128,10 @@ function boundedNumber(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
+}
+
+function boundedInteger(value, fallback, min, max) {
+  return Math.floor(boundedNumber(value, fallback, min, max));
 }
 
 function gitCommand(args) {
@@ -314,6 +336,10 @@ async function main() {
       target_wpm_midpoint: Number(((targetWpmMin + targetWpmMax) / 2).toFixed(3)),
     },
     render_profile: renderProfile,
+    motion_policy: motionPolicy,
+    parallax_policy: parallaxPolicy,
+    parallax_target_max: parallaxTargetMax,
+    parallax_min_spacing_sec: parallaxMinSpacingSec,
     image_output_qa_required: true,
     visual_prompt_review_policy: "blockers_only_after_harden",
     run_intent: runIntent,
@@ -350,8 +376,10 @@ async function main() {
       provider_native_tts_speed_required: true,
       post_tempo_normalization_default: false,
       image_output_qa_required_before_render: true,
+      directed_motion_plan_required_before_render: true,
+      inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",
     },
-    stage_checklist: stageChecklistFor({ audio_target: audioTarget }),
+    stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy }),
     episode_dir: episodeDir,
     updated_at: now,
   };

@@ -73,18 +73,28 @@ import {
   creditExhaustedIdsFromReport,
   isModelslabCreditExhaustion,
 } from "./lib/image-fallback-policy.mjs";
-import { assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import { promoteEditorialMotionPlans } from "./editorial-motion-promote-proof.mjs";
 import {
+  editorialMotionDistributionFindings,
   motionIntentFindings,
   motionIntentForPrompt,
   motionTraceFindings,
   motionTraceForIntent,
   positionAnchorFromStaging,
   sanitizeAuthoredMotionIntent,
+  sanitizeDepthCandidate,
   sanitizeLayeredParallaxTreatment,
   sanitizeMotionKeyframes,
 } from "./lib/motion-plan-utils.mjs";
+import {
+  noticeableParallaxTreatment,
+  selectAuthoredParallaxCandidates,
+} from "./lib/parallax-policy.mjs";
+import {
+  parallaxApprovalMatches,
+  parallaxAssetContractSha256,
+} from "./lib/parallax-contract.mjs";
 import { resolveTransitionSfxFamily, transitionSfxFamilyGuide } from "./lib/transition-sfx-policy.mjs";
 import {
   gptImage2OutputSizeForTests,
@@ -161,9 +171,9 @@ function testAuthoritativeStageRegistry() {
   const ids = PIPELINE_STAGE_REGISTRY.map((stage) => stage.id);
   assert.equal(new Set(ids).size, ids.length);
   assert.deepEqual(ids.slice(-7), [
-    "transition_edit_plan",
-    "image_generation",
     "image_output_qa",
+    "parallax_asset_generation",
+    "parallax_asset_approval",
     "motion_edit_plan",
     "premium_render",
     "final_qa",
@@ -173,6 +183,9 @@ function testAuthoritativeStageRegistry() {
   assert.equal(ids.includes("reference_plan_approval"), true);
   const narratorOnly = stageChecklistFor({ audio_target: "narrator_only" });
   assert.equal(narratorOnly.find((row) => row.stage === "sfx_score_plan")?.status, "skipped_with_waiver");
+  assert.equal(stageChecklistFor({ audio_target: "narrator_only", parallax_policy: "disabled" }).find((row) => row.stage === "parallax_asset_generation")?.status, "skipped_with_waiver");
+  assert.equal(commandStageFor("visual", "parallax-assets"), "parallax_asset_generation");
+  assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
 
@@ -236,6 +249,60 @@ async function testRunStatusRejectsFalseGreenFinalQa() {
   status = JSON.parse(result.stdout);
   finalStage = status.stage_ledger.find((row) => row.stage === "final_qa");
   assert.equal(finalStage.state, "failed");
+}
+
+async function testRunStatusParallaxDecisionStages() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-parallax-status-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await fs.mkdir(episodeDir, { recursive: true });
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+    motion_policy: "selective_editorial_v1",
+    parallax_policy: "selective_inspected",
+    render_profile: "smooth_subpixel_ken_burns",
+  });
+  const reportPath = path.join(episodeDir, "parallax_asset_report_ep_01.json");
+  await writeJson(reportPath, {
+    schema: "goldflow_parallax_asset_report_v1",
+    status: "blocked",
+    candidate_count: 0,
+    candidates: [],
+    blockers: [{ code: "parallax_no_candidate_decision_required" }],
+    next_command_shape: "visual parallax-assets --no-suitable-parallax true --reviewer <name> --note <reason>",
+  });
+  let result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+    cwd: process.cwd(),
+    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+  });
+  let status = JSON.parse(result.stdout);
+  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").state, "blocked");
+  assert.match(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").next_command_shape, /no-suitable-parallax/);
+
+  const sourcePath = path.join(episodeDir, "parallax-source.json");
+  await writeJson(sourcePath, { fixture: true });
+  const waivedReport = {
+    schema: "goldflow_parallax_asset_report_v1",
+    status: "passed",
+    candidate_count: 0,
+    candidates: [],
+    no_suitable_parallax_waiver: { reviewer: "fixture", note: "No clean separable foreground exists." },
+    source_hashes: { [sourcePath]: await sha256File(sourcePath) },
+  };
+  waivedReport.asset_contract_sha256 = parallaxAssetContractSha256(waivedReport);
+  await writeJson(reportPath, waivedReport);
+  result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+    cwd: process.cwd(),
+    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+  });
+  status = JSON.parse(result.stdout);
+  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").state, "skipped_with_waiver");
+  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_approval").state, "skipped_with_waiver");
 }
 
 async function testAppendOnlyExecutionProvenance() {
@@ -991,10 +1058,19 @@ function testDirectedMotionAndFullTimelineTransitions() {
     end_scale: 1.08,
     easing: "ease_in_out",
     reason: "Follow the interception into the visible impact point.",
+    depth_candidate: {
+      eligible: true,
+      priority: 91,
+      separation_confidence: "high",
+      foreground_subject: "Joey and the stopped blade",
+      background_plane: "the guild chamber wall",
+      editorial_reason: "Depth makes the interception land as the hero reversal.",
+    },
   };
   assert.deepEqual(sanitizeAuthoredMotionIntent(authoredMotion), authoredMotion);
   assert.equal(sanitizeAuthoredMotionIntent({ ...authoredMotion, end_anchor: { x: 1.4, y: 0.3 } }), null);
   assert.equal(sanitizeAuthoredMotionIntent({ ...authoredMotion, behavior: "random_wobble" }), null);
+  assert.equal(sanitizeAuthoredMotionIntent({ ...authoredMotion, behavior: "static_hold" }), null);
   const authoredIntent = motionIntentForPrompt({
     image_id: "cut_authored",
     duration_sec: 7,
@@ -1005,6 +1081,8 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.deepEqual(authoredIntent.end_anchor, authoredMotion.end_anchor);
   assert.equal(authoredIntent.intent_reason, authoredMotion.reason);
   assert.equal(authoredIntent.focal_source, "llm_authored_shot_manifest_motion_intent");
+  assert.equal(authoredIntent.depth_candidate.priority, 91);
+  assert.equal(sanitizeDepthCandidate({ eligible: true, priority: 101 }), null);
 
   const keyframedMotion = {
     behavior: "impact_push",
@@ -1171,6 +1249,70 @@ function testDirectedMotionAndFullTimelineTransitions() {
   const foregroundTrace = motionTraceForIntent({ image_id: "cut_depth", duration_sec: 4, motion_keyframes: foregroundKeyframes }, 60).map((row) => ({ ...row, layer: "foreground" }));
   assert.deepEqual(motionTraceFindings([...backgroundTrace, ...foregroundTrace]), []);
 
+  const editorialRows = Array.from({ length: 10 }, (_, index) => ({
+    image_id: `motion_${index}`,
+    start_sec: index * 5,
+    behavior: index === 2 || index === 7 ? "static_hold" : "slow_push_in",
+  }));
+  assert.equal(editorialMotionDistributionFindings(editorialRows).filter((row) => row.severity === "blocker").length, 0);
+  assert.equal(editorialMotionDistributionFindings(editorialRows.map((row) => ({ ...row, behavior: "slow_push_in" }))).some((row) => row.code === "motion_static_hold_share_too_low"), true);
+
+  const depthPrompts = [
+    { image_id: "depth_a", start_sec: 5, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "slow_push_in", depth_candidate: { eligible: true, priority: 75, separation_confidence: "medium", foreground_subject: "hero", background_plane: "hall", editorial_reason: "hero reveal" } } } },
+    { image_id: "depth_b", start_sec: 8, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "impact_push", depth_candidate: { eligible: true, priority: 99, separation_confidence: "high", foreground_subject: "blade", background_plane: "arena", editorial_reason: "impact" } } } },
+    { image_id: "depth_c", start_sec: 18, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "ui_focus", depth_candidate: { eligible: true, priority: 88, separation_confidence: "high", foreground_subject: "system panel", background_plane: "city", editorial_reason: "system reveal" } } } },
+    { image_id: "depth_static", start_sec: 30, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "static_hold", depth_candidate: { eligible: true, priority: 100, separation_confidence: "high", foreground_subject: "hero", background_plane: "hall", editorial_reason: "should remain still" } } } },
+  ];
+  const selectedDepth = selectAuthoredParallaxCandidates(depthPrompts, { maxCandidates: 2, minSpacingSec: 6 });
+  assert.deepEqual(selectedDepth.map((row) => row.image_id), ["depth_b", "depth_c"]);
+  const depthAssetHash = "b".repeat(64);
+  const noticeable = noticeableParallaxTreatment({
+    intent: { start_anchor: { x: 0.5, y: 0.5 }, end_anchor: { x: 0.55, y: 0.48 } },
+    candidate: selectedDepth[0],
+    assetReport: {
+      status: "passed",
+      image_sha256: depthAssetHash,
+      background_path: "/tmp/depth-background.png",
+      background_sha256: depthAssetHash,
+      foreground_path: "/tmp/depth-foreground.png",
+      foreground_sha256: depthAssetHash,
+    },
+  });
+  assert.equal(noticeable.occlusion_contract, "foreground_cover");
+  assert.equal(noticeable.foreground_keyframes.at(-1).scale - noticeable.background_keyframes.at(-1).scale >= 0.05, true);
+  const contractReport = {
+    source_hashes: { "/tmp/prompts.json": depthAssetHash },
+    candidates: [{
+      image_id: "depth_b",
+      image_sha256: depthAssetHash,
+      priority: 99,
+      asset_report_path: "/tmp/depth.json",
+      asset_report: {
+        mask_sha256: depthAssetHash,
+        foreground_sha256: depthAssetHash,
+        background_sha256: depthAssetHash,
+      },
+    }],
+  };
+  const contractHash = parallaxAssetContractSha256(contractReport);
+  const approval = {
+    status: "approved",
+    asset_report_sha256: depthAssetHash,
+    asset_contract_sha256: contractHash,
+    approved_image_ids: ["depth_b"],
+    declined_image_ids: [],
+    decisions: [{ image_id: "depth_b", image_sha256: depthAssetHash, decision: "approved", asset_report_path: "/tmp/depth.json", mask_sha256: depthAssetHash, foreground_sha256: depthAssetHash, background_sha256: depthAssetHash }],
+  };
+  assert.equal(parallaxApprovalMatches(contractReport, approval, { reportSha256: depthAssetHash }), true);
+  assert.equal(parallaxApprovalMatches(contractReport, { ...approval, approved_image_ids: [] }, { reportSha256: depthAssetHash }), false);
+
+  assert.equal(assertLockedRenderProfileForTests({ v2Run: true, lockedRenderProfile: "smooth_subpixel_ken_burns", requestedMotionMode: "smooth_subpixel_ken_burns" }), "smooth_subpixel_ken_burns");
+  assert.throws(
+    () => assertLockedRenderProfileForTests({ v2Run: true, lockedRenderProfile: "smooth_subpixel_ken_burns", requestedMotionMode: "smooth_fast_ken_burns" }),
+    /does not match run_identity\.render_profile/i,
+  );
+  assert.equal(assertLockedRenderProfileForTests({ v2Run: true, lockedRenderProfile: "smooth_subpixel_ken_burns", requestedMotionMode: "smooth_fast_ken_burns", workflowBypass: true }), "smooth_fast_ken_burns");
+
   const baseFullMotionIntents = [
     { image_id: "cut_a", scene_id: "scene_1", visual_beat_id: "beat_0", start_sec: 0, duration_sec: 2, behavior: "slow_push_in" },
     { image_id: "cut_open", scene_id: "scene_1", visual_beat_id: "beat_1", start_sec: 2, duration_sec: 4, behavior: "slow_push_in" },
@@ -1232,6 +1374,114 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.equal(resolvedSwipe.asset_trim_start_sec, 0.55);
   assert.equal(resolvedSwipe.sfx_offset_sec, -0.25);
   assert.equal(transitionSfxFamilyGuide().some((row) => row.family === "system_scan"), true);
+}
+
+async function testMotionPlanConsumesApprovedParallax() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-motion-parallax-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  await fs.mkdir(episodeDir, { recursive: true });
+  const acceptedHashes = {};
+  const prompts = Array.from({ length: 8 }, (_, index) => {
+    const imageId = `cut_${String(index + 1).padStart(3, "0")}`;
+    acceptedHashes[imageId] = String(index + 1).repeat(64).slice(0, 64);
+    const isStatic = index === 3;
+    return {
+      image_id: imageId,
+      scene_id: "scene_001",
+      visual_beat_id: `beat_${index + 1}`,
+      start_sec: index * 5,
+      duration_sec: 5,
+      image_generation_required: true,
+      shot_manifest: {
+        motion_intent: {
+          behavior: isStatic ? "static_hold" : "slow_push_in",
+          focal_subject: "Joey",
+          start_anchor: { x: 0.5, y: 0.5 },
+          end_anchor: { x: 0.5, y: 0.5 },
+          start_scale: 1,
+          end_scale: isStatic ? 1 : 1.04,
+          easing: isStatic ? "linear" : "ease_in_out",
+          reason: isStatic ? "Hold the reaction." : "Push toward the focal subject.",
+          depth_candidate: index === 0
+            ? { eligible: true, priority: 92, separation_confidence: "high", foreground_subject: "Joey", background_plane: "the guild hall", editorial_reason: "Open the hero reveal in depth." }
+            : { eligible: false, priority: 0, separation_confidence: "low", foreground_subject: null, background_plane: null, editorial_reason: "Single-plane cut." },
+        },
+      },
+    };
+  });
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  const imagegenPath = path.join(episodeDir, "imagegen_report_ep_01.json");
+  const imageQaPath = path.join(episodeDir, "image_output_qa_ep_01.json");
+  const decisionsPath = path.join(episodeDir, "image_output_review_decisions_ep_01.json");
+  const ledgerPath = path.join(episodeDir, "cut_execution_ledger.json");
+  const audioPath = path.join(episodeDir, "longform_audio_bed_report_ep_01.json");
+  const identityPath = path.join(episodeDir, "run_identity.json");
+  await writeJson(promptPath, { status: "passed", prompts });
+  await writeJson(imagegenPath, { status: "passed", results: [] });
+  await writeJson(decisionsPath, { status: "complete", decisions: prompts.map((row) => ({ image_id: row.image_id, decision: "accepted" })) });
+  await writeJson(imageQaPath, { status: "passed", review_decisions_sha256: await sha256File(decisionsPath), accepted_image_hashes: acceptedHashes });
+  await writeJson(ledgerPath, { cuts: prompts.map((row) => ({ image_id: row.image_id, image_sha256: acceptedHashes[row.image_id], image_qa_status: "passed_auto" })) });
+  await writeJson(audioPath, { status: "passed", mix: { duration_sec: 40 } });
+  await writeJson(identityPath, { schema: "goldflow_run_identity_v2", motion_policy: "selective_editorial_v1", parallax_policy: "selective_inspected", render_profile: "smooth_subpixel_ken_burns" });
+
+  const foregroundPath = path.join(episodeDir, "foreground.png");
+  const backgroundPath = path.join(episodeDir, "background.png");
+  const maskPath = path.join(episodeDir, "mask.png");
+  await fs.writeFile(foregroundPath, "foreground");
+  await fs.writeFile(backgroundPath, "background");
+  await fs.writeFile(maskPath, "mask");
+  const candidate = {
+    image_id: "cut_001",
+    image_sha256: acceptedHashes.cut_001,
+    priority: 92,
+    foreground_subject: "Joey",
+    background_plane: "the guild hall",
+    editorial_reason: "Open the hero reveal in depth.",
+    asset_report_path: path.join(episodeDir, "cut_001-parallax-assets.json"),
+    asset_report: {
+      status: "passed",
+      image_sha256: acceptedHashes.cut_001,
+      mask_path: maskPath,
+      mask_sha256: await sha256File(maskPath),
+      foreground_path: foregroundPath,
+      foreground_sha256: await sha256File(foregroundPath),
+      background_path: backgroundPath,
+      background_sha256: await sha256File(backgroundPath),
+    },
+  };
+  const parallaxReportPath = path.join(episodeDir, "parallax_asset_report_ep_01.json");
+  const parallaxReport = { status: "passed", candidate_count: 1, candidates: [candidate], source_hashes: {} };
+  parallaxReport.asset_contract_sha256 = parallaxAssetContractSha256(parallaxReport);
+  await writeJson(parallaxReportPath, parallaxReport);
+  const parallaxApprovalPath = path.join(episodeDir, "parallax_asset_approval_ep_01.json");
+  await writeJson(parallaxApprovalPath, {
+    status: "approved",
+    asset_report_sha256: await sha256File(parallaxReportPath),
+    asset_contract_sha256: parallaxReport.asset_contract_sha256,
+    approved_image_ids: ["cut_001"],
+    declined_image_ids: [],
+    decisions: [{
+      image_id: "cut_001",
+      image_sha256: acceptedHashes.cut_001,
+      decision: "approved",
+      asset_report_path: candidate.asset_report_path,
+      mask_sha256: candidate.asset_report.mask_sha256,
+      foreground_sha256: candidate.asset_report.foreground_sha256,
+      background_sha256: candidate.asset_report.background_sha256,
+    }],
+  });
+  const outputPath = path.join(episodeDir, "motion_edit_plan_ep_01.json");
+  await execFileAsync(process.execPath, [
+    "scripts/visual-motion-plan.mjs",
+    "--episode-dir", episodeDir,
+    "--episode", "ep_01",
+    "--output", outputPath,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const motionPlan = await readJson(outputPath);
+  assert.equal(motionPlan.status, "passed");
+  assert.equal(motionPlan.layered_parallax_count, 1);
+  assert.equal(motionPlan.static_hold_count, 1);
+  assert.equal(motionPlan.motion_intents.find((row) => row.image_id === "cut_001").depth_treatment.occlusion_contract, "foreground_cover");
 }
 
 async function testStreamingRenderHashFinalization() {
@@ -1308,7 +1558,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.qwen_native_speed, 1.25);
   assert.equal(identity.voice_provider_options.pace_strategy, "provider_native_speed_no_post_tempo");
   assert.equal(identity.production_gates.post_tempo_normalization_default, false);
-  assert.equal(identity.render_profile, "smooth_fast_ken_burns");
+  assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
+  assert.equal(identity.motion_policy, "selective_editorial_v1");
+  assert.equal(identity.parallax_policy, "selective_inspected");
+  assert.equal(identity.parallax_target_max, 3);
+  assert.equal(identity.parallax_min_spacing_sec, 6);
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");
@@ -5621,6 +5875,7 @@ const FIXTURE_SUITES = {
     testRunIdentityV2Policies,
     testFinalQaSourceHashFreshness,
     testRunStatusRejectsFalseGreenFinalQa,
+    testRunStatusParallaxDecisionStages,
     testAppendOnlyExecutionProvenance,
     testCumulativeImagegenHistoryAndEpisodeTruth,
     testPinnedCodexRuntimeContracts,
@@ -5716,6 +5971,7 @@ const FIXTURE_SUITES = {
     testProviderCircuitBreakerStopsUnclaimedWork,
     testProviderConcurrencyBacksOffAndRecovers,
     testDirectedMotionAndFullTimelineTransitions,
+    testMotionPlanConsumesApprovedParallax,
     testStreamingRenderHashFinalization,
     testRenderRequiresHashMatchedImageQa,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,

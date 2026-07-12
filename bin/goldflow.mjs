@@ -137,7 +137,7 @@ ${registryCommands}
   goldflow run status              Print the artifact-backed stage ledger
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
-  goldflow visual parallax-assets Build inspected foreground/background layers for a bounded hero-shot proof
+  goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
   goldflow visual motion-proof-plan Build isolated image-aware motion/transition proof plans
   goldflow visual motion-promote-proof Promote an approved bounded motion proof into a full-timeline variant
   goldflow render finalize-report  Stream-hash and finalize an existing passed render report
@@ -153,8 +153,8 @@ Common flags:
   --allow-dirty-worktree true --dirty-reason <reason> is diagnostic/proof-only
 
 Render profiles:
-  default premium: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
-  subpixel smooth: --motion smooth_subpixel_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  default premium: --motion smooth_subpixel_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
+  integer fast fallback: --motion smooth_fast_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
   legacy diagnostic: --motion fill_ken_burns --motion-strength 1.75 --render-scale-multiplier 1.45 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast
   Motion clips are hash cached; compliant concat streams skip the redundant normalization encode.
 
@@ -167,7 +167,7 @@ Validation-batch flags:
   --image-provider hybrid_codex_refs_opening_risky_modelslab_rest --codex-opening-sec 600
   Routes all references, opening-window cuts, and risky multi-character or explicitly Codex-routed cuts through staged Codex imagegen import, and later simple cuts through ModelsLab.
   Actual WPM is always recorded diagnostically and never blocks production.
-  --render-profile smooth_fast_ken_burns is the default; use --render-profile fill_ken_burns only for a deliberate legacy comparison.
+  --render-profile smooth_subpixel_ken_burns is the default; smooth_fast_ken_burns and fill_ken_burns are explicit fallback/diagnostic profiles.
 
 Production order:
   ${productionOrderSummary()}
@@ -240,6 +240,10 @@ if (command === "help" || command === "--help" || command === "-h") {
 } else if (command === "visual" && subcommand === "motion-plan") {
   run("visual-motion-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "parallax-assets") {
+  run("visual-parallax-assets.mjs", flags);
+} else if (command === "visual" && subcommand === "approve-parallax") {
+  run("parallax-asset-approve.mjs", flags);
+} else if (command === "visual" && subcommand === "parallax-proof-assets") {
   run("editorial-parallax-assets.mjs", flags);
 } else if (command === "visual" && subcommand === "motion-proof-plan") {
   run("editorial-motion-proof-plan.mjs", flags);

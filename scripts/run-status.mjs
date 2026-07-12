@@ -12,6 +12,10 @@ import {
 } from "./lib/pipeline-stage-registry.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import {
+  parallaxApprovalMatches,
+  parallaxAssetContractSha256,
+} from "./lib/parallax-contract.mjs";
+import {
   codexCreditFallbackEnabled,
   creditExhaustedIdsFromReport,
   creditExhaustedIdsFromRows,
@@ -237,7 +241,7 @@ function qwenNativeSpeed(identity = {}) {
 }
 
 function renderCommand(identity, base, episode) {
-  const profile = String(identity?.render_profile ?? "smooth_fast_ken_burns").toLowerCase();
+  const profile = String(identity?.render_profile ?? "smooth_subpixel_ken_burns").toLowerCase();
   const common = `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180`;
   if (profile === "smooth_subpixel_ken_burns") {
     return `${common} --motion smooth_subpixel_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`;
@@ -793,6 +797,80 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
   };
 }
 
+async function parallaxAssetGenerationComplete(episodeDir, episode) {
+  const reportPath = path.join(episodeDir, `parallax_asset_report_${episode}.json`);
+  const report = await readJson(reportPath, null);
+  if (!report) return { done: false, evidence: `${path.basename(reportPath)} missing` };
+  const status = String(report.status ?? "").toLowerCase();
+  if (status !== "passed") {
+    return {
+      done: false,
+      state: status === "failed" ? "failed" : "blocked",
+      evidence: `${path.basename(reportPath)} status=${status || "missing"}; blockers=${(report.blockers ?? []).map((row) => row.code ?? row).join(",") || "none"}`,
+      next_command_shape: report.next_command_shape ?? null,
+    };
+  }
+  const sourceState = await sourceHashState(report.source_hashes);
+  if (!sourceState.count || sourceState.stale.length) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale or missing` };
+  }
+  if (report.asset_contract_sha256 !== parallaxAssetContractSha256(report)) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} asset contract hash stale` };
+  }
+  const candidates = Array.isArray(report.candidates) ? report.candidates : [];
+  if (Number(report.candidate_count ?? 0) !== candidates.length) {
+    return { done: false, state: "failed", evidence: `${path.basename(reportPath)} candidate count mismatch` };
+  }
+  if (!candidates.length) {
+    const waiver = report.no_suitable_parallax_waiver;
+    if (!waiver?.reviewer || !waiver?.note) {
+      return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} requires explicit no-suitable-parallax decision` };
+    }
+    return { state: "skipped_with_waiver", evidence: `${path.basename(reportPath)} no suitable candidate; reviewer=${waiver.reviewer}` };
+  }
+  if (!report.review_sheet_path || !(await exists(report.review_sheet_path))) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} review sheet missing` };
+  }
+  for (const candidate of candidates) {
+    for (const [assetPath, expectedHash] of [
+      [candidate.image_path, candidate.image_sha256],
+      [candidate.asset_report?.mask_path, candidate.asset_report?.mask_sha256],
+      [candidate.asset_report?.foreground_path, candidate.asset_report?.foreground_sha256],
+      [candidate.asset_report?.background_path, candidate.asset_report?.background_sha256],
+    ]) {
+      if (!assetPath || !expectedHash || await fileSha256(assetPath) !== expectedHash) {
+        return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale asset for ${candidate.image_id}: ${assetPath ?? "missing path"}` };
+      }
+    }
+  }
+  return { done: true, evidence: `${path.basename(reportPath)} candidates=${candidates.length}; review sheet=current` };
+}
+
+async function parallaxAssetApprovalComplete(episodeDir, episode) {
+  const reportPath = path.join(episodeDir, `parallax_asset_report_${episode}.json`);
+  const approvalPath = path.join(episodeDir, `parallax_asset_approval_${episode}.json`);
+  const [report, approval, reportHash] = await Promise.all([
+    readJson(reportPath, null),
+    readJson(approvalPath, null),
+    fileSha256(reportPath),
+  ]);
+  if (report?.status !== "passed") return { done: false, evidence: `${path.basename(reportPath)} not passed` };
+  if (!Number(report.candidate_count ?? 0)) {
+    const waiver = report.no_suitable_parallax_waiver;
+    return waiver?.reviewer && waiver?.note
+      ? { state: "skipped_with_waiver", evidence: `${path.basename(reportPath)} no suitable candidate waiver` }
+      : { done: false, state: "blocked", evidence: `${path.basename(reportPath)} no-candidate waiver missing` };
+  }
+  if (!approval) return { done: false, evidence: `${path.basename(approvalPath)} missing` };
+  if (!parallaxApprovalMatches(report, approval, { reportSha256: reportHash })) {
+    return { done: false, state: "stale", evidence: `${path.basename(approvalPath)} decisions or hashes stale` };
+  }
+  return {
+    done: true,
+    evidence: `${path.basename(approvalPath)} approved=${approval.approved_image_ids?.length ?? 0}; declined=${approval.declined_image_ids?.length ?? 0}`,
+  };
+}
+
 async function scriptApprovalComplete(episodeDir, currentScriptHash) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const approvalPath = path.join(episodeDir, "operator_script_approval.json");
@@ -1321,7 +1399,11 @@ async function main() {
     target_wpm_max: flags["target-wpm-max"] ?? flags["wpm-max"] ?? runIdentity.target_wpm_max ?? runIdentity.pace_targets?.target_wpm_max ?? runIdentity.pace_targets?.max ?? DEFAULT_TARGET_WPM_MAX,
     target_wpm_midpoint: flags["target-wpm-mid"] ?? flags["wpm-mid"] ?? runIdentity.target_wpm_midpoint ?? runIdentity.pace_targets?.target_wpm_midpoint ?? runIdentity.pace_targets?.mid ?? DEFAULT_TARGET_WPM_MID,
     pace_targets: runIdentity.pace_targets ?? null,
-    render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_fast_ken_burns",
+    render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_subpixel_ken_burns",
+    motion_policy: runIdentity.motion_policy ?? null,
+    parallax_policy: runIdentity.parallax_policy ?? null,
+    parallax_target_max: runIdentity.parallax_target_max ?? null,
+    parallax_min_spacing_sec: runIdentity.parallax_min_spacing_sec ?? null,
     run_intent: runIdentity.run_intent ?? "production",
     proof_scope: runIdentity.proof_scope ?? { mode: "full_episode", start_sec: 0, end_sec: null },
     git: runIdentity.git ?? null,
@@ -1373,6 +1455,9 @@ async function main() {
   const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
   const imagegen = await imageReportComplete(episodeDir, episode, identity);
   const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
+  const parallaxPolicyCurrent = identity.parallax_policy === "selective_inspected";
+  const parallaxGeneration = parallaxPolicyCurrent ? await parallaxAssetGenerationComplete(episodeDir, episode) : null;
+  const parallaxApproval = parallaxPolicyCurrent ? await parallaxAssetApprovalComplete(episodeDir, episode) : null;
   const render = await renderComplete(episodeDir, episode, identity);
   const finalQa = await finalQaComplete(episodeDir, episode, identity);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
@@ -1446,6 +1531,12 @@ async function main() {
     image_output_qa: legacyIdentity && !imageOutputQaRequired(identity)
       ? { state: "skipped_with_waiver", evidence: "legacy run predates required per-cut image QA" }
       : imageOutputQa,
+    parallax_asset_generation: parallaxPolicyCurrent
+      ? parallaxGeneration
+      : { state: "skipped_with_waiver", evidence: identity.parallax_policy === "disabled" ? "parallax explicitly disabled in run identity" : "run predates selective inspected parallax contract" },
+    parallax_asset_approval: parallaxPolicyCurrent
+      ? parallaxApproval
+      : { state: "skipped_with_waiver", evidence: identity.parallax_policy === "disabled" ? "parallax explicitly disabled in run identity" : "run predates selective inspected parallax contract" },
     motion_edit_plan: legacyIdentity
       ? { state: "skipped_with_waiver", evidence: "legacy run predates directed motion-plan contract" }
       : motionPlan,

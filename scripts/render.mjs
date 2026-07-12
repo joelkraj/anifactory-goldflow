@@ -41,7 +41,7 @@ const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-g
 const renderReportPath = flags.reportOutput ?? flags["report-output"] ?? path.join(episodeDir, `render_report_${episode}.json`);
 const width = Number(flags.width ?? 1920);
 const height = Number(flags.height ?? 1080);
-const motionMode = normalizeMotionMode(flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "smooth_fast_ken_burns");
+const motionMode = normalizeMotionMode(flags.motion ?? process.env.ANIFACTORY_RENDER_MOTION ?? "smooth_subpixel_ken_burns");
 const fps = Number(flags.fps ?? process.env.ANIFACTORY_RENDER_FPS ?? (["smooth_fast_ken_burns", "smooth_subpixel_ken_burns"].includes(motionMode) ? 60 : 30));
 const foregroundScale = Number(flags["foreground-scale"] ?? process.env.ANIFACTORY_RENDER_FOREGROUND_SCALE ?? 0.93);
 const motionStrength = Number(flags["motion-strength"] ?? process.env.ANIFACTORY_RENDER_MOTION_STRENGTH ?? 1.75);
@@ -81,7 +81,22 @@ function normalizeMotionMode(value) {
   const key = String(value ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
   if (key === "smooth_fast" || key === "smooth_ken_burns" || key === "smooth_fast_kenburns") return "smooth_fast_ken_burns";
   if (["smooth_subpixel", "subpixel", "subpixel_ken_burns", "smooth_subpixel_kenburns"].includes(key)) return "smooth_subpixel_ken_burns";
-  return key || "smooth_fast_ken_burns";
+  return key || "smooth_subpixel_ken_burns";
+}
+
+export function assertLockedRenderProfileForTests({
+  v2Run,
+  lockedRenderProfile,
+  requestedMotionMode,
+  workflowBypass = false,
+  diagnosticProof: diagnostic = false,
+}) {
+  const locked = normalizeMotionMode(lockedRenderProfile ?? "smooth_subpixel_ken_burns");
+  const requested = normalizeMotionMode(requestedMotionMode ?? "smooth_subpixel_ken_burns");
+  if (v2Run && !workflowBypass && !diagnostic && requested !== locked) {
+    throw new Error(`Render profile ${requested} does not match run_identity.render_profile ${locked}. Change the locked run identity through preflight, or use an explicitly approved diagnostic bypass.`);
+  }
+  return requested;
 }
 
 function sha256(value) {
@@ -1952,6 +1967,9 @@ async function main() {
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   const v2Run = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";
+  const lockedRenderProfile = normalizeMotionMode(runIdentity?.render_profile ?? "smooth_subpixel_ken_burns");
+  const workflowBypass = /^(true|1|yes)$/i.test(String(flags["workflow-bypass"] ?? "false"));
+  assertLockedRenderProfileForTests({ v2Run, lockedRenderProfile, requestedMotionMode: motionMode, workflowBypass, diagnosticProof });
   if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
   if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
   if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);

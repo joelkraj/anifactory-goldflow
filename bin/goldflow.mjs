@@ -165,6 +165,8 @@ ${registryCommands}
   goldflow visual motion-proof-plan Build isolated image-aware motion/transition proof plans
   goldflow visual motion-promote-proof Promote an approved bounded motion proof into a full-timeline variant
   goldflow render finalize-report  Stream-hash and finalize an existing passed render report
+  goldflow analytics ingest        Attribute a YouTube retention export to exact Goldflow cuts
+  goldflow analytics aggregate     Aggregate multiple episode feedback reports
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
 
@@ -293,6 +295,10 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("render-report-finalize.mjs", flags);
 } else if (command === "final" && subcommand === "qa") {
   run("final-qa.mjs", flags);
+} else if (command === "analytics" && subcommand === "ingest") {
+  run("youtube-analytics-feedback.mjs", ["ingest", ...flags]);
+} else if (command === "analytics" && subcommand === "aggregate") {
+  run("youtube-analytics-feedback.mjs", ["aggregate", ...flags]);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {
   run("audio-sfx-score-enrichment.mjs", flags);
 } else if (command === "audio" && subcommand === "score-drops-chunked") {

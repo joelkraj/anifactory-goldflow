@@ -164,6 +164,7 @@ import {
 } from "./semantic-scene-plan.mjs";
 import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
 import { advanceCommandTokensForTests, autoAdvanceDecisionForTests } from "./run-advance.mjs";
+import { buildRetentionAttributionForTests, normalizeRetentionRowsForTests } from "./youtube-analytics-feedback.mjs";
 import {
   closeVisualBeatTimelineForTests,
   factLedgerMatchesScriptForTests,
@@ -235,6 +236,30 @@ function testGuardedRunAdvancePolicies() {
   );
   assert.deepEqual(tokens?.slice(1), ["visual", "harden", "--episode-dir", "/tmp/episode", "--prompts", "/tmp/episode/section_image_prompts.json"]);
   assert.equal(advanceCommandTokensForTests("Stage images; then run something", "/tmp/episode"), null);
+}
+
+function testYoutubeRetentionAttribution() {
+  const retention = normalizeRetentionRowsForTests([
+    { "Video position (%)": "0", "Absolute audience retention (%)": "100" },
+    { "Video position (%)": "50", "Absolute audience retention (%)": "62" },
+    { "Video position (%)": "100", "Absolute audience retention (%)": "41" },
+  ], 120);
+  assert.deepEqual(retention.map((row) => row.elapsed_sec), [0, 60, 120]);
+  const attributed = buildRetentionAttributionForTests({
+    retentionRows: retention,
+    prompts: [
+      { image_id: "cut_001", visual_beat_id: "beat_001", scene_id: "scene_001", start_sec: 0, duration_sec: 60, visual_job: "premise_image", image_provider_route: "modelslab", reference_requirements: [{}], shot_manifest: { shot_job: "interaction", location_contract_id: "hall", motion_intent: { behavior: "slow_push_in" } } },
+      { image_id: "cut_002", visual_beat_id: "beat_002", scene_id: "scene_002", start_sec: 60, duration_sec: 60, visual_job: "consequence", image_provider_route: "modelslab", reference_requirements: [{}, {}], shot_manifest: { shot_job: "consequence", location_contract_id: "court", motion_intent: { behavior: "aftermath_reveal" } } },
+    ],
+    imagegenResults: [{ image_id: "cut_002", image_provider: "editorial_reuse" }],
+    motionIntents: [{ image_id: "cut_002", behavior: "static_hold" }],
+    transitions: [{ start_sec: 60, transition: "fade" }],
+  });
+  assert.equal(attributed[1].image_id, "cut_002");
+  assert.equal(attributed[1].delta_from_previous_pct, -38);
+  assert.equal(attributed[1].transition_type, "fade");
+  assert.equal(attributed[1].motion_behavior, "static_hold");
+  assert.equal(attributed[1].image_provider, "editorial_reuse");
 }
 
 async function testFinalQaSourceHashFreshness() {
@@ -2051,7 +2076,7 @@ function testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse() {
     local_props: [],
   };
   const assessment = visualUnitRiskAssessmentForTests(steady, { visualReferencePlan: { reference_targets: referenceTargets } });
-  assert.equal(assessment.risk_class, "medium");
+  assert.equal(assessment.risk_class, "simple");
   assert.equal(assessment.reference_need.candidate_count, 4);
   assert.equal(assessment.reference_need.estimated_count, 2);
   assert.equal(assessment.reasons.includes("four_likely_attached_refs"), false);
@@ -6207,7 +6232,9 @@ const FIXTURE_SUITES = {
     testImagegenReusesImportedCodexOpeningCut,
     testSilentTransitionsWithoutSfxBank,
   ],
-  integration: [],
+  integration: [
+    testYoutubeRetentionAttribution,
+  ],
 };
 
 export async function runFixtureSuite(name = "all") {

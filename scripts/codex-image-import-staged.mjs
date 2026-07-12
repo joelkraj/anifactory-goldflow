@@ -88,7 +88,7 @@ async function walk(dir) {
 }
 
 function imageIdFromPath(filePath) {
-  return path.basename(filePath).match(/(ep_\d+-cut-\d+)/)?.[1] ?? null;
+  return path.basename(filePath).match(/(ep_\d+-(?:cut-\d+|w\d+-w\d+))/)?.[1] ?? null;
 }
 
 function refIdFromPath(filePath, validIds) {

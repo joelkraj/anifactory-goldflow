@@ -143,6 +143,16 @@ function compactWords(value) {
 function sanitizeShotManifest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const arrayOfStrings = (field) => Array.isArray(value[field]) ? value[field].map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+  const referenceSlots = Array.isArray(value.reference_slots) ? value.reference_slots
+    .filter((row) => row && typeof row === "object" && row.ref_id)
+    .map((row, index) => ({
+      ref_id: String(row.ref_id),
+      kind: row.kind ? String(row.kind) : null,
+      required: row.required !== false,
+      slot_order: Number.isFinite(Number(row.slot_order)) ? Number(row.slot_order) : index + 1,
+      slot_purpose: row.slot_purpose ? String(row.slot_purpose) : null,
+      reason: row.reason ? String(row.reason) : null,
+    })) : [];
   return {
     shot_job: value.shot_job ? String(value.shot_job) : null,
     visible_characters: arrayOfStrings("visible_characters"),
@@ -156,6 +166,7 @@ function sanitizeShotManifest(value) {
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
+    reference_slots: referenceSlots,
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
     character_staging: sanitizeCharacterStaging(value.character_staging),
   };
@@ -642,7 +653,9 @@ function sanitizePrompt(prompt, indexes) {
   );
   let codexPromptTextValue = activeProviderRoute === "codex_imagegen" ? promptTextValue : null;
 
-  const inputRequirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
+  const inputRequirements = shotManifest?.reference_slots?.length
+    ? shotManifest.reference_slots
+    : Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
   const accepted = [];
   for (const req of inputRequirements) {
     if (!req?.ref_id) {

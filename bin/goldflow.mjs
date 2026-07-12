@@ -158,6 +158,7 @@ Commands:
 ${registryCommands}
   goldflow run codex-doctor        Inspect the pinned Codex runtime
   goldflow run status              Print the artifact-backed stage ledger
+  goldflow run advance             Advance automatic stages until approval, spend, blocker, or requested hold
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -212,6 +213,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("codex-runtime-doctor.mjs", flags);
 } else if (command === "run" && subcommand === "status") {
   run("run-status.mjs", flags);
+} else if (command === "run" && subcommand === "advance") {
+  run("run-advance.mjs", flags);
 } else if (command === "run" && subcommand === "import-proof-baseline") {
   run("proof-baseline-import.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {

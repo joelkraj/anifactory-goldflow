@@ -163,6 +163,7 @@ import {
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
 import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
+import { advanceCommandTokensForTests, autoAdvanceDecisionForTests } from "./run-advance.mjs";
 import {
   closeVisualBeatTimelineForTests,
   factLedgerMatchesScriptForTests,
@@ -218,6 +219,22 @@ function testRunIdentityV2Policies() {
     label: "proof_0_300",
   });
   assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
+}
+
+function testGuardedRunAdvancePolicies() {
+  assert.deepEqual(autoAdvanceDecisionForTests("script_approval", "missing", {}), { executable: false, reason: "approval_required" });
+  assert.deepEqual(autoAdvanceDecisionForTests("semantic_scene_plan", "missing", {}), { executable: false, reason: "planner_spend_not_approved" });
+  assert.equal(autoAdvanceDecisionForTests("semantic_scene_plan", "missing", { allowPlannerSpend: true }).executable, true);
+  assert.deepEqual(autoAdvanceDecisionForTests("image_generation", "missing", { allowPlannerSpend: true }), { executable: false, reason: "media_spend_not_approved" });
+  assert.equal(autoAdvanceDecisionForTests("image_generation", "missing", { allowMediaSpend: true }).executable, true);
+  assert.deepEqual(autoAdvanceDecisionForTests("image_output_qa", "needs_manual_review", {}), { executable: false, reason: "risk_decisions_required" });
+  assert.equal(autoAdvanceDecisionForTests("image_output_qa", "missing", {}).executable, true);
+  const tokens = advanceCommandTokensForTests(
+    "node bin/goldflow.mjs visual harden --episode-dir <episode-dir> --prompts <episode-dir>/section_image_prompts.json",
+    "/tmp/episode",
+  );
+  assert.deepEqual(tokens?.slice(1), ["visual", "harden", "--episode-dir", "/tmp/episode", "--prompts", "/tmp/episode/section_image_prompts.json"]);
+  assert.equal(advanceCommandTokensForTests("Stage images; then run something", "/tmp/episode"), null);
 }
 
 async function testFinalQaSourceHashFreshness() {
@@ -6068,6 +6085,7 @@ const FIXTURE_SUITES = {
   "stage-contract": [
     testAuthoritativeStageRegistry,
     testRunIdentityV2Policies,
+    testGuardedRunAdvancePolicies,
     testFinalQaSourceHashFreshness,
     testRunStatusRejectsFalseGreenFinalQa,
     testRunStatusParallaxDecisionStages,

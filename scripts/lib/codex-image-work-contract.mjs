@@ -148,10 +148,11 @@ function refTargetRows(plan) {
 }
 
 function refRequiresGeneration(row) {
-  if (row?.required_before_imagegen === false) return false;
   const mode = cleanText(row?.generation_mode).toLowerCase();
   if (["no_ref_needed", "source_only", "derive_from_first_clean_cut", "derive_from_best_cut", "derive_from_first_clean_wide_cut"].includes(mode)) return false;
-  return row?.image_generation_required !== false;
+  if (row?.image_generation_required === false) return false;
+  if (mode === "standalone_ref") return true;
+  return row?.required_before_imagegen === true;
 }
 
 function exactScopedRows(rows, scope, idForRow, label) {

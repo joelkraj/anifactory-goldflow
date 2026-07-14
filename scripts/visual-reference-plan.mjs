@@ -1247,6 +1247,14 @@ export function visualReferenceCodexCacheEnabledForTests(inputFlags = {}) {
   return visualReferenceCodexCacheEnabled(inputFlags);
 }
 
+function shouldSplitReferenceChunk(promptLength, sceneCount, maxPromptChars) {
+  return Number(sceneCount) > 1 && Number(promptLength) > Number(maxPromptChars);
+}
+
+export function shouldSplitReferenceChunkForTests(promptLength, sceneCount, maxPromptChars = 950_000) {
+  return shouldSplitReferenceChunk(promptLength, sceneCount, maxPromptChars);
+}
+
 function normalizeTarget(target, index) {
   const refId = slug(target.ref_id ?? `${target.kind ?? "ref"}_${index + 1}`);
   const mode = String(target.generation_mode ?? "manual_review");
@@ -2094,30 +2102,58 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
 
   const sceneChunks = chunkArray(semanticPlan.scenes, Number(flags["visual-ref-chunk-scenes"] ?? 8));
   const chunkConcurrency = Math.max(1, Number(flags["visual-ref-chunk-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REF_CHUNK_CONCURRENCY ?? 6));
-  const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
-    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
+  const maxChunkPromptChars = Math.max(100_000, Number(
+    flags["visual-ref-max-prompt-chars"]
+      ?? process.env.ANIFACTORY_VISUAL_REF_MAX_PROMPT_CHARS
+      ?? 950_000,
+  ));
+
+  const planChunk = async ({ sceneChunk, chunkLabel, stageSuffix, displayLabel }) => {
     const chunkSemanticPlan = {
       ...semanticPlan,
       scenes: sceneChunk,
       scene_count: sceneChunk.length,
     };
     const prompt = buildPrompt(chunkSemanticPlan, {
-      chunkLabel: `chunk ${index + 1} of ${sceneChunks.length}`,
+      chunkLabel,
       guidance,
       inventoryLedger: evidenceLedger,
       locationContractLedger,
     });
-    const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
+    if (shouldSplitReferenceChunk(prompt.length, sceneChunk.length, maxChunkPromptChars)) {
+      const splitAt = Math.ceil(sceneChunk.length / 2);
+      const children = [sceneChunk.slice(0, splitAt), sceneChunk.slice(splitAt)].filter((rows) => rows.length);
+      console.error(`visual refs ${displayLabel}: prompt ${prompt.length} chars exceeds ${maxChunkPromptChars}; splitting ${sceneChunk.length} scenes into ${children.map((rows) => rows.length).join("+")}`);
+      const childResults = await mapWithConcurrency(children, Math.min(children.length, 2), async (child, childIndex) => planChunk({
+        sceneChunk: child,
+        chunkLabel: `${chunkLabel}, adaptive part ${childIndex + 1} of ${children.length}`,
+        stageSuffix: `${stageSuffix}_part_${String(childIndex + 1).padStart(2, "0")}`,
+        displayLabel: `${displayLabel} part ${childIndex + 1}/${children.length}`,
+      }));
+      return childResults.flat();
+    }
+    const chunkStageName = `${stageName}_${stageSuffix}`;
     const llm = useLocalRoute
       ? await callLocal(prompt, chunkStageName, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000))
       : await callCodex(prompt, chunkStageName);
     const rawTargetCount = Array.isArray(llm.parsed?.reference_targets) ? llm.parsed.reference_targets.length : 0;
     const candidatePlan = sanitizeChunkReferenceCandidates(llm.parsed);
-    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
-    return { candidatePlan, rawTargetCount };
+    console.error(`visual refs ${displayLabel}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
+    return [{ candidatePlan, rawTargetCount }];
+  };
+
+  const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
+    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
+    return planChunk({
+      sceneChunk,
+      chunkLabel: `chunk ${index + 1} of ${sceneChunks.length}`,
+      stageSuffix: `chunk_${String(index + 1).padStart(2, "0")}`,
+      displayLabel: `chunk ${index + 1}/${sceneChunks.length}`,
+    });
   });
-  const chunkPlans = chunkResults.map((result) => result.candidatePlan);
-  const chunkRawTargetCount = chunkResults.reduce((sum, result) => sum + result.rawTargetCount, 0);
+  const plannedChunks = chunkResults.flat();
+  const chunkPlans = plannedChunks.map((result) => result.candidatePlan);
+  const chunkRawTargetCount = plannedChunks.reduce((sum, result) => sum + result.rawTargetCount, 0);
   if (!chunkPlans.some((plan) => plan.reference_targets.length)) throw new Error("Visual reference chunks returned no clean reference candidates for global director selection.");
   console.error(`visual refs merge: ${chunkPlans.length} chunk plans`);
   if (String(flags["visual-ref-merge-mode"] ?? "").toLowerCase() === "deterministic") {
@@ -2140,7 +2176,8 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     codex_cli_version: merged.codex_cli_version ?? null,
     output_path: merged.output_path ?? null,
     chunked: true,
-    chunk_count: sceneChunks.length,
+    chunk_count: plannedChunks.length,
+    source_chunk_count: sceneChunks.length,
     chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
     chunk_raw_target_count: chunkRawTargetCount,
     merged_target_count: parsed.reference_targets.length,

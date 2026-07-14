@@ -123,6 +123,7 @@ import {
   referenceLocationScopeForTests,
   referenceOpeningIdentityFindingsForTests,
   selectedReferenceInventoryForTests,
+  shouldSplitReferenceChunkForTests,
   visualReferenceCodexCacheEnabledForTests,
 } from "./visual-reference-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
@@ -540,6 +541,13 @@ function testPlannerCachesDefaultOn() {
     assert.equal(enabled({}), true);
     assert.equal(enabled({ "reuse-codex-calls": "false", "visual-ref-reuse-codex-chunks": "false", "codex-reuse-cache": "false" }), false);
   }
+}
+
+function testVisualReferencePlannerSplitsOnlyOversizedChunks() {
+  assert.equal(shouldSplitReferenceChunkForTests(950_001, 8), true);
+  assert.equal(shouldSplitReferenceChunkForTests(950_000, 8), false);
+  assert.equal(shouldSplitReferenceChunkForTests(1_200_000, 1), false);
+  assert.equal(shouldSplitReferenceChunkForTests(700_000, 8), false);
 }
 
 async function testCumulativeImagegenHistoryAndEpisodeTruth() {
@@ -6220,6 +6228,7 @@ const FIXTURE_SUITES = {
     testAppendOnlyExecutionProvenance,
     testExecutionProvenanceScopesAndTruthfulCompletion,
     testPlannerCachesDefaultOn,
+    testVisualReferencePlannerSplitsOnlyOversizedChunks,
     testCumulativeImagegenHistoryAndEpisodeTruth,
     testPinnedCodexRuntimeContracts,
     testNestedCodexCallsUseSharedRunner,

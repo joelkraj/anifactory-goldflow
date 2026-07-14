@@ -375,8 +375,8 @@ export async function createCodexWorkManifest(options) {
     if (!new Set(["passed", "approved"]).has(cleanText(referencePlan?.status).toLowerCase())) {
       throw new Error(`Reference plan is not passed: ${referencePlanPath}.`);
     }
-    if (!new Set(["passed", "approved"]).has(cleanText(characterStateRefs?.status).toLowerCase())) {
-      throw new Error(`Character-state refs are not approved: ${characterStateRefsPath}.`);
+    if (!new Set(["draft_needs_manual_review", "passed", "approved"]).has(cleanText(characterStateRefs?.status).toLowerCase())) {
+      throw new Error(`Character-state refs are not a valid planner output: ${characterStateRefsPath}.`);
     }
     episodeDir = normalizeAbsolute(options.episodeDir) ?? path.dirname(referencePlanPath);
     const runIdentityPath = path.join(episodeDir, "run_identity.json");

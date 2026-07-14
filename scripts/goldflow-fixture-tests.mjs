@@ -6192,7 +6192,7 @@ async function testCodexImageWorkQueueContracts() {
       { ref_id: "joey_state", kind: "character_state", generation_mode: "standalone_ref", required_before_imagegen: true, base_identity_ref_id: "joey_base", codex_image_prompt: "Joey state reference, anime/manhwa, 16:9 landscape." },
     ],
   });
-  await writeJson(characterStateRefsPath, { status: "passed", character_state_refs: [] });
+  await writeJson(characterStateRefsPath, { status: "draft_needs_manual_review", character_state_refs: [] });
   const refCreated = await createCodexWorkManifest({
     mode: "reference",
     episodeDir,

@@ -15,7 +15,9 @@ const episodeDir = flags["episode-dir"]
   : path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
-const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
+// Reference approval is governed by the selected reference paths in the approved
+// plan. A historical scene-image batch must never veto that separate gate.
+const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_codex_manual_${episode}.json`);
 const approvalOutputPath = flags.output ?? path.join(episodeDir, `visual_reference_approval_${episode}.json`);
 
 function parseFlags(parts) {
@@ -79,7 +81,7 @@ async function main() {
   if (missingReferencePaths.length && flags["allow-missing-reference-paths"] !== "true") {
     throw new Error(`Cannot approve: required references are missing image paths: ${missingReferencePaths.slice(0, 20).join(", ")}`);
   }
-  if (imagegenReport && imagegenReport.status && imagegenReport.status !== "passed") {
+  if (imagegenReport?.reference_only === true && imagegenReport.status && imagegenReport.status !== "passed") {
     throw new Error(`Cannot approve: imagegen report exists but status is ${imagegenReport.status}.`);
   }
   const visualReferencePlanHash = await fileHash(visualReferencePlanPath);

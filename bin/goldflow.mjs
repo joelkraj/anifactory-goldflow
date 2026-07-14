@@ -279,6 +279,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("editorial-motion-promote-proof.mjs", flags);
 } else if (command === "imagegen" && subcommand === "start") {
   run("imagegen.mjs", flags);
+} else if (command === "imagegen" && subcommand === "codex-work") {
+  run("codex-image-work.mjs", flags);
 } else if (command === "imagegen" && subcommand === "promote-derived-refs") {
   run("imagegen.mjs", ["--promote-derived-refs", "true", ...flags]);
 } else if (command === "imagegen" && subcommand === "import-codex") {

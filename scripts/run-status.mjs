@@ -273,10 +273,52 @@ function imagegenStartCommand(identity, extra = "") {
   return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15${extra}`;
 }
 
-function codexCreditFallbackCommand(identity, ids, { references = false } = {}) {
+function codexWorkCommand(identity, ids, { references = false, qaRecovery = false, seedDerivedRefs = false } = {}) {
   const idFlag = references ? "--reference-ids" : "--image-ids";
-  const referenceFlag = references ? " --references-only true" : "";
-  return `ModelsLab credit exhaustion confirmed for ${ids.length} ${references ? "reference" : "scene"} asset(s). Stage only these IDs with built-in Codex Imagen workers, then run: node bin/goldflow.mjs imagegen import-staged-codex ${commandBase(identity)}${referenceFlag} --staging-dir <staging-dir> ${idFlag} ${ids.join(",")} --output <episode-dir>/imagegen_report_${identity.episode ?? "<episode>"}.json`;
+  const modeFlags = [
+    references ? "--references-only true" : "--prompts <episode-dir>/section_image_prompts_hardened.json",
+    qaRecovery ? "--qa-recovery true" : "",
+    seedDerivedRefs ? "--seed-derived-refs true" : "",
+  ].filter(Boolean).join(" ");
+  return `node bin/goldflow.mjs imagegen codex-work ${commandBase(identity)} --action create ${modeFlags} ${idFlag} ${ids.join(",")} --max-attempts 3 --lease-sec 900`;
+}
+
+function promptUsesCodex(prompt, identity) {
+  const explicit = String(prompt?.image_provider_route ?? prompt?.provider_route ?? prompt?.provider ?? "").toLowerCase();
+  if (explicit.includes("codex")) return true;
+  if (explicit.includes("modelslab")) return false;
+  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  if (provider === "codex_imagegen") return true;
+  if (provider === "modelslab") return false;
+  if (provider === "hybrid_codex_opening_modelslab_rest" || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest") {
+    return promptStartSec(prompt) < codexOpeningSec(identity);
+  }
+  if (provider === "hybrid_codex_refs_opening_risky_modelslab_rest") {
+    return promptStartSec(prompt) < codexOpeningSec(identity)
+      || visibleCharacterCount(prompt) >= 2
+      || (prompt?.risk_tags ?? []).length > 0;
+  }
+  return provider === "hybrid_codex_refs_multichar" && visibleCharacterCount(prompt) >= 2;
+}
+
+function scopedImagegenRecoveryCommand(identity, ids, promptPlan, options = {}) {
+  const idSet = new Set(ids.map(String));
+  const prompts = (promptPlan?.prompts ?? []).filter((prompt) => idSet.has(String(prompt?.image_id ?? "")));
+  const codexIds = prompts.filter((prompt) => promptUsesCodex(prompt, identity)).map((prompt) => String(prompt.image_id));
+  const codexSet = new Set(codexIds);
+  const modelslabIds = ids.map(String).filter((id) => !codexSet.has(id));
+  const commands = [];
+  if (codexIds.length) commands.push(codexWorkCommand(identity, codexIds, options));
+  if (modelslabIds.length) {
+    const providerFilter = usesCodexSceneCuts(identity) ? " --provider-filter modelslab" : "";
+    const recoveryFlags = `${options.seedDerivedRefs ? " --seed-derived-refs true" : ""}${options.qaRecovery ? " --qa-recovery true" : ""}`;
+    commands.push(imagegenStartCommand(identity, ` --cut-ids ${modelslabIds.join(",")}${providerFilter}${recoveryFlags}`));
+  }
+  return commands.join("; then ") || imagegenStartCommand(identity);
+}
+
+function codexCreditFallbackCommand(identity, ids, { references = false } = {}) {
+  return `ModelsLab credit exhaustion confirmed for ${ids.length} ${references ? "reference" : "scene"} asset(s). ${codexWorkCommand(identity, ids, { references })}`;
 }
 
 function imagegenPromoteDerivedRefsCommand(identity) {
@@ -502,7 +544,7 @@ async function derivedReferenceImagegenStatus(episodeDir, promptPlan, latestImag
   const seedIds = [...new Set(targets.flatMap((target) => target.candidate_image_ids ?? []))];
   if (seedIds.length) {
     return {
-      next_command_shape: imagegenStartCommand(identity, ` --seed-derived-refs true --cut-ids ${seedIds.slice(0, 60).join(",")}`),
+      next_command_shape: scopedImagegenRecoveryCommand(identity, seedIds.slice(0, 60), promptPlan, { seedDerivedRefs: true }),
       evidence: `pending derived refs=${targets.length}; seed cuts needed=${seedIds.slice(0, 8).join(", ")}${seedIds.length > 8 ? ` +${seedIds.length - 8} more` : ""}`,
     };
   }
@@ -582,7 +624,7 @@ async function imageReportComplete(episodeDir, episode, identity) {
       evidence: `image files=${generated}/${promptCount || "unknown"}; failed cuts=${failedIds.slice(0, 8).join(", ")}${failedIds.length > 8 ? ` +${failedIds.length - 8} more` : ""}${creditIds.length ? `; modelslab_credit_exhausted=${creditIds.length}; codex_fallback=approved` : ""}`,
       next_command_shape: creditIds.length
         ? codexCreditFallbackCommand(identity, creditIds)
-        : imagegenStartCommand(identity, ` --cut-ids ${failedIds.join(",")}`),
+        : scopedImagegenRecoveryCommand(identity, failedIds, promptPlan),
     };
   }
   const successIds = successfulImageIdsFromReport(latestReport);
@@ -594,13 +636,15 @@ async function imageReportComplete(episodeDir, episode, identity) {
     return {
       done: false,
       evidence: `image files=${generated}/${promptCount || "unknown"}; missing cuts=${missingIds.slice(0, 8).join(", ")}${missingIds.length > 8 ? ` +${missingIds.length - 8} more` : ""}`,
-      next_command_shape: imagegenStartCommand(identity, ` --cut-ids ${missingIds.join(",")}`),
+      next_command_shape: scopedImagegenRecoveryCommand(identity, missingIds, promptPlan),
     };
   }
   return {
     done: promptCount > 0 && generated >= promptCount && duplicates.length === 0,
     evidence: `image files=${generated}/${promptCount || "unknown"}${duplicates.length ? `; duplicate_hashes=${duplicates.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}` : ""}${failedProbe ? `; failed probe/report also present: ${failedProbe.name}` : ""}`,
-    next_command_shape: imagegenStartCommand(identity),
+    next_command_shape: usesCodexSceneCuts(identity)
+      ? scopedImagegenRecoveryCommand(identity, (promptPlan.prompts ?? []).filter((prompt) => prompt?.image_generation_required !== false).map((prompt) => String(prompt.image_id)), promptPlan)
+      : imagegenStartCommand(identity),
   };
 }
 
@@ -643,7 +687,10 @@ async function referenceGenerationComplete(episodeDir, identity) {
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
   let fallbackCommand = null;
   let fallbackEvidence = "";
-  if (missing.length && codexCreditFallbackEnabled(identity)) {
+  if (missing.length && usesCodexReferences(identity)) {
+    fallbackCommand = codexWorkCommand(identity, missing, { references: true });
+    fallbackEvidence = `; codex_worker_queue=${missing.length}`;
+  } else if (missing.length && codexCreditFallbackEnabled(identity)) {
     const reports = await matchingJsonReports(episodeDir, new RegExp(`^imagegen_report_${identity.episode ?? "ep_01"}.*\\.json$`));
     const latestReferenceReport = reports
       .filter(({ report }) => report?.reference_only === true)

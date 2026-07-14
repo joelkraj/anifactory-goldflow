@@ -1878,14 +1878,20 @@ function numericOrNull(value) {
 
 function finalAudioLoudnormSettings(audioBedReport) {
   if (!finalAudioLoudnormEnabled) return { enabled: false };
-  const targetLufs = numericOrNull(finalAudioTargetLufsFlag)
-    ?? numericOrNull(audioBedReport?.mix?.target_lufs)
+  // A narrator-only mix may carry zero-valued unset metadata. FFmpeg rejects
+  // those values, so accept report settings only within loudnorm's valid range.
+  const inRange = (value, min, max) => {
+    const parsed = numericOrNull(value);
+    return parsed !== null && parsed >= min && parsed <= max ? parsed : null;
+  };
+  const targetLufs = inRange(finalAudioTargetLufsFlag, -70, -5)
+    ?? inRange(audioBedReport?.mix?.target_lufs, -70, -5)
     ?? -13;
-  const truePeakDb = numericOrNull(finalAudioTruePeakFlag)
-    ?? numericOrNull(audioBedReport?.mix?.true_peak_db)
+  const truePeakDb = inRange(finalAudioTruePeakFlag, -9, 0)
+    ?? inRange(audioBedReport?.mix?.true_peak_db, -9, 0)
     ?? -1;
-  const lra = numericOrNull(finalAudioLraFlag)
-    ?? numericOrNull(audioBedReport?.mix?.loudness_range)
+  const lra = inRange(finalAudioLraFlag, 1, 50)
+    ?? inRange(audioBedReport?.mix?.loudness_range, 1, 50)
     ?? 11;
   return {
     enabled: true,

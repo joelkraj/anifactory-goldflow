@@ -11,6 +11,8 @@ const MUTABLE_REFERENCE_OUTPUT_KEYS = new Set([
   "derived_from_image_sha256",
   "derived_reference_promotion_updated_at",
   "derived_reference_status",
+  "image_provider",
+  "image_provider_route",
   "reference_generation_updated_at",
   "reference_image_path",
   "updated_at",

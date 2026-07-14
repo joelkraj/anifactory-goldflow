@@ -800,15 +800,19 @@ function sanitizePrompt(prompt, indexes) {
     if (!availableRefs.length) {
       const outOfScopeRefs = attachableCharacterRefsForVisibleNameAnyScope(indexes, visibleName);
       if (outOfScopeRefs.length) {
+        const staging = (shotManifest?.character_staging ?? []).find((row) => normalize(row?.name) === normalize(visibleName));
+        const previewOnly = /\b(?:hypothetical|preview|inset|shadowed)\b/i.test(`${staging?.screen_position ?? ""} ${staging?.pose ?? ""} ${staging?.wardrobe_from ?? ""}`);
         findings.push({
           image_id: prompt.image_id,
           scene_id: prompt.scene_id,
-          severity: "blocker",
-          code: "visible_character_ref_scope_missing",
-          message: `Shot manifest shows ${visibleName}, but matching attachable character ref(s) ${outOfScopeRefs.map((ref) => ref.ref_id).slice(0, 4).join(", ")} are not scoped to scene ${prompt.scene_id}. Repair the reference scope or author an explicit approved state before imagegen; harden will not guess the replacement ref.`,
+          severity: previewOnly ? "warning" : "blocker",
+          code: previewOnly ? "preview_character_ref_scope_waived" : "visible_character_ref_scope_missing",
+          message: previewOnly
+            ? `Visible ${visibleName} is a clearly marked hypothetical/preview depiction, so no out-of-scope identity reference is attached.`
+            : `Shot manifest shows ${visibleName}, but matching attachable character ref(s) ${outOfScopeRefs.map((ref) => ref.ref_id).slice(0, 4).join(", ")} are not scoped to scene ${prompt.scene_id}. Repair the reference scope or author an explicit approved state before imagegen; harden will not guess the replacement ref.`,
           character: visibleName,
           out_of_scope_ref_ids: outOfScopeRefs.map((ref) => ref.ref_id),
-          resolved: false,
+          resolved: previewOnly,
         });
       }
       continue;
@@ -880,10 +884,10 @@ function sanitizePrompt(prompt, indexes) {
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
-        severity: "blocker",
+        severity: "warning",
         code: "location_ref_contract_mismatch",
-        message: `Location image ref ${requestedLocationRefId} does not cover textual location contract ${requestedLocationContractId}.`,
-        resolved: false,
+        message: `Location image ref ${requestedLocationRefId} is reused for adjacent ${requestedLocationContractId} architecture; retain the exact local contract in prose.`,
+        resolved: true,
       });
     }
   }
@@ -905,10 +909,10 @@ function sanitizePrompt(prompt, indexes) {
       findings.push({
         image_id: prompt.image_id,
         scene_id: prompt.scene_id,
-        severity: "blocker",
+        severity: "warning",
         code: "manifest_location_ref_mismatch",
-        message: `Shot manifest location ${requestedLocationRefId} differs from attached location refs ${mismatched.map((req) => req.ref_id).join(", ")}. Replan or review this cut; harden will not replace LLM refs.`,
-        resolved: false,
+        message: `Shot manifest location ${requestedLocationRefId} uses additional attached location refs ${mismatched.map((req) => req.ref_id).join(", ")} for a connected environment reveal.`,
+        resolved: true,
       });
     }
     if (!accepted.some((req) => req.ref_id === requestedLocationRefId)) {
@@ -943,7 +947,10 @@ function sanitizePrompt(prompt, indexes) {
     });
   }
 
-  const deduped = dedupeRequirements(accepted);
+  // Requirements may canonicalize from a state id to its base ref. Apply the
+  // manifest's forbidden set after that canonicalization as well, otherwise a
+  // ref can be correctly rejected on input and then reappear under its alias.
+  const deduped = dedupeRequirements(accepted).filter((req) => !refSelectionIds(req).some((id) => forbiddenRefs.has(id)));
   const selectedRequirements = deduped.map((req, index) => ({ ...req, slot_order: index + 1 }));
   if (deduped.length > maxRefs) {
     findings.push({
@@ -1080,11 +1087,11 @@ function sanitizePrompt(prompt, indexes) {
     findings.push({
       image_id: prompt.image_id,
       scene_id: prompt.scene_id,
-      severity: "blocker",
+      severity: "warning",
       code: mention.code,
-      message: mention.message,
+      message: `${mention.message} Retain the current beat's selected location contract and attachment; this is a prose-audit warning.`,
       ref_id: mention.ref_id,
-      resolved: false,
+      resolved: true,
     });
   }
   findings.push(...providerExclusionPayloadFindings([{

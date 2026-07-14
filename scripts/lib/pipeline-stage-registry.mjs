@@ -1,4 +1,4 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-12.2";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-14.1";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -162,7 +162,7 @@ const stages = [
     output_artifact: "immutable reference batch reports + assets/images/references/*",
     approval: "automatic",
     validator: "reference_batch_completeness",
-    commands: ["imagegen start:references", "imagegen import-staged-codex:references"],
+    commands: ["imagegen start:references", "imagegen codex-work:references", "imagegen import-staged-codex:references"],
   },
   {
     id: "reference_image_approval",
@@ -217,7 +217,7 @@ const stages = [
     output_artifact: "immutable image batches + cut_execution_ledger.json",
     approval: "automatic",
     validator: "episode_image_manifest",
-    commands: ["imagegen start", "imagegen import-codex", "imagegen import-staged-codex"],
+    commands: ["imagegen start", "imagegen codex-work", "imagegen import-codex", "imagegen import-staged-codex"],
   },
   {
     id: "image_focal_analysis",
@@ -322,7 +322,7 @@ export function stageIsSatisfied(state) {
 
 export function commandStageFor(commandName, subcommandName, flags = {}) {
   const key = `${commandName} ${subcommandName}`.trim();
-  if (key === "imagegen start" || key === "imagegen import-staged-codex") {
+  if (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen import-staged-codex") {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
   }
@@ -398,6 +398,7 @@ function boundedProofScopeFlag(identity = {}) {
 function codexReferences(identity = {}) {
   return new Set([
     "codex",
+    "codex_imagegen",
     "hybrid_codex_refs_multichar",
     "hybrid_codex_opening_modelslab_rest",
     "hybrid_codex_refs_opening_risky_modelslab_rest",
@@ -407,6 +408,7 @@ function codexReferences(identity = {}) {
 function codexSceneCuts(identity = {}) {
   return new Set([
     "codex",
+    "codex_imagegen",
     "hybrid_codex_refs_multichar",
     "hybrid_codex_opening_modelslab_rest",
     "hybrid_codex_refs_opening_risky_modelslab_rest",
@@ -436,7 +438,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? `node bin/goldflow.mjs semantic plan ${base} --concurrency 4 --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
       : `node bin/goldflow.mjs semantic plan ${base} --concurrency 4`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
-    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed}`,
+    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency 15`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
     audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
@@ -450,7 +452,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: codexReferences(identity)
-      ? `Stage isolated built-in Codex reference rasters, then run: node bin/goldflow.mjs imagegen import-staged-codex ${base} --references-only true --staging-dir <staging-dir> --reference-ids <ref_ids>`
+      ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 3 --lease-sec 900`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency 15`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --note "<generated reference review notes>"`,
     visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base}`,
@@ -458,7 +460,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
     image_generation: codexSceneCuts(identity)
-      ? `Import staged Codex-routed cuts: node bin/goldflow.mjs imagegen import-staged-codex ${base} --staging-dir <staging-dir> --image-ids <codex_cut_ids> --output <episode-dir>/imagegen_report_${episode}.json; then run ModelsLab remainder: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
+      ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 3 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency 8`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,

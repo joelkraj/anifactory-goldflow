@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1130,6 +1131,7 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       "--correction-findings", correctionPath,
       "--base-prompts", basePlanPath,
       "--output", planPath,
+      "--visual-chunk-concurrency", String(Math.max(1, Number(flags["visual-chunk-concurrency"] ?? 12))),
       ...(flags["image-provider"] ? ["--image-provider", flags["image-provider"]] : []),
       ...(flags.provider ? ["--provider", flags.provider] : []),
       ...(flags["allow-draft-refs"] === "true" ? ["--allow-draft-refs", "true"] : []),

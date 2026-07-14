@@ -384,7 +384,7 @@ export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, ru
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const commands = [];
   if (codexIds.length) {
-    commands.push(`Stage fresh built-in Codex imagegen PNGs for ${codexIds.join(",")}, then run: node bin/goldflow.mjs imagegen import-staged-codex ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --staging-dir <isolated-qa-recovery-staging-dir> --output <episode-dir>/imagegen_report_${episode}.json --force true --qa-recovery true`);
+    commands.push(`node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids ${codexIds.join(",")} --qa-recovery true --max-attempts 3 --lease-sec 900`);
   }
   if (modelslabIds.length) {
     const providerFilter = /hybrid/i.test(provider) ? " --provider-filter modelslab" : "";

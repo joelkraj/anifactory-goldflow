@@ -38,7 +38,7 @@ const regenerateSpeakers = new Set(String(flags["regenerate-speakers"] ?? "")
   .map((value) => value.trim().toUpperCase())
   .filter(Boolean));
 const maxChars = Number(flags["max-chars"] ?? 850);
-const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 8)));
+const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 15)));
 const unitGapSec = Math.max(0, Math.min(1.5, Number(flags["unit-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_GAP_SEC ?? 0.08)));
 const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.16)));
 const stitchSampleRate = Math.max(8000, Math.min(96000, Number(flags["stitch-sample-rate"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_SAMPLE_RATE ?? 24000)));

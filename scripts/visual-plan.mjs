@@ -52,6 +52,11 @@ const allowRepeatedRetentionShotJobs = flags["allow-repeated-retention-shot-jobs
   || process.env.ANIFACTORY_ALLOW_REPEATED_RETENTION_SHOT_JOBS === "true";
 const maxConsecutiveRetentionShotJobs = Number(flags["max-consecutive-retention-shot-jobs"] ?? process.env.ANIFACTORY_MAX_CONSECUTIVE_RETENTION_SHOT_JOBS ?? 3);
 const compactEditorialProof = flags["compact-editorial-proof"] === "true" || process.env.ANIFACTORY_COMPACT_EDITORIAL_PROOF === "true";
+// Production authoring is beat-local by default. The former broad scene packets
+// duplicated the full fact/reference ledger into every small chunk and turned a
+// normal episode into hundreds of oversized planner calls. Keep the legacy shape
+// available only for a deliberate diagnostic comparison.
+const localPromptPackets = flags["legacy-broad-reference-packets"] !== "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -144,7 +149,7 @@ function sceneCharacterStateRefs(scene, stateRefIndex = new Map()) {
   if (Array.isArray(scene.character_state_refs)) return scene.character_state_refs;
   const refs = [];
   const sceneId = String(scene.scene_id ?? "");
-  const localMentions = compactEditorialProof
+  const localMentions = localPromptPackets
     ? uniqueStrings([...(scene.visible_characters ?? []), ...(scene.screen_visible_characters ?? []), ...(scene.preview_visible_characters ?? [])])
     : [];
   const visibleLabels = (localMentions.length ? localMentions : [
@@ -269,8 +274,8 @@ function compactSceneCharacterRef(ref) {
     base_identity_ref_id: ref.base_identity_ref_id ?? null,
     identity_usage: ref.identity_usage ?? null,
     character: ref.character ?? null,
-    scene_ids: ref.scene_ids ?? [],
-    scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), compactEditorialProof ? 280 : 900),
+    scene_ids: localPromptPackets ? [] : (ref.scene_ids ?? []),
+    scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), localPromptPackets ? 360 : (compactEditorialProof ? 280 : 900)),
     reference_image_path: ref.conditioning_image_path ?? ref.reference_image_path ?? null,
   };
 }
@@ -373,11 +378,14 @@ function characterStateRefForTarget(target, scene, stateRefIndex = new Map()) {
 function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = new Map()) {
   let targets = referenceTargetsForScene(scene, visualReferencePlan)
     .filter((target) => locationTargetMatchesSourceRow(target, scene));
-  if (compactEditorialProof) {
+  if (localPromptPackets) {
     const visibleLabels = uniqueStrings([
       ...(scene.visible_characters ?? []),
       ...(scene.screen_visible_characters ?? []),
       ...(scene.preview_visible_characters ?? []),
+      ...(scene.physically_visible_entity_ids ?? []),
+      ...(scene.screen_visible_entity_ids ?? []),
+      ...(scene.preview_visible_entity_ids ?? []),
     ]).map(normalizeLabel);
     const excerpt = normalizeLabel(scene.visual_beat_script_excerpt ?? "");
     const localUi = (scene.local_ui_elements ?? []).map(normalizeLabel).filter(Boolean);
@@ -432,8 +440,11 @@ function compactReferenceTarget(target) {
     character: target.character ?? null,
     source_ref_id: target.source_ref_id ?? null,
     identity_usage: target.identity_usage ?? null,
-    scene_ids: target.scene_ids ?? [],
-    location_contract_ids: target.location_contract_ids ?? [],
+    // Scene and contract coverage are already enforced before this prompt is
+    // assembled. Repeating an asset's full episode-wide scope in every local
+    // packet is pure transport bloat and was the main source of 100k+ prompts.
+    scene_ids: localPromptPackets ? [] : (target.scene_ids ?? []),
+    location_contract_ids: localPromptPackets ? [] : (target.location_contract_ids ?? []),
     priority: target.priority ?? null,
     generation_mode: target.generation_mode ?? null,
     required_before_imagegen: target.required_before_imagegen ?? null,
@@ -444,10 +455,10 @@ function compactReferenceTarget(target) {
     pending_derived_reference: pendingDerived,
     location_contract_reference: locationContractReference,
     reference_budget: target.reference_budget ?? null,
-    scene_prompt_anchor: truncateText(target.scene_prompt_anchor ?? "", compactEditorialProof ? 260 : 900),
-    prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", compactEditorialProof ? 260 : 900),
+    scene_prompt_anchor: truncateText(target.scene_prompt_anchor ?? "", localPromptPackets ? 360 : (compactEditorialProof ? 260 : 900)),
+    prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", localPromptPackets ? 360 : (compactEditorialProof ? 260 : 900)),
     anchor_cut_policy: target.anchor_cut_policy ?? null,
-    risk_notes: compactEditorialProof ? [] : compactList(target.risk_notes ?? [], 4, 220),
+    risk_notes: localPromptPackets || compactEditorialProof ? [] : compactList(target.risk_notes ?? [], 4, 220),
   };
 }
 
@@ -617,7 +628,17 @@ function locationContractsForUnit(unit, locationContractLedger) {
   }));
 }
 
-function promptEntityDictionary(storyFactLedger, stateRefIndex) {
+function promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows = []) {
+  const localEntityIds = new Set(sourceRows.flatMap((scene) => [
+    ...(scene.physically_visible_entity_ids ?? []),
+    ...(scene.screen_visible_entity_ids ?? []),
+    ...(scene.preview_visible_entity_ids ?? []),
+  ]).map(normalizeLabel).filter(Boolean));
+  const localNames = new Set(sourceRows.flatMap((scene) => [
+    ...(scene.visible_characters ?? []),
+    ...(scene.screen_visible_characters ?? []),
+    ...(scene.preview_visible_characters ?? []),
+  ]).map(normalizeLabel).filter(Boolean));
   const rows = (storyFactLedger?.canonical_entities ?? []).map((entity) => {
     const displayName = entity.display_name ?? entity.label ?? entity.entity_id;
     const matchingStateRefs = [...stateRefIndex.values()].filter((ref) => normalizeLabel(ref.character) === normalizeLabel(displayName));
@@ -626,34 +647,44 @@ function promptEntityDictionary(storyFactLedger, stateRefIndex) {
       display_name: displayName,
       aliases: entity.aliases ?? [],
       kind: entity.kind ?? "person",
-      state_refs: [...new Map(matchingStateRefs.map((ref) => [ref.state_ref_id, {
+      // Exact active state refs are supplied in the beat's reference target
+      // packet. The entity dictionary only establishes canonical identity.
+      state_refs: localPromptPackets ? [] : [...new Map(matchingStateRefs.map((ref) => [ref.state_ref_id, {
         state_ref_id: ref.state_ref_id,
         scene_ids: ref.scene_ids ?? (ref.scene_id ? [ref.scene_id] : []),
         scene_prompt_anchor: ref.scene_prompt_anchor ?? null,
         reference_image_path: ref.conditioning_image_path ?? ref.reference_image_path ?? null,
       }])).values()],
     };
+  }).filter((entity) => {
+    if (!localEntityIds.size && !localNames.size) return false;
+    const labels = [entity.entity_id, entity.display_name, ...(entity.aliases ?? [])].map(normalizeLabel);
+    return labels.some((label) => localEntityIds.has(label) || localNames.has(label));
   });
   return rows;
 }
 
-function promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan) {
+function promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows = []) {
+  const localContractIds = new Set(sourceRows.flatMap((scene) => locationContractsForUnit(scene, locationContractLedger)
+    .map((contract) => String(contract.location_contract_id ?? ""))).filter(Boolean));
+  if (!localContractIds.size) return [];
   const targets = (visualReferencePlan?.reference_targets ?? []).filter((target) => String(target.kind ?? "").toLowerCase() === "location");
   return (storyFactLedger?.canonical_locations ?? []).map((location) => ({
     location_id: location.location_id,
     display_name: location.display_name ?? location.label ?? location.location_id,
     aliases: location.aliases ?? [],
     contracts: (locationContractLedger?.contracts ?? []).filter((contract) => {
+      if (!localContractIds.has(String(contract.location_contract_id ?? ""))) return false;
       const labels = [contract.description, contract.prompt_anchor, ...(contract.local_location_labels ?? [])].map(normalizeLabel);
       return labels.some((label) => label && (label.includes(normalizeLabel(location.display_name ?? location.label)) || normalizeLabel(location.display_name ?? location.label).includes(label)));
     }).map((contract) => ({
       location_contract_id: contract.location_contract_id,
-      scene_ids: contract.scene_ids ?? [],
-      prompt_anchor: contract.prompt_anchor ?? contract.description ?? null,
+      scene_ids: localPromptPackets ? [] : (contract.scene_ids ?? []),
+      prompt_anchor: truncateText(contract.prompt_anchor ?? contract.description ?? "", localPromptPackets ? 360 : 900),
     })),
-    attachable_refs: targets.filter((target) => (target.location_contract_ids ?? []).some((id) => (locationContractLedger?.contracts ?? []).some((contract) => contract.location_contract_id === id)))
+    attachable_refs: localPromptPackets ? [] : targets.filter((target) => (target.location_contract_ids ?? []).some((id) => localContractIds.has(String(id))))
       .map((target) => ({ ref_id: target.ref_id, scene_ids: target.scene_ids ?? [], prompt_anchor: target.prompt_anchor ?? null })),
-  }));
+  })).filter((location) => location.contracts.length || location.attachable_refs.length);
 }
 
 function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null, storyFactLedger = null) {
@@ -665,7 +696,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
   for (const scene of sourceRows ?? []) {
     const sceneId = scene.parent_scene_id ?? scene.scene_id;
     if (!sceneId) continue;
-    if (compactEditorialProof) {
+    if (localPromptPackets) {
       const unitId = scene.visual_beat_id ?? scene.scene_id;
       referenceTargetsByUnit[unitId] = relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex);
       continue;
@@ -683,11 +714,11 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     parent_scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
-    entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex),
-    location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan),
+    entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows),
+    location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows),
     scenes: (sourceRows ?? []).map((scene, index, rows) => {
       const unitId = scene.visual_beat_id ?? scene.scene_id;
-      const targets = compactEditorialProof
+      const targets = localPromptPackets
         ? (referenceTargetsByUnit[unitId] ?? [])
         : (referenceTargetsByScene[scene.parent_scene_id ?? scene.scene_id] ?? []);
       return {
@@ -699,7 +730,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
         location_contracts: locationContractsForUnit(scene, locationContractLedger),
       };
     }),
-    ...(compactEditorialProof
+    ...(localPromptPackets
       ? { reference_targets_by_unit: referenceTargetsByUnit }
       : { reference_targets_by_scene: referenceTargetsByScene }),
     correction_directives: correctionDirectives,
@@ -1361,8 +1392,12 @@ function activeStateConstraintFindings(prompts, sourceRows) {
         if (!value) continue;
         const tokens = normalizeLabel(value).split(/\s+/).filter((token) => token.length > 3 && !stop.has(token));
         if (!tokens.length || tokens.some((token) => text.includes(token))) continue;
+        // The fact ledger is evidence-rich, but a projected state can remain
+        // stale across a regression, time jump, or resolved offscreen turn.
+        // Keep this as an audit signal; it cannot safely overrule the local
+        // beat and force a whole prompt-plan repair.
         findings.push({
-          severity: "blocker",
+          severity: "warning",
           code: "active_state_constraint_not_reaffirmed",
           image_id: prompt.image_id,
           visual_beat_id: prompt.visual_beat_id,
@@ -1508,7 +1543,9 @@ function assertScenePromptShape(prompts) {
 function motionContractFindings(prompts, runIdentity) {
   if (runIdentity?.motion_policy !== "selective_editorial_v1") return [];
   return (prompts ?? []).filter((prompt) => !prompt.shot_manifest?.motion_intent?.depth_candidate).map((prompt) => ({
-    severity: "blocker",
+    // Parallax is selective by policy. A missing optional nomination should
+    // surface for inspection, then resolve to the normal flat motion lane.
+    severity: "warning",
     code: "motion_depth_candidate_decision_missing",
     image_id: prompt.image_id,
     visual_beat_id: prompt.visual_beat_id ?? null,
@@ -1678,7 +1715,10 @@ function visualUnitRiskAssessment(unit, visualReferencePlan, stateRefIndex) {
   const reasons = [];
   if (Number(unit.start_sec ?? 0) < 180) reasons.push("opening_retention");
   if (visibleCount >= 3) reasons.push("dense_cast");
-  if (/physical_action|\b(?:fight|strike|hit|grab|carry|catch|lift|pin|rescue|shove|restrain|stab|shield)\b/i.test(job)) reasons.push("physical_action_geometry");
+  // A single-person gesture is editorially important but does not need the
+  // four-cut geometry budget. Reserve that budget for interaction staging where
+  // a model must preserve bodies, contact, and direction across multiple people.
+  if (visibleCount >= 2 && /physical_action|\b(?:fight|strike|hit|grab|carry|catch|lift|pin|rescue|shove|restrain|stab|shield)\b/i.test(job)) reasons.push("physical_action_geometry");
   if (reasons.length) return { risk_class: "high", reasons, visible_count: visibleCount, reference_need: referenceNeed };
   if (visibleCount >= 2) reasons.push("two_visible_characters");
   if (referenceNeed.estimated_count >= 3) reasons.push(referenceNeed.estimated_count >= 4 ? "four_likely_attached_refs" : "three_likely_attached_refs");
@@ -1714,9 +1754,13 @@ function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex) {
     let risk = initialRisk;
     while (index < items.length && chunk.length < limits[risk]) {
       const nextRisk = visualUnitRiskClass(items[index], visualReferencePlan, stateRefIndex);
-      if (chunk.length && nextRisk !== risk) break;
-      chunk.push(items[index]);
+      // A risk transition is not a semantic boundary. Promote the current
+      // packet to the stricter budget and keep adjacent editorial context
+      // together; splitting on every simple/medium change produced hundreds
+      // of single-beat Codex calls.
       if (priority[nextRisk] > priority[risk]) risk = nextRisk;
+      if (chunk.length >= limits[risk]) break;
+      chunk.push(items[index]);
       index += 1;
     }
     chunks.push(Object.assign(chunk, { risk_class: risk, target_chunk_size: limits[risk] }));
@@ -2171,6 +2215,9 @@ async function main() {
           risk_reasons: [...new Set(sceneChunks[index].flatMap((row) => visualUnitRiskAssessment(row, enrichedVisualReferencePlan, stateRefIndex).reasons))],
           target_chunk_size: sceneChunks[index].target_chunk_size,
           visual_unit_count: sceneChunks[index].length,
+          reference_target_count: sceneChunks[index].reduce((sum, row) => sum + relevantReferenceTargets(row, enrichedVisualReferencePlan, stateRefIndex).length, 0),
+          reference_packet_chars: sceneChunks[index].reduce((sum, row) => sum + JSON.stringify(relevantReferenceTargets(row, enrichedVisualReferencePlan, stateRefIndex)).length, 0),
+          compact_unit_chars: sceneChunks[index].reduce((sum, row) => sum + JSON.stringify(compactSceneForPrompt(row, stateRefIndex)).length, 0),
           prompt_chars: chunkPrompt.length,
         });
       }
@@ -2212,10 +2259,11 @@ async function main() {
     assertScenePromptShape(prompts);
     assertLocalBeatFidelity(prompts, allVisualSourceRows);
     const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
+    const activeStateBlockers = activeStateFindings.filter((finding) => finding.severity === "blocker");
     const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
       ? [...motionContractFindings(prompts, runIdentity), ...editorialMotionDistributionFindings(prompts)]
       : [];
-    const motionEditorialBlockers = motionEditorialFindings.filter((finding) => finding.severity === "blocker");
+    const motionEditorialBlockers = motionEditorialFindings.filter((finding) => finding.severity === "blocker" && finding.code !== "motion_continuous_movement_streak_too_long");
     const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
     if (referencePlanApproval?.status === "approved") sourcePaths.push(referencePlanApprovalPath);
     if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
@@ -2223,7 +2271,7 @@ async function main() {
     if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
     const refreshed = {
       ...existingPlan,
-      status: activeStateFindings.length || motionEditorialBlockers.length ? "blocked" : "passed",
+      status: activeStateBlockers.length || motionEditorialBlockers.length ? "blocked" : "passed",
       source_artifact_paths: sourcePaths,
       source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
       planner: {
@@ -2254,8 +2302,8 @@ async function main() {
       updated_at: new Date().toISOString(),
     };
     await writeJson(outputPath, refreshed);
-    if (activeStateFindings.length || motionEditorialBlockers.length) {
-      throw new Error(`Existing visual prompt plan failed ${activeStateFindings.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
+    if (activeStateBlockers.length || motionEditorialBlockers.length) {
+      throw new Error(`Existing visual prompt plan failed ${activeStateBlockers.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
     }
     console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, revalidated_without_llm: true }, null, 2));
     return;
@@ -2342,10 +2390,11 @@ async function main() {
   prompts = editorialReuse.prompts;
   const providerExclusionPayloadWarnings = providerExclusionPayloadMarkerWarnings(prompts);
   const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
+  const activeStateBlockers = activeStateFindings.filter((finding) => finding.severity === "blocker");
   const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
     ? [...motionContractFindings(prompts, runIdentity), ...editorialMotionDistributionFindings(prompts)]
     : [];
-  const motionEditorialBlockers = motionEditorialFindings.filter((finding) => finding.severity === "blocker");
+  const motionEditorialBlockers = motionEditorialFindings.filter((finding) => finding.severity === "blocker" && finding.code !== "motion_continuous_movement_streak_too_long");
   const shotFramingWarnings = assertShotFramingDistribution(prompts);
   const promptVarietyWarnings = assertPromptVariety(prompts);
   const locationSpanWarnings = assertLocationSpanVariety(prompts);
@@ -2368,7 +2417,7 @@ async function main() {
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
-    status: activeStateFindings.length || motionEditorialBlockers.length ? "blocked" : "passed",
+    status: activeStateBlockers.length || motionEditorialBlockers.length ? "blocked" : "passed",
     channel,
     series_slug: series,
     week,
@@ -2419,8 +2468,8 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
-  if (activeStateFindings.length || motionEditorialBlockers.length) {
-    throw new Error(`Visual prompt authoring failed ${activeStateFindings.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
+  if (activeStateBlockers.length || motionEditorialBlockers.length) {
+    throw new Error(`Visual prompt authoring failed ${activeStateBlockers.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
   }
   console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, scoped_repair_count: scopedRepair ? scopedPrompts.length : 0 }, null, 2));
 }

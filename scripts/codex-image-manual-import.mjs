@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -15,9 +16,12 @@ const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week,
 const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json");
 const imageDir = path.join(episodeDir, "assets", "images");
 const reportPath = flags.output ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
+const cutExecutionLedgerPath = flags["cut-execution-ledger"] ?? path.join(episodeDir, "cut_execution_ledger.json");
 const imageId = flags["image-id"] ?? flags.imageId ?? flags["cut-id"] ?? flags.cutId;
 const sourcePath = flags.source ?? flags["source-path"];
 const forceDuplicate = flags["force-duplicate"] === "true";
+const importRoute = flags["import-route"] ?? "codex_imagegen_manual_import";
+const workManifestPath = flags["work-manifest"] ?? null;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -63,19 +67,13 @@ async function verifyRasterImage(filePath) {
   const stat = await fs.stat(filePath);
   if (!stat.isFile() || stat.size <= 0) throw new Error(`Raster is missing or empty: ${filePath}`);
   if (/mock|placeholder/i.test(path.basename(filePath))) throw new Error(`Raster appears to be a mock/placeholder: ${filePath}`);
-  if (extension === ".png") {
-    const file = await fs.open(filePath, "r");
-    try {
-      const buffer = Buffer.alloc(8);
-      await file.read(buffer, 0, 8, 0);
-      if (!buffer.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-        throw new Error(`PNG failed magic-byte validation: ${filePath}`);
-      }
-    } finally {
-      await file.close();
-    }
+  const metadata = await sharp(filePath, { failOn: "error" }).metadata();
+  if (!metadata.width || !metadata.height) throw new Error(`Raster has no decodable dimensions: ${filePath}`);
+  if (metadata.width <= metadata.height) throw new Error(`Raster must be landscape: ${filePath} (${metadata.width}x${metadata.height})`);
+  if (Math.abs((metadata.width / metadata.height) - (16 / 9)) > 0.08) {
+    throw new Error(`Raster must be 16:9 within 0.08 tolerance: ${filePath} (${metadata.width}x${metadata.height})`);
   }
-  return stat;
+  return { stat, metadata };
 }
 
 function slotWord(value) {
@@ -120,6 +118,42 @@ function imagePathFor(prompt) {
   return path.join(imageDir, `${prompt.image_id}-codex-imagegen-image.png`);
 }
 
+async function updateCutExecutionLedger({ prompt, outputPath, outputHash, promptHash, referenceInputs }) {
+  const ledger = await readJson(cutExecutionLedgerPath, null);
+  if (!ledger || !Array.isArray(ledger.cuts)) return;
+  const cuts = ledger.cuts.map((cut) => {
+    if (String(cut?.image_id ?? "") !== String(prompt.image_id)) return cut;
+    return {
+      ...cut,
+      submitted_prompt_hash: promptHash,
+      references: referenceInputs,
+      image_provider: importRoute,
+      image_model: flags.model ?? "codex_builtin_imagegen_manual",
+      editorial_reuse_approved: false,
+      reuse_source_image_id: null,
+      image_path: outputPath,
+      image_sha256: outputHash,
+      generation_status: "manual_imported",
+      image_qa_status: "pending",
+      image_qa_note: null,
+      motion_profile_hash: null,
+      motion_clip_path: null,
+      motion_clip_sha256: null,
+      motion_clip_cache_key: null,
+      updated_at: new Date().toISOString(),
+    };
+  });
+  const pendingImageQaCount = cuts.filter((cut) => !String(cut?.image_qa_status ?? "").startsWith("passed")).length;
+  await writeJson(cutExecutionLedgerPath, {
+    ...ledger,
+    status: cuts.every((cut) => cut?.image_sha256) ? "passed" : "partial",
+    completed_image_count: cuts.filter((cut) => cut?.image_sha256).length,
+    pending_image_qa_count: pendingImageQaCount,
+    cuts,
+    updated_at: new Date().toISOString(),
+  });
+}
+
 async function main() {
   if (!imageId) throw new Error("Missing --image-id/--cut-id.");
   if (!sourcePath) throw new Error("Missing --source.");
@@ -141,36 +175,7 @@ async function main() {
   })));
   const promptPlanHash = await hashFile(promptPath);
   const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, reference_inputs: referenceInputs, prompt_plan_sha256: promptPlanHash }));
-  const outputPath = imagePathFor(prompt);
-  await fs.mkdir(path.dirname(outputPath), { recursive: true });
-  await fs.copyFile(sourcePath, outputPath);
-  await verifyRasterImage(outputPath);
-  await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
   const sourceHash = await hashFile(sourcePath);
-  const outputHash = await hashFile(outputPath);
-  const updatedAt = new Date().toISOString();
-  await writeJson(`${outputPath}.metadata.json`, {
-    image_id: prompt.image_id,
-    prompt_hash: promptHash,
-    source_prompt_path: promptPath,
-    source_prompt_sha256: promptPlanHash,
-    source_manual_codex_image_path: sourcePath,
-    source_manual_codex_image_sha256: sourceHash,
-    reference_image_paths: referenceImagePaths,
-    reference_inputs: referenceInputs,
-    reference_slots: promptForHash.reference_slots ?? [],
-    image_prompt: modelPrompt,
-    codex_prompt: modelPrompt,
-    image_provider: "codex_imagegen_manual_import",
-    model: flags.model ?? "codex_builtin_imagegen_manual",
-    generated: {
-      downloaded_path: outputPath,
-      manual_source_path: sourcePath,
-      manual_source_sha256: sourceHash,
-      output_sha256: outputHash,
-    },
-    updated_at: updatedAt,
-  });
   const allPromptIds = new Set(plan.prompts.filter((row) => row.image_generation_required !== false).map((row) => row.image_id));
   const priorReport = await readJson(reportPath, null);
   const mergedById = new Map();
@@ -187,12 +192,44 @@ async function main() {
       mergedById.set(row.image_id, row);
     }
   }
+  const outputPath = imagePathFor(prompt);
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  const tempOutputPath = `${outputPath}.import-${process.pid}-${Date.now()}.tmp.png`;
+  await fs.copyFile(sourcePath, tempOutputPath);
+  await verifyRasterImage(tempOutputPath);
+  await fs.rename(tempOutputPath, outputPath);
+  await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
+  const outputHash = await hashFile(outputPath);
+  const updatedAt = new Date().toISOString();
+  await writeJson(`${outputPath}.metadata.json`, {
+    image_id: prompt.image_id,
+    prompt_hash: promptHash,
+    source_prompt_path: promptPath,
+    source_prompt_sha256: promptPlanHash,
+    source_manual_codex_image_path: sourcePath,
+    source_manual_codex_image_sha256: sourceHash,
+    reference_image_paths: referenceImagePaths,
+    reference_inputs: referenceInputs,
+    reference_slots: promptForHash.reference_slots ?? [],
+    image_prompt: modelPrompt,
+    codex_prompt: modelPrompt,
+    image_provider: importRoute,
+    work_manifest_path: workManifestPath,
+    model: flags.model ?? "codex_builtin_imagegen_manual",
+    generated: {
+      downloaded_path: outputPath,
+      manual_source_path: sourcePath,
+      manual_source_sha256: sourceHash,
+      output_sha256: outputHash,
+    },
+    updated_at: updatedAt,
+  });
   mergedById.set(prompt.image_id, {
     image_id: prompt.image_id,
     status: "manual_imported",
     image_path: outputPath,
     prompt_hash: promptHash,
-    image_provider: "codex_imagegen_manual_import",
+    image_provider: importRoute,
     generated: {
       downloaded_path: outputPath,
       manual_source_path: sourcePath,
@@ -212,7 +249,8 @@ async function main() {
     episode,
     prompt_plan_path: promptPath,
     prompt_plan_hash: promptPlanHash,
-    image_provider: "codex_imagegen_manual_import",
+    image_provider: importRoute,
+    work_manifest_path: workManifestPath,
     image_dir: imageDir,
     image_count: results.length,
     expected_image_count: allPromptIds.size,
@@ -223,12 +261,19 @@ async function main() {
     updated_at: updatedAt,
   };
   await writeJson(reportPath, report);
+  await updateCutExecutionLedger({
+    prompt,
+    outputPath,
+    outputHash,
+    promptHash,
+    referenceInputs,
+  });
   console.log(JSON.stringify({ status: reportStatus, image_id: prompt.image_id, image_path: outputPath, report_path: reportPath, image_count: results.length, expected_image_count: allPromptIds.size, missing_image_count: missingImageCount }, null, 2));
 }
 
 main().catch(async (error) => {
   const failed = { schema: "goldflow_imagegen_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() };
-  if (reportPath) await writeJson(reportPath, failed).catch(() => {});
+  if (reportPath) await writeJson(`${reportPath}.failed-${Date.now()}.json`, failed).catch(() => {});
   console.error(failed.error);
   process.exitCode = 1;
 });

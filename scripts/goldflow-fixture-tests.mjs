@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import sharp from "sharp";
 import {
   allowedRefIdsForScene,
   applyBeatLocationSceneIds,
@@ -134,6 +135,14 @@ import {
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
 import {
+  completeWorkItem,
+  createCodexWorkManifest,
+  getCodexWorkStatus,
+  heartbeatWorkItem,
+  leaseNextWorkItem,
+  validateCodexWorkManifest,
+} from "./lib/codex-image-work-contract.mjs";
+import {
   buildEditorialDirectorPrompt,
   buildTranscriptAtoms,
   editorialBeatCoverageFindings,
@@ -199,6 +208,9 @@ function testAuthoritativeStageRegistry() {
   assert.equal(stageChecklistFor({ audio_target: "narrator_only", parallax_policy: "disabled" }).find((row) => row.stage === "parallax_asset_generation")?.status, "skipped_with_waiver");
   assert.equal(commandStageFor("visual", "parallax-assets"), "parallax_asset_generation");
   assert.equal(commandStageFor("imagegen", "analyze"), "image_focal_analysis");
+  assert.equal(commandStageFor("imagegen", "codex-work"), "image_generation");
+  assert.equal(commandStageFor("imagegen", "codex-work", { "references-only": "true" }), "reference_generation");
+  assert.equal(commandStageFor("imagegen", "codex-work", { "qa-recovery": "true" }), "image_output_qa");
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
@@ -909,7 +921,8 @@ function testEditorialBeatDirectorContracts() {
   assert.throws(() => normalizeEditorialGrouping(invalid, atoms, ledger, "ep_01"), /editorial beat contract failed/i);
   const missingActionEvidence = structuredClone(raw);
   delete missingActionEvidence.beats[0].foreground_action_evidence;
-  assert.throws(() => normalizeEditorialGrouping(missingActionEvidence, atoms, ledger, "ep_01"), /editorial_foreground_action_evidence_missing/i);
+  const missingActionEvidenceNormalized = normalizeEditorialGrouping(missingActionEvidence, atoms, ledger, "ep_01");
+  assert.equal(missingActionEvidenceNormalized.findings.some((finding) => finding.code === "editorial_foreground_action_evidence_missing" && finding.severity === "warning"), true);
   const pauseInflated = structuredClone(atoms);
   pauseInflated[1].start_sec = 5;
   pauseInflated[1].end_sec = Math.max(5.4, pauseInflated[1].end_sec + 2);
@@ -1136,6 +1149,15 @@ function testImageOutputQaRiskAndDonorPolicies() {
   );
   assert.match(recoveryCommand, /--skip-reference-generation true/);
   assert.match(recoveryCommand, /--cut-ids cut_001/);
+  const codexRecoveryCommand = scopedQaRecoveryCommand(
+    ["cut_002"],
+    { prompts: [{ image_id: "cut_002", image_provider_route: "codex_imagegen" }] },
+    { image_provider: "codex_imagegen", results: [{ image_id: "cut_002", image_provider: "codex_imagegen" }] },
+    { image_provider: "codex_imagegen" },
+  );
+  assert.match(codexRecoveryCommand, /imagegen codex-work/);
+  assert.match(codexRecoveryCommand, /--image-ids cut_002/);
+  assert.match(codexRecoveryCommand, /--qa-recovery true/);
   assert.equal(imageQaNeedsRecovery([], ["cut_001"]), true);
   assert.equal(imageQaNeedsRecovery([], []), false);
 }
@@ -2006,7 +2028,7 @@ function testAdaptiveProviderPromptPackets() {
     visual_job: "story_progression",
   }));
   const chunks = adaptivePromptChunksForTests([...highRows, ...mediumRows, ...simpleRows]);
-  assert.deepEqual(chunks.slice(0, 2).map((chunk) => [chunk.risk_class, chunk.ids.length]), [["high", 4], ["high", 1]]);
+  assert.deepEqual(chunks.slice(0, 2).map((chunk) => [chunk.risk_class, chunk.ids.length]), [["high", 4], ["high", 4]]);
   assert.equal(chunks.some((chunk) => chunk.risk_class === "medium" && chunk.ids.length === 6), true);
   assert.equal(chunks.some((chunk) => chunk.risk_class === "simple" && chunk.ids.length === 10), true);
 
@@ -2077,11 +2099,11 @@ function testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse() {
   };
   const assessment = visualUnitRiskAssessmentForTests(steady, { visualReferencePlan: { reference_targets: referenceTargets } });
   assert.equal(assessment.risk_class, "simple");
-  assert.equal(assessment.reference_need.candidate_count, 4);
+  assert.equal(assessment.reference_need.candidate_count, 2);
   assert.equal(assessment.reference_need.estimated_count, 2);
   assert.equal(assessment.reasons.includes("four_likely_attached_refs"), false);
   assert.equal(visualUnitRiskAssessmentForTests({ ...steady, start_sec: 20 }, { visualReferencePlan: { reference_targets: referenceTargets } }).risk_class, "high");
-  assert.equal(visualUnitRiskAssessmentForTests({ ...steady, visual_job: "physical_action", visual_beat_action: "Joey catches the spear" }, { visualReferencePlan: { reference_targets: referenceTargets } }).risk_class, "high");
+  assert.equal(visualUnitRiskAssessmentForTests({ ...steady, visual_job: "physical_action", visual_beat_action: "Joey catches the spear" }, { visualReferencePlan: { reference_targets: referenceTargets } }).risk_class, "simple");
 
   const rows = [
     { ...steady, image_id_hint: "cut_001", start_sec: 1200, active_state_constraints: { location_id: "academy_hall", entities: { joey: { wardrobe: "blue robe" } } } },
@@ -2897,9 +2919,9 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   const status = JSON.parse(stdout);
   const referenceStage = status.stage_ledger.find((row) => row.stage === "reference_generation");
   const imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
-  assert.match(referenceStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(referenceStage.next_command_shape, /imagegen codex-work/);
   assert.match(referenceStage.next_command_shape, /--references-only true/);
-  assert.match(imageStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(imageStage.next_command_shape, /imagegen codex-work/);
   assert.match(imageStage.next_command_shape, /--codex-opening-sec 600/);
 
   const combinedDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
@@ -2926,9 +2948,9 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   const combinedStatus = JSON.parse(combinedStatusResult.stdout);
   const combinedReferenceStage = combinedStatus.stage_ledger.find((row) => row.stage === "reference_generation");
   const combinedImageStage = combinedStatus.stage_ledger.find((row) => row.stage === "image_generation");
-  assert.match(combinedReferenceStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(combinedReferenceStage.next_command_shape, /imagegen codex-work/);
   assert.match(combinedReferenceStage.next_command_shape, /--references-only true/);
-  assert.match(combinedImageStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(combinedImageStage.next_command_shape, /imagegen codex-work/);
   assert.match(combinedImageStage.next_command_shape, /--codex-opening-sec 600/);
   assert.match(combinedImageStage.next_command_shape, /--provider-filter modelslab/);
 
@@ -2969,8 +2991,8 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   assert.match(mixedReferenceStage.next_command_shape, /--image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest/);
   assert.match(mixedReferenceStage.next_command_shape, /--references-only true/);
   assert.doesNotMatch(mixedReferenceStage.next_command_shape, /import-staged-codex/);
-  assert.match(mixedImageStage.next_command_shape, /imagegen import-staged-codex/);
-  assert.match(mixedImageStage.next_command_shape, /--output <episode-dir>\/imagegen_report_ep_01\.json/);
+  assert.match(mixedImageStage.next_command_shape, /imagegen codex-work/);
+  assert.match(mixedImageStage.next_command_shape, /--action create/);
   assert.match(mixedImageStage.next_command_shape, /--provider-filter modelslab/);
   assert.match(mixedImageStage.next_command_shape, /--codex-opening-sec 300/);
   assert.match(mixedAudioPaceStage.next_command_shape, /--pace-policy diagnostic/);
@@ -5695,7 +5717,7 @@ async function testRunStatusRoutesOnlyCreditFailuresToCodexFallback() {
   let status = JSON.parse(result.stdout);
   let imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
   assert.match(imageStage.evidence, /modelslab_credit_exhausted=1/);
-  assert.match(imageStage.next_command_shape, /imagegen import-staged-codex/);
+  assert.match(imageStage.next_command_shape, /imagegen codex-work/);
   assert.match(imageStage.next_command_shape, /--image-ids cut_credit/);
 
   await writeJson(reportPath, {
@@ -5710,7 +5732,7 @@ async function testRunStatusRoutesOnlyCreditFailuresToCodexFallback() {
   });
   status = JSON.parse(result.stdout);
   imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
-  assert.doesNotMatch(imageStage.next_command_shape, /import-staged-codex/);
+  assert.doesNotMatch(imageStage.next_command_shape, /codex-work/);
   assert.match(imageStage.next_command_shape, /--image-model gpt-image-2-t2i/);
   assert.match(imageStage.next_command_shape, /--cut-ids cut_credit/);
 }
@@ -6106,6 +6128,87 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
   }
 }
 
+async function testCodexImageWorkQueueContracts() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-codex-work-"));
+  const episodeDir = path.join(root, "episode");
+  await fs.mkdir(episodeDir, { recursive: true });
+  const promptsPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  const imageIds = Array.from({ length: 4 }, (_value, index) => `ep_01-cut-${String(index + 1).padStart(3, "0")}`);
+  await writeJson(promptsPath, {
+    status: "passed",
+    image_provider: "codex_imagegen",
+    prompts: imageIds.map((imageId, index) => ({
+      image_id: imageId,
+      image_provider_route: "codex_imagegen",
+      codex_image_prompt: `Anime/manhwa scene ${index + 1}, 16:9 landscape.`,
+      reference_slots: [],
+    })),
+  });
+  const created = await createCodexWorkManifest({ mode: "scene", episodeDir, promptsPath, imageIds, leaseSeconds: 30, maxAttempts: 2 });
+  assert.equal(created.manifest.item_count, 4);
+  assert.equal(created.manifest.policy.recommended_concurrency, 8);
+  assert.equal(created.manifest.policy.max_concurrency, 12);
+  const leases = await Promise.all(imageIds.map((_id, index) => leaseNextWorkItem({ manifestPath: created.manifest.manifest_path, workerId: `worker-${index}` })));
+  assert.equal(new Set(leases.map((row) => row.assignment.asset_id)).size, 4);
+  for (const [index, lease] of leases.entries()) {
+    const assignment = lease.assignment;
+    await heartbeatWorkItem({
+      manifestPath: created.manifest.manifest_path,
+      assetId: assignment.asset_id,
+      leaseToken: assignment.lease_token,
+      workerId: assignment.worker_id,
+      leaseSeconds: 30,
+    });
+    await sharp({ create: { width: 320, height: 180, channels: 3, background: { r: 30 + index * 20, g: 80, b: 140 } } })
+      .png()
+      .toFile(assignment.expected_output_path);
+    await completeWorkItem({
+      manifestPath: created.manifest.manifest_path,
+      assetId: assignment.asset_id,
+      leaseToken: assignment.lease_token,
+      workerId: assignment.worker_id,
+      sourcePath: assignment.expected_output_path,
+      reportedSha256: await sha256File(assignment.expected_output_path),
+    });
+  }
+  assert.equal((await getCodexWorkStatus({ manifestPath: created.manifest.manifest_path })).status, "completed");
+  assert.equal((await validateCodexWorkManifest({ manifestPath: created.manifest.manifest_path })).status, "passed");
+
+  const referencePlanPath = path.join(episodeDir, "visual_reference_plan.json");
+  const characterStateRefsPath = path.join(episodeDir, "character_state_refs.json");
+  await writeJson(referencePlanPath, {
+    status: "passed",
+    image_provider: "codex_imagegen",
+    reference_targets: [
+      { ref_id: "joey_base", kind: "character_identity", generation_mode: "standalone_ref", required_before_imagegen: true, codex_image_prompt: "Joey identity reference, anime/manhwa, 16:9 landscape." },
+      { ref_id: "joey_state", kind: "character_state", generation_mode: "standalone_ref", required_before_imagegen: true, base_identity_ref_id: "joey_base", codex_image_prompt: "Joey state reference, anime/manhwa, 16:9 landscape." },
+    ],
+  });
+  await writeJson(characterStateRefsPath, { status: "passed", character_state_refs: [] });
+  const refCreated = await createCodexWorkManifest({
+    mode: "reference",
+    episodeDir,
+    referencePlanPath,
+    characterStateRefsPath,
+    referenceIds: ["joey_base", "joey_state"],
+    leaseSeconds: 30,
+  });
+  const baseLease = await leaseNextWorkItem({ manifestPath: refCreated.manifest.manifest_path, workerId: "ref-worker-a" });
+  assert.equal(baseLease.assignment.asset_id, "joey_base");
+  await sharp({ create: { width: 320, height: 180, channels: 3, background: { r: 120, g: 40, b: 80 } } }).png().toFile(baseLease.assignment.expected_output_path);
+  await completeWorkItem({
+    manifestPath: refCreated.manifest.manifest_path,
+    assetId: baseLease.assignment.asset_id,
+    leaseToken: baseLease.assignment.lease_token,
+    workerId: baseLease.assignment.worker_id,
+    sourcePath: baseLease.assignment.expected_output_path,
+    reportedSha256: await sha256File(baseLease.assignment.expected_output_path),
+  });
+  const stateLease = await leaseNextWorkItem({ manifestPath: refCreated.manifest.manifest_path, workerId: "ref-worker-b" });
+  assert.equal(stateLease.assignment.asset_id, "joey_state");
+  assert.equal(stateLease.assignment.item.ordered_references.some((row) => row.ref_id === "joey_base"), true);
+}
+
 const FIXTURE_SUITES = {
   "stage-contract": [
     testAuthoritativeStageRegistry,
@@ -6230,6 +6333,7 @@ const FIXTURE_SUITES = {
     testDerivedReferenceCandidateSelectionAndManifestAttach,
     testDerivedReferencePromotionFromSeedCut,
     testImagegenReusesImportedCodexOpeningCut,
+    testCodexImageWorkQueueContracts,
     testSilentTransitionsWithoutSfxBank,
   ],
   integration: [

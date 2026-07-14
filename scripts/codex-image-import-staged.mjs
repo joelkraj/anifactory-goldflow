@@ -6,6 +6,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import sharp from "sharp";
+import { loadWorkManifest, validateCodexWorkManifest } from "./lib/codex-image-work-contract.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,11 +23,13 @@ const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts
 const visualReferencePlanPath = flags.referencePlan ?? flags["reference-plan"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
 const stagingDir = flags["staging-dir"] ?? path.join(episodeDir, "assets", "images", "codex_worker_staging");
-const reportPath = flags.output ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `imagegen_report_codex_manual_${episode}.json`);
+const referencesOnly = flags["references-only"] === "true";
+const reportPath = flags.output ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, referencesOnly ? `imagegen_report_${episode}_codex_references.json` : `imagegen_report_${episode}.json`);
 const dryRun = flags["dry-run"] === "true";
 const force = flags.force === "true" || flags["force-import"] === "true";
 const workflowBypass = flags["workflow-bypass"] === "true";
-const referencesOnly = flags["references-only"] === "true";
+const qaRecovery = flags["qa-recovery"] === "true";
+const manifestPath = flags.manifest ? path.resolve(flags.manifest) : null;
 const referenceDir = path.join(episodeDir, "assets", "images", "references");
 
 function parseFlags(parts) {
@@ -50,6 +54,20 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+async function writeImmutableBatchReport(report, label) {
+  if (dryRun) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const manifestId = manifestPath ? path.basename(path.dirname(manifestPath)) : "legacy-staged";
+  const outputPath = path.join(episodeDir, "reports", "imagegen-batches", `${stamp}-${label}-${manifestId}.json`);
+  await writeJson(outputPath, {
+    ...report,
+    immutable_batch: true,
+    work_manifest_path: manifestPath,
+    immutable_report_path: outputPath,
+  });
+  return outputPath;
+}
+
 async function exists(filePath) {
   return Boolean(filePath) && fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
 }
@@ -57,16 +75,33 @@ async function exists(filePath) {
 async function verifyPng(filePath) {
   const stat = await fs.stat(filePath);
   if (!stat.isFile() || stat.size <= 0) throw new Error(`Missing or empty staged image: ${filePath}`);
-  const handle = await fs.open(filePath, "r");
-  try {
-    const buffer = Buffer.alloc(8);
-    await handle.read(buffer, 0, 8, 0);
-    if (!buffer.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-      throw new Error(`Staged file is not a PNG: ${filePath}`);
-    }
-  } finally {
-    await handle.close();
+  const metadata = await sharp(filePath, { failOn: "error" }).metadata();
+  if (metadata.format !== "png" || !metadata.width || !metadata.height) throw new Error(`Staged file is not a decodable PNG: ${filePath}`);
+  if (metadata.width <= metadata.height) throw new Error(`Staged image must be landscape: ${filePath} (${metadata.width}x${metadata.height})`);
+  const aspect = metadata.width / metadata.height;
+  if (Math.abs(aspect - (16 / 9)) > 0.08) throw new Error(`Staged image must be 16:9 within 0.08 tolerance: ${filePath} (${metadata.width}x${metadata.height})`);
+  return metadata;
+}
+
+function requestedIds(...values) {
+  return new Set(values.flatMap((value) => String(value ?? "").split(",")).map((value) => value.trim()).filter(Boolean));
+}
+
+function assertExactFilesById(rows, scope, kind) {
+  const byId = new Map();
+  for (const row of rows) {
+    const list = byId.get(row.assetId) ?? [];
+    list.push(row.filePath);
+    byId.set(row.assetId, list);
   }
+  const duplicateIds = [...byId.entries()].filter(([, paths]) => paths.length !== 1);
+  if (duplicateIds.length) throw new Error(`Expected exactly one staged PNG per ${kind}; duplicates: ${duplicateIds.map(([id, paths]) => `${id}=${paths.length}`).join(", ")}`);
+  if (scope.size) {
+    const missing = [...scope].filter((id) => !byId.has(id));
+    const extra = [...byId.keys()].filter((id) => !scope.has(id));
+    if (missing.length || extra.length) throw new Error(`Staged ${kind} scope mismatch; missing=${missing.join(",") || "none"}; extra=${extra.join(",") || "none"}`);
+  }
+  return new Map([...byId.entries()].map(([id, paths]) => [id, paths[0]]));
 }
 
 async function hashFile(filePath) {
@@ -85,6 +120,24 @@ async function walk(dir) {
     if (entry.isFile() && entry.name.toLowerCase().endsWith(".png")) files.push(filePath);
   }
   return files;
+}
+
+async function validatedManifestRows(expectedMode, scope) {
+  if (!manifestPath) return null;
+  const validation = await validateCodexWorkManifest({ manifestPath });
+  if (validation.status !== "passed") throw new Error(`Codex work manifest is not importable; ${validation.finding_count} validation finding(s). Inspect ${manifestPath}.`);
+  const { manifest, manifestDir } = await loadWorkManifest(manifestPath);
+  if (manifest.mode !== expectedMode) throw new Error(`Codex work manifest mode is ${manifest.mode}; expected ${expectedMode}.`);
+  const manifestIds = new Set(manifest.items.map((item) => item.asset_id));
+  if (scope.size) {
+    const outOfManifest = [...scope].filter((id) => !manifestIds.has(id));
+    if (outOfManifest.length) throw new Error(`Requested IDs are outside Codex work manifest: ${outOfManifest.join(", ")}`);
+  }
+  const selectedIds = scope.size ? [...scope] : [...manifestIds];
+  return Promise.all(selectedIds.map(async (assetId) => {
+    const completion = await readJson(path.join(manifestDir, "completions", `${assetId}.json`));
+    return { assetId, filePath: completion.source_path };
+  }));
 }
 
 function imageIdFromPath(filePath) {
@@ -126,6 +179,8 @@ async function importOne(imageId, sourcePath) {
     reportPath,
   ];
   if (workflowBypass) args.push("--workflow-bypass", "true");
+  if (qaRecovery) args.push("--qa-recovery", "true");
+  if (manifestPath) args.push("--import-route", "codex_imagegen_worker_queue", "--work-manifest", manifestPath);
   const { stdout } = await execFile(process.execPath, args, { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
   return JSON.parse(stdout);
 }
@@ -171,8 +226,13 @@ async function importReferenceOne(refId, sourcePath, referencePlan, characterRef
   };
   await writeJson(visualReferencePlanPath, updatedReferencePlan);
   if (Array.isArray(characterRefs?.character_state_refs)) {
+    const currentPlanHash = await hashFile(visualReferencePlanPath);
     const updatedCharacterRefs = {
       ...characterRefs,
+      source_hashes: {
+        ...(characterRefs.source_hashes ?? {}),
+        [visualReferencePlanPath]: currentPlanHash,
+      },
       character_state_refs: characterRefs.character_state_refs.map((row) => row.source_ref_id === refId ? {
         ...row,
         reference_image_path: outputPath,
@@ -191,13 +251,15 @@ async function importReferences() {
   const referencePlan = await readJson(visualReferencePlanPath);
   const characterRefs = await exists(characterStateRefsPath) ? await readJson(characterStateRefsPath) : null;
   const validIds = new Set((referencePlan.reference_targets ?? []).map((row) => row.ref_id).filter(Boolean));
-  const scope = new Set(String(flags["reference-ids"] ?? flags["reference-id"] ?? "").split(",").map((row) => row.trim()).filter(Boolean));
-  const files = (await walk(stagingDir))
-    .map((filePath) => ({ filePath, refId: refIdFromPath(filePath, validIds) }))
-    .filter((row) => row.refId && (!scope.size || scope.has(row.refId)))
-    .sort((left, right) => left.refId.localeCompare(right.refId, undefined, { numeric: true }));
-  const byId = new Map();
-  for (const row of files) byId.set(row.refId, row.filePath);
+  const scope = requestedIds(flags["reference-ids"], flags["reference-id"]);
+  const unknownScope = [...scope].filter((id) => !validIds.has(id));
+  if (unknownScope.length) throw new Error(`Unknown reference ids requested: ${unknownScope.join(", ")}`);
+  const manifestRows = await validatedManifestRows("reference", scope);
+  const files = (manifestRows ?? (await walk(stagingDir))
+    .map((filePath) => ({ filePath, assetId: refIdFromPath(filePath, validIds) }))
+    .filter((row) => row.assetId && (!scope.size || scope.has(row.assetId))))
+    .sort((left, right) => left.assetId.localeCompare(right.assetId, undefined, { numeric: true }));
+  const byId = assertExactFilesById(files, scope, "reference id");
   const imports = [];
   const importedHashOwners = new Map();
   let currentReferencePlan = referencePlan;
@@ -228,6 +290,7 @@ async function importReferences() {
     episode,
     reference_only: true,
     staging_dir: stagingDir,
+    work_manifest_path: manifestPath,
     visual_reference_plan_path: visualReferencePlanPath,
     character_state_refs_path: characterStateRefsPath,
     imported_count: imports.length,
@@ -235,12 +298,15 @@ async function importReferences() {
     updated_at: new Date().toISOString(),
   };
   if (!dryRun) await writeJson(reportPath, report);
+  const immutableReportPath = await writeImmutableBatchReport(report, "codex-references");
   console.log(JSON.stringify({
     status: dryRun ? "dry_run" : report.status,
     staging_dir: stagingDir,
     report_path: dryRun ? null : reportPath,
     imported_count: imports.length,
+    immutable_report_path: immutableReportPath,
   }, null, 2));
+  if (report.status !== "passed") throw new Error(`Staged Codex reference import failed; inspect ${reportPath}`);
 }
 
 async function main() {
@@ -251,6 +317,9 @@ async function main() {
   const plan = await readJson(promptPath);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
   const validIds = new Set(plan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => prompt.image_id));
+  const scope = requestedIds(flags["image-ids"], flags["image-id"], flags["cut-ids"], flags["cut-id"]);
+  const unknownScope = [...scope].filter((id) => !validIds.has(id));
+  if (unknownScope.length) throw new Error(`Unknown image ids requested: ${unknownScope.join(", ")}`);
   const priorReport = await exists(reportPath) ? await readJson(reportPath) : null;
   const alreadyImported = new Set();
   const importedHashOwners = new Map();
@@ -262,12 +331,12 @@ async function main() {
       if (!importedHashOwners.has(hash)) importedHashOwners.set(hash, row.image_id);
     }
   }
-  const files = (await walk(stagingDir))
-    .map((filePath) => ({ filePath, imageId: imageIdFromPath(filePath) }))
-    .filter((row) => row.imageId && validIds.has(row.imageId))
-    .sort((left, right) => left.imageId.localeCompare(right.imageId, undefined, { numeric: true }));
-  const byId = new Map();
-  for (const row of files) byId.set(row.imageId, row.filePath);
+  const manifestRows = await validatedManifestRows("scene", scope);
+  const files = (manifestRows ?? (await walk(stagingDir))
+    .map((filePath) => ({ filePath, assetId: imageIdFromPath(filePath) }))
+    .filter((row) => row.assetId && validIds.has(row.assetId) && (!scope.size || scope.has(row.assetId))))
+    .sort((left, right) => left.assetId.localeCompare(right.assetId, undefined, { numeric: true }));
+  const byId = assertExactFilesById(files, scope, "image id");
   const imports = [];
   for (const [imageId, filePath] of byId.entries()) {
     await verifyPng(filePath);
@@ -293,6 +362,7 @@ async function main() {
     console.log(JSON.stringify(imports.at(-1)));
   }
   const report = dryRun || !(await exists(reportPath)) ? null : await readJson(reportPath);
+  const immutableReportPath = report ? await writeImmutableBatchReport(report, "codex-scenes") : null;
   console.log(JSON.stringify({
     status: dryRun ? "dry_run" : "completed",
     staging_dir: stagingDir,
@@ -300,6 +370,7 @@ async function main() {
     report_path: reportPath,
     image_count: report?.image_count ?? null,
     missing_image_count: report?.missing_image_count ?? null,
+    immutable_report_path: immutableReportPath,
   }, null, 2));
 }
 

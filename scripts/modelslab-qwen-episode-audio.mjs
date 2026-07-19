@@ -274,38 +274,51 @@ function isRetryableNonJsonResponse(response, text) {
 }
 
 async function fetchVoiceRequest(id) {
-  const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_ATTEMPTS ?? 4));
+  const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_ATTEMPTS ?? 8));
   const baseDelayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_BACKOFF_MS ?? 5000));
-  let response;
+  const requestJitterMs = Math.abs(Number(id) || 0) % 7 * 250;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response;
     try {
       response = await fetchWithTimeout(`https://modelslab.com/api/v6/voice/fetch/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key: apiKey() }),
       });
-      break;
     } catch (error) {
       if (attempt < attempts && isAbortError(error)) {
-        const delayMs = baseDelayMs * attempt;
+        const delayMs = baseDelayMs * attempt + requestJitterMs;
         console.warn(`/api/v6/voice/fetch/${id} timed out (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
         await sleep(delayMs);
         continue;
       }
       throw error;
     }
+    const text = await response.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      if (attempt < attempts && isRetryableNonJsonResponse(response, text)) {
+        const delayMs = baseDelayMs * attempt + requestJitterMs;
+        console.warn(`/api/v6/voice/fetch/${id} returned retryable non-json ${response.status} (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw new Error(`/api/v6/voice/fetch/${id} returned non-json ${response.status}: ${text.slice(0, 500)}`);
+    }
+    if (!response.ok || json.status === "error" || json.status === "failed") {
+      if (attempt < attempts && isRateLimitResponse(response, json)) {
+        const delayMs = baseDelayMs * attempt + requestJitterMs;
+        console.warn(`/api/v6/voice/fetch/${id} rate limited (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw new Error(`/api/v6/voice/fetch/${id} failed ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+    }
+    return json;
   }
-  const text = await response.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`/api/v6/voice/fetch/${id} returned non-json ${response.status}: ${text.slice(0, 500)}`);
-  }
-  if (!response.ok || json.status === "error") {
-    throw new Error(`/api/v6/voice/fetch/${id} failed ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
-  }
-  return json;
+  throw new Error(`/api/v6/voice/fetch/${id} failed after ${attempts} attempts`);
 }
 
 async function resolveAudioResponse(initial) {

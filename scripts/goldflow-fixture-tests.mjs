@@ -129,6 +129,7 @@ import {
   visualReferenceCodexCacheEnabledForTests,
 } from "./visual-reference-plan.mjs";
 import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
+import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
 import {
@@ -3310,6 +3311,22 @@ function testVoiceDirectionCharacterization() {
 
   const nonSpokenDirection = voiceDirectionTransformForTests("[SFX: cold system ping]");
   assert.deepEqual(nonSpokenDirection.paragraph_units.map((unit) => unit.kind), ["sound_design"]);
+}
+
+function testScriptMetaScanAllowsInStoryAnalyticsObjects() {
+  const inStory = scanScriptMetaContamination([
+    "Joey showed Nora the retention graph.",
+    "The curve proved viewers who found her came back.",
+  ].join("\n"));
+  assert.equal(inStory.status, "passed");
+
+  const leakedPlanning = scanScriptMetaContamination("That was the hook. Viewer anticipation verified. Opening retention improved.");
+  assert.equal(leakedPlanning.status, "blocked");
+  assert.deepEqual(leakedPlanning.blockers.map((row) => row.code).sort(), [
+    "hook_meta_line",
+    "opening_retention_meta",
+    "viewer_anticipation_meta",
+  ].sort());
 }
 
 function testQwenPlanAuditsAppliedTtsOverrides() {
@@ -6545,6 +6562,7 @@ const FIXTURE_SUITES = {
     testRenderRequiresHashMatchedImageQa,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,
+    testScriptMetaScanAllowsInStoryAnalyticsObjects,
     testQwenPlanAuditsAppliedTtsOverrides,
     testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets,
     testNarrationPaceChecks,

@@ -55,11 +55,6 @@ const META_PATTERNS = [
     reason: "CTR analytics language leaked into narration prose.",
   },
   {
-    code: "retention_graph_meta",
-    pattern: /\bretention graphs?\b/i,
-    reason: "Analytics-dashboard language leaked into narration prose.",
-  },
-  {
     code: "audience_retention_meta",
     pattern: /\baudience retention\b/i,
     reason: "Audience-retention analytics language leaked into narration prose.",

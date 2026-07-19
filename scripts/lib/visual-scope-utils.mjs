@@ -155,6 +155,22 @@ export function dropOutOfScopePromptRefs(prompt, allowedRefIds) {
     })
     .map((usage) => normalizeRefId(usage?.ref_id))
     .filter((refId) => refId && allowed.has(refId)));
+  const positiveAttachmentCounts = new Map();
+  const normalizedAllowedRef = (refId) => {
+    const normalized = normalizeRefId(refId);
+    return normalized && allowed.has(normalized) ? normalized : null;
+  };
+  const selectedRefIds = new Set([
+    ...next.reference_requirements.map((requirement) => normalizedAllowedRef(requirement?.ref_id)),
+    ...asArray(next.shot_manifest?.reference_slots).map((slot) => normalizedAllowedRef(slot?.ref_id)),
+  ].filter(Boolean));
+  const roleDeclaredRefIds = new Set([
+    ...asArray(next.shot_manifest?.character_state_ref_ids).map(normalizedAllowedRef),
+    normalizedAllowedRef(next.shot_manifest?.protagonist_state_ref_id),
+    normalizedAllowedRef(next.shot_manifest?.location_ref_id),
+  ].filter(Boolean));
+  for (const refId of selectedRefIds) positiveAttachmentCounts.set(refId, 1);
+  for (const refId of roleDeclaredRefIds) positiveAttachmentCounts.set(refId, (positiveAttachmentCounts.get(refId) ?? 0) + 1);
   const recordDrop = (refId, field) => {
     referenceUsage.push({
       ref_id: refId,
@@ -175,6 +191,15 @@ export function dropOutOfScopePromptRefs(prompt, allowedRefIds) {
       .map(normalizeRefId)
       .filter((refId) => {
         if (!refId) return false;
+        if ((positiveAttachmentCounts.get(refId) ?? 0) >= 2) {
+          referenceUsage.push({
+            ref_id: refId,
+            usage: "positive_attachment_consensus_removed_from_forbidden_ref_ids",
+            field: "shot_manifest.forbidden_ref_ids",
+            reason: "The same in-scope ref was selected in at least two positive attachment fields, so deterministic normalization resolved the contradictory forbidden entry without authoring a replacement.",
+          });
+          return false;
+        }
         if (referenceLimitDropped.has(refId)) {
           referenceUsage.push({
             ref_id: refId,

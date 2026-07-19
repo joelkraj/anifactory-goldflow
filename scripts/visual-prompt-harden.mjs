@@ -609,6 +609,12 @@ function looksLikePhysicalLocation(prompt, promptTextValue) {
   return /\b(?:apartment|kitchen|bedroom|bathroom|gym|treadmill|office|workplace|cubicle|support desk|street|sidewalk|porch|bridge|lobby|elevator|coffee shop|courthouse|corridor|hallway|hall|boardroom|conference|stage|auditorium|arena|courtyard|chapel|cathedral|academy|campus|manor|station|facility|booth|hotel|tower|clinic|dental|warehouse|room|table|dining)\b/i.test(text);
 }
 
+function isPureMediaDepiction(prompt) {
+  const depictionMode = String(prompt?.depiction_mode ?? "").trim().toLowerCase();
+  if (!new Set(["document_or_screen", "system_preview"]).has(depictionMode)) return false;
+  return !Array.isArray(prompt?.physically_visible_entity_ids) || prompt.physically_visible_entity_ids.length === 0;
+}
+
 function sanitizePrompt(prompt, indexes) {
   const findings = [];
   const rawMotionIntent = prompt?.shot_manifest?.motion_intent;
@@ -1034,9 +1040,12 @@ function sanitizePrompt(prompt, indexes) {
       resolved: false,
     });
   }
+  const physicalLocationLanguage = looksLikePhysicalLocation(prompt, promptTextValue);
+  const pureMediaDepiction = isPureMediaDepiction(prompt);
   if (indexes.usesLocationContractLedger
     && !requestedLocationContractId
-    && looksLikePhysicalLocation(prompt, promptTextValue)) {
+    && physicalLocationLanguage
+    && !pureMediaDepiction) {
     const inScopeLocationContracts = indexes.locationContracts.filter((contract) => sceneIdsCover(contract.scene_ids, prompt.scene_id));
     const hasInScopeLocationContract = inScopeLocationContracts.length > 0;
     findings.push({
@@ -1052,7 +1061,8 @@ function sanitizePrompt(prompt, indexes) {
   } else if (!indexes.usesLocationContractLedger
     && !requestedLocationRefId
     && !selectedRequirements.some((req) => referenceKindRank(req.kind) === 1)
-    && looksLikePhysicalLocation(prompt, promptTextValue)) {
+    && physicalLocationLanguage
+    && !pureMediaDepiction) {
     const inScopeLocationRefs = indexes.locationTargets.filter((target) => sceneIdsCover(target.scene_ids, prompt.scene_id) && targetIsLocationContract(target));
     const hasInScopeLocationRef = inScopeLocationRefs.length > 0;
     findings.push({
@@ -1064,6 +1074,15 @@ function sanitizePrompt(prompt, indexes) {
         ? `Legacy prompt describes a physical environment without its in-scope location ref contract: ${inScopeLocationRefs.map((target) => target.ref_id).join(", ")}.`
         : "Legacy prompt describes a physical environment, but no in-scope location ref contract exists.",
       resolved: !hasInScopeLocationRef,
+    });
+  } else if (!requestedLocationContractId && physicalLocationLanguage && pureMediaDepiction) {
+    findings.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id,
+      severity: "warning",
+      code: "screen_only_location_contract_not_required",
+      message: `The ${prompt.depiction_mode} beat has no physically visible current-reality entities, so parent-scene location language does not require a physical location contract.`,
+      resolved: true,
     });
   }
   for (const refId of forbiddenRefs) {

@@ -2146,6 +2146,11 @@ function testAdaptiveProviderPromptPackets() {
     start_sec: 0,
     duration_sec: 3.2,
     local_location: "Academy Hall",
+    depiction_mode: "document_or_screen",
+    physically_visible_entity_ids: [],
+    screen_visible_entity_ids: ["joey"],
+    preview_visible_entity_ids: [],
+    mentioned_only_entity_ids: [],
     visible_characters: ["Joey"],
   };
   const authored = {
@@ -2179,6 +2184,9 @@ function testAdaptiveProviderPromptPackets() {
   assert.equal(normalized.modelslab_image_prompt, authored.provider_prompt);
   assert.equal(normalized.codex_image_prompt, null);
   assert.deepEqual(normalized.visible_subjects, ["Joey"]);
+  assert.equal(normalized.depiction_mode, "document_or_screen");
+  assert.deepEqual(normalized.physically_visible_entity_ids, []);
+  assert.deepEqual(normalized.screen_visible_entity_ids, ["joey"]);
   assert.deepEqual(normalized.reference_requirements.map((row) => row.ref_id), ["joey_ref"]);
   const retimed = retimeExistingPromptsForTests([normalized], [{
     ...source,
@@ -2703,6 +2711,31 @@ function testReferenceLimitOmissionIsNotForbidden() {
     usage.ref_id === "loc_stage"
     && usage.usage === "non_forbidden_ref_removed_from_forbidden_ref_ids"
     && usage.field === "shot_manifest.forbidden_ref_ids"
+  )), true);
+}
+
+function testPositiveAttachmentConsensusRemovesForbiddenConflict() {
+  const allowed = new Set(["nora_identity", "wrong_prop"]);
+  const sanitized = dropOutOfScopePromptRefs({
+    reference_requirements: [
+      { ref_id: "nora_identity", kind: "character_state" },
+      { ref_id: "wrong_prop", kind: "prop" },
+    ],
+    reference_usage: [],
+    shot_manifest: {
+      visible_characters: ["Nora"],
+      character_state_ref_ids: ["nora_identity"],
+      reference_slots: [
+        { ref_id: "nora_identity", kind: "character_state" },
+        { ref_id: "wrong_prop", kind: "prop" },
+      ],
+      forbidden_ref_ids: ["nora_identity", "wrong_prop"],
+    },
+  }, allowed);
+  assert.deepEqual(sanitized.shot_manifest.forbidden_ref_ids, ["wrong_prop"]);
+  assert.equal(sanitized.reference_usage.some((usage) => (
+    usage.ref_id === "nora_identity"
+    && usage.usage === "positive_attachment_consensus_removed_from_forbidden_ref_ids"
   )), true);
 }
 
@@ -4678,7 +4711,7 @@ function testPassedReviewClearsDeadletterPayload() {
   );
 }
 
-async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraInventoryAssets = [], extraCharacterStateRefs = [], manualTriage = null, includeDefaultLocationRef = true, includeDefaultCharacterRef = true, locationContracts = null, referenceDirectorContractVersion = null }) {
+async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraInventoryAssets = [], extraCharacterStateRefs = [], manualTriage = null, includeDefaultLocationRef = true, includeDefaultCharacterRef = true, locationContracts = null, referenceDirectorContractVersion = null, depictionMode = "current_reality", physicallyVisibleEntityIds = ["joey"] }) {
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   const hash = "fixture_hash";
   await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
@@ -4735,6 +4768,8 @@ async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = 
       modelslab_image_prompt: promptText,
       codex_image_prompt: codexPromptText,
       location: "apartment kitchen",
+      depiction_mode: depictionMode,
+      physically_visible_entity_ids: physicallyVisibleEntityIds,
       reference_requirements: referenceRequirements,
       reference_usage: referenceUsage,
       shot_manifest: {
@@ -5232,6 +5267,69 @@ async function testVisualHardenV2AcceptsTextLocationContractWithoutImageRef() {
   assert.equal(plan.prompts[0].shot_manifest.location_contract_id, "apartment_kitchen_contract");
   assert.equal(plan.prompts[0].shot_manifest.location_ref_id, null);
   assert.equal(report.findings.some((finding) => finding.code === "physical_location_contract_missing"), false);
+}
+
+async function testVisualHardenV2AllowsPureScreenDepictionWithoutLocationContract() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "A full-screen dashboard fills the apartment monitor while the physical room remains offscreen.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    depictionMode: "document_or_screen",
+    physicallyVisibleEntityIds: [],
+    referenceDirectorContractVersion: "reference_director_v2",
+    locationContracts: [{
+      location_contract_id: "apartment_kitchen_contract",
+      scene_ids: ["scene_001"],
+      description: "apartment kitchen",
+      prompt_anchor: "compact apartment kitchen with one window and dark counters",
+    }],
+    includeDefaultLocationRef: false,
+    includeDefaultCharacterRef: false,
+    shotManifest: {
+      visible_characters: [],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+      location_contract_id: null,
+      location_ref_id: null,
+    },
+    referenceRequirements: [],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => finding.code === "physical_location_contract_missing"), false);
+  assert.equal(report.findings.some((finding) => finding.code === "screen_only_location_contract_not_required"), true);
+}
+
+async function testVisualHardenV2StillBlocksCurrentRealityWithoutLocationContract() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "An empty apartment kitchen with a table and morning light fills the frame.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    depictionMode: "current_reality",
+    physicallyVisibleEntityIds: [],
+    referenceDirectorContractVersion: "reference_director_v2",
+    locationContracts: [{
+      location_contract_id: "apartment_kitchen_contract",
+      scene_ids: ["scene_001"],
+      description: "apartment kitchen",
+      prompt_anchor: "compact apartment kitchen with one window and dark counters",
+    }],
+    includeDefaultLocationRef: false,
+    includeDefaultCharacterRef: false,
+    shotManifest: {
+      visible_characters: [],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+      location_contract_id: null,
+      location_ref_id: null,
+    },
+    referenceRequirements: [],
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.findings.some((finding) => finding.code === "physical_location_contract_missing" && finding.severity === "blocker"), true);
 }
 
 async function testVisualHardenV2BlocksUnknownLocationContract() {
@@ -6586,6 +6684,7 @@ const FIXTURE_SUITES = {
     testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement,
     testOutOfScopeRefDropping,
     testReferenceLimitOmissionIsNotForbidden,
+    testPositiveAttachmentConsensusRemovesForbiddenConflict,
     testOutOfScopeLocationMentionAssertion,
     testProviderAwarePromptSelection,
     testSceneImageProductionContractBlocksDroppedRefsAndStyle,
@@ -6624,6 +6723,8 @@ const FIXTURE_SUITES = {
     testVisualHardenBlocksMissingManifestLocationWithoutAddingIt,
     testVisualHardenBlocksMissingPendingDerivedLocationContract,
     testVisualHardenV2AcceptsTextLocationContractWithoutImageRef,
+    testVisualHardenV2AllowsPureScreenDepictionWithoutLocationContract,
+    testVisualHardenV2StillBlocksCurrentRealityWithoutLocationContract,
     testVisualHardenV2BlocksUnknownLocationContract,
     testVisualHardenManualTriageCanDisregardSpecificBlocker,
     testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation,

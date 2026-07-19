@@ -1282,6 +1282,11 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     visual_novelty_directive: sourceUnit?.visual_novelty_directive ?? row.visual_novelty_directive ?? null,
     location_timeline_label: sourceUnit?.location_timeline_label ?? row.location_timeline_label ?? null,
     visual_beat_quality_findings: sourceUnit?.visual_beat_quality_findings ?? row.visual_beat_quality_findings ?? [],
+    depiction_mode: sourceUnit?.depiction_mode ?? row.depiction_mode ?? "current_reality",
+    physically_visible_entity_ids: sourceUnit?.physically_visible_entity_ids ?? row.physically_visible_entity_ids ?? [],
+    screen_visible_entity_ids: sourceUnit?.screen_visible_entity_ids ?? row.screen_visible_entity_ids ?? [],
+    preview_visible_entity_ids: sourceUnit?.preview_visible_entity_ids ?? row.preview_visible_entity_ids ?? [],
+    mentioned_only_entity_ids: sourceUnit?.mentioned_only_entity_ids ?? row.mentioned_only_entity_ids ?? [],
     active_state_constraints: sourceUnit?.active_state_constraints ?? null,
     start_sec: Number(sourceUnit?.start_sec ?? row.start_sec ?? 0),
     duration_sec: Math.max(0.25, Number(sourceUnit?.duration_sec ?? row.duration_sec ?? 6)),
@@ -1316,6 +1321,23 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     characterStateRefs: scopedCharacterRefs,
   });
   return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
+}
+
+function revalidateExistingPrompt(prompt, sourceUnit, scope = {}) {
+  const scopedCharacterRefs = sceneCharacterStateRefs(sourceUnit, scope.stateRefIndex ?? new Map());
+  const allowedRefIds = allowedRefIdsForScene({
+    scene: sourceUnit,
+    visualReferencePlan: scope.visualReferencePlan,
+    characterStateRefs: scopedCharacterRefs,
+  });
+  return dropOutOfScopePromptRefs({
+    ...prompt,
+    depiction_mode: sourceUnit?.depiction_mode ?? prompt.depiction_mode ?? "current_reality",
+    physically_visible_entity_ids: sourceUnit?.physically_visible_entity_ids ?? prompt.physically_visible_entity_ids ?? [],
+    screen_visible_entity_ids: sourceUnit?.screen_visible_entity_ids ?? prompt.screen_visible_entity_ids ?? [],
+    preview_visible_entity_ids: sourceUnit?.preview_visible_entity_ids ?? prompt.preview_visible_entity_ids ?? [],
+    mentioned_only_entity_ids: sourceUnit?.mentioned_only_entity_ids ?? prompt.mentioned_only_entity_ids ?? [],
+  }, allowedRefIds);
 }
 
 export function normalizePromptPacketForTests(row, sourceUnit, options = {}) {
@@ -2302,6 +2324,10 @@ async function main() {
     assertPromptIdentityMatchesInputs(prompts, allVisualSourceRows, episode, "visual prompt revalidation");
     const timingRebind = flags["retime-existing"] === "true";
     if (timingRebind) prompts = retimeExistingPromptsForTests(prompts, allVisualSourceRows, episode);
+    prompts = prompts.map((prompt, index) => revalidateExistingPrompt(prompt, allVisualSourceRows[index], {
+      visualReferencePlan: enrichedVisualReferencePlan,
+      stateRefIndex,
+    }));
     assertScenePromptShape(prompts);
     assertLocalBeatFidelity(prompts, allVisualSourceRows, storyFactLedger);
     const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);

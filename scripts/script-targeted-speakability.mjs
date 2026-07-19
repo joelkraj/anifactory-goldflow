@@ -239,14 +239,26 @@ function targetedFindings(script) {
 }
 
 function replacementsFromFindings(findings) {
-  return findings.map((finding) => ({
-    from: finding.source_text,
-    to: finding.suggested_spoken_text,
-    regex: false,
-    flags: "g",
-    scope: "qwen_spoken_text",
-    reason: finding.reason,
-  }));
+  const byContract = new Map();
+  for (const finding of findings) {
+    const replacement = {
+      from: finding.source_text,
+      to: finding.suggested_spoken_text,
+      regex: false,
+      flags: "g",
+      scope: "qwen_spoken_text",
+      reason: finding.reason,
+    };
+    const key = JSON.stringify([
+      replacement.from,
+      replacement.to,
+      replacement.regex,
+      replacement.flags,
+      replacement.scope,
+    ]);
+    if (!byContract.has(key)) byContract.set(key, replacement);
+  }
+  return [...byContract.values()];
 }
 
 async function archiveFile(filePath, label) {

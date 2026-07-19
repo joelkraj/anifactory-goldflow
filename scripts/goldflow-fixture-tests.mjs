@@ -3511,7 +3511,7 @@ async function testTargetedSpeakabilityLiveContentHomograph() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   await fs.mkdir(episodeDir, { recursive: true });
-  await fs.writeFile(path.join(episodeDir, "script_clean.md"), "The clip became live content before I could breathe. Crown Night was streaming live. Walk there on a live stream. My face became best-performing stream content. I had to go live before the timer hit zero.", "utf8");
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), "The clip became live content before I could breathe. Crown Night was streaming live. Walk there on a live stream. My face became best-performing stream content. I had to go live before the timer hit zero. Then I had to go live again.", "utf8");
   await execFileAsync(process.execPath, [
     "scripts/script-targeted-speakability.mjs",
     "--channel", "test",
@@ -3532,6 +3532,7 @@ async function testTargetedSpeakabilityLiveContentHomograph() {
   assert.equal(overrides.replacements.some((replacement) => replacement.from === "live stream" && replacement.to === "livestream"), true);
   assert.equal(overrides.replacements.some((replacement) => replacement.from === "stream content" && replacement.to === "stream videos"), true);
   assert.equal(overrides.replacements.some((replacement) => replacement.from === "go live" && replacement.to === "start a livestream"), true);
+  assert.equal(overrides.replacements.filter((replacement) => replacement.from === "go live").length, 1);
 }
 
 async function testVisualBeatDensityDefaults() {

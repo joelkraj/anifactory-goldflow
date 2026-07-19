@@ -395,7 +395,14 @@ function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = ne
       const kind = String(target.kind ?? "").toLowerCase();
       if (kind === "style" || kind === "location") return true;
       if (kind === "character_state") {
-        const targetLabels = [target.subject, target.character].map(normalizeLabel).filter(Boolean);
+        const stateRef = characterStateRefForTarget(target, scene, stateRefIndex);
+        const targetLabels = [
+          stateRef?.character,
+          target.character,
+          target.canonical_subject_id,
+          target.subject,
+          target.ref_id,
+        ].map(normalizeLabel).filter(Boolean);
         return targetLabels.some((label) => visibleLabels.includes(label));
       }
       if (kind === "ui") {
@@ -2158,12 +2165,19 @@ function indexCharacterStateRefs(artifact) {
       scene_prompt_anchor: scenePromptAnchorFromRef(ref),
       source: ref.source ?? "character_state_ref_artifact",
     };
+    for (const directId of [normalized.state_ref_id, normalized.source_ref_id, normalized.ref_id]) {
+      if (directId) index.set(String(directId), normalized);
+    }
     for (const sceneId of sceneIds) {
       index.set(`${sceneId}:${normalizeLabel(character)}`, { ...normalized, scene_id: sceneId === "*" ? null : sceneId });
       if (sceneId === "*") index.set(normalizeLabel(character), normalized);
     }
   }
   return index;
+}
+
+export function relevantReferenceTargetsForTests(scene, visualReferencePlan, characterStateRefs) {
+  return relevantReferenceTargets(scene, visualReferencePlan, indexCharacterStateRefs(characterStateRefs));
 }
 
 async function main() {

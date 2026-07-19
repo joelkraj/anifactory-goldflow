@@ -113,6 +113,7 @@ import {
   enforceEditorialReusePolicyForTests,
   localBeatFidelityFindingsForTests,
   normalizePromptPacketForTests,
+  relevantReferenceTargetsForTests,
   retimeExistingPromptsForTests,
   visualUnitRiskAssessmentForTests,
   visualPromptCodexCacheEnabledForTests,
@@ -4931,6 +4932,64 @@ async function testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted() {
   )), true);
 }
 
+async function testVisualPlannerKeepsCanonicalIdentityTargetsForVisibleCharacters() {
+  const scene = {
+    scene_id: "scene_001",
+    parent_scene_id: "scene_001",
+    visible_characters: ["Joey Manhwa", "Alyssa Grant", "Jace Mercer"],
+    physically_visible_entity_ids: ["joey_manhwa", "alyssa_grant", "jace_mercer"],
+    visual_beat_script_excerpt: "Joey films while Alyssa kisses Jace.",
+    visual_job: "premise_image",
+  };
+  const characterTargets = [
+    ["joey_manhwa_identity", "Joey Manhwa — canonical identity", "Joey Manhwa"],
+    ["alyssa_grant_identity", "Alyssa Grant — canonical identity", "Alyssa Grant"],
+    ["jace_mercer_identity", "Jace Mercer — canonical celebrity streamer identity", "Jace Mercer"],
+  ];
+  const visualReferencePlan = {
+    reference_targets: [
+      ...characterTargets.map(([refId, subject]) => ({
+        ref_id: refId,
+        kind: "character_state",
+        subject,
+        scene_ids: ["scene_001"],
+        generation_mode: "standalone_ref",
+        reference_image_path: `/tmp/${refId}.png`,
+      })),
+      {
+        ref_id: "initial_filming_area",
+        kind: "location",
+        subject: "Initial filming area",
+        scene_ids: ["scene_001"],
+        generation_mode: "standalone_ref",
+        reference_image_path: "/tmp/initial_filming_area.png",
+      },
+    ],
+  };
+  const characterStateRefs = {
+    character_state_refs: characterTargets.map(([refId, , character]) => ({
+      state_ref_id: refId,
+      source_ref_id: refId,
+      character,
+      scene_ids: ["scene_001"],
+      scene_prompt_anchor: `${character}, exact approved identity and wardrobe`,
+      reference_image_path: `/tmp/${refId}.png`,
+    })),
+  };
+
+  const targets = relevantReferenceTargetsForTests(scene, visualReferencePlan, characterStateRefs);
+  assert.deepEqual(targets.map((target) => target.ref_id), [
+    "joey_manhwa_identity",
+    "alyssa_grant_identity",
+    "jace_mercer_identity",
+    "initial_filming_area",
+  ]);
+  for (const target of targets.slice(0, 3)) {
+    assert.equal(target.attachable_reference, true);
+    assert.match(target.scene_prompt_anchor, /exact approved identity and wardrobe/);
+  }
+}
+
 async function testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const promptText = "Joey swings the red paddle across a mahogany desk in the contract-sky office chamber.";
@@ -6555,6 +6614,7 @@ const FIXTURE_SUITES = {
     testVisualHardenAcceptsInventoryOnlyLocationContract,
     testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs,
     testVisualHardenCanonicalizesStateRefRequirements,
+    testVisualPlannerKeepsCanonicalIdentityTargetsForVisibleCharacters,
     testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
     testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists,
     testVisualHardenTreatsCollectiveSubjectsAsGeneric,

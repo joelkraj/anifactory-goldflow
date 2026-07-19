@@ -1215,27 +1215,27 @@ function narrationPerformanceUnits(text) {
   return units;
 }
 
-function detectMode(text, index, total, explicitSpeaker = null) {
-  const upper = text.toUpperCase();
+function detectMode(text, explicitSpeaker = null) {
   const lower = text.toLowerCase();
   if (explicitSpeaker && /^MC_INTERNAL$/i.test(explicitSpeaker)) return "mc_internal";
   if (explicitSpeaker && /^(SYSTEM|SYSTEM UI|UI|NOTICE|WARNING)$/i.test(explicitSpeaker)) return "warning/system";
   if (explicitSpeaker && explicitSpeaker !== "NARRATOR") return "character_dialogue";
+  if (/^(?:SYSTEM(?: UI| WARNING)?|UI|NOTICE|WARNING)\s*:/i.test(text)) return "warning/system";
   if (/^[A-Z][A-Z0-9'’. -]{1,40}:/.test(text) || /^[A-Z][A-Za-z0-9'’. -]{1,40}:/.test(text)) return "character_dialogue";
   const sentenceParts = splitIntoSentences(text).map((part) => part.trim()).filter(Boolean);
   const shortInventoryRun = sentenceParts.length >= 4 && sentenceParts.filter((part) => words(part).length <= 4).length >= 3;
   if (shortInventoryRun && /noise thinned|forms|lanterns|exit map|doors visible|behind her|clock|sirens|badge|stairs|stairwell|froze|trapped|failed|route|shelter/i.test(lower)) {
     return "panic/freeze inventory";
   }
-  if (/system|continuity|probability|timeline deviation|future son/i.test(text)) return "warning/system";
-  if (/loudspeaker|radio booth|broadcast|missing brother|on air|cassette|tape label|speaker grille|pay with one voice|dead intercom|recorded yesterday/i.test(lower)) return "tense reveal";
-  if (/haru|son|appa|baby bracelet|raincoat|child/i.test(lower)) return "memory/child tenderness";
-  if (/bitcoin|wallet|forum|game currency|account|cash|broker/i.test(lower)) return "strategy";
-  if (/woke|mirror|fifteen|2009|calendar|regression/i.test(lower)) return "regression shock";
-  if (/mother|father|kitchen|family|rice|gas|heat/i.test(lower)) return "family";
-  if (/laughed|joke|absurd|cosmic/i.test(lower) && !/missing|brother|voice|speaker|radio|recorded|intercom/i.test(lower)) return "dry humor";
-  if (index >= total - 3) return "cliffhanger landing";
-  if (/clinic|deposit|medicine|rent|coins|poverty|delivery/i.test(lower)) return "failed future / poverty";
+  if (/\b(?:system|continuity|probability|timeline deviation|quest|reward|skill|status|warning|notice)\b/i.test(text)) return "warning/system";
+  if (/\b(?:loudspeaker|broadcast|transmission|recording|intercom|surveillance feed|went on air|on the air)\b/i.test(lower)) return "tense reveal";
+  if (/\b(?:child|son|daughter|baby|toddler|little boy|little girl)\b/i.test(lower)) return "memory/child tenderness";
+  if (/\b(?:strategy|contingency|analytics|contract|evidence|receipt|dashboard|leverage|negotiat(?:e|ed|ion)|budget|revenue|broker|wallet)\b/i.test(lower)) return "strategy";
+  if (/\b(?:regression|regressed|second life|returned to the past|woke up younger|woke up years earlier|calendar showed)\b/i.test(lower)) return "regression shock";
+  if (/\b(?:mother|father|parent|parents|family|sister|brother)\b/i.test(lower)) return "family";
+  if (/\b(?:laughed|joke|absurd|ridiculous|deadpan)\b/i.test(lower) && !/\b(?:missing|voice|speaker|recorded|intercom)\b/i.test(lower)) return "dry humor";
+  if (/\b(?:but (?:he|she|they|i) (?:did not|didn't) know|had no idea what came next|was only the beginning|had only begun|was not over yet|wasn't over yet|one final warning|waiting for (?:him|her|them)|what came next)\b/i.test(lower)) return "cliffhanger landing";
+  if (/\b(?:clinic|deposit|medicine|rent|poverty|eviction|debt collector|unpaid bill)\b/i.test(lower)) return "failed future / poverty";
   return "exposition narration";
 }
 
@@ -1285,21 +1285,18 @@ function universalTagForMode(mode, text, tags, segmentIndex) {
   };
   const mix = (items, fallback) => first(items, fallback);
   if (mode === "memory/child tenderness") {
-    if (/haru|appa|child|son/.test(lower)) return mix([...(recipes.tender_child_line ?? ["[soft voice]"]), "[sad]", "[hopeful]", "[voice breaking]"], "[soft voice]");
-    return first(core.negative, "[sad]");
+    return ["[warm, direct]", "[tender, moving forward]", "[protective, controlled]"][segmentIndex % 3];
   }
-  if (mode === "regression shock") return firstSafeNarration(recipes.teen_panic, "[shocked]");
-  if (mode === "strategy") return /bitcoin|wallet|forum|cash|broker/i.test(text)
-    ? first(recipes.strategy_focus, "[determined]")
-    : first((core.complex_social ?? []).filter((tag) => !/sarcastic|contempt/i.test(tag)), "[determined]");
-  if (mode === "warning/system") return first(recipes.system_or_robotic_warning, "[low voice]");
-  if (mode === "panic/freeze inventory") return mix(["[stunned, breath shallow]", "[low, tense]", "[voice tightens]", "[controlled panic]"], "[low, tense]");
-  if (mode === "tense reveal") return first(recipes.revelation, "[shocked]");
-  if (mode === "family") return /mother|father/.test(lower) ? first(core.negative, "[worried]") : firstSafeNarration(core.volume_pitch_style, "[low voice]");
+  if (mode === "regression shock") return ["[shocked, moving forward]", "[urgent disbelief]", "[controlled shock]"][segmentIndex % 3];
+  if (mode === "strategy") return ["[focused, brisk]", "[analytical, direct]", "[determined, forward]"][segmentIndex % 3];
+  if (mode === "warning/system") return ["[cold, clipped system notice]", "[precise machine readout]", "[formal system warning]"][segmentIndex % 3];
+  if (mode === "panic/freeze inventory") return ["[controlled urgency]", "[tense, moving forward]", "[stunned but direct]"][segmentIndex % 3];
+  if (mode === "tense reveal") return ["[tense reveal, forward]", "[shocked, controlled]", "[urgent realization]"][segmentIndex % 3];
+  if (mode === "family") return ["[grounded, forward narration]", "[concerned, direct]", "[protective, controlled]"][segmentIndex % 3];
   if (mode === "dry humor") return first(recipes.dry_humor, "[sarcastic]");
-  if (mode === "cliffhanger landing") return first(recipes.cliffhanger, "[low voice]");
-  if (mode === "failed future / poverty") return first(recipes.exhausted_narration, "[sad]");
-  if (mode === "performed dialogue mix") return firstSafeNarration(core.volume_pitch_style, "[low voice]");
+  if (mode === "cliffhanger landing") return ["[tense, moving forward]", "[ominous, controlled]", "[sharp cliffhanger landing]"][segmentIndex % 3];
+  if (mode === "failed future / poverty") return ["[strained, moving forward]", "[weary but direct]", "[grim, controlled]"][segmentIndex % 3];
+  if (mode === "performed dialogue mix") return "[lightly acted dialogue, natural and restrained]";
   if (mode === "exposition narration") {
     return ["[grounded, forward narration]", "[focused, brisk]", "[curious, controlled]", "[tense, moving forward]"][segmentIndex % 4];
   }
@@ -1343,18 +1340,17 @@ function physicalCueFor(mode, segmentIndex, allTags, text = "") {
   if (Number.isFinite(maxDurationSec) && maxDurationSec > 45 && ["tense reveal", "performed dialogue mix", "character_dialogue"].includes(mode) && segmentIndex === 1) {
     return physical[segmentIndex % physical.length];
   }
-  if (["memory/child tenderness", "regression shock", "warning/system", "cliffhanger landing", "failed future / poverty", "family", "panic/freeze inventory"].includes(mode) && segmentIndex % 2 === 1) {
+  if (["memory/child tenderness", "regression shock", "cliffhanger landing", "failed future / poverty", "family", "panic/freeze inventory"].includes(mode) && segmentIndex % 6 === 1) {
     return physical[segmentIndex % physical.length];
   }
-  if (["regression shock", "warning/system", "cliffhanger landing"].includes(mode)) return physical[segmentIndex % physical.length];
   return null;
 }
 
 function pauseForMode(mode, segmentIndex) {
-  if (mode === "cliffhanger landing") return "[long pause]";
-  if (["warning/system", "tense reveal", "regression shock", "memory/child tenderness", "panic/freeze inventory"].includes(mode)) return segmentIndex % 2 ? "[short pause]" : null;
-  if (mode === "character_dialogue") return "[micro-pause]";
-  if (mode === "performed dialogue mix" && segmentIndex % 3 === 0) return "[micro-pause]";
+  if (mode === "cliffhanger landing") return segmentIndex % 4 === 1 ? "[micro-pause]" : null;
+  if (["warning/system", "tense reveal", "regression shock", "memory/child tenderness", "panic/freeze inventory"].includes(mode)) return segmentIndex % 6 === 1 ? "[short pause]" : null;
+  if (mode === "character_dialogue") return segmentIndex % 4 === 1 ? "[micro-pause]" : null;
+  if (mode === "performed dialogue mix" && segmentIndex % 6 === 1) return "[micro-pause]";
   return null;
 }
 
@@ -1840,7 +1836,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
       : hasDialogue && !hasNarration
         ? speakers.find((speaker) => speaker !== "NARRATOR")
         : null;
-    const detectedMode = detectMode(body, segments.length, 25, explicitPerformanceSpeaker);
+    const detectedMode = detectMode(body, explicitPerformanceSpeaker);
     const sanitizedMode = sanitizeDeliveryMode({ detectedMode, hasDialogue, hasNarration, speakers, body });
     const mode = hasDialogue && hasNarration && sanitizedMode === "exposition narration" ? "performed dialogue mix" : sanitizedMode;
     const dialogueOnly = hasDialogue && !hasNarration && !hasInternal;
@@ -2248,10 +2244,12 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   if (topTempoPct > 60) {
     failures.push({
       code: "tempo_classification_dominates_episode",
-      severity: "blocker",
+      severity: qwenLocal ? "warning" : "blocker",
       tempo: topTempo[0],
       pct: Number(topTempoPct.toFixed(2)),
-      reason: "More than 60% of audio segments share one pacing tempo; the episode is likely flat or rushed.",
+      reason: qwenLocal
+        ? "More than 60% of Qwen segments share one pacing label. This is diagnostic only because recap narration may intentionally sustain a fast provider-native cadence; emotional variation must come from emphasis rather than forced slow tags."
+        : "More than 60% of audio segments share one pacing tempo; the episode is likely flat or rushed.",
     });
   } else if (topTempoPct > 40) {
     failures.push({
@@ -2524,6 +2522,30 @@ export function voiceDirectionTransformForTests(value, { speaker = "", ttsOverri
 
 export function qwenGenerationPlanForTests(segments, { ttsOverrides = {}, ttsProvider = "qwen_local" } = {}) {
   return buildQwenGenerationPlan(segments, {}, {}, ttsProvider, ttsOverrides);
+}
+
+export function voiceDirectionMetadataForTests(texts) {
+  const tags = { universal_recipes: {}, proven_core_tags: {} };
+  return texts.map((text, index) => {
+    const deliveryMode = detectMode(String(text ?? ""));
+    const performanceTag = universalTagForMode(deliveryMode, String(text ?? ""), tags, index);
+    const physicalTag = physicalCueFor(deliveryMode, index, tags, String(text ?? ""));
+    const pauseTag = pauseForMode(deliveryMode, index);
+    const expectedDurationSec = expectedFishDurationSec(String(text ?? ""), {
+      mode: deliveryMode,
+      hasNarration: true,
+      speakers: ["NARRATOR"],
+      pause: pauseTag,
+      physical: physicalTag,
+    });
+    return {
+      delivery_mode: deliveryMode,
+      performance_tag: performanceTag,
+      physical_tag: physicalTag,
+      pause_tag: pauseTag,
+      pacing_tempo: classifyTempo(String(text ?? ""), expectedDurationSec, deliveryMode),
+    };
+  });
 }
 
 function isSpeakableQwenText(value) {
@@ -3351,6 +3373,7 @@ async function main() {
   }
   audioPerformancePlan.status = report.status === "passed" ? "passed" : "failed_repairable";
   strategy.status = report.status === "passed" ? "passed" : "failed_repairable";
+  qwenGenerationPlan.status = report.status === "passed" ? "passed" : "failed_repairable";
   report.voice_artifact_contamination = voiceContaminationReport;
   await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), qwenGenerationPlan);
   await writeJson(path.join(episodeDir, "system_ui_speech_coverage_report.json"), {

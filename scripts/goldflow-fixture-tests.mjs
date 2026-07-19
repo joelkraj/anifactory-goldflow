@@ -128,7 +128,7 @@ import {
   shouldSplitReferenceChunkForTests,
   visualReferenceCodexCacheEnabledForTests,
 } from "./visual-reference-plan.mjs";
-import { qwenGenerationPlanForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
+import { qwenGenerationPlanForTests, voiceDirectionMetadataForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
 import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
@@ -3311,6 +3311,26 @@ function testVoiceDirectionCharacterization() {
 
   const nonSpokenDirection = voiceDirectionTransformForTests("[SFX: cold system ping]");
   assert.deepEqual(nonSpokenDirection.paragraph_units.map((unit) => unit.kind), ["sound_design"]);
+}
+
+function testVoiceDirectionPreservesFastRecapCadence() {
+  const ordinarySegments = Array.from({ length: 30 }, (_, index) => `Joey reviewed sponsor footage and prepared release number ${index + 1}.`);
+  const metadata = voiceDirectionMetadataForTests(ordinarySegments);
+  assert.ok(metadata.every((row) => row.delivery_mode === "exposition narration"));
+  assert.ok(metadata.every((row) => !/\b(?:low voice|quiet|hushed|whisper|slow)\b/i.test(row.performance_tag)));
+  assert.ok(metadata.every((row) => row.pause_tag === null));
+
+  const semanticModes = voiceDirectionMetadataForTests([
+    "The sponsor approved the release and the audience watched.",
+    "His son waited beside the hospital bed.",
+    "But he did not know the final investor was waiting for him.",
+    "SYSTEM WARNING: release probability changed.",
+  ]);
+  assert.equal(semanticModes[0].delivery_mode, "exposition narration");
+  assert.equal(semanticModes[1].delivery_mode, "memory/child tenderness");
+  assert.equal(semanticModes[2].delivery_mode, "cliffhanger landing");
+  assert.equal(semanticModes[3].delivery_mode, "warning/system");
+  assert.doesNotMatch(semanticModes[3].performance_tag, /low voice/i);
 }
 
 function testScriptMetaScanAllowsInStoryAnalyticsObjects() {
@@ -6563,6 +6583,7 @@ const FIXTURE_SUITES = {
     testRenderRequiresHashMatchedImageQa,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,
+    testVoiceDirectionPreservesFastRecapCadence,
     testScriptMetaScanAllowsInStoryAnalyticsObjects,
     testQwenPlanAuditsAppliedTtsOverrides,
     testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets,

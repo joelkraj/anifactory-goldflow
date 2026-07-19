@@ -7,8 +7,9 @@ function boundedInteger(value, fallback, min, max) {
 }
 
 export function selectAuthoredParallaxCandidates(prompts, options = {}) {
-  const maxCandidates = boundedInteger(options.maxCandidates, 3, 0, 5);
-  const minSpacingSec = Math.max(0, Number(options.minSpacingSec ?? 6));
+  const maxCandidates = boundedInteger(options.maxCandidates, 5, 0, 5);
+  const minSpacingSec = Math.max(0, Number(options.minSpacingSec ?? 10));
+  const openingWindowSec = Math.max(0, Number(options.openingWindowSec ?? 120));
   if (!maxCandidates) return [];
   const authored = (prompts ?? []).map((prompt) => {
     const motionIntent = prompt?.shot_manifest?.motion_intent;
@@ -33,9 +34,11 @@ export function selectAuthoredParallaxCandidates(prompts, options = {}) {
     && Number.isFinite(row.priority)
     && ["high", "medium"].includes(row.separation_confidence));
   authored.sort((left, right) => right.priority - left.priority || left.start_sec - right.start_sec || left.image_id.localeCompare(right.image_id));
+  const opening = openingWindowSec > 0 ? authored.filter((row) => row.start_sec < openingWindowSec) : [];
+  const selectionPool = opening.length ? opening : authored;
 
   const selected = [];
-  for (const candidate of authored) {
+  for (const candidate of selectionPool) {
     if (selected.some((row) => Math.abs(row.start_sec - candidate.start_sec) < minSpacingSec)) continue;
     selected.push(candidate);
     if (selected.length >= maxCandidates) break;
@@ -51,15 +54,11 @@ export function noticeableParallaxTreatment({ intent, assetReport, candidate }) 
   const foregroundEnd = priority >= 90 ? 1.075 : priority >= 75 ? 1.065 : 1.055;
   const backgroundEnd = 1.005;
   const backgroundKeyframes = [
-    { at: 0, anchor, scale: backgroundStart, easing_to_next: "linear" },
-    { at: 0.1, anchor, scale: backgroundStart, easing_to_next: "ease_in_out" },
-    { at: 0.88, anchor, scale: backgroundEnd, easing_to_next: "linear" },
+    { at: 0, anchor, scale: backgroundStart, easing_to_next: "ease_in_out" },
     { at: 1, anchor, scale: backgroundEnd, easing_to_next: "linear" },
   ];
   const foregroundKeyframes = [
-    { at: 0, anchor, scale: backgroundStart, easing_to_next: "linear" },
-    { at: 0.1, anchor, scale: backgroundStart, easing_to_next: "ease_in_out" },
-    { at: 0.88, anchor, scale: foregroundEnd, easing_to_next: "linear" },
+    { at: 0, anchor, scale: backgroundStart, easing_to_next: "ease_in_out" },
     { at: 1, anchor, scale: foregroundEnd, easing_to_next: "linear" },
   ];
   return sanitizeLayeredParallaxTreatment({

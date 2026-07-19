@@ -403,6 +403,59 @@ function whisperSubtitleGroups(words) {
   return initialWhisperSubtitleGroups(words);
 }
 
+function alignExpandedZeroMultiplierCaptions(events, words) {
+  const adjusted = (events ?? []).map((event) => ({ ...event }));
+  const zeroTimesSpans = [];
+  for (let index = 0; index < (words ?? []).length - 1; index += 1) {
+    const first = words[index];
+    const second = words[index + 1];
+    if (normalizedSubtitleWord(first?.word) !== "zero" || normalizedSubtitleWord(second?.word) !== "times") continue;
+    zeroTimesSpans.push({
+      start_sec: Number(first.start_sec),
+      end_sec: Number(second.end_sec),
+    });
+  }
+  const used = new Set();
+  for (let eventIndex = 0; eventIndex < adjusted.length; eventIndex += 1) {
+    const event = adjusted[eventIndex];
+    if (!/\b0\s*x\b/i.test(String(event.text ?? ""))) continue;
+    const midpoint = (Number(event.start_sec) + Number(event.end_sec)) / 2;
+    let selectedIndex = -1;
+    let selectedDistance = Number.POSITIVE_INFINITY;
+    for (let spanIndex = 0; spanIndex < zeroTimesSpans.length; spanIndex += 1) {
+      if (used.has(spanIndex)) continue;
+      const span = zeroTimesSpans[spanIndex];
+      const distance = Math.abs(midpoint - (span.start_sec + span.end_sec) / 2);
+      if (distance <= 8 && distance < selectedDistance) {
+        selectedIndex = spanIndex;
+        selectedDistance = distance;
+      }
+    }
+    if (selectedIndex < 0) continue;
+    used.add(selectedIndex);
+    const span = zeroTimesSpans[selectedIndex];
+    if (Number(event.start_sec) <= span.start_sec + 0.02 && Number(event.end_sec) >= span.end_sec - 0.02) continue;
+
+    const multiplierOnly = subtitleWordCount(event.text) === 1;
+    if (multiplierOnly) {
+      const previous = adjusted[eventIndex - 1] ?? null;
+      if (previous && Number(previous.start_sec) < span.start_sec && Number(previous.end_sec) >= span.end_sec - 0.02) {
+        previous.end_sec = span.start_sec;
+      }
+      event.start_sec = span.start_sec;
+      event.end_sec = span.end_sec;
+    } else {
+      event.start_sec = Math.min(Number(event.start_sec), span.start_sec);
+      event.end_sec = Math.max(Number(event.end_sec), span.end_sec);
+    }
+  }
+  return adjusted.filter((event) => Number(event.end_sec) > Number(event.start_sec));
+}
+
+export function alignExpandedZeroMultiplierCaptionsForTests(events, words) {
+  return alignExpandedZeroMultiplierCaptions(events, words);
+}
+
 function subtitleEventsFromScript(words, stitchReport) {
   const segments = timedCaptionSegments(stitchReport);
   if (!segments.length) return null;
@@ -486,7 +539,10 @@ function subtitleEventsFromVisualBeats(words, visualBeatPlan) {
     expectedIndex = endIndex + 1;
   }
   if (expectedIndex !== sortedWords.at(-1).resolved_index + 1) return null;
-  const merged = mergeShortSubtitleEvents(events.filter((row) => row.text && row.end_sec > row.start_sec));
+  const merged = alignExpandedZeroMultiplierCaptions(
+    mergeShortSubtitleEvents(events.filter((row) => row.text && row.end_sec > row.start_sec)),
+    sortedWords,
+  );
   const actualCaptionTokens = merged.flatMap((event) => captionTokens(event.text));
   if (actualCaptionTokens.join("\n") !== expectedCaptionTokens.join("\n")) return null;
   return merged;
@@ -982,7 +1038,7 @@ function progressExpr(frameCount, curve = "linear") {
   if (curve === "fast_in") return `pow(${base},0.72)`;
   if (curve === "ease_out") return `(1-pow(1-${base},1.35))`;
   if (curve === "fast_out") return `(1-pow(1-${base},0.72))`;
-  if (curve === "ease_in_out") return `(${base}*${base}*(3-2*${base}))`;
+  if (curve === "ease_in_out") return `(0.35*${base}+0.65*(${base}*${base}*(3-2*${base})))`;
   return base;
 }
 
@@ -1196,7 +1252,10 @@ function directedMotionProfile(intent) {
 function easedExpression(rawExpression, easing = "linear") {
   if (easing === "ease_in") return `pow(${rawExpression},2)`;
   if (easing === "ease_out") return `(1-pow(1-${rawExpression},2))`;
-  if (easing === "ease_in_out") return `((${rawExpression})*(${rawExpression})*(${rawExpression})*(((${rawExpression})*(6*(${rawExpression})-15))+10))`;
+  if (easing === "ease_in_out") {
+    const smooth = `((${rawExpression})*(${rawExpression})*(${rawExpression})*(((${rawExpression})*(6*(${rawExpression})-15))+10))`;
+    return `(0.35*(${rawExpression})+0.65*${smooth})`;
+  }
   return rawExpression;
 }
 

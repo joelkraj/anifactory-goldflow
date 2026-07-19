@@ -693,6 +693,15 @@ export async function leaseNextWorkItem(options) {
   await reconcileExpiredLeases(manifestPath);
   const workerId = cleanText(options.workerId);
   if (!workerId) throw new Error("Lease requires --worker-id.");
+  const liveLeaseEntries = await fs.readdir(path.join(manifestDir, "leases"), { withFileTypes: true });
+  for (const entry of liveLeaseEntries) {
+    if (!entry.isDirectory() || !entry.name.endsWith(".lock")) continue;
+    const lease = await readJson(path.join(manifestDir, "leases", entry.name, "lease.json")).catch(() => null);
+    if (!lease || lease.worker_id !== workerId || Date.parse(lease.expires_at) <= Date.now()) continue;
+    const assignment = await readJson(path.join(lease.attempt_dir, "assignment.json")).catch(() => null);
+    if (!assignment) throw new Error(`Worker ${workerId} has a live lease without an assignment for ${lease.asset_id}.`);
+    return { status: "leased", assignment, reused_existing_lease: true };
+  }
   const leaseSeconds = asPositiveInteger(options.leaseSeconds, manifest.policy.lease_seconds ?? DEFAULT_LEASE_SECONDS, "lease seconds");
   const verificationComplete = await verificationWaveComplete(manifest, manifestDir);
   const verificationIds = new Set(manifest.policy?.verification_asset_ids ?? []);
@@ -700,6 +709,7 @@ export async function leaseNextWorkItem(options) {
   for (const item of eligibleItems) {
     if (await pathExists(completionPath(manifestDir, item.asset_id))) continue;
     if (await pathExists(deadletterPath(manifestDir, item.asset_id))) continue;
+    if (await pathExists(leasePath(manifestDir, item.asset_id))) continue;
     const attempts = await attemptDirectories(manifestDir, item.asset_id);
     if (attempts.length >= manifest.policy.max_attempts) {
       await writeDeadletter(manifest, manifestDir, item, attempts.length, "max_attempts_exhausted_before_lease");
@@ -712,8 +722,6 @@ export async function leaseNextWorkItem(options) {
     const attemptDir = path.join(attemptAssetDir(manifestDir, item.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
     const temporaryLeaseDir = path.join(manifestDir, "leases", `.${item.asset_id}.${token}.tmp`);
     const liveLeaseDir = leasePath(manifestDir, item.asset_id);
-    await fs.mkdir(path.dirname(attemptDir), { recursive: true });
-    await fs.mkdir(attemptDir);
     await fs.mkdir(temporaryLeaseDir);
     const startedAt = nowIso();
     const expiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
@@ -737,7 +745,6 @@ export async function leaseNextWorkItem(options) {
       await fs.rename(temporaryLeaseDir, liveLeaseDir);
     } catch (error) {
       await fs.rm(temporaryLeaseDir, { recursive: true, force: true });
-      await fs.rm(attemptDir, { recursive: true, force: true });
       if (["EEXIST", "ENOTEMPTY"].includes(error?.code)) continue;
       throw error;
     }
@@ -755,6 +762,8 @@ export async function leaseNextWorkItem(options) {
       expected_output_path: path.join(attemptDir, item.expected_output.filename),
     };
     try {
+      await fs.mkdir(path.dirname(attemptDir), { recursive: true });
+      await fs.mkdir(attemptDir);
       await writeJsonExclusive(path.join(attemptDir, "assignment.json"), assignment);
       await writeJsonExclusive(path.join(attemptDir, "heartbeat.json"), {
         schema: "goldflow_codex_image_heartbeat_v1",
@@ -919,6 +928,128 @@ export async function completeWorkItem(options) {
   return { status: "completed", completion };
 }
 
+function orderedReferenceHashes(item) {
+  return (item?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 }));
+}
+
+export async function reuseExactWorkCompletions(options) {
+  const source = await loadWorkManifest(options.sourceManifestPath);
+  const target = await loadWorkManifest(options.targetManifestPath);
+  if (source.manifest.mode !== target.manifest.mode) throw new Error("Exact completion reuse requires matching manifest modes.");
+  const scope = new Set(parseIdScope(options.assetIds, options.imageIds, options.cutIds, options.referenceIds));
+  const sourceItems = new Map(source.manifest.items.map((item) => [item.asset_id, item]));
+  const workerId = cleanText(options.workerId) || `exact-cache-reuse-${source.manifest.manifest_id}`;
+  const reused = [];
+  const skipped = [];
+
+  for (const targetItem of target.manifest.items) {
+    if (scope.size && !scope.has(targetItem.asset_id)) continue;
+    if (await pathExists(completionPath(target.manifestDir, targetItem.asset_id))) {
+      skipped.push({ asset_id: targetItem.asset_id, reason: "target_already_completed" });
+      continue;
+    }
+    if (await pathExists(leasePath(target.manifestDir, targetItem.asset_id))) {
+      skipped.push({ asset_id: targetItem.asset_id, reason: "target_has_live_lease" });
+      continue;
+    }
+    const sourceItem = sourceItems.get(targetItem.asset_id);
+    const sourceCompletion = await readJson(completionPath(source.manifestDir, targetItem.asset_id)).catch(() => null);
+    if (!sourceItem || !sourceCompletion) {
+      skipped.push({ asset_id: targetItem.asset_id, reason: "source_not_completed" });
+      continue;
+    }
+    const samePrompt = sourceItem.prompt_sha256 === targetItem.prompt_sha256;
+    const sameReferences = stableStringify(orderedReferenceHashes(sourceItem)) === stableStringify(orderedReferenceHashes(targetItem));
+    const sameOutput = stableStringify(sourceItem.expected_output) === stableStringify(targetItem.expected_output);
+    const completionMatchesSource = sourceCompletion.prompt_sha256 === sourceItem.prompt_sha256
+      && stableStringify(sourceCompletion.ordered_reference_hashes ?? []) === stableStringify(orderedReferenceHashes(sourceItem));
+    const sourceAssignment = await readJson(path.join(sourceCompletion.attempt_dir ?? "", "assignment.json")).catch(() => null);
+    const sourceBindingValid = sourceAssignment?.item?.asset_id === sourceItem.asset_id
+      && sourceAssignment?.item?.source_row_sha256 === sourceItem.source_row_sha256;
+    const sourceHash = await sha256File(sourceCompletion.source_path ?? "").catch(() => null);
+    if (!samePrompt || !sameReferences || !sameOutput || !completionMatchesSource || !sourceBindingValid || sourceHash !== sourceCompletion.sha256) {
+      skipped.push({ asset_id: targetItem.asset_id, reason: "content_binding_changed" });
+      continue;
+    }
+    await inspectPng(sourceCompletion.source_path, targetItem.expected_output);
+
+    const token = randomUUID();
+    const attempts = await attemptDirectories(target.manifestDir, targetItem.asset_id);
+    const attemptNumber = attempts.length + 1;
+    const attemptDir = path.join(attemptAssetDir(target.manifestDir, targetItem.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
+    const temporaryLeaseDir = path.join(target.manifestDir, "leases", `.${targetItem.asset_id}.${token}.tmp`);
+    const liveLeaseDir = leasePath(target.manifestDir, targetItem.asset_id);
+    await fs.mkdir(path.dirname(attemptDir), { recursive: true });
+    await fs.mkdir(attemptDir);
+    await fs.mkdir(temporaryLeaseDir);
+    const startedAt = nowIso();
+    const leaseSeconds = target.manifest.policy.lease_seconds ?? DEFAULT_LEASE_SECONDS;
+    const lease = {
+      schema: "goldflow_codex_image_lease_v1",
+      status: "leased",
+      manifest_id: target.manifest.manifest_id,
+      manifest_path: target.manifestPath,
+      asset_id: targetItem.asset_id,
+      asset_kind: targetItem.asset_kind,
+      attempt_number: attemptNumber,
+      attempt_dir: attemptDir,
+      lease_token: token,
+      worker_id: workerId,
+      leased_at: startedAt,
+      expires_at: new Date(Date.now() + leaseSeconds * 1000).toISOString(),
+      lease_seconds: leaseSeconds,
+    };
+    const assignment = {
+      schema: "goldflow_codex_image_assignment_v1",
+      status: "assigned",
+      ...lease,
+      item: targetItem,
+      expected_output_path: path.join(attemptDir, targetItem.expected_output.filename),
+      reused_from_manifest_id: source.manifest.manifest_id,
+      reused_from_completion_sha256: sourceCompletion.sha256,
+    };
+    await writeJsonExclusive(path.join(temporaryLeaseDir, "lease.json"), lease);
+    await fs.rename(temporaryLeaseDir, liveLeaseDir);
+    await writeJsonExclusive(path.join(attemptDir, "assignment.json"), assignment);
+    await writeJsonExclusive(path.join(attemptDir, "heartbeat.json"), {
+      schema: "goldflow_codex_image_heartbeat_v1",
+      status: "live",
+      manifest_id: target.manifest.manifest_id,
+      asset_id: targetItem.asset_id,
+      lease_token: token,
+      worker_id: workerId,
+      heartbeat_at: startedAt,
+      expires_at: lease.expires_at,
+      cache_reuse: true,
+    });
+    try {
+      await fs.link(sourceCompletion.source_path, assignment.expected_output_path);
+    } catch (error) {
+      if (error?.code !== "EXDEV") throw error;
+      await fs.copyFile(sourceCompletion.source_path, assignment.expected_output_path);
+    }
+    await completeWorkItem({
+      manifestPath: target.manifestPath,
+      assetId: targetItem.asset_id,
+      leaseToken: token,
+      workerId,
+      sourcePath: assignment.expected_output_path,
+      reportedSha256: sourceCompletion.sha256,
+    });
+    reused.push({ asset_id: targetItem.asset_id, sha256: sourceCompletion.sha256, source_manifest_id: source.manifest.manifest_id });
+  }
+
+  return {
+    status: "passed",
+    source_manifest_id: source.manifest.manifest_id,
+    target_manifest_id: target.manifest.manifest_id,
+    reused_count: reused.length,
+    skipped_count: skipped.length,
+    reused,
+    skipped,
+  };
+}
+
 export async function failWorkItem(options) {
   const { manifest, manifestDir } = await loadWorkManifest(options.manifestPath);
   const item = itemById(manifest, options.assetId);
@@ -1073,7 +1204,15 @@ export async function validateCodexWorkManifest(options) {
   }
   for (const item of manifest.items) {
     if (!(await pathExists(completionPath(manifestDir, item.asset_id)))) findings.push({ code: "item_not_completed", asset_id: item.asset_id });
-    if (await pathExists(deadletterPath(manifestDir, item.asset_id))) findings.push({ code: "item_deadlettered", asset_id: item.asset_id });
+    if (await pathExists(deadletterPath(manifestDir, item.asset_id))) {
+      const deadletter = await readJson(deadletterPath(manifestDir, item.asset_id)).catch(() => null);
+      findings.push({
+        code: "item_deadlettered",
+        asset_id: item.asset_id,
+        reason: deadletter?.reason ?? null,
+        attempt_count: deadletter?.attempt_count ?? null,
+      });
+    }
     for (const reference of item.ordered_references) {
       if (!(await pathExists(reference.path))) {
         findings.push({ code: "reference_input_missing", asset_id: item.asset_id, ref_id: reference.ref_id, path: reference.path });

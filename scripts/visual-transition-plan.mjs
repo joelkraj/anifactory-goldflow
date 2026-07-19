@@ -260,6 +260,50 @@ async function main() {
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPlanPath}`);
   const boundaries = buildBoundaries(promptPlan.prompts);
   const boundariesById = new Map(boundaries.map((boundary) => [boundary.boundary_id, boundary]));
+  if (flags["revalidate-existing"] === "true") {
+    const existing = await readJson(outputPath, null);
+    if (existing?.status !== "passed" || !Array.isArray(existing.transition_events)) {
+      throw new Error(`Transition timing revalidation requires an existing passed plan: ${outputPath}`);
+    }
+    const boundaryByPair = new Map(boundaries.map((boundary) => [`${boundary.from_image_id}->${boundary.to_image_id}`, boundary]));
+    const transitionEvents = existing.transition_events.map((event) => {
+      const boundary = boundaryByPair.get(`${event.from_image_id}->${event.to_image_id}`);
+      if (!boundary) throw new Error(`Transition timing revalidation could not find current boundary for ${event.from_image_id}->${event.to_image_id}.`);
+      return {
+        ...event,
+        boundary_id: boundary.boundary_id,
+        scene_id: boundary.scene_id,
+        start_sec: boundary.start_sec,
+        in_hook: boundary.in_hook,
+        in_retention_ramp: boundary.in_retention_ramp,
+        scene_changed: boundary.scene_changed,
+        transition_sfx: transitionSfxEnabled ? event.transition_sfx === true : false,
+        sfx_family: transitionSfxEnabled ? event.sfx_family : "none",
+        cue_id: transitionSfxEnabled ? event.cue_id : null,
+        asset_path: transitionSfxEnabled ? event.asset_path : null,
+        asset_id: transitionSfxEnabled ? event.asset_id : null,
+      };
+    });
+    const refreshed = {
+      ...existing,
+      prompt_plan_path: promptPlanPath,
+      transition_sfx_enabled: transitionSfxEnabled,
+      sfx_manifest_path: transitionSfxEnabled ? sfxManifestPath : null,
+      source_hashes: Object.fromEntries((await Promise.all([promptPlanPath, transitionSfxEnabled ? sfxManifestPath : null].filter(Boolean).map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+      planner: {
+        ...(existing.planner ?? {}),
+        timing_revalidated_without_llm: true,
+        timing_revalidated_at: nowIso(),
+      },
+      candidate_boundary_count: boundaries.length,
+      transition_event_count: transitionEvents.length,
+      transition_events: transitionEvents,
+      updated_at: nowIso(),
+    };
+    await writeJson(outputPath, refreshed);
+    console.log(JSON.stringify({ status: refreshed.status, output_path: outputPath, transition_event_count: refreshed.transition_event_count, timing_revalidated_without_llm: true }, null, 2));
+    return;
+  }
   const llm = dryRun
     ? { provider: "dry_run", model: "none", prompt_path: null, output_path: null, parsed: { transition_events: boundaries.filter((row) => row.in_hook).map((row, index) => ({ boundary_id: row.boundary_id, to_image_id: row.to_image_id, xfade_transition: index % 2 ? "slideup" : "smoothup", transition_sfx: transitionSfxEnabled, sfx_family: transitionSfxEnabled ? (index % 2 ? "swipe_up" : "manga_snap") : "none", edit_reason: "dry run hook transition" })), warnings: [] } }
     : await callCodex(buildPrompt(boundaries), `${episode}_transition_edit_plan`);

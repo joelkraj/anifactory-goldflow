@@ -8,6 +8,7 @@ import {
   editorialMotionDistributionFindings,
   motionIntentFindings,
   motionIntentForPrompt,
+  rebalanceEditorialMotionStreaks,
 } from "./lib/motion-plan-utils.mjs";
 import { parallaxApprovalMatches } from "./lib/parallax-contract.mjs";
 import { noticeableParallaxTreatment } from "./lib/parallax-policy.mjs";
@@ -198,6 +199,9 @@ async function main() {
       },
     };
   });
+  if (identity?.motion_policy === "selective_editorial_v1") {
+    intents = rebalanceEditorialMotionStreaks(intents, { maximumMovingCuts: 7 });
+  }
   const findings = [
     ...motionIntentFindings(intents, acceptedHashes),
     ...(identity?.motion_policy === "selective_editorial_v1" ? editorialMotionDistributionFindings(intents) : []),

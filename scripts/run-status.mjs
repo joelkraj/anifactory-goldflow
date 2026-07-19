@@ -523,6 +523,46 @@ function failedImageIdsFromReport(report) {
     .map((row) => String(row.image_id)))];
 }
 
+export async function imageLedgerMatchesPromptCreativeContractForTests({ promptPlan, ledger, report, hashFile = fileSha256, fileExists = exists }) {
+  const prompts = (promptPlan?.prompts ?? []).filter((prompt) => prompt?.image_generation_required !== false);
+  const cutsById = new Map((ledger?.cuts ?? []).map((cut) => [String(cut.image_id ?? ""), cut]));
+  const resultsById = new Map((report?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  if (!prompts.length || cutsById.size < prompts.length || resultsById.size < prompts.length) return false;
+  const hashCache = new Map();
+  const currentHash = async (filePath) => {
+    if (!filePath) return null;
+    if (!hashCache.has(filePath)) hashCache.set(filePath, await hashFile(filePath));
+    return hashCache.get(filePath);
+  };
+  for (const prompt of prompts) {
+    const imageId = String(prompt.image_id ?? "");
+    const cut = cutsById.get(imageId);
+    const result = resultsById.get(imageId);
+    if (!cut || !result || !cut.image_path || !(await fileExists(cut.image_path))) return false;
+    if (String(result.status ?? "").toLowerCase() === "failed" || result.image_path !== cut.image_path) return false;
+    const authoredPromptHash = sha256(JSON.stringify({
+      image_prompt: prompt.image_prompt ?? null,
+      modelslab_image_prompt: prompt.modelslab_image_prompt ?? null,
+      codex_image_prompt: prompt.codex_image_prompt ?? null,
+      shot_manifest: prompt.shot_manifest ?? null,
+      reference_requirements: prompt.reference_requirements ?? [],
+    }));
+    if (cut.authored_prompt_hash !== authoredPromptHash) return false;
+    const currentImageHash = await currentHash(cut.image_path);
+    if (!currentImageHash || currentImageHash !== cut.image_sha256) return false;
+    const resultImageHash = result.generated?.output_sha256 ?? result.generated?.manual_source_sha256 ?? null;
+    if (resultImageHash && resultImageHash !== currentImageHash) return false;
+    const currentRefIds = (prompt.reference_slots ?? prompt.reference_requirements ?? []).map((row) => row?.ref_id).filter(Boolean).map(String).sort();
+    const ledgerRefIds = (cut.reference_ids ?? []).map(String).sort();
+    if (JSON.stringify(currentRefIds) !== JSON.stringify(ledgerRefIds)) return false;
+    for (const reference of cut.references ?? []) {
+      if (!reference?.path || !(await fileExists(reference.path))) return false;
+      if ((await currentHash(reference.path)) !== reference.sha256) return false;
+    }
+  }
+  return true;
+}
+
 async function derivedReferenceImagegenStatus(episodeDir, promptPlan, latestImageReport, identity) {
   const visualReferencePlan = await readJson(path.join(episodeDir, "visual_reference_plan.json"), null);
   const targets = [];
@@ -585,6 +625,7 @@ async function imageReportComplete(episodeDir, episode, identity) {
     return [...byHash.values()].filter((rows) => rows.length > 1).map((rows) => rows.join("="));
   }
   const latestReport = reports[0]?.report ?? null;
+  const cutExecutionLedger = await readJson(path.join(episodeDir, "cut_execution_ledger.json"), null);
   const derivedStatus = await derivedReferenceImagegenStatus(episodeDir, promptPlan, latestReport, identity);
   if (derivedStatus) {
     return {
@@ -593,10 +634,21 @@ async function imageReportComplete(episodeDir, episode, identity) {
       next_command_shape: derivedStatus.next_command_shape,
     };
   }
-  const passed = reports.find(({ report }) => {
+  const timingOnlyCreativeCompatibleReports = new Set();
+  for (const candidate of reports) {
+    const report = candidate.report;
+    if (report.prompt_plan_hash === promptPlanHash) continue;
     const status = String(report.status ?? "").toLowerCase();
     const missing = Number(report.missing_image_count ?? report.missing_count ?? 0);
-    const hashOk = report.prompt_plan_hash === promptPlanHash;
+    if (report.reference_only === true || status !== "passed" || missing !== 0) continue;
+    if (await imageLedgerMatchesPromptCreativeContractForTests({ promptPlan, ledger: cutExecutionLedger, report })) {
+      timingOnlyCreativeCompatibleReports.add(candidate.filePath);
+    }
+  }
+  const passed = reports.find(({ report, filePath }) => {
+    const status = String(report.status ?? "").toLowerCase();
+    const missing = Number(report.missing_image_count ?? report.missing_count ?? 0);
+    const hashOk = report.prompt_plan_hash === promptPlanHash || timingOnlyCreativeCompatibleReports.has(filePath);
     const countOk = Number(report.expected_image_count ?? report.image_count ?? 0) >= promptCount
       && Number(report.image_count ?? 0) >= promptCount;
     return report.reference_only !== true && status === "passed" && missing === 0 && hashOk && countOk;
@@ -609,7 +661,7 @@ async function imageReportComplete(episodeDir, episode, identity) {
         evidence: `${passed.name}; duplicate_hashes=${duplicates.slice(0, 4).join(", ")}${duplicates.length > 4 ? ` +${duplicates.length - 4} more` : ""}`,
       };
     }
-    return { done: true, evidence: passed.name };
+    return { done: true, evidence: `${passed.name}${passed.report.prompt_plan_hash !== promptPlanHash ? "; timing-only prompt rebind verified against per-cut creative hashes and accepted rasters" : ""}` };
   }
   const imageDir = path.join(episodeDir, "assets", "images");
   const imageNames = await listFiles(imageDir);
@@ -728,15 +780,46 @@ async function longformMixComplete(episodeDir, episode) {
   const latest = await latestMatching(episodeDir, new RegExp(`^longform_audio_bed_report_${episode}.*\\.json$`));
   if (!latest) return { done: false, evidence: null };
   const report = await readJson(latest.filePath, {});
+  const status = String(report.status ?? "").toLowerCase();
+  if (!["passed", "completed"].includes(status)) {
+    return { done: false, state: status === "failed" ? "failed" : "blocked", evidence: `${latest.name} status=${status || "missing"}` };
+  }
   const finalAudio = report.final_audio_path
     ?? report.final_m4a_path
     ?? report.output_m4a_path
     ?? report.output_path
     ?? report.mix?.m4a_path
     ?? report.mix?.wav_path;
+  if (!finalAudio || !(await exists(finalAudio))) return { done: false, evidence: `${latest.name}; final audio missing` };
+
+  if (report.narration_path) {
+    const qwenReportPath = report.qwen_report_path ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+    const qwenReport = await readJson(qwenReportPath, null);
+    const currentNarrationPath = qwenReport?.output_path ?? null;
+    if (!currentNarrationPath || !(await exists(currentNarrationPath))) {
+      return { done: false, state: "stale", evidence: `${latest.name}; current Qwen stitched narration missing` };
+    }
+    if (path.resolve(report.narration_path) !== path.resolve(currentNarrationPath)) {
+      return { done: false, state: "stale", evidence: `${latest.name}; narration path does not match current Qwen stitch report` };
+    }
+    const currentDuration = Number(qwenReport.final_duration_sec);
+    const reportDuration = Number(report.narration_duration_sec);
+    if (Number.isFinite(currentDuration) && Number.isFinite(reportDuration) && Math.abs(currentDuration - reportDuration) > 0.25) {
+      return { done: false, state: "stale", evidence: `${latest.name}; narration duration does not match current Qwen stitch report` };
+    }
+    if (report.qwen_report_sha256 && await fileSha256(qwenReportPath) !== report.qwen_report_sha256) {
+      return { done: false, state: "stale", evidence: `${latest.name}; Qwen stitch report hash stale` };
+    }
+    if (report.narration_sha256 && await fileSha256(currentNarrationPath) !== report.narration_sha256) {
+      return { done: false, state: "stale", evidence: `${latest.name}; narration audio hash stale` };
+    }
+  }
+  if (report.final_audio_sha256 && await fileSha256(finalAudio) !== report.final_audio_sha256) {
+    return { done: false, state: "stale", evidence: `${latest.name}; final mix hash stale` };
+  }
   return {
-    done: Boolean(finalAudio && await exists(finalAudio)),
-    evidence: `${latest.name}${finalAudio ? ` -> ${finalAudio}` : ""}`,
+    done: true,
+    evidence: `${latest.name} -> ${finalAudio}; narration source current`,
   };
 }
 

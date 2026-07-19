@@ -78,9 +78,41 @@ function whisperRows(words) {
   }));
 }
 
+function smallIntegerWords(value) {
+  const number = Number(value);
+  const ones = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+  if (!Number.isInteger(number) || number < 0 || number > 99) return null;
+  if (number < 20) return [ones[number]];
+  return [tens[Math.floor(number / 10)], ...(number % 10 ? [ones[number % 10]] : [])];
+}
+
+function spokenExpansionVariants(word) {
+  const multiplier = String(word?.normalized ?? "").match(/^(\d{1,2})x$/);
+  if (!multiplier) return [];
+  const numberWords = smallIntegerWords(multiplier[1]);
+  if (!numberWords) return [];
+  return Number(multiplier[1]) === 0
+    ? [[...numberWords, "times"], [...numberWords, "x"]]
+    : [[...numberWords, "x"]];
+}
+
 function alignScriptWords(scriptWords, timedWords, lookahead = 9) {
   let cursor = 0;
   return scriptWords.map((word) => {
+    for (const variant of spokenExpansionVariants(word)) {
+      for (let index = cursor; index < Math.min(timedWords.length, cursor + lookahead); index += 1) {
+        if (!variant.every((token, offset) => timedWords[index + offset]?.normalized === token)) continue;
+        cursor = index + variant.length;
+        return {
+          ...word,
+          whisper_index: index,
+          whisper_end_index: index + variant.length - 1,
+          alignment_score: 1,
+          spoken_expansion: variant.join(" "),
+        };
+      }
+    }
     let selected = -1;
     let selectedScore = -1;
     for (let index = cursor; index < Math.min(timedWords.length, cursor + lookahead); index += 1) {
@@ -215,6 +247,52 @@ export function buildTranscriptAtoms(script, words, timedScenes = [], factLedger
     );
   }
   return atoms;
+}
+
+export function retimeLockedEditorialBeats(lockedBeats, freshAtoms) {
+  const beats = Array.isArray(lockedBeats) ? lockedBeats : [];
+  const atoms = Array.isArray(freshAtoms) ? freshAtoms : [];
+  if (!beats.length || !atoms.length) throw new Error("Locked beat retiming requires existing beats and fresh transcript atoms.");
+
+  const lockedAtomIds = beats.flatMap((beat) => (beat.source_atom_ids ?? []).map(String));
+  if (lockedAtomIds.length !== atoms.length) {
+    throw new Error(`Locked beat retiming atom count changed (${lockedAtomIds.length} locked, ${atoms.length} fresh). Explicit regrouping is required.`);
+  }
+  if (new Set(lockedAtomIds).size !== lockedAtomIds.length) {
+    throw new Error("Locked beat retiming found duplicate source atoms in the approved grouping.");
+  }
+
+  let atomCursor = 0;
+  return beats.map((beat) => {
+    const atomCount = Array.isArray(beat.source_atom_ids) ? beat.source_atom_ids.length : 0;
+    if (!atomCount) throw new Error(`Locked beat ${beat.visual_beat_id ?? "unknown"} has no source atoms.`);
+    const selected = atoms.slice(atomCursor, atomCursor + atomCount);
+    atomCursor += atomCount;
+    if (selected.length !== atomCount) throw new Error(`Locked beat ${beat.visual_beat_id ?? "unknown"} exceeds the fresh atom timeline.`);
+
+    const freshExcerpt = normalizeText(selected.map((atom) => atom.text).join(" "));
+    const lockedExcerpt = normalizeText(beat.visual_beat_script_excerpt);
+    if (freshExcerpt !== lockedExcerpt) {
+      throw new Error(`Locked beat ${beat.visual_beat_id ?? "unknown"} no longer matches the approved script excerpt. Explicit regrouping is required.`);
+    }
+
+    const first = selected[0];
+    const last = selected.at(-1);
+    return {
+      ...beat,
+      source_atom_ids: selected.map((atom) => atom.atom_id),
+      source_word_start_index: first.source_word_start_index,
+      source_word_end_index: last.source_word_end_index,
+      start_sec: first.start_sec,
+      end_sec: last.end_sec,
+      duration_sec: Number(Math.max(0, last.end_sec - first.start_sec).toFixed(3)),
+      visual_beat_script_excerpt: freshExcerpt,
+      timing_repair: {
+        identity_preserved: true,
+        prior_source_atom_ids: (beat.source_atom_ids ?? []).map(String),
+      },
+    };
+  });
 }
 
 function canonicalDictionaries(factLedger) {

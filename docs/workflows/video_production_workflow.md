@@ -126,6 +126,7 @@ Planner calls use exact content-addressed cache reuse by default. Prompt hash, m
    - Generates one continuous narration track and generation metadata.
    - Stitching uses `0.08s` between units inside a source segment and `0.16s` between source segments by default. This protects final phonemes without padding a long episode unnecessarily.
    - Preflight locks Qwen provider-native speed at `1.25` by default. The provider request, cache key, TTS report, and stitch report all record that speed.
+   - Emotional direction does not lower the recap cadence. Tender, fearful, system, and cliffhanger beats retain forward delivery; use tone and emphasis instead of generic quiet/hushed/slow directions, whispering, or extended pauses.
    - If the stitched audio changes, rerun Whisper timing and every timing-dependent downstream artifact.
    - Do not destructively amplify cached TTS segments. Narration loudness is raised later in the longform mix.
 
@@ -138,7 +139,7 @@ Planner calls use exact content-addressed cache reuse by default. Prompt hash, m
    - Run after local Whisper timing and before timing bind:
      `node bin/goldflow.mjs audio pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 195 --target-wpm-max 220`
    - Writes `narration_pace_report_<episode>.json`.
-   - This is a hard production gate: actual WPM is computed from Whisper word count and audio duration, and must be 195-220 WPM unless the operator explicitly approves a diagnostic/recovery bypass.
+   - Actual WPM is computed from Whisper word count and audio duration against the 195-220 WPM target, but it is diagnostic rather than a production gate.
    - Actual TTS WPM is always diagnostic. Audio pace-check records `actual_wpm` and `diagnostic_pace_status`, while the ledger requires only current script/audio hashes and a valid measurement.
    - An out-of-range WPM result does not block production or trigger automatic full-episode TTS regeneration. Test native-speed changes on a small representative sample before scaling them.
    - Post-TTS tempo normalization is not a normal production recovery. `audio tempo-normalize` requires `--operator-approved-emergency true` and is reserved for an explicit operator-approved emergency diagnostic; rerun Whisper after any such use.
@@ -171,6 +172,7 @@ Planner calls use exact content-addressed cache reuse by default. Prompt hash, m
 13. Longform audio bed mix.
    - Default happy path is narrator-only: `audio longform-bed --narration-only true`.
    - Narrator-only mode requires only the stitched narration/Qwen report, raises/limits/loudnorms the narration, writes a normal mix report, and marks SFX, score, ambience, and transition SFX disabled.
+   - Completion is hash- and source-bound, not file-existence truth. The report identifies the current Qwen stitch report, stitched narration path/hash/duration, and final mix hash; `run status` marks the stage stale when any of those inputs or outputs no longer match.
    - Narrator-only mode keeps the final M4A and drops the huge intermediate WAV by default. Pass `--keep-wav true` only for diagnostics. Use `goldflow run cleanup --episode-dir <episode-dir>` to audit safe reclaimable intermediates and `--apply true` to prune them.
    - Opt-in audio-design variants mix narration, SFX, ambience, and score into one final continuous audio track.
    - Production narration loudness starts at `--narration-volume-db 2`, with the longform limiter enabled.
@@ -181,6 +183,7 @@ Planner calls use exact content-addressed cache reuse by default. Prompt hash, m
 14. Visual beat planning.
    - Atomize exact narration into clause/sentence units with inclusive Whisper word spans. The LLM may regroup contiguous atoms but cannot omit, overlap, reorder, or cross explicit location/state transitions.
    - Use stable span-derived beat/image IDs, project cumulative `active_state_constraints` only when exact evidence activates a positive visible state, and lock grouping in `visual_beat_approval.json`. Negative/unknown transition placeholders are not depiction requirements. Later repair changes named fields only unless an operator explicitly approves regrouping; use `visual beats --reproject-active-state-only true` to refresh state projection without changing approved grouping.
+   - For a narrow TTS repair, rerun Whisper timing, audio pace diagnostics, and timing bind, then use `visual beats --retime-locked-grouping true`. Revalidate refs and approvals, use `visual plan --revalidate-existing true --retime-existing true`, harden, and retime the existing transition plan with `visual transitions --revalidate-existing true`. Preserve accepted scene images only after proving all creative prompt hashes, ref ids/hashes, provider routes, and raster hashes still match the cut ledger; refresh focal/QA/parallax/motion provenance before the replacement render.
    - Temporary state values expire after the evidence-bearing beat. If prompt authoring blocks, retain the complete blocked prompt plan and use cut/scene-scoped planning with the blocked plan as the base; scoped replacements merge by stable `image_id` while untouched prompts remain byte-identical.
    - When a metadata-only upstream repair changes provenance without changing prompt intent, run `visual plan --revalidate-existing true`; it rechecks the complete existing plan and refreshes source hashes without invoking the LLM.
    - Enforce hold rails: 2.2-4.5s at 0-30s, 3.2-7s at 30-180s, 5-12s through 20 minutes, and 7-15s afterward. Specific indivisible/transition exceptions must be recorded.
@@ -348,7 +351,7 @@ Planner calls use exact content-addressed cache reuse by default. Prompt hash, m
 
 23. Selective inspected parallax.
    - Visual prompt authoring writes a conservative `motion_intent.depth_candidate` on every cut. It may mark only exceptional moving hero reveal, impact, transformation, UI, or critical-object frames eligible when the requested composition has one clean foreground subject and a coherent background plane. A true `static_hold` is never eligible because layered depth is movement.
-   - Run `goldflow visual parallax-assets` after image QA. Deterministic code selects only from those LLM-authored nominations, ranks by authored priority, spaces them apart, caps them at the run-locked maximum (three by default, five hard maximum), and binds every layer to the accepted source-image hash.
+   - Run `goldflow visual parallax-assets` after image QA. Deterministic code selects only from those LLM-authored nominations, ranks by authored priority, spaces them apart, and spends up to five candidates inside the first 120 seconds whenever safe opening nominations exist. Later depth is optional and must not displace that retention-window allowance. Every layer is bound to the accepted source-image hash.
    - Inspect the generated source/mask/foreground/background review sheet. Run `goldflow visual approve-parallax` with an explicit approved or declined decision for every candidate. Weak masks, translucent/overlapping subjects, edge-clipped figures, unsafe plates, or duplicate silhouettes must be declined.
    - If no authored frame is suitable, record the explicit `--no-suitable-parallax true --reviewer <name> --note <reason>` waiver. A no-suitable decision is a valid production outcome; manufacturing weak parallax is not.
 
@@ -509,7 +512,7 @@ Use this checklist before spending generation time:
 
 2. Speakability
    - Run targeted speakability only by default.
-   - Fix known TTS hazards before full TTS: dangling ellipses, clipped sentence endings, dense UI text, ranks, currencies, acronyms, and number pronunciation.
+   - Fix known TTS hazards before full TTS: dangling ellipses, clipped sentence endings, dense UI text, ranks, currencies, initialisms, and number pronunciation. Approved initialisms are expanded only in `qwen_spoken_text` (`CEO` -> `C E O`); source prose and captions retain their original spelling, and ordinary all-caps interface words are not expanded generically.
    - Do not let speakability rewrite the story broadly unless explicitly requested.
 
 3. Audio spine
@@ -551,6 +554,7 @@ Use this checklist before spending generation time:
    - Use final-script subtitles timed to Whisper, not Whisper-recognized text.
    - If `engagement_overlay_plan_<episode>.json` is present and passed, spot-check that bubbles do not cover faces, subtitles, or key UI, and that the prompt feels native to the current story beat.
    - Subtitle style: yellow text, small black outline, no background box.
+   - Script-faithful subtitle tokens remain unchanged when TTS uses a pronunciation expansion. Bind `0X` to the Whisper words “zero times” rather than assigning it proportionally to the following phrase.
    - Motion style: new runs lock `--motion smooth_subpixel_ken_burns`; use `smooth_fast_ken_burns` only as an explicitly preflighted faster integer-sampling fallback. Both consume the same directed motion plan at 60 fps, while subpixel uses cubic fractional movement without heavy oversampling. Verify `render_motion.mode`, `render_motion.fps`, cache reuse counts, motion behavior variation, static/moving contrast, approved parallax count, and frame-cadence smoothness in the report. Use `fill_ken_burns` only as a deliberate legacy/diagnostic comparison.
    - Preserve absolute visual cut `start_sec`; do not globally scale cut durations. Probe motion clip durations and audit rendered image timing against transcript/visual beats.
    - Verify final MP4 codec/pixel format with `ffprobe`, especially `yuv420p` for upload compatibility.

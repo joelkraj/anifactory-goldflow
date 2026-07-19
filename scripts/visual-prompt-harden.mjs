@@ -586,7 +586,7 @@ function requirementRefIdForPrompt(rawRefId, req, prompt, indexes) {
 function genericVisibleGroupName(value) {
   const text = normalize(value);
   if (!text) return true;
-  if (/\b(?:men|women|clerks|priests|guards|students|citizens|crowd|crowds|witnesses|workers|staff|audience|spectators|officials|soldiers|nobles|reporters|followers)\b/.test(text)) return true;
+  if (/\b(?:men|women|clerks|priests|guards|students|citizens|crowd|crowds|witnesses|workers|staff|audience|spectators|officials|soldiers|nobles|reporters|followers|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?)\b/.test(text)) return true;
   if (/\b[a-z]+\s+s\b/.test(text)) return true;
   return false;
 }

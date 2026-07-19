@@ -119,8 +119,85 @@ function imagePathFor(prompt) {
 }
 
 async function updateCutExecutionLedger({ prompt, outputPath, outputHash, promptHash, referenceInputs }) {
-  const ledger = await readJson(cutExecutionLedgerPath, null);
-  if (!ledger || !Array.isArray(ledger.cuts)) return;
+  let ledger = await readJson(cutExecutionLedgerPath, null);
+  if (!ledger || !Array.isArray(ledger.cuts)) {
+    const plan = await readJson(promptPath, null);
+    const report = await readJson(reportPath, null);
+    if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !Array.isArray(report?.results)) return;
+    const resultById = new Map(report.results.map((row) => [String(row?.image_id ?? ""), row]));
+    const cuts = [];
+    for (const planned of plan.prompts) {
+      if (planned.image_generation_required === false) continue;
+      const imageId = String(planned.image_id ?? "");
+      const result = resultById.get(imageId) ?? null;
+      const imagePath = result?.image_path ?? null;
+      const imageHash = imagePath && await exists(imagePath) ? await hashFile(imagePath) : null;
+      const metadata = imagePath ? await readJson(`${imagePath}.metadata.json`, null) : null;
+      const paths = [...new Set((metadata?.reference_image_paths
+        ?? planned.reference_slots?.map((slot) => slot.reference_image_path)
+        ?? []).filter(Boolean))];
+      const references = [];
+      for (const referencePath of paths) {
+        references.push({ path: referencePath, sha256: await hashFile(referencePath) });
+      }
+      cuts.push({
+        image_id: imageId,
+        scene_id: planned.scene_id ?? null,
+        visual_beat_id: planned.visual_beat_id ?? null,
+        start_sec: Number(planned.start_sec ?? 0),
+        duration_sec: Number(planned.duration_sec ?? 0),
+        beat_hash: sha256(JSON.stringify({
+          scene_id: planned.scene_id ?? null,
+          visual_beat_id: planned.visual_beat_id ?? null,
+          start_sec: planned.start_sec ?? null,
+          duration_sec: planned.duration_sec ?? null,
+          visual_beat_script_excerpt: planned.visual_beat_script_excerpt ?? null,
+          visual_beat_action: planned.visual_beat_action ?? null,
+          visual_job: planned.visual_job ?? null,
+        })),
+        authored_prompt_hash: sha256(JSON.stringify({
+          image_prompt: planned.image_prompt ?? null,
+          modelslab_image_prompt: planned.modelslab_image_prompt ?? null,
+          codex_image_prompt: planned.codex_image_prompt ?? null,
+          shot_manifest: planned.shot_manifest ?? null,
+          reference_requirements: planned.reference_requirements ?? [],
+        })),
+        submitted_prompt_hash: result?.prompt_hash ?? metadata?.prompt_hash ?? null,
+        reference_ids: (planned.reference_slots ?? planned.reference_requirements ?? []).map((row) => row.ref_id).filter(Boolean),
+        references,
+        image_provider: result?.image_provider ?? metadata?.image_provider ?? null,
+        image_model: result?.generated?.model ?? metadata?.model ?? null,
+        editorial_reuse_approved: metadata?.editorial_reuse_approved === true || result?.generated?.editorial_reuse_approved === true,
+        reuse_source_image_id: metadata?.reuse_source_image_id ?? result?.generated?.reuse_source_image_id ?? null,
+        image_path: imagePath,
+        image_sha256: imageHash,
+        generation_status: result?.status ?? "missing",
+        image_qa_status: "pending",
+        image_qa_note: null,
+        motion_profile_hash: null,
+        motion_clip_path: null,
+        motion_clip_sha256: null,
+        motion_clip_cache_key: null,
+        updated_at: new Date().toISOString(),
+      });
+    }
+    ledger = {
+      schema: "goldflow_cut_execution_ledger_v1",
+      status: cuts.length > 0 && cuts.every((cut) => cut.image_sha256) ? "passed" : "partial",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      prompt_plan_path: promptPath,
+      prompt_plan_hash: await hashFile(promptPath),
+      imagegen_report_path: reportPath,
+      cut_count: cuts.length,
+      completed_image_count: cuts.filter((cut) => cut.image_sha256).length,
+      pending_image_qa_count: cuts.length,
+      cuts,
+      updated_at: new Date().toISOString(),
+    };
+  }
   const cuts = ledger.cuts.map((cut) => {
     if (String(cut?.image_id ?? "") !== String(prompt.image_id)) return cut;
     return {

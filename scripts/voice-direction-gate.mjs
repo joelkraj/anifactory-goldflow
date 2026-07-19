@@ -77,12 +77,12 @@ async function sha256File(filePath) {
 function palette() {
   if (seriesSlug === "30-year-old-loser-reborn-to-buy-bitcoin") {
     return {
-      failed_future: ["[exhausted, worn down]", "[quiet despair]", "[voice heavy with shame]", "[flat, tired, barely holding together]"],
-      haru: ["[soft, aching tenderness]", "[fragile, voice almost breaking]", "[protective whisper]", "[exhales slowly, holding back tears]"],
-      regression: ["[stunned, breath shallow]", "[low, confused disbelief]", "[sharp inhale]", "[disoriented, trying to stay quiet]"],
-      strategy: ["[dry, calculating focus]", "[controlled urgency]", "[quiet excitement barely contained]", "[measured, careful, afraid to hope]"],
-      system: ["[cold dread]", "[hushed, clinical fear]", "[low, still, as if reading a diagnosis]", "[voice tightens]"],
-      family: ["[restrained warmth]", "[guilty, quiet]", "[trying to sound like a normal son]", "[tired tenderness]"],
+      failed_future: ["[exhausted but forward]", "[restrained despair]", "[shame held under control]", "[worn down, still moving]"],
+      haru: ["[aching tenderness, steady pace]", "[fragile but clear]", "[protective and direct]", "[holding back tears, still moving]"],
+      regression: ["[stunned, breath controlled]", "[confused disbelief, moving forward]", "[sharp realization]", "[disoriented but focused]"],
+      strategy: ["[dry, calculating focus]", "[controlled urgency]", "[excitement contained]", "[measured and alert]"],
+      system: ["[cold, clipped system readout]", "[clinical warning, steady pace]", "[precise machine notice]", "[controlled alarm]"],
+      family: ["[restrained warmth]", "[guilty but clear]", "[trying to sound normal]", "[tired tenderness, steady pace]"],
       dialogue: {
         "DAE-HO": "[guarded, older than his voice should be]",
         HARU: "[soft child voice, trying to sound brave]",
@@ -99,13 +99,13 @@ function palette() {
         DEFAULT: "[lightly acted dialogue, natural and restrained]",
       },
       dialogue_mix: ["[alive, intimate storytelling]", "[acted gently, shifting between narrator and character]", "[warm but tense, dialogue held close]"],
-      cliffhanger: ["[hushed, dangerous stillness]", "[low, ominous, letting the words land]", "[breath held]", "[slowly, as if the next word matters]"],
+      cliffhanger: ["[dangerous restraint, forward pace]", "[ominous and controlled]", "[tension held without pausing]", "[clipped cliffhanger landing]"],
       physical: ["[breathes in]", "[exhales slowly]", "[sighs quietly]", "[voice catches]", "[swallows hard]", "[sharp inhale]", "[bitter laugh under his breath]", "[clears throat quietly]"],
       humor: ["[dry, darkly amused]", "[bitter laugh under his breath]"],
     };
   }
   return {
-    default: ["[low, intimate]", "[tense, focused]", "[soft, wounded]", "[urgent, controlled]", "[cold dread]", "[quiet resolve]", "[bitterly amused]", "[hushed cliffhanger]"],
+    default: ["[grounded, forward]", "[tense, focused]", "[wounded but controlled]", "[urgent, controlled]", "[cold tension]", "[firm resolve]", "[bitterly amused]", "[clipped cliffhanger]"],
     physical: ["[exhales slowly]", "[swallows hard]", "[breathes in]"],
     dialogue: { DEFAULT: "[lightly acted dialogue, natural and restrained]" },
   };
@@ -1301,7 +1301,7 @@ function universalTagForMode(mode, text, tags, segmentIndex) {
   if (mode === "failed future / poverty") return first(recipes.exhausted_narration, "[sad]");
   if (mode === "performed dialogue mix") return firstSafeNarration(core.volume_pitch_style, "[low voice]");
   if (mode === "exposition narration") {
-    return ["[low, intimate narration]", "[quiet, focused]", "[hushed curiosity]", "[low, tense]"][segmentIndex % 4];
+    return ["[grounded, forward narration]", "[focused, brisk]", "[curious, controlled]", "[tense, moving forward]"][segmentIndex % 4];
   }
   return first((core.complex_social ?? []).filter((tag) => !/sarcastic|contempt/i.test(tag)), "[determined]");
 }
@@ -1512,7 +1512,7 @@ function classifyTempo(text, expectedDurationSec, mode = "") {
   const duration = Math.max(1, Number(expectedDurationSec) || count / 145 * 60);
   const wps = count / duration;
   const haystack = `${mode} ${text}`.toLowerCase();
-  if (/cliffhanger|memory|tender|dread|warning|system|poverty|family|slow|silence|pause|froze|nothing came|held breath|quiet|shocked/.test(haystack) || wps < 1.85 || count <= 4) return "slow";
+  if (/\b(?:slow|silence|pause|held breath|extended stillness)\b/.test(haystack) || wps < 1.85 || count <= 4) return "slow";
   if (/\b(comedy|dry humor|urgent|panic|escalation|countdown|monster|attack|crash|explod|changed at once|prank|haunted|purchase|license|barrier|ran|chase)\b/.test(haystack)) return "fast";
   if (!/dialogue/.test(haystack) && wps > 3.4) return "fast";
   return "medium";
@@ -1525,20 +1525,16 @@ function expectedFishDurationSec(text, { mode = "", hasDialogue = false, hasNarr
   const modeText = String(mode ?? "").toLowerCase();
   let wpm = 145;
 
-  // Fish reads clean narration faster than dialogue, while dialogue and mixed
-  // narration need room for acting, breaths, and speaker changes. Calibrating
-  // here keeps the post-Fish duration gate meaningful instead of comparing
-  // real acting against a single generic narration speed.
-  if (hasDialogue && hasNarration) wpm = 120;
-  else if (hasDialogue) wpm = 105;
-  else if (/\b(SYSTEM|NOTICE|WARNING|UI)\b/.test(speakerText) || /system|warning/.test(modeText)) wpm = 100;
-  else wpm = 208;
+  // Keep expected durations aligned with the production recap cadence. Emotion
+  // changes emphasis, not the underlying pace; slow metadata otherwise nudges
+  // voice plans toward long pauses that the final narration should not contain.
+  if (hasDialogue && hasNarration) wpm = 195;
+  else if (hasDialogue) wpm = 200;
+  else if (/\b(SYSTEM|NOTICE|WARNING|UI)\b/.test(speakerText) || /system|warning/.test(modeText)) wpm = 205;
+  else wpm = 215;
 
-  if (/cliffhanger|dread|tender|memory|child|grief|shame|breath held|dangerous stillness/.test(modeText)) {
-    wpm = Math.min(wpm, hasDialogue ? 105 : 145);
-  }
   if (/comedy|dry humor|urgent|panic|escalation|attack|monster|countdown/.test(modeText)) {
-    wpm = Math.max(wpm, hasDialogue ? 115 : 175);
+    wpm = Math.max(wpm, hasDialogue ? 205 : 215);
   }
 
   const tagPadding = (pause ? 0.15 : 0) + (physical ? 0.2 : 0);
@@ -1560,7 +1556,7 @@ function balanceTempoClassifications(segments) {
       const wordCount = words(row.segment.stripped_text ?? "").length;
       let target = null;
       let score = 0;
-      if (top[0] === "medium" && (/\b(dread|warning|system|shocked|poverty|family|quiet|froze|nothing came|receipt wrapped)\b/.test(text) || wordCount <= 8)) {
+      if (top[0] === "medium" && (/\b(silence|pause|held breath|extended stillness)\b/.test(text) || wordCount <= 4)) {
         target = "slow";
         score += 3;
       }
@@ -1648,11 +1644,11 @@ function alternatePerformanceTagsForRun(tag = "", segment = {}) {
       "[cold, clipped system notice]",
     ];
   }
-  if (/\bemphasis\b/.test(context)) return ["[focused emphasis]", "[quiet emphasis]", "[tense emphasis]", "[sharp emphasis]"];
+  if (/\bemphasis\b/.test(context)) return ["[focused emphasis]", "[controlled emphasis]", "[tense emphasis]", "[sharp emphasis]"];
   if (/\blow voice\b/.test(context)) return ["[low, tense]", "[low, controlled]", "[low, shaken]", "[low, urgent]"];
   if (/\bsoft\b/.test(context)) return ["[soft, careful]", "[soft, worried]", "[soft, restrained]", "[soft, tense]"];
   if (/\bnervous\b/.test(context)) return ["[nervous, quick]", "[nervous, breath held]", "[nervous, trying to stay calm]"];
-  if (!clean) return ["[focused]", "[quiet]", "[tense]"];
+  if (!clean) return ["[focused]", "[controlled]", "[tense]"];
   return [`[${clean}, clipped]`, `[${clean}, restrained]`, `[${clean}, tighter]`];
 }
 
@@ -2436,12 +2432,41 @@ function qwenPronunciationText(value) {
     .replace(/\bMP\b/g, "M P")
     .replace(/\bDPS\b/g, "D P S")
     .replace(/\bAOE\b/g, "A O E")
+    .replace(/\bCEO\b/g, "C E O")
+    .replace(/\bCFO\b/g, "C F O")
+    .replace(/\bCOO\b/g, "C O O")
+    .replace(/\bCTO\b/g, "C T O")
+    .replace(/\bCIO\b/g, "C I O")
+    .replace(/\bCMO\b/g, "C M O")
+    .replace(/\bHR\b/g, "H R")
+    .replace(/\bPR\b/g, "P R")
+    .replace(/\bAI\b/g, "A I")
     .replace(/\bUI\b/g, "U I")
+    .replace(/\bUX\b/g, "U X")
+    .replace(/\bAPI\b/g, "A P I")
+    .replace(/\bFBI\b/g, "F B I")
+    .replace(/\bIRS\b/g, "I R S")
+    .replace(/\bSEC\b/g, "S E C")
+    .replace(/\bNDA\b/g, "N D A")
+    .replace(/\bLLC\b/g, "L L C")
+    .replace(/\bIPO\b/g, "I P O")
+    .replace(/\bIT\b/g, "I T")
+    .replace(/\bDNA\b/g, "D N A")
+    .replace(/\bGPS\b/g, "G P S")
+    .replace(/\bUSB\b/g, "U S B")
+    .replace(/\bPDF\b/g, "P D F")
+    .replace(/\bURL\b/g, "U R L")
+    .replace(/\bVIP\b/g, "V I P")
     .replace(/\bID\b/g, "I D")
     .replace(/\bMC\b/g, "M C")
     .replace(/\bLevel\s*[-:]\s*-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/\bLevel\s+-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/:\s*-\s*(\d{1,2})\b/g, (_match, value) => `, negative ${numberWord(value)}`)
+    .replace(/\b(\d[\d,]*)\s*x\b/gi, (_match, multiplier) => (
+      Number(String(multiplier).replace(/,/g, "")) === 0
+        ? "zero times"
+        : `${integerToSpokenWords(multiplier)} times`
+    ))
     .replace(/\b(\d[\d,]*(?:\.\d+)?)\s*\/\s*(\d[\d,]*(?:\.\d+)?)\b/g, (_match, left, right) => `${numberToSpokenWords(left)} out of ${numberToSpokenWords(right)}`)
     .replace(/\b(\d[\d,]*(?:\.\d+)?)%/g, (_match, number) => `${numberToSpokenWords(number)} percent`)
     .replace(/\b\d[\d,]*(?:\.\d+)?\b/g, (number) => numberToSpokenWords(number))
@@ -2526,10 +2551,10 @@ function qwenIntensityFor(segment, unit) {
 }
 
 function qwenPacingFor(unit) {
-  if (unit?.kind === "mc_internal" || /^MC_INTERNAL$/i.test(String(unit?.speaker ?? ""))) return "close, steady internal monologue with no theatrical projection";
-  if (/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))) return "precise interface cadence near the episode target of 195-220 words per minute, slightly clearer on letter ranks and warnings without long pauses";
-  if (unit?.kind === "dialogue" || unit?.kind === "performance_action") return "tight speaker turn near 195-220 spoken words per minute, conversational but clipped, no long lead-in or tail";
-  return "forward anime recap narration around 208 spoken words per minute, energetic and clean, no slow dramatic gaps, no rushed endings";
+  if (unit?.kind === "mc_internal" || /^MC_INTERNAL$/i.test(String(unit?.speaker ?? ""))) return "close internal monologue near 210-215 spoken words per minute, controlled and direct, with no theatrical pause";
+  if (/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))) return "precise interface cadence near 205-215 spoken words per minute, clear on letter ranks and warnings, with no long pauses";
+  if (unit?.kind === "dialogue" || unit?.kind === "performance_action") return "tight speaker turn near 205-215 spoken words per minute, conversational but clipped, with no long lead-in or tail";
+  return "forward anime recap narration around 215 spoken words per minute, energetic and clean, with clean sentence endings and no slow dramatic gaps";
 }
 
 function qwenCharacterLine(speaker, role, cast = null) {
@@ -2549,6 +2574,7 @@ function qwenInstructForUnit({ segment, unit, role, cast }) {
     `Emotion: ${segment.emotional_audio_texture ?? segment.delivery_mode ?? "tense anime recap pressure"}.`,
     `Intensity: ${qwenIntensityFor(segment, unit)}.`,
     `Pacing: ${qwenPacingFor(unit)}.`,
+    "Pacing priority: preserve the target cadence on tender, fearful, system, and cliffhanger beats; express emotion through emphasis and tone rather than silence, whispering, or extended pauses.",
     "Pronunciation: spell letter ranks and UI abbreviations as separated letters when needed, for example SSS is spoken as S S S.",
     "Do not say stage directions. Do not add bracket tags. Do not add words. Do not add a foreign accent. Do not stutter, repeat syllables, repeat words, add filler sounds, or invent breath noises. Stop cleanly after the final word. Preserve exact text except approved pronunciation normalization.",
   ].join(" ");

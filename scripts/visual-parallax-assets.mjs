@@ -128,12 +128,14 @@ async function main() {
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenPath}`);
   if (imageQa?.status !== "passed") throw new Error(`Parallax assets require passed image QA: ${imageQaPath}`);
   const parallaxPolicy = String(identity.parallax_policy ?? "disabled");
-  const maxCandidates = Math.floor(boundedNumber(flags["max-candidates"] ?? identity.parallax_target_max, 3, 0, 5));
-  const minSpacingSec = boundedNumber(flags["min-spacing-sec"] ?? identity.parallax_min_spacing_sec, 6, 0, 120);
+  const maxCandidates = Math.floor(boundedNumber(flags["max-candidates"] ?? identity.parallax_target_max, 5, 0, 5));
+  const minSpacingSec = boundedNumber(flags["min-spacing-sec"] ?? identity.parallax_min_spacing_sec, 10, 0, 120);
+  const openingWindowSec = boundedNumber(flags["opening-window-sec"] ?? identity.parallax_opening_window_sec, 120, 0, 600);
   const selected = parallaxPolicy === "selective_inspected"
     ? selectAuthoredParallaxCandidates(promptPlan.prompts, {
         maxCandidates,
         minSpacingSec,
+        openingWindowSec,
       })
     : [];
   const sourceHashes = Object.fromEntries(await Promise.all(
@@ -175,26 +177,57 @@ async function main() {
   const resultById = new Map((imagegenReport.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const acceptedHashes = imageQa.accepted_image_hashes ?? {};
   const candidates = [];
+  const candidateFailures = [];
   for (const candidate of selected) {
-    const generated = resultById.get(candidate.image_id);
-    const generatedImagePath = String(generated?.image_path ?? "").trim();
-    if (!generatedImagePath) throw new Error(`Missing generated image for parallax candidate ${candidate.image_id}.`);
-    const imagePath = path.resolve(generatedImagePath);
-    const imageHash = await sha256File(imagePath);
-    if (acceptedHashes[candidate.image_id] !== imageHash) throw new Error(`Parallax candidate is not bound to an accepted image hash: ${candidate.image_id}`);
-    const slug = candidate.image_id.replace(/[^a-zA-Z0-9._-]+/g, "-");
-    const assetReport = await buildParallaxAssets({
-      imagePath,
-      outputDir: path.join(assetsDir, slug),
-      slug,
-    });
-    candidates.push({
-      ...candidate,
-      image_path: imagePath,
-      image_sha256: imageHash,
-      asset_report_path: assetReport.report_path,
-      asset_report: assetReport,
-    });
+    try {
+      const generated = resultById.get(candidate.image_id);
+      const generatedImagePath = String(generated?.image_path ?? "").trim();
+      if (!generatedImagePath) throw new Error(`Missing generated image for parallax candidate ${candidate.image_id}.`);
+      const imagePath = path.resolve(generatedImagePath);
+      const imageHash = await sha256File(imagePath);
+      if (acceptedHashes[candidate.image_id] !== imageHash) throw new Error(`Parallax candidate is not bound to an accepted image hash: ${candidate.image_id}`);
+      const slug = candidate.image_id.replace(/[^a-zA-Z0-9._-]+/g, "-");
+      const assetReport = await buildParallaxAssets({
+        imagePath,
+        outputDir: path.join(assetsDir, slug),
+        slug,
+      });
+      candidates.push({
+        ...candidate,
+        image_path: imagePath,
+        image_sha256: imageHash,
+        asset_report_path: assetReport.report_path,
+        asset_report: assetReport,
+      });
+    } catch (error) {
+      candidateFailures.push({
+        image_id: candidate.image_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (!candidates.length) {
+    const report = {
+      schema: "goldflow_parallax_asset_report_v1",
+      status: "blocked",
+      review_status: "no_assets_generated",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      parallax_policy: parallaxPolicy,
+      candidate_count: 0,
+      candidates: [],
+      candidate_failures: candidateFailures,
+      blockers: [{ code: "parallax_all_candidates_failed", message: "Every selected parallax candidate failed local layer extraction; repair only the failed candidate set or record an explicit no-suitable waiver." }],
+      source_hashes: sourceHashes,
+      updated_at: new Date().toISOString(),
+    };
+    report.asset_contract_sha256 = parallaxAssetContractSha256(report);
+    await writeJson(outputPath, report);
+    console.log(JSON.stringify({ status: report.status, output_path: outputPath, candidate_count: 0, failed_candidate_count: candidateFailures.length }, null, 2));
+    process.exitCode = 2;
+    return;
   }
   const reviewSheet = await writeReviewSheet(candidates, reviewSheetPath);
   const report = {
@@ -207,8 +240,11 @@ async function main() {
     episode,
     parallax_policy: parallaxPolicy,
     candidate_count: candidates.length,
+    selected_candidate_count: selected.length,
+    candidate_failures: candidateFailures,
     target_max: maxCandidates,
     min_spacing_sec: minSpacingSec,
+    opening_window_sec: openingWindowSec,
     review_sheet_path: reviewSheet,
     candidates,
     source_hashes: sourceHashes,
@@ -220,6 +256,7 @@ async function main() {
     status: "passed",
     output_path: outputPath,
     candidate_count: candidates.length,
+    failed_candidate_count: candidateFailures.length,
     review_sheet_path: reviewSheet,
     review_status: report.review_status,
   }, null, 2));

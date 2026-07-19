@@ -69,6 +69,24 @@ export function sanitizeMotionKeyframes(value) {
   return rows;
 }
 
+function sameMotionPoint(left, right) {
+  return Math.abs(Number(left?.anchor?.x) - Number(right?.anchor?.x)) < 1e-8
+    && Math.abs(Number(left?.anchor?.y) - Number(right?.anchor?.y)) < 1e-8
+    && Math.abs(Number(left?.scale) - Number(right?.scale)) < 1e-8;
+}
+
+export function continuousMotionKeyframes(value, behavior = null) {
+  const rows = sanitizeMotionKeyframes(value);
+  if (!rows || behavior === "static_hold") return rows;
+  const movingPoints = rows.filter((row, index) => index === 0 || !sameMotionPoint(row, rows[index - 1]));
+  if (movingPoints.length < 2 || movingPoints.length === rows.length) return rows;
+  return movingPoints.map((row, index) => ({
+    ...row,
+    at: index / (movingPoints.length - 1),
+    easing_to_next: index === movingPoints.length - 1 ? "linear" : row.easing_to_next,
+  }));
+}
+
 export function sanitizeLayeredParallaxTreatment(value) {
   if (!value || typeof value !== "object" || String(value.mode ?? "") !== "layered_parallax") return null;
   const backgroundKeyframes = sanitizeMotionKeyframes(value.background_keyframes);
@@ -145,7 +163,7 @@ export function sanitizeDepthCandidate(value) {
 }
 
 export function motionKeyframesForIntent(value) {
-  const authored = sanitizeMotionKeyframes(value?.motion_keyframes);
+  const authored = continuousMotionKeyframes(value?.motion_keyframes, String(value?.behavior ?? ""));
   if (authored) return authored;
   if (!validAnchor(value?.start_anchor)
     || !validAnchor(value?.end_anchor)
@@ -162,7 +180,7 @@ export function sanitizeAuthoredMotionIntent(value) {
   if (!value || typeof value !== "object") return null;
   const behavior = String(value.behavior ?? "").trim();
   const hasKeyframes = value.motion_keyframes !== undefined && value.motion_keyframes !== null;
-  const motionKeyframes = hasKeyframes ? sanitizeMotionKeyframes(value.motion_keyframes) : null;
+  const motionKeyframes = hasKeyframes ? continuousMotionKeyframes(value.motion_keyframes, behavior) : null;
   if (hasKeyframes && !motionKeyframes) return null;
   const firstKeyframe = motionKeyframes?.[0] ?? null;
   const lastKeyframe = motionKeyframes?.at(-1) ?? null;
@@ -240,7 +258,10 @@ export function easingProgress(value, easing = "linear") {
   const t = clamp(value, 0, 1);
   if (easing === "ease_in") return t * t;
   if (easing === "ease_out") return 1 - ((1 - t) * (1 - t));
-  if (easing === "ease_in_out") return t * t * t * ((t * ((t * 6) - 15)) + 10);
+  if (easing === "ease_in_out") {
+    const smooth = t * t * t * ((t * ((t * 6) - 15)) + 10);
+    return (0.35 * t) + (0.65 * smooth);
+  }
   return t;
 }
 
@@ -412,10 +433,10 @@ export function motionIntentForPrompt(prompt, imageSha256, decision = null, opti
   const override = decision?.focal_override && typeof decision.focal_override === "object" ? decision.focal_override : null;
   const behavior = BEHAVIORS.has(String(override?.behavior ?? "")) ? String(override.behavior) : base.behavior;
   const easing = EASINGS.has(String(override?.easing ?? "")) ? String(override.easing) : base.easing;
-  const overrideKeyframes = sanitizeMotionKeyframes(override?.motion_keyframes);
+  const overrideKeyframes = continuousMotionKeyframes(override?.motion_keyframes, behavior);
   const hasSinglePointOverride = Boolean(override)
     && ["start_anchor", "end_anchor", "start_scale", "end_scale", "easing"].some((field) => override[field] !== undefined);
-  const selectedKeyframes = overrideKeyframes ?? (!hasSinglePointOverride ? sanitizeMotionKeyframes(base.motion_keyframes) : null);
+  const selectedKeyframes = overrideKeyframes ?? (!hasSinglePointOverride ? continuousMotionKeyframes(base.motion_keyframes, behavior) : null);
   const startScale = clamp(selectedKeyframes?.[0]?.scale ?? override?.start_scale ?? base.start_scale, 1, 1.25);
   const endScale = clamp(selectedKeyframes?.at(-1)?.scale ?? override?.end_scale ?? base.end_scale, 1, 1.25);
   const startSec = Number(prompt.start_sec ?? 0);
@@ -447,6 +468,57 @@ export function motionIntentForPrompt(prompt, imageSha256, decision = null, opti
 
 function behaviorForEditorialRow(row) {
   return String(row?.behavior ?? row?.shot_manifest?.motion_intent?.behavior ?? "").trim();
+}
+
+export function rebalanceEditorialMotionStreaks(rows, options = {}) {
+  const maximumMovingCuts = Math.max(1, Number(options.maximumMovingCuts ?? 7));
+  const ordered = [...(rows ?? [])].sort((left, right) => (
+    Number(left?.start_sec ?? 0) - Number(right?.start_sec ?? 0)
+    || String(left?.image_id ?? "").localeCompare(String(right?.image_id ?? ""))
+  ));
+  const byId = new Map(ordered.map((row) => [row.image_id, row]));
+  let streak = [];
+
+  const flush = () => {
+    while (streak.length > maximumMovingCuts) {
+      const midpoint = (streak.length - 1) / 2;
+      const candidate = streak
+        .map((row, index) => ({ row, index, distance: Math.abs(index - midpoint) }))
+        .filter(({ row }) => !row.depth_treatment)
+        .sort((left, right) => {
+          const leftAction = /action|impact|follow|parallax/.test(String(left.row.behavior ?? "")) ? 1 : 0;
+          const rightAction = /action|impact|follow|parallax/.test(String(right.row.behavior ?? "")) ? 1 : 0;
+          return leftAction - rightAction || left.distance - right.distance || left.index - right.index;
+        })[0];
+      if (!candidate) break;
+      const source = candidate.row;
+      byId.set(source.image_id, {
+        ...source,
+        focal_source: "deterministic_editorial_motion_contrast",
+        start_anchor: { x: 0.5, y: 0.5 },
+        end_anchor: { x: 0.5, y: 0.5 },
+        start_scale: 1,
+        end_scale: 1,
+        easing: "linear",
+        behavior: "static_hold",
+        intent_reason: "Insert a calm composition hold between authored moving cuts.",
+        motion_keyframes: undefined,
+        depth_treatment: undefined,
+      });
+      streak = streak.slice(candidate.index + 1);
+    }
+    streak = [];
+  };
+
+  for (const row of ordered) {
+    if (row.behavior === "static_hold") {
+      flush();
+      continue;
+    }
+    streak.push(row);
+  }
+  flush();
+  return (rows ?? []).map((row) => byId.get(row.image_id) ?? row);
 }
 
 export function editorialMotionDistributionFindings(rows, options = {}) {

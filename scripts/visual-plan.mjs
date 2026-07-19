@@ -1216,6 +1216,22 @@ function assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, label
   }
 }
 
+export function retimeExistingPromptsForTests(prompts, sourceRows, episodeId = "ep_01") {
+  assertPromptIdentityMatchesInputs(prompts, sourceRows, episodeId, "visual prompt timing repair");
+  return prompts.map((prompt, index) => {
+    const source = sourceRows[index];
+    const startSec = Number(source.start_sec ?? prompt.start_sec ?? 0);
+    const durationSec = Math.max(0.25, Number(source.duration_sec ?? (Number(source.end_sec ?? startSec) - startSec) ?? prompt.duration_sec ?? 0.25));
+    return {
+      ...prompt,
+      start_sec: Number(startSec.toFixed(3)),
+      duration_sec: Number(durationSec.toFixed(3)),
+      location_timeline_label: source.location_timeline_label ?? prompt.location_timeline_label ?? null,
+      active_state_constraints: source.active_state_constraints ?? prompt.active_state_constraints ?? null,
+    };
+  });
+}
+
 function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const imageId = targetImageIdForRow(sourceUnit, episodeId, index);
   const reuseCandidates = new Set((sourceUnit?.__editorial_reuse_candidate_image_ids ?? []).map(String));
@@ -1589,8 +1605,21 @@ function nameAppearsInPrompt(name, prompt) {
   return first.length > 2 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
 }
 
-function localBeatFidelityFindings(prompts, sourceRows) {
+function nonPersonEntityLabels(storyFactLedger) {
+  const labels = new Set();
+  for (const entity of storyFactLedger?.canonical_entities ?? []) {
+    if (String(entity?.kind ?? "").toLowerCase() === "person") continue;
+    for (const label of [entity?.display_name, ...(entity?.aliases ?? [])]) {
+      const normalized = normalizeLabel(label);
+      if (normalized) labels.add(normalized);
+    }
+  }
+  return labels;
+}
+
+function localBeatFidelityFindings(prompts, sourceRows, storyFactLedger = null) {
   const failures = [];
+  const knownNonPersonLabels = nonPersonEntityLabels(storyFactLedger);
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const source = sourceRows[index] ?? {};
@@ -1599,6 +1628,7 @@ function localBeatFidelityFindings(prompts, sourceRows) {
       .filter((finding) => finding?.code === "named_character_not_visible_subject" && finding.character)
       .map((finding) => String(finding.character));
     for (const name of [...new Set([...localNames, ...qualityNames])]) {
+      if (knownNonPersonLabels.has(normalizeLabel(name))) continue;
       if (!nameAppearsInPrompt(name, prompt)) {
         failures.push(`${prompt.image_id} local excerpt names ${name}, but prompt/manifest does not stage or visibly mediate that person`);
       }
@@ -1615,12 +1645,12 @@ function localBeatFidelityFindings(prompts, sourceRows) {
   return failures;
 }
 
-export function localBeatFidelityFindingsForTests(prompts, sourceRows) {
-  return localBeatFidelityFindings(prompts, sourceRows);
+export function localBeatFidelityFindingsForTests(prompts, sourceRows, storyFactLedger = null) {
+  return localBeatFidelityFindings(prompts, sourceRows, storyFactLedger);
 }
 
-function assertLocalBeatFidelity(prompts, sourceRows) {
-  const failures = localBeatFidelityFindings(prompts, sourceRows);
+function assertLocalBeatFidelity(prompts, sourceRows, storyFactLedger = null) {
+  const failures = localBeatFidelityFindings(prompts, sourceRows, storyFactLedger);
   if (failures.length) {
     throw new Error(`Visual prompt plan failed local beat fidelity:\n${failures.slice(0, 40).join("\n")}`);
   }
@@ -2251,13 +2281,15 @@ async function main() {
   if (flags["revalidate-existing"] === "true") {
     if (scopedRepair) throw new Error("Existing prompt-plan revalidation must validate the complete plan; omit scoped cut/scene flags.");
     const existingPlan = await readJson(outputPath, null);
-    const prompts = existingPlan?.prompts;
+    let prompts = existingPlan?.prompts;
     if (!Array.isArray(prompts) || prompts.length !== allVisualSourceRows.length) {
       throw new Error(`Existing prompt-plan revalidation requires ${allVisualSourceRows.length} prompts at ${outputPath}.`);
     }
     assertPromptIdentityMatchesInputs(prompts, allVisualSourceRows, episode, "visual prompt revalidation");
+    const timingRebind = flags["retime-existing"] === "true";
+    if (timingRebind) prompts = retimeExistingPromptsForTests(prompts, allVisualSourceRows, episode);
     assertScenePromptShape(prompts);
-    assertLocalBeatFidelity(prompts, allVisualSourceRows);
+    assertLocalBeatFidelity(prompts, allVisualSourceRows, storyFactLedger);
     const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
     const activeStateBlockers = activeStateFindings.filter((finding) => finding.severity === "blocker");
     const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
@@ -2271,12 +2303,14 @@ async function main() {
     if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
     const refreshed = {
       ...existingPlan,
+      prompts,
       status: activeStateBlockers.length || motionEditorialBlockers.length ? "blocked" : "passed",
       source_artifact_paths: sourcePaths,
       source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
       planner: {
         ...(existingPlan.planner ?? {}),
         revalidated_without_llm: true,
+        timing_rebound_without_llm: timingRebind,
         revalidated_at: new Date().toISOString(),
       },
       visual_plan_scope: {
@@ -2286,6 +2320,7 @@ async function main() {
         cut_ids: prompts.map((prompt) => prompt.image_id),
         untouched_prompt_count: prompts.length,
         revalidated_existing: true,
+        timing_rebound_existing: timingRebind,
       },
       active_state_findings: activeStateFindings,
       motion_editorial_findings: motionEditorialFindings,
@@ -2377,7 +2412,7 @@ async function main() {
   const empty = scopedPrompts.filter((row) => !row.image_prompt);
   if (!scopedPrompts.length || empty.length) throw new Error(`Visual planner returned ${scopedPrompts.length} prompts with ${empty.length} empty prompts.`);
   assertScenePromptShape(scopedPrompts);
-  assertLocalBeatFidelity(scopedPrompts, visualSourceRows);
+  assertLocalBeatFidelity(scopedPrompts, visualSourceRows, storyFactLedger);
   const scopedImageIds = scopedPrompts.map((prompt) => prompt.image_id);
   let prompts = scopedPrompts;
   if (scopedRepair) {

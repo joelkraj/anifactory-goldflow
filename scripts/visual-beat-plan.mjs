@@ -15,6 +15,7 @@ import {
   groupingLockHash,
   normalizeEditorialGrouping,
   projectActiveStateConstraints,
+  retimeLockedEditorialBeats,
 } from "./lib/editorial-beat-director.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1407,17 +1408,31 @@ async function existingGroupingLock() {
 async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) {
   const locked = await existingGroupingLock();
   const reprojectActiveStateOnly = flags["reproject-active-state-only"] === "true";
-  if (locked && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly) {
+  const retimeLockedGrouping = flags["retime-locked-grouping"] === "true";
+  if (locked && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping) {
     console.error(`visual beats: grouping lock current; reusing ${outputPath}`);
     return { reused: true, report: locked.plan };
   }
-  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly) {
+  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping) {
     throw new Error("Visual beat grouping was previously locked. Pass --approve-regrouping true only with explicit operator approval.");
+  }
+  if (retimeLockedGrouping && !locked) {
+    throw new Error("Locked beat retiming requires a currently approved visual beat grouping.");
   }
   const boundedScope = Number.isFinite(scopeEndSecNumber);
   const scopedScript = boundedScope ? scriptPrefixForTimedWordsForTests(scriptText, wordTiming.words) : { script: scriptText, source_word_end_exclusive: null, matched_timing_tail_words: null, fallback: false };
   const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger);
-  const directed = reprojectActiveStateOnly && locked
+  const directed = retimeLockedGrouping && locked
+    ? {
+        beats: retimeLockedEditorialBeats(locked.plan.beats, atoms),
+        planner: {
+          ...(locked.plan.editorial_director ?? {}),
+          timing_repaired_from_locked_grouping: true,
+          identity_preserved: true,
+          prior_visual_beat_plan_sha256: locked.approval.visual_beat_plan_sha256,
+        },
+      }
+    : reprojectActiveStateOnly && locked
     ? {
         beats: locked.plan.beats,
         planner: {
@@ -1460,6 +1475,7 @@ async function main() {
   let numberedBeatsAll;
   let whisperAlignmentSummary;
   let editorialResult = null;
+  let appliedRailFindings = [];
   if (useEditorialDirector) {
     if (!factLedgerMatchesScriptForTests(factLedger, scriptPath, scriptHash)) {
       throw new Error(`Editorial beat direction requires current passed story_fact_ledger.json: ${storyFactLedgerPath}`);
@@ -1470,8 +1486,8 @@ async function main() {
       return;
     }
     numberedBeatsAll = closeVisualBeatTimelineForTests(editorialResult.beats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
-    const appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll);
-    if (appliedRailFindings.length) {
+    appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll);
+    if (appliedRailFindings.length && flags["retime-locked-grouping"] !== "true") {
       throw new Error(`Editorial applied hold rails failed: ${appliedRailFindings.slice(0, 12).map((finding) => `${finding.visual_beat_id}:${finding.duration_sec}s`).join(", ")}`);
     }
     whisperAlignmentSummary = {
@@ -1580,6 +1596,7 @@ async function main() {
       atom_count: editorialResult.atoms.length,
       grouping_lock_sha256: groupingLockHash(beatsWithQuality),
       active_state_projection: "binding_per_beat",
+      timing_repair_retention_findings: flags["retime-locked-grouping"] === "true" ? appliedRailFindings : [],
       retention_rails: {
         sec_0_30: [2.2, 4.5],
         sec_30_180: [3.2, 7],
@@ -1614,7 +1631,9 @@ async function main() {
       visual_beat_plan_sha256: planHash,
       grouping_lock_sha256: report.editorial_director.grouping_lock_sha256,
       approved_by: flags["approved-by"] ?? "codex-agent",
-      approval_note: flags.note ?? "LLM grouping passed exact Whisper coverage, transition, evidence, timing-rail, and active-state validation.",
+      approval_note: flags.note ?? (flags["retime-locked-grouping"] === "true"
+        ? "Approved grouping identity preserved while exact timestamps and Whisper word spans were repaired from the current narration."
+        : "LLM grouping passed exact Whisper coverage, transition, evidence, timing-rail, and active-state validation."),
       regrouping_requires_explicit_operator_approval: true,
       updated_at: new Date().toISOString(),
     });

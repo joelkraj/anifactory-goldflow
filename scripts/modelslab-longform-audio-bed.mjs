@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { sha256File } from "./lib/file-hash.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -862,6 +863,10 @@ async function start() {
           qwenReport,
         });
   const scoreMeta = scoreProviderMeta();
+  const finalAudioPath = mix?.m4a_path ?? mix?.wav_path ?? null;
+  const qwenReportSha256 = await sha256File(qwenReportPath);
+  const narrationSha256 = await sha256File(narrationPath);
+  const finalAudioSha256 = finalAudioPath && await exists(finalAudioPath) ? await sha256File(finalAudioPath) : null;
   const report = {
     status: dryRun ? "dry_run" : "completed",
     created_at: new Date().toISOString(),
@@ -883,6 +888,15 @@ async function start() {
     sfx_endpoint: skipSfx ? null : "/api/v6/voice/sfx",
     narration_path: narrationPath,
     narration_duration_sec: narrationDuration,
+    narration_sha256: narrationSha256,
+    qwen_report_path: qwenReportPath,
+    qwen_report_sha256: qwenReportSha256,
+    source_script_hash: qwenReport?.source_script_hash ?? null,
+    final_audio_sha256: finalAudioSha256,
+    source_hashes: {
+      [qwenReportPath]: qwenReportSha256,
+      [narrationPath]: narrationSha256,
+    },
     mixed_duration_sec: mix?.duration_sec ?? durationSec,
     score_chapter_plan_path: effectiveSkipScore ? null : scorePlanPath,
     score_drop_plan_path: !effectiveSkipScore && scoreDropPlan ? scoreDropPlanPath : null,

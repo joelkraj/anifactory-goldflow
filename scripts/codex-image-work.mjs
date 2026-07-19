@@ -11,6 +11,7 @@ import {
   heartbeatWorkItem,
   leaseNextWorkItem,
   parseIdScope,
+  reuseExactWorkCompletions,
   validateCodexWorkManifest,
 } from "./lib/codex-image-work-contract.mjs";
 
@@ -86,6 +87,14 @@ export async function runCodexImageWork(flags) {
   }
 
   const manifestPath = required(flags, "manifest");
+  if (action === "reuse-exact") {
+    return reuseExactWorkCompletions({
+      sourceManifestPath: required(flags, "source-manifest"),
+      targetManifestPath: manifestPath,
+      assetIds: parseIdScope(flags["asset-ids"], flags["asset-id"], flags["image-ids"], flags["image-id"], flags["cut-ids"], flags["cut-id"]),
+      workerId: flags["worker-id"],
+    });
+  }
   if (action === "lease") {
     return leaseNextWorkItem({
       manifestPath,

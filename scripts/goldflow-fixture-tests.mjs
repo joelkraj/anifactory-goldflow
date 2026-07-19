@@ -77,10 +77,11 @@ import {
   creditExhaustedIdsFromReport,
   isModelslabCreditExhaustion,
 } from "./lib/image-fallback-policy.mjs";
-import { assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { alignExpandedZeroMultiplierCaptionsForTests, assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import { promoteEditorialMotionPlans } from "./editorial-motion-promote-proof.mjs";
 import { applyAutomaticFocalAnchorForTests } from "./visual-motion-plan.mjs";
 import {
+  continuousMotionKeyframes,
   editorialMotionDistributionFindings,
   motionIntentFindings,
   motionIntentForPrompt,
@@ -112,6 +113,7 @@ import {
   enforceEditorialReusePolicyForTests,
   localBeatFidelityFindingsForTests,
   normalizePromptPacketForTests,
+  retimeExistingPromptsForTests,
   visualUnitRiskAssessmentForTests,
   visualPromptCodexCacheEnabledForTests,
 } from "./visual-plan.mjs";
@@ -141,6 +143,7 @@ import {
   getCodexWorkStatus,
   heartbeatWorkItem,
   leaseNextWorkItem,
+  reuseExactWorkCompletions,
   validateCodexWorkManifest,
 } from "./lib/codex-image-work-contract.mjs";
 import {
@@ -150,6 +153,7 @@ import {
   editorialRetentionRailFindings,
   normalizeEditorialGrouping,
   projectActiveStateConstraints,
+  retimeLockedEditorialBeats,
   retentionRailForTime,
 } from "./lib/editorial-beat-director.mjs";
 import {
@@ -911,6 +915,33 @@ function testEditorialBeatDirectorContracts() {
   assert.deepEqual(normalized.beats[1].local_ui_elements, ["blue system panel"]);
   assert.deepEqual(editorialBeatCoverageFindings(normalized.beats, spoken.length), []);
   assert.deepEqual(editorialRetentionRailFindings(closeVisualBeatTimelineForTests(normalized.beats, spoken.at(-1).end_sec)), []);
+  const lockedBeats = normalized.beats.map((beat, index) => ({
+    ...beat,
+    visual_beat_id: `locked_beat_${index + 1}`,
+    image_id_hint: `locked_image_${index + 1}`,
+  }));
+  const freshAtoms = atoms.map((atom, index) => {
+    const insertedWordShift = index > 1 ? 1 : 0;
+    const expandedAtomEnd = index === 1 ? 1 : 0;
+    const sourceWordStart = atom.source_word_start_index + insertedWordShift;
+    const sourceWordEnd = atom.source_word_end_index + insertedWordShift + expandedAtomEnd;
+    return {
+      ...atom,
+      atom_id: `atom_w${String(sourceWordStart).padStart(6, "0")}_w${String(sourceWordEnd).padStart(6, "0")}`,
+      source_word_start_index: sourceWordStart,
+      source_word_end_index: sourceWordEnd,
+      start_sec: Number((atom.start_sec + (index > 1 ? 0.2 : 0)).toFixed(3)),
+      end_sec: Number((atom.end_sec + (index > 0 ? 0.2 : 0)).toFixed(3)),
+    };
+  });
+  const retimedLocked = retimeLockedEditorialBeats(lockedBeats, freshAtoms);
+  assert.deepEqual(retimedLocked.map((beat) => beat.visual_beat_id), lockedBeats.map((beat) => beat.visual_beat_id));
+  assert.deepEqual(retimedLocked.map((beat) => beat.image_id_hint), lockedBeats.map((beat) => beat.image_id_hint));
+  assert.notDeepEqual(retimedLocked.flatMap((beat) => beat.source_atom_ids), lockedBeats.flatMap((beat) => beat.source_atom_ids));
+  assert.equal(retimedLocked[1].source_word_end_index, lockedBeats[1].source_word_end_index + 1);
+  assert.equal(retimedLocked[2].source_word_start_index, lockedBeats[2].source_word_start_index + 1);
+  assert.equal(retimedLocked.every((beat) => beat.timing_repair.identity_preserved), true);
+  assert.throws(() => retimeLockedEditorialBeats(lockedBeats, freshAtoms.slice(1)), /atom count changed/i);
   const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
   assert.equal(projected[0].active_state_constraints.entities.joey.wardrobe, "plain gray student shirt");
   assert.equal(projected[0].active_state_constraints.entities.joey.visible_state, undefined);
@@ -940,6 +971,25 @@ function testEditorialBeatDirectorContracts() {
   assert.match(prompt, /Never merge across an atom with transition_barrier_before=true/i);
   assert.deepEqual(retentionRailForTime(0), { band: "0_30", min_sec: 2.2, max_sec: 4.5 });
   assert.deepEqual(retentionRailForTime(1300), { band: "1200_plus", min_sec: 7, max_sec: 15 });
+
+  const multiplierScript = "The system appeared. [PROJECTED RETURN: 0X] Joey closed the laptop.";
+  const multiplierTokens = ["The", "system", "appeared", "PROJECTED", "RETURN", "zero", "times", "Joey", "closed", "the", "laptop"];
+  const multiplierWords = multiplierTokens.map((word, index) => ({
+    index,
+    word,
+    normalized: word.toLowerCase(),
+    start_sec: index * 0.4,
+    end_sec: (index + 1) * 0.4,
+  }));
+  const multiplierAtoms = buildTranscriptAtoms(multiplierScript, multiplierWords, [{
+    scene_id: "scene_multiplier",
+    start_sec: 0,
+    end_sec: multiplierWords.at(-1).end_sec,
+    location: "System Room",
+  }]);
+  const multiplierAtom = multiplierAtoms.find((atom) => atom.text.startsWith("0X"));
+  assert.equal(multiplierAtom.source_word_start_index, 5);
+  assert.equal(multiplierWords[multiplierAtom.source_word_start_index].normalized, "zero");
 }
 
 function testEditorialBeatTimelineClosure() {
@@ -1060,6 +1110,23 @@ function testPhraseAwareSubtitleGrouping() {
   assert.equal(lockedCaptionRows.source, "approved_visual_beat_script_text_timed_by_whisper");
   assert.equal(lockedCaptionRows.events.map((row) => row.text).join(" "), "The system gave Joey Manhwa Role assigned.");
   assert.doesNotMatch(lockedCaptionRows.events.map((row) => row.text).join(" "), /Manwa|Roll/);
+
+  const alignedMultiplier = alignExpandedZeroMultiplierCaptionsForTests([
+    { start_sec: 178.86, end_sec: 182.18, text: "730] [RECIPROCITY RETURN:" },
+    { start_sec: 183.06, end_sec: 183.84, text: "0X]" },
+    { start_sec: 185.16, end_sec: 187.86, text: "Seven years." },
+  ], [
+    { word: ",730", start_sec: 178.86, end_sec: 179.68 },
+    { word: "reciprocity", start_sec: 179.68, end_sec: 180.48 },
+    { word: "return", start_sec: 180.48, end_sec: 180.96 },
+    { word: "zero", start_sec: 180.96, end_sec: 181.64 },
+    { word: "times.", start_sec: 181.64, end_sec: 182.18 },
+    { word: "Seven", start_sec: 183.06, end_sec: 183.44 },
+  ]);
+  assert.deepEqual(alignedMultiplier.slice(0, 2), [
+    { start_sec: 178.86, end_sec: 180.96, text: "730] [RECIPROCITY RETURN:" },
+    { start_sec: 180.96, end_sec: 182.18, text: "0X]" },
+  ]);
 }
 
 function testQwenKeepsBracketedUiDialogueSpeakable() {
@@ -1318,6 +1385,30 @@ function testDirectedMotionAndFullTimelineTransitions() {
   assert.equal(sanitizedKeyframedMotion.start_scale, 1);
   assert.equal(sanitizedKeyframedMotion.end_scale, 1.065);
   assert.deepEqual(sanitizedKeyframedMotion.start_anchor, { x: 0.5, y: 0.5 });
+  const delayedMotion = continuousMotionKeyframes([
+    { at: 0, anchor: { x: 0.3, y: 0.5 }, scale: 1.01, easing_to_next: "ease_in_out" },
+    { at: 0.2, anchor: { x: 0.3, y: 0.5 }, scale: 1.01, easing_to_next: "ease_in_out" },
+    { at: 0.75, anchor: { x: 0.7, y: 0.5 }, scale: 1.06, easing_to_next: "ease_out" },
+    { at: 1, anchor: { x: 0.7, y: 0.5 }, scale: 1.06, easing_to_next: "linear" },
+  ], "lateral_follow");
+  assert.equal(delayedMotion.length, 2);
+  assert.deepEqual(delayedMotion.map((row) => row.at), [0, 1]);
+  assert.equal(motionTraceForIntent({ image_id: "cut_continuous", duration_sec: 4, behavior: "lateral_follow", motion_keyframes: delayedMotion }, 60)[1].x > delayedMotion[0].anchor.x, true);
+  const subtleMoveTrace = motionTraceForIntent({
+    image_id: "cut_subtle_continuous",
+    duration_sec: 10,
+    behavior: "slow_push_in",
+    motion_keyframes: [
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1.01, easing_to_next: "ease_in_out" },
+      { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1.045, easing_to_next: "linear" },
+    ],
+  }, 60);
+  assert.equal(subtleMoveTrace[1].scale > subtleMoveTrace[0].scale, true);
+  const staticDelay = continuousMotionKeyframes([
+    { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" },
+    { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" },
+  ], "static_hold");
+  assert.equal(staticDelay.length, 2);
   assert.equal(sanitizeMotionKeyframes([{ at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" }]), null);
   assert.equal(sanitizeAuthoredMotionIntent({ ...keyframedMotion, motion_keyframes: [...keyframedMotion.motion_keyframes].reverse() }), null);
   const keyframedIntent = motionIntentForPrompt({ image_id: "cut_keyframed", duration_sec: 4, shot_manifest: { motion_intent: keyframedMotion } }, "hash-keyframed");
@@ -1480,6 +1571,7 @@ function testDirectedMotionAndFullTimelineTransitions() {
     { image_id: "depth_b", start_sec: 8, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "impact_push", depth_candidate: { eligible: true, priority: 99, separation_confidence: "high", foreground_subject: "blade", background_plane: "arena", editorial_reason: "impact" } } } },
     { image_id: "depth_c", start_sec: 18, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "ui_focus", depth_candidate: { eligible: true, priority: 88, separation_confidence: "high", foreground_subject: "system panel", background_plane: "city", editorial_reason: "system reveal" } } } },
     { image_id: "depth_static", start_sec: 30, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "static_hold", depth_candidate: { eligible: true, priority: 100, separation_confidence: "high", foreground_subject: "hero", background_plane: "hall", editorial_reason: "should remain still" } } } },
+    { image_id: "depth_late", start_sec: 200, duration_sec: 5, shot_manifest: { motion_intent: { behavior: "slow_push_in", depth_candidate: { eligible: true, priority: 100, separation_confidence: "high", foreground_subject: "late hero", background_plane: "late hall", editorial_reason: "must not displace retention-window depth" } } } },
   ];
   const selectedDepth = selectAuthoredParallaxCandidates(depthPrompts, { maxCandidates: 2, minSpacingSec: 6 });
   assert.deepEqual(selectedDepth.map((row) => row.image_id), ["depth_b", "depth_c"]);
@@ -1497,7 +1589,10 @@ function testDirectedMotionAndFullTimelineTransitions() {
     },
   });
   assert.equal(noticeable.occlusion_contract, "foreground_cover");
-  assert.equal(noticeable.foreground_keyframes.at(-1).scale - noticeable.background_keyframes.at(-1).scale >= 0.05, true);
+  const finalDepthSeparation = noticeable.foreground_keyframes.at(-1).scale - noticeable.background_keyframes.at(-1).scale;
+  const backgroundTravel = noticeable.background_keyframes[0].scale - noticeable.background_keyframes.at(-1).scale;
+  assert.equal(finalDepthSeparation >= 0.05 && finalDepthSeparation <= 0.08, true);
+  assert.equal(backgroundTravel >= 0.01 && backgroundTravel <= 0.025, true);
   const contractReport = {
     source_hashes: { "/tmp/prompts.json": depthAssetHash },
     candidates: [{
@@ -1779,8 +1874,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
   assert.equal(identity.motion_policy, "selective_editorial_v1");
   assert.equal(identity.parallax_policy, "selective_inspected");
-  assert.equal(identity.parallax_target_max, 3);
-  assert.equal(identity.parallax_min_spacing_sec, 6);
+  assert.equal(identity.parallax_target_max, 5);
+  assert.equal(identity.parallax_min_spacing_sec, 10);
+  assert.equal(identity.parallax_opening_window_sec, 120);
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");
@@ -2082,6 +2178,19 @@ function testAdaptiveProviderPromptPackets() {
   assert.equal(normalized.codex_image_prompt, null);
   assert.deepEqual(normalized.visible_subjects, ["Joey"]);
   assert.deepEqual(normalized.reference_requirements.map((row) => row.ref_id), ["joey_ref"]);
+  const retimed = retimeExistingPromptsForTests([normalized], [{
+    ...source,
+    start_sec: 0.42,
+    duration_sec: 3.48,
+    location_timeline_label: "0:00 Academy Hall",
+    active_state_constraints: { location_id: "academy_hall", applied_through_source_word_index: 11, entities: {} },
+  }]);
+  assert.equal(retimed[0].start_sec, 0.42);
+  assert.equal(retimed[0].duration_sec, 3.48);
+  assert.equal(retimed[0].provider_prompt, normalized.provider_prompt);
+  assert.equal(retimed[0].prompt_hash, normalized.prompt_hash);
+  assert.deepEqual(retimed[0].shot_manifest, normalized.shot_manifest);
+  assert.equal(retimed[0].active_state_constraints.applied_through_source_word_index, 11);
 }
 
 function testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse() {
@@ -2780,6 +2889,30 @@ function testLocalBeatFidelityEditorialCases() {
   ]);
   assert.deepEqual(hyphenatedNameFindings, []);
 
+  const organizationFindings = localBeatFidelityFindingsForTests([
+    {
+      image_id: "ep_01-cut-organization",
+      image_prompt: "Joey studies a launch dashboard in the glass meeting room while regional merchants watch the trial metrics.",
+      shot_manifest: {
+        visible_characters: ["Joey"],
+        location_ref_id: "tenfold_glass_meeting_room_ref",
+      },
+    },
+  ], [
+    {
+      primary_subject: "Joey",
+      visible_subjects: ["Joey", "regional merchants"],
+      visual_beat_script_excerpt: "Tenfold opened the regional trial while Joey watched the merchant dashboard.",
+    },
+  ], {
+    canonical_entities: [{
+      kind: "organization",
+      display_name: "Tenfold",
+      aliases: ["Tenfold"],
+    }],
+  });
+  assert.deepEqual(organizationFindings, []);
+
   const blockedFindings = localBeatFidelityFindingsForTests([
     {
       image_id: "ep_01-cut-missing",
@@ -3133,8 +3266,15 @@ function testVoiceDirectionCharacterization() {
   const cardinalNumbers = voiceDirectionTransformForTests("418 students connected to 4,812 shadows for 100,000 years.");
   assert.equal(cardinalNumbers.qwen_spoken_text, "four hundred and eighteen students connected to four thousand eight hundred and twelve shadows for one hundred thousand years.");
 
+  const initialisms = voiceDirectionTransformForTests("The CEO told HR to send the NDA as a PDF through the API, but the SYSTEM stayed active.");
+  assert.equal(initialisms.qwen_spoken_text, "The C E O told H R to send the N D A as a P D F through the A P I, but the SYSTEM stayed active.");
+
   const systemNumbers = voiceDirectionTransformForTests("BODY CLAIM: 41% SHARED BODY CLAIM: 50 / 50 HELL DURATION: 8.3 YEARS", { speaker: "SYSTEM" });
   assert.equal(systemNumbers.qwen_spoken_text, "BODY CLAIM: forty-one percent SHARED BODY CLAIM: fifty out of fifty HELL DURATION: eight point three YEARS");
+
+  const multipliers = voiceDirectionTransformForTests("RECIPROCITY RETURN: 0X. THE 10X SYSTEM ACTIVATED.", { speaker: "SYSTEM" });
+  assert.equal(multipliers.qwen_spoken_text, "RECIPROCITY RETURN: zero times. THE ten times SYSTEM ACTIVATED.");
+  assert.equal(ttsSafeTextForTests("RECIPROCITY RETURN: 0X. 10X CASHBACK."), "Reciprocity Return: zero times. ten times Cashback.");
 
   const trailingAttribution = voiceDirectionTransformForTests("\"Run,\" he said.");
   assert.deepEqual(trailingAttribution.paragraph_units.map((unit) => unit.text), ["Run."]);
@@ -3216,6 +3356,9 @@ function testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets() {
   ]);
   assert.ok(units.every((unit) => unit.source_speaker === "SYSTEM"));
   assert.ok(units.every((unit) => /precise interface cadence/i.test(unit.qwen_instruct)));
+  assert.ok(units.every((unit) => /205-215 spoken words per minute/i.test(unit.qwen_instruct)));
+  assert.ok(units.every((unit) => /express emotion through emphasis and tone/i.test(unit.qwen_instruct)));
+  assert.ok(units.every((unit) => !/\b(?:hushed|whisper|slowly|slow cadence)\b/i.test(unit.qwen_instruct)));
 }
 
 async function testNarrationPaceChecks() {
@@ -4789,6 +4932,35 @@ async function testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists
   )), true);
 }
 
+async function testVisualHardenTreatsCollectiveSubjectsAsGeneric() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "Early Tenfold merchants gather around the apartment desk to review a clean launch dashboard.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [{
+      ref_id: "char_tenfold_accountant_ref",
+      kind: "character_state",
+      subject: "Tenfold Accountant",
+      scene_ids: ["scene_001"],
+      reference_image_path: "/tmp/char_tenfold_accountant_ref.png",
+    }],
+    referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
+    shotManifest: {
+      visible_characters: ["Early Tenfold Merchants"],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "visible_character_ref_not_attached"
+    || finding.code === "visible_character_ref_scope_missing"
+  )), false);
+}
+
 async function testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const vaguePromptText = "Frame-left, Joey in clean academy clothes watches the stage with a controlled expression.";
@@ -6180,7 +6352,49 @@ async function testCodexImageWorkQueueContracts() {
     });
   }
   assert.equal((await getCodexWorkStatus({ manifestPath: created.manifest.manifest_path })).status, "completed");
-  assert.equal((await validateCodexWorkManifest({ manifestPath: created.manifest.manifest_path })).status, "passed");
+  const initialValidation = await validateCodexWorkManifest({ manifestPath: created.manifest.manifest_path });
+  assert.equal(initialValidation.status, "passed", JSON.stringify(initialValidation.findings, null, 2));
+
+  const duplicateWorkerEpisodeDir = path.join(root, "duplicate-worker-episode");
+  await fs.mkdir(duplicateWorkerEpisodeDir, { recursive: true });
+  const duplicateWorkerPromptsPath = path.join(duplicateWorkerEpisodeDir, "section_image_prompts_hardened.json");
+  const duplicateWorkerIds = ["ep_01-duplicate-001", "ep_01-duplicate-002"];
+  await writeJson(duplicateWorkerPromptsPath, {
+    status: "passed",
+    image_provider: "codex_imagegen",
+    prompts: duplicateWorkerIds.map((imageId) => ({
+      image_id: imageId,
+      image_provider_route: "codex_imagegen",
+      codex_image_prompt: `${imageId}, anime/manhwa, 16:9 landscape.`,
+      reference_slots: [],
+    })),
+  });
+  const duplicateWorkerManifest = await createCodexWorkManifest({
+    mode: "scene",
+    episodeDir: duplicateWorkerEpisodeDir,
+    promptsPath: duplicateWorkerPromptsPath,
+    imageIds: duplicateWorkerIds,
+    leaseSeconds: 30,
+    maxAttempts: 2,
+  });
+  const firstWorkerLease = await leaseNextWorkItem({ manifestPath: duplicateWorkerManifest.manifest.manifest_path, workerId: "same-worker" });
+  const repeatedWorkerLease = await leaseNextWorkItem({ manifestPath: duplicateWorkerManifest.manifest.manifest_path, workerId: "same-worker" });
+  assert.equal(repeatedWorkerLease.reused_existing_lease, true);
+  assert.equal(repeatedWorkerLease.assignment.asset_id, firstWorkerLease.assignment.asset_id);
+  const duplicateWorkerStatus = await getCodexWorkStatus({ manifestPath: duplicateWorkerManifest.manifest.manifest_path });
+  assert.equal(duplicateWorkerStatus.counts.leased, 1);
+  assert.equal(duplicateWorkerStatus.counts.pending, 1);
+
+  const refreshedPromptsPath = path.join(episodeDir, "section_image_prompts_hardened_refreshed.json");
+  const originalPrompts = await readJson(promptsPath);
+  await writeJson(refreshedPromptsPath, { ...originalPrompts, provenance_refresh: "fixture" });
+  const refreshed = await createCodexWorkManifest({ mode: "scene", episodeDir, promptsPath: refreshedPromptsPath, imageIds, leaseSeconds: 30, maxAttempts: 2 });
+  const reused = await reuseExactWorkCompletions({
+    sourceManifestPath: created.manifest.manifest_path,
+    targetManifestPath: refreshed.manifest.manifest_path,
+  });
+  assert.equal(reused.reused_count, 4);
+  assert.equal((await validateCodexWorkManifest({ manifestPath: refreshed.manifest.manifest_path })).status, "passed");
 
   const referencePlanPath = path.join(episodeDir, "visual_reference_plan.json");
   const characterStateRefsPath = path.join(episodeDir, "character_state_refs.json");
@@ -6305,6 +6519,7 @@ const FIXTURE_SUITES = {
     testVisualHardenCanonicalizesStateRefRequirements,
     testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
     testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists,
+    testVisualHardenTreatsCollectiveSubjectsAsGeneric,
     testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored,
     testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed,
     testVisualHardenPreservesAttachableFaceOnlyStateRef,

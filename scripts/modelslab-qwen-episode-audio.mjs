@@ -502,6 +502,7 @@ function ttsSafeText(value) {
     .replace(/\b([A-Z])\s*[- ]\s*rank\b/g, "$1 rank")
     .replace(/\bUI\b/g, "U I")
     .replace(/\bID\b/g, "I D")
+    .replace(/\b(\d{1,2})\s*x\b/gi, (_match, multiplier) => `${numberWord(multiplier)} times`)
     .replace(/\bLevel\s*[-:]\s*-\s*(\d{1,2})\b/gi, (_match, level) => `Level negative ${numberWord(level)}`)
     .replace(/\s+/g, " ")
     .trim();

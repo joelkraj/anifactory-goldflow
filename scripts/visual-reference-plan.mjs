@@ -2460,7 +2460,12 @@ async function main() {
         },
       }
     : await createReferencePlan(scopedSemantic, stageName, guidance, referenceEvidenceLedger, locationContractLedger);
-  let referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map(normalizeTarget);
+  let referenceTargets = (Array.isArray(llm.parsed.reference_targets) ? llm.parsed.reference_targets : []).map((target, index) => {
+    const normalized = normalizeTarget(target, index);
+    return legacyRevalidation
+      ? { ...normalized, ...target, ref_id: normalized.ref_id, scene_ids: normalized.scene_ids, generation_mode: normalized.generation_mode }
+      : normalized;
+  });
   const llmTargetIds = new Set(referenceTargets.map((target) => String(target.ref_id ?? "")));
   const llmTargetCount = referenceTargets.length;
   const shouldDropStyleRefs = dropStyleRefs || (Boolean(visualStyleBible) && !keepStyleRefs);
@@ -2474,7 +2479,12 @@ async function main() {
   const beatLocationScope = applyBeatLocationSceneIds(referenceTargets, visualBeatRows(visualBeatPlan));
   referenceTargets = beatLocationScope.targets;
   if (!referenceTargets.length) throw new Error("Visual reference planner returned no reference_targets.");
-  let characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map(normalizeStateRef);
+  let characterStateRefs = (Array.isArray(llm.parsed.character_state_refs) ? llm.parsed.character_state_refs : []).map((ref, index) => {
+    const normalized = normalizeStateRef(ref, index);
+    return legacyRevalidation
+      ? { ...normalized, ...ref, state_ref_id: normalized.state_ref_id, scene_ids: normalized.scene_ids }
+      : normalized;
+  });
   const sourceFaceAnchoring = applySourceFaceAnchors({
     referenceTargets,
     characterStateRefs,
@@ -2560,7 +2570,9 @@ async function main() {
       episode_visual_direction_path: episodeVisualDirection.trim() ? episodeVisualDirectionPath : null,
     },
     visual_reference_scope: scope,
-    reference_director_contract_version: legacyRevalidation ? "legacy_revalidation" : "reference_director_v2",
+    reference_director_contract_version: legacyRevalidation
+      ? (existingReferencePlan.reference_director_contract_version ?? "legacy_revalidation")
+      : "reference_director_v2",
     reference_evidence_ledger_path: referenceEvidenceLedgerOutputPath,
     location_contract_ledger_path: locationContractLedgerOutputPath,
     reference_inventory_ledger_path: referenceInventoryLedgerOutputPath,
@@ -2570,6 +2582,7 @@ async function main() {
       ? "style refs dropped for this run; use style bible/text guidance only"
       : "style refs allowed only as abstract rendering/material/lighting samples",
     planner: {
+      ...(legacyRevalidation ? existingReferencePlan.planner ?? {} : {}),
       provider: llm.provider,
       model: llm.model ?? null,
       reasoning_effort: llm.reasoning_effort ?? null,
@@ -2581,6 +2594,8 @@ async function main() {
       chunk_concurrency: llm.chunk_concurrency ?? null,
       chunk_raw_target_count: llm.chunk_raw_target_count ?? null,
       merged_target_count: llm.merged_target_count ?? llmTargetCount,
+      revalidated_without_llm: legacyRevalidation,
+      revalidated_at: legacyRevalidation ? new Date().toISOString() : null,
     },
     reference_budget: {
       profile: "llm_directed_v2",

@@ -50,8 +50,9 @@ const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] 
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
-const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 3, 0, 5);
-const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 6, 0, 120);
+const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 5, 0, 5);
+const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 10, 0, 120);
+const parallaxOpeningWindowSec = boundedNumber(flags["parallax-opening-window-sec"], 120, 0, 600);
 const operatorQwenNarratorVoiceId = cleanOptionalId(flags["qwen-narrator-voice-id"] ?? flags["narrator-voice-id"] ?? null);
 const qwenNarratorVoiceId = operatorQwenNarratorVoiceId ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 const qwenNarratorVoicePolicy = operatorQwenNarratorVoiceId
@@ -340,6 +341,7 @@ async function main() {
     parallax_policy: parallaxPolicy,
     parallax_target_max: parallaxTargetMax,
     parallax_min_spacing_sec: parallaxMinSpacingSec,
+    parallax_opening_window_sec: parallaxOpeningWindowSec,
     image_output_qa_required: true,
     visual_prompt_review_policy: "blockers_only_after_harden",
     run_intent: runIntent,

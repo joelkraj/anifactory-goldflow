@@ -50,9 +50,15 @@ const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] 
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
-const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 5, 0, 5);
-const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 10, 0, 120);
-const parallaxOpeningWindowSec = boundedNumber(flags["parallax-opening-window-sec"], 120, 0, 600);
+const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 15, 0, 20);
+const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 3, 0, 120);
+const parallaxOpeningWindowSec = boundedNumber(flags["parallax-opening-window-sec"], 180, 0, 600);
+const parallaxFirstWindowSec = boundedNumber(flags["parallax-first-window-sec"], 30, 0, parallaxOpeningWindowSec);
+const parallaxFirstWindowTarget = boundedInteger(flags["parallax-first-window-target"], 5, 0, parallaxTargetMax);
+const parallaxRetentionWindowTarget = boundedInteger(flags["parallax-retention-window-target"], 10, 0, parallaxTargetMax);
+const parallaxBackgroundProvider = normalizeParallaxBackgroundProvider(
+  flags["parallax-background-provider"] ?? (imageProvider === "modelslab" ? "modelslab_flux_klein" : "local_blur_legacy"),
+);
 const operatorQwenNarratorVoiceId = cleanOptionalId(flags["qwen-narrator-voice-id"] ?? flags["narrator-voice-id"] ?? null);
 const qwenNarratorVoiceId = operatorQwenNarratorVoiceId ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 const qwenNarratorVoicePolicy = operatorQwenNarratorVoiceId
@@ -113,6 +119,12 @@ function normalizeParallaxPolicy(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (["selective_inspected", "disabled"].includes(normalized)) return normalized;
   throw new Error(`Unknown parallax policy: ${value}`);
+}
+
+function normalizeParallaxBackgroundProvider(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["modelslab_flux_klein", "local_blur_legacy"].includes(normalized)) return normalized;
+  throw new Error(`Unknown parallax background provider: ${value}`);
 }
 
 function cleanOptionalId(value) {
@@ -342,6 +354,10 @@ async function main() {
     parallax_target_max: parallaxTargetMax,
     parallax_min_spacing_sec: parallaxMinSpacingSec,
     parallax_opening_window_sec: parallaxOpeningWindowSec,
+    parallax_first_window_sec: parallaxFirstWindowSec,
+    parallax_first_window_target: parallaxFirstWindowTarget,
+    parallax_retention_window_target: parallaxRetentionWindowTarget,
+    parallax_background_provider: parallaxBackgroundProvider,
     image_output_qa_required: true,
     visual_prompt_review_policy: "blockers_only_after_harden",
     run_intent: runIntent,
@@ -359,6 +375,7 @@ async function main() {
       reference_model: lockedModelVersions().reference_model,
       image_fallback_provider: imageFallbackProvider,
       image_fallback_condition: imageFallbackCondition,
+      parallax_background_provider: parallaxBackgroundProvider,
       audio_target: audioTarget,
       qwen_narrator_voice_id: qwenNarratorVoiceId,
     },

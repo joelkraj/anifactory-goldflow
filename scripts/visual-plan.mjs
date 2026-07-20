@@ -561,7 +561,7 @@ Core contract:
 - Match motion to the visual job: reveal environment with a useful zoom-out; follow an actor toward visible action or impact; shift between separately staged subjects in an interaction; hold or gently push on readable reactions; settle on a UI panel or critical object without losing context; reveal the surrounding aftermath after a consequence. Use a static hold when the composition already carries strong action or the cut is too short for a meaningful move.
 - Stillness is part of the edit. In a chunk of four or more cuts, author at least one true static_hold when a reaction, tension beat, readable UI/object insert, or already-dynamic composition supports it. A static_hold keeps every anchor and scale identical for the entire cut; it is not a moving shot with a static label. Across the local sequence, usually let roughly 20-40 percent of cuts remain true holds instead of moving every image. Never move a frame merely to keep it alive.
 - Motion anchors must correspond to authored screen positions and remain between 0 and 1. Keep normal scales between 1.0 and 1.12 so the move does not crop away the evidence the cut was built to show. motion_keyframes use normalized at values from exactly 0 to exactly 1 in strict order; each row carries anchor, scale, and easing_to_next. Avoid fast scale reversals and ease_out movement directly from frame zero. Use keyframes selectively, not as compulsory motion on every cut.
-- Every motion_intent includes depth_candidate. Set eligible true only for an exceptional moving hero reveal, impact, transformation, or UI/object moment with one cleanly separable foreground subject and a coherent background plane. A true static_hold is not eligible because layered depth is movement. Supply a 0-100 editorial priority, high/medium/low separation confidence, the exact foreground subject, the background plane, and why depth improves this beat. Nominate at most one candidate per local chunk unless two beats are independently exceptional. Crowded, overlapping, translucent, edge-clipped, or visually tangled compositions are not depth candidates. Set eligible false for ordinary cuts.
+- Every motion_intent includes depth_candidate. Set eligible true only for a moving shot with one cleanly separable foreground subject and a coherent background plane. A true static_hold is not eligible because layered depth is movement. Supply a 0-100 editorial priority, high/medium/low separation confidence, the exact foreground subject, the background plane, and why depth improves this beat. Follow the run's parallax_direction retention targets across the supplied timestamps when enough safe frames exist; do not impose a one-candidate-per-chunk cap, and do not force crowded, overlapping, translucent, edge-clipped, or visually tangled frames merely to hit a quota.
 - Vary behavior and direction across the local chunk. Do not repeat the same motion pattern more than twice in succession unless the repeated hold is an intentional continuity choice.
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
 - Background extras appear only when the local beat asks for them. Keep private, lonely, or solo beats visibly clear of unrelated people.
@@ -694,7 +694,7 @@ function promptLocationDictionary(storyFactLedger, locationContractLedger, visua
   })).filter((location) => location.contracts.length || location.attachable_refs.length);
 }
 
-function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null, storyFactLedger = null) {
+function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null, storyFactLedger = null, runIdentity = null) {
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
@@ -721,6 +721,14 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     parent_scene_count: timedPlan.scenes?.length ?? 0,
     timing_source: timedPlan.timing_source,
     visual_reference_plan_status: visualReferencePlan?.status ?? null,
+    parallax_direction: {
+      policy: runIdentity?.parallax_policy ?? "disabled",
+      target_max: Number(runIdentity?.parallax_target_max ?? 0),
+      first_window_sec: Number(runIdentity?.parallax_first_window_sec ?? 30),
+      first_window_target: Number(runIdentity?.parallax_first_window_target ?? 0),
+      retention_window_end_sec: Number(runIdentity?.parallax_opening_window_sec ?? 180),
+      retention_window_target: Number(runIdentity?.parallax_retention_window_target ?? 0),
+    },
     entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows),
     location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows),
     scenes: (sourceRows ?? []).map((scene, index, rows) => {
@@ -791,7 +799,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - A prompt may use a calm foreground character only when the beat excerpt itself is about stillness, calculation, realization, or a character reveal.
 - Author one shot_manifest.motion_intent for the exact composition you requested. The move must serve the cut's visual job rather than drift randomly: reveal a location with a useful zoom-out, follow visible action toward its impact, shift between separately staged subjects, hold or gently push on a readable reaction, settle on UI or a critical object, or reveal the aftermath. Static hold is valid when the still composition already carries the beat, and every anchor and scale must remain identical for that entire cut. In chunks of four or more cuts, include at least one true static_hold when the story provides a readable reaction, tension, UI/object insert, or already-dynamic frame; usually keep roughly 20-40 percent of the local sequence still. For a cut that earns stronger editorial timing, add 2-5 motion_keyframes. The default hand-edited shape is hold, one acceleration-smooth move, then final readable hold; do not manufacture impact with a quick zoom overshoot and reversal.
 - motion_intent anchors are normalized screen coordinates from 0 to 1 and must match character_staging or the visible object/UI position. Keep normal scales between 1.0 and 1.12. motion_keyframes must begin at 0, end at 1, and increase strictly, with anchor, scale, and easing_to_next on every row. Prefer ease_in_out for active camera travel, avoid ease_out movement directly from frame zero, and avoid scale direction reversals unless a reviewed cut truly requires one. Include a concrete reason naming what the viewer should notice. Vary behavior and direction across adjacent cuts; do not repeat the same pattern more than twice unless continuity specifically benefits from it. Use keyframes selectively; calm or already-readable compositions should remain still or use one restrained move.
-- Include depth_candidate on every motion_intent. Set it eligible only for a high-value moving hero frame with a clean foreground subject and coherent background plane; a true static_hold is not eligible. Rank it 0-100 and describe the two planes. Nominate at most one per local chunk unless two are independently exceptional. Set eligible false for ordinary, crowded, overlapping, translucent, edge-clipped, or tangled frames.
+- Include depth_candidate on every motion_intent. Set it eligible only for a useful moving frame with a clean foreground subject and coherent background plane; a true static_hold is not eligible. Rank it 0-100 and describe the two planes. Follow the run's retention-window parallax targets when enough safe compositions exist, without forcing ordinary, crowded, overlapping, translucent, edge-clipped, or tangled frames.
 - Author the shot_manifest before writing the prose prompt. Treat it as the contract for the cut: physically visible characters, mentioned-only characters, textual location contract, optional attachable location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
 - The prose prompt and reference_requirements must obey shot_manifest. If a character is mentioned_only, do not attach that character reference and do not stage that person physically. If a ref_id is in forbidden_ref_ids, do not attach it. forbidden_ref_ids is only for refs that would actively corrupt this cut, such as a wrong character, wrong state, wrong visible location, wrong timeline, or out-of-scope anchor. In-scope refs omitted because all four reference slots are already filled are not forbidden; report them only in reference_usage as available_not_attached_reference_limit. Only attach refs with attachable_reference true. For physical locations, choose the matching in-scope LOCATION CONTRACT LEDGER entry and set shot_manifest.location_contract_id. Describe its prompt_anchor architecture, materials, and layout in prose. Set shot_manifest.location_ref_id and add a location reference_requirement only when a matching approved attachable location image target exists. Never use a text-only contract id as an image ref id.
 - Every input unit includes target_image_id. Copy target_image_id exactly into output image_id. Do not restart image_id numbering inside chunks, and do not invent sequential IDs from the schema example.
@@ -2274,7 +2282,7 @@ async function main() {
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
-        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
         promptSizes.push({
           chunk_index: index + 1,
           risk_class: sceneChunks[index].risk_class,
@@ -2288,7 +2296,7 @@ async function main() {
         });
       }
     } else {
-      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
       promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
     }
     await writeJson(outputPath, {
@@ -2404,7 +2412,7 @@ async function main() {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units, risk=${sceneChunk.risk_class}`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
       const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
       const chunkLlm = isLocalLLMRoute(chunkStageName)
@@ -2437,7 +2445,7 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
-    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";

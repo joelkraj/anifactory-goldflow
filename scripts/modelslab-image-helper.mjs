@@ -30,23 +30,30 @@ async function ensureDir(dir) {
 }
 
 let cachedModelslabApiKey = null;
+let cachedModelslabApiKeyPromise = null;
 async function modelslabApiKey() {
   if (cachedModelslabApiKey) return cachedModelslabApiKey;
-  const fromEnv = process.env.MODELSLAB_API_KEY || process.env.API_KEY;
-  if (fromEnv) {
-    cachedModelslabApiKey = fromEnv;
-    return cachedModelslabApiKey;
+  if (!cachedModelslabApiKeyPromise) {
+    cachedModelslabApiKeyPromise = (async () => {
+      const fromEnv = process.env.MODELSLAB_API_KEY || process.env.API_KEY;
+      if (fromEnv) return fromEnv;
+      const { stdout: listStdout } = await execFile("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
+      const list = JSON.parse(listStdout);
+      const keys = list?.data?.items ?? [];
+      const selected = keys.find((key) => key.is_default === 1 || key.is_default === true) ?? keys[0];
+      if (!selected?.id) throw new Error("No ModelsLab API key available. Set MODELSLAB_API_KEY or login with the ModelsLab CLI.");
+      const { stdout: getStdout } = await execFile("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
+      const detail = JSON.parse(getStdout);
+      if (!detail?.data?.key) throw new Error(`ModelsLab key ${selected.id} did not return a key value.`);
+      return detail.data.key;
+    })();
   }
-  const { stdout: listStdout } = await execFile("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
-  const list = JSON.parse(listStdout);
-  const keys = list?.data?.items ?? [];
-  const selected = keys.find((key) => key.is_default === 1 || key.is_default === true) ?? keys[0];
-  if (!selected?.id) throw new Error("No ModelsLab API key available. Set MODELSLAB_API_KEY or login with the ModelsLab CLI.");
-  const { stdout: getStdout } = await execFile("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
-  const detail = JSON.parse(getStdout);
-  if (!detail?.data?.key) throw new Error(`ModelsLab key ${selected.id} did not return a key value.`);
-  cachedModelslabApiKey = detail.data.key;
-  return cachedModelslabApiKey;
+  try {
+    cachedModelslabApiKey = await cachedModelslabApiKeyPromise;
+    return cachedModelslabApiKey;
+  } finally {
+    cachedModelslabApiKeyPromise = null;
+  }
 }
 
 async function postModelslabJson(endpoint, body, label, retries = 2) {

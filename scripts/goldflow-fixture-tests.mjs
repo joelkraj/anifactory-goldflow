@@ -94,9 +94,15 @@ import {
   sanitizeMotionKeyframes,
 } from "./lib/motion-plan-utils.mjs";
 import {
+  inspectedParallaxCandidateOverrides,
   noticeableParallaxTreatment,
   selectAuthoredParallaxCandidates,
 } from "./lib/parallax-policy.mjs";
+import {
+  MODELSLAB_PARALLAX_BACKGROUND_STRATEGY,
+  parallaxBackgroundFilter,
+  parallaxBackgroundPrompt,
+} from "./editorial-parallax-assets.mjs";
 import {
   parallaxApprovalMatches,
   parallaxAssetContractSha256,
@@ -1545,6 +1551,12 @@ function testDirectedMotionAndFullTimelineTransitions() {
     foreground_keyframes: foregroundKeyframes,
   });
   assert.equal(parallaxTreatment.occlusion_contract, "foreground_cover");
+  assert.equal(MODELSLAB_PARALLAX_BACKGROUND_STRATEGY, "modelslab_flux_klein_reconstruction");
+  assert.match(parallaxBackgroundFilter(), /maskedmerge/);
+  const backgroundPrompt = parallaxBackgroundPrompt({ foregroundSubject: "the hero", backgroundPlane: "the academy hall" });
+  assert.match(backgroundPrompt, /clean unoccupied rear plate/);
+  assert.match(backgroundPrompt, /academy hall/);
+  assert.match(backgroundPrompt, /behind the hero/);
   assert.equal(sanitizeLayeredParallaxTreatment({
     ...parallaxTreatment,
     foreground_keyframes: foregroundKeyframes.map((row) => ({ ...row, anchor: { x: 0.52, y: 0.5 } })),
@@ -1577,6 +1589,37 @@ function testDirectedMotionAndFullTimelineTransitions() {
   ];
   const selectedDepth = selectAuthoredParallaxCandidates(depthPrompts, { maxCandidates: 2, minSpacingSec: 6 });
   assert.deepEqual(selectedDepth.map((row) => row.image_id), ["depth_b", "depth_c"]);
+  const retentionDepthPrompts = Array.from({ length: 18 }, (_, index) => ({
+    image_id: `retention_depth_${index}`,
+    start_sec: index < 6 ? index * 5 : 30 + ((index - 6) * 12),
+    duration_sec: 4,
+    shot_manifest: { motion_intent: { behavior: "slow_push_in", depth_candidate: { eligible: true, priority: 100 - index, separation_confidence: "high", foreground_subject: `subject ${index}`, background_plane: `plane ${index}`, editorial_reason: "retention depth" } } },
+  }));
+  const retentionDepth = selectAuthoredParallaxCandidates(retentionDepthPrompts, {
+    maxCandidates: 15,
+    minSpacingSec: 3,
+    firstWindowSec: 30,
+    firstWindowTarget: 5,
+    openingWindowSec: 180,
+    retentionWindowTarget: 10,
+  });
+  assert.equal(retentionDepth.filter((row) => row.start_sec < 30).length, 5);
+  assert.equal(retentionDepth.filter((row) => row.start_sec >= 30 && row.start_sec < 180).length, 10);
+  const inspectedOverrides = inspectedParallaxCandidateOverrides(retentionDepthPrompts, {
+    status: "approved",
+    reviewer: "fixture",
+    note: "inspected generated frames",
+    candidates: retentionDepthPrompts.slice(0, 3).map((row) => ({
+      image_id: row.image_id,
+      priority: 95,
+      separation_confidence: "high",
+      foreground_subject: "reviewed foreground",
+      background_plane: "reviewed background",
+      editorial_reason: "reviewed depth opportunity",
+    })),
+  }, { maxCandidates: 15, openingWindowSec: 180 });
+  assert.equal(inspectedOverrides.length, 3);
+  assert.equal(inspectedOverrides.every((row) => row.selection_source === "inspected_candidate_override"), true);
   const depthAssetHash = "b".repeat(64);
   const noticeable = noticeableParallaxTreatment({
     intent: { start_anchor: { x: 0.5, y: 0.5 }, end_anchor: { x: 0.55, y: 0.48 } },
@@ -1876,9 +1919,14 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
   assert.equal(identity.motion_policy, "selective_editorial_v1");
   assert.equal(identity.parallax_policy, "selective_inspected");
-  assert.equal(identity.parallax_target_max, 5);
-  assert.equal(identity.parallax_min_spacing_sec, 10);
-  assert.equal(identity.parallax_opening_window_sec, 120);
+  assert.equal(identity.parallax_target_max, 15);
+  assert.equal(identity.parallax_min_spacing_sec, 3);
+  assert.equal(identity.parallax_opening_window_sec, 180);
+  assert.equal(identity.parallax_first_window_sec, 30);
+  assert.equal(identity.parallax_first_window_target, 5);
+  assert.equal(identity.parallax_retention_window_target, 10);
+  assert.equal(identity.parallax_background_provider, "modelslab_flux_klein");
+  assert.equal(identity.provider_locks.parallax_background_provider, "modelslab_flux_klein");
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");

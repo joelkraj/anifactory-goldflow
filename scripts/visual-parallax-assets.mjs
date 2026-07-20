@@ -7,7 +7,10 @@ import sharp from "sharp";
 import { buildParallaxAssets } from "./editorial-parallax-assets.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
 import { parallaxAssetContractSha256 } from "./lib/parallax-contract.mjs";
-import { selectAuthoredParallaxCandidates } from "./lib/parallax-policy.mjs";
+import {
+  inspectedParallaxCandidateOverrides,
+  selectAuthoredParallaxCandidates,
+} from "./lib/parallax-policy.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -115,31 +118,49 @@ async function main() {
   const imagegenPath = path.resolve(flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`));
   const imageQaPath = path.resolve(flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`));
   const identityPath = path.resolve(flags["run-identity"] ?? path.join(episodeDir, "run_identity.json"));
+  const candidateOverridesPath = flags["candidate-overrides"] ? path.resolve(flags["candidate-overrides"]) : null;
   const outputPath = path.resolve(flags.output ?? path.join(episodeDir, `parallax_asset_report_${episode}.json`));
   const assetsDir = path.resolve(flags["assets-dir"] ?? path.join(episodeDir, "assets", "motion", "parallax"));
   const reviewSheetPath = path.resolve(flags["review-sheet"] ?? path.join(episodeDir, "review_samples", "parallax_assets", `parallax_asset_review_${episode}.jpg`));
-  const [promptPlan, imagegenReport, imageQa, identity] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, identity, candidateOverrides] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenPath),
     readJson(imageQaPath),
     readJson(identityPath, {}),
+    candidateOverridesPath ? readJson(candidateOverridesPath) : null,
   ]);
   if (promptPlan?.status !== "passed") throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenPath}`);
   if (imageQa?.status !== "passed") throw new Error(`Parallax assets require passed image QA: ${imageQaPath}`);
   const parallaxPolicy = String(identity.parallax_policy ?? "disabled");
-  const maxCandidates = Math.floor(boundedNumber(flags["max-candidates"] ?? identity.parallax_target_max, 5, 0, 5));
-  const minSpacingSec = boundedNumber(flags["min-spacing-sec"] ?? identity.parallax_min_spacing_sec, 10, 0, 120);
-  const openingWindowSec = boundedNumber(flags["opening-window-sec"] ?? identity.parallax_opening_window_sec, 120, 0, 600);
+  const maxCandidates = Math.floor(boundedNumber(flags["max-candidates"] ?? identity.parallax_target_max, 15, 0, 20));
+  const minSpacingSec = boundedNumber(flags["min-spacing-sec"] ?? identity.parallax_min_spacing_sec, 3, 0, 120);
+  const openingWindowSec = boundedNumber(flags["opening-window-sec"] ?? identity.parallax_opening_window_sec, 180, 0, 600);
+  const firstWindowSec = boundedNumber(flags["first-window-sec"] ?? identity.parallax_first_window_sec, 30, 0, openingWindowSec);
+  const firstWindowTarget = Math.floor(boundedNumber(flags["first-window-target"] ?? identity.parallax_first_window_target, 5, 0, maxCandidates));
+  const retentionWindowTarget = Math.floor(boundedNumber(flags["retention-window-target"] ?? identity.parallax_retention_window_target, 10, 0, maxCandidates));
+  const backgroundProvider = String(
+    flags["background-provider"]
+      ?? identity.parallax_background_provider
+      ?? (identity.image_provider === "modelslab" ? "modelslab_flux_klein" : "local_blur_legacy"),
+  ).trim();
+  if (!["modelslab_flux_klein", "local_blur_legacy"].includes(backgroundProvider)) {
+    throw new Error(`Unsupported parallax background provider: ${backgroundProvider}`);
+  }
   const selected = parallaxPolicy === "selective_inspected"
-    ? selectAuthoredParallaxCandidates(promptPlan.prompts, {
-        maxCandidates,
-        minSpacingSec,
-        openingWindowSec,
-      })
+    ? (candidateOverrides
+      ? inspectedParallaxCandidateOverrides(promptPlan.prompts, candidateOverrides, { maxCandidates, openingWindowSec })
+      : selectAuthoredParallaxCandidates(promptPlan.prompts, {
+          maxCandidates,
+          minSpacingSec,
+          firstWindowSec,
+          openingWindowSec,
+          firstWindowTarget,
+          retentionWindowTarget,
+        }))
     : [];
   const sourceHashes = Object.fromEntries(await Promise.all(
-    [promptPath, imagegenPath, imageQaPath, identityPath].map(async (filePath) => [filePath, await sha256File(filePath)]),
+    [promptPath, imagegenPath, imageQaPath, identityPath, candidateOverridesPath].filter(Boolean).map(async (filePath) => [filePath, await sha256File(filePath)]),
   ));
   if (!selected.length) {
     const waiverRequested = isTrue(flags["no-suitable-parallax"]);
@@ -157,6 +178,7 @@ async function main() {
       week,
       episode,
       parallax_policy: parallaxPolicy,
+      background_provider: backgroundProvider,
       candidate_count: 0,
       candidates: [],
       no_suitable_parallax_waiver: waiverRequested ? { reviewer, note, approved_at: new Date().toISOString() } : null,
@@ -176,9 +198,7 @@ async function main() {
 
   const resultById = new Map((imagegenReport.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const acceptedHashes = imageQa.accepted_image_hashes ?? {};
-  const candidates = [];
-  const candidateFailures = [];
-  for (const candidate of selected) {
+  const candidateResults = await Promise.all(selected.map(async (candidate) => {
     try {
       const generated = resultById.get(candidate.image_id);
       const generatedImagePath = String(generated?.image_path ?? "").trim();
@@ -191,21 +211,26 @@ async function main() {
         imagePath,
         outputDir: path.join(assetsDir, slug),
         slug,
+        backgroundProvider,
+        foregroundSubject: candidate.foreground_subject,
+        backgroundPlane: candidate.background_plane,
       });
-      candidates.push({
+      return { candidate: {
         ...candidate,
         image_path: imagePath,
         image_sha256: imageHash,
         asset_report_path: assetReport.report_path,
         asset_report: assetReport,
-      });
+      }, failure: null };
     } catch (error) {
-      candidateFailures.push({
+      return { candidate: null, failure: {
         image_id: candidate.image_id,
         error: error instanceof Error ? error.message : String(error),
-      });
+      } };
     }
-  }
+  }));
+  const candidates = candidateResults.map((row) => row.candidate).filter(Boolean);
+  const candidateFailures = candidateResults.map((row) => row.failure).filter(Boolean);
   if (!candidates.length) {
     const report = {
       schema: "goldflow_parallax_asset_report_v1",
@@ -216,6 +241,7 @@ async function main() {
       week,
       episode,
       parallax_policy: parallaxPolicy,
+      background_provider: backgroundProvider,
       candidate_count: 0,
       candidates: [],
       candidate_failures: candidateFailures,
@@ -239,14 +265,26 @@ async function main() {
     week,
     episode,
     parallax_policy: parallaxPolicy,
+    background_provider: backgroundProvider,
     candidate_count: candidates.length,
     selected_candidate_count: selected.length,
     candidate_failures: candidateFailures,
     target_max: maxCandidates,
     min_spacing_sec: minSpacingSec,
+    first_window_sec: firstWindowSec,
+    first_window_target: firstWindowTarget,
+    retention_window_target: retentionWindowTarget,
     opening_window_sec: openingWindowSec,
+    first_window_candidate_count: candidates.filter((row) => row.start_sec < firstWindowSec).length,
+    retention_window_candidate_count: candidates.filter((row) => row.start_sec >= firstWindowSec && row.start_sec < openingWindowSec).length,
+    selection_source: candidateOverrides ? "inspected_candidate_overrides" : "llm_authored_depth_candidates",
+    candidate_overrides_path: candidateOverridesPath,
     review_sheet_path: reviewSheet,
     candidates,
+    estimated_background_cost_usd: Number(candidates.reduce(
+      (sum, row) => sum + Number(row.asset_report?.background_provider_result?.estimated_cost_usd ?? 0),
+      0,
+    ).toFixed(4)),
     source_hashes: sourceHashes,
     updated_at: new Date().toISOString(),
   };

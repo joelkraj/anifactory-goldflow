@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildStageCommand, stageDefinition, stageIsSatisfied } from "./lib/pipeline-stage-registry.mjs";
+import { productionProfileById, productionProfileForIdentity } from "./lib/production-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -12,9 +13,10 @@ const maxSteps = Math.max(1, Number(flags["max-steps"] ?? 50));
 const maxAttemptsPerStage = Math.max(1, Number(flags["max-attempts-per-stage"] ?? 2));
 const dryRun = isTrue(flags["dry-run"]);
 const allowSpend = isTrue(flags["allow-spend"]);
-const allowPlannerSpend = allowSpend || isTrue(flags["allow-planner-spend"]);
-const allowMediaSpend = allowSpend || isTrue(flags["allow-media-spend"]);
-const allowRender = isTrue(flags["allow-render"]);
+const explicitAllowPlannerSpend = allowSpend || isTrue(flags["allow-planner-spend"]);
+const explicitAllowMediaSpend = allowSpend || isTrue(flags["allow-media-spend"]);
+const explicitAllowRender = allowSpend || isTrue(flags["allow-render"]);
+const ignoreProfileAuthorizations = isTrue(flags["ignore-profile-authorizations"]);
 const untilStage = String(flags.until ?? "").trim() || null;
 
 const PLANNER_SPEND_STAGES = new Set(["semantic_scene_plan", "visual_beat_plan", "visual_reference_plan", "visual_prompt_plan", "visual_prompt_blocker_repair"]);
@@ -110,7 +112,11 @@ export function autoAdvanceDecisionForTests(stageId, stageState, options = {}) {
   const definition = stageDefinition(stageId);
   if (!definition) return { executable: false, reason: "unknown_stage" };
   if (options.untilStage && stageId === options.untilStage) return { executable: false, reason: "until_stage_reached" };
-  if (["operator", "operator_or_agent"].includes(definition.approval)) return { executable: false, reason: "approval_required" };
+  if (definition.approval === "operator") return { executable: false, reason: "approval_required" };
+  if (definition.approval === "operator_or_agent") {
+    const agentValidatedStages = new Set(options.agentValidatedStages ?? []);
+    if (!agentValidatedStages.has(stageId)) return { executable: false, reason: "approval_required" };
+  }
   if (definition.approval === "risk_cut_decisions" && stageState !== "missing") return { executable: false, reason: "risk_decisions_required" };
   if (PLANNER_SPEND_STAGES.has(stageId) && !options.allowPlannerSpend) return { executable: false, reason: "planner_spend_not_approved" };
   if (MEDIA_SPEND_STAGES.has(stageId) && !options.allowMediaSpend) return { executable: false, reason: "media_spend_not_approved" };
@@ -139,6 +145,18 @@ async function main() {
   const attemptsByStage = new Map();
   let status = await readStatus();
   const episodeDir = path.resolve(status.episode_dir);
+  const profile = flags.profile || flags["production-profile"]
+    ? productionProfileById(flags.profile ?? flags["production-profile"])
+    : productionProfileForIdentity(status.identity ?? {});
+  const commandIdentity = {
+    ...(status.identity ?? {}),
+    production_profile: profile.id,
+  };
+  const profileAdvance = ignoreProfileAuthorizations ? {} : profile.advance;
+  const allowPlannerSpend = explicitAllowPlannerSpend || profileAdvance.authorize_planner_spend === true;
+  const allowMediaSpend = explicitAllowMediaSpend || profileAdvance.authorize_media_spend === true;
+  const allowRender = explicitAllowRender || profileAdvance.authorize_render === true;
+  const agentValidatedStages = profileAdvance.agent_validated_stages ?? [];
   for (let step = 0; step < maxSteps; step += 1) {
     const stageId = status.current_stage;
     const stageState = status.current_stage_state ?? status.stage_ledger?.find((row) => row.stage === stageId)?.state ?? "missing";
@@ -152,11 +170,12 @@ async function main() {
       allowPlannerSpend,
       allowMediaSpend,
       allowRender,
+      agentValidatedStages,
     });
-    const command = buildStageCommand(stageId, status.identity ?? {});
+    const command = buildStageCommand(stageId, commandIdentity);
     if (!decision.executable) {
-      await writeAdvanceState(episodeDir, { status: "held", current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps });
-      console.log(JSON.stringify({ status: "held", current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps }, null, 2));
+      await writeAdvanceState(episodeDir, { status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps });
+      console.log(JSON.stringify({ status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps }, null, 2));
       return;
     }
     const invocation = advanceCommandTokensForTests(command, episodeDir, status.identity?.source_path ?? null);
@@ -179,7 +198,7 @@ async function main() {
       console.log(JSON.stringify({ status: "dry_run", current_stage: stageId, invocation, steps }, null, 2));
       return;
     }
-    await writeAdvanceState(episodeDir, { status: "running", current_stage: stageId, steps: [...steps, stepRow] });
+    await writeAdvanceState(episodeDir, { status: "running", production_profile: profile.id, current_stage: stageId, steps: [...steps, stepRow] });
     const result = await runNode(invocation);
     steps.push({ ...stepRow, status: result.code === 0 ? "passed_command" : "failed_command", exit_code: result.code, signal: result.signal ?? null, completed_at: new Date().toISOString() });
     status = await readStatus();

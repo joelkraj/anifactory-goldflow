@@ -1,4 +1,6 @@
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-14.1";
+import { productionProfileForIdentity } from "./production-profiles.mjs";
+
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-21.1";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -428,6 +430,10 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const nativeSpeed = Number(identity.qwen_native_speed ?? identity.voice_provider_options?.qwen_native_speed ?? 1.25);
   const pacePolicy = "diagnostic";
   const paceFlag = " --pace-policy diagnostic";
+  const productionProfile = productionProfileForIdentity(identity);
+  const planner = productionProfile.planner;
+  const media = productionProfile.media;
+  const render = productionProfile.render;
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
@@ -435,10 +441,10 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
     semantic_scene_plan: identity?.proof_scope?.mode === "bounded"
-      ? `node bin/goldflow.mjs semantic plan ${base} --concurrency 4 --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
-      : `node bin/goldflow.mjs semantic plan ${base} --concurrency 4`,
+      ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
+      : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
-    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency 15`,
+    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
     audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
@@ -448,26 +454,26 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     longform_audio_mix: narratorOnly(identity)
       ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`
       : `node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`,
-    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base}${boundedProofScopeFlag(identity)}`,
-    visual_reference_plan: `node bin/goldflow.mjs visual refs ${base}`,
+    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${planner.editorial_concurrency}${boundedProofScopeFlag(identity)}`,
+    visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${planner.visual_ref_chunk_concurrency}`,
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: codexReferences(identity)
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 3 --lease-sec 900`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency 15`,
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency ${media.reference_concurrency}`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --note "<generated reference review notes>"`,
-    visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base}`,
+    visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base} --visual-chunk-concurrency ${planner.visual_chunk_concurrency} --visual-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
     visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
-    visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2`,
+    visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2 --visual-chunk-concurrency ${planner.visual_chunk_concurrency}`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
     image_generation: codexSceneCuts(identity)
-      ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 3 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency 15 --output <episode-dir>/imagegen_report_${episode}.json`
-      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15`,
-    image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency 8`,
+      ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 3 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency ${media.image_concurrency} --output <episode-dir>/imagegen_report_${episode}.json`
+      : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${media.image_concurrency} --reference-concurrency ${media.reference_concurrency}`,
+    image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
-    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency 4 --clip-preset veryfast --final-preset veryfast`,
+    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,
     upload_packaging: "Generate upload packaging only after final QA passes.",
   };

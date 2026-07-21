@@ -158,7 +158,7 @@ Commands:
 ${registryCommands}
   goldflow run codex-doctor        Inspect the pinned Codex runtime
   goldflow run status              Print the artifact-backed stage ledger
-  goldflow run advance             Advance automatic stages until approval, spend, blocker, or requested hold
+  goldflow run advance             Advance automatic stages continuously using the locked production profile
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -176,7 +176,13 @@ Common flags:
   --week <week>
   --episode ep_01
   --run-intent proof --proof-scope 0-300 locks an isolated bounded proof
+  --production-profile fast-premium locks eight-way planner concurrency and authorized continuous automatic stages
   --allow-dirty-worktree true --dirty-reason <reason> is diagnostic/proof-only
+
+Production profiles:
+  fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, TTS/images 15, render 4
+  balanced: legacy 4/4/6/6 planner concurrency and explicit spend flags for run advance
+  Selecting fast-premium at preflight authorizes planner/media/render spend for run advance. Creative review gates still hold.
 
 Render profiles:
   default premium: --motion smooth_subpixel_ken_burns --motion-strength 1.75 --render-concurrency 4 --clip-preset veryfast --final-preset veryfast

@@ -146,6 +146,12 @@ import {
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
 import {
+  DEFAULT_PRODUCTION_PROFILE,
+  normalizeProductionProfile,
+  productionProfileForIdentity,
+} from "./lib/production-profiles.mjs";
+import { plannerChunkIdentityFindings } from "./lib/planner-chunk-ledger.mjs";
+import {
   completeWorkItem,
   createCodexWorkManifest,
   getCodexWorkStatus,
@@ -245,6 +251,10 @@ function testRunIdentityV2Policies() {
     label: "proof_0_300",
   });
   assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
+  assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v1");
+  assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v1");
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 8);
+  assert.equal(productionProfileForIdentity({}).planner.visual_chunk_concurrency, 6);
 }
 
 function testGuardedRunAdvancePolicies() {
@@ -255,12 +265,29 @@ function testGuardedRunAdvancePolicies() {
   assert.equal(autoAdvanceDecisionForTests("image_generation", "missing", { allowMediaSpend: true }).executable, true);
   assert.deepEqual(autoAdvanceDecisionForTests("image_output_qa", "needs_manual_review", {}), { executable: false, reason: "risk_decisions_required" });
   assert.equal(autoAdvanceDecisionForTests("image_output_qa", "missing", {}).executable, true);
+  assert.deepEqual(autoAdvanceDecisionForTests("visual_beat_plan", "missing", { allowPlannerSpend: true }), { executable: false, reason: "approval_required" });
+  assert.equal(autoAdvanceDecisionForTests("visual_beat_plan", "missing", {
+    allowPlannerSpend: true,
+    agentValidatedStages: ["visual_beat_plan"],
+  }).executable, true);
   const tokens = advanceCommandTokensForTests(
     "node bin/goldflow.mjs visual harden --episode-dir <episode-dir> --prompts <episode-dir>/section_image_prompts.json",
     "/tmp/episode",
   );
   assert.deepEqual(tokens?.slice(1), ["visual", "harden", "--episode-dir", "/tmp/episode", "--prompts", "/tmp/episode/section_image_prompts.json"]);
   assert.equal(advanceCommandTokensForTests("Stage images; then run something", "/tmp/episode"), null);
+}
+
+function testPlannerChunkIdentityValidation() {
+  assert.deepEqual(plannerChunkIdentityFindings(["beat_a", "beat_b"], ["beat_a", "beat_b"]), []);
+  assert.deepEqual(
+    plannerChunkIdentityFindings(["beat_a", "beat_b"], ["beat_a"]).map((finding) => finding.code),
+    ["planner_chunk_output_count_mismatch", "planner_chunk_identity_mismatch"],
+  );
+  assert.deepEqual(
+    plannerChunkIdentityFindings(["beat_a", "beat_b"], ["beat_b", "beat_a"]).map((finding) => finding.code),
+    ["planner_chunk_identity_mismatch"],
+  );
 }
 
 function testYoutubeRetentionAttribution() {
@@ -1914,6 +1941,12 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const identity = await readJson(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"));
   assert.equal(identity.qwen_native_speed, 1.25);
+  assert.equal(identity.production_profile, "fast_premium_v1");
+  assert.equal(identity.production_profile_config.target_wall_clock_minutes, 180);
+  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 8);
   assert.equal(identity.voice_provider_options.pace_strategy, "provider_native_speed_no_post_tempo");
   assert.equal(identity.production_gates.post_tempo_normalization_default, false);
   assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
@@ -1944,6 +1977,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(codexCreditFallbackEnabled(identity), true);
   assert.match(buildStageCommand("reference_generation", identity), /--reference-image-model gpt-image-2-i2i/);
   assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8/);
+  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 8/);
+  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 8/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8 --visual-chunk-validation-attempts 2/);
 }
 
 function testModelslabCreditFallbackClassification() {
@@ -6679,6 +6716,7 @@ const FIXTURE_SUITES = {
     testAuthoritativeStageRegistry,
     testRunIdentityV2Policies,
     testGuardedRunAdvancePolicies,
+    testPlannerChunkIdentityValidation,
     testFinalQaSourceHashFreshness,
     testRunStatusRejectsFalseGreenFinalQa,
     testRunStatusParallaxDecisionStages,

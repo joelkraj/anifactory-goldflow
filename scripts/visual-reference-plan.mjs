@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import {
   applyBeatLocationSceneIds,
   applyDeterministicLocationSceneIds,
@@ -2101,7 +2102,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
   }
 
   const sceneChunks = chunkArray(semanticPlan.scenes, Number(flags["visual-ref-chunk-scenes"] ?? 8));
-  const chunkConcurrency = Math.max(1, Number(flags["visual-ref-chunk-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REF_CHUNK_CONCURRENCY ?? 6));
+  const chunkConcurrency = Math.max(1, Number(flags["visual-ref-chunk-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REF_CHUNK_CONCURRENCY ?? 8));
   const maxChunkPromptChars = Math.max(100_000, Number(
     flags["visual-ref-max-prompt-chars"]
       ?? process.env.ANIFACTORY_VISUAL_REF_MAX_PROMPT_CHARS
@@ -2138,6 +2139,22 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
       : await callCodex(prompt, chunkStageName);
     const rawTargetCount = Array.isArray(llm.parsed?.reference_targets) ? llm.parsed.reference_targets.length : 0;
     const candidatePlan = sanitizeChunkReferenceCandidates(llm.parsed);
+    await recordPlannerChunkCheckpoint({
+      episodeDir,
+      plannerStage: "visual_reference_plan",
+      chunkId: stageSuffix,
+      inputHash: sha256(prompt),
+      expectedIds: sceneChunk.map((scene) => scene.scene_id).filter(Boolean),
+      status: "passed",
+      attempt: 1,
+      reused: Boolean(llm.reused_cached_output),
+      outputPath: llm.output_path,
+      metadata: {
+        scene_count: sceneChunk.length,
+        raw_target_count: rawTargetCount,
+        retained_candidate_count: candidatePlan.reference_targets.length,
+      },
+    });
     console.error(`visual refs ${displayLabel}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
     return [{ candidatePlan, rawTargetCount }];
   };
@@ -2160,13 +2177,50 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     throw new Error("Deterministic visual-reference merge is disabled in director v2. The global LLM director must make the final creative selection.");
   }
   const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans, guidance, evidenceLedger, locationContractLedger);
-  const mergeStageName = `${stageName}_merge`;
-  const merged = useLocalRoute
-    ? await callLocal(mergePrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
-    : await callCodex(mergePrompt, mergeStageName);
-  if (!Array.isArray(merged.parsed?.reference_targets) || !merged.parsed.reference_targets.length) {
-    throw new Error("Global visual-reference director returned no reference targets; refusing chunk-union fallback because it would turn local proposals into automatic generation orders.");
+  const mergeInputHash = sha256(mergePrompt);
+  const maxMergeAttempts = Math.max(1, Number(flags["visual-ref-merge-validation-attempts"] ?? 2));
+  let merged = null;
+  let lastMergeError = null;
+  for (let attempt = 1; attempt <= maxMergeAttempts; attempt += 1) {
+    const mergeStageName = attempt === 1 ? `${stageName}_merge` : `${stageName}_merge_repair_${attempt}`;
+    const attemptPrompt = attempt === 1
+      ? mergePrompt
+      : `${mergePrompt}\n\nGlobal-director correction: the previous response failed validation with ${lastMergeError?.message}. Return the complete selected reference plan again with at least one clean, evidence-backed reference target.`;
+    try {
+      const candidate = useLocalRoute
+        ? await callLocal(attemptPrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
+        : await callCodex(attemptPrompt, mergeStageName);
+      if (!Array.isArray(candidate.parsed?.reference_targets) || !candidate.parsed.reference_targets.length) {
+        throw new Error("global director returned no reference targets");
+      }
+      merged = candidate;
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "visual_reference_plan",
+        chunkId: "global_merge",
+        inputHash: mergeInputHash,
+        expectedIds: sceneChunks.flatMap((chunk) => chunk.map((scene) => scene.scene_id)).filter(Boolean),
+        status: "passed",
+        attempt,
+        reused: Boolean(candidate.reused_cached_output),
+        outputPath: candidate.output_path,
+        metadata: { selected_target_count: candidate.parsed.reference_targets.length },
+      });
+      break;
+    } catch (error) {
+      lastMergeError = error instanceof Error ? error : new Error(String(error));
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "visual_reference_plan",
+        chunkId: "global_merge",
+        inputHash: mergeInputHash,
+        status: "failed",
+        attempt,
+        findings: [{ code: "reference_global_merge_validation_failed", message: lastMergeError.message }],
+      });
+    }
   }
+  if (!merged) throw new Error(`Global visual-reference director failed after ${maxMergeAttempts} scoped attempts: ${lastMergeError?.message}`);
   const parsed = merged.parsed;
   return {
     provider: merged.provider,
@@ -2592,6 +2646,7 @@ async function main() {
       chunked: llm.chunked ?? false,
       chunk_count: llm.chunk_count ?? null,
       chunk_concurrency: llm.chunk_concurrency ?? null,
+      chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       chunk_raw_target_count: llm.chunk_raw_target_count ?? null,
       merged_target_count: llm.merged_target_count ?? llmTargetCount,
       revalidated_without_llm: legacyRevalidation,

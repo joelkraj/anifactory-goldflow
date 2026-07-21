@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { plannerChunkIdentityFindings, recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import {
   allowedRefIdsForScene,
   dropOutOfScopePromptRefs,
@@ -278,6 +279,50 @@ function compactSceneCharacterRef(ref) {
     scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), localPromptPackets ? 360 : (compactEditorialProof ? 280 : 900)),
     reference_image_path: ref.conditioning_image_path ?? ref.reference_image_path ?? null,
   };
+}
+
+function hasElapsedTimeReset(row = {}) {
+  const time = normalizeLabel(row.time ?? "");
+  return /\b(?:later|following|next)\b/i.test(time)
+    && /\b(?:morning|afternoon|evening|night|day|days|week|weeks|month|months|year|years)\b/i.test(time);
+}
+
+export function expireElapsedPhysicalState(rows = []) {
+  const expired = new Set();
+  const lastEvidence = new Map();
+  let previousSceneId = null;
+  let elapsedResetActive = false;
+  return rows.map((row) => {
+    const sceneId = String(row.parent_scene_id ?? row.scene_id ?? "");
+    if (previousSceneId && sceneId !== previousSceneId && hasElapsedTimeReset(row)) {
+      elapsedResetActive = true;
+      for (const key of lastEvidence.keys()) {
+        const field = key.slice(key.lastIndexOf(":") + 1);
+        if (field === "wardrobe" || field === "injury") expired.add(key);
+      }
+    }
+    previousSceneId = sceneId;
+    const active = structuredClone(row.active_state_constraints ?? null);
+    for (const [entityId, state] of Object.entries(active?.entities ?? {})) {
+      for (const field of ["wardrobe", "injury"]) {
+        const key = `${entityId}:${field}`;
+        const evidence = normalizeLabel(state?.state_evidence?.[field] ?? "");
+        const priorEvidence = lastEvidence.get(key) ?? "";
+        const localExcerpt = normalizeLabel(row.visual_beat_script_excerpt ?? row.script_excerpt ?? "");
+        const evidenceIsLocal = Boolean(evidence && localExcerpt.includes(evidence));
+        if (elapsedResetActive && !lastEvidence.has(key) && !evidenceIsLocal) expired.add(key);
+        if (evidence && ((priorEvidence && evidence !== priorEvidence) || evidenceIsLocal)) expired.delete(key);
+        if (evidence) lastEvidence.set(key, evidence);
+        if (!expired.has(key)) continue;
+        delete state[field];
+        if (state.state_evidence) {
+          delete state.state_evidence[field];
+          if (!Object.keys(state.state_evidence).length) delete state.state_evidence;
+        }
+      }
+    }
+    return { ...row, active_state_constraints: active };
+  });
 }
 
 function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
@@ -557,6 +602,7 @@ Core contract:
 - For every attached character state, reaffirm the supplied scene_prompt_anchor in that person's own clause, then add current screen position and action. If the anchor already begins with the character's name, do not repeat the name a second time.
 - Put ordered reference-role metadata once in shot_manifest.reference_slots. Do not duplicate it in top-level compatibility fields and do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
 - active_state_constraints is binding. Preserve its current wardrobe, injury, possession, status, visible state, and location facts for every visible entity; never reset a character to a base/default state merely because an older ref exists.
+- Treat status as narrative/social context, not physical appearance. Wardrobe and injury may come only from the current active wardrobe/injury fields or the exact selected character-state anchor. When those physical fields are absent, use the selected base identity anchor's attire and intact physical condition; never infer old clothing or wounds from a status such as winner, boxer, victim, or defeated rival.
 - Author one motion_intent that serves the beat instead of adding decorative drift. Name the focal subject, normalized start/end anchors, restrained start/end scale, easing, and the editorial reason for the move. For an impact, reveal, focus shift, or UI entrance that benefits from hand-edited timing, add 2-5 motion_keyframes. Default to hold, one acceleration-smooth ease_in_out move, then a readable hold. Let the visual transition and SFX provide impact instead of bouncing the camera scale.
 - Match motion to the visual job: reveal environment with a useful zoom-out; follow an actor toward visible action or impact; shift between separately staged subjects in an interaction; hold or gently push on readable reactions; settle on a UI panel or critical object without losing context; reveal the surrounding aftermath after a consequence. Use a static hold when the composition already carries strong action or the cut is too short for a meaningful move.
 - Stillness is part of the edit. In a chunk of four or more cuts, author at least one true static_hold when a reaction, tension beat, readable UI/object insert, or already-dynamic composition supports it. A static_hold keeps every anchor and scale identical for the entire cut; it is not a moving shot with a static label. Across the local sequence, usually let roughly 20-40 percent of cuts remain true holds instead of moving every image. Never move a frame merely to keep it alive.
@@ -1092,16 +1138,16 @@ async function callLocal(prompt, stageName, maxTokens = null) {
   throw new Error(`local-qwen visual plan returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
 }
 
-async function callCodex(prompt, stageName, expectedBeatIds = null) {
+async function callCodex(prompt, stageName, expectedBeatIds = null, validateParsed = null) {
   assertPromptSize(prompt, stageName);
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
   if (visualPromptCodexCacheEnabled(flags)) {
-    const cached = await findLatestCodexOutput(callDir, stageName, expectedBeatIds, prompt);
+    const cached = await findLatestCodexOutput(callDir, stageName, expectedBeatIds, prompt, validateParsed);
     if (cached) return cached;
     console.error(`visual ${stageName}: no reusable cached Codex output found; calling Codex`);
   }
-  const attempts = Math.max(1, Number(flags["codex-call-attempts"] ?? 2));
+  const attempts = Math.max(1, Number(flags["codex-call-attempts"] ?? (validateParsed ? 1 : 2)));
   const timeoutMs = Math.max(30_000, Number(flags["codex-call-timeout-ms"] ?? 8 * 60_000));
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1116,6 +1162,8 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
         reasoningEffort: flags["reasoning-effort"] ?? null,
         timeoutMs,
       });
+      const parsed = extractJson(call.content);
+      if (validateParsed) validateParsed(parsed);
       return {
         provider: "codex",
         model: call.model,
@@ -1124,7 +1172,7 @@ async function callCodex(prompt, stageName, expectedBeatIds = null) {
         codex_cli_version: call.codex_cli_version,
         output_path: outputPath,
         content: call.content,
-        parsed: extractJson(call.content),
+        parsed,
       };
     } catch (error) {
       lastError = error;
@@ -1142,7 +1190,7 @@ export function visualPromptCodexCacheEnabledForTests(inputFlags = {}) {
   return visualPromptCodexCacheEnabled(inputFlags);
 }
 
-async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null, prompt = "") {
+async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null, prompt = "", validateParsed = null) {
   let entries = [];
   try {
     entries = await fs.readdir(callDir, { withFileTypes: true });
@@ -1177,6 +1225,7 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null,
           if (actualBeatIds.length !== expectedBeatIds.length) continue;
           if (!expectedBeatIds.every((beatId, index) => actualBeatIds[index] === beatId)) continue;
         }
+        if (validateParsed) validateParsed(parsed);
         console.error(`visual ${stageName}: reused cached Codex output ${candidate.outputPath}`);
         return {
           provider: "codex-cache",
@@ -1577,7 +1626,7 @@ function assertRetentionShotJobVarietySoft(prompts) {
   }));
 }
 
-function assertScenePromptShape(prompts) {
+function scenePromptShapeFindings(prompts) {
   const failures = [];
   const badLayout = /\b(?:contact sheet|reference board|reference sheet|character sheet|visible reference panel|reference panels?|reference panel layout|turnaround sheet|turnaround board|character turnaround)\b/ig;
   const metadataStart = /^\s*(?:cut\s+\d+|scene\s+\d+|beat\s+\d+)/i;
@@ -1588,6 +1637,11 @@ function assertScenePromptShape(prompts) {
     if (hasAffirmativeReferenceLayoutRequest(text, badLayout)) failures.push(`${prompt.image_id} requests a reference/sheet layout in a scene cut`);
     if (duplicateSlotText.test(text)) failures.push(`${prompt.image_id} duplicates reference slot text inside prompt body`);
   }
+  return failures;
+}
+
+function assertScenePromptShape(prompts) {
+  const failures = scenePromptShapeFindings(prompts);
   if (failures.length) {
     throw new Error(`Visual prompt plan violates scene-prompt shape contract:\n${failures.slice(0, 30).join("\n")}`);
   }
@@ -1691,6 +1745,43 @@ function assertLocalBeatFidelity(prompts, sourceRows, storyFactLedger = null) {
   if (failures.length) {
     throw new Error(`Visual prompt plan failed local beat fidelity:\n${failures.slice(0, 40).join("\n")}`);
   }
+}
+
+function visualPromptChunkValidation(parsed, sourceRows, options = {}) {
+  const rawPrompts = Array.isArray(parsed?.prompts) ? parsed.prompts : [];
+  const expectedBeatIds = sourceRows.map((row) => String(row.visual_beat_id ?? ""));
+  const actualBeatIds = rawPrompts.map((row) => String(row.visual_beat_id ?? ""));
+  const findings = plannerChunkIdentityFindings(expectedBeatIds, actualBeatIds);
+  if (findings.length) return { findings, rawPrompts, normalizedPrompts: [] };
+  try {
+    assertPromptIdentityMatchesInputs(rawPrompts, sourceRows, episode, options.label ?? "visual prompt chunk");
+  } catch (error) {
+    findings.push({ code: "planner_chunk_prompt_identity_invalid", message: error instanceof Error ? error.message : String(error) });
+    return { findings, rawPrompts, normalizedPrompts: [] };
+  }
+  const normalizedPrompts = rawPrompts.map((row, index) => normalizePrompt(row, index, episode, sourceRows[index] ?? null, {
+    visualReferencePlan: options.visualReferencePlan,
+    stateRefIndex: options.stateRefIndex,
+    activeImageProvider: options.activeImageProvider,
+    activeImageProviderOptions: options.activeImageProviderOptions,
+  }));
+  for (const row of normalizedPrompts.filter((prompt) => !prompt.image_prompt)) {
+    findings.push({ code: "planner_chunk_empty_prompt", image_id: row.image_id });
+  }
+  for (const message of scenePromptShapeFindings(normalizedPrompts)) {
+    findings.push({ code: "planner_chunk_scene_shape_invalid", message });
+  }
+  for (const message of localBeatFidelityFindings(normalizedPrompts, sourceRows, options.storyFactLedger)) {
+    findings.push({ code: "planner_chunk_local_beat_fidelity_failed", message });
+  }
+  findings.push(...activeStateConstraintFindings(normalizedPrompts, sourceRows)
+    .filter((finding) => finding.severity === "blocker")
+    .map((finding) => ({ ...finding, code: finding.code ?? "planner_chunk_active_state_failed" })));
+  return { findings, rawPrompts, normalizedPrompts };
+}
+
+export function visualPromptChunkValidationForTests(parsed, sourceRows, options = {}) {
+  return visualPromptChunkValidation(parsed, sourceRows, options);
 }
 
 function assertShotFramingDistribution(prompts) {
@@ -2170,7 +2261,7 @@ function visualSourceContextAudit(rows, scopedLocationCoverage = []) {
   };
 }
 
-function indexCharacterStateRefs(artifact) {
+export function indexCharacterStateRefs(artifact) {
   const refs = [];
   if (Array.isArray(artifact?.character_state_refs)) refs.push(...artifact.character_state_refs);
   if (Array.isArray(artifact?.states)) refs.push(...artifact.states);
@@ -2195,8 +2286,15 @@ function indexCharacterStateRefs(artifact) {
       scene_prompt_anchor: scenePromptAnchorFromRef(ref),
       source: ref.source ?? "character_state_ref_artifact",
     };
-    for (const directId of [normalized.state_ref_id, normalized.source_ref_id, normalized.ref_id]) {
+    for (const directId of [normalized.state_ref_id, normalized.ref_id]) {
       if (directId) index.set(String(directId), normalized);
+    }
+    // A face-only child state may point at its base identity through
+    // source_ref_id. That dependency must never replace the base identity's
+    // own lookup entry or every scene requesting the identity inherits the
+    // child's wardrobe/injury anchor.
+    if (normalized.source_ref_id && !index.has(String(normalized.source_ref_id))) {
+      index.set(String(normalized.source_ref_id), normalized);
     }
     for (const sceneId of sceneIds) {
       index.set(`${sceneId}:${normalizeLabel(character)}`, { ...normalized, scene_id: sceneId === "*" ? null : sceneId });
@@ -2254,9 +2352,10 @@ async function main() {
   const enrichedVisualReferencePlan = await enrichVisualReferencePlan(visualReferencePlan);
   const correctionDirectives = await loadCorrectionDirectives(correctionFindingsPath);
   const stateRefIndex = indexCharacterStateRefs(characterStateRefs);
-  const allVisualSourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
+  const rawVisualSourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
+  const allVisualSourceRows = expireElapsedPhysicalState(rawVisualSourceRows);
   const visualSourceRows = filterVisualSourceRows(allVisualSourceRows, episode);
   if (!visualSourceRows.length) throw new Error("Visual planner small-batch filters selected zero visual units.");
   const scopedRepair = visualSourceRows.length !== allVisualSourceRows.length;
@@ -2407,24 +2506,82 @@ async function main() {
       visual_unit_count: chunk.length,
       beat_ids: chunk.map((row) => row.visual_beat_id ?? null).filter(Boolean),
     }));
-    const chunkConcurrency = Math.max(1, Number(flags["visual-chunk-concurrency"] ?? 6));
+    const chunkConcurrency = Math.max(1, Number(flags["visual-chunk-concurrency"] ?? 8));
     const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units, risk=${sceneChunk.risk_class}`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
       const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
-      const chunkStageName = `${stageName}_chunk_${String(index + 1).padStart(2, "0")}`;
+      const chunkId = `chunk_${String(index + 1).padStart(3, "0")}`;
+      const inputHash = sha256(chunkPrompt);
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
-      const chunkLlm = isLocalLLMRoute(chunkStageName)
-        ? await callLocal(chunkPrompt, chunkStageName, Number(flags["visual-chunk-max-tokens"] ?? 7000))
-        : await callCodex(chunkPrompt, chunkStageName, expectedBeatIds);
-      const chunkPrompts = Array.isArray(chunkLlm.parsed.prompts) ? chunkLlm.parsed.prompts : [];
-      if (chunkPrompts.length !== sceneChunk.length) {
-        throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} returned ${chunkPrompts.length} prompts for ${sceneChunk.length} visual units.`);
+      const validationOptions = {
+        label: `visual chunk ${index + 1}/${sceneChunks.length}`,
+        visualReferencePlan: enrichedVisualReferencePlan,
+        stateRefIndex,
+        activeImageProvider,
+        activeImageProviderOptions,
+        storyFactLedger,
+      };
+      const maxValidationAttempts = Math.max(1, Number(flags["visual-chunk-validation-attempts"] ?? 2));
+      let lastFindings = [];
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxValidationAttempts; attempt += 1) {
+        const attemptPrompt = attempt === 1
+          ? chunkPrompt
+          : `${chunkPrompt}\n\nChunk-local correction: the previous response failed deterministic validation with ${JSON.stringify(lastFindings.slice(0, 16))}. Return the complete JSON for only these same visual beats. Preserve every beat/image identity and repair the named manifest, prompt, reference, state, or local-fidelity issue.`;
+        const chunkStageName = attempt === 1 ? `${stageName}_${chunkId}` : `${stageName}_${chunkId}_repair_${attempt}`;
+        try {
+          const validateParsed = (parsed) => {
+            const checked = visualPromptChunkValidation(parsed, sceneChunk, validationOptions);
+            if (checked.findings.length) {
+              const error = new Error(`chunk validation failed: ${checked.findings.slice(0, 8).map((finding) => finding.code).join(", ")}`);
+              error.findings = checked.findings;
+              throw error;
+            }
+            return checked;
+          };
+          const chunkLlm = isLocalLLMRoute(chunkStageName)
+            ? await callLocal(attemptPrompt, chunkStageName, Number(flags["visual-chunk-max-tokens"] ?? 7000))
+            : await callCodex(attemptPrompt, chunkStageName, expectedBeatIds, validateParsed);
+          const checked = validateParsed(chunkLlm.parsed);
+          await recordPlannerChunkCheckpoint({
+            episodeDir,
+            plannerStage: "visual_prompt_plan",
+            chunkId,
+            inputHash,
+            expectedIds: expectedBeatIds,
+            status: "passed",
+            attempt,
+            reused: chunkLlm.provider === "codex-cache",
+            outputPath: chunkLlm.output_path,
+            metadata: {
+              risk_class: sceneChunk.risk_class,
+              visual_unit_count: sceneChunk.length,
+              prompt_count: checked.rawPrompts.length,
+            },
+          });
+          console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${checked.rawPrompts.length} prompts on validation attempt ${attempt}`);
+          return { chunkLlm, chunkPrompts: checked.rawPrompts, validationAttempt: attempt };
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          lastFindings = Array.isArray(error?.findings)
+            ? error.findings
+            : [{ code: "visual_prompt_chunk_call_failed", message: lastError.message }];
+          await recordPlannerChunkCheckpoint({
+            episodeDir,
+            plannerStage: "visual_prompt_plan",
+            chunkId,
+            inputHash,
+            expectedIds: expectedBeatIds,
+            status: "failed",
+            attempt,
+            findings: lastFindings,
+            metadata: { risk_class: sceneChunk.risk_class, visual_unit_count: sceneChunk.length },
+          });
+        }
       }
-      assertPromptIdentityMatchesInputs(chunkPrompts, sceneChunk, episode, `visual chunk ${index + 1}/${sceneChunks.length}`);
-      console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${chunkPrompts.length} prompts`);
-      return { chunkLlm, chunkPrompts };
+      throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} failed after ${maxValidationAttempts} scoped attempts: ${lastError?.message}`);
     });
     const styleSummaries = [];
     for (const result of chunkResults) {
@@ -2442,6 +2599,9 @@ async function main() {
       chunked: true,
       chunk_count: sceneChunks.length,
       chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
+      reused_chunk_count: chunkResults.filter((result) => result.chunkLlm.provider === "codex-cache").length,
+      repaired_chunk_count: chunkResults.filter((result) => result.validationAttempt > 1).length,
+      max_chunk_validation_attempt: Math.max(...chunkResults.map((result) => result.validationAttempt ?? 1)),
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
     };
   } else {
@@ -2517,6 +2677,11 @@ async function main() {
       output_path: llm.output_path ?? null,
       chunked: llm.chunked ?? false,
       chunk_count: llm.chunk_count ?? null,
+      chunk_concurrency: llm.chunk_concurrency ?? null,
+      reused_chunk_count: llm.reused_chunk_count ?? 0,
+      repaired_chunk_count: llm.repaired_chunk_count ?? 0,
+      max_chunk_validation_attempt: llm.max_chunk_validation_attempt ?? 1,
+      chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       adaptive_chunks: adaptiveChunkTelemetry,
     },
     editorial_reuse_policy: editorialReuse.policy,

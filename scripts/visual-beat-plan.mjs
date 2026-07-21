@@ -7,6 +7,7 @@ import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mj
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import {
   buildEditorialDirectorPrompt,
   buildTranscriptAtoms,
@@ -1342,20 +1343,48 @@ async function callEditorialLlm(prompt, stageName) {
 
 async function directEditorialBeats(atoms, factLedger, timedScenes) {
   const chunks = editorialAtomChunks(atoms, Math.max(8, Number(flags["editorial-chunk-atoms"] ?? 40)));
-  const concurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 4)));
+  const concurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 8)));
   const results = await runPool(chunks, concurrency, async (chunk, index) => {
     const basePrompt = buildEditorialDirectorPrompt(chunk, factLedger, timedScenes);
+    const chunkId = `editorial_${String(index + 1).padStart(3, "0")}`;
+    const inputHash = sha256(basePrompt);
     let lastError = null;
     for (let attempt = 1; attempt <= Math.max(1, Number(flags["editorial-attempts"] ?? 2)); attempt += 1) {
       const prompt = attempt === 1
         ? basePrompt
         : `${basePrompt}\n\nCorrection pass: the prior grouping failed deterministic validation with: ${lastError?.message}. Return complete corrected JSON satisfying atom coverage, transition barriers, evidence, and timing rails.`;
-      const call = await callEditorialLlm(prompt, `${episode}_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_${attempt}`);
       try {
+        const call = await callEditorialLlm(prompt, `${episode}_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_${attempt}`);
         const normalized = normalizeEditorialGrouping(call.parsed, chunk, factLedger, episode);
+        await recordPlannerChunkCheckpoint({
+          episodeDir,
+          plannerStage: "visual_beat_plan",
+          chunkId,
+          inputHash,
+          expectedIds: chunk.map((atom) => atom.atom_id),
+          status: "passed",
+          attempt,
+          reused: Boolean(call.reused),
+          outputPath: call.output_path,
+          metadata: {
+            atom_count: chunk.length,
+            beat_count: normalized.beats.length,
+          },
+        });
         return { ...normalized, call, atom_count: chunk.length };
       } catch (error) {
-        lastError = error;
+        lastError = error instanceof Error ? error : new Error(String(error));
+        await recordPlannerChunkCheckpoint({
+          episodeDir,
+          plannerStage: "visual_beat_plan",
+          chunkId,
+          inputHash,
+          expectedIds: chunk.map((atom) => atom.atom_id),
+          status: "failed",
+          attempt,
+          findings: [{ code: "editorial_chunk_validation_failed", message: lastError.message }],
+          metadata: { atom_count: chunk.length },
+        });
       }
     }
     throw lastError ?? new Error(`Editorial beat chunk ${index + 1} failed.`);
@@ -1369,6 +1398,7 @@ async function directEditorialBeats(atoms, factLedger, timedScenes) {
       chunk_count: chunks.length,
       concurrency,
       reused_chunk_count: results.filter((result) => result.call.reused).length,
+      chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       output_paths: results.map((result) => result.call.output_path).filter(Boolean),
     },
   };

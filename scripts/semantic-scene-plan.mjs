@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -690,7 +691,7 @@ async function callCodex(prompt, stageName) {
   };
 }
 
-async function reusableCodexCall(stageName, prompt) {
+async function reusableCodexCall(stageName, prompt, validateParsed = null) {
   if (!semanticCodexCacheEnabled(flags)) return null;
   const callDir = path.join(weekDir, "_codex_calls");
   let files = [];
@@ -710,6 +711,8 @@ async function reusableCodexCall(stageName, prompt) {
       promptHash: sha256(prompt),
     })) continue;
     const content = await fs.readFile(outputPath, "utf8");
+    const parsed = extractJson(content);
+    if (validateParsed && !validateParsed(parsed)) continue;
     return {
       provider: "codex-cache",
       model: metadata.model,
@@ -718,7 +721,7 @@ async function reusableCodexCall(stageName, prompt) {
       codex_cli_version: metadata.codex_cli_version,
       output_path: outputPath,
       content,
-      parsed: extractJson(content),
+      parsed,
       reused_output: true,
     };
   }
@@ -921,22 +924,65 @@ async function main() {
   const useChunking = flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
   if (useChunking) {
     const chunks = scriptChunks(planningScript);
-    const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 4)));
+    const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 8)));
     parsedChunks = await runPool(chunks, async (chunk) => {
       const chunkTargets = chunkSceneCountTargets(chunk.text);
       const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
       console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: ${chunk.words} words, target ${chunkTargets.target} scenes`);
-      const chunkStageName = `${stageName}_chunk_${String(chunk.chunk_index).padStart(2, "0")}`;
-      const chunkLlm = isLocalLLMRoute(chunkStageName)
-        ? await callLocal(chunkPrompt, chunkStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
-        : await reusableCodexCall(chunkStageName, chunkPrompt) ?? await callCodex(chunkPrompt, chunkStageName);
-      if (chunkLlm.reused_output) console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: reused ${chunkLlm.output_path}`);
-      const chunkScenes = Array.isArray(chunkLlm.parsed.scenes) ? chunkLlm.parsed.scenes : [];
-      if (chunkScenes.length < chunkTargets.minimum) {
-        throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} under-segmented: returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words.`);
+      const chunkId = `chunk_${String(chunk.chunk_index).padStart(2, "0")}`;
+      const inputHash = sha256(chunkPrompt);
+      const maxValidationAttempts = Math.max(1, Number(flags["semantic-chunk-validation-attempts"] ?? 2));
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxValidationAttempts; attempt += 1) {
+        const attemptStageName = attempt === 1 ? `${stageName}_${chunkId}` : `${stageName}_${chunkId}_repair_${attempt}`;
+        const attemptPrompt = attempt === 1
+          ? chunkPrompt
+          : `${chunkPrompt}\n\nChunk-local correction: the previous response failed deterministic validation with ${lastError?.message}. Return the complete chunk JSON again, preserve exact script evidence, and include at least ${chunkTargets.minimum} scenes.`;
+        const hasEnoughScenes = (parsed) => Array.isArray(parsed?.scenes) && parsed.scenes.length >= chunkTargets.minimum;
+        try {
+          const chunkLlm = isLocalLLMRoute(attemptStageName)
+            ? await callLocal(attemptPrompt, attemptStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
+            : await reusableCodexCall(attemptStageName, attemptPrompt, hasEnoughScenes) ?? await callCodex(attemptPrompt, attemptStageName);
+          const chunkScenes = Array.isArray(chunkLlm.parsed.scenes) ? chunkLlm.parsed.scenes : [];
+          if (chunkScenes.length < chunkTargets.minimum) {
+            throw new Error(`returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words`);
+          }
+          await recordPlannerChunkCheckpoint({
+            episodeDir,
+            plannerStage: "semantic_scene_plan",
+            chunkId,
+            inputHash,
+            status: "passed",
+            attempt,
+            reused: Boolean(chunkLlm.reused_output),
+            outputPath: chunkLlm.output_path,
+            metadata: {
+              word_start_index: chunk.word_start_index,
+              word_end_index_exclusive: chunk.word_end_index_exclusive,
+              scene_count: chunkScenes.length,
+            },
+          });
+          if (chunkLlm.reused_output) console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: reused ${chunkLlm.output_path}`);
+          console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
+          return { chunk, targets: chunkTargets, llm: chunkLlm, scenes: chunkScenes };
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          await recordPlannerChunkCheckpoint({
+            episodeDir,
+            plannerStage: "semantic_scene_plan",
+            chunkId,
+            inputHash,
+            status: "failed",
+            attempt,
+            findings: [{ code: "semantic_chunk_validation_failed", message: lastError.message }],
+            metadata: {
+              word_start_index: chunk.word_start_index,
+              word_end_index_exclusive: chunk.word_end_index_exclusive,
+            },
+          });
+        }
       }
-      console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
-      return { chunk, targets: chunkTargets, llm: chunkLlm, scenes: chunkScenes };
+      throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} failed after ${maxValidationAttempts} scoped attempts: ${lastError?.message}`);
     }, semanticConcurrency);
     llm = {
       provider: parsedChunks[0]?.llm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
@@ -947,6 +993,7 @@ async function main() {
       chunked: true,
       chunk_count: chunks.length,
       concurrency: semanticConcurrency,
+      reused_chunk_count: parsedChunks.filter((item) => item.llm?.reused_output).length,
     };
   } else {
     const prompt = buildPrompt(planningScript, bibles, targets);
@@ -1038,6 +1085,8 @@ async function main() {
       chunked: llm.chunked ?? false,
       chunk_count: llm.chunk_count ?? null,
       concurrency: llm.concurrency ?? 1,
+      reused_chunk_count: llm.reused_chunk_count ?? 0,
+      chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       overlap_words: useChunking ? Number(flags["semantic-overlap-words"] ?? 120) : 0,
       reconciliation: {
         provider: reconciliation.llm.provider,

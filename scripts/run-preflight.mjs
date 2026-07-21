@@ -18,6 +18,11 @@ import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "./lib/codex-cli-runner.mjs";
+import {
+  DEFAULT_PRODUCTION_PROFILE,
+  normalizeProductionProfile,
+  productionProfileSummary,
+} from "./lib/production-profiles.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,6 +46,10 @@ const imageFallbackCondition = normalizeImageFallbackCondition(
 );
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
+const productionProfile = normalizeProductionProfile(
+  flags["production-profile"] ?? flags.profile ?? DEFAULT_PRODUCTION_PROFILE,
+);
+const productionProfileConfig = productionProfileSummary(productionProfile);
 const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
 const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
@@ -339,6 +348,8 @@ async function main() {
     qwen_narrator_voice_policy: qwenNarratorVoicePolicy,
     qwen_native_speed: qwenNativeSpeed,
     audio_target: audioTarget,
+    production_profile: productionProfile,
+    production_profile_config: productionProfileConfig,
     pace_policy: pacePolicy,
     target_wpm_min: targetWpmMin,
     target_wpm_max: targetWpmMax,
@@ -378,6 +389,7 @@ async function main() {
       parallax_background_provider: parallaxBackgroundProvider,
       audio_target: audioTarget,
       qwen_narrator_voice_id: qwenNarratorVoiceId,
+      production_profile: productionProfile,
     },
     model_versions: lockedModelVersions(),
     source_path: sourcePath,
@@ -397,6 +409,9 @@ async function main() {
       image_output_qa_required_before_render: true,
       directed_motion_plan_required_before_render: true,
       inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",
+      automatic_stage_spend_authorized_by_profile: productionProfileConfig.advance.authorize_planner_spend
+        && productionProfileConfig.advance.authorize_media_spend
+        && productionProfileConfig.advance.authorize_render,
     },
     stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy }),
     episode_dir: episodeDir,

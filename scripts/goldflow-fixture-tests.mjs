@@ -62,7 +62,7 @@ import {
   scopedQaRecoveryCommand,
 } from "./image-output-qa.mjs";
 import { focalAnalysisFromPixelsForTests } from "./image-focal-analysis.mjs";
-import { ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { collectQwenUnitsForTests, ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
 import { finalizeRenderReport } from "./render-report-finalize.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
@@ -1176,6 +1176,30 @@ function testQwenKeepsBracketedUiDialogueSpeakable() {
   assert.match(spoken, /chapter zero activated/i);
   assert.match(spoken, /survive the carriage/i);
   assert.doesNotMatch(spoken, /[\[\]]/);
+}
+
+function testNarratorOnlyQwenMergesAcrossVoiceSegments() {
+  const unit = (segmentId, sourceSpeaker, text) => ({
+    segment_id: segmentId,
+    unit_index: 1,
+    speaker: "NARRATOR",
+    source_speaker: sourceSpeaker,
+    qwen_spoken_text: text,
+    caption_text: text,
+  });
+  const plan = {
+    segments: [
+      { segment_id: "voice_seg_01", qwen_generation_units: [unit("voice_seg_01", "NARRATOR", "Joey entered the hall.")] },
+      { segment_id: "voice_seg_02", qwen_generation_units: [unit("voice_seg_02", "VANESSA", "Vanessa told him to leave.")] },
+    ],
+  };
+  const lock = { narrator_voice_id: "owned_narrator" };
+  const merged = collectQwenUnitsForTests(plan, lock, { maxCharsLimit: 850, narratorOnly: true });
+  assert.equal(merged.length, 1);
+  assert.deepEqual(merged[0].source_segment_ids, ["voice_seg_01", "voice_seg_02"]);
+  assert.match(merged[0].text, /Joey entered the hall\. Vanessa told him to leave\./);
+  const cast = collectQwenUnitsForTests(plan, lock, { maxCharsLimit: 850, narratorOnly: false });
+  assert.equal(cast.length, 2);
 }
 
 async function testEpisodeLocalAmbienceSpecContract() {
@@ -6826,6 +6850,7 @@ const FIXTURE_SUITES = {
   media: [
     testPhraseAwareSubtitleGrouping,
     testQwenKeepsBracketedUiDialogueSpeakable,
+    testNarratorOnlyQwenMergesAcrossVoiceSegments,
     testEpisodeLocalAmbienceSpecContract,
     testImageOutputQaRiskAndDonorPolicies,
     testExceptionDrivenQaAndAutomaticFocalAnalysis,

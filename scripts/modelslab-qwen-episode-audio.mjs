@@ -763,7 +763,10 @@ async function buildVoiceLock() {
   return lock;
 }
 
-function collectUnits(plan, lock) {
+function collectUnits(plan, lock, {
+  maxCharsLimit = maxChars,
+  narratorOnly = !characterVoiceCasting,
+} = {}) {
   const rawUnits = [];
   for (const segment of plan.segments ?? []) {
     for (const unit of segment.qwen_generation_units ?? []) {
@@ -779,6 +782,8 @@ function collectUnits(plan, lock) {
         text,
         caption_text: String(unit.caption_text ?? unit.source_text ?? unit.qwen_spoken_text ?? text).trim(),
         expected_duration_sec: Number(segment.expected_duration_sec ?? 0),
+        source_segment_ids: [segment.segment_id],
+        source_speakers: [unit.source_speaker ?? unit.speaker ?? "NARRATOR"],
       });
     }
   }
@@ -790,12 +795,16 @@ function collectUnits(plan, lock) {
     const canMergeNarrator = normalized === "NARRATOR"
       && last
       && String(last.speaker ?? "").toUpperCase() === "NARRATOR"
-      && String(last.source_speaker ?? "NARRATOR").toUpperCase() === String(unit.source_speaker ?? "NARRATOR").toUpperCase()
-      && last.segment_id === unit.segment_id
-      && `${last.text} ${unit.text}`.length <= maxChars;
+      && (narratorOnly || (
+        String(last.source_speaker ?? "NARRATOR").toUpperCase() === String(unit.source_speaker ?? "NARRATOR").toUpperCase()
+        && last.segment_id === unit.segment_id
+      ))
+      && `${last.text} ${unit.text}`.length <= maxCharsLimit;
     if (canMergeNarrator) {
       last.text = `${last.text} ${unit.text}`.replace(/\s+/g, " ").trim();
       last.caption_text = `${last.caption_text ?? last.text} ${unit.caption_text ?? unit.text}`.replace(/\s+/g, " ").trim();
+      last.source_segment_ids = [...new Set([...(last.source_segment_ids ?? [last.segment_id]), ...(unit.source_segment_ids ?? [unit.segment_id])])];
+      last.source_speakers = [...new Set([...(last.source_speakers ?? [last.source_speaker]), ...(unit.source_speakers ?? [unit.source_speaker])])];
     } else {
       merged.push({ ...unit });
     }
@@ -803,7 +812,7 @@ function collectUnits(plan, lock) {
 
   const units = [];
   for (const unit of merged) {
-    for (const chunk of chunkTextBySentence(unit.text, maxChars)) {
+    for (const chunk of chunkTextBySentence(unit.text, maxCharsLimit)) {
       units.push({
         ...unit,
         text: chunk,
@@ -811,6 +820,10 @@ function collectUnits(plan, lock) {
       }
   }
   return units;
+}
+
+export function collectQwenUnitsForTests(plan, lock, options = {}) {
+  return collectUnits(plan, lock, options);
 }
 
 async function synthesizeUnit(unit, lock, index, previousResults = new Map(), previousContentResults = new Map()) {

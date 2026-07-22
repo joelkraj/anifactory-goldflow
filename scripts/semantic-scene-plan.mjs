@@ -758,6 +758,10 @@ function buildReconciliationPrompt(script, bibles, extractedChunks, targets) {
     overlap_words: item.chunk.overlap_words,
     extracted: item.llm.parsed,
   }));
+  const serializedChunkPacket = JSON.stringify(chunkPacket);
+  const lockedScriptPacket = script.length + serializedChunkPacket.length > 900_000
+    ? `[LOCKED SCRIPT OMITTED FROM THIS OVERSIZED RECONCILIATION PACKET. SHA-256: ${sha256(script)}. Use only verbatim evidence already present in OVERLAPPING EXTRACTIONS. Deterministic validation will check every returned excerpt against the full locked script.]`
+    : script;
   return `Reconcile overlapping semantic extractions into one factual continuity plan and one story fact ledger.
 
 Your job is evidence reconciliation, not story invention and not visual art direction.
@@ -781,10 +785,10 @@ BIBLES:
 ${JSON.stringify(bibles).slice(0, 20_000)}
 
 LOCKED SCRIPT:
-${script}
+${lockedScriptPacket}
 
 OVERLAPPING EXTRACTIONS:
-${JSON.stringify(chunkPacket)}
+${serializedChunkPacket}
 
 Return one JSON object only:
 {

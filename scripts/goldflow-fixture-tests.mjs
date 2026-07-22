@@ -830,6 +830,12 @@ function testSemanticReconciliationEvidenceContract() {
   assert.match(prompt, /exact_excerpt copied verbatim/i);
   assert.match(prompt, /Overlapping chunks intentionally repeat evidence/i);
   assert.doesNotMatch(prompt, /OVERLAPPING EXTRACTIONS:\n\[\n  \{/);
+  const oversizedPrompt = semanticReconciliationPromptForTests("A".repeat(900_001), {}, [{
+    chunk: { chunk_index: 1, word_start_index: 0, word_end_index_exclusive: 1, overlap_words: 0 },
+    llm: { parsed: { scenes: [] } },
+  }], { target: 1, minimum: 1, maximum: 1 });
+  assert.match(oversizedPrompt, /LOCKED SCRIPT OMITTED FROM THIS OVERSIZED RECONCILIATION PACKET/);
+  assert.ok(oversizedPrompt.length < 100_000);
   assert.equal(sanitizeCanonicalIdForTests("academy_evacu\u200bation_fork"), "academy_evacuation_fork");
   const valid = {
     canonical_entities: [{ entity_id: "joey", evidence: [{ exact_excerpt: "Joey entered Analytics Hall.", confidence: 0.99 }] }],

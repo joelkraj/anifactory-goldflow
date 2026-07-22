@@ -829,6 +829,7 @@ function testSemanticReconciliationEvidenceContract() {
   assert.match(prompt, /evidence reconciliation, not story invention/i);
   assert.match(prompt, /exact_excerpt copied verbatim/i);
   assert.match(prompt, /Overlapping chunks intentionally repeat evidence/i);
+  assert.doesNotMatch(prompt, /OVERLAPPING EXTRACTIONS:\n\[\n  \{/);
   assert.equal(sanitizeCanonicalIdForTests("academy_evacu\u200bation_fork"), "academy_evacuation_fork");
   const valid = {
     canonical_entities: [{ entity_id: "joey", evidence: [{ exact_excerpt: "Joey entered Analytics Hall.", confidence: 0.99 }] }],

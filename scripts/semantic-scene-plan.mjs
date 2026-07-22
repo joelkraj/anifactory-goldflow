@@ -778,13 +778,13 @@ Hard rules:
 - Preserve the semantic scene schema from the extracted rows, including mandatory location ref_requirements for concrete physical scenes.
 
 BIBLES:
-${JSON.stringify(bibles, null, 2).slice(0, 20_000)}
+${JSON.stringify(bibles).slice(0, 20_000)}
 
 LOCKED SCRIPT:
 ${script}
 
 OVERLAPPING EXTRACTIONS:
-${JSON.stringify(chunkPacket, null, 2)}
+${JSON.stringify(chunkPacket)}
 
 Return one JSON object only:
 {

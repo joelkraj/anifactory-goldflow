@@ -42,6 +42,9 @@ async function runProviderFreeSyntheticE2e() {
   ], { cwd: process.cwd(), env });
   await execFileAsync(process.execPath, ["scripts/source-ingest.mjs", ...base, "--source", sourcePath], { cwd: process.cwd(), env });
   const episodeDir = path.join(root, "channels", "synthetic", "weekly_runs", "synthetic-e2e", "episodes", "ep_01");
+  const { stdout: statusStdout } = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], { cwd: process.cwd(), env });
+  const statusAfterIngest = JSON.parse(statusStdout);
+  assert.equal(statusAfterIngest.identity.production_profile, "fast_premium_v1");
   const scriptPath = path.join(episodeDir, "script_clean.md");
   await execFileAsync(process.execPath, ["scripts/script-approve.mjs", ...base, "--hash", await fileSha256(scriptPath)], { cwd: process.cwd(), env });
 

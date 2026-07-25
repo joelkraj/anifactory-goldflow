@@ -1561,6 +1561,7 @@ async function main() {
     git: runIdentity.git ?? null,
     provider_locks: runIdentity.provider_locks ?? null,
     model_versions: runIdentity.model_versions ?? null,
+    production_profile: runIdentity.production_profile ?? runIdentity.provider_locks?.production_profile ?? null,
     run_identity_schema: runIdentity.schema ?? "missing",
     stage_registry_version: runIdentity.stage_registry_version ?? null,
   };

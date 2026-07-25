@@ -1285,8 +1285,9 @@ async function runPool(items, concurrency, worker) {
 function editorialAtomChunks(atoms, maxAtoms = 40) {
   const chunks = [];
   let current = [];
+  const hardMaxAtoms = Math.max(maxAtoms, Number(flags["editorial-chunk-hard-max-atoms"] ?? 80));
   for (const atom of atoms) {
-    if (current.length >= maxAtoms && atom.transition_barrier_before) {
+    if (current.length >= hardMaxAtoms || (current.length >= maxAtoms && atom.transition_barrier_before)) {
       chunks.push(current);
       current = [];
     }
@@ -1439,20 +1440,50 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) 
   const locked = await existingGroupingLock();
   const reprojectActiveStateOnly = flags["reproject-active-state-only"] === "true";
   const retimeLockedGrouping = flags["retime-locked-grouping"] === "true";
-  if (locked && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping) {
+  const regroupLockedTailFromSec = flags["regroup-locked-tail-from-sec"] == null
+    ? null
+    : Number(flags["regroup-locked-tail-from-sec"]);
+  const regroupLockedTail = Number.isFinite(regroupLockedTailFromSec);
+  if (locked && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping && !regroupLockedTail) {
     console.error(`visual beats: grouping lock current; reusing ${outputPath}`);
     return { reused: true, report: locked.plan };
   }
-  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping) {
+  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping && !regroupLockedTail) {
     throw new Error("Visual beat grouping was previously locked. Pass --approve-regrouping true only with explicit operator approval.");
   }
   if (retimeLockedGrouping && !locked) {
     throw new Error("Locked beat retiming requires a currently approved visual beat grouping.");
   }
+  if (regroupLockedTail && (!locked || flags["approve-regrouping"] !== "true")) {
+    throw new Error("Scoped locked-tail regrouping requires a current grouping approval and --approve-regrouping true.");
+  }
   const boundedScope = Number.isFinite(scopeEndSecNumber);
   const scopedScript = boundedScope ? scriptPrefixForTimedWordsForTests(scriptText, wordTiming.words) : { script: scriptText, source_word_end_exclusive: null, matched_timing_tail_words: null, fallback: false };
   const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger);
-  const directed = retimeLockedGrouping && locked
+  const directed = regroupLockedTail && locked
+    ? await (async () => {
+        const retimed = retimeLockedEditorialBeats(locked.plan.beats, atoms);
+        const prefix = retimed.filter((beat) => Number(beat.end_sec) <= regroupLockedTailFromSec);
+        const consumedAtomCount = prefix.reduce((sum, beat) => sum + (beat.source_atom_ids?.length ?? 0), 0);
+        if (!prefix.length || consumedAtomCount >= atoms.length) {
+          throw new Error(`Scoped locked-tail regrouping boundary ${regroupLockedTailFromSec}s does not leave both a preserved prefix and a regenerable suffix.`);
+        }
+        const suffixAtoms = atoms.slice(consumedAtomCount);
+        const suffix = await directEditorialBeats(suffixAtoms, factLedger, timedPlan.scenes);
+        return {
+          beats: [...prefix, ...suffix.beats],
+          planner: {
+            ...suffix.planner,
+            scoped_locked_tail_regrouping: true,
+            identity_preserved_before_sec: regroupLockedTailFromSec,
+            preserved_beat_count: prefix.length,
+            regenerated_beat_count: suffix.beats.length,
+            regenerated_source_word_start_index: suffixAtoms[0].source_word_start_index,
+            prior_visual_beat_plan_sha256: locked.approval.visual_beat_plan_sha256,
+          },
+        };
+      })()
+    : retimeLockedGrouping && locked
     ? {
         beats: retimeLockedEditorialBeats(locked.plan.beats, atoms),
         planner: {
@@ -1517,8 +1548,14 @@ async function main() {
     }
     numberedBeatsAll = closeVisualBeatTimelineForTests(editorialResult.beats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
     appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll);
-    if (appliedRailFindings.length && flags["retime-locked-grouping"] !== "true") {
-      throw new Error(`Editorial applied hold rails failed: ${appliedRailFindings.slice(0, 12).map((finding) => `${finding.visual_beat_id}:${finding.duration_sec}s`).join(", ")}`);
+    const regroupTailBoundarySec = flags["regroup-locked-tail-from-sec"] == null
+      ? null
+      : Number(flags["regroup-locked-tail-from-sec"]);
+    const blockingRailFindings = Number.isFinite(regroupTailBoundarySec)
+      ? appliedRailFindings.filter((finding) => Number(finding.start_sec ?? 0) >= regroupTailBoundarySec)
+      : appliedRailFindings;
+    if (blockingRailFindings.length && flags["retime-locked-grouping"] !== "true") {
+      throw new Error(`Editorial applied hold rails failed: ${blockingRailFindings.slice(0, 12).map((finding) => `${finding.visual_beat_id}:${finding.duration_sec}s`).join(", ")}`);
     }
     whisperAlignmentSummary = {
       mode: "exact_whisper_word_span_atoms",
@@ -1680,7 +1717,14 @@ export const visualBeatInternalsForTests = {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(async (error) => {
-    await writeJson(outputPath, { schema: "goldflow_visual_beat_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    const failure = { schema: "goldflow_visual_beat_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() };
+    const approval = await readJson(visualBeatApprovalPath, null).catch(() => null);
+    const currentHash = await hashFile(outputPath).catch(() => null);
+    if (approval?.status === "approved" && currentHash && approval.visual_beat_plan_sha256 === currentHash) {
+      await writeJson(path.join(episodeDir, "visual_beat_plan_failed_latest.json"), failure).catch(() => {});
+    } else {
+      await writeJson(outputPath, failure).catch(() => {});
+    }
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

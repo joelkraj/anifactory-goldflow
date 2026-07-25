@@ -7,6 +7,7 @@ import {
   PIPELINE_STAGE_REGISTRY,
   PIPELINE_STAGE_REGISTRY_VERSION,
   buildStageCommand,
+  readyStageIds,
   stageDefinition,
   stageIsSatisfied,
 } from "./lib/pipeline-stage-registry.mjs";
@@ -20,6 +21,7 @@ import {
   creditExhaustedIdsFromReport,
   creditExhaustedIdsFromRows,
 } from "./lib/image-fallback-policy.mjs";
+import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -78,7 +80,7 @@ function sha256(value) {
 
 async function fileSha256(filePath) {
   try {
-    return sha256(await fs.readFile(filePath));
+    return await streamSha256File(filePath);
   } catch {
     return null;
   }
@@ -1706,6 +1708,10 @@ async function main() {
   });
 
   const next = rows.find((row) => !stageIsSatisfied(row.state)) ?? null;
+  const readyCommandStages = readyStageIds(rows);
+  const repairCommandStages = next?.stage === "visual_prompt_harden" && next?.state === "blocked"
+    ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
+    : [];
   const result = {
     schema: "goldflow_run_status_v2",
     stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
@@ -1714,9 +1720,11 @@ async function main() {
     run_identity_path: await exists(runIdentityPath) ? runIdentityPath : null,
     current_stage: next?.stage ?? "complete",
     current_stage_state: next?.state ?? "passed",
-    allowed_command_stages: next?.stage === "visual_prompt_harden" && next?.state === "blocked"
-      ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
-      : next?.stage ? [next.stage] : [],
+    allowed_command_stages: [...new Set([
+      ...readyCommandStages,
+      ...repairCommandStages,
+      ...(next?.stage && !["blocked", "failed"].includes(String(next.state ?? "")) ? [next.stage] : []),
+    ])],
     next_required_input: next?.required_input ?? null,
     next_output_artifact: next?.output_artifact ?? null,
     operator_approval_required: next?.operator_approval_required ?? false,

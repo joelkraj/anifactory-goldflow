@@ -35,6 +35,8 @@ const openingReviewSec = Math.max(0, Number(flags["opening-review-sec"] ?? 180))
 const contactWindowSec = Math.max(60, Number(flags["contact-window-sec"] ?? 300));
 const integrationSampleRate = Math.max(0, Math.min(1, Number(flags["integration-sample-rate"] ?? 0.08)));
 const writeFullContactSheets = flags["write-full-contact-sheets"] === "true";
+const incrementalPacket = flags["incremental-packet"] === "true";
+const updateCutLedger = flags["update-ledger"] !== "false";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -68,6 +70,13 @@ async function readJson(filePath, fallback = null) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function writeJsonAtomic(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.rename(temporary, filePath);
 }
 
 async function exists(filePath) {
@@ -137,7 +146,7 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
   const acceptIds = new Set(options.acceptedIds ?? []);
   const rejectIds = new Set(options.rejectedIds ?? []);
   const priorById = new Map((prior.decisions ?? []).map((row) => [String(row.image_id ?? ""), row]));
-  const decisions = rows.filter((row) => row.requires_manual_risk_review).map((row) => {
+  const currentDecisions = rows.filter((row) => row.requires_manual_risk_review).map((row) => {
     const previous = priorById.get(row.image_id);
     const hashMatches = previous?.image_sha256 === row.image_sha256;
     let decision = hashMatches ? normalizedReviewDecision(previous?.decision) : "not_inspected";
@@ -154,6 +163,13 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
       focal_override: hashMatches ? previous?.focal_override ?? null : null,
     };
   });
+  const currentIds = new Set(currentDecisions.map((row) => row.image_id));
+  const decisions = options.preserveUnseen === true
+    ? [
+        ...currentDecisions,
+        ...(prior.decisions ?? []).filter((row) => !currentIds.has(String(row?.image_id ?? ""))),
+      ]
+    : currentDecisions;
   const counts = Object.fromEntries([...REVIEW_DECISIONS].map((value) => [value, decisions.filter((row) => row.decision === value).length]));
   const status = counts.rejected > 0 ? "blocked" : counts.not_inspected > 0 ? "pending_review" : "complete";
   return {
@@ -431,12 +447,26 @@ async function main() {
     note: reviewNote,
     acceptedIds: approve && legacyBulkApproval ? [...riskIds] : [...acceptedIds],
     rejectedIds: [...rejectedIds],
+    preserveUnseen: incrementalPacket,
   });
   if (decisionLedger.decisions.some((row) => row.decision !== "not_inspected") && (!decisionLedger.reviewer || !decisionLedger.note)) {
     throw new Error(`Accepted/rejected decisions in ${reviewDecisionsPath} require top-level reviewer and note.`);
   }
-  await writeJson(reviewDecisionsPath, { ...decisionLedger, contact_sheets: packets });
+  const contactSheets = incrementalPacket
+    ? {
+        all_sheets: [...new Set([
+          ...(priorDecisions?.contact_sheets?.all_sheets ?? []),
+          ...packets.all_sheets,
+        ])],
+        risk_sheets: [...new Set([
+          ...(priorDecisions?.contact_sheets?.risk_sheets ?? []),
+          ...packets.risk_sheets,
+        ])],
+      }
+    : packets;
+  await writeJsonAtomic(reviewDecisionsPath, { ...decisionLedger, contact_sheets: contactSheets });
   const structuralBlockerIds = new Set(structuralBlockers.map((finding) => finding.image_id).filter(Boolean));
+  const decisionById = new Map(decisionLedger.decisions.map((row) => [row.image_id, row]));
   const rejectedDecisionIds = decisionLedger.decisions.filter((row) => row.decision === "rejected").map((row) => row.image_id);
   const notInspectedIds = decisionLedger.decisions.filter((row) => row.decision === "not_inspected").map((row) => row.image_id);
   const recoveryRequired = imageQaNeedsRecovery(structuralBlockers, rejectedDecisionIds);
@@ -446,9 +476,15 @@ async function main() {
       ? "needs_manual_review"
       : "passed";
   const failedImageIds = [...new Set([...structuralBlockerIds, ...rejectedDecisionIds])].filter(Boolean);
-  const ledgerUpdate = await updateLedgerQa(audit.rows, decisionLedger, structuralBlockerIds, decisionLedger.note || null);
+  const ledgerUpdate = updateCutLedger
+    ? await updateLedgerQa(audit.rows, decisionLedger, structuralBlockerIds, decisionLedger.note || null)
+    : null;
+  const incrementallyAcceptedRows = audit.rows.filter((row) => (
+    !structuralBlockerIds.has(row.image_id)
+    && (!row.requires_manual_risk_review || decisionById.get(row.image_id)?.decision === "accepted")
+  ));
   const report = {
-    schema: "goldflow_image_output_qa_v2",
+    schema: incrementalPacket ? "goldflow_incremental_image_output_qa_v1" : "goldflow_image_output_qa_v2",
     status,
     channel,
     series_slug: series,
@@ -490,10 +526,22 @@ async function main() {
     review_decisions_sha256: await hashFile(reviewDecisionsPath),
     review_decision_counts: decisionLedger.counts,
     invalidated_motion_image_ids: ledgerUpdate?.invalidated_motion_image_ids ?? [],
-    review_packets: packets,
-    accepted_image_hashes: status === "passed"
-      ? Object.fromEntries(audit.rows.map((row) => [row.image_id, row.image_sha256]))
-      : {},
+    review_packets: contactSheets,
+    accepted_image_hashes: incrementalPacket
+      ? Object.fromEntries(incrementallyAcceptedRows.map((row) => [row.image_id, row.image_sha256]))
+      : status === "passed"
+        ? Object.fromEntries(audit.rows.map((row) => [row.image_id, row.image_sha256]))
+        : {},
+    incremental_packet: incrementalPacket,
+    incremental_accepted_images: incrementalPacket
+      ? incrementallyAcceptedRows.map((row) => ({
+          image_id: row.image_id,
+          image_path: row.image_path,
+          image_sha256: row.image_sha256,
+          start_sec: row.start_sec,
+          qa_tier: row.qa_tier,
+        }))
+      : [],
     generated_text_accuracy_checked: false,
     generated_text_accuracy_policy: "out_of_scope_by_operator_direction",
     next_command: recoveryRequired
@@ -505,7 +553,7 @@ async function main() {
   };
   await writeJson(outputPath, report);
   console.log(JSON.stringify({ status, report_path: outputPath, image_count: report.image_count, risk_cut_count: report.risk_cut_count, unresolved_blocker_count: report.unresolved_blocker_count, review_packets: packets }, null, 2));
-  if (status !== "passed") process.exitCode = 1;
+  if (!incrementalPacket && status !== "passed") process.exitCode = 1;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

@@ -11,8 +11,10 @@ import {
 } from "../scripts/lib/pipeline-stage-registry.mjs";
 import {
   beginStageExecution,
+  episodeDirForFlags,
   finishStageExecution,
 } from "../scripts/lib/execution-provenance.mjs";
+import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -95,6 +97,20 @@ function run(script, scriptArgs = []) {
   enforceWorkflowGuard(command, subcommand, scriptArgs);
   const parsedFlags = parseFlags(scriptArgs);
   const stage = commandStage(command, subcommand, parsedFlags);
+  const plannerRerunDecision = plannerRerunDecisionForEpisode({
+    stage,
+    flags: parsedFlags,
+    episodeDir: episodeDirForFlags(parsedFlags, process.env),
+  });
+  if (!plannerRerunDecision.allowed) {
+    console.error(`Planner rerun blocked: ${command} ${subcommand}`);
+    console.error(`Reason: ${plannerRerunDecision.reason}. Prior attempts: ${plannerRerunDecision.prior_attempt_count}.`);
+    if (plannerRerunDecision.failed_expected_ids?.length) {
+      console.error(`Failed planner units: ${plannerRerunDecision.failed_expected_ids.slice(0, 40).join(", ")}`);
+    }
+    console.error(plannerRerunDecision.required_recovery);
+    process.exit(1);
+  }
   void (async () => {
     const execution = stage ? await beginStageExecution({
       stage,
@@ -159,6 +175,8 @@ ${registryCommands}
   goldflow run codex-doctor        Inspect the pinned Codex runtime
   goldflow run status              Print the artifact-backed stage ledger
   goldflow run advance             Advance automatic stages continuously using the locked production profile
+  goldflow run audio-semantic-fork Run semantic planning and the voice/TTS/Whisper branch concurrently
+  goldflow run visual-wavefront    Prefetch hardened ModelsLab cuts while prompt chunks are authored
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -181,6 +199,7 @@ Common flags:
 
 Production profiles:
   fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, TTS/images 15, render 4
+  fast-premium orchestration: semantic || voice/TTS/Whisper fork, scoped-only planner recovery, prompt-to-ModelsLab wavefront prefetch
   balanced: legacy 4/4/6/6 planner concurrency and explicit spend flags for run advance
   Selecting fast-premium at preflight authorizes planner/media/render spend for run advance. Creative review gates still hold.
 
@@ -223,6 +242,10 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("run-status.mjs", flags);
 } else if (command === "run" && subcommand === "advance") {
   run("run-advance.mjs", flags);
+} else if (command === "run" && subcommand === "audio-semantic-fork") {
+  run("run-audio-semantic-fork.mjs", flags);
+} else if (command === "run" && subcommand === "visual-wavefront") {
+  run("run-visual-wavefront.mjs", flags);
 } else if (command === "run" && subcommand === "import-proof-baseline") {
   run("proof-baseline-import.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {

@@ -1,6 +1,6 @@
 import { productionProfileForIdentity } from "./production-profiles.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-21.1";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-24.1";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -64,6 +64,11 @@ const stages = [
     output_artifact: "semantic_scene_plan.json + story_fact_ledger.json",
     approval: "automatic",
     validator: "semantic_plan_and_fact_ledger",
+    output_patterns: [
+      /^semantic_scene_plan\.json$/,
+      /^story_fact_ledger\.json$/,
+      /^semantic_.*\.json$/,
+    ],
     commands: ["semantic plan"],
   },
   {
@@ -73,6 +78,13 @@ const stages = [
     output_artifact: "qwen_generation_plan.json",
     approval: "automatic",
     validator: "voice_plan_hashes",
+    depends_on: ["targeted_speakability"],
+    output_patterns: [
+      /^qwen_generation_plan\.json$/,
+      /^audio_performance_plan\.json$/,
+      /^voice_direction_strategy_.*\.json$/,
+      /^voice_reference_completeness_report\.json$/,
+    ],
     commands: ["voice plan", "run import-proof-baseline"],
   },
   {
@@ -82,6 +94,12 @@ const stages = [
     output_artifact: "modelslab_qwen_tts_report_<episode>.json + stitched narration",
     approval: "automatic",
     validator: "qwen_report_audio_hashes",
+    depends_on: ["voice_plan"],
+    output_patterns: [
+      /^modelslab_qwen_tts_report_.*\.json$/,
+      /^qwen_.*\.json$/,
+      /^audio_stitch_report_.*\.json$/,
+    ],
     commands: ["tts qwen"],
   },
   {
@@ -91,6 +109,10 @@ const stages = [
     output_artifact: "narration_word_timing_<episode>.json",
     approval: "automatic",
     validator: "whisper_audio_hash",
+    depends_on: ["qwen_tts_stitch"],
+    output_patterns: [
+      /^narration_word_timing_.*\.json$/,
+    ],
     commands: ["audio whisper-timing"],
   },
   {
@@ -100,6 +122,10 @@ const stages = [
     output_artifact: "narration_pace_report_<episode>.json",
     approval: "automatic",
     validator: "audio_pace_hash_and_policy",
+    depends_on: ["local_whisper_word_timing"],
+    output_patterns: [
+      /^narration_pace_report_.*\.json$/,
+    ],
     commands: ["audio pace-check", "audio tempo-normalize"],
   },
   {
@@ -109,6 +135,7 @@ const stages = [
     output_artifact: "timed_scene_plan.json",
     approval: "automatic",
     validator: "timed_scene_source_hashes",
+    depends_on: ["semantic_scene_plan", "audio_pace_check"],
     commands: ["timing bind"],
   },
   {
@@ -182,6 +209,10 @@ const stages = [
     output_artifact: "section_image_prompts.json",
     approval: "automatic",
     validator: "prompt_plan_source_hashes",
+    output_patterns: [
+      /^section_image_prompts\.json$/,
+      /^planner_chunk_ledger\.json$/,
+    ],
     commands: ["visual plan"],
   },
   {
@@ -191,6 +222,11 @@ const stages = [
     output_artifact: "section_image_prompts_hardened.json + visual_prompt_hardening_<episode>.json",
     approval: "automatic",
     validator: "hardened_prompt_contract",
+    output_patterns: [
+      /^section_image_prompts_hardened\.json$/,
+      /^visual_prompt_hardening_.*\.json$/,
+      /^visual_prompt_hardening_sample_.*\.md$/,
+    ],
     commands: ["visual harden"],
   },
   {
@@ -210,6 +246,9 @@ const stages = [
     output_artifact: "transition_edit_plan_<episode>.json",
     approval: "automatic",
     validator: "transition_plan_hashes",
+    output_patterns: [
+      /^transition_edit_plan_.*\.json$/,
+    ],
     commands: ["visual transitions", "visual engagement"],
   },
   {
@@ -300,7 +339,8 @@ const stages = [
 export const PIPELINE_STAGE_REGISTRY = Object.freeze(stages.map((entry, index) => Object.freeze({
   ...entry,
   order: index,
-  dependencies: Object.freeze(index === 0 ? [] : [stages[index - 1].id]),
+  dependencies: Object.freeze(entry.depends_on ?? (index === 0 ? [] : [stages[index - 1].id])),
+  output_patterns: Object.freeze(entry.output_patterns ?? []),
   artifact_contract: Object.freeze({
     output: entry.output_artifact,
     validator: entry.validator,
@@ -352,6 +392,27 @@ export function stageChecklistFor(identity = {}) {
 
 export function workflowStageIds() {
   return PIPELINE_STAGE_REGISTRY.map((entry) => entry.id);
+}
+
+export function stageOutputPathMatches(stageId, relativePath) {
+  const definition = stageDefinition(stageId);
+  if (!definition?.output_patterns?.length) return true;
+  return definition.output_patterns.some((pattern) => pattern.test(String(relativePath ?? "")));
+}
+
+export function readyStageIds(stageRows = []) {
+  const byId = new Map(stageRows.map((row) => [row.stage, row]));
+  return PIPELINE_STAGE_REGISTRY
+    .filter((definition) => {
+      const row = byId.get(definition.id);
+      if (!row || stageIsSatisfied(row.state)) return false;
+      if (!["missing", "stale"].includes(String(row.state ?? ""))) return false;
+      return definition.dependencies.every((dependencyId) => {
+        const dependency = byId.get(dependencyId);
+        return dependency && stageIsSatisfied(dependency.state);
+      });
+    })
+    .map((definition) => definition.id);
 }
 
 export function workflowCommandSummary() {
@@ -441,8 +502,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
     semantic_scene_plan: identity?.proof_scope?.mode === "bounded"
-      ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
-      : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
+      ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
+      : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
     qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
@@ -454,14 +515,14 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     longform_audio_mix: narratorOnly(identity)
       ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`
       : `node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`,
-    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${planner.editorial_concurrency}${boundedProofScopeFlag(identity)}`,
-    visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${planner.visual_ref_chunk_concurrency}`,
+    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${planner.editorial_concurrency} --resume-incomplete-chunks true${boundedProofScopeFlag(identity)}`,
+    visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${planner.visual_ref_chunk_concurrency} --resume-incomplete-chunks true`,
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: codexReferences(identity)
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 3 --lease-sec 900`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency ${media.reference_concurrency}`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --note "<generated reference review notes>"`,
-    visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base} --visual-chunk-concurrency ${planner.visual_chunk_concurrency} --visual-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
+    visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base} --visual-chunk-concurrency ${planner.visual_chunk_concurrency} --visual-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true`,
     visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
     visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2 --visual-chunk-concurrency ${planner.visual_chunk_concurrency}`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,

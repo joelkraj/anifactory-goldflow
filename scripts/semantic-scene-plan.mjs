@@ -419,6 +419,54 @@ function semanticSceneAnchorFindings(scenes, script) {
   return findings;
 }
 
+export function semanticSceneCoverageFindingsForTests(scenes, script, maxSceneSpanWords = 1600) {
+  const scriptText = normalizeText(script);
+  const findings = [];
+  const starts = [];
+  let cursor = 0;
+  for (const scene of scenes ?? []) {
+    const anchor = normalizeText(scene?.script_excerpt_start);
+    const index = anchor ? scriptText.indexOf(anchor, cursor) : -1;
+    starts.push(index);
+    if (index >= 0) cursor = index + Math.max(1, anchor.length);
+  }
+  for (let index = 0; index < starts.length; index += 1) {
+    const start = starts[index];
+    if (start < 0) continue;
+    const next = starts[index + 1] >= 0 ? starts[index + 1] : scriptText.length;
+    const spanWords = scriptText.slice(start, next).split(/\s+/).filter(Boolean).length;
+    if (spanWords > maxSceneSpanWords) {
+      findings.push({
+        severity: "blocker",
+        code: "semantic_scene_span_too_large",
+        scene_id: String(scenes[index]?.scene_id ?? ""),
+        title: String(scenes[index]?.title ?? ""),
+        span_words: spanWords,
+        max_scene_span_words: maxSceneSpanWords,
+        message: "A reconciled semantic scene spans too much locked narration and must be split using the existing chunk extractions.",
+      });
+    }
+  }
+  const lastScene = scenes?.at?.(-1);
+  const lastEnd = normalizeText(lastScene?.script_excerpt_end);
+  if (lastScene && lastEnd) {
+    const lastEndIndex = scriptText.lastIndexOf(lastEnd);
+    const trailingWords = lastEndIndex < 0
+      ? Number.POSITIVE_INFINITY
+      : scriptText.slice(lastEndIndex + lastEnd.length).split(/\s+/).filter(Boolean).length;
+    if (trailingWords > 24) {
+      findings.push({
+        severity: "blocker",
+        code: "semantic_final_scene_does_not_cover_script_end",
+        scene_id: String(lastScene.scene_id ?? ""),
+        trailing_words: trailingWords,
+        message: "The final semantic scene end anchor leaves locked narration uncovered.",
+      });
+    }
+  }
+  return findings;
+}
+
 function countByCode(findings) {
   const counts = {};
   for (const finding of findings) {
@@ -771,6 +819,8 @@ Hard rules:
 - Merge aliases into one canonical entity when the script proves they are the same person. Keep distinct people distinct.
 - Canonicalize physical locations, props, recurring UI motifs, and character state transitions across chunk boundaries.
 - Overlapping chunks intentionally repeat evidence. Deduplicate repeated scenes and facts without deleting story coverage.
+- Preserve the useful scene granularity already present in the chunk extractions. Never collapse several adjacent extraction chunks into one catch-all scene. No reconciled scene may span more than 1,600 locked-script words; split broad arcs at the supplied exact chunk anchors.
+- The first scene must begin near the beginning of the locked script and the final scene must end on the locked script's actual final narration. Short or repeated anchors such as "yes" must be resolved by ordered script position, not by the first matching occurrence.
 - Preserve scene order and exact script anchors. Return ${targets.minimum}-${targets.maximum} scenes, aiming for ${targets.target}.
 - Every canonical fact row and every state transition must contain at least one evidence row with exact_excerpt copied verbatim from the locked script and confidence from 0 to 1.
 - Every state transition must also set transition_evidence_excerpt to the one exact evidence excerpt where to_state first becomes true. Earlier from-state evidence may remain in evidence, but it is not the transition boundary.
@@ -861,7 +911,7 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
     const attemptStage = attempt === 1 ? reconciliationStage : `${reconciliationStage}_attempt_${attempt}`;
     const prompt = attempt === 1
       ? basePrompt
-      : `${basePrompt}\n\nCorrection pass: the previous response failed exact source-evidence validation with ${JSON.stringify(lastFindings.slice(0, 20))}. Return the complete JSON object again. Copy every exact_excerpt and transition_evidence_excerpt byte-for-byte from LOCKED SCRIPT, including punctuation and any internal line breaks.`;
+      : `${basePrompt}\n\nCorrection pass: the previous response failed deterministic evidence or scene-coverage validation with ${JSON.stringify(lastFindings.slice(0, 20))}. Return the complete JSON object again. Fix every listed issue. Preserve the useful scene boundaries from the overlapping chunk extractions, split any oversized catch-all scene at supplied exact anchors, and cover the locked script through its actual final narration. Copy every exact_excerpt and transition_evidence_excerpt byte-for-byte from LOCKED SCRIPT, including punctuation and any internal line breaks.`;
     const llm = isLocalLLMRoute(attemptStage)
       ? await callLocal(prompt, attemptStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
       : await reusableCodexCall(attemptStage, prompt) ?? await callCodex(prompt, attemptStage);
@@ -896,13 +946,20 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
       updated_at: new Date().toISOString(),
     };
     const evidenceFindings = storyFactEvidenceFindingsForTests(ledger, script);
-    if (!evidenceFindings.some((finding) => finding.severity === "blocker")) {
-      return { llm, parsed, ledger, evidenceFindings };
+    const normalizedScenes = normalizeScenes(parsed.scenes ?? []);
+    const snappedScenes = snapSemanticSceneAnchors(normalizedScenes, script).scenes;
+    const sceneFindings = [
+      ...semanticSceneAnchorFindings(snappedScenes, script),
+      ...semanticSceneCoverageFindingsForTests(snappedScenes, script),
+    ];
+    const reconciliationFindings = [...evidenceFindings, ...sceneFindings];
+    if (!reconciliationFindings.some((finding) => finding.severity === "blocker")) {
+      return { llm, parsed, ledger, evidenceFindings, sceneFindings };
     }
-    lastFindings = evidenceFindings;
+    lastFindings = reconciliationFindings;
   }
   const preview = lastFindings.slice(0, 10).map((finding) => `${finding.fact_id}:${finding.code}`).join(", ");
-  throw new Error(`Semantic reconciliation returned unsupported fact evidence: ${preview}`);
+  throw new Error(`Semantic reconciliation failed evidence or scene-coverage validation: ${preview}`);
 }
 
 async function main() {
@@ -1028,7 +1085,8 @@ async function main() {
   const normalizedScenes = normalizeScenes(scenes);
   const anchorSnapReport = snapSemanticSceneAnchors(normalizedScenes, planningScript);
   const anchorFindings = semanticSceneAnchorFindings(anchorSnapReport.scenes, planningScript);
-  const anchorBlockers = anchorFindings.filter((finding) => finding.severity === "blocker");
+  const coverageFindings = semanticSceneCoverageFindingsForTests(anchorSnapReport.scenes, planningScript);
+  const anchorBlockers = [...anchorFindings, ...coverageFindings].filter((finding) => finding.severity === "blocker");
   if (anchorBlockers.length) {
     const preview = anchorBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.anchor ?? finding.message}`).join("\n");
     throw new Error(`Semantic scene planner returned scene anchors that do not bind to the locked script:\n${preview}`);
@@ -1073,6 +1131,8 @@ async function main() {
     semantic_validation: {
       anchor_finding_count: anchorFindings.length,
       anchor_findings_by_code: countByCode(anchorFindings),
+      coverage_finding_count: coverageFindings.length,
+      coverage_findings_by_code: countByCode(coverageFindings),
       anchor_snap_count: anchorSnapReport.snaps.length,
       quality_finding_count: semanticQualityFindings.length,
       quality_findings_by_code: countByCode(semanticQualityFindings),

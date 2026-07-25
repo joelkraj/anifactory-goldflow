@@ -125,6 +125,7 @@ import {
   visualPromptCodexCacheEnabledForTests,
 } from "./visual-plan.mjs";
 import {
+  dropUnknownReferenceSceneScopesForTests,
   referenceCharacterStateFindingsForTests,
   referenceDirectorSelectionFindingsForTests,
   referenceEvidenceLedgerForTests,
@@ -143,6 +144,8 @@ import {
   PIPELINE_STAGE_REGISTRY,
   buildStageCommand,
   commandStageFor,
+  readyStageIds,
+  stageOutputPathMatches,
   stageChecklistFor,
 } from "./lib/pipeline-stage-registry.mjs";
 import {
@@ -151,6 +154,16 @@ import {
   productionProfileForIdentity,
 } from "./lib/production-profiles.mjs";
 import { plannerChunkIdentityFindings } from "./lib/planner-chunk-ledger.mjs";
+import {
+  plannerInvocationScope,
+  plannerRerunDecision,
+} from "./lib/planner-rerun-policy.mjs";
+import {
+  combineWavefrontPlansForTests,
+  dedupeIncrementalAcceptedImagesForTests,
+  stableMotionPrefetchCandidatesForTests,
+  shouldFlushWavefrontBatchForTests,
+} from "./run-visual-wavefront.mjs";
 import {
   completeWorkItem,
   createCodexWorkManifest,
@@ -184,6 +197,7 @@ import {
   sanitizeCanonicalIdForTests,
   semanticProofScopeForTests,
   semanticSceneAnchorFindingsForTests,
+  semanticSceneCoverageFindingsForTests,
   semanticSceneQualityFindingsForTests,
   semanticScriptChunksForTests,
   semanticSnapSceneAnchorsForTests,
@@ -234,6 +248,189 @@ function testAuthoritativeStageRegistry() {
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
 
+function testParallelStageDependenciesAndOwnedOutputs() {
+  const semantic = PIPELINE_STAGE_REGISTRY.find((stage) => stage.id === "semantic_scene_plan");
+  const voice = PIPELINE_STAGE_REGISTRY.find((stage) => stage.id === "voice_plan");
+  const tts = PIPELINE_STAGE_REGISTRY.find((stage) => stage.id === "qwen_tts_stitch");
+  const timingBind = PIPELINE_STAGE_REGISTRY.find((stage) => stage.id === "timing_bind");
+  assert.deepEqual(semantic.dependencies, ["targeted_speakability"]);
+  assert.deepEqual(voice.dependencies, ["targeted_speakability"]);
+  assert.deepEqual(tts.dependencies, ["voice_plan"]);
+  assert.deepEqual(timingBind.dependencies, ["semantic_scene_plan", "audio_pace_check"]);
+  const rows = PIPELINE_STAGE_REGISTRY.map((stage) => ({
+    stage: stage.id,
+    state: ["run_identity", "source_ingest", "script_approval", "script_pace_check", "targeted_speakability"].includes(stage.id)
+      ? "passed"
+      : "missing",
+  }));
+  assert.deepEqual(
+    readyStageIds(rows).filter((stage) => ["semantic_scene_plan", "voice_plan", "qwen_tts_stitch"].includes(stage)),
+    ["semantic_scene_plan", "voice_plan"],
+  );
+  rows.find((row) => row.stage === "voice_plan").state = "passed";
+  assert.equal(readyStageIds(rows).includes("qwen_tts_stitch"), true);
+  rows.find((row) => row.stage === "qwen_tts_stitch").state = "passed";
+  assert.equal(readyStageIds(rows).includes("local_whisper_word_timing"), true);
+  assert.equal(stageOutputPathMatches("semantic_scene_plan", "semantic_scene_plan.json"), true);
+  assert.equal(stageOutputPathMatches("semantic_scene_plan", "modelslab_qwen_tts_report_ep_01.json"), false);
+  assert.equal(stageOutputPathMatches("qwen_tts_stitch", "modelslab_qwen_tts_report_ep_01.json"), true);
+  assert.equal(stageOutputPathMatches("qwen_tts_stitch", "semantic_scene_plan.json"), false);
+  assert.equal(stageOutputPathMatches("local_whisper_word_timing", "narration_word_timing_ep_01.json"), true);
+  assert.equal(stageOutputPathMatches("local_whisper_word_timing", "story_fact_ledger.json"), false);
+}
+
+function testScopedOnlyPlannerRerunPolicy() {
+  const priorEvents = [{
+    event_type: "stage_completed",
+    stage: "visual_prompt_plan",
+    status: "failed",
+  }];
+  assert.equal(plannerInvocationScope({ "cut-ids": "cut_001" }).scoped, true);
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: {},
+    priorEvents,
+  }).allowed, false);
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: { "cut-ids": "cut_001" },
+    priorEvents,
+  }).reason, "scoped_planner_recovery");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: { "resume-incomplete-chunks": "true" },
+    priorEvents,
+  }).reason, "content_addressed_incomplete_chunk_resume");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: { "resume-incomplete-chunks": "true" },
+    priorEvents: [{
+      event_type: "stage_completed",
+      stage: "visual_prompt_plan",
+      status: "passed",
+    }],
+  }).reason, "completed_planner_requires_exact_scope");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: { "resume-incomplete-chunks": "true" },
+    priorEvents: [{
+      event_type: "stage_completed",
+      stage: "visual_prompt_plan",
+      status: "passed",
+    }],
+    unresolvedExpectedIds: ["cut_002"],
+  }).reason, "content_addressed_incomplete_chunk_resume");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: {
+      "resume-incomplete-chunks": "true",
+      "codex-reuse-cache": "false",
+    },
+    priorEvents,
+  }).allowed, false);
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: { "resume-incomplete-chunks": "true" },
+    priorEvents: [{
+      event_type: "stage_started",
+      stage: "visual_prompt_plan",
+    }],
+  }).reason, "content_addressed_incomplete_chunk_resume");
+}
+
+function testVisualWavefrontBatchPolicy() {
+  assert.equal(shouldFlushWavefrontBatchForTests({
+    pendingCutCount: 14,
+    minCuts: 15,
+    oldestPendingMs: 1000,
+    nowMs: 5999,
+    maxWaitMs: 5000,
+  }), false);
+  assert.equal(shouldFlushWavefrontBatchForTests({
+    pendingCutCount: 15,
+    minCuts: 15,
+    oldestPendingMs: 1000,
+    nowMs: 2000,
+  }), true);
+  assert.equal(shouldFlushWavefrontBatchForTests({
+    pendingCutCount: 4,
+    minCuts: 15,
+    oldestPendingMs: 1000,
+    nowMs: 6000,
+    maxWaitMs: 5000,
+  }), true);
+  const combined = combineWavefrontPlansForTests([
+    { source_script_hash: "hash", prompts: [{ image_id: "cut_001" }], wavefront: { chunk_id: "chunk_001" } },
+    { source_script_hash: "hash", prompts: [{ image_id: "cut_002" }], wavefront: { chunk_id: "chunk_002" } },
+  ], {
+    identity: {
+      channel: "test",
+      series_slug: "series",
+      week: "week",
+      episode: "ep_01",
+      image_provider: "modelslab",
+    },
+  });
+  assert.deepEqual(combined.prompts.map((prompt) => prompt.image_id), ["cut_001", "cut_002"]);
+  assert.throws(() => combineWavefrontPlansForTests([
+    { prompts: [{ image_id: "cut_001" }] },
+    { prompts: [{ image_id: "cut_001" }] },
+  ]), /duplicated/);
+
+  const deduped = dedupeIncrementalAcceptedImagesForTests([
+    { incremental_accepted_images: [{ image_id: "cut_static", image_path: "/tmp/a.png", image_sha256: "hash-a", start_sec: 0 }] },
+    { incremental_accepted_images: [
+      { image_id: "cut_move", image_path: "/tmp/b.png", image_sha256: "hash-b", start_sec: 4 },
+      { image_id: "cut_duplicate", image_path: "/tmp/c.png", image_sha256: "hash-a", start_sec: 8 },
+    ] },
+  ]);
+  assert.deepEqual(deduped.accepted_images.map((row) => row.image_id), ["cut_static", "cut_move"]);
+  assert.equal(deduped.duplicate_hashes[0].duplicate_of_image_id, "cut_static");
+
+  const stable = stableMotionPrefetchCandidatesForTests({
+    prompts: [
+      {
+        image_id: "cut_static",
+        start_sec: 0,
+        duration_sec: 4,
+        shot_manifest: {
+          motion_intent: {
+            behavior: "static_hold",
+            focal_subject: "Joey",
+            start_anchor: { x: 0.5, y: 0.5 },
+            end_anchor: { x: 0.5, y: 0.5 },
+            start_scale: 1,
+            end_scale: 1,
+            easing: "linear",
+            depth_candidate: { eligible: false, priority: 0, separation_confidence: "low", editorial_reason: "single plane" },
+          },
+        },
+      },
+      {
+        image_id: "cut_move",
+        start_sec: 4,
+        duration_sec: 4,
+        shot_manifest: {
+          motion_intent: {
+            behavior: "slow_push_in",
+            focal_subject: "Joey",
+            start_anchor: { x: 0.5, y: 0.5 },
+            end_anchor: { x: 0.5, y: 0.5 },
+            start_scale: 1.01,
+            end_scale: 1.06,
+            easing: "ease_in_out",
+            depth_candidate: { eligible: false, priority: 0, separation_confidence: "low", editorial_reason: "single plane" },
+          },
+        },
+      },
+    ],
+    acceptedImages: deduped.accepted_images,
+    timelineEndSec: 8,
+    motionPolicy: "selective_editorial_v1",
+  });
+  assert.deepEqual(stable.map((row) => row.image_id), ["cut_static"]);
+}
+
 function testRunIdentityV2Policies() {
   assert.throws(
     () => validateDirtyWorktreePolicy({ dirty: true, intent: "production", allowDirty: true, reason: "not allowed" }),
@@ -254,6 +451,11 @@ function testRunIdentityV2Policies() {
   assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v1");
   assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v1");
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 8);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.parallel_audio_semantic, true);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.visual_wavefront_prefetch, true);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_image_qa, true);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_motion_clip_prefetch, true);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.planner_recovery_policy, "scoped_only");
   assert.equal(productionProfileForIdentity({}).planner.visual_chunk_concurrency, 6);
 }
 
@@ -261,6 +463,10 @@ function testGuardedRunAdvancePolicies() {
   assert.deepEqual(autoAdvanceDecisionForTests("script_approval", "missing", {}), { executable: false, reason: "approval_required" });
   assert.deepEqual(autoAdvanceDecisionForTests("semantic_scene_plan", "missing", {}), { executable: false, reason: "planner_spend_not_approved" });
   assert.equal(autoAdvanceDecisionForTests("semantic_scene_plan", "missing", { allowPlannerSpend: true }).executable, true);
+  assert.deepEqual(
+    autoAdvanceDecisionForTests("semantic_scene_plan", "failed", { allowPlannerSpend: true }),
+    { executable: false, reason: "planner_triage_and_scoped_recovery_required" },
+  );
   assert.deepEqual(autoAdvanceDecisionForTests("image_generation", "missing", { allowPlannerSpend: true }), { executable: false, reason: "media_spend_not_approved" });
   assert.equal(autoAdvanceDecisionForTests("image_generation", "missing", { allowMediaSpend: true }).executable, true);
   assert.deepEqual(autoAdvanceDecisionForTests("image_output_qa", "needs_manual_review", {}), { executable: false, reason: "risk_decisions_required" });
@@ -711,6 +917,18 @@ function testSemanticSceneAnchorValidation() {
   assert.equal(brokenFindings.some((finding) => finding.code === "semantic_end_anchor_not_found"), true);
 }
 
+function testSemanticSceneCoverageRejectsCollapsedTail() {
+  const prefix = Array.from({ length: 40 }, (_, index) => `prefix${index}`).join(" ");
+  const tail = Array.from({ length: 1700 }, (_, index) => `tail${index}`).join(" ");
+  const script = `${prefix} Final arc begins ${tail} Yes`;
+  const findings = semanticSceneCoverageFindingsForTests([
+    { scene_id: "scene_001", title: "Opening", script_excerpt_start: "prefix0", script_excerpt_end: "prefix39" },
+    { scene_id: "scene_002", title: "Collapsed Tail", script_excerpt_start: "Final arc begins", script_excerpt_end: "Yes" },
+  ], script);
+  assert.equal(findings.some((finding) => finding.code === "semantic_scene_span_too_large"), true);
+  assert.equal(findings.some((finding) => finding.code === "semantic_final_scene_does_not_cover_script_end"), false);
+}
+
 function testSemanticSceneQualityFindings() {
   const findings = semanticSceneQualityFindingsForTests([
     {
@@ -744,6 +962,16 @@ function testSemanticSceneQualityFindings() {
     missingLocationFindings.some((finding) => finding.code === "semantic_physical_scene_missing_location_ref_requirement" && finding.severity === "blocker"),
     true
   );
+}
+
+function testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement() {
+  const result = dropUnknownReferenceSceneScopesForTests([
+    { ref_id: "rail_office_ref", scene_ids: ["scene_069", "scene_070", "scene_070a"] },
+  ], new Set(["scene_069", "scene_070a"]));
+  assert.deepEqual(result.targets[0].scene_ids, ["scene_069", "scene_070a"]);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].code, "reference_target_unknown_scene_scope_dropped");
+  assert.deepEqual(result.findings[0].scene_ids, ["scene_070"]);
 }
 
 function testSemanticPlannerPromptContracts() {
@@ -969,6 +1197,11 @@ function testEditorialBeatDirectorContracts() {
     const sourceWordEnd = atom.source_word_end_index + insertedWordShift + expandedAtomEnd;
     return {
       ...atom,
+      ...(index === 2 ? {
+        scene_id: "scene_repaired",
+        semantic_location: "repaired hall",
+        semantic_scene: { scene_id: "scene_repaired", location: "repaired hall" },
+      } : {}),
       atom_id: `atom_w${String(sourceWordStart).padStart(6, "0")}_w${String(sourceWordEnd).padStart(6, "0")}`,
       source_word_start_index: sourceWordStart,
       source_word_end_index: sourceWordEnd,
@@ -982,6 +1215,9 @@ function testEditorialBeatDirectorContracts() {
   assert.notDeepEqual(retimedLocked.flatMap((beat) => beat.source_atom_ids), lockedBeats.flatMap((beat) => beat.source_atom_ids));
   assert.equal(retimedLocked[1].source_word_end_index, lockedBeats[1].source_word_end_index + 1);
   assert.equal(retimedLocked[2].source_word_start_index, lockedBeats[2].source_word_start_index + 1);
+  assert.equal(retimedLocked[2].scene_id, "scene_repaired");
+  assert.equal(retimedLocked[2].parent_scene_id, "scene_repaired");
+  assert.equal(retimedLocked[2].timing_repair.repaired_scene_id, "scene_repaired");
   assert.equal(retimedLocked.every((beat) => beat.timing_repair.identity_preserved), true);
   assert.throws(() => retimeLockedEditorialBeats(lockedBeats, freshAtoms.slice(1)), /atom count changed/i);
   const projected = projectActiveStateConstraints(normalized.beats, atoms, ledger, timedScenes);
@@ -1032,6 +1268,31 @@ function testEditorialBeatDirectorContracts() {
   const multiplierAtom = multiplierAtoms.find((atom) => atom.text.startsWith("0X"));
   assert.equal(multiplierAtom.source_word_start_index, 5);
   assert.equal(multiplierWords[multiplierAtom.source_word_start_index].normalized, "zero");
+
+  const driftSentences = Array.from({ length: 220 }, (_value, index) => `At checkpoint ${index}, Joey carefully acquired asset ${index} and moved forward.`);
+  const driftScript = driftSentences.join(" ");
+  const driftScriptTokens = [...driftScript.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)].map((match) => match[0]);
+  let carefullyCount = 0;
+  const driftSpokenTokens = driftScriptTokens.filter((token) => {
+    if (token.toLowerCase() !== "carefully") return true;
+    carefullyCount += 1;
+    return carefullyCount % 3 !== 0;
+  });
+  const driftWords = driftSpokenTokens.map((word, index) => ({
+    index,
+    word,
+    normalized: word.toLowerCase(),
+    start_sec: index * 0.12,
+    end_sec: (index + 1) * 0.12,
+  }));
+  const driftAtoms = buildTranscriptAtoms(driftScript, driftWords, [{
+    scene_id: "scene_drift",
+    start_sec: 0,
+    end_sec: driftWords.at(-1).end_sec,
+    location: "Continuity Room",
+  }]);
+  assert.equal(driftAtoms.at(-1).source_word_end_index, driftWords.length - 1);
+  assert.equal(Math.max(...driftAtoms.map((atom) => atom.duration_sec)) < 10, true);
 }
 
 function testEditorialBeatTimelineClosure() {
@@ -1256,6 +1517,13 @@ function testImageOutputQaRiskAndDonorPolicies() {
   const stale = mergeRiskReviewDecisions([{ ...riskRows[0], image_sha256: "hash-b" }], accepted);
   assert.equal(stale.status, "pending_review");
   assert.equal(stale.decisions[0].decision, "not_inspected");
+  const cumulative = mergeRiskReviewDecisions([{
+    ...riskRows[0],
+    image_id: "cut_002",
+    image_sha256: "hash-c",
+  }], accepted, { preserveUnseen: true });
+  assert.deepEqual(cumulative.decisions.map((row) => row.image_id), ["cut_002", "cut_001"]);
+  assert.equal(cumulative.decisions.find((row) => row.image_id === "cut_001").decision, "accepted");
 
   const ledgerResult = applyImageQaDecisionsToLedger({
     cuts: [
@@ -1319,6 +1587,23 @@ function testExceptionDrivenQaAndAutomaticFocalAnalysis() {
   assert.equal(analysis.focal_anchor.x > 0.55, true);
   assert.equal(analysis.confidence > 0.3, true);
 
+  const diffusePixels = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
+      const value = (x + y) % 2 === 0 ? 230 : 35;
+      diffusePixels[offset] = value;
+      diffusePixels[offset + 1] = value;
+      diffusePixels[offset + 2] = value;
+    }
+  }
+  const diffuseAnalysis = focalAnalysisFromPixelsForTests(diffusePixels, width, height, 3);
+  assert.equal(
+    diffuseAnalysis.findings.some((finding) => finding.code === "salient_region_edge_clipping_risk"),
+    false,
+    "diffuse full-frame detail must not be misclassified as a clipped focal subject",
+  );
+
   const fourRefPrompt = {
     image_id: "cut_sample",
     start_sec: 500,
@@ -1347,6 +1632,17 @@ function testExceptionDrivenQaAndAutomaticFocalAnalysis() {
   assert.equal(shifted.end_anchor.x > 0.65, true);
   assert.equal(shifted.motion_keyframes[1].anchor.x > 0.65, true);
   assert.equal(applyAutomaticFocalAnchorForTests(intent, { confidence: 0.9, focal_anchor: { x: 0.8, y: 0.45 } }, { focal_override: { start_anchor: { x: 0.2, y: 0.2 } } }), intent);
+  const staticIntent = {
+    ...intent,
+    behavior: "static_hold",
+    start_scale: 1,
+    end_scale: 1,
+    motion_keyframes: [
+      { at: 0, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" },
+      { at: 1, anchor: { x: 0.5, y: 0.5 }, scale: 1, easing_to_next: "linear" },
+    ],
+  };
+  assert.equal(applyAutomaticFocalAnchorForTests(staticIntent, { confidence: 0.9, focal_anchor: { x: 0.8, y: 0.45 } }), staticIntent);
 }
 
 async function testProviderCircuitBreakerStopsUnclaimedWork() {
@@ -1950,6 +2246,92 @@ async function testRenderRequiresHashMatchedImageQa() {
     () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, identity, imageOutputQa, ledger, options),
     /changed after output QA/i,
   );
+}
+
+async function testIncrementalMotionClipPrebuildReusesExactCache() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-motion-prebuild-"));
+  const imagePath = path.join(tempDir, "cut_static.png");
+  const audioPath = path.join(tempDir, "audio.m4a");
+  const promptPath = path.join(tempDir, "prompts.json");
+  const imagegenPath = path.join(tempDir, "imagegen.json");
+  const transitionPath = path.join(tempDir, "transitions.json");
+  const motionPath = path.join(tempDir, "motion.json");
+  const audioBedPath = path.join(tempDir, "audio-bed.json");
+  const workDir = path.join(tempDir, "render-work");
+  await sharp({ create: { width: 320, height: 180, channels: 3, background: { r: 40, g: 80, b: 140 } } }).png().toFile(imagePath);
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-f", "lavfi",
+    "-i", "anullsrc=r=48000:cl=mono",
+    "-t", "6",
+    "-c:a", "aac",
+    audioPath,
+  ]);
+  const imageHash = await sha256File(imagePath);
+  const prompts = [
+    { image_id: "cut_before", start_sec: 0, duration_sec: 2, image_generation_required: true },
+    {
+      image_id: "cut_static",
+      start_sec: 2,
+      duration_sec: 2,
+      image_generation_required: true,
+      shot_manifest: {
+        motion_intent: {
+          behavior: "static_hold",
+          focal_subject: "Joey",
+          start_anchor: { x: 0.5, y: 0.5 },
+          end_anchor: { x: 0.5, y: 0.5 },
+          start_scale: 1,
+          end_scale: 1,
+          easing: "linear",
+          depth_candidate: { eligible: false, priority: 0, separation_confidence: "low", editorial_reason: "single plane" },
+        },
+      },
+    },
+    { image_id: "cut_after", start_sec: 4, duration_sec: 2, image_generation_required: true },
+  ];
+  const intent = motionIntentForPrompt(prompts[1], imageHash, null, { timelineEndSec: 6 });
+  await writeJson(promptPath, { status: "passed", prompts });
+  await writeJson(imagegenPath, { status: "passed", results: [{ image_id: "cut_static", image_path: imagePath }] });
+  await writeJson(transitionPath, {
+    status: "passed",
+    transition_events: [{ from_image_id: "cut_static", to_image_id: "cut_after", xfade_transition: "dissolve", xfade_duration_sec: 0.2 }],
+  });
+  await writeJson(motionPath, { status: "passed", motion_intents: [intent] });
+  await writeJson(audioBedPath, { status: "passed", mix: { m4a_path: audioPath, duration_sec: 6 } });
+  const renderArgs = [
+    "scripts/render.mjs",
+    "--channel", "fixture",
+    "--series", "fixture",
+    "--week", "fixture",
+    "--episode", "ep_01",
+    "--prompts", promptPath,
+    "--imagegen-report", imagegenPath,
+    "--transition-plan", transitionPath,
+    "--motion-plan", motionPath,
+    "--audio-bed-report", audioBedPath,
+    "--prebuild-motion-clips", "true",
+    "--prebuild-image-ids", "cut_static",
+    "--work-dir", workDir,
+    "--motion", "smooth_subpixel_ken_burns",
+    "--render-concurrency", "1",
+    "--clip-preset", "ultrafast",
+    "--width", "320",
+    "--height", "180",
+    "--fps", "30",
+    "--render-scale-multiplier", "1.05",
+  ];
+  const firstReportPath = path.join(tempDir, "prebuild-first.json");
+  await execFileAsync(process.execPath, [...renderArgs, "--report-output", firstReportPath], { cwd: process.cwd() });
+  const first = await readJson(firstReportPath);
+  assert.equal(first.status, "passed");
+  assert.equal(first.motion_clip_cache_generated_count, 1);
+  assert.match(path.basename(first.clips[0].motion_clip_path), /^00002-cut_static\.mp4$/);
+  const secondReportPath = path.join(tempDir, "prebuild-second.json");
+  await execFileAsync(process.execPath, [...renderArgs, "--report-output", secondReportPath], { cwd: process.cwd() });
+  const second = await readJson(secondReportPath);
+  assert.equal(second.motion_clip_cache_reused_count, 1);
+  assert.equal(second.clips[0].motion_clip_cache_key, first.clips[0].motion_clip_cache_key);
 }
 
 async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
@@ -2970,6 +3352,20 @@ function testGroupReferencePromptDoesNotDemandOnePerson() {
   });
   assert.match(prompt, /three to five clearly distinct visible people/i);
   assert.doesNotMatch(prompt, /exactly one visible person/i);
+}
+
+function testSingleCharacterReferencePromptIgnoresNegativeGroupWords() {
+  const prompt = referencePromptForTests({
+    ref_id: "joey_identity_ref",
+    kind: "character_state",
+    subject: "Joey Mercer base identity",
+    conditioning_asset_role: "identity_state",
+    conditioning_subject_count: 1,
+    prompt_anchor: "Exactly one adult man on a plain background; no additional people.",
+    risk_notes: ["Used in dense multi-character scenes and team broadcasts."],
+  });
+  assert.match(prompt, /exactly one visible person/i);
+  assert.doesNotMatch(prompt, /three to five clearly distinct visible people/i);
 }
 
 function testConciseReferenceRoleContract() {
@@ -5815,7 +6211,7 @@ async function testTimingBindMatchesPossessiveAnchorsAfterCursor() {
     status: "passed",
     source_script_hash: scriptHash,
     narration_audio_hash: narrationHash,
-    audio_duration_sec: 27,
+    audio_duration_sec: 16,
     words: [
       word("Earlier", 0, 0.2), word("he", 0.2, 0.4), word("thought", 0.4, 0.6), word("of", 0.6, 0.8),
       word("his", 0.8, 1), word("mother's", 1, 1.2), word("piano", 1.2, 1.4), word("and", 1.4, 1.6),
@@ -6745,6 +7141,9 @@ async function testCodexImageWorkQueueContracts() {
 const FIXTURE_SUITES = {
   "stage-contract": [
     testAuthoritativeStageRegistry,
+    testParallelStageDependenciesAndOwnedOutputs,
+    testScopedOnlyPlannerRerunPolicy,
+    testVisualWavefrontBatchPolicy,
     testRunIdentityV2Policies,
     testGuardedRunAdvancePolicies,
     testPlannerChunkIdentityValidation,
@@ -6777,7 +7176,9 @@ const FIXTURE_SUITES = {
   ],
   planner: [
     testSemanticSceneAnchorValidation,
+    testSemanticSceneCoverageRejectsCollapsedTail,
     testSemanticSceneQualityFindings,
+    testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement,
     testSemanticPlannerPromptContracts,
     testSemanticChunkingSplitsLongSingleParagraph,
     testBoundedProofBaselineScoping,
@@ -6806,6 +7207,7 @@ const FIXTURE_SUITES = {
     testProviderAwarePromptSelection,
     testSceneImageProductionContractBlocksDroppedRefsAndStyle,
     testGroupReferencePromptDoesNotDemandOnePerson,
+    testSingleCharacterReferencePromptIgnoresNegativeGroupWords,
     testConciseReferenceRoleContract,
     testLocalBeatFidelityEditorialCases,
     testVisualPlannerDriftContracts,
@@ -6860,6 +7262,7 @@ const FIXTURE_SUITES = {
     testMotionPlanConsumesApprovedParallax,
     testStreamingRenderHashFinalization,
     testRenderRequiresHashMatchedImageQa,
+    testIncrementalMotionClipPrebuildReusesExactCache,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,
     testVoiceDirectionPreservesFastRecapCadence,

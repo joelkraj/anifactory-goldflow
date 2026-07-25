@@ -67,6 +67,7 @@ const promoteDerivedRefs = flags["promote-derived-refs"] === "true";
 const providerCircuitFailureThreshold = Math.max(2, Number(flags["provider-circuit-failures"] ?? process.env.ANIFACTORY_IMAGE_PROVIDER_CIRCUIT_FAILURES ?? 3));
 const invocationStartedAt = new Date().toISOString();
 const invocationStartedMs = Date.now();
+const batchKindOverride = String(flags["batch-kind"] ?? "").trim() || null;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -202,11 +203,17 @@ function referencePathFor(target, provider = routedProviderForReference(imagePro
 
 function referencePrompt(target) {
   const kind = String(target.kind ?? "");
-  const targetText = `${target.subject ?? ""} ${target.prompt_anchor ?? ""} ${(target.risk_notes ?? []).join(" ")}`.toLowerCase();
+  const subjectText = String(target.subject ?? "").toLowerCase();
+  const assetRole = String(target.conditioning_asset_role ?? target.director_role ?? "").toLowerCase();
+  const subjectCount = Number(target.conditioning_subject_count ?? 1);
   const creatureCharacterState = kind === "character_state"
-    && /\b(creature|monster|monsters|hound|hounds|dragon|beast|beasts|wolf|wolves)\b/.test(targetText);
+    && (assetRole === "creature_identity"
+      || /\b(creature|monster|monsters|hound|hounds|dragon|beast|beasts|wolf|wolves)\b/.test(subjectText));
   const groupCharacterState = kind === "character_state"
-    && /\b(group|squad|team|crowd|people|guards|soldiers|students|witnesses|faction|workforce)\b/.test(targetText);
+    && (assetRole === "faction_language"
+      || assetRole === "group_identity"
+      || (Number.isFinite(subjectCount) && subjectCount > 1)
+      || /\b(group|squad|team|crowd|guards|soldiers|students|witnesses|faction|workforce)\b/.test(subjectText));
   const kindInstruction = {
     style: "16:9 landscape anime/manhwa rendering sample with one coherent frame, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
     character_state: creatureCharacterState
@@ -1995,7 +2002,7 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   const materialized = await writeAuditableImagegenReport(report, {
-    kind: seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images",
+    kind: batchKindOverride ?? (seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images"),
     currentRows: [...referenceRun.results, ...results],
   });
   console.log(JSON.stringify({ status: materialized.status, current_batch_status: materialized.current_batch_status, report_path: reportPath, immutable_batch_report_path: materialized.immutable_batch_report_path, image_count: materialized.image_count, current_batch_image_count: materialized.current_batch_image_count }, null, 2));

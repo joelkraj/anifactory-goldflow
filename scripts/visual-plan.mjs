@@ -53,6 +53,9 @@ const allowRepeatedRetentionShotJobs = flags["allow-repeated-retention-shot-jobs
   || process.env.ANIFACTORY_ALLOW_REPEATED_RETENTION_SHOT_JOBS === "true";
 const maxConsecutiveRetentionShotJobs = Number(flags["max-consecutive-retention-shot-jobs"] ?? process.env.ANIFACTORY_MAX_CONSECUTIVE_RETENTION_SHOT_JOBS ?? 3);
 const compactEditorialProof = flags["compact-editorial-proof"] === "true" || process.env.ANIFACTORY_COMPACT_EDITORIAL_PROOF === "true";
+const wavefrontOutputDir = flags["wavefront-output-dir"]
+  ? path.resolve(flags["wavefront-output-dir"])
+  : null;
 // Production authoring is beat-local by default. The former broad scene packets
 // duplicated the full fact/reference ledger into every small chunk and turned a
 // normal episode into hundreds of oversized planner calls. Keep the legacy shape
@@ -95,6 +98,13 @@ async function hashFile(filePath) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function writeJsonAtomic(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.rename(temporary, filePath);
 }
 
 function extractJson(text) {
@@ -2372,6 +2382,43 @@ async function main() {
     ? scopedVisualBeatPlanFromRows(visualBeatPlan, visualSourceRows)
     : null;
   const stageName = `${episode}_visual_plan`;
+  const wavefrontChunkFiles = [];
+  async function emitWavefrontChunk({ chunkIndex, chunkId, inputHash, sourceRows, rawPrompts, styleSummary = "" }) {
+    if (!wavefrontOutputDir) return null;
+    const prompts = rawPrompts.map((row, index) => normalizePrompt(row, index, episode, sourceRows[index] ?? null, {
+      visualReferencePlan: enrichedVisualReferencePlan,
+      stateRefIndex,
+      activeImageProvider,
+      activeImageProviderOptions,
+    }));
+    const filePath = path.join(
+      wavefrontOutputDir,
+      `${String(chunkIndex + 1).padStart(4, "0")}-${chunkId}-${inputHash.slice(0, 12)}.plan.json`,
+    );
+    await writeJsonAtomic(filePath, {
+      schema: "goldflow_section_image_prompts_wavefront_v1",
+      status: "passed",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      source_script_hash: timedPlan.source_script_hash,
+      image_provider: activeImageProvider,
+      image_provider_options: activeImageProviderOptions,
+      style_summary: styleSummary,
+      prompt_policy: "accepted visual-planner chunk emitted for sanctioned wavefront prefetch; official full-plan hardening remains authoritative",
+      wavefront: {
+        chunk_index: chunkIndex + 1,
+        chunk_id: chunkId,
+        input_sha256: inputHash,
+        cut_ids: prompts.map((prompt) => prompt.image_id),
+      },
+      prompts,
+      updated_at: new Date().toISOString(),
+    });
+    wavefrontChunkFiles.push(filePath);
+    return filePath;
+  }
   if (dryRunPrompt) {
     const useChunkingForDryRun = flags["visual-chunking"] !== "false"
       && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
@@ -2498,6 +2545,19 @@ async function main() {
     && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
   if (useChunking) {
     const sceneChunks = adaptivePromptChunks(visualSourceRows, enrichedVisualReferencePlan, stateRefIndex);
+    if (wavefrontOutputDir) {
+      await writeJsonAtomic(path.join(wavefrontOutputDir, "manifest.json"), {
+        schema: "goldflow_visual_prompt_wavefront_manifest_v1",
+        status: "running",
+        channel,
+        series_slug: series,
+        week,
+        episode,
+        expected_chunk_count: sceneChunks.length,
+        expected_cut_count: visualSourceRows.length,
+        started_at: new Date().toISOString(),
+      });
+    }
     adaptiveChunkTelemetry = sceneChunks.map((chunk, index) => ({
       chunk_index: index + 1,
       risk_class: chunk.risk_class,
@@ -2561,6 +2621,14 @@ async function main() {
               prompt_count: checked.rawPrompts.length,
             },
           });
+          await emitWavefrontChunk({
+            chunkIndex: index,
+            chunkId,
+            inputHash,
+            sourceRows: sceneChunk,
+            rawPrompts: checked.rawPrompts,
+            styleSummary: chunkLlm.parsed.style_summary ?? "",
+          });
           console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${checked.rawPrompts.length} prompts on validation attempt ${attempt}`);
           return { chunkLlm, chunkPrompts: checked.rawPrompts, validationAttempt: attempt };
         } catch (error) {
@@ -2617,6 +2685,19 @@ async function main() {
       activeImageProvider,
       activeImageProviderOptions,
     }));
+  if (wavefrontOutputDir && !useChunking) {
+    await emitWavefrontChunk({
+      chunkIndex: 0,
+      chunkId: "single_call",
+      inputHash: sha256(JSON.stringify({
+        visual_beat_ids: visualSourceRows.map((row) => row.visual_beat_id ?? null),
+        prompts: parsedPrompts,
+      })),
+      sourceRows: visualSourceRows,
+      rawPrompts: parsedPrompts,
+      styleSummary,
+    });
+  }
   const empty = scopedPrompts.filter((row) => !row.image_prompt);
   if (!scopedPrompts.length || empty.length) throw new Error(`Visual planner returned ${scopedPrompts.length} prompts with ${empty.length} empty prompts.`);
   assertScenePromptShape(scopedPrompts);
@@ -2683,6 +2764,8 @@ async function main() {
       max_chunk_validation_attempt: llm.max_chunk_validation_attempt ?? 1,
       chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       adaptive_chunks: adaptiveChunkTelemetry,
+      wavefront_output_dir: wavefrontOutputDir,
+      wavefront_chunk_count: wavefrontChunkFiles.length,
     },
     editorial_reuse_policy: editorialReuse.policy,
     style_summary: styleSummary,
@@ -2716,6 +2799,21 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
+  if (wavefrontOutputDir) {
+    await writeJsonAtomic(path.join(wavefrontOutputDir, "manifest.json"), {
+      schema: "goldflow_visual_prompt_wavefront_manifest_v1",
+      status: report.status,
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      expected_chunk_count: useChunking ? adaptiveChunkTelemetry.length : 1,
+      emitted_chunk_count: wavefrontChunkFiles.length,
+      expected_cut_count: visualSourceRows.length,
+      emitted_chunk_files: [...wavefrontChunkFiles].sort(),
+      completed_at: new Date().toISOString(),
+    });
+  }
   if (activeStateBlockers.length || motionEditorialBlockers.length) {
     throw new Error(`Visual prompt authoring failed ${activeStateBlockers.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
   }

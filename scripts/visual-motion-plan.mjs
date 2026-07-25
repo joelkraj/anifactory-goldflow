@@ -76,7 +76,7 @@ function clamp(value, min = 0.1, max = 0.9) {
 }
 
 export function applyAutomaticFocalAnchorForTests(intent, analysis, decision = null) {
-  if (!intent || decision?.focal_override || !analysis || Number(analysis.confidence ?? 0) < 0.48) return intent;
+  if (!intent || intent.behavior === "static_hold" || decision?.focal_override || !analysis || Number(analysis.confidence ?? 0) < 0.48) return intent;
   const detected = analysis.focal_anchor;
   if (!Number.isFinite(Number(detected?.x)) || !Number.isFinite(Number(detected?.y))) return intent;
   const target = { x: clamp(detected.x), y: clamp(detected.y) };

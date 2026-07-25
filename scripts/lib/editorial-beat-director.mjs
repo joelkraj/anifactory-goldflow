@@ -97,42 +97,156 @@ function spokenExpansionVariants(word) {
     : [[...numberWords, "x"]];
 }
 
-function alignScriptWords(scriptWords, timedWords, lookahead = 9) {
-  let cursor = 0;
-  return scriptWords.map((word) => {
-    for (const variant of spokenExpansionVariants(word)) {
-      for (let index = cursor; index < Math.min(timedWords.length, cursor + lookahead); index += 1) {
+function localAlignmentScore(scriptWords, scriptIndex, timedWords, timedIndex, horizon = 14) {
+  let scriptCursor = scriptIndex;
+  let timedCursor = timedIndex;
+  let matches = 0;
+  let gaps = 0;
+  let openingRun = 0;
+  let opening = true;
+  const scriptLimit = Math.min(scriptWords.length, scriptIndex + horizon);
+  const timedLimit = Math.min(timedWords.length, timedIndex + horizon + 6);
+  while (scriptCursor < scriptLimit && timedCursor < timedLimit) {
+    const scriptToken = scriptWords[scriptCursor]?.normalized;
+    const timedToken = timedWords[timedCursor]?.normalized;
+    if (scriptToken && scriptToken === timedToken) {
+      matches += 1;
+      if (opening) openingRun += 1;
+      scriptCursor += 1;
+      timedCursor += 1;
+      continue;
+    }
+    opening = false;
+    if (scriptWords[scriptCursor + 1]?.normalized === timedToken) {
+      scriptCursor += 1;
+      gaps += 1;
+      continue;
+    }
+    if (scriptToken === timedWords[timedCursor + 1]?.normalized) {
+      timedCursor += 1;
+      gaps += 1;
+      continue;
+    }
+    scriptCursor += 1;
+    timedCursor += 1;
+    gaps += 1;
+  }
+  return matches * 4 + openingRun * 3 - gaps * 0.35;
+}
+
+function uniqueNgramPositions(words, size) {
+  const positions = new Map();
+  for (let index = 0; index <= words.length - size; index += 1) {
+    const tokens = words.slice(index, index + size).map((word) => word.normalized);
+    if (tokens.some((token) => !token)) continue;
+    const key = tokens.join("\u001f");
+    const existing = positions.get(key);
+    positions.set(key, existing == null ? index : -1);
+  }
+  return positions;
+}
+
+function longestIncreasingAnchors(anchors) {
+  if (!anchors.length) return [];
+  const tails = [];
+  const tailIndexes = [];
+  const previous = Array(anchors.length).fill(-1);
+  for (let index = 0; index < anchors.length; index += 1) {
+    const value = anchors[index].whisper_index;
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (tails[middle] < value) low = middle + 1;
+      else high = middle;
+    }
+    tails[low] = value;
+    previous[index] = low > 0 ? tailIndexes[low - 1] : -1;
+    tailIndexes[low] = index;
+  }
+  const selected = [];
+  let cursor = tailIndexes[tails.length - 1];
+  while (cursor >= 0) {
+    selected.push(anchors[cursor]);
+    cursor = previous[cursor];
+  }
+  return selected.reverse();
+}
+
+function alignScriptWords(scriptWords, timedWords, _lookahead = 64) {
+  if (!scriptWords.length || !timedWords.length) return [];
+  const ngramSize = 5;
+  const scriptPositions = uniqueNgramPositions(scriptWords, ngramSize);
+  const timedPositions = uniqueNgramPositions(timedWords, ngramSize);
+  const candidates = [];
+  for (const [key, scriptIndex] of scriptPositions) {
+    const whisperIndex = timedPositions.get(key);
+    if (scriptIndex < 0 || whisperIndex == null || whisperIndex < 0) continue;
+    candidates.push({ script_index: scriptIndex, whisper_index: whisperIndex });
+  }
+  candidates.sort((left, right) => left.script_index - right.script_index || left.whisper_index - right.whisper_index);
+  const anchors = longestIncreasingAnchors(candidates);
+  const endpoints = [
+    { script_index: 0, whisper_index: 0 },
+    ...anchors.filter((anchor) => anchor.script_index > 0 && anchor.script_index < scriptWords.length - 1),
+    { script_index: scriptWords.length - 1, whisper_index: timedWords.length - 1 },
+  ];
+  const deduped = [];
+  for (const anchor of endpoints) {
+    const prior = deduped.at(-1);
+    if (prior && anchor.script_index === prior.script_index) {
+      prior.whisper_index = Math.max(prior.whisper_index, anchor.whisper_index);
+      continue;
+    }
+    if (prior && anchor.whisper_index <= prior.whisper_index) continue;
+    deduped.push({ ...anchor });
+  }
+  if (deduped.at(-1)?.script_index !== scriptWords.length - 1) {
+    deduped.push({ script_index: scriptWords.length - 1, whisper_index: timedWords.length - 1 });
+  }
+
+  let segment = 0;
+  let previousWhisperIndex = 0;
+  const aligned = scriptWords.map((word, scriptIndex) => {
+    while (segment + 1 < deduped.length - 1 && scriptIndex > deduped[segment + 1].script_index) segment += 1;
+    const left = deduped[segment];
+    const right = deduped[Math.min(segment + 1, deduped.length - 1)];
+    const denominator = Math.max(1, right.script_index - left.script_index);
+    const ratio = (scriptIndex - left.script_index) / denominator;
+    const projected = Math.round(left.whisper_index + ratio * (right.whisper_index - left.whisper_index));
+    const whisperIndex = Math.max(previousWhisperIndex, Math.min(timedWords.length - 1, projected));
+    previousWhisperIndex = whisperIndex;
+    return {
+      ...word,
+      whisper_index: whisperIndex,
+      alignment_score: timedWords[whisperIndex]?.normalized === word.normalized ? 1 : 0.9,
+      alignment_method: "unique_ngram_anchor_interpolation",
+    };
+  });
+  for (let scriptIndex = 0; scriptIndex < aligned.length; scriptIndex += 1) {
+    const variants = spokenExpansionVariants(aligned[scriptIndex]);
+    if (!variants.length) continue;
+    const projected = aligned[scriptIndex].whisper_index;
+    const minimum = Math.max(0, Number(aligned[scriptIndex - 1]?.whisper_index ?? -1) + 1, projected - 10);
+    const maximum = Math.min(timedWords.length, projected + 11);
+    for (const variant of variants) {
+      let matched = false;
+      for (let index = minimum; index < maximum; index += 1) {
         if (!variant.every((token, offset) => timedWords[index + offset]?.normalized === token)) continue;
-        cursor = index + variant.length;
-        return {
-          ...word,
+        aligned[scriptIndex] = {
+          ...aligned[scriptIndex],
           whisper_index: index,
           whisper_end_index: index + variant.length - 1,
           alignment_score: 1,
           spoken_expansion: variant.join(" "),
         };
+        matched = true;
+        break;
       }
+      if (matched) break;
     }
-    let selected = -1;
-    let selectedScore = -1;
-    for (let index = cursor; index < Math.min(timedWords.length, cursor + lookahead); index += 1) {
-      const candidate = timedWords[index].normalized;
-      if (!candidate || !word.normalized) continue;
-      const exact = candidate === word.normalized;
-      const distance = exact ? 0 : editDistance(candidate, word.normalized);
-      const score = exact ? 1 : 1 - distance / Math.max(candidate.length, word.normalized.length, 1);
-      if (score > selectedScore) {
-        selected = index;
-        selectedScore = score;
-      }
-      if (exact) break;
-    }
-    if (selected >= 0 && (selectedScore >= 0.72 || word.normalized.length <= 2 && selectedScore >= 0.5)) {
-      cursor = selected + 1;
-      return { ...word, whisper_index: selected, alignment_score: Number(selectedScore.toFixed(4)) };
-    }
-    return { ...word, whisper_index: null, alignment_score: 0 };
-  });
+  }
+  return aligned;
 }
 
 function clauseSpans(script, alignedWords, { maxWords = 18, minWords = 5 } = {}) {
@@ -201,7 +315,7 @@ export function retentionRailForTime(startSec) {
 export function buildTranscriptAtoms(script, words, timedScenes = [], factLedger = {}, options = {}) {
   const timedWords = whisperRows(words);
   if (!timedWords.length) throw new Error("Editorial atoms require Whisper words.");
-  const scriptWords = alignScriptWords(wordsWithOffsets(script), timedWords, Number(options.lookahead ?? 9));
+  const scriptWords = alignScriptWords(wordsWithOffsets(script), timedWords, Number(options.lookahead ?? 64));
   const spans = clauseSpans(script, scriptWords, options);
   const atomStarts = [];
   for (let index = 0; index < spans.length; index += 1) {
@@ -236,6 +350,10 @@ export function buildTranscriptAtoms(script, words, timedScenes = [], factLedger
       transition_barrier_before: false,
     };
   });
+  const durationAnomalies = atoms.filter((atom) => Number(atom.duration_sec) > Number(options.maxAtomDurationSec ?? 45));
+  if (durationAnomalies.length) {
+    throw new Error(`Editorial atom timing alignment failed: ${durationAnomalies.slice(0, 8).map((atom) => `${atom.atom_id}:${atom.duration_sec}s`).join(", ")}`);
+  }
   const transitionAtoms = evidenceTransitionAtomIds(atoms, factLedger);
   for (let index = 0; index < atoms.length; index += 1) {
     const previous = atoms[index - 1] ?? null;
@@ -278,8 +396,22 @@ export function retimeLockedEditorialBeats(lockedBeats, freshAtoms) {
 
     const first = selected[0];
     const last = selected.at(-1);
+    const sceneDurations = new Map();
+    for (const atom of selected) {
+      const sceneId = String(atom.scene_id ?? "").trim();
+      if (!sceneId) continue;
+      const duration = Math.max(0, Number(atom.end_sec ?? 0) - Number(atom.start_sec ?? 0));
+      sceneDurations.set(sceneId, (sceneDurations.get(sceneId) ?? 0) + duration);
+    }
+    const dominantSceneId = [...sceneDurations.entries()]
+      .sort((left, right) => right[1] - left[1])[0]?.[0] ?? first.scene_id ?? beat.parent_scene_id ?? beat.scene_id ?? null;
+    const dominantAtom = selected.find((atom) => atom.scene_id === dominantSceneId) ?? first;
     return {
       ...beat,
+      parent_scene_id: dominantSceneId,
+      scene_id: dominantSceneId,
+      semantic_location: dominantAtom.semantic_location ?? beat.semantic_location ?? null,
+      semantic_scene: dominantAtom.semantic_scene ?? beat.semantic_scene ?? null,
       source_atom_ids: selected.map((atom) => atom.atom_id),
       source_word_start_index: first.source_word_start_index,
       source_word_end_index: last.source_word_end_index,
@@ -290,6 +422,8 @@ export function retimeLockedEditorialBeats(lockedBeats, freshAtoms) {
       timing_repair: {
         identity_preserved: true,
         prior_source_atom_ids: (beat.source_atom_ids ?? []).map(String),
+        prior_scene_id: beat.parent_scene_id ?? beat.scene_id ?? null,
+        repaired_scene_id: dominantSceneId,
       },
     };
   });

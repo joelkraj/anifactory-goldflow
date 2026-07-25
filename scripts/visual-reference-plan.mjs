@@ -2341,6 +2341,26 @@ function finalDirectorSelectionFindings(referenceTargets, {
   return findings;
 }
 
+export function dropUnknownReferenceSceneScopesForTests(referenceTargets, knownSceneIds) {
+  const known = knownSceneIds instanceof Set ? knownSceneIds : new Set(knownSceneIds ?? []);
+  const findings = [];
+  const targets = (referenceTargets ?? []).map((target) => {
+    const original = (target.scene_ids ?? []).map(String).filter(Boolean);
+    const dropped = original.filter((sceneId) => !known.has(sceneId));
+    if (dropped.length) {
+      findings.push({
+        code: "reference_target_unknown_scene_scope_dropped",
+        severity: "warning",
+        ref_id: target.ref_id,
+        scene_ids: dropped,
+        message: `Dropped retired or unknown scene scope from ${target.ref_id}; deterministic validation did not author a replacement scope.`,
+      });
+    }
+    return { ...target, scene_ids: original.filter((sceneId) => known.has(sceneId)) };
+  });
+  return { targets, findings };
+}
+
 function openingSelectedIdentityFindings(referenceTargets, visualBeatPlan) {
   const openingVisibleIds = new Set(visualBeatRows(visualBeatPlan)
     .filter((beat) => Number(beat.start_sec ?? 0) < 30)
@@ -2566,16 +2586,19 @@ async function main() {
   ];
   const promptFacingPrune = prunePromptFacingNoRefTargets(referenceTargets);
   referenceTargets = promptFacingPrune.referenceTargets;
+  const knownSceneIds = new Set(scopedSemantic.scenes.map((scene) => String(scene.scene_id ?? "")));
+  const unknownSceneScopeDrop = dropUnknownReferenceSceneScopesForTests(referenceTargets, knownSceneIds);
+  referenceTargets = unknownSceneScopeDrop.targets;
   const directorSelectionFindings = finalDirectorSelectionFindings(referenceTargets, {
     llmTargetIds,
-    knownSceneIds: new Set(scopedSemantic.scenes.map((scene) => String(scene.scene_id ?? ""))),
+    knownSceneIds,
     legacyRevalidation,
   });
   const openingIdentityFindings = openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
   const characterStateFindings = characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation });
   const coverageFindings = locationContractLedger.findings ?? [];
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
-  const findings = [...coverageFindings, ...locationContractScope.findings, ...styleFindings, ...directorSelectionFindings, ...openingIdentityFindings, ...characterStateFindings];
+  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...openingIdentityFindings, ...characterStateFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const referenceInventoryLedger = buildSelectedReferenceInventory(referenceTargets, {
     sourceScriptHash: semanticPlan.source_script_hash,

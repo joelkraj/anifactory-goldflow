@@ -17,6 +17,7 @@ const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts
 const imagegenReportPath = flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, `image_focal_analysis_${episode}.json`);
 const concurrency = Math.max(1, Number(flags.concurrency ?? 8));
+const analysisAlgorithm = "sharp_local_contrast_saliency_v2";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -131,10 +132,13 @@ export function focalAnalysisFromPixelsForTests(data, width, height, channels = 
   const concentration = clamp(concentrationScore / totalScore);
   const confidence = clamp(0.18 + concentration * 0.9 + Math.min(0.2, standardDeviation * 0.8));
   const edgeTouches = [bbox.x < 0.025, bbox.y < 0.025, bbox.x + bbox.width > 0.975, bbox.y + bbox.height > 0.975].filter(Boolean).length;
+  const salientArea = bbox.width * bbox.height;
   const findings = [];
   if (standardDeviation < 0.018) findings.push({ severity: "needs_review", code: "image_low_visual_information", message: "The generated frame has unusually low luminance variation." });
   if (anchor.x < 0.07 || anchor.x > 0.93 || anchor.y < 0.07 || anchor.y > 0.93) findings.push({ severity: "needs_review", code: "focal_anchor_near_frame_edge", message: "The strongest visual focus sits unusually close to a frame edge." });
-  if (edgeTouches >= 2 && bbox.width * bbox.height > 0.5) findings.push({ severity: "needs_review", code: "salient_region_edge_clipping_risk", message: "The dominant salient region touches multiple frame edges and may be awkwardly cropped." });
+  // A near-full-frame mask indicates diffuse detail, common in illustrated scenes,
+  // rather than a concentrated subject being clipped by the composition.
+  if (edgeTouches >= 2 && salientArea > 0.5 && salientArea <= 0.9) findings.push({ severity: "needs_review", code: "salient_region_edge_clipping_risk", message: "The dominant salient region touches multiple frame edges and may be awkwardly cropped." });
   return {
     focal_anchor: anchor,
     salient_bbox: bbox,
@@ -178,7 +182,7 @@ async function main() {
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed" || !Array.isArray(imagegenReport.results)) throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   const resultById = new Map(imagegenReport.results.map((row) => [String(row.image_id ?? ""), row]));
-  const priorByHash = new Map((prior?.analyses ?? []).filter((row) => row.image_sha256).map((row) => [row.image_sha256, row]));
+  const priorByHash = new Map((prior?.algorithm === analysisAlgorithm ? prior?.analyses ?? [] : []).filter((row) => row.image_sha256).map((row) => [row.image_sha256, row]));
   const units = promptPlan.prompts.filter((prompt) => prompt.image_generation_required !== false).map((prompt) => ({ prompt, result: resultById.get(String(prompt.image_id ?? "")) }));
   const analyses = await mapWithConcurrency(units, concurrency, async ({ prompt, result }) => {
     const imagePath = result?.image_path ?? null;
@@ -202,7 +206,7 @@ async function main() {
       status: "passed",
       image_path: imagePath,
       image_sha256: imageHash,
-      analysis_source: cached ? "image_hash_cache" : "sharp_local_contrast_saliency_v1",
+      analysis_source: cached ? "image_hash_cache" : analysisAlgorithm,
       ...analysis,
     };
   });
@@ -215,7 +219,7 @@ async function main() {
     series_slug: series,
     week,
     episode,
-    algorithm: "sharp_local_contrast_saliency_v1",
+    algorithm: analysisAlgorithm,
     prompt_plan_path: promptPath,
     prompt_plan_sha256: await hashFile(promptPath),
     imagegen_report_path: imagegenReportPath,

@@ -270,6 +270,19 @@ function applyBoundedProofEnd(scenes, semantic, wordTiming) {
   return scenes;
 }
 
+function applyFinalScriptAudioEnd(scenes, semantic, wordTiming, script) {
+  if (semantic?.proof_scope?.scoped === true || !scenes.length) return scenes;
+  const last = scenes.at(-1);
+  const finalAnchor = normalize(last?.script_excerpt_end);
+  const normalizedScript = normalize(script);
+  const audioEnd = Number(wordTiming?.audio_duration_sec);
+  if (!finalAnchor || !normalizedScript.endsWith(finalAnchor) || !(audioEnd > Number(last.start_sec))) return scenes;
+  last.end_sec = Number(audioEnd.toFixed(3));
+  last.duration_sec = Number((last.end_sec - Number(last.start_sec)).toFixed(3));
+  last.end_resolution = "final_script_audio_end";
+  return scenes;
+}
+
 function assertTimingQuality(scenes) {
   const failures = [];
   for (const scene of scenes) {
@@ -305,7 +318,7 @@ async function main() {
   if (audioHash && wordTiming.narration_audio_hash && wordTiming.narration_audio_hash !== audioHash) throw new Error("Whisper timing is stale for current stitched narration audio.");
   const semanticScenes = semantic.scenes ?? [];
   const startBounds = sceneStartBounds(semanticScenes, wordTiming.words, script);
-  const scenes = applyBoundedProofEnd(fillEndFallbackGaps(semanticScenes.map((scene, index) => {
+  const scenes = applyFinalScriptAudioEnd(applyBoundedProofEnd(fillEndFallbackGaps(semanticScenes.map((scene, index) => {
     const bounds = sceneBounds(scene, wordTiming.words, script, startBounds[index], startBounds[index + 1]?.start_sec);
     return {
       ...scene,
@@ -313,7 +326,7 @@ async function main() {
       duration_sec: Number((bounds.end_sec - bounds.start_sec).toFixed(3)),
       timing_source: "local_whisper_word_timing",
     };
-  })), semantic, wordTiming);
+  })), semantic, wordTiming), semantic, wordTiming, script);
   assertTimingQuality(scenes);
   const report = {
     schema: "goldflow_timed_scene_plan_v1",

@@ -21,6 +21,15 @@ const profiles = {
       clip_preset: "veryfast",
       final_preset: "veryfast",
     },
+    orchestration: {
+      parallel_audio_semantic: true,
+      visual_wavefront_prefetch: true,
+      incremental_image_qa: true,
+      incremental_motion_clip_prefetch: true,
+      wavefront_min_cuts: 15,
+      wavefront_max_wait_ms: 5000,
+      planner_recovery_policy: "scoped_only",
+    },
     advance: {
       authorize_planner_spend: true,
       authorize_media_spend: true,
@@ -49,6 +58,15 @@ const profiles = {
       render_concurrency: 4,
       clip_preset: "veryfast",
       final_preset: "veryfast",
+    },
+    orchestration: {
+      parallel_audio_semantic: false,
+      visual_wavefront_prefetch: false,
+      incremental_image_qa: false,
+      incremental_motion_clip_prefetch: false,
+      wavefront_min_cuts: 15,
+      wavefront_max_wait_ms: 5000,
+      planner_recovery_policy: "scoped_only",
     },
     advance: {
       authorize_planner_spend: false,
@@ -102,7 +120,7 @@ export function productionProfileSummary(value = DEFAULT_PRODUCTION_PROFILE) {
     planner: profile.planner,
     media: profile.media,
     render: profile.render,
+    orchestration: profile.orchestration,
     advance: profile.advance,
   };
 }
-

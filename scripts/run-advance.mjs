@@ -112,6 +112,9 @@ export function autoAdvanceDecisionForTests(stageId, stageState, options = {}) {
   const definition = stageDefinition(stageId);
   if (!definition) return { executable: false, reason: "unknown_stage" };
   if (options.untilStage && stageId === options.untilStage) return { executable: false, reason: "until_stage_reached" };
+  if (PLANNER_SPEND_STAGES.has(stageId) && ["blocked", "failed", "stale"].includes(String(stageState ?? ""))) {
+    return { executable: false, reason: "planner_triage_and_scoped_recovery_required" };
+  }
   if (definition.approval === "operator") return { executable: false, reason: "approval_required" };
   if (definition.approval === "operator_or_agent") {
     const agentValidatedStages = new Set(options.agentValidatedStages ?? []);
@@ -165,6 +168,10 @@ async function main() {
       console.log(JSON.stringify({ status: "complete", stop_reason: "pipeline_complete", steps }, null, 2));
       return;
     }
+    const useParallelAudioSemantic = stageId === "semantic_scene_plan"
+      && profile.orchestration?.parallel_audio_semantic === true;
+    const useVisualWavefront = stageId === "visual_prompt_plan"
+      && profile.orchestration?.visual_wavefront_prefetch === true;
     const decision = autoAdvanceDecisionForTests(stageId, stageState, {
       untilStage,
       allowPlannerSpend,
@@ -172,7 +179,32 @@ async function main() {
       allowRender,
       agentValidatedStages,
     });
-    const command = buildStageCommand(stageId, commandIdentity);
+    let command = buildStageCommand(stageId, commandIdentity);
+    if ((useParallelAudioSemantic || useVisualWavefront) && !allowMediaSpend) {
+      await writeAdvanceState(episodeDir, {
+        status: "held",
+        production_profile: profile.id,
+        current_stage: stageId,
+        current_stage_state: stageState,
+        stop_reason: "wavefront_or_parallel_media_spend_not_approved",
+        next_command: command,
+        steps,
+      });
+      console.log(JSON.stringify({
+        status: "held",
+        production_profile: profile.id,
+        current_stage: stageId,
+        stop_reason: "wavefront_or_parallel_media_spend_not_approved",
+        next_command: command,
+        steps,
+      }, null, 2));
+      return;
+    }
+    if (useParallelAudioSemantic) {
+      command = `node bin/goldflow.mjs run audio-semantic-fork --episode-dir ${episodeDir}`;
+    } else if (useVisualWavefront) {
+      command = `node bin/goldflow.mjs run visual-wavefront --episode-dir ${episodeDir} --min-cuts ${profile.orchestration.wavefront_min_cuts ?? 15} --max-wait-ms ${profile.orchestration.wavefront_max_wait_ms ?? 5000}`;
+    }
     if (!decision.executable) {
       await writeAdvanceState(episodeDir, { status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps });
       console.log(JSON.stringify({ status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps }, null, 2));

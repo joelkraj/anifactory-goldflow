@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { stageOutputPathMatches } from "./pipeline-stage-registry.mjs";
 
 const DEFAULT_DATA_ROOT = "/Users/joel/AniFactoryData";
 const HASHABLE_EXTENSIONS = new Set([".json", ".jsonl", ".md", ".txt", ".sha256", ".ass", ".vtt", ".srt"]);
@@ -236,7 +237,10 @@ export async function finishStageExecution(execution, {
   if (!episodeDir || !(await fs.stat(episodeDir).catch(() => null))) return null;
   const completedAt = new Date();
   const outputSnapshot = await walkHashableFiles(episodeDir);
-  const outputHashes = changedHashes(execution.input_hashes, outputSnapshot);
+  const outputHashes = Object.fromEntries(
+    Object.entries(changedHashes(execution.input_hashes, outputSnapshot))
+      .filter(([relativePath]) => stageOutputPathMatches(execution.stage, relativePath)),
+  );
   const cost = await costAndReuseFromOutputs(episodeDir, outputHashes);
   const report = {
     schema: "goldflow_stage_execution_report_v1",

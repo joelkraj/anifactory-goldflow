@@ -28,6 +28,7 @@ const retentionRampSec = Number(flags["retention-ramp-sec"] ?? 180);
 const maxBoundaries = Number(flags["max-boundaries"] ?? 220);
 const dryRun = flags["dry-run"] === "true";
 const transitionSfxEnabled = flags["transition-sfx"] !== "false";
+const transitionSfxEndSec = Number(flags["transition-sfx-end-sec"] ?? Number.POSITIVE_INFINITY);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -133,7 +134,7 @@ Goal:
 - Decide which visual cut boundaries deserve true editorial transition treatment${transitionSfxEnabled ? " and transition SFX" : ""}.
 - Especially in the first 3 minutes, make the edit feel hand placed. Use the first 30 seconds as the densest cold open, then keep the 30-180 second ramp visually alive with selective sweeps, drop-ins, swipe-up/down, manga snaps, system scans, impact flashes, and quieter wipes.
 - Do NOT place SFX on every cut after the hook. Be selective after 30 seconds.
-${transitionSfxEnabled ? "- Transition SFX should land exactly on the cut boundary, not float under narration. Choose an editorial SFX family; deterministic code resolves that family to an approved available bank asset and supplies calibrated trim, lead-in, fade, and gain." : "- Transition SFX are disabled for this run. Set transition_sfx false and sfx_family none on every event."}
+${transitionSfxEnabled ? `- Transition SFX should land exactly on the cut boundary, not float under narration. Choose an editorial SFX family; deterministic code resolves that family to an approved available bank asset and supplies calibrated trim, lead-in, fade, and gain.${Number.isFinite(transitionSfxEndSec) ? ` Transition SFX are allowed only before ${transitionSfxEndSec} seconds; every later event must stay silent.` : ""}` : "- Transition SFX are disabled for this run. Set transition_sfx false and sfx_family none on every event."}
 - Score drops are handled by the score planner; here you may only add a note when a boundary should be considered a score-drop anchor.
 ${transitionSfxEnabled ? "- Do not choose cue ids or asset paths. Choose only one family from the compact family guide below." : "- Do not reference cue ids, SFX families other than none, or SFX assets."}
 
@@ -207,11 +208,12 @@ async function callCodex(prompt, stageName) {
 function normalizeEvent(event, boundariesById, sfxManifest) {
   const boundary = boundariesById.get(String(event.boundary_id ?? ""));
   if (!boundary) return null;
+  const sfxAllowedAtBoundary = transitionSfxEnabled && boundary.start_sec < transitionSfxEndSec;
   const family = String(event.sfx_family ?? "none").trim().toLowerCase();
-  const familyResolution = transitionSfxEnabled && event.transition_sfx === true
+  const familyResolution = sfxAllowedAtBoundary && event.transition_sfx === true
     ? resolveTransitionSfxFamily(sfxManifest, family, { inHook: boundary.in_hook })
     : null;
-  const legacyResolution = !familyResolution && transitionSfxEnabled && event.transition_sfx === true && event.cue_id
+  const legacyResolution = !familyResolution && sfxAllowedAtBoundary && event.transition_sfx === true && event.cue_id
     ? availableTransitionCueById(sfxManifest, event.cue_id)
     : null;
   const resolved = familyResolution ?? (legacyResolution ? {
@@ -319,6 +321,7 @@ async function main() {
     episode,
     prompt_plan_path: promptPlanPath,
     transition_sfx_enabled: transitionSfxEnabled,
+    transition_sfx_end_sec: Number.isFinite(transitionSfxEndSec) ? transitionSfxEndSec : null,
     sfx_manifest_path: transitionSfxEnabled ? sfxManifestPath : null,
     source_hashes: Object.fromEntries((await Promise.all([promptPlanPath, transitionSfxEnabled ? sfxManifestPath : null].filter(Boolean).map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     planner: { provider: llm.provider, model: llm.model, prompt_path: llm.prompt_path, output_path: llm.output_path },

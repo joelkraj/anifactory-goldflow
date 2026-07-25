@@ -63,6 +63,11 @@ const finalAudioLraFlag = flags["final-audio-lra"] ?? process.env.ANIFACTORY_REN
 const proofScopeEndSec = Number(flags["proof-scope-end-sec"] ?? NaN);
 const diagnosticProof = /^(true|1|yes)$/i.test(String(flags["diagnostic-proof"] ?? "false"));
 const allowTransitionSfxOnNarratorOnly = /^(true|1|yes)$/i.test(String(flags["allow-transition-sfx-on-narrator-only"] ?? "false"));
+const prebuildMotionClipsOnly = /^(true|1|yes)$/i.test(String(flags["prebuild-motion-clips"] ?? "false"));
+const prebuildImageIds = new Set(String(flags["prebuild-image-ids"] ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -1473,15 +1478,26 @@ export function xfadeSegmentTimingForTests(clipDurations, transitionDurations) {
   };
 }
 
-async function buildMotionClips(promptPlan, imagegenReport, audioDuration, transitionEditPlan = null, motionEditPlan = null) {
+async function buildMotionClips(
+  promptPlan,
+  imagegenReport,
+  audioDuration,
+  transitionEditPlan = null,
+  motionEditPlan = null,
+  options = {},
+) {
   const imageById = new Map((imagegenReport.results ?? []).map((row) => [row.image_id, row.image_path]));
   const plannedTransitionByToImage = transitionPlanByToImage(transitionEditPlan);
   const motionIntentByImage = new Map((motionEditPlan?.motion_intents ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const directedMotionRequired = motionEditPlan?.status === "passed";
-  const prompts = (promptPlan.prompts ?? []).filter((prompt) => imageById.has(prompt.image_id));
-  if (!prompts.length) throw new Error("No generated images found for prompt plan.");
-  const totalPromptDuration = prompts.reduce((sum, prompt) => sum + Math.max(1, Number(prompt.duration_sec ?? 6)), 0);
-  const hasAbsoluteStarts = prompts.every((prompt) => Number.isFinite(Number(prompt.start_sec)));
+  const onlyImageIds = options.onlyImageIds instanceof Set ? options.onlyImageIds : null;
+  const allPrompts = (promptPlan.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false);
+  const promptRows = allPrompts
+    .map((prompt, index) => ({ prompt, index }))
+    .filter(({ prompt }) => imageById.has(prompt.image_id) && (!onlyImageIds?.size || onlyImageIds.has(String(prompt.image_id))));
+  if (!promptRows.length) throw new Error("No generated images found for prompt plan.");
+  const totalPromptDuration = allPrompts.reduce((sum, prompt) => sum + Math.max(1, Number(prompt.duration_sec ?? 6)), 0);
+  const hasAbsoluteStarts = allPrompts.every((prompt) => Number.isFinite(Number(prompt.start_sec)));
   const scale = hasAbsoluteStarts ? 1 : audioDuration > 0 && totalPromptDuration > 0 ? audioDuration / totalPromptDuration : 1;
   const clipDir = path.join(workDir, "motion-clips");
   await fs.mkdir(clipDir, { recursive: true });
@@ -1495,17 +1511,16 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
   const clipJobs = [];
   let clipCacheReused = 0;
   let clipCacheGenerated = 0;
-  const plannedStarts = prompts.map((prompt, index) => {
+  const plannedStarts = allPrompts.map((prompt, index) => {
     if (hasAbsoluteStarts) return Number(prompt.start_sec);
-    return prompts.slice(0, index).reduce((sum, row) => sum + imageDuration(row, scale), 0);
+    return allPrompts.slice(0, index).reduce((sum, row) => sum + imageDuration(row, scale), 0);
   });
   const clipRows = [];
   let layeredParallaxClipCount = 0;
-  for (let index = 0; index < prompts.length; index += 1) {
-    const prompt = prompts[index];
+  for (const { prompt, index } of promptRows) {
     const imagePath = imageById.get(prompt.image_id);
     if (!(await exists(imagePath))) throw new Error(`Missing generated image for ${prompt.image_id}: ${imagePath}`);
-    const previousPrompt = prompts[index - 1] ?? null;
+    const previousPrompt = allPrompts[index - 1] ?? null;
     const startSec = hasAbsoluteStarts ? Math.max(0, plannedStarts[index]) : plannedStarts[index];
     const nextStartSec = hasAbsoluteStarts ? plannedStarts[index + 1] : null;
     const plannedDuration = hasAbsoluteStarts
@@ -1534,10 +1549,24 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
   }
   const selectedXfadeDurations = new Map();
   const selectedBoundaryRows = [];
-  for (let index = 0; index < clipRows.length - 1; index += 1) {
-    const current = clipRows[index];
-    const next = clipRows[index + 1];
-    const planned = plannedTransitionByToImage.get(next.prompt.image_id);
+  const clipRowByIndex = new Map(clipRows.map((row) => [row.index, row]));
+  for (const current of clipRows) {
+    const nextPrompt = allPrompts[current.index + 1] ?? null;
+    if (!nextPrompt) continue;
+    const nextStartSec = hasAbsoluteStarts ? plannedStarts[current.index + 1] : current.startSec + current.duration;
+    const followingStartSec = hasAbsoluteStarts ? plannedStarts[current.index + 2] : null;
+    const nextDuration = hasAbsoluteStarts
+      ? Number.isFinite(followingStartSec) && followingStartSec > nextStartSec
+        ? followingStartSec - nextStartSec
+        : audioDuration - nextStartSec
+      : imageDuration(nextPrompt, scale);
+    const next = clipRowByIndex.get(current.index + 1) ?? {
+      index: current.index + 1,
+      prompt: nextPrompt,
+      startSec: nextStartSec,
+      duration: Math.max(1 / fps, Math.min(nextDuration, Math.max(1 / fps, audioDuration - nextStartSec))),
+    };
+    const planned = plannedTransitionByToImage.get(nextPrompt.image_id);
     const legacySelected = !transitionEditPlan && hookXfadeEnabled && next.startSec < retentionXfadeSec;
     if (!planned && !legacySelected) continue;
     const duration = planned?.xfade_duration_sec
@@ -1547,7 +1576,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     selectedBoundaryRows.push({ current, next, planned, duration });
   }
   const plannedTransitionCount = Array.isArray(transitionEditPlan?.transition_events) ? transitionEditPlan.transition_events.length : selectedBoundaryRows.length;
-  if (transitionEditPlan && selectedBoundaryRows.length !== plannedTransitionCount) {
+  if (!options.prebuildOnly && transitionEditPlan && selectedBoundaryRows.length !== plannedTransitionCount) {
     throw new Error(`Transition plan contains ${plannedTransitionCount} events but ${selectedBoundaryRows.length} map to adjacent timeline boundaries.`);
   }
   for (const row of clipRows) {
@@ -1650,6 +1679,26 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
     });
   }
   await runLimited(clipJobs, renderConcurrency);
+  if (options.prebuildOnly) {
+    return {
+      status: "passed",
+      prebuild_only: true,
+      clip_dir: clipDir,
+      prompt_count: clipRows.length,
+      image_ids: clipRows.map((row) => row.prompt.image_id),
+      motion_clip_cache_reused_count: clipCacheReused,
+      motion_clip_cache_generated_count: clipCacheGenerated,
+      clips: clipRows.map((row) => ({
+        image_id: row.prompt.image_id,
+        image_sha256: row.imageSha256,
+        motion_profile_hash: row.motionProfileHash,
+        motion_clip_cache_key: row.cacheKey,
+        motion_clip_path: row.clipPath,
+        motion_clip_sha256: row.motionClipSha256,
+        motion_clip_cache_status: row.cacheStatus,
+      })),
+    };
+  }
   const cutLedger = diagnosticProof ? null : await readJson(cutExecutionLedgerPath, null);
   if (!diagnosticProof && Array.isArray(cutLedger?.cuts)) {
     const motionById = new Map(clipRows.map((row) => [String(row.prompt.image_id ?? ""), row]));
@@ -1760,7 +1809,7 @@ async function buildMotionClips(promptPlan, imagegenReport, audioDuration, trans
   await fs.writeFile(concatPath, `${lines.join("\n")}\n`, "utf8");
   return {
     concatPath,
-    prompt_count: prompts.length,
+    prompt_count: clipRows.length,
     duration_scale: scale,
     clip_dir: clipDir,
     motion_mode: motionMode,
@@ -2030,11 +2079,61 @@ async function main() {
   ]);
   if (promptPlan?.status !== "passed") throw new Error(`Missing passed prompt plan: ${promptPlanPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
-  if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   const v2Run = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";
   const lockedRenderProfile = normalizeMotionMode(runIdentity?.render_profile ?? "smooth_subpixel_ken_burns");
   const workflowBypass = /^(true|1|yes)$/i.test(String(flags["workflow-bypass"] ?? "false"));
   assertLockedRenderProfileForTests({ v2Run, lockedRenderProfile, requestedMotionMode: motionMode, workflowBypass, diagnosticProof });
+  if (prebuildMotionClipsOnly) {
+    if (motionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed hash-bound partial motion plan: ${motionEditPlanPath}`);
+    if (transitionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed transition plan: ${transitionEditPlanPath}`);
+    const audioPath = flags.audio ?? audioBedReport?.mix?.m4a_path ?? audioBedReport?.mix?.wav_path;
+    if (!audioPath || !(await exists(audioPath))) throw new Error(`Motion-clip prebuild requires final mixed audio from ${audioBedReportPath}`);
+    const audioDuration = await mediaDuration(audioPath);
+    await fs.mkdir(workDir, { recursive: true });
+    const prebuild = await buildMotionClips(
+      promptPlan,
+      imagegenReport,
+      audioDuration,
+      transitionEditPlan,
+      motionEditPlan,
+      {
+        prebuildOnly: true,
+        onlyImageIds: prebuildImageIds,
+      },
+    );
+    const report = {
+      schema: "goldflow_motion_clip_prebuild_v1",
+      status: "passed",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      prompt_plan_path: promptPlanPath,
+      prompt_plan_sha256: await hashFile(promptPlanPath),
+      imagegen_report_path: imagegenReportPath,
+      imagegen_report_sha256: await hashFile(imagegenReportPath),
+      transition_edit_plan_path: transitionEditPlanPath,
+      transition_edit_plan_sha256: await hashFile(transitionEditPlanPath),
+      partial_motion_plan_path: motionEditPlanPath,
+      partial_motion_plan_sha256: await hashFile(motionEditPlanPath),
+      audio_bed_report_path: audioBedReportPath,
+      audio_duration_sec: audioDuration,
+      render_profile: motionMode,
+      render_concurrency: renderConcurrency,
+      ...prebuild,
+      updated_at: new Date().toISOString(),
+    };
+    await writeJson(renderReportPath, report);
+    console.log(JSON.stringify({
+      status: report.status,
+      report_path: renderReportPath,
+      prebuilt_clip_count: report.prompt_count,
+      generated_count: report.motion_clip_cache_generated_count,
+      reused_count: report.motion_clip_cache_reused_count,
+    }, null, 2));
+    return;
+  }
+  if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
   if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
   if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);

@@ -251,6 +251,7 @@ import {
   visualResolveScopeForBlockers,
 } from "./lib/visual-resolution-utils.mjs";
 import {
+  applyManualLocationRefRepairsForTests,
   semanticBuildPromptForTests,
   semanticReconciliationPromptForTests,
   sanitizeCanonicalIdForTests,
@@ -1697,6 +1698,40 @@ function testSemanticSceneQualityFindings() {
     missingLocationFindings.some((finding) => finding.code === "semantic_physical_scene_missing_location_ref_requirement" && finding.severity === "blocker"),
     true
   );
+  const repairedLocationScenes = applyManualLocationRefRepairsForTests(
+    [{
+      scene_id: "scene_002",
+      title: "Location Missing Ref",
+      location: "tribunal witness floor",
+      visible_subjects: ["Joey Manhwa"],
+      ref_requirements: [{ kind: "character", ref_id: "char_joey_manhwa" }],
+    }],
+    {
+      schema: "goldflow_semantic_manual_location_ref_repair_v1",
+      status: "approved",
+      source_script_hash: "script_hash",
+      repairs: [{
+        scene_id: "scene_002",
+        expected_location: "tribunal witness floor",
+        location_ref_requirement: {
+          ref_id: "tribunal_witness_floor",
+          kind: "location",
+          required: true,
+          reason: "Manual scoped location coverage.",
+        },
+      }],
+    },
+    {
+      sourceScriptHash: "script_hash",
+      requestedSceneIds: ["scene_002"],
+    },
+  );
+  assert.equal(
+    semanticSceneQualityFindingsForTests(repairedLocationScenes.scenes)
+      .some((finding) => finding.code === "semantic_physical_scene_missing_location_ref_requirement"),
+    false,
+  );
+  assert.equal(repairedLocationScenes.applied_repairs[0].scene_id, "scene_002");
 }
 
 function testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement() {

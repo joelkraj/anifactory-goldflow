@@ -21,6 +21,9 @@ const scriptPath = path.join(episodeDir, "script_clean.md");
 const outputPath = flags.output ?? path.join(episodeDir, "semantic_scene_plan.json");
 const storyFactLedgerPath = flags["fact-ledger-output"] ?? path.join(episodeDir, "story_fact_ledger.json");
 const proofBaselineTimingPath = flags["proof-baseline-word-timing"] ?? null;
+const manualLocationRefRepairsPath = flags["manual-location-ref-repairs"]
+  ? path.resolve(flags["manual-location-ref-repairs"])
+  : null;
 const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
 const scopeEndSec = flags["scope-end-sec"] == null ? null : Number(flags["scope-end-sec"]);
 
@@ -266,6 +269,103 @@ function normalizeScenes(scenes) {
       ref_id: requirement?.ref_id ? sanitizeCanonicalIdForTests(requirement.ref_id) : requirement?.ref_id,
     })),
   }));
+}
+
+function commaSeparatedIds(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function applyManualLocationRefRepairsForTests(
+  scenes,
+  artifact,
+  { sourceScriptHash = null, requestedSceneIds = [] } = {},
+) {
+  if (!artifact) return { scenes, applied_repairs: [] };
+  if (artifact.schema !== "goldflow_semantic_manual_location_ref_repair_v1"
+    || artifact.status !== "approved") {
+    throw new Error("Manual semantic location-ref repair artifact is not approved or has an unsupported schema");
+  }
+  if (sourceScriptHash && artifact.source_script_hash !== sourceScriptHash) {
+    throw new Error("Manual semantic location-ref repair artifact does not match the locked script hash");
+  }
+  const repairs = Array.isArray(artifact.repairs) ? artifact.repairs : [];
+  if (!repairs.length) {
+    throw new Error("Manual semantic location-ref repair artifact contains no repairs");
+  }
+  const repairIds = repairs.map((repair) => String(repair?.scene_id ?? "").trim());
+  if (repairIds.some((sceneId) => !sceneId) || new Set(repairIds).size !== repairIds.length) {
+    throw new Error("Manual semantic location-ref repairs require unique non-empty scene IDs");
+  }
+  const requestedIds = [...new Set(requestedSceneIds.map(String).filter(Boolean))];
+  if (requestedIds.length) {
+    const orderedRequested = scenes
+      .map((scene) => String(scene?.scene_id ?? ""))
+      .filter((sceneId) => requestedIds.includes(sceneId));
+    const orderedRepairs = scenes
+      .map((scene) => String(scene?.scene_id ?? ""))
+      .filter((sceneId) => repairIds.includes(sceneId));
+    if (orderedRequested.length !== requestedIds.length
+      || JSON.stringify(orderedRequested) !== JSON.stringify(orderedRepairs)) {
+      throw new Error(
+        `Manual semantic repair scene scope ${JSON.stringify(orderedRepairs)} `
+        + `does not match --scene-ids ${JSON.stringify(orderedRequested)}`,
+      );
+    }
+  }
+  const repairsById = new Map(repairs.map((repair) => [String(repair.scene_id), repair]));
+  const sceneIds = new Set(scenes.map((scene) => String(scene?.scene_id ?? "")));
+  const unknownIds = repairIds.filter((sceneId) => !sceneIds.has(sceneId));
+  if (unknownIds.length) {
+    throw new Error(`Manual semantic location-ref repairs name unknown scenes: ${unknownIds.join(", ")}`);
+  }
+  const appliedRepairs = [];
+  const repairedScenes = scenes.map((scene) => {
+    const sceneId = String(scene?.scene_id ?? "");
+    const repair = repairsById.get(sceneId);
+    if (!repair) return scene;
+    const expectedLocation = String(repair.expected_location ?? "").trim();
+    const actualLocation = String(scene.location ?? "").trim();
+    if (!expectedLocation || expectedLocation !== actualLocation) {
+      throw new Error(
+        `Manual semantic location-ref repair for ${sceneId} expected location `
+        + `${JSON.stringify(expectedLocation)} but current scene has ${JSON.stringify(actualLocation)}`,
+      );
+    }
+    const existingLocationRefs = (scene.ref_requirements ?? []).filter(
+      (requirement) => String(requirement?.kind ?? "").trim().toLowerCase() === "location",
+    );
+    if (existingLocationRefs.length) {
+      throw new Error(`Manual semantic location-ref repair refuses to overwrite existing location scope for ${sceneId}`);
+    }
+    const requirement = repair.location_ref_requirement ?? {};
+    const rawRefId = String(requirement.ref_id ?? "").trim();
+    if (!rawRefId
+      || sanitizeCanonicalIdForTests(rawRefId) !== rawRefId
+      || String(requirement.kind ?? "").trim().toLowerCase() !== "location"
+      || requirement.required !== true
+      || !String(requirement.reason ?? "").trim()) {
+      throw new Error(`Manual semantic location-ref repair for ${sceneId} has an invalid location requirement`);
+    }
+    const normalizedRequirement = {
+      ...requirement,
+      ref_id: rawRefId,
+      kind: "location",
+      required: true,
+    };
+    appliedRepairs.push({
+      scene_id: sceneId,
+      expected_location: expectedLocation,
+      location_ref_requirement: normalizedRequirement,
+    });
+    return {
+      ...scene,
+      ref_requirements: [...(scene.ref_requirements ?? []), normalizedRequirement],
+    };
+  });
+  return { scenes: repairedScenes, applied_repairs: appliedRepairs };
 }
 
 function normalizeText(value) {
@@ -967,6 +1067,12 @@ async function main() {
   if (!script.trim()) throw new Error(`Missing script_clean.md at ${scriptPath}`);
   const scriptHash = sha256(script);
   await requireApproval(scriptHash);
+  const manualLocationRefRepairs = manualLocationRefRepairsPath
+    ? await readJson(manualLocationRefRepairsPath, null)
+    : null;
+  if (manualLocationRefRepairsPath && !manualLocationRefRepairs) {
+    throw new Error(`Missing or invalid manual semantic location-ref repair artifact: ${manualLocationRefRepairsPath}`);
+  }
   const baselineTiming = proofBaselineTimingPath ? await readJson(proofBaselineTimingPath, null) : null;
   if (proofBaselineTimingPath && (!baselineTiming || baselineTiming.source_script_hash !== scriptHash)) {
     throw new Error(`Semantic proof baseline timing is missing or does not match locked script hash: ${proofBaselineTimingPath}`);
@@ -1083,7 +1189,16 @@ async function main() {
     throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
   }
   const normalizedScenes = normalizeScenes(scenes);
-  const anchorSnapReport = snapSemanticSceneAnchors(normalizedScenes, planningScript);
+  const manualRepairResult = applyManualLocationRefRepairsForTests(
+    normalizedScenes,
+    manualLocationRefRepairs,
+    {
+      sourceScriptHash: scriptHash,
+      requestedSceneIds: commaSeparatedIds(flags["scene-ids"] ?? flags["scene-id"]),
+    },
+  );
+  const repairedScenes = manualRepairResult.scenes;
+  const anchorSnapReport = snapSemanticSceneAnchors(repairedScenes, planningScript);
   const anchorFindings = semanticSceneAnchorFindings(anchorSnapReport.scenes, planningScript);
   const coverageFindings = semanticSceneCoverageFindingsForTests(anchorSnapReport.scenes, planningScript);
   const anchorBlockers = [...anchorFindings, ...coverageFindings].filter((finding) => finding.severity === "blocker");
@@ -1091,7 +1206,7 @@ async function main() {
     const preview = anchorBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.anchor ?? finding.message}`).join("\n");
     throw new Error(`Semantic scene planner returned scene anchors that do not bind to the locked script:\n${preview}`);
   }
-  const semanticQualityFindings = semanticSceneQualityFindings(normalizedScenes);
+  const semanticQualityFindings = semanticSceneQualityFindings(repairedScenes);
   const semanticQualityBlockers = semanticQualityFindings.filter((finding) => finding.severity === "blocker");
   if (semanticQualityBlockers.length) {
     const preview = semanticQualityBlockers.slice(0, 8).map((finding) => `${finding.scene_id} ${finding.code}: ${finding.message}`).join("\n");
@@ -1104,8 +1219,16 @@ async function main() {
     source_hashes: {
       [scriptPath]: scriptHash,
       ...(proofBaselineTimingPath ? { [proofBaselineTimingPath]: sha256(await fs.readFile(proofBaselineTimingPath)) } : {}),
+      ...(manualLocationRefRepairsPath
+        ? { [manualLocationRefRepairsPath]: sha256(await fs.readFile(manualLocationRefRepairsPath)) }
+        : {}),
     },
     proof_scope: scope.scoped ? { ...scope, script: undefined } : null,
+    manual_location_ref_repair: manualLocationRefRepairsPath ? {
+      artifact_path: manualLocationRefRepairsPath,
+      artifact_sha256: sha256(await fs.readFile(manualLocationRefRepairsPath)),
+      applied_repairs: manualRepairResult.applied_repairs,
+    } : null,
     semantic_scene_count: anchorSnapReport.scenes.length,
     evidence_finding_count: reconciliation.evidenceFindings.length,
   };
@@ -1123,10 +1246,18 @@ async function main() {
       [scriptPath]: scriptHash,
       [storyFactLedgerPath]: sha256(`${JSON.stringify(storyFactLedger, null, 2)}\n`),
       ...(proofBaselineTimingPath ? { [proofBaselineTimingPath]: sha256(await fs.readFile(proofBaselineTimingPath)) } : {}),
+      ...(manualLocationRefRepairsPath
+        ? { [manualLocationRefRepairsPath]: sha256(await fs.readFile(manualLocationRefRepairsPath)) }
+        : {}),
     },
     story_fact_ledger_path: storyFactLedgerPath,
     timing_dependency: proofBaselineTimingPath ? "proof_baseline_word_timing_scope_only" : "none_semantic_only",
     proof_scope: scope.scoped ? { ...scope, script: undefined } : null,
+    manual_location_ref_repair: manualLocationRefRepairsPath ? {
+      artifact_path: manualLocationRefRepairsPath,
+      artifact_sha256: sha256(await fs.readFile(manualLocationRefRepairsPath)),
+      applied_repairs: manualRepairResult.applied_repairs,
+    } : null,
     scene_count_policy: targets,
     semantic_validation: {
       anchor_finding_count: anchorFindings.length,

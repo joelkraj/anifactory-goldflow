@@ -198,7 +198,7 @@ Common flags:
   --allow-dirty-worktree true --dirty-reason <reason> is diagnostic/proof-only
 
 Production profiles:
-  fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, TTS/images 15, render 4
+  fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, local Kokoro TTS 1, reference/images 15, render 4
   fast-premium orchestration: semantic || voice/TTS/Whisper fork, scoped-only planner recovery, prompt-to-ModelsLab wavefront prefetch
   balanced: legacy 4/4/6/6 planner concurrency and explicit spend flags for run advance
   Selecting fast-premium at preflight authorizes planner/media/render spend for run advance. Creative review gates still hold.
@@ -212,7 +212,7 @@ Render profiles:
 Validation-batch flags:
   --image-provider modelslab --image-model gpt-image-2-t2i --reference-model gpt-image-2-i2i --image-fallback-provider codex_imagegen --image-fallback-condition modelslab_credit_exhausted
   Locks GPT Image 2 end to end and permits built-in Codex Imagen fallback only after an explicit ModelsLab insufficient-credit response.
-  --qwen-native-speed 1.25 locks provider-native narration speed at preflight; measured WPM is diagnostic and does not trigger regeneration.
+  --tts-provider kokoro_local --narrator-voice-id am_puck --tts-native-speed 1.2 locks the audited default narration route; local Qwen is the exact-unit fallback.
   --image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest --codex-opening-sec 300
   Routes references through ModelsLab, scene cuts before the locked opening timestamp through staged Codex imagegen import, and later cuts through ModelsLab.
   --image-provider hybrid_codex_refs_opening_risky_modelslab_rest --codex-opening-sec 600
@@ -264,6 +264,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("semantic-scene-plan.mjs", flags);
 } else if (command === "voice" && subcommand === "plan") {
   run("voice-direction-gate.mjs", flags);
+} else if (command === "tts" && subcommand === "narrate") {
+  run("narration-tts-episode.mjs", flags);
 } else if (command === "tts" && subcommand === "qwen") {
   run("modelslab-qwen-episode-audio.mjs", flags);
 } else if (command === "audio" && subcommand === "whisper-timing") {

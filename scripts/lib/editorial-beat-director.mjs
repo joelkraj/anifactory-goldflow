@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sanitizeBackgroundPopulation } from "./background-population-utils.mjs";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -472,6 +473,8 @@ Hard rails:
 - Select only canonical entity_id and location_id values below. If the narration gives no supported visible person, an object/UI/environment beat is valid.
 - location_id is the physical camera setting of the foreground action. A destination, landmark, or room mentioned in the distance does not become the beat location until the narration places the visible subjects there.
 - Composition is beat-specific. There is no global wide or close-up bias.
+- Background population is neither a default nor forbidden. Use presence=explicit when the grouped atoms name a crowd/group. Use presence=implied only when a concrete local social situation logically needs anonymous people to read correctly—for example an active hearing, ceremony, class, market, public humiliation, audience reaction, staffed workplace, or assembled formation—even if the exact clause does not use the word crowd. A merely public location is insufficient. Use presence=none for private, lonely, abandoned, after-hours, isolated, or object/UI-only beats.
+- Anonymous background population is not a canonical character and does not belong in physically_visible_entity_ids. Give it a concrete description, exact local evidence for the social situation, and subordinate staging that preserves the focal subject.
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 
 ATOMS:
@@ -512,6 +515,12 @@ Return JSON only:
     "entity_evidence": {"entity_id":"exact excerpt from grouped atoms"},
     "props": [],
     "ui_elements": [],
+    "background_population": {
+      "presence": "none|implied|explicit",
+      "description": "anonymous background people or null",
+      "evidence": "exact local excerpt supporting the social situation or null",
+      "staging": "where they appear and how they support, not compete with, the focal beat or null"
+    },
     "foreground_action": "specific visible present-tense action",
     "foreground_action_evidence": "exact excerpt from grouped atoms",
     "composition_intent": "specific framing, focal subject, and spatial relationship",
@@ -555,6 +564,16 @@ function groupingFindings(rows, atoms, factLedger) {
       // Source-atom membership remains enforced above; authored paraphrase evidence is advisory.
       findings.push({ severity: "warning", code: "editorial_foreground_action_evidence_missing", row_index: rowIndex });
     }
+    const backgroundPopulation = sanitizeBackgroundPopulation(row.background_population);
+    if (backgroundPopulation.presence !== "none") {
+      const populationEvidence = normalizeEvidenceText(backgroundPopulation.evidence);
+      if (!backgroundPopulation.description || !backgroundPopulation.staging) {
+        findings.push({ severity: "blocker", code: "editorial_background_population_contract_incomplete", row_index: rowIndex });
+      }
+      if (!populationEvidence || !groupedText.includes(populationEvidence)) {
+        findings.push({ severity: "blocker", code: "editorial_background_population_evidence_missing", row_index: rowIndex });
+      }
+    }
     for (const field of ["physically_visible_entity_ids", "screen_visible_entity_ids", "preview_visible_entity_ids", "mentioned_only_entity_ids"]) {
       for (const entityId of row[field] ?? []) {
         if (!entityIds.has(String(entityId))) findings.push({ severity: "blocker", code: "editorial_unknown_entity", row_index: rowIndex, entity_id: entityId });
@@ -592,6 +611,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
     mentioned_only_entity_ids: (row.mentioned_only_entity_ids ?? []).map(canonicalId).filter(Boolean),
     primary_entity_id: canonicalId(row.primary_entity_id) || null,
     entity_evidence: Object.fromEntries(Object.entries(row.entity_evidence ?? {}).map(([id, evidence]) => [canonicalId(id), evidence])),
+    background_population: sanitizeBackgroundPopulation(row.background_population),
   })) : [];
   if (!rows.length) throw new Error("Editorial beat director returned no beats.");
   const findings = groupingFindings(rows, atoms, factLedger);
@@ -649,6 +669,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
       primary_subject: entityMap.get(String(row.primary_entity_id ?? ""))?.display_name ?? null,
       local_props: assetLabels(row.props ?? []),
       local_ui_elements: assetLabels(row.ui_elements ?? []),
+      background_population: sanitizeBackgroundPopulation(row.background_population),
       editorial_cues: unique(row.editorial_cues ?? []),
       visual_novelty_directive: normalizeText(row.composition_intent),
       local_continuity_note: normalizeText(row.continuity_note),

@@ -177,7 +177,7 @@ function targetedFindings(script) {
       source_text: match[0],
       suggested_spoken_text: homographLiveSuggestion(match[0]),
       excerpt: excerptAround(script, match.index ?? 0, match[0].length),
-      reason: "The word live can be misread as liv instead of live-stream live; use an explicit streaming phrase in Qwen spoken text only.",
+      reason: "The word live can be misread as liv instead of live-stream live; use an explicit streaming phrase in TTS spoken text only.",
     });
   }
   for (const match of script.matchAll(/\bstreaming\s+live\b/gi)) {
@@ -188,7 +188,7 @@ function targetedFindings(script) {
       source_text: match[0],
       suggested_spoken_text: preserveCase(match[0], "livestreaming"),
       excerpt: excerptAround(script, match.index ?? 0, match[0].length),
-      reason: "The phrase streaming live can still make TTS choose the wrong live pronunciation; use livestreaming in Qwen spoken text only.",
+      reason: "The phrase streaming live can still make TTS choose the wrong live pronunciation; use livestreaming in TTS spoken text only.",
     });
   }
   for (const match of script.matchAll(/\blive\s+stream\b/gi)) {
@@ -210,7 +210,7 @@ function targetedFindings(script) {
       source_text: match[0],
       suggested_spoken_text: preserveCase(match[0], "livestream video content"),
       excerpt: excerptAround(script, match.index ?? 0, match[0].length),
-      reason: "The phrase live content can be misread as liv/contented wording; use livestream video content in Qwen spoken text only.",
+      reason: "The phrase live content can be misread as liv/contented wording; use livestream video content in TTS spoken text only.",
     });
   }
   for (const match of script.matchAll(/\bstream\s+content\b/gi)) {
@@ -221,7 +221,7 @@ function targetedFindings(script) {
       source_text: match[0],
       suggested_spoken_text: preserveCase(match[0], "stream videos"),
       excerpt: excerptAround(script, match.index ?? 0, match[0].length),
-      reason: "The phrase stream content can make TTS choose the adjective content pronunciation; use stream videos in Qwen spoken text only.",
+      reason: "The phrase stream content can make TTS choose the adjective content pronunciation; use stream videos in TTS spoken text only.",
     });
   }
   for (const match of script.matchAll(/\b(?:became|become|becoming|is|was|were|are|as|into)\s+(?:her\s+|his\s+|their\s+|the\s+)?content\b/gi)) {
@@ -232,7 +232,7 @@ function targetedFindings(script) {
       source_text: match[0],
       suggested_spoken_text: homographContentSuggestion(match[0]),
       excerpt: excerptAround(script, match.index ?? 0, match[0].length),
-      reason: "The noun content can be misread like satisfied/content; use clip, video content, or stream content in Qwen spoken text only.",
+      reason: "The noun content can be misread like satisfied/content; use clip, video content, or stream content in TTS spoken text only.",
     });
   }
   return findings.sort((a, b) => a.line - b.line || a.source_text.localeCompare(b.source_text));
@@ -246,7 +246,7 @@ function replacementsFromFindings(findings) {
       to: finding.suggested_spoken_text,
       regex: false,
       flags: "g",
-      scope: "qwen_spoken_text",
+      scope: "tts_spoken_text",
       reason: finding.reason,
     };
     const key = JSON.stringify([
@@ -314,7 +314,12 @@ async function main() {
     episode,
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
-    apply_to: ["qwen_generation_plan.qwen_spoken_text"],
+    apply_to: [
+      "narration_generation_plan.spoken_text",
+      "narration_generation_plan.tts_spoken_text",
+      "qwen_generation_plan.qwen_spoken_text",
+    ],
+    accepted_scope_aliases: ["qwen_spoken_text"],
     script_text_policy: "Do not mutate script_clean.md, captions, semantic scenes, or visual prompts.",
     replacements,
     pronunciation_map: [],

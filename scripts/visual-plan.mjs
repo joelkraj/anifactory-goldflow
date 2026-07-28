@@ -13,6 +13,11 @@ import {
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
 import { CHARACTER_STAGING_POSITIONS, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import {
+  backgroundPopulationFindings,
+  backgroundPopulationIsRequired,
+  sanitizeBackgroundPopulation,
+} from "./lib/background-population-utils.mjs";
 import { normalizeImageProvider, routedProviderForPrompt } from "./lib/image-provider-routing.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import {
@@ -380,6 +385,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     time: scene.time,
     visible_characters: scene.visible_characters ?? [],
     visible_subjects: scene.visible_subjects ?? [],
+    background_population: sanitizeBackgroundPopulation(scene.background_population),
     primary_subject: scene.primary_subject ?? null,
     visual_intent: truncateText(scene.visual_intent ?? "", 360),
     character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex).map(compactSceneCharacterRef),
@@ -620,7 +626,7 @@ Core contract:
 - Every motion_intent includes depth_candidate. Set eligible true only for a moving shot with one cleanly separable foreground subject and a coherent background plane. A true static_hold is not eligible because layered depth is movement. Supply a 0-100 editorial priority, high/medium/low separation confidence, the exact foreground subject, the background plane, and why depth improves this beat. Follow the run's parallax_direction retention targets across the supplied timestamps when enough safe frames exist; do not impose a one-candidate-per-chunk cap, and do not force crowded, overlapping, translucent, edge-clipped, or visually tangled frames merely to hit a quota.
 - Vary behavior and direction across the local chunk. Do not repeat the same motion pattern more than twice in succession unless the repeated hold is an intentional continuity choice.
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
-- Background extras appear only when the local beat asks for them. Keep private, lonely, or solo beats visibly clear of unrelated people.
+- Background extras are neither preferred nor forbidden. Copy the beat's background_population contract into shot_manifest. Preserve explicit groups, and preserve implied population when the editorial beat says an active social situation needs anonymous people to read correctly. Describe those people and their subordinate staging in provider prose. Never infer extras from a public location alone, and keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
 - Keep image_strategy as fresh unless editorial_reuse.eligible is true and one listed candidate image genuinely depicts the same stable location, cast, state, and emotional purpose. For deliberate reuse, set image_strategy to reuse_prior_approved and copy one exact candidate id into reuse_source_image_id. Still author the full current-beat provider_prompt and motion_intent so the cut can safely fall back to fresh generation and receive its own edit movement.
 - Editorial reuse is a late-video efficiency tool for stable explanation, analysis, aftermath, or low-risk dialogue. Never use it for the opening, action, a new location, a state change, UI/system reveal, status turn, payoff, threat, or cliffhanger.
@@ -660,6 +666,7 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
       "location_contract_id": null,
       "location_ref_id": null,
       "foreground_action": "specific visible action",
+      "background_population": {"presence":"none|implied|explicit","description":null,"evidence":null,"staging":null},
       "visible_props": [],
       "ui_elements": [],
       "forbidden_ref_ids": [],
@@ -866,7 +873,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt should use natural Codex-friendly image prose with the same shot_manifest contract.
 - Every scene prompt should carry concise anime/manhwa style intent without boilerplate. Prefer a short tail such as "16:9 landscape anime/manhwa frame" when the prompt would otherwise be ambiguous. Do not append long repeated style phrases such as clean line art, cel-shaded characters, cinematic webtoon lighting, or non-photorealistic painted background to every cut.
-- Background extras are beat-authored, not a style default. Add anonymous customers, staff, workers, crowds, or audience figures only when the local beat excerpt, visible_subjects, editorial cue, or shot_manifest explicitly calls for them. For lonely/private/solo investigation beats, make the room visibly empty except for the named subject and necessary objects, even if the location is normally public.
+- Background extras are neither preferred nor forbidden. Preserve the beat's background_population contract in shot_manifest. An explicit group stays visible. An implied population stays visible when the beat identifies a concrete social situation—such as a hearing, ceremony, active class or market, public humiliation, audience reaction, staffed workplace, or assembled formation—that would become visually misleading if rendered empty. Keep anonymous people out of visible_characters and character_staging; describe them through background_population and provider prose. A public location by itself is not evidence. Use presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - ModelsLab Flux handles multi-character shots at surfaces poorly. Whenever two or more characters are positioned at, behind, leaning on, or separated by ANY surface or large object that can cross or occlude a human body (waist-to-chest-height objects — recognize the actual surface from the beat and location, do not rely on a fixed list of furniture types), modelslab_image_prompt must: (a) give each visible character a clear spatial relationship to that surface — near side, far side, behind it, beside its edge, or another explicit side-of-surface placement; (b) state body clearance concretely — full torso above the surface line, feet grounded, hands resting on or above the edge, and body silhouette clear of the surface plane; and (c) prefer asymmetric or diagonal placement over flat centered bilateral staging, offsetting one character forward or to a near corner and the other farther back. codex_image_prompt may keep a more centered, cinematic composition as long as the bodies stay discrete, side-of-surface placement is readable, and body/surface placement is clear.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same parent scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
@@ -1541,6 +1548,7 @@ function sanitizeShotManifest(value) {
     location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    background_population: sanitizeBackgroundPopulation(value.background_population),
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
@@ -1724,6 +1732,14 @@ function localBeatFidelityFindings(prompts, sourceRows, storyFactLedger = null) 
   for (let index = 0; index < prompts.length; index += 1) {
     const prompt = prompts[index];
     const source = sourceRows[index] ?? {};
+    const sourcePopulation = sanitizeBackgroundPopulation(source.background_population);
+    const promptPopulation = sanitizeBackgroundPopulation(prompt.shot_manifest?.background_population);
+    if (backgroundPopulationIsRequired(sourcePopulation) && !backgroundPopulationIsRequired(promptPopulation)) {
+      failures.push(`${prompt.image_id} drops the beat's ${sourcePopulation.presence} background population contract`);
+    }
+    for (const finding of backgroundPopulationFindings(prompt)) {
+      failures.push(`${prompt.image_id} ${finding.code}: ${finding.message}`);
+    }
     const localNames = mentionedCandidateNames(source);
     const qualityNames = (source.visual_beat_quality_findings ?? [])
       .filter((finding) => finding?.code === "named_character_not_visible_subject" && finding.character)

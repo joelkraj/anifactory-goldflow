@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,7 +16,9 @@ const channel = flags.channel ?? "53rebirth";
 const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
-const episodeRoot = flags.episodeDir ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
+const episodeRoot = flags.episodeDir
+  ?? flags["episode-dir"]
+  ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const runIdentityPath = path.join(episodeRoot, "run_identity.json");
 const reviewVoiceDir = flags.voiceDir ?? path.join(episodeRoot, "review_samples/modelslab_voice_design");
 const episodeJoelNarratorRequestPath = path.join(episodeRoot, "review_samples/modelslab_joel_narrator/joel_narrator_qwen_tts_request_v2.json");
@@ -32,16 +36,39 @@ const force = /^(1|true|yes)$/i.test(String(flags.force ?? "false"));
 const dryRun = /^(1|true|yes)$/i.test(String(flags["dry-run"] ?? "false"));
 const reuseUnchanged = /^(1|true|yes)$/i.test(String(flags["reuse-unchanged"] ?? "false"));
 const characterVoiceCasting = /^(?:true|1|yes|enabled|on)$/i.test(String(flags["character-voice-casting"] ?? process.env.ANIFACTORY_CHARACTER_VOICE_CASTING ?? "false").trim());
-const reportSuffix = dryRun || suffix !== "-modelslab-qwen" ? slug(suffix) : "";
+const reportSuffix = dryRun
+  ? `${slug(suffix)}-dry-run`
+  : suffix !== "-modelslab-qwen"
+  ? slug(suffix)
+  : "";
 const regenerateSpeakers = new Set(String(flags["regenerate-speakers"] ?? "")
   .split(",")
   .map((value) => value.trim().toUpperCase())
   .filter(Boolean));
-const maxChars = Number(flags["max-chars"] ?? 850);
+const regenerateUnitIds = new Set(String(flags["regenerate-unit-ids"] ?? flags["unit-ids"] ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean));
+const maxChars = Math.max(120, Number(flags["max-chars"] ?? 420));
+const minWords = Math.max(1, Number(flags["min-words"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_MIN_WORDS ?? 20));
+const maxWords = Math.max(minWords, Number(flags["max-words"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_MAX_WORDS ?? 45));
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_MODELSLAB_QWEN_CONCURRENCY ?? 15)));
 const unitGapSec = Math.max(0, Math.min(1.5, Number(flags["unit-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_GAP_SEC ?? 0.08)));
 const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_SEGMENT_GAP_SEC ?? 0.16)));
 const stitchSampleRate = Math.max(8000, Math.min(96000, Number(flags["stitch-sample-rate"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_SAMPLE_RATE ?? 24000)));
+const stitchEdgePadSec = Math.max(0.01, Math.min(0.08, Number(flags["stitch-edge-pad-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_EDGE_PAD_SEC ?? 0.025)));
+const stitchFadeSec = Math.max(0.003, Math.min(0.02, Number(flags["stitch-fade-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_FADE_SEC ?? 0.008)));
+const unitTranscriptQa = !/^(?:0|false|no|off)$/i.test(String(flags["unit-transcript-qa"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_TRANSCRIPT_QA ?? "true"));
+const unitQaWhisperModel = String(flags["unit-qa-whisper-model"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_WHISPER_MODEL ?? "small");
+const unitQaWhisperDevice = String(flags["unit-qa-whisper-device"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_WHISPER_DEVICE ?? "auto");
+const unitQaWhisperComputeType = String(flags["unit-qa-whisper-compute-type"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_WHISPER_COMPUTE_TYPE ?? "auto");
+const unitQaMaxWer = Math.max(0.05, Math.min(1, Number(flags["unit-qa-max-wer"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_MAX_WER ?? 0.18)));
+const unitQaMinTrailingSilenceSec = Math.max(0.02, Math.min(0.2, Number(flags["unit-qa-min-trailing-silence-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_MIN_TRAILING_SILENCE_SEC ?? 0.05)));
+const requestedQwenInstructionField = String(flags["qwen-instruct-field"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_INSTRUCT_FIELD ?? "").trim();
+const allowedQwenInstructionFields = new Set(["instruct", "instruction", "qwen_instruct"]);
+const qwenInstructionField = allowedQwenInstructionFields.has(requestedQwenInstructionField) ? requestedQwenInstructionField : null;
+const TTS_OUTPUT_QA_POLICY_VERSION = "tts_output_qa_v2";
+const retryInvocationId = `${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${process.pid}`;
 const qwenFetchTimeoutMs = Math.max(30000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_TIMEOUT_MS ?? 120000));
 const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REFRESH_VOICES ?? "")
   .split(",")
@@ -428,6 +455,29 @@ async function mediaDuration(filePath) {
   return Number(result.stdout.trim());
 }
 
+function runBinary(command, commandArgs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, commandArgs, { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = [];
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) resolve(Buffer.concat(stdout));
+      else reject(new Error(`${command} exited ${code}\n${stderr}`));
+    });
+  });
+}
+
+async function sha256File(filePath) {
+  return createHash("sha256").update(await fs.readFile(filePath)).digest("hex");
+}
+
+function sha256Text(value) {
+  return createHash("sha256").update(String(value ?? "")).digest("hex");
+}
+
 function cleanText(value) {
   return String(value ?? "")
     .replace(/\[([^\]]+)\]/g, "$1")
@@ -447,22 +497,9 @@ function numberWord(value) {
 }
 
 function normalizeTtsDisfluencies(value) {
-  let text = String(value ?? "");
-  for (let pass = 0; pass < 3; pass += 1) {
-    text = text.replace(/\b([A-Za-z]+),\s+\1\b/gi, "$1");
-  }
-  const clauses = text
-    .split(/\s*[,.!?;:—-]+\s*/g)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  if (clauses.length >= 3) {
-    const normalizedClauses = clauses.map((part) => part.toLowerCase());
-    const uniqueClauses = [...new Set(normalizedClauses)];
-    if (uniqueClauses.length === 1) text = clauses[0];
-  }
-  return text
-    .replace(/\b([a-z])-\1([A-Za-z]{2,})\b/g, (_match, lead, rest) => `${lead}${rest}`)
-    .replace(/\b([a-z])-\s*([A-Za-z]{2,})\b/g, (_match, _lead, rest) => rest)
+  // Repetitions and stutters may be intentional approved prose. Any spoken
+  // repair must arrive through the explicit, hash-bound override artifact.
+  return String(value ?? "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -483,17 +520,43 @@ function normalizeAllCapsForTts(value) {
 function applyTextOverrides(units, overrides) {
   const rows = Array.isArray(overrides?.overrides) ? overrides.overrides : [];
   if (!rows.length) return units;
+  const segmentSpeakerCounts = new Map();
+  for (const unit of units) {
+    for (const segmentId of unit.source_segment_ids ?? [unit.source_segment_id ?? unit.segment_id]) {
+      const key = `${String(segmentId ?? "")}\u001f${String(unit.speaker ?? "").toUpperCase()}`;
+      segmentSpeakerCounts.set(key, Number(segmentSpeakerCounts.get(key) ?? 0) + 1);
+    }
+  }
   return units.map((unit, index) => {
     const match = rows.find((row) => {
+      if (row.unit_id && String(row.unit_id) === String(unit.unit_id)) return true;
       if (Number(row.index ?? 0) === index + 1) return true;
-      return String(row.segment_id ?? "") === String(unit.segment_id ?? "")
+      const sameSegmentSpeaker = (unit.source_segment_ids ?? [unit.source_segment_id ?? unit.segment_id])
+        .map(String).includes(String(row.segment_id ?? ""))
         && String(row.speaker ?? "").toUpperCase() === String(unit.speaker ?? "").toUpperCase();
+      if (!sameSegmentSpeaker) return false;
+      if (row.unit_index != null) {
+        return (unit.source_unit_refs ?? []).some((ref) => (
+          String(ref.segment_id) === String(row.segment_id)
+          && String(ref.unit_index) === String(row.unit_index)
+        ));
+      }
+      const key = `${String(unit.segment_id ?? "")}\u001f${String(unit.speaker ?? "").toUpperCase()}`;
+      return segmentSpeakerCounts.get(`${String(row.segment_id ?? "")}\u001f${String(unit.speaker ?? "").toUpperCase()}`) === 1
+        || segmentSpeakerCounts.get(key) === 1;
     });
     if (!match?.text) return unit;
     return {
       ...unit,
       text: ttsSafeText(match.text),
       text_override_reason: match.reason ?? "manual_qwen_audio_quality_repair",
+      text_override_source: match.unit_id
+        ? "explicit_unit_id"
+        : match.index != null
+        ? "explicit_output_index"
+        : match.unit_index != null
+        ? "explicit_source_unit_index"
+        : "unambiguous_segment_speaker",
     };
   });
 }
@@ -536,34 +599,43 @@ function suffixFileWith(label, base, extension) {
 }
 
 function unitReuseKey(unit) {
-  return [
-    String(unit.segment_id ?? ""),
-    String(unit.unit_index ?? ""),
-    String(unit.speaker ?? "").toUpperCase(),
-    String(unit.text ?? "").replace(/\s+/g, " ").trim(),
-  ].join("\u001f");
+  const identityHash = String(unit?.synthesis_identity?.content_sha256 ?? "");
+  return identityHash && unit?.unit_id ? `${String(unit.unit_id)}\u001f${identityHash}` : "";
 }
 
 function previousResultMap(report) {
   const map = new Map();
   for (const row of report?.results ?? []) {
-    map.set(unitReuseKey(row), row);
+    const key = unitReuseKey(row);
+    if (key) map.set(key, row);
   }
   return map;
 }
 
+function previousUnitIdResultMap(report) {
+  const map = new Map();
+  for (const row of report?.results ?? []) {
+    if (row?.unit_id) map.set(String(row.unit_id), row);
+  }
+  return map;
+}
+
+function reusablePreviousUnit(previous, unit) {
+  if (!previous?.wav) return false;
+  return String(previous.unit_id ?? "") === String(unit.unit_id ?? "")
+    && Boolean(unitReuseKey(previous))
+    && unitReuseKey(previous) === unitReuseKey(unit);
+}
+
 function unitContentReuseKey(unit) {
-  return [
-    String(unit.speaker ?? "NARRATOR").toUpperCase(),
-    String(unit.voice_id ?? ""),
-    String(unit.text ?? "").replace(/\s+/g, " ").trim(),
-  ].join("\u001f");
+  return String(unit?.synthesis_identity?.content_sha256 ?? "");
 }
 
 function previousContentResultMap(report) {
   const map = new Map();
   for (const row of report?.results ?? []) {
     const key = unitContentReuseKey(row);
+    if (!key) continue;
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(row);
   }
@@ -573,6 +645,61 @@ function previousContentResultMap(report) {
 function takePreviousContentResult(map, unit) {
   const rows = map.get(unitContentReuseKey(unit)) ?? [];
   return rows.shift() ?? null;
+}
+
+function synthesisIdentity(unit, voice, {
+  speed = nativeSpeed,
+  instructionField = qwenInstructionField,
+} = {}) {
+  const request = qwenRequestForUnit(unit, voice, 0, instructionField, speed);
+  const payload = {
+    schema: "goldflow_qwen_synthesis_identity_v1",
+    provider: "modelslab_qwen",
+    provider_endpoint: "/api/v6/voice/text_to_audio",
+    model_id: request.body.model_id,
+    language: request.body.language,
+    prompt: request.body.prompt,
+    native_speed: request.body.speed,
+    voice_id: String(unit.voice_id ?? voice?.id ?? ""),
+    reference_audio: String(voice?.init_audio ?? ""),
+    reference_audio_sha256: String(
+      voice?.reference_audio_sha256
+      ?? voice?.source_audio_sha256
+      ?? voice?.init_audio_sha256
+      ?? "",
+    ) || null,
+    authored_qwen_instruct: String(unit.qwen_instruct ?? ""),
+    authored_qwen_instructions: Array.isArray(unit.authored_qwen_instructions)
+      ? unit.authored_qwen_instructions
+      : String(unit.qwen_instruct ?? "") ? [String(unit.qwen_instruct)] : [],
+    configured_instruction_field: instructionField ?? null,
+    instruction_submitted: request.instruction_delivery.submitted,
+    submitted_instruction_field: request.instruction_delivery.submitted_field,
+    submitted_instruction: request.instruction_delivery.submitted
+      ? String(unit.qwen_instruct ?? "")
+      : null,
+  };
+  return {
+    ...payload,
+    content_sha256: sha256Text(JSON.stringify(payload)),
+  };
+}
+
+export function synthesisIdentityForTests(unit, voice, options = {}) {
+  return synthesisIdentity(unit, voice, options);
+}
+
+function assertRegenerateUnitIdsExist(units, requestedIds) {
+  const known = new Set(units.map((unit) => String(unit.unit_id)));
+  const missing = [...requestedIds].filter((unitId) => !known.has(unitId));
+  if (missing.length) {
+    throw new Error(`Scoped Qwen regeneration named unknown unit id(s): ${missing.join(", ")}. Read unit_id values from the current materialized TTS report or a dry-run plan.`);
+  }
+}
+
+export function validateRegenerateUnitIdsForTests(units, requestedIds) {
+  assertRegenerateUnitIdsExist(units, new Set(requestedIds));
+  return units.filter((unit) => new Set(requestedIds).has(unit.unit_id)).map((unit) => unit.unit_id);
 }
 
 function speakerVoiceId(speaker, lock = null) {
@@ -597,22 +724,28 @@ function assertProductionVoiceRoute(unit, lock) {
   return voice;
 }
 
-function chunkTextBySentence(text, limit) {
+function wordCount(value) {
+  return String(value ?? "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function chunkTextBySentence(text, limit, wordLimit = maxWords) {
   const sentences = String(text ?? "").match(/[^.!?]+[.!?]+|[^.!?]+$/g)?.map((part) => part.trim()).filter(Boolean) ?? [];
   const chunks = [];
   for (const sentence of sentences.length ? sentences : [text]) {
     const last = chunks[chunks.length - 1];
-    if (last && `${last} ${sentence}`.length <= limit) chunks[chunks.length - 1] = `${last} ${sentence}`;
-    else if (sentence.length <= limit) chunks.push(sentence);
+    const combined = `${last ?? ""} ${sentence}`.trim();
+    if (last && combined.length <= limit && wordCount(combined) <= wordLimit) chunks[chunks.length - 1] = combined;
+    else if (sentence.length <= limit && wordCount(sentence) <= wordLimit) chunks.push(sentence);
     else {
       const words = sentence.split(/\s+/);
       let current = "";
       for (const word of words) {
-        if (`${current} ${word}`.trim().length > limit && current) {
+        const candidate = `${current} ${word}`.trim();
+        if ((candidate.length > limit || wordCount(candidate) > wordLimit) && current) {
           chunks.push(current);
           current = word;
         } else {
-          current = `${current} ${word}`.trim();
+          current = candidate;
         }
       }
       if (current) chunks.push(current);
@@ -753,6 +886,12 @@ async function buildVoiceLock() {
       ? "uploaded_local_approved_voice_source_because_voice_id_was_forced_refresh"
       : "uploaded_local_approved_voice_source_because_cached_url_missing_or_expired";
   }
+  for (const voice of lock.voices) {
+    const localReference = voice.source_audio_path ?? voice.sample_path ?? null;
+    voice.reference_audio_sha256 = localReference && await exists(localReference)
+      ? await sha256File(localReference)
+      : voice.reference_audio_sha256 ?? null;
+  }
   lock.status = lock.voices.every((voice) => voice.status === "passed" && voice.init_audio) ? "passed" : "warning";
   lock.production_ready = lock.voices.some((voice) => voice.id === lock.narrator_voice_id && voice.status === "passed" && voice.init_audio);
   await fs.writeFile(lockPath, JSON.stringify(lock, null, 2));
@@ -765,70 +904,315 @@ async function buildVoiceLock() {
 
 function collectUnits(plan, lock, {
   maxCharsLimit = maxChars,
+  minWordsLimit = minWords,
+  maxWordsLimit = maxWords,
   narratorOnly = !characterVoiceCasting,
+  instructionField = qwenInstructionField,
 } = {}) {
+  const lexicalTokens = (value) => String(value ?? "").trim().split(/\s+/).filter(Boolean);
+  const explicitBarrier = (segment, unit, sourceSpeaker) => {
+    const explicit = [
+      segment?.tts_merge_barrier,
+      segment?.synthesis_barrier,
+      segment?.hard_boundary,
+      unit?.tts_merge_barrier,
+      unit?.synthesis_barrier,
+      unit?.hard_boundary,
+      unit?.do_not_merge,
+    ].some((value) => value === true || /^(?:true|1|yes|hard)$/i.test(String(value ?? "")));
+    const sourceLabel = String(sourceSpeaker ?? "NARRATOR").toUpperCase();
+    const trueSystemOrTurn = String(unit?.kind ?? "narration").toLowerCase() !== "narration"
+      || /^(?:SYSTEM|UI|NOTICE|WARNING)$/.test(sourceLabel);
+    const castSpeakerTurn = !narratorOnly && sourceLabel !== "NARRATOR";
+    return explicit || trueSystemOrTurn || castSpeakerTurn;
+  };
   const rawUnits = [];
   for (const segment of plan.segments ?? []) {
     for (const unit of segment.qwen_generation_units ?? []) {
       const inline = inlineSpeakerUnit(unit.qwen_spoken_text ?? unit.text ?? unit.source_text ?? "", unit.speaker ?? "NARRATOR");
       const text = ttsSafeText(inline.text);
       if (!text) continue;
+      const sourceSpeaker = unit.source_speaker ?? unit.speaker ?? "NARRATOR";
+      // Captions are an independent, approved-text layer. Never fall back to
+      // qwen_spoken_text or post-speakability TTS text here.
+      const captionText = String(unit.caption_text ?? unit.source_text ?? "").trim();
       rawUnits.push({
-        segment_id: segment.segment_id,
+        source_segment_id: segment.segment_id,
         unit_index: unit.unit_index,
         speaker: inline.speaker,
-        source_speaker: unit.source_speaker ?? unit.speaker ?? "NARRATOR",
+        source_speaker: sourceSpeaker,
         voice_id: speakerVoiceId(inline.speaker, lock),
         text,
-        caption_text: String(unit.caption_text ?? unit.source_text ?? unit.qwen_spoken_text ?? text).trim(),
-        expected_duration_sec: Number(segment.expected_duration_sec ?? 0),
+        caption_text: captionText,
+        qwen_instruct: String(unit.qwen_instruct ?? "").trim() || null,
+        authored_qwen_instructions: String(unit.qwen_instruct ?? "").trim()
+          ? [String(unit.qwen_instruct).trim()]
+          : [],
+        kind: unit.kind ?? "narration",
+        merge_barrier: explicitBarrier(segment, unit, sourceSpeaker),
+        authored_segment_expected_duration_sec: Number(segment.expected_duration_sec ?? 0),
         source_segment_ids: [segment.segment_id],
-        source_speakers: [unit.source_speaker ?? unit.speaker ?? "NARRATOR"],
+        source_speakers: [sourceSpeaker],
+        source_unit_indices: [unit.unit_index],
+        tts_override_replacements_applied: Array.isArray(unit.tts_override_replacements_applied)
+          ? unit.tts_override_replacements_applied
+          : [],
+        source_unit_refs: [{
+          segment_id: segment.segment_id,
+          unit_index: unit.unit_index,
+          source_speaker: sourceSpeaker,
+          caption_text: captionText,
+        }],
       });
     }
   }
 
-  const merged = [];
+  const sameSynthesisContext = (left, right) => (
+    String(left?.speaker ?? "NARRATOR").toUpperCase() === String(right?.speaker ?? "NARRATOR").toUpperCase()
+    && (narratorOnly
+      || String(left?.source_speaker ?? "NARRATOR").toUpperCase() === String(right?.source_speaker ?? "NARRATOR").toUpperCase())
+    && String(left?.voice_id ?? "") === String(right?.voice_id ?? "")
+    && (!instructionField || String(left?.qwen_instruct ?? "") === String(right?.qwen_instruct ?? ""))
+  );
+  const runs = [];
   for (const unit of rawUnits) {
-    const normalized = String(unit.speaker ?? "NARRATOR").toUpperCase();
-    const last = merged[merged.length - 1];
-    const canMergeNarrator = normalized === "NARRATOR"
-      && last
-      && String(last.speaker ?? "").toUpperCase() === "NARRATOR"
-      && (narratorOnly || (
-        String(last.source_speaker ?? "NARRATOR").toUpperCase() === String(unit.source_speaker ?? "NARRATOR").toUpperCase()
-        && last.segment_id === unit.segment_id
-      ))
-      && `${last.text} ${unit.text}`.length <= maxCharsLimit;
-    if (canMergeNarrator) {
-      last.text = `${last.text} ${unit.text}`.replace(/\s+/g, " ").trim();
-      last.caption_text = `${last.caption_text ?? last.text} ${unit.caption_text ?? unit.text}`.replace(/\s+/g, " ").trim();
-      last.source_segment_ids = [...new Set([...(last.source_segment_ids ?? [last.segment_id]), ...(unit.source_segment_ids ?? [unit.segment_id])])];
-      last.source_speakers = [...new Set([...(last.source_speakers ?? [last.source_speaker]), ...(unit.source_speakers ?? [unit.source_speaker])])];
+    const lastRun = runs.at(-1);
+    const previous = lastRun?.at(-1);
+    if (lastRun && previous && !previous.merge_barrier && !unit.merge_barrier && sameSynthesisContext(previous, unit)) {
+      lastRun.push(unit);
     } else {
-      merged.push({ ...unit });
+      runs.push([unit]);
     }
   }
 
-  const units = [];
-  for (const unit of merged) {
-    for (const chunk of chunkTextBySentence(unit.text, maxCharsLimit)) {
-      units.push({
-        ...unit,
-        text: chunk,
-      });
+  const tokenText = (tokens, start, end) => tokens.slice(start, end).map((row) => row.word).join(" ");
+  const choosePartitions = (tokens) => {
+    const total = tokens.length;
+    if (!total) return [];
+    if (total < minWordsLimit && tokenText(tokens, 0, total).length <= maxCharsLimit) return [[0, total]];
+    const minimumChunks = Math.max(1, Math.ceil(total / maxWordsLimit));
+    const maximumBalancedChunks = Math.max(minimumChunks, Math.floor(total / minWordsLimit));
+    const isSentenceEnd = (index) => /[.!?]["'”’)]*$/u.test(tokens[index - 1]?.word ?? "");
+    const isClauseEnd = (index) => /[,;:—-]["'”’)]*$/u.test(tokens[index - 1]?.word ?? "");
+    const isSourceBoundary = (index) => tokens[index - 1]?.source !== tokens[index]?.source;
+    for (let chunkCount = minimumChunks; chunkCount <= maximumBalancedChunks; chunkCount += 1) {
+      const ranges = [];
+      let start = 0;
+      let possible = true;
+      for (let chunkIndex = 0; chunkIndex < chunkCount - 1; chunkIndex += 1) {
+        const remainingChunks = chunkCount - chunkIndex - 1;
+        const low = Math.max(start + minWordsLimit, total - remainingChunks * maxWordsLimit);
+        const high = Math.min(start + maxWordsLimit, total - remainingChunks * minWordsLimit);
+        const target = Math.round(total * (chunkIndex + 1) / chunkCount);
+        const candidates = [];
+        for (let end = low; end <= high; end += 1) {
+          if (tokenText(tokens, start, end).length > maxCharsLimit) continue;
+          candidates.push({
+            end,
+            boundary_rank: isSentenceEnd(end) ? 0 : isSourceBoundary(end) ? 1 : isClauseEnd(end) ? 2 : 3,
+            distance: Math.abs(end - target),
+          });
+        }
+        candidates.sort((left, right) => left.boundary_rank - right.boundary_rank
+          || left.distance - right.distance
+          || right.end - left.end);
+        const selected = candidates[0]?.end;
+        if (!selected) {
+          possible = false;
+          break;
+        }
+        ranges.push([start, selected]);
+        start = selected;
       }
+      if (possible
+        && total - start <= maxWordsLimit
+        && (total - start >= minWordsLimit || chunkCount === 1)
+        && tokenText(tokens, start, total).length <= maxCharsLimit) {
+        ranges.push([start, total]);
+        return ranges;
+      }
+    }
+    // Extremely long individual tokens or pathological character density are
+    // the only reason to leave the balanced 20–45-word lane.
+    const ranges = [];
+    let start = 0;
+    while (start < total) {
+      let end = Math.min(total, start + maxWordsLimit);
+      while (end > start + 1 && tokenText(tokens, start, end).length > maxCharsLimit) end -= 1;
+      ranges.push([start, end]);
+      start = end;
+    }
+    return ranges;
+  };
+
+  const chunks = [];
+  for (const run of runs) {
+    const tokens = [];
+    for (const source of run) {
+      const words = lexicalTokens(source.text);
+      words.forEach((word, localIndex) => tokens.push({ word, source, local_index: localIndex, source_word_count: words.length }));
+    }
+    for (const [start, end] of choosePartitions(tokens)) {
+      const selected = tokens.slice(start, end);
+      const sourceSlices = [];
+      for (const token of selected) {
+        const current = sourceSlices.at(-1);
+        if (current?.source === token.source && current.local_end === token.local_index) {
+          current.local_end += 1;
+        } else {
+          sourceSlices.push({ source: token.source, local_start: token.local_index, local_end: token.local_index + 1 });
+        }
+      }
+      const captionFragments = sourceSlices.flatMap(({ source, local_start: localStart, local_end: localEnd }) => {
+        const captionWords = lexicalTokens(source.caption_text);
+        const spokenCount = Math.max(1, lexicalTokens(source.text).length);
+        const captionStart = Math.floor(localStart * captionWords.length / spokenCount);
+        const captionEnd = localEnd >= spokenCount
+          ? captionWords.length
+          : Math.floor(localEnd * captionWords.length / spokenCount);
+        const text = captionWords.slice(captionStart, captionEnd).join(" ");
+        return text ? [{
+          segment_id: source.source_segment_id,
+          unit_index: source.unit_index,
+          source_speaker: source.source_speaker,
+          caption_word_start: captionStart,
+          caption_word_end_exclusive: captionEnd,
+          text,
+        }] : [];
+      });
+      const sources = sourceSlices.map((row) => row.source);
+      const first = sources[0];
+      const sourceUnitRefs = sources.map((source) => source.source_unit_refs[0])
+        .filter((row, index, rows) => rows.findIndex((candidate) => String(candidate.segment_id) === String(row.segment_id)
+          && String(candidate.unit_index) === String(row.unit_index)) === index);
+      chunks.push({
+        ...first,
+        text: selected.map((row) => row.word).join(" "),
+        caption_text: captionFragments.map((row) => row.text).join(" ").trim(),
+        caption_fragments: captionFragments,
+        source_segment_ids: [...new Set(sources.map((source) => source.source_segment_id))],
+        source_speakers: [...new Set(sources.map((source) => source.source_speaker))],
+        source_unit_indices: [...new Set(sources.map((source) => source.unit_index))],
+        source_unit_refs: sourceUnitRefs,
+        authored_qwen_instructions: [...new Set(sources.flatMap((source) => source.authored_qwen_instructions ?? []))],
+        tts_override_replacements_applied: sources.flatMap((source) => source.tts_override_replacements_applied ?? [])
+          .filter((row, index, rows) => rows.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(row)) === index),
+        merge_barrier: run.some((source) => source.merge_barrier),
+        ended_at_sentence_boundary: /[.!?]["'”’)]*$/u.test(selected.at(-1)?.word ?? ""),
+      });
+    }
   }
-  return units;
+
+  return chunks.map((unit) => {
+    const firstRef = unit.source_unit_refs[0] ?? { segment_id: unit.source_segment_id, unit_index: unit.unit_index };
+    const identitySeed = {
+      sources: unit.caption_fragments.map((row) => [
+        row.segment_id,
+        row.unit_index,
+        row.caption_word_start,
+        row.caption_word_end_exclusive,
+      ]),
+      spoken_text: unit.text,
+    };
+    const unitId = `tts_${slug(firstRef.segment_id)}_u${String(firstRef.unit_index ?? "x")}_${sha256Text(JSON.stringify(identitySeed)).slice(0, 12)}`;
+    const count = wordCount(unit.text);
+    const crossedSegment = unit.source_segment_ids.length > 1;
+    const belowMin = count < minWordsLimit;
+    return {
+      ...unit,
+      unit_id: unitId,
+      segment_id: unitId,
+      word_count: count,
+      expected_duration_sec: Number((count / 210 * 60).toFixed(3)),
+      target_duration_range_sec: {
+        min: Number((count / 240 * 60).toFixed(3)),
+        max: Number((count / 170 * 60).toFixed(3)),
+      },
+      chunk_policy: {
+        sentence_bounded: unit.ended_at_sentence_boundary,
+        sentence_boundary_preferred: true,
+        min_words_target: minWordsLimit,
+        max_words: maxWordsLimit,
+        max_chars: maxCharsLimit,
+        below_min_word_target: belowMin,
+        short_chunk_reason: belowMin
+          ? unit.merge_barrier
+            ? "explicit_speaker_system_or_authored_barrier"
+            : "end_of_compatible_synthesis_context"
+          : null,
+        crossed_segment_boundary: crossedSegment,
+        crossed_instruction_boundary: !instructionField && unit.authored_qwen_instructions.length > 1,
+        instruction_field_configured: instructionField ?? null,
+        authored_instruction_count: unit.authored_qwen_instructions.length,
+        authored_instruction_submitted: Boolean(instructionField && unit.qwen_instruct),
+        narrator_only: narratorOnly,
+      },
+    };
+  });
 }
 
 export function collectQwenUnitsForTests(plan, lock, options = {}) {
   return collectUnits(plan, lock, options);
 }
 
-async function synthesizeUnit(unit, lock, index, previousResults = new Map(), previousContentResults = new Map()) {
+function qwenRequestForUnit(unit, voice, index, instructionField = qwenInstructionField, speed = nativeSpeed) {
+  const body = {
+    model_id: "qwen-tts",
+    init_audio: voice.init_audio,
+    prompt: unit.text,
+    language: "english",
+    speed,
+    track_id: 12000 + index,
+  };
+  const hasInstruction = Boolean(String(unit.qwen_instruct ?? "").trim());
+  if (hasInstruction && instructionField) body[instructionField] = unit.qwen_instruct;
+  return {
+    body,
+    instruction_delivery: {
+      authored_instruction_present: hasInstruction,
+      provider_endpoint: "/api/v6/voice/text_to_audio",
+      provider_support_status: instructionField
+        ? "explicit_operator_configured_provider_field"
+        : "unsupported_by_current_modelslab_v6_contract_not_submitted",
+      submitted: hasInstruction && Boolean(instructionField),
+      submitted_field: hasInstruction ? instructionField : null,
+      authored_instruction: hasInstruction ? unit.qwen_instruct : null,
+      authored_instructions: Array.isArray(unit.authored_qwen_instructions)
+        ? unit.authored_qwen_instructions
+        : hasInstruction ? [unit.qwen_instruct] : [],
+    },
+    provider_model_attestation: "requested_qwen_tts_response_model_identity_not_attested",
+  };
+}
+
+export function qwenRequestForUnitForTests(unit, voice, index, instructionField = null) {
+  return qwenRequestForUnit(unit, voice, index, instructionField);
+}
+
+async function synthesizeUnit(
+  unit,
+  lock,
+  index,
+  previousResults = new Map(),
+  previousContentResults = new Map(),
+  previousUnitIds = new Map(),
+) {
   const normalizedSpeaker = String(unit.speaker ?? "NARRATOR").toUpperCase();
-  if (reuseUnchanged) {
+  const voice = assertProductionVoiceRoute(unit, lock);
+  const requestContract = qwenRequestForUnit(unit, voice, index);
+  unit = {
+    ...unit,
+    synthesis_identity: synthesisIdentity(unit, voice),
+  };
+  const targetedSpeakerRegeneration = regenerateSpeakers.size > 0;
+  const targetedUnitRegeneration = regenerateUnitIds.size > 0;
+  const targetedRegeneration = targetedSpeakerRegeneration || targetedUnitRegeneration;
+  const selectedForRegeneration = targetedUnitRegeneration
+    ? regenerateUnitIds.has(String(unit.unit_id))
+    : targetedSpeakerRegeneration
+    ? regenerateSpeakers.has(normalizedSpeaker)
+    : false;
+  if (reuseUnchanged && !selectedForRegeneration) {
     const previous = takePreviousContentResult(previousContentResults, unit);
     if (previous?.wav && await exists(previous.wav)) {
       if (previous.voice_id !== unit.voice_id) {
@@ -841,14 +1225,19 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map(), pr
         duration_sec: await mediaDuration(previous.wav),
         previous_segment_id: previous.segment_id ?? null,
         previous_unit_index: previous.unit_index ?? null,
+        instruction_delivery: requestContract.instruction_delivery,
+        provider_model_attestation: requestContract.provider_model_attestation,
+        unit_qa: previous.unit_qa ?? null,
       };
     }
   }
-  const targetedRegeneration = regenerateSpeakers.size > 0;
-  const shouldRegenerateThisSpeaker = !targetedRegeneration || regenerateSpeakers.has(normalizedSpeaker);
-  if (targetedRegeneration && !shouldRegenerateThisSpeaker) {
-    const previous = previousResults.get(unitReuseKey(unit));
-    if (previous?.wav && await exists(previous.wav)) {
+  if (targetedRegeneration && !selectedForRegeneration) {
+    const previousById = previousUnitIds.get(String(unit.unit_id));
+    const previous = reusablePreviousUnit(previousById, unit)
+      ? previousById
+      : previousResults.get(unitReuseKey(unit))
+        ?? takePreviousContentResult(previousContentResults, unit);
+    if (previous?.wav && await exists(previous.wav) && String(previous.voice_id) === String(unit.voice_id)) {
       if (previous.voice_id !== unit.voice_id) {
         throw new Error(`Refusing targeted Qwen TTS reuse for ${unit.segment_id}: previous voice '${previous.voice_id ?? "unknown"}' does not match current voice '${unit.voice_id}'.`);
       }
@@ -860,39 +1249,50 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map(), pr
         previous_voice_id: previous.voice_id,
         previous_status: previous.status,
         targeted_regeneration_skipped: true,
+        instruction_delivery: requestContract.instruction_delivery,
+        provider_model_attestation: requestContract.provider_model_attestation,
+        unit_qa: previous.unit_qa ?? null,
       };
     }
-    throw new Error(`Targeted regeneration for ${[...regenerateSpeakers].join(", ")} cannot reuse prior audio for ${unit.segment_id} ${unit.speaker}; refusing unintended generation.`);
+    const scope = targetedUnitRegeneration
+      ? `unit id(s) ${[...regenerateUnitIds].join(", ")}`
+      : `speaker(s) ${[...regenerateSpeakers].join(", ")}`;
+    throw new Error(`Targeted regeneration for ${scope} cannot reuse exact prior audio for ${unit.unit_id} ${unit.segment_id} ${unit.speaker}; refusing unintended generation.`);
   }
-  const voice = assertProductionVoiceRoute(unit, lock);
-  const basename = `${String(index + 1).padStart(4, "0")}-${slug(unit.segment_id)}-${slug(unit.speaker)}-${slug(unit.voice_id)}`;
+  const retryTag = selectedForRegeneration || force ? `-retry-${retryInvocationId}` : "";
+  const basename = `${String(index + 1).padStart(4, "0")}-${slug(unit.unit_id)}-${slug(unit.speaker)}-${slug(unit.voice_id)}${retryTag}`;
   const wav = path.join(outDir, `${basename}.wav`);
   const meta = path.join(outDir, `${basename}.json`);
   const cachedMeta = await readJson(meta, null);
-  const cacheMatchesUnit = cachedMeta
-    && cachedMeta.unit?.text === unit.text
-    && String(cachedMeta.unit?.speaker ?? "").toUpperCase() === normalizedSpeaker
-    && cachedMeta.unit?.voice_id === unit.voice_id
-    && cachedMeta.voice?.init_audio === voice.init_audio
-    && Number(cachedMeta.tts_native_speed ?? cachedMeta.request_parameters?.speed ?? 1) === nativeSpeed;
-  if (!force && !targetedRegeneration && await exists(wav)) {
+  const cacheMatchesUnit = cachedMeta?.synthesis_identity?.content_sha256 === unit.synthesis_identity.content_sha256;
+  if (!force && !selectedForRegeneration && await exists(wav)) {
     if (cacheMatchesUnit) {
-      return { ...unit, status: "reused", wav, duration_sec: await mediaDuration(wav), meta };
+      return {
+        ...unit,
+        status: "reused",
+        wav,
+        duration_sec: await mediaDuration(wav),
+        meta,
+        synthesis_identity: unit.synthesis_identity,
+        instruction_delivery: requestContract.instruction_delivery,
+        provider_model_attestation: requestContract.provider_model_attestation,
+        unit_qa: cachedMeta.unit_qa ?? null,
+      };
     }
     await fs.rm(wav, { force: true });
   }
   if (dryRun) {
-    return { ...unit, status: "dry_run", wav, meta };
+    return {
+      ...unit,
+      status: "dry_run",
+      wav,
+      meta,
+      instruction_delivery: requestContract.instruction_delivery,
+      provider_model_attestation: requestContract.provider_model_attestation,
+    };
   }
-  const makeRequest = () => post("/api/v6/voice/text_to_audio", {
-      model_id: "qwen-tts",
-      init_audio: voice.init_audio,
-      prompt: unit.text,
-      language: "english",
-      speed: nativeSpeed,
-      track_id: 12000 + index,
-    });
-  const previous = force || !cacheMatchesUnit ? null : cachedMeta;
+  const makeRequest = () => post("/api/v6/voice/text_to_audio", requestContract.body);
+  const previous = force || selectedForRegeneration || !cacheMatchesUnit ? null : cachedMeta;
   let initial = previous?.request?.id ? previous.request : await makeRequest();
   let resolved;
   let finalUrl = null;
@@ -905,14 +1305,37 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map(), pr
       attempt,
       unit,
       voice,
+      synthesis_identity: unit.synthesis_identity,
       tts_native_speed: nativeSpeed,
-      request_parameters: { language: "english", speed: nativeSpeed },
+      request_parameters: {
+        model_id: "qwen-tts",
+        language: "english",
+        speed: nativeSpeed,
+        qwen_instruct_field: requestContract.instruction_delivery.submitted_field,
+      },
+      instruction_delivery: requestContract.instruction_delivery,
+      provider_model_attestation: requestContract.provider_model_attestation,
     }, null, 2));
     try {
       resolved = await resolveAudioResponse(initial);
       const url = audioLinks(resolved)[0];
       if (!url) throw new Error(`ModelsLab Qwen returned no audio URL for ${unit.segment_id}`);
-      await fs.writeFile(meta, JSON.stringify({ request: initial, resolved, unit, voice, tts_native_speed: nativeSpeed, request_parameters: { language: "english", speed: nativeSpeed } }, null, 2));
+      await fs.writeFile(meta, JSON.stringify({
+        request: initial,
+        resolved,
+        unit,
+        voice,
+        synthesis_identity: unit.synthesis_identity,
+        tts_native_speed: nativeSpeed,
+        request_parameters: {
+          model_id: "qwen-tts",
+          language: "english",
+          speed: nativeSpeed,
+          qwen_instruct_field: requestContract.instruction_delivery.submitted_field,
+        },
+        instruction_delivery: requestContract.instruction_delivery,
+        provider_model_attestation: requestContract.provider_model_attestation,
+      }, null, 2));
       const ok = await downloadWhenReady(url, wav);
       if (!ok) throw new Error(`Timed out downloading ${url}`);
       finalUrl = url;
@@ -929,14 +1352,1099 @@ async function synthesizeUnit(unit, lock, index, previousResults = new Map(), pr
         attempt: attempt + 1,
         unit,
         voice,
+        synthesis_identity: unit.synthesis_identity,
         tts_native_speed: nativeSpeed,
-        request_parameters: { language: "english", speed: nativeSpeed },
+        request_parameters: {
+          model_id: "qwen-tts",
+          language: "english",
+          speed: nativeSpeed,
+          qwen_instruct_field: requestContract.instruction_delivery.submitted_field,
+        },
+        instruction_delivery: requestContract.instruction_delivery,
+        provider_model_attestation: requestContract.provider_model_attestation,
       }, null, 2));
     }
   }
   if (!resolved) throw lastError ?? new Error(`ModelsLab Qwen did not resolve ${unit.segment_id}`);
   if (!finalUrl) throw lastError ?? new Error(`ModelsLab Qwen did not download audio for ${unit.segment_id}`);
-  return { ...unit, status: "generated", wav, url: finalUrl, duration_sec: await mediaDuration(wav), meta, native_speed: nativeSpeed };
+  return {
+    ...unit,
+    status: "generated",
+    wav,
+    url: finalUrl,
+    duration_sec: await mediaDuration(wav),
+    meta,
+    native_speed: nativeSpeed,
+    instruction_delivery: requestContract.instruction_delivery,
+    provider_model_attestation: requestContract.provider_model_attestation,
+  };
+}
+
+function dbfs(amplitude) {
+  const value = Math.abs(Number(amplitude ?? 0));
+  return value > 0 ? Number((20 * Math.log10(value)).toFixed(3)) : null;
+}
+
+function pcmMetricsFromBuffer(buffer, sampleRate) {
+  const sampleCount = Math.floor(buffer.length / 2);
+  if (!sampleCount) {
+    return {
+      sample_rate: sampleRate,
+      sample_count: 0,
+      duration_sec: 0,
+      peak_dbfs: null,
+      rms_dbfs: null,
+      leading_silence_sec: 0,
+      trailing_silence_sec: 0,
+    };
+  }
+  let peak = 0;
+  let sumSquares = 0;
+  let sum = 0;
+  let clippingSamples = 0;
+  let maximumSampleStep = 0;
+  let largeSampleStepCount = 0;
+  let maximumIsolatedImpulse = 0;
+  let isolatedImpulseCount = 0;
+  const samples = new Float64Array(sampleCount);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const sample = buffer.readInt16LE(index * 2) / 32768;
+    samples[index] = sample;
+    const absolute = Math.abs(sample);
+    peak = Math.max(peak, absolute);
+    sumSquares += sample * sample;
+    sum += sample;
+    if (absolute >= 0.999) clippingSamples += 1;
+    if (index > 0) {
+      const step = Math.abs(sample - samples[index - 1]);
+      maximumSampleStep = Math.max(maximumSampleStep, step);
+      if (step >= 0.3) largeSampleStepCount += 1;
+    }
+  }
+  for (let index = 1; index < sampleCount - 1; index += 1) {
+    const left = samples[index - 1];
+    const center = samples[index];
+    const right = samples[index + 1];
+    const impulse = Math.abs(center - ((left + right) / 2));
+    const neighborDifference = Math.abs(left - right);
+    maximumIsolatedImpulse = Math.max(maximumIsolatedImpulse, impulse);
+    if (impulse >= 0.45 && neighborDifference <= 0.12) isolatedImpulseCount += 1;
+  }
+  const frameSamples = Math.max(1, Math.round(sampleRate * 0.005));
+  let firstActiveSample = sampleCount;
+  let lastActiveSample = -1;
+  const activeFrames = [];
+  for (let start = 0; start < sampleCount; start += frameSamples) {
+    const end = Math.min(sampleCount, start + frameSamples);
+    let frameSquares = 0;
+    let framePeak = 0;
+    for (let index = start; index < end; index += 1) {
+      const value = samples[index];
+      frameSquares += value * value;
+      framePeak = Math.max(framePeak, Math.abs(value));
+    }
+    const frameRms = Math.sqrt(frameSquares / Math.max(1, end - start));
+    if (frameRms >= 0.00316 || framePeak >= 0.01259) {
+      firstActiveSample = Math.min(firstActiveSample, start);
+      lastActiveSample = Math.max(lastActiveSample, end - 1);
+      activeFrames.push({ start_sample: start, end_sample: end });
+    }
+  }
+  const activeIntervals = [];
+  for (const frame of activeFrames) {
+    const previous = activeIntervals.at(-1);
+    if (previous && frame.start_sample - previous.end_sample <= Math.round(sampleRate * 0.02)) {
+      previous.end_sample = frame.end_sample;
+    } else {
+      activeIntervals.push({ ...frame });
+    }
+  }
+  const windowPeak = (seconds) => {
+    const count = Math.max(1, Math.round(sampleRate * seconds));
+    let value = 0;
+    for (let index = Math.max(0, sampleCount - count); index < sampleCount; index += 1) value = Math.max(value, Math.abs(samples[index]));
+    return value;
+  };
+  const windowRms = (seconds) => {
+    const count = Math.max(1, Math.round(sampleRate * seconds));
+    let squares = 0;
+    const start = Math.max(0, sampleCount - count);
+    for (let index = start; index < sampleCount; index += 1) squares += samples[index] * samples[index];
+    return Math.sqrt(squares / Math.max(1, sampleCount - start));
+  };
+  const durationSec = sampleCount / sampleRate;
+  const leadingSilenceSec = firstActiveSample === sampleCount ? durationSec : firstActiveSample / sampleRate;
+  const trailingSilenceSec = lastActiveSample < 0 ? durationSec : Math.max(0, (sampleCount - lastActiveSample - 1) / sampleRate);
+  return {
+    sample_rate: sampleRate,
+    sample_count: sampleCount,
+    duration_sec: Number(durationSec.toFixed(6)),
+    peak_dbfs: dbfs(peak),
+    rms_dbfs: dbfs(Math.sqrt(sumSquares / sampleCount)),
+    dc_offset: Number((sum / sampleCount).toFixed(8)),
+    dc_offset_dbfs: dbfs(sum / sampleCount),
+    clipping_sample_count: clippingSamples,
+    clipping_ratio: Number((clippingSamples / sampleCount).toFixed(8)),
+    maximum_sample_step_dbfs: dbfs(maximumSampleStep),
+    large_sample_step_count: largeSampleStepCount,
+    maximum_isolated_impulse_dbfs: dbfs(maximumIsolatedImpulse),
+    isolated_impulse_count: isolatedImpulseCount,
+    first_sample_dbfs: dbfs(samples[0]),
+    last_sample_dbfs: dbfs(samples[sampleCount - 1]),
+    leading_silence_sec: Number(leadingSilenceSec.toFixed(6)),
+    trailing_silence_sec: Number(trailingSilenceSec.toFixed(6)),
+    active_start_sec: Number((firstActiveSample === sampleCount ? 0 : firstActiveSample / sampleRate).toFixed(6)),
+    active_end_sec: Number((lastActiveSample < 0 ? 0 : (lastActiveSample + 1) / sampleRate).toFixed(6)),
+    active_intervals_sec: activeIntervals.map((row) => ({
+      start_sec: Number((row.start_sample / sampleRate).toFixed(6)),
+      end_sec: Number((row.end_sample / sampleRate).toFixed(6)),
+    })),
+    tail_10ms_peak_dbfs: dbfs(windowPeak(0.01)),
+    tail_50ms_rms_dbfs: dbfs(windowRms(0.05)),
+  };
+}
+
+async function audioPcmMetrics(filePath) {
+  const pcm = await runBinary("ffmpeg", [
+    "-nostdin",
+    "-v", "error",
+    "-i", filePath,
+    "-map", "0:a:0",
+    "-ac", "1",
+    "-ar", String(stitchSampleRate),
+    "-f", "s16le",
+    "pipe:1",
+  ]);
+  return pcmMetricsFromBuffer(pcm, stitchSampleRate);
+}
+
+function audioQaFindings(metrics, unit, {
+  minTrailingSilence = unitQaMinTrailingSilenceSec,
+} = {}) {
+  const findings = [];
+  const push = (severity, code, details = {}) => findings.push({ severity, code, ...details });
+  if (!metrics?.sample_count || metrics.duration_sec <= 0) {
+    push("blocker", "tts_audio_empty");
+    return findings;
+  }
+  if (metrics.duration_sec < 0.18) {
+    push("blocker", "tts_audio_implausibly_short", { duration_sec: metrics.duration_sec });
+  }
+  if (metrics.clipping_ratio >= 0.0005) {
+    push("blocker", "tts_audio_clipping", { clipping_ratio: metrics.clipping_ratio, peak_dbfs: metrics.peak_dbfs });
+  } else if (metrics.clipping_sample_count > 0) {
+    push("warning", "tts_audio_peak_touches_full_scale", { clipping_sample_count: metrics.clipping_sample_count });
+  }
+  if (Number(metrics.isolated_impulse_count ?? 0) > 0
+    && Number.isFinite(metrics.maximum_isolated_impulse_dbfs)
+    && metrics.maximum_isolated_impulse_dbfs > -3.5) {
+    push("blocker", "tts_audio_impulsive_discontinuity", {
+      maximum_sample_step_dbfs: metrics.maximum_sample_step_dbfs,
+      large_sample_step_count: metrics.large_sample_step_count,
+      maximum_isolated_impulse_dbfs: metrics.maximum_isolated_impulse_dbfs,
+      isolated_impulse_count: metrics.isolated_impulse_count,
+    });
+  } else if (Number(metrics.isolated_impulse_count ?? 0) > 0
+    && Number.isFinite(metrics.maximum_isolated_impulse_dbfs)
+    && metrics.maximum_isolated_impulse_dbfs > -8) {
+    push("warning", "tts_audio_possible_impulsive_click", {
+      maximum_sample_step_dbfs: metrics.maximum_sample_step_dbfs,
+      large_sample_step_count: metrics.large_sample_step_count,
+      maximum_isolated_impulse_dbfs: metrics.maximum_isolated_impulse_dbfs,
+      isolated_impulse_count: metrics.isolated_impulse_count,
+    });
+  }
+  if (Number.isFinite(metrics.last_sample_dbfs) && metrics.last_sample_dbfs > -36) {
+    push("blocker", "tts_audio_endpoint_discontinuity", { last_sample_dbfs: metrics.last_sample_dbfs });
+  }
+  const energeticTail = (Number.isFinite(metrics.tail_10ms_peak_dbfs) && metrics.tail_10ms_peak_dbfs > -35)
+    || (Number.isFinite(metrics.tail_50ms_rms_dbfs) && metrics.tail_50ms_rms_dbfs > -38);
+  if (metrics.trailing_silence_sec < minTrailingSilence && energeticTail) {
+    push("blocker", "tts_audio_tail_not_settled", {
+      trailing_silence_sec: metrics.trailing_silence_sec,
+      required_sec: minTrailingSilence,
+      tail_10ms_peak_dbfs: metrics.tail_10ms_peak_dbfs,
+      tail_50ms_rms_dbfs: metrics.tail_50ms_rms_dbfs,
+    });
+  } else if (metrics.trailing_silence_sec < 0.08) {
+    push("warning", "tts_audio_tail_margin_narrow", { trailing_silence_sec: metrics.trailing_silence_sec });
+  }
+  if (metrics.leading_silence_sec < 0.005) {
+    push("warning", "tts_audio_leading_margin_narrow", { leading_silence_sec: metrics.leading_silence_sec });
+  }
+  if (Number.isFinite(metrics.rms_dbfs) && (metrics.rms_dbfs < -42 || metrics.rms_dbfs > -8)) {
+    push("warning", "tts_audio_loudness_outlier", { rms_dbfs: metrics.rms_dbfs });
+  }
+  const wordTotal = Number(unit?.word_count ?? wordCount(unit?.text));
+  const minimumPlausible = wordTotal > 0 ? wordTotal / 330 * 60 : 0;
+  const maximumPlausible = wordTotal > 0 ? wordTotal / 90 * 60 : Number.POSITIVE_INFINITY;
+  if (wordTotal >= 8 && metrics.duration_sec < minimumPlausible) {
+    push("blocker", "tts_audio_duration_too_short_for_text", { duration_sec: metrics.duration_sec, word_count: wordTotal });
+  }
+  if (wordTotal >= 8 && metrics.duration_sec > maximumPlausible) {
+    push("blocker", "tts_audio_duration_too_long_for_text", { duration_sec: metrics.duration_sec, word_count: wordTotal });
+  }
+  return findings;
+}
+
+export function audioQaFindingsForTests(metrics, unit, options = {}) {
+  return audioQaFindings(metrics, unit, options);
+}
+
+const TRANSCRIPT_INITIALISMS = new Set([
+  "sss", "ss", "xp", "hp", "mp", "dps", "aoe",
+  "ceo", "cfo", "coo", "cto", "cio", "cmo", "hr", "pr", "ai", "ui", "ux",
+  "api", "fbi", "irs", "sec", "nda", "llc", "ipo", "dna", "gps", "usb",
+  "pdf", "url", "vip", "id", "mc",
+]);
+const NUMBER_UNITS = new Map(Object.entries({
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+  ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
+  seventeen: 17, eighteen: 18, nineteen: 19,
+}));
+const NUMBER_TENS = new Map(Object.entries({
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+}));
+const NUMBER_SCALES = new Map(Object.entries({ thousand: 1_000, million: 1_000_000, billion: 1_000_000_000 }));
+const ORDINAL_VALUES = new Map(Object.entries({
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7,
+  eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13,
+  fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18,
+  nineteenth: 19, twentieth: 20, thirtieth: 30, fortieth: 40, fiftieth: 50,
+  sixtieth: 60, seventieth: 70, eightieth: 80, ninetieth: 90,
+}));
+const DECADE_VALUES = new Map(Object.entries({
+  twenties: 20, thirties: 30, forties: 40, fifties: 50,
+  sixties: 60, seventies: 70, eighties: 80, nineties: 90,
+}));
+
+function transcriptInputText(value) {
+  return Array.isArray(value)
+    ? value.map((row) => String(row?.word ?? row ?? "")).join(" ")
+    : String(value ?? "");
+}
+
+function rawTranscriptTokens(value) {
+  return (transcriptInputText(value)
+    .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1$2")
+    .replace(/\b(\d{1,3}),?\s+(?=\d{3}\b)/g, "$1")
+    .replace(/\bI['’]d\s+not\b/gi, "I did not")
+    .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
+    .replace(/([A-Za-z])[-‐‑‒–—]([A-Za-z])/gu, "$1 $2")
+    .match(/[+-]?\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|[A-Za-z]+(?:['’][A-Za-z]+)?\.?|[/%]/g) ?? [])
+    .map((raw) => {
+      const lower = raw.toLowerCase();
+      if (lower === "st.") return "saint";
+      if (/^[+-]?\d/.test(lower) || lower === "/" || lower === "%") return lower.replaceAll(",", "");
+      return lower.replace(/[.'’]/g, "").replace(/[^a-z0-9]+/g, "");
+    })
+    .filter(Boolean);
+}
+
+function normalizedNumberString(value) {
+  if (!Number.isFinite(value)) return null;
+  if (Number.isInteger(value)) return String(value);
+  return String(Number(value.toFixed(12)));
+}
+
+function parseNumberAt(tokens, start) {
+  const token = String(tokens[start] ?? "");
+  if (ORDINAL_VALUES.has(token)) {
+    return { value: String(ORDINAL_VALUES.get(token)), end: start + 1, suffix: "ordinal" };
+  }
+  if (DECADE_VALUES.has(token)) {
+    return { value: String(DECADE_VALUES.get(token)), end: start + 1, suffix: "decade" };
+  }
+  const directOrdinal = token.match(/^([+-]?\d+)(?:st|nd|rd|th)$/i);
+  if (directOrdinal) {
+    return { value: normalizedNumberString(Number(directOrdinal[1])), end: start + 1, suffix: "ordinal" };
+  }
+  const direct = token.match(/^([+-]?\d+(?:\.\d+)?)([%xs])?$/i);
+  if (direct) {
+    let value = Number(direct[1]);
+    let end = start + 1;
+    if (!direct[2] && NUMBER_SCALES.has(tokens[end])) {
+      value *= NUMBER_SCALES.get(tokens[end]);
+      end += 1;
+    }
+    return {
+      value: normalizedNumberString(value),
+      end,
+      suffix: direct[2]?.toLowerCase() === "s" ? "decade" : direct[2]?.toLowerCase() ?? null,
+    };
+  }
+  let index = start;
+  let negative = false;
+  if (tokens[index] === "negative" || tokens[index] === "minus") {
+    negative = true;
+    index += 1;
+  }
+  let total = 0;
+  let current = 0;
+  let sawNumber = false;
+  let decimalDigits = "";
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (NUMBER_UNITS.has(token)) {
+      current += NUMBER_UNITS.get(token);
+      sawNumber = true;
+      index += 1;
+      continue;
+    }
+    if (NUMBER_TENS.has(token)) {
+      current += NUMBER_TENS.get(token);
+      sawNumber = true;
+      index += 1;
+      continue;
+    }
+    if (token === "hundred") {
+      current = Math.max(1, current) * 100;
+      sawNumber = true;
+      index += 1;
+      continue;
+    }
+    if (NUMBER_SCALES.has(token) && sawNumber) {
+      total += Math.max(1, current) * NUMBER_SCALES.get(token);
+      current = 0;
+      index += 1;
+      continue;
+    }
+    if (token === "and" && sawNumber && (current >= 100 || total > 0)
+      && (NUMBER_UNITS.has(tokens[index + 1]) || NUMBER_TENS.has(tokens[index + 1]) || tokens[index + 1] === "hundred")) {
+      index += 1;
+      continue;
+    }
+    if (token === "point" && sawNumber) {
+      let cursor = index + 1;
+      while (NUMBER_UNITS.has(tokens[cursor]) && NUMBER_UNITS.get(tokens[cursor]) <= 9) {
+        decimalDigits += String(NUMBER_UNITS.get(tokens[cursor]));
+        cursor += 1;
+      }
+      if (decimalDigits) index = cursor;
+      break;
+    }
+    break;
+  }
+  if (!sawNumber) return null;
+  const integer = total + current;
+  const value = decimalDigits ? Number(`${integer}.${decimalDigits}`) : integer;
+  return {
+    value: normalizedNumberString(negative ? -value : value),
+    end: index,
+    suffix: null,
+  };
+}
+
+function canonicalTranscriptTokensWithoutAliases(value) {
+  const base = rawTranscriptTokens(value);
+  const compounds = [];
+  for (let index = 0; index < base.length; index += 1) {
+    if (base[index] === "live" && base[index + 1] === "stream") {
+      compounds.push("livestream");
+      index += 1;
+    } else if (base[index] === "live" && base[index + 1] === "streaming") {
+      compounds.push("livestreaming");
+      index += 1;
+    } else if (base[index] === "deed" && base[index + 1] === "holder") {
+      compounds.push("deedholder");
+      index += 1;
+    } else if (base[index] === "for" && base[index + 1] === "closure") {
+      compounds.push("foreclosure");
+      index += 1;
+    } else if (base[index] === "counter" && base[index + 1] === "claim") {
+      compounds.push("counterclaim");
+      index += 1;
+    } else if (base[index] === "after" && base[index + 1] === "life") {
+      compounds.push("afterlife");
+      index += 1;
+    } else {
+      compounds.push(base[index]);
+    }
+  }
+  const output = [];
+  for (let index = 0; index < compounds.length;) {
+    const parsed = parseNumberAt(compounds, index);
+    if (parsed?.value != null) {
+      const ratioMarker = compounds[parsed.end] === "/" || (
+        compounds[parsed.end] === "out" && compounds[parsed.end + 1] === "of"
+      );
+      const ratioStart = compounds[parsed.end] === "/" ? parsed.end + 1 : parsed.end + 2;
+      const right = ratioMarker ? parseNumberAt(compounds, ratioStart) : null;
+      if (right?.value != null) {
+        output.push(`ratio:${parsed.value}/${right.value}`);
+        index = right.end;
+        continue;
+      }
+      const suffix = parsed.suffix
+        ?? (compounds[parsed.end] === "%" || compounds[parsed.end] === "percent" ? "percent" : null)
+        ?? (compounds[parsed.end] === "times" ? "times" : null);
+      output.push(suffix === "%" || suffix === "percent"
+        ? `pct:${parsed.value}`
+        : suffix === "x" || suffix === "times"
+        ? `times:${parsed.value}`
+        : suffix === "ordinal"
+        ? `ord:${parsed.value}`
+        : suffix === "decade"
+        ? `decade:${parsed.value}`
+        : `num:${parsed.value}`);
+      index = parsed.end + (parsed.suffix ? 0 : suffix ? 1 : 0);
+      continue;
+    }
+    if (/^[a-z]$/.test(compounds[index])) {
+      let end = index;
+      let letters = "";
+      while (end < compounds.length && /^[a-z]$/.test(compounds[end])) {
+        letters += compounds[end];
+        end += 1;
+      }
+      if (letters.length >= 2) {
+        output.push(`abbr:${letters}`);
+        index = end;
+        continue;
+      }
+    }
+    if (TRANSCRIPT_INITIALISMS.has(compounds[index])) {
+      output.push(`abbr:${compounds[index]}`);
+    } else if (compounds[index] === "s" && compounds[index + 1] === "rank") {
+      output.push("abbr:s");
+    } else {
+      output.push(compounds[index]);
+    }
+    index += 1;
+  }
+  return output;
+}
+
+function replaceTokenSequence(tokens, pattern, replacement) {
+  if (!pattern.length) return tokens;
+  const output = [];
+  for (let index = 0; index < tokens.length;) {
+    const matches = pattern.every((token, offset) => tokens[index + offset] === token);
+    if (matches) {
+      output.push(replacement);
+      index += pattern.length;
+    } else {
+      output.push(tokens[index]);
+      index += 1;
+    }
+  }
+  return output;
+}
+
+function transcriptTokens(value, equivalentPhrases = []) {
+  let tokens = canonicalTranscriptTokensWithoutAliases(value);
+  const aliases = equivalentPhrases.flatMap((row, index) => {
+    const from = canonicalTranscriptTokensWithoutAliases(row?.from ?? "");
+    const to = canonicalTranscriptTokensWithoutAliases(row?.to ?? "");
+    if (!from.length || !to.length) return [];
+    const alias = `alias:${sha256Text(JSON.stringify([index, from, to])).slice(0, 12)}`;
+    return [{ pattern: from, alias }, { pattern: to, alias }];
+  }).sort((left, right) => right.pattern.length - left.pattern.length);
+  for (const { pattern, alias } of aliases) tokens = replaceTokenSequence(tokens, pattern, alias);
+  return tokens;
+}
+
+function transcriptAlignment(intended, recognized) {
+  const rows = intended.length + 1;
+  const columns = recognized.length + 1;
+  const scores = Array.from({ length: rows }, () => new Uint16Array(columns));
+  for (let left = 0; left < rows; left += 1) scores[left][0] = left;
+  for (let right = 0; right < columns; right += 1) scores[0][right] = right;
+  for (let left = 1; left < rows; left += 1) {
+    for (let right = 1; right < columns; right += 1) {
+      const substitution = scores[left - 1][right - 1] + (intended[left - 1] === recognized[right - 1] ? 0 : 1);
+      scores[left][right] = Math.min(substitution, scores[left - 1][right] + 1, scores[left][right - 1] + 1);
+    }
+  }
+  const operations = [];
+  let left = intended.length;
+  let right = recognized.length;
+  while (left > 0 || right > 0) {
+    if (left > 0 && right > 0) {
+      const cost = intended[left - 1] === recognized[right - 1] ? 0 : 1;
+      if (scores[left][right] === scores[left - 1][right - 1] + cost) {
+        operations.push({
+          type: cost === 0 ? "match" : "substitution",
+          intended: intended[left - 1],
+          recognized: recognized[right - 1],
+        });
+        left -= 1;
+        right -= 1;
+        continue;
+      }
+    }
+    if (left > 0 && scores[left][right] === scores[left - 1][right] + 1) {
+      operations.push({ type: "deletion", intended: intended[left - 1], recognized: null });
+      left -= 1;
+      continue;
+    }
+    operations.push({ type: "insertion", intended: null, recognized: recognized[right - 1] });
+    right -= 1;
+  }
+  return operations.reverse();
+}
+
+function longestRun(operations, type) {
+  let longest = 0;
+  let current = 0;
+  for (const operation of operations) {
+    if (operation.type === type) {
+      current += 1;
+      longest = Math.max(longest, current);
+    } else current = 0;
+  }
+  return longest;
+}
+
+function transcriptQa(intendedText, recognizedText, {
+  maxWer = unitQaMaxWer,
+  equivalentPhrases = [],
+  blockAnySubstitution = true,
+  blockIsolatedEdits = true,
+} = {}) {
+  const intendedRaw = rawTranscriptTokens(intendedText);
+  const recognizedRaw = rawTranscriptTokens(recognizedText);
+  const intended = transcriptTokens(intendedText, equivalentPhrases);
+  const recognized = transcriptTokens(recognizedText, equivalentPhrases);
+  const operations = transcriptAlignment(intended, recognized);
+  const deletions = operations.filter((row) => row.type === "deletion").length;
+  const insertions = operations.filter((row) => row.type === "insertion").length;
+  const substitutions = operations.filter((row) => row.type === "substitution").length;
+  const errors = deletions + insertions + substitutions;
+  const wer = intended.length ? errors / intended.length : recognized.length ? 1 : 0;
+  const deletionRun = longestRun(operations, "deletion");
+  const insertionRun = longestRun(operations, "insertion");
+  let leadingDeletionRun = 0;
+  for (const operation of operations) {
+    if (operation.type === "insertion") continue;
+    if (operation.type !== "deletion") break;
+    leadingDeletionRun += 1;
+  }
+  let trailingDeletionRun = 0;
+  for (let index = operations.length - 1; index >= 0; index -= 1) {
+    if (operations[index].type === "insertion") continue;
+    if (operations[index].type !== "deletion") break;
+    trailingDeletionRun += 1;
+  }
+  const findings = [];
+  const push = (severity, code, details = {}) => findings.push({ severity, code, ...details });
+  const protectedToken = (value) => /^(?:abbr|num|pct|ratio|times|alias):/.test(String(value ?? ""));
+  if (!recognized.length) push("blocker", "tts_transcript_empty");
+  if (deletionRun >= 2) push("blocker", "tts_transcript_contiguous_words_missing", { longest_deletion_run: deletionRun });
+  if (leadingDeletionRun > 0) push("blocker", "tts_transcript_opening_word_missing", { missing_count: leadingDeletionRun });
+  if (trailingDeletionRun > 0) push("blocker", "tts_transcript_final_word_missing", { missing_count: trailingDeletionRun });
+  if (deletions >= Math.max(3, Math.ceil(intended.length * 0.12))) {
+    push("blocker", "tts_transcript_excessive_deletions", { deletions, intended_word_count: intended.length });
+  }
+  if (insertionRun >= 3) push("blocker", "tts_transcript_unexpected_word_burst", { longest_insertion_run: insertionRun });
+  if (wer > maxWer && errors > 1) {
+    push("blocker", "tts_transcript_wer_exceeded", { word_error_rate: Number(wer.toFixed(6)), maximum: maxWer });
+  }
+  const protectedMismatches = operations.filter((operation) => (
+    operation.type === "substitution"
+    && (protectedToken(operation.intended) || protectedToken(operation.recognized))
+  ));
+  const protectedDeletions = operations.filter((operation) => operation.type === "deletion" && protectedToken(operation.intended));
+  const protectedInsertions = operations.filter((operation) => operation.type === "insertion" && protectedToken(operation.recognized));
+  if (protectedMismatches.length) {
+    push("blocker", "tts_transcript_protected_value_mismatch", { operations: protectedMismatches });
+  }
+  if (protectedDeletions.length) {
+    push("blocker", "tts_transcript_protected_value_missing", { operations: protectedDeletions });
+  }
+  if (protectedInsertions.length) {
+    push("blocker", "tts_transcript_unexpected_protected_value", { operations: protectedInsertions });
+  }
+  if (deletions > 0 && !findings.some((row) => row.code.includes("missing") || row.code === "tts_transcript_excessive_deletions")) {
+    push(blockIsolatedEdits ? "blocker" : "warning", "tts_transcript_isolated_word_deletion", {
+      deletions,
+      adjudication_policy: blockIsolatedEdits
+        ? "requires_medium_whisper_confirmation"
+        : "medium_whisper_difference_without_structural_loss",
+    });
+  }
+  if (insertions > 0 && insertionRun < 3) {
+    push(blockIsolatedEdits ? "blocker" : "warning", "tts_transcript_isolated_insertion", {
+      insertions,
+      adjudication_policy: blockIsolatedEdits
+        ? "requires_medium_whisper_confirmation"
+        : "medium_whisper_difference_without_repetition_burst",
+    });
+  }
+  if (substitutions > 0 && blockAnySubstitution) {
+    push("blocker", errors <= 1 ? "tts_transcript_isolated_substitution" : "tts_transcript_word_substitutions", {
+      substitutions,
+      adjudication_policy: "requires_medium_whisper_confirmation",
+    });
+  }
+  return {
+    intended_word_count: intendedRaw.length,
+    recognized_word_count: recognizedRaw.length,
+    intended_canonical_token_count: intended.length,
+    recognized_canonical_token_count: recognized.length,
+    intended_canonical_tokens: intended,
+    recognized_canonical_tokens: recognized,
+    deletions,
+    insertions,
+    substitutions,
+    word_error_rate: Number(wer.toFixed(6)),
+    longest_deletion_run: deletionRun,
+    longest_insertion_run: insertionRun,
+    leading_deletion_run: leadingDeletionRun,
+    trailing_deletion_run: trailingDeletionRun,
+    operations,
+    findings,
+  };
+}
+
+export function transcriptQaForTests(intendedText, recognizedText, options = {}) {
+  return transcriptQa(intendedText, recognizedText, options);
+}
+
+function transcriptEquivalentPhrases(unit) {
+  return [
+    { from: "Manhwa", to: "Manwa" },
+    { from: "Kane", to: "Cain" },
+    { from: "Kane", to: "cane" },
+    { from: "a claim", to: "acclaim" },
+    ...(Array.isArray(unit?.tts_override_replacements_applied)
+      ? unit.tts_override_replacements_applied.filter((row) => row?.asr_equivalence_allowed === true)
+      : []),
+    ...(Array.isArray(unit?.asr_equivalent_phrases) ? unit.asr_equivalent_phrases : []),
+  ];
+}
+
+function untranscribedActiveIntervals(metrics, recognizedWords, paddingSec = 0.12) {
+  if (!Array.isArray(metrics?.active_intervals_sec) || !recognizedWords?.length) return [];
+  const words = recognizedWords
+    .map((word) => ({
+      start_sec: Math.max(0, Number(word.start_sec ?? 0) - paddingSec),
+      end_sec: Number(word.end_sec ?? 0) + paddingSec,
+    }))
+    .sort((left, right) => left.start_sec - right.start_sec);
+  const windows = [];
+  for (const word of words) {
+    const previous = windows.at(-1);
+    if (previous && word.start_sec <= previous.end_sec) previous.end_sec = Math.max(previous.end_sec, word.end_sec);
+    else windows.push({ ...word });
+  }
+  const speechStart = Number(recognizedWords[0].start_sec ?? 0);
+  const speechEnd = Number(recognizedWords.at(-1).end_sec ?? 0);
+  const residual = [];
+  for (const interval of metrics.active_intervals_sec) {
+    let pieces = [{
+      start_sec: Math.max(Number(interval.start_sec ?? 0), speechStart),
+      end_sec: Math.min(Number(interval.end_sec ?? 0), speechEnd),
+    }].filter((piece) => piece.end_sec > piece.start_sec);
+    for (const window of windows) {
+      pieces = pieces.flatMap((piece) => {
+        if (window.end_sec <= piece.start_sec || window.start_sec >= piece.end_sec) return [piece];
+        const output = [];
+        if (window.start_sec > piece.start_sec) output.push({ start_sec: piece.start_sec, end_sec: window.start_sec });
+        if (window.end_sec < piece.end_sec) output.push({ start_sec: window.end_sec, end_sec: piece.end_sec });
+        return output;
+      });
+      if (!pieces.length) break;
+    }
+    residual.push(...pieces.filter((piece) => piece.end_sec - piece.start_sec >= 0.16));
+  }
+  return residual.map((piece) => ({
+    start_sec: Number(piece.start_sec.toFixed(3)),
+    end_sec: Number(piece.end_sec.toFixed(3)),
+    duration_sec: Number((piece.end_sec - piece.start_sec).toFixed(3)),
+  }));
+}
+
+export function untranscribedActiveIntervalsForTests(metrics, recognizedWords, paddingSec) {
+  return untranscribedActiveIntervals(metrics, recognizedWords, paddingSec);
+}
+
+async function runFasterWhisperUnitBatch(rows, {
+  model = unitQaWhisperModel,
+  device = unitQaWhisperDevice,
+  computeType = unitQaWhisperComputeType,
+} = {}) {
+  if (!rows.length) return new Map();
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-tts-unit-qa-"));
+  const inputPath = path.join(tmpDir, "input.json");
+  const outputPath = path.join(tmpDir, "output.json");
+  await fs.writeFile(inputPath, JSON.stringify(rows.map((row) => ({ unit_id: row.unit_id, wav: row.wav }))), "utf8");
+  const python = String.raw`
+import json, sys
+from faster_whisper import WhisperModel
+
+input_path, output_path, model_name, device, compute_type = sys.argv[1:6]
+with open(input_path, "r", encoding="utf-8") as handle:
+    rows = json.load(handle)
+model = WhisperModel(model_name, device=device, compute_type=compute_type)
+output = []
+for row in rows:
+    segments, info = model.transcribe(
+        row["wav"],
+        language="en",
+        word_timestamps=True,
+        vad_filter=False,
+        beam_size=5,
+        condition_on_previous_text=False,
+    )
+    segment_rows = list(segments)
+    words = []
+    for segment in segment_rows:
+        for word in (segment.words or []):
+            words.append({
+                "word": word.word.strip(),
+                "start_sec": round(float(word.start), 3),
+                "end_sec": round(float(word.end), 3),
+                "probability": round(float(getattr(word, "probability", 0.0) or 0.0), 4),
+            })
+    output.append({
+        "unit_id": row["unit_id"],
+        "text": " ".join(segment.text.strip() for segment in segment_rows if segment.text.strip()).strip(),
+        "words": words,
+        "language": info.language,
+        "language_probability": float(info.language_probability),
+    })
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump(output, handle, ensure_ascii=False)
+`;
+  try {
+    const timeoutMs = Number(process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_QA_TIMEOUT_MS ?? 7_200_000);
+    await new Promise((resolve, reject) => {
+      const child = spawn("python3", [
+        "-c", python,
+        inputPath,
+        outputPath,
+        model,
+        device,
+        computeType,
+      ], { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`Per-unit Whisper QA timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on("exit", (code, signal) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`Per-unit Whisper QA failed with code ${code ?? "null"} signal ${signal ?? "null"}: ${stderr.slice(-2000)}`));
+      });
+    });
+    const output = JSON.parse(await fs.readFile(outputPath, "utf8"));
+    return new Map(output.map((row) => [String(row.unit_id), row]));
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+async function mapPool(items, limit, worker) {
+  const output = new Array(items.length);
+  let cursor = 0;
+  async function runWorker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      output[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => runWorker()));
+  return output;
+}
+
+function requiredMediumQaReasons(row = {}) {
+  const riskFlags = new Set(
+    (Array.isArray(row.risk_flags) ? row.risk_flags : [])
+      .map((value) => String(value ?? "").toLowerCase()),
+  );
+  const sourceKind = [
+    row.kind,
+    row.context_family,
+    row.unit_type,
+    row.source_kind,
+  ].map((value) => String(value ?? "").toLowerCase());
+  const speaker = String(row.speaker ?? row.source_speaker ?? "").toUpperCase();
+  const reasons = [];
+  if (riskFlags.has("system_ui_atomic")
+    || sourceKind.some((value) => /system[_ -]?ui|system_ui_atomic/.test(value))
+    || /^(?:SYSTEM|NOTICE|WARNING|UI)$/.test(speaker)) {
+    reasons.push("system_ui_atomic");
+  }
+  if (riskFlags.has("protected_term_or_value")
+    || (Array.isArray(row.protected_terms) && row.protected_terms.length > 0)
+    || (Array.isArray(row.protected_tokens) && row.protected_tokens.length > 0)
+    || (Array.isArray(row.protected_values) && row.protected_values.length > 0)) {
+    reasons.push("protected_term_or_value");
+  }
+  return reasons;
+}
+
+export function requiredMediumQaReasonsForTests(row = {}) {
+  return requiredMediumQaReasons(row);
+}
+
+async function runUnitOutputQa(results) {
+  const usable = results.filter((row) => row?.wav);
+  const measurements = await mapPool(usable, 6, async (row) => ({
+    row,
+    audio_sha256: await sha256File(row.wav),
+    metrics: await audioPcmMetrics(row.wav),
+  }));
+  const reusableTranscripts = new Map();
+  const needsTranscript = [];
+  for (const measurement of measurements) {
+    const previousQa = measurement.row.unit_qa;
+    const transcriptQaRequired = unitTranscriptQa
+      && String(measurement.row.provider ?? "") !== "kokoro_local";
+    if (transcriptQaRequired
+      && previousQa?.policy_version === TTS_OUTPUT_QA_POLICY_VERSION
+      && previousQa?.audio_sha256 === measurement.audio_sha256
+      && previousQa?.transcript?.recognized_text != null) {
+      reusableTranscripts.set(String(measurement.row.unit_id), {
+        text: previousQa.transcript.recognized_text,
+        words: previousQa.transcript.recognized_words ?? [],
+        reused: true,
+      });
+    } else if (transcriptQaRequired) {
+      needsTranscript.push(measurement.row);
+    }
+  }
+  let transcriptEngineError = null;
+  let freshTranscripts = new Map();
+  if (unitTranscriptQa) {
+    try {
+      freshTranscripts = await runFasterWhisperUnitBatch(needsTranscript);
+    } catch (error) {
+      transcriptEngineError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  const rows = measurements.map(({ row, audio_sha256, metrics }) => {
+    const recognized = reusableTranscripts.get(String(row.unit_id)) ?? freshTranscripts.get(String(row.unit_id)) ?? null;
+    const audioFindings = audioQaFindings(metrics, row);
+    const deliveryFirstPrimary = String(row.provider ?? "") === "kokoro_local";
+    const transcriptQaRequired = unitTranscriptQa && !deliveryFirstPrimary;
+    const transcript = recognized ? transcriptQa(row.text, recognized.text, {
+      equivalentPhrases: transcriptEquivalentPhrases(row),
+      maxWer: deliveryFirstPrimary ? Math.max(unitQaMaxWer, 0.45) : unitQaMaxWer,
+      blockAnySubstitution: !deliveryFirstPrimary,
+      blockIsolatedEdits: !deliveryFirstPrimary,
+    }) : null;
+    const findings = [...audioFindings, ...(transcript?.findings ?? [])];
+    if (transcriptQaRequired && transcriptEngineError && !recognized) {
+      findings.push({
+        severity: "blocker",
+        code: "tts_transcript_qa_engine_failed",
+        error: transcriptEngineError,
+      });
+    } else if (transcriptQaRequired && !recognized) {
+      findings.push({
+        severity: "blocker",
+        code: "tts_transcript_qa_missing_result",
+      });
+    }
+    if (!transcriptQaRequired) {
+      findings.push({
+        severity: "warning",
+        code: deliveryFirstPrimary
+          ? "tts_primary_transcript_qa_deferred_to_full_stream"
+          : "tts_transcript_qa_explicitly_disabled",
+        note: deliveryFirstPrimary
+          ? "Puck unit transcript QA is intentionally deferred to stitched-stream Whisper and official word timing."
+          : "Acoustic QA ran, but transcript fidelity was not independently checked.",
+      });
+    }
+    if (recognized?.words?.length) {
+      const firstWordStart = Number(recognized.words[0].start_sec ?? 0);
+      const lastWordEnd = Number(recognized.words.at(-1).end_sec ?? 0);
+      const unexplainedLead = firstWordStart - Number(metrics.active_start_sec ?? 0);
+      const unexplainedTail = Number(metrics.active_end_sec ?? metrics.duration_sec ?? 0) - lastWordEnd;
+      const internalBursts = untranscribedActiveIntervals(metrics, recognized.words);
+      const longestInternalBurst = internalBursts.reduce((maximum, interval) => Math.max(maximum, interval.duration_sec), 0);
+      if (unexplainedLead > 0.6) {
+        findings.push({ severity: "blocker", code: "tts_audio_unexplained_active_lead", unexplained_active_sec: Number(unexplainedLead.toFixed(3)) });
+      } else if (unexplainedLead > 0.35) {
+        findings.push({ severity: "warning", code: "tts_audio_possible_non_speech_lead", unexplained_active_sec: Number(unexplainedLead.toFixed(3)) });
+      }
+      if (unexplainedTail > 0.6) {
+        findings.push({ severity: "blocker", code: "tts_audio_unexplained_active_tail", unexplained_active_sec: Number(unexplainedTail.toFixed(3)) });
+      } else if (unexplainedTail > 0.35) {
+        findings.push({ severity: "warning", code: "tts_audio_possible_non_speech_tail", unexplained_active_sec: Number(unexplainedTail.toFixed(3)) });
+      }
+      if (longestInternalBurst > 0.45) {
+        findings.push({
+          severity: "blocker",
+          code: "tts_audio_untranscribed_internal_burst",
+          longest_untranscribed_active_sec: Number(longestInternalBurst.toFixed(3)),
+          intervals: internalBursts,
+        });
+      } else if (internalBursts.length) {
+        findings.push({
+          severity: "warning",
+          code: "tts_audio_possible_internal_breath_or_noise",
+          longest_untranscribed_active_sec: Number(longestInternalBurst.toFixed(3)),
+          intervals: internalBursts,
+        });
+      }
+    }
+    const blockers = findings.filter((finding) => finding.severity === "blocker");
+    return {
+      policy_version: TTS_OUTPUT_QA_POLICY_VERSION,
+      status: blockers.length ? "blocked" : findings.length ? "passed_with_warnings" : "passed",
+      audio_sha256,
+      metrics,
+      transcript: recognized ? {
+        engine: "faster_whisper",
+        model: unitQaWhisperModel,
+        device: unitQaWhisperDevice,
+        compute_type: unitQaWhisperComputeType,
+        recognized_text: recognized.text,
+        recognized_words: recognized.words ?? [],
+        reused_exact_hash_qa: Boolean(recognized.reused),
+        ...transcript,
+      } : {
+        status: "not_run",
+        reason: unitTranscriptQa ? "no_transcript_returned" : "explicitly_disabled",
+      },
+      findings,
+    };
+  });
+  const transcriptOnlyBlockedIndexes = rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row, index }) => {
+      if (String(measurements[index]?.row?.provider ?? "") === "kokoro_local") {
+        return false;
+      }
+      const blockers = row.findings.filter((finding) => finding.severity === "blocker");
+      return blockers.length > 0 && blockers.every((finding) => String(finding.code ?? "").startsWith("tts_transcript_"));
+    })
+    .map(({ index }) => index);
+  const forcedMediumReasonsByIndex = new Map(
+    measurements
+      .map(({ row }, index) => [
+        index,
+        String(row.provider ?? "") === "kokoro_local" ? [] : requiredMediumQaReasons(row),
+      ])
+      .filter(([, reasons]) => reasons.length > 0),
+  );
+  const mediumAdjudicationIndexes = [...new Set([
+    ...transcriptOnlyBlockedIndexes,
+    ...forcedMediumReasonsByIndex.keys(),
+  ])].sort((left, right) => left - right);
+  if (mediumAdjudicationIndexes.length && unitQaWhisperModel !== "medium") {
+    let mediumMap = new Map();
+    let mediumError = null;
+    try {
+      mediumMap = await runFasterWhisperUnitBatch(
+        mediumAdjudicationIndexes.map((index) => measurements[index].row),
+        { model: "medium" },
+      );
+    } catch (error) {
+      mediumError = error instanceof Error ? error.message : String(error);
+    }
+    for (const index of mediumAdjudicationIndexes) {
+      const source = measurements[index].row;
+      const medium = mediumMap.get(String(source.unit_id)) ?? null;
+      const forcedReasons = forcedMediumReasonsByIndex.get(index) ?? [];
+      if (!medium) {
+        rows[index].transcript_cross_validation = {
+          status: "failed",
+          model: "medium",
+          error: mediumError ?? "missing medium transcript",
+          required_reasons: forcedReasons,
+        };
+        if (forcedReasons.length) {
+          rows[index].findings = [
+            ...(rows[index].findings ?? []),
+            {
+              severity: "blocker",
+              code: "tts_required_medium_qa_missing",
+              required_reasons: forcedReasons,
+              error: mediumError ?? "missing medium transcript",
+            },
+          ];
+          rows[index].status = "blocked";
+        }
+        continue;
+      }
+      const mediumTranscript = transcriptQa(source.text, medium.text, {
+        equivalentPhrases: transcriptEquivalentPhrases(source),
+        maxWer: Math.max(unitQaMaxWer, 0.3),
+        blockAnySubstitution: false,
+        blockIsolatedEdits: false,
+      });
+      const mediumFindings = [
+        ...audioQaFindings(measurements[index].metrics, source),
+        ...mediumTranscript.findings,
+      ];
+      const mediumBlockers = mediumFindings.filter((finding) => finding.severity === "blocker");
+      rows[index].transcript_cross_validation = {
+        status: mediumBlockers.length ? "blocked" : "passed",
+        model: "medium",
+        primary_model: unitQaWhisperModel,
+        required_reasons: forcedReasons,
+        primary_recognized_text: rows[index].transcript?.recognized_text ?? null,
+        recognized_text: medium.text,
+        recognized_words: medium.words ?? [],
+        ...mediumTranscript,
+        findings: mediumFindings,
+      };
+      if (forcedReasons.length || !mediumBlockers.length) {
+        rows[index].status = mediumFindings.length ? "passed_with_warnings" : "passed";
+        if (mediumBlockers.length) rows[index].status = "blocked";
+        rows[index].transcript = {
+          engine: "faster_whisper",
+          model: "medium",
+          device: unitQaWhisperDevice,
+          compute_type: unitQaWhisperComputeType,
+          recognized_text: medium.text,
+          recognized_words: medium.words ?? [],
+          reused_exact_hash_qa: false,
+          cross_validated_from_primary_model: unitQaWhisperModel,
+          ...mediumTranscript,
+        };
+        rows[index].findings = mediumFindings;
+      }
+    }
+  }
+  const byUnitId = new Map(rows.map((row, index) => [String(measurements[index].row.unit_id), row]));
+  for (const result of results) {
+    if (result?.unit_id && byUnitId.has(String(result.unit_id))) result.unit_qa = byUnitId.get(String(result.unit_id));
+  }
+  const blockers = rows.flatMap((row, index) => row.findings
+    .filter((finding) => finding.severity === "blocker")
+    .map((finding) => ({ unit_id: measurements[index].row.unit_id, ...finding })));
+  const warnings = rows.flatMap((row, index) => row.findings
+    .filter((finding) => finding.severity === "warning")
+    .map((finding) => ({ unit_id: measurements[index].row.unit_id, ...finding })));
+  return {
+    status: blockers.length ? "blocked" : "passed",
+    policy_version: TTS_OUTPUT_QA_POLICY_VERSION,
+    transcript_qa_enabled: unitTranscriptQa,
+    transcript_engine: unitTranscriptQa ? "faster_whisper" : null,
+    transcript_model: unitTranscriptQa ? unitQaWhisperModel : null,
+    transcript_engine_error: transcriptEngineError,
+    unit_count: rows.length,
+    passed_unit_count: rows.filter((row) => row.status !== "blocked").length,
+    blocked_unit_count: rows.filter((row) => row.status === "blocked").length,
+    blocker_count: blockers.length,
+    warning_count: warnings.length,
+    blockers,
+    warnings,
+    units: results.map((row) => ({
+      unit_id: row.unit_id,
+      segment_id: row.segment_id,
+      text: row.text,
+      wav: row.wav,
+      qa: row.unit_qa ?? null,
+    })),
+  };
+}
+
+export async function runUnitOutputQaForDiagnostics(results) {
+  return runUnitOutputQa(results);
 }
 
 function concatLine(filePath) {
@@ -958,19 +2466,380 @@ async function writeSilenceWav(filePath, durationSec) {
   return filePath;
 }
 
-async function stitchWavs(results, finalWav) {
+function stitchBoundaryPadding(leftMetrics, rightMetrics, targetGapSec, edgePadSec = stitchEdgePadSec) {
+  const retainedLeft = Math.min(edgePadSec, Math.max(0, Number(leftMetrics?.trailing_silence_sec ?? 0)));
+  const retainedRight = Math.min(edgePadSec, Math.max(0, Number(rightMetrics?.leading_silence_sec ?? 0)));
+  const inserted = Math.max(0, targetGapSec - retainedLeft - retainedRight);
+  return {
+    target_gap_sec: Number(targetGapSec.toFixed(6)),
+    retained_left_trailing_silence_sec: Number(retainedLeft.toFixed(6)),
+    retained_right_leading_silence_sec: Number(retainedRight.toFixed(6)),
+    inserted_silence_sec: Number(inserted.toFixed(6)),
+    effective_gap_sec: Number((retainedLeft + retainedRight + inserted).toFixed(6)),
+  };
+}
+
+export function stitchBoundaryPaddingForTests(leftMetrics, rightMetrics, targetGapSec, edgePadSec) {
+  return stitchBoundaryPadding(leftMetrics, rightMetrics, targetGapSec, edgePadSec);
+}
+
+function firstSourceSegmentId(row) {
+  return String(row?.source_segment_ids?.[0] ?? row?.source_segment_id ?? row?.segment_id ?? "");
+}
+
+function lastSourceSegmentId(row) {
+  return String(row?.source_segment_ids?.at?.(-1) ?? row?.source_segment_id ?? row?.segment_id ?? "");
+}
+
+async function prepareStitchInput(row, index, options = {}) {
+  const metrics = row?.unit_qa?.metrics;
+  if (!metrics || row.unit_qa?.status === "blocked") {
+    throw new Error(`Refusing to prepare stitch input ${row?.unit_id ?? index}: per-unit audio QA is missing or blocked.`);
+  }
+  const leading = Math.max(0, Number(metrics.leading_silence_sec ?? 0));
+  const trailing = Math.max(0, Number(metrics.trailing_silence_sec ?? 0));
+  const duration = Math.max(0, Number(metrics.duration_sec ?? row.duration_sec ?? 0));
+  const trimStart = Math.max(0, leading - stitchEdgePadSec);
+  const trimEnd = Math.min(duration, duration - Math.max(0, trailing - stitchEdgePadSec));
+  const contentDuration = trimEnd - trimStart;
+  if (contentDuration < 0.2) throw new Error(`Refusing to stitch ${row.unit_id}: padding-aware trim would leave ${contentDuration.toFixed(3)}s.`);
+  const repairTailSilenceSec = options?.repairTailUnitIds?.has(String(row.unit_id))
+    ? Math.max(0.06, Number(options.repairTailSilenceSec ?? 0.06))
+    : 0;
+  const preparedDuration = contentDuration + repairTailSilenceSec;
+  const hashPrefix = String(row.unit_qa.audio_sha256 ?? "unhashed").slice(0, 12);
+  const preparationPolicy = {
+    sample_rate: stitchSampleRate,
+    edge_pad_sec: stitchEdgePadSec,
+    fade_sec: stitchFadeSec,
+    diagnostic_repair_tail_silence_sec: repairTailSilenceSec,
+  };
+  const policyHash = sha256Text(JSON.stringify(preparationPolicy)).slice(0, 12);
+  const preparedDir = path.join(outDir, "stitch-inputs");
+  const preparedPath = path.join(preparedDir, `${String(index + 1).padStart(4, "0")}-${slug(row.unit_id)}-${hashPrefix}-${policyHash}.wav`);
+  await fs.mkdir(preparedDir, { recursive: true });
+  if (!(await exists(preparedPath))) {
+    const fade = Math.min(stitchFadeSec, contentDuration / 4);
+    const fadeOutStart = Math.max(0, contentDuration - fade);
+    const filter = [
+      `atrim=start=${trimStart.toFixed(6)}:end=${trimEnd.toFixed(6)}`,
+      "asetpts=PTS-STARTPTS",
+      `afade=t=in:st=0:d=${fade.toFixed(6)}`,
+      `afade=t=out:st=${fadeOutStart.toFixed(6)}:d=${fade.toFixed(6)}`,
+      ...(repairTailSilenceSec > 0
+        ? [`apad=pad_dur=${repairTailSilenceSec.toFixed(6)}`]
+        : []),
+    ].join(",");
+    await run("ffmpeg", [
+      "-y",
+      "-nostdin",
+      "-v", "error",
+      "-i", row.wav,
+      "-af", filter,
+      "-ar", String(stitchSampleRate),
+      "-ac", "1",
+      "-acodec", "pcm_s16le",
+      preparedPath,
+    ]);
+  }
+  return {
+    unit_id: row.unit_id,
+    source_wav: row.wav,
+    prepared_wav: preparedPath,
+    source_duration_sec: duration,
+    trim_start_sec: Number(trimStart.toFixed(6)),
+    trim_end_sec: Number(trimEnd.toFixed(6)),
+    content_duration_sec: Number(contentDuration.toFixed(6)),
+    prepared_duration_sec: Number(preparedDuration.toFixed(6)),
+    retained_leading_silence_sec: Number(Math.min(stitchEdgePadSec, leading).toFixed(6)),
+    retained_trailing_silence_sec: Number(
+      (Math.min(stitchEdgePadSec, trailing) + repairTailSilenceSec).toFixed(6),
+    ),
+    diagnostic_repair_tail_silence_sec: Number(repairTailSilenceSec.toFixed(6)),
+    fade_sec: Number(Math.min(stitchFadeSec, contentDuration / 4).toFixed(6)),
+    preparation_policy: preparationPolicy,
+    preparation_policy_sha256: policyHash,
+    prepared_audio_sha256: await sha256File(preparedPath),
+  };
+}
+
+async function qaRenderedAudioRows(sourceRows, renderedRows, stage) {
+  let transcriptMap = new Map();
+  let transcriptEngineError = null;
+  const transcriptRows = renderedRows.filter((_row, index) => (
+    String(sourceRows[index]?.provider ?? "") !== "kokoro_local"
+  ));
+  try {
+    transcriptMap = await runFasterWhisperUnitBatch(transcriptRows.map((row) => ({
+      unit_id: row.unit_id,
+      wav: row.wav,
+    })));
+  } catch (error) {
+    transcriptEngineError = error instanceof Error ? error.message : String(error);
+  }
+  const units = [];
+  for (let index = 0; index < renderedRows.length; index += 1) {
+    const source = sourceRows[index];
+    const rendered = renderedRows[index];
+    const [metrics, audioSha256] = await Promise.all([
+      audioPcmMetrics(rendered.wav),
+      sha256File(rendered.wav),
+    ]);
+    const recognized = transcriptMap.get(String(rendered.unit_id)) ?? null;
+    const deliveryFirstPrimary = String(source.provider ?? "") === "kokoro_local";
+    const transcript = recognized ? transcriptQa(source.text, recognized.text, {
+      equivalentPhrases: transcriptEquivalentPhrases(source),
+    }) : null;
+    const renderedEdgeMinimum = /^(?:prepared_stitch_input|final_stitch_boundary)$/u.test(stage)
+      ? Math.max(0.01, stitchEdgePadSec - 0.001)
+      : unitQaMinTrailingSilenceSec;
+    const findings = [
+      ...audioQaFindings(metrics, source, { minTrailingSilence: renderedEdgeMinimum }),
+      ...(transcript?.findings ?? []),
+    ];
+    if (!recognized && !deliveryFirstPrimary) {
+      findings.push({
+        severity: "blocker",
+        code: "tts_rendered_transcript_qa_missing",
+        stage,
+        error: transcriptEngineError,
+      });
+    } else if (!recognized) {
+      findings.push({
+        severity: "warning",
+        code: "tts_primary_rendered_transcript_qa_deferred_to_full_stream",
+        stage,
+      });
+    }
+    const blockers = findings.filter((row) => row.severity === "blocker");
+    units.push({
+      unit_id: source.unit_id,
+      stage,
+      status: blockers.length ? "blocked" : findings.length ? "passed_with_warnings" : "passed",
+      audio_path: rendered.wav,
+      audio_sha256: audioSha256,
+      metrics,
+      transcript: recognized ? {
+        recognized_text: recognized.text,
+        recognized_words: recognized.words ?? [],
+        ...transcript,
+      } : null,
+      findings,
+    });
+  }
+  const transcriptOnlyBlocked = units.filter((row) => {
+    const source = sourceRows[units.indexOf(row)];
+    if (String(source?.provider ?? "") === "kokoro_local") return false;
+    const blockers = row.findings.filter((finding) => finding.severity === "blocker");
+    return blockers.length > 0 && blockers.every((finding) => String(finding.code ?? "").startsWith("tts_transcript_"));
+  });
+  if (transcriptOnlyBlocked.length && unitQaWhisperModel !== "medium") {
+    let mediumMap = new Map();
+    let mediumError = null;
+    try {
+      mediumMap = await runFasterWhisperUnitBatch(
+        transcriptOnlyBlocked.map((row) => ({
+          unit_id: row.unit_id,
+          wav: row.audio_path,
+        })),
+        { model: "medium" },
+      );
+    } catch (error) {
+      mediumError = error instanceof Error ? error.message : String(error);
+    }
+    for (const unit of transcriptOnlyBlocked) {
+      const index = units.indexOf(unit);
+      const source = sourceRows[index];
+      const medium = mediumMap.get(String(unit.unit_id)) ?? null;
+      if (!medium) {
+        unit.transcript_cross_validation = {
+          status: "failed",
+          model: "medium",
+          error: mediumError ?? "missing medium transcript",
+        };
+        continue;
+      }
+      const mediumTranscript = transcriptQa(source.text, medium.text, {
+        equivalentPhrases: transcriptEquivalentPhrases(source),
+        maxWer: Math.max(unitQaMaxWer, 0.3),
+        blockAnySubstitution: false,
+        blockIsolatedEdits: false,
+      });
+      const renderedEdgeMinimum = /^(?:prepared_stitch_input|final_stitch_boundary)$/u.test(stage)
+        ? Math.max(0.01, stitchEdgePadSec - 0.001)
+        : unitQaMinTrailingSilenceSec;
+      const mediumFindings = [
+        ...audioQaFindings(unit.metrics, source, { minTrailingSilence: renderedEdgeMinimum }),
+        ...mediumTranscript.findings,
+      ];
+      const mediumBlockers = mediumFindings.filter((finding) => finding.severity === "blocker");
+      unit.transcript_cross_validation = {
+        status: mediumBlockers.length ? "blocked" : "passed",
+        model: "medium",
+        primary_model: unitQaWhisperModel,
+        primary_recognized_text: unit.transcript?.recognized_text ?? null,
+        recognized_text: medium.text,
+        recognized_words: medium.words ?? [],
+        ...mediumTranscript,
+        findings: mediumFindings,
+      };
+      if (!mediumBlockers.length) {
+        unit.status = mediumFindings.length ? "passed_with_warnings" : "passed";
+        unit.transcript = {
+          recognized_text: medium.text,
+          recognized_words: medium.words ?? [],
+          cross_validated_from_primary_model: unitQaWhisperModel,
+          cross_validation_model: "medium",
+          ...mediumTranscript,
+        };
+        unit.findings = mediumFindings;
+      }
+    }
+  }
+  const blockers = units.flatMap((row) => row.findings
+    .filter((finding) => finding.severity === "blocker")
+    .map((finding) => ({ unit_id: row.unit_id, ...finding })));
+  return {
+    stage,
+    status: blockers.length ? "blocked" : "passed",
+    unit_count: units.length,
+    blockers,
+    units,
+  };
+}
+
+async function extractAudioWindow(inputPath, outputPath, { durationSec, tail = false }) {
+  const seekArgs = tail
+    ? ["-sseof", `-${durationSec.toFixed(6)}`]
+    : ["-ss", "0"];
+  await run("ffmpeg", [
+    "-y",
+    "-nostdin",
+    "-v", "error",
+    ...seekArgs,
+    "-i", inputPath,
+    "-t", durationSec.toFixed(6),
+    "-ar", String(stitchSampleRate),
+    "-ac", "1",
+    "-acodec", "pcm_s16le",
+    outputPath,
+  ]);
+}
+
+async function finalStitchQa(finalWav, usable, prepared) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-tts-final-stitch-qa-"));
+  try {
+    const probes = [{
+      ...usable[0],
+      unit_id: `${usable[0].unit_id}__final_head`,
+      source_unit_id: usable[0].unit_id,
+      duration_sec: prepared[0].prepared_duration_sec,
+      tail: false,
+    }];
+    if (usable.length > 1) {
+      probes.push({
+        ...usable.at(-1),
+        unit_id: `${usable.at(-1).unit_id}__final_tail`,
+        source_unit_id: usable.at(-1).unit_id,
+        duration_sec: prepared.at(-1).prepared_duration_sec,
+        tail: true,
+      });
+    }
+    const rendered = [];
+    for (const [index, probe] of probes.entries()) {
+      const wav = path.join(tmpDir, `${index ? "tail" : "head"}.wav`);
+      await extractAudioWindow(finalWav, wav, { durationSec: probe.duration_sec, tail: probe.tail });
+      rendered.push({ unit_id: probe.unit_id, wav });
+    }
+    const boundaryQa = await qaRenderedAudioRows(probes, rendered, "final_stitch_boundary");
+    const aggregate = {
+      text: usable.map((row) => row.text).join(" "),
+      word_count: usable.reduce((sum, row) => sum + Number(row.word_count ?? wordCount(row.text)), 0),
+    };
+    const [metrics, audioSha256] = await Promise.all([
+      audioPcmMetrics(finalWav),
+      sha256File(finalWav),
+    ]);
+    const acousticFindings = audioQaFindings(metrics, aggregate);
+    const blockers = [
+      ...boundaryQa.blockers,
+      ...acousticFindings.filter((row) => row.severity === "blocker"),
+    ];
+    return {
+      status: blockers.length ? "blocked" : "passed",
+      audio_path: finalWav,
+      audio_sha256: audioSha256,
+      metrics,
+      acoustic_findings: acousticFindings,
+      boundary_asr_qa: boundaryQa,
+      blockers,
+    };
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+async function stitchWavs(results, finalWav, options = {}) {
   const usable = results.filter((row) => row.wav);
   if (!usable.length) return null;
-  const concatPath = path.join(outDir, "concat.txt");
-  const unitGapPath = unitGapSec > 0 ? await writeSilenceWav(path.join(outDir, `unit-gap-${Math.round(unitGapSec * 1000)}ms.wav`), unitGapSec) : null;
-  const segmentGapPath = segmentGapSec > 0 ? await writeSilenceWav(path.join(outDir, `segment-gap-${Math.round(segmentGapSec * 1000)}ms.wav`), segmentGapSec) : null;
+  const prepared = await mapPool(
+    usable,
+    4,
+    (row, index) => prepareStitchInput(row, index, options),
+  );
+  const preparedQa = await qaRenderedAudioRows(
+    usable,
+    prepared.map((row) => ({ unit_id: row.unit_id, wav: row.prepared_wav })),
+    "prepared_stitch_input",
+  );
+  prepared.forEach((row, index) => {
+    row.prepared_qa = preparedQa.units[index] ?? null;
+  });
+  if (preparedQa.status === "blocked") {
+    return {
+      status: "blocked",
+      prepared_inputs: prepared,
+      prepared_qa: preparedQa,
+      boundaries: [],
+      final_qa: null,
+      policy: {
+        edge_pad_sec: stitchEdgePadSec,
+        fade_sec: stitchFadeSec,
+        sample_rate: stitchSampleRate,
+        padding_aware: true,
+        trims_verified_silence_only: true,
+      },
+    };
+  }
+  const concatPath = path.join(outDir, `concat-${retryInvocationId}.txt`);
   const lines = [];
-  for (let index = 0; index < usable.length; index += 1) {
-    lines.push(concatLine(usable[index].wav));
-    if (index >= usable.length - 1) continue;
-    const crossesSegment = String(usable[index].segment_id ?? "") !== String(usable[index + 1].segment_id ?? "");
-    const gapPath = crossesSegment ? segmentGapPath : unitGapPath;
-    if (gapPath) lines.push(concatLine(gapPath));
+  const boundaries = [];
+  for (let index = 0; index < prepared.length; index += 1) {
+    lines.push(concatLine(prepared[index].prepared_wav));
+    if (index >= prepared.length - 1) continue;
+    const crossesSegment = lastSourceSegmentId(usable[index]) !== firstSourceSegmentId(usable[index + 1]);
+    const targetGapSec = crossesSegment ? segmentGapSec : unitGapSec;
+    const padding = stitchBoundaryPadding(
+      usable[index].unit_qa?.metrics,
+      usable[index + 1].unit_qa?.metrics,
+      targetGapSec,
+    );
+    let gapPath = null;
+    if (padding.inserted_silence_sec > 0) {
+      const gapMicros = Math.round(padding.inserted_silence_sec * 1_000_000);
+      gapPath = await writeSilenceWav(
+        path.join(outDir, `padding-gap-${stitchSampleRate}hz-${gapMicros}us.wav`),
+        padding.inserted_silence_sec,
+      );
+      lines.push(concatLine(gapPath));
+    }
+    boundaries.push({
+      after_unit_id: usable[index].unit_id,
+      before_unit_id: usable[index + 1].unit_id,
+      crosses_segment: crossesSegment,
+      gap_wav: gapPath,
+      ...padding,
+    });
   }
   await fs.writeFile(concatPath, lines.join("\n"));
   await run("ffmpeg", [
@@ -983,7 +2852,40 @@ async function stitchWavs(results, finalWav) {
     "-acodec", "pcm_s16le",
     finalWav,
   ]);
-  return concatPath;
+  const finalQa = await finalStitchQa(finalWav, usable, prepared);
+  const rmsValues = usable.map((row) => Number(row.unit_qa?.metrics?.rms_dbfs)).filter(Number.isFinite);
+  const rmsSpread = rmsValues.length ? Math.max(...rmsValues) - Math.min(...rmsValues) : 0;
+  return {
+    status: finalQa.status,
+    concat_path: concatPath,
+    prepared_inputs: prepared,
+    prepared_qa: preparedQa,
+    boundaries,
+    final_qa: finalQa,
+    loudness_check: {
+      unit_rms_min_dbfs: rmsValues.length ? Number(Math.min(...rmsValues).toFixed(3)) : null,
+      unit_rms_max_dbfs: rmsValues.length ? Number(Math.max(...rmsValues).toFixed(3)) : null,
+      unit_rms_spread_db: Number(rmsSpread.toFixed(3)),
+      status: rmsSpread > 15 ? "warning_large_inter_unit_loudness_spread" : "passed",
+      normalization_applied: false,
+      note: "Chunk loudness is measured and reported; destructive per-unit loudness pumping is not applied.",
+    },
+    policy: {
+      edge_pad_sec: stitchEdgePadSec,
+      fade_sec: stitchFadeSec,
+      sample_rate: stitchSampleRate,
+      padding_aware: true,
+      trims_verified_silence_only: true,
+    },
+  };
+}
+
+export async function stitchWavsForDiagnostics(results, finalWav, options = {}) {
+  return stitchWavs(results, finalWav, options);
+}
+
+export async function runFasterWhisperUnitBatchForDiagnostics(rows, options = {}) {
+  return runFasterWhisperUnitBatch(rows, options);
 }
 
 function assertStitchVoiceIntegrity(results, lock) {
@@ -1002,6 +2904,12 @@ function assertStitchVoiceIntegrity(results, lock) {
 }
 
 async function main() {
+  if (requestedQwenInstructionField && !qwenInstructionField) {
+    throw new Error(`Unsupported --qwen-instruct-field '${requestedQwenInstructionField}'. Allowed explicit provider fields: ${[...allowedQwenInstructionFields].join(", ")}.`);
+  }
+  if (regenerateSpeakers.size > 0 && regenerateUnitIds.size > 0) {
+    throw new Error("Choose one scoped Qwen retry mode: --regenerate-speakers or --regenerate-unit-ids, not both.");
+  }
   await fs.mkdir(outDir, { recursive: true });
   const lock = await buildVoiceLock();
   if (lock.status !== "passed") throw new Error(`ModelsLab Qwen voice lock is ${lock.status}; inspect ${lockPath}`);
@@ -1017,13 +2925,17 @@ async function main() {
       return total <= maxDurationSec;
     });
   }
+  if (regenerateUnitIds.size > 0) assertRegenerateUnitIdsExist(units, regenerateUnitIds);
   const previousReportPath = flags["previous-report"]
     ?? path.join(episodeRoot, `modelslab_qwen_tts_report_${episode}${reportSuffix ? `-${reportSuffix}` : ""}.json`);
-  const previousReport = regenerateSpeakers.size > 0 || reuseUnchanged ? await readJson(previousReportPath, null) : null;
+  const targetedRegeneration = regenerateSpeakers.size > 0 || regenerateUnitIds.size > 0;
+  const previousReport = targetedRegeneration || reuseUnchanged ? await readJson(previousReportPath, null) : null;
   const previousResults = previousResultMap(previousReport);
   const previousContentResults = previousContentResultMap(previousReport);
-  if (regenerateSpeakers.size > 0 && !previousResults.size) {
-    throw new Error(`Targeted regeneration requested for ${[...regenerateSpeakers].join(", ")} but no previous TTS report was readable at ${previousReportPath}`);
+  const previousUnitIds = previousUnitIdResultMap(previousReport);
+  if (targetedRegeneration && !previousResults.size && !previousUnitIds.size) {
+    const scope = regenerateUnitIds.size ? [...regenerateUnitIds].join(", ") : [...regenerateSpeakers].join(", ");
+    throw new Error(`Targeted regeneration requested for ${scope} but no previous TTS report was readable at ${previousReportPath}`);
   }
   if (reuseUnchanged && !previousContentResults.size) {
     throw new Error(`Unchanged-unit Qwen TTS reuse requested but no previous TTS report was readable at ${previousReportPath}`);
@@ -1037,7 +2949,7 @@ async function main() {
       const index = cursor;
       cursor += 1;
       console.log(`modelslab qwen ${index + 1}/${units.length} w${workerIndex} ${units[index].speaker}: ${units[index].text.slice(0, 70)}`);
-      results[index] = await synthesizeUnit(units[index], lock, index, previousResults, previousContentResults);
+      results[index] = await synthesizeUnit(units[index], lock, index, previousResults, previousContentResults, previousUnitIds);
       completed += 1;
       if (completed % 25 === 0 || completed === units.length) {
         console.log(`modelslab qwen progress ${completed}/${units.length}`);
@@ -1048,18 +2960,36 @@ async function main() {
 
   const finalWav = path.join(path.dirname(outDir), `${episode}-${channel}-pilot-qwen-modelslab${suffix}.wav`);
   const finalM4a = finalWav.replace(/\.wav$/, ".m4a");
-  let concatPath = null;
-  if (!dryRun && results.some((row) => row.wav)) {
+  const unitQaReportPath = path.join(episodeRoot, `qwen_tts_unit_qa_${episode}${reportSuffix ? `-${reportSuffix}` : ""}.json`);
+  const unitQaReport = dryRun ? {
+    status: "not_run_dry_run",
+    policy_version: TTS_OUTPUT_QA_POLICY_VERSION,
+    unit_count: results.length,
+    units: results.map((row) => ({ unit_id: row.unit_id, segment_id: row.segment_id, text: row.text })),
+  } : await runUnitOutputQa(results);
+  await fs.writeFile(unitQaReportPath, JSON.stringify(unitQaReport, null, 2));
+  let stitch = null;
+  if (!dryRun && unitQaReport.status === "passed" && results.some((row) => row.wav)) {
     assertStitchVoiceIntegrity(results, lock);
-    concatPath = await stitchWavs(results, finalWav);
-    await run("ffmpeg", ["-y", "-i", finalWav, "-acodec", "aac", "-b:a", "160k", finalM4a]);
-    await fs.writeFile(finalWav.replace(/\.wav$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
-    await fs.writeFile(finalM4a.replace(/\.m4a$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
+    stitch = await stitchWavs(results, finalWav);
+    if (stitch?.status === "passed") {
+      await run("ffmpeg", ["-y", "-i", finalWav, "-acodec", "aac", "-b:a", "160k", finalM4a]);
+      await fs.writeFile(finalWav.replace(/\.wav$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
+      await fs.writeFile(finalM4a.replace(/\.m4a$/, ".intended-transcript.txt"), results.map((row) => row.text).join("\n"), "utf8");
+    }
   }
+  const reportStatus = unitQaReport.status === "blocked" || stitch?.status === "blocked"
+    ? "blocked"
+    : results.every((row) => row.status !== "failed")
+    ? "passed"
+    : "warning";
+  const preparedByUnitId = new Map((stitch?.prepared_inputs ?? []).map((row) => [String(row.unit_id), row]));
+  const boundaryByUnitId = new Map((stitch?.boundaries ?? []).map((row) => [String(row.after_unit_id), row]));
   const report = {
-    status: results.every((row) => row.status !== "failed") ? "passed" : "warning",
+    status: reportStatus,
     provider: "modelslab_qwen",
     model_id: "qwen-tts",
+    provider_model_attestation: "requested_qwen_tts_response_model_identity_not_attested",
     created_at: new Date().toISOString(),
     source_script_hash: plan.source_script_hash ?? null,
     source_script_path: plan.source_script_path ?? path.join(episodeRoot, "script_clean.md"),
@@ -1068,28 +2998,64 @@ async function main() {
     plan_path: planPath,
     out_dir: outDir,
     regenerate_speakers: [...regenerateSpeakers],
+    regenerate_unit_ids: [...regenerateUnitIds],
+    regeneration_scope: regenerateUnitIds.size
+      ? "exact_unit_ids"
+      : regenerateSpeakers.size
+      ? "exact_speakers"
+      : force
+      ? "explicit_full_force"
+      : "full_or_cache_reuse",
+    retry_invocation_id: targetedRegeneration || force ? retryInvocationId : null,
     reuse_unchanged: reuseUnchanged,
     previous_report_path: previousReportPath,
-    final_wav: dryRun ? null : finalWav,
-    final_m4a: dryRun ? null : finalM4a,
-    concat_path: concatPath,
+    final_wav: stitch?.status === "passed" ? finalWav : null,
+    final_wav_sha256: stitch?.status === "passed" ? stitch.final_qa?.audio_sha256 ?? await sha256File(finalWav) : null,
+    final_m4a: stitch?.status === "passed" ? finalM4a : null,
+    final_m4a_sha256: stitch?.status === "passed" ? await sha256File(finalM4a) : null,
+    concat_path: stitch?.concat_path ?? null,
+    stitch,
     segment_gap_sec: segmentGapSec,
     unit_gap_sec: unitGapSec,
+    stitch_edge_pad_sec: stitchEdgePadSec,
+    stitch_fade_sec: stitchFadeSec,
     native_speed: nativeSpeed,
     pace_strategy: "provider_native_speed_no_post_tempo",
     post_tempo_normalized: false,
     stitch_sample_rate: stitchSampleRate,
+    chunk_policy: {
+      sentence_bounded: true,
+      min_words_target: minWords,
+      max_words: maxWords,
+      max_chars: maxChars,
+      below_min_word_target_count: results.filter((row) => Number(row.word_count ?? 0) < minWords).length,
+      crosses_segment_boundaries: results.some((row) => (row.source_segment_ids ?? []).length > 1),
+      crosses_qwen_instruct_boundaries: false,
+    },
+    qwen_instruction_delivery: {
+      provider_endpoint: "/api/v6/voice/text_to_audio",
+      configured_field: qwenInstructionField,
+      status: qwenInstructionField
+        ? "explicit_operator_configured_provider_field"
+        : "unsupported_by_current_modelslab_v6_contract_not_submitted",
+      authored_instruction_count: results.filter((row) => row.qwen_instruct).length,
+      submitted_instruction_count: results.filter((row) => row.instruction_delivery?.submitted).length,
+    },
+    unit_qa_report_path: unitQaReportPath,
+    unit_qa_status: unitQaReport.status,
+    unit_qa_policy_version: TTS_OUTPUT_QA_POLICY_VERSION,
     unit_count: results.length,
-    duration_sec: dryRun ? null : await mediaDuration(finalWav).catch(() => results.reduce((sum, row, index) => {
-      if (index >= results.length - 1) return sum + Number(row.duration_sec ?? 0);
-      const crossesSegment = String(row.segment_id ?? "") !== String(results[index + 1]?.segment_id ?? "");
-      return sum + Number(row.duration_sec ?? 0) + (crossesSegment ? segmentGapSec : unitGapSec);
-    }, 0)),
+    duration_sec: stitch?.status === "passed" ? await mediaDuration(finalWav).catch(() => results.reduce((sum, row) => {
+      const prepared = preparedByUnitId.get(String(row.unit_id));
+      const boundary = boundaryByUnitId.get(String(row.unit_id));
+      return sum + Number(prepared?.prepared_duration_sec ?? row.duration_sec ?? 0) + Number(boundary?.inserted_silence_sec ?? 0);
+    }, 0)) : null,
     results,
   };
   const reportPath = path.join(episodeRoot, `modelslab_qwen_tts_report_${episode}${reportSuffix ? `-${reportSuffix}` : ""}.json`);
   await fs.writeFile(reportPath, JSON.stringify(report, null, 2));
-  const stitchReportPath = path.join(episodeRoot, suffixFileWith(suffix, `audio_stitch_report_${episode}`, ".json"));
+  const stitchReportSuffix = dryRun ? `-${reportSuffix}` : suffix;
+  const stitchReportPath = path.join(episodeRoot, suffixFileWith(stitchReportSuffix, `audio_stitch_report_${episode}`, ".json"));
   await fs.writeFile(stitchReportPath, JSON.stringify({
     status: report.status,
     provider: "modelslab_qwen",
@@ -1098,12 +3064,25 @@ async function main() {
     source_script_hash: report.source_script_hash,
     source_script_path: report.source_script_path,
     output_path: report.final_wav,
+    output_sha256: report.final_wav_sha256,
+    final_wav_sha256: report.final_wav_sha256,
+    final_m4a_path: report.final_m4a,
+    final_m4a_sha256: report.final_m4a_sha256,
     sound_design_mix_path: null,
     final_duration_sec: report.duration_sec,
     native_speed: nativeSpeed,
     pace_strategy: "provider_native_speed_no_post_tempo",
     post_tempo_normalized: false,
+    unit_qa_report_path: unitQaReportPath,
+    unit_qa_status: unitQaReport.status,
+    unit_qa_policy_version: TTS_OUTPUT_QA_POLICY_VERSION,
+    provider_model_attestation: report.provider_model_attestation,
+    qwen_instruction_delivery: report.qwen_instruction_delivery,
+    stitch_policy: stitch?.policy ?? null,
+    stitch_loudness_check: stitch?.loudness_check ?? null,
+    stitch_boundaries: stitch?.boundaries ?? [],
     segments: results.map((row, index) => ({
+      unit_id: row.unit_id,
       segment_id: row.segment_id,
       text: row.text,
       stripped_text: row.text,
@@ -1112,20 +3091,34 @@ async function main() {
       speaker_context: [row.speaker],
       delivery_mode: "modelslab_qwen_tts",
       raw_audio_duration_sec: row.duration_sec,
-      segment_gap_sec: index < results.length - 1 && String(row.segment_id ?? "") !== String(results[index + 1]?.segment_id ?? "") ? segmentGapSec : 0,
-      unit_gap_sec: index < results.length - 1 && String(row.segment_id ?? "") === String(results[index + 1]?.segment_id ?? "") ? unitGapSec : 0,
-      duration_sec: Number((Number(row.duration_sec ?? 0) + (index < results.length - 1
-        ? String(row.segment_id ?? "") !== String(results[index + 1]?.segment_id ?? "") ? segmentGapSec : unitGapSec
-        : 0)).toFixed(6)),
+      prepared_audio_duration_sec: preparedByUnitId.get(String(row.unit_id))?.prepared_duration_sec ?? null,
+      segment_gap_sec: index < results.length - 1 && boundaryByUnitId.get(String(row.unit_id))?.crosses_segment
+        ? Number(boundaryByUnitId.get(String(row.unit_id))?.effective_gap_sec ?? segmentGapSec)
+        : 0,
+      unit_gap_sec: index < results.length - 1 && !boundaryByUnitId.get(String(row.unit_id))?.crosses_segment
+        ? Number(boundaryByUnitId.get(String(row.unit_id))?.effective_gap_sec ?? unitGapSec)
+        : 0,
+      inserted_silence_sec: Number(boundaryByUnitId.get(String(row.unit_id))?.inserted_silence_sec ?? 0),
+      duration_sec: Number((Number(preparedByUnitId.get(String(row.unit_id))?.prepared_duration_sec ?? row.duration_sec ?? 0)
+        + Number(boundaryByUnitId.get(String(row.unit_id))?.inserted_silence_sec ?? 0)).toFixed(6)),
       audio_path: row.wav,
+      prepared_audio_path: preparedByUnitId.get(String(row.unit_id))?.prepared_wav ?? null,
       tts_provider: "modelslab_qwen",
       voice_id: row.voice_id,
       native_speed: nativeSpeed,
+      qwen_instruct: row.qwen_instruct ?? null,
+      authored_qwen_instructions: row.authored_qwen_instructions ?? [],
+      instruction_delivery: row.instruction_delivery ?? null,
+      source_segment_ids: row.source_segment_ids ?? [],
+      source_unit_refs: row.source_unit_refs ?? [],
+      caption_fragments: row.caption_fragments ?? [],
+      unit_qa: row.unit_qa ?? null,
     })),
     modelslab_qwen_tts_report_path: reportPath,
     modelslab_qwen_voice_lock_path: lockPath,
   }, null, 2));
   console.log(JSON.stringify({ status: report.status, unit_count: report.unit_count, duration_sec: report.duration_sec, final_m4a: report.final_m4a, report_path: reportPath }, null, 2));
+  if (report.status === "blocked") process.exitCode = 1;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

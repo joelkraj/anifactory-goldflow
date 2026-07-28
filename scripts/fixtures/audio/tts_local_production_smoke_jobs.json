@@ -1,0 +1,23 @@
+{
+  "schema": "goldflow_narration_tts_jobs_v1",
+  "route": "production_runtime_smoke",
+  "provider": "diagnostic_only",
+  "attempt": 1,
+  "kokoro_voice_id": "am_puck",
+  "kokoro_voice_sha256": "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89",
+  "qwen_reference_audio_sha256": "934de29bed0d3da6b8c8fb2a6c611202a967498422702f8c30f85b4bb10019d0",
+  "qwen_reference_text": "Because a deed is not a toy. A deed is the only word in any language that means this is mine and the world has to agree. The breathing got closer. Out of the black came a shape too big to be a man and too graceful to be a beast. A broken crown curved between its horns.",
+  "qwen_reference_voice_id": "am_puck",
+  "qwen_reference_voice_sha256": "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89",
+  "qwen_voice_continuity_contract": "clone_primary_puck_identity",
+  "jobs": [
+    {
+      "unit_id": "production_runtime_smoke_001",
+      "spoken_text": "The gate opened, and he stepped through without looking back.",
+      "spoken_text_sha256": "0c32f6032f99ff57e1607a8f074a134893623b04c1a106f11225df35b730d5bc",
+      "attempt": 1,
+      "seed": 20260727,
+      "qwen_instruct": ""
+    }
+  ]
+}

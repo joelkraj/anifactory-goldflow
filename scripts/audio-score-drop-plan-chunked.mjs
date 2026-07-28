@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -18,7 +19,8 @@ const episode = flags.episode ?? "ep_01";
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const scriptPath = path.join(episodeDir, "script_clean.md");
-const qwenReportPath = flags.qwenReport ?? flags["qwen-report"] ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
+const qwenReportPath = narrationReportPath;
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const scorePlanPath = flags.scorePlan ?? flags["score-plan"] ?? path.join(episodeDir, "score_chapter_plan.json");
 const scoreDropPlanPath = flags.scoreDropPlan ?? flags["score-drop-plan"] ?? path.join(episodeDir, `score_drop_plan_${episode}.json`);
@@ -288,7 +290,7 @@ async function main() {
     readJson(wordTimingPath, null),
   ]);
   if (!script.trim()) throw new Error(`Missing script: ${scriptPath}`);
-  if (!Array.isArray(qwenReport?.segments) || !qwenReport.segments.length) throw new Error(`Missing Qwen stitch segments: ${qwenReportPath}`);
+  if (!Array.isArray(qwenReport?.segments) || !qwenReport.segments.length) throw new Error(`Missing narration stitch segments: ${qwenReportPath}`);
   if (wordTiming?.status !== "passed" || !Array.isArray(wordTiming.words) || !wordTiming.words.length) {
     throw new Error(`Refusing chunked score planning without passed local Whisper timing: ${wordTimingPath}`);
   }
@@ -351,6 +353,7 @@ async function main() {
     episode,
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
+    narration_report_path: narrationReportPath,
     source_artifact_paths: [scriptPath, qwenReportPath, wordTimingPath],
     source_hashes: sourceHashes,
     timing_source: "local_whisper_word_timing",
@@ -392,6 +395,7 @@ async function main() {
     episode,
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
+    narration_report_path: narrationReportPath,
     timing_source: "local_whisper_word_timing",
     timing_gate: timingGate,
     score_provider: "local_ace_step",
@@ -419,6 +423,7 @@ async function main() {
     chunk_overlap_sec: chunkOverlapSec,
     concurrency: chunkConcurrency,
     llm_calls: llmCalls,
+    narration_report_path: narrationReportPath,
     score_plan_path: scorePlanPath,
     score_drop_plan_path: scoreDropPlanPath,
     timing_gate: timingGate,

@@ -55,6 +55,22 @@ export function plannerRerunDecision({
   unresolvedExpectedIds = [],
 } = {}) {
   if (!PLANNER_STAGE_IDS.has(stage)) return { allowed: true, reason: "not_a_planner_stage" };
+  const deterministicNonAuthoringRerun = (
+    stage === "visual_beat_plan"
+    && (isTrue(flags["retime-locked-grouping"]) || isTrue(flags["reproject-active-state-only"]))
+  ) || (
+    stage === "visual_reference_plan"
+    && isTrue(flags["revalidate-existing"])
+  ) || (
+    stage === "visual_prompt_plan"
+    && isTrue(flags["revalidate-existing"])
+  );
+  if (deterministicNonAuthoringRerun) {
+    return {
+      allowed: true,
+      reason: "deterministic_non_authoring_revalidation",
+    };
+  }
   const priorAttempts = priorEvents.filter((row) => (
     row?.event_type === "stage_completed"
     && row?.stage === stage

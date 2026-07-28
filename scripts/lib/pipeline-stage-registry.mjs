@@ -1,6 +1,10 @@
 import { productionProfileForIdentity } from "./production-profiles.mjs";
+import {
+  isLegacyQwenIdentity,
+  narrationTtsPolicyForIdentity,
+} from "./narration-tts-policy.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-24.1";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-27.1";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -75,11 +79,12 @@ const stages = [
     id: "voice_plan",
     title: "Narrator voice plan",
     required_input: "speakability report + overrides",
-    output_artifact: "qwen_generation_plan.json",
+    output_artifact: "narration_generation_plan.json",
     approval: "automatic",
     validator: "voice_plan_hashes",
     depends_on: ["targeted_speakability"],
     output_patterns: [
+      /^narration_generation_plan\.json$/,
       /^qwen_generation_plan\.json$/,
       /^audio_performance_plan\.json$/,
       /^voice_direction_strategy_.*\.json$/,
@@ -89,18 +94,21 @@ const stages = [
   },
   {
     id: "qwen_tts_stitch",
-    title: "Qwen TTS and stitch",
+    title: "Narration TTS and stitch",
     required_input: "voice plan + approved spoken text",
-    output_artifact: "modelslab_qwen_tts_report_<episode>.json + stitched narration",
+    output_artifact: "narration_tts_report_<episode>.json + stitched narration",
     approval: "automatic",
-    validator: "qwen_report_audio_hashes",
+    validator: "narration_report_audio_qa_hashes",
     depends_on: ["voice_plan"],
     output_patterns: [
+      /^narration_tts_report_.*\.json$/,
+      /^narration_tts_unit_qa_.*\.json$/,
+      /^narration_full_stream_qa_.*\.json$/,
       /^modelslab_qwen_tts_report_.*\.json$/,
-      /^qwen_.*\.json$/,
+      /^qwen_tts_unit_qa_.*\.json$/,
       /^audio_stitch_report_.*\.json$/,
     ],
-    commands: ["tts qwen"],
+    commands: ["tts narrate", "tts qwen"],
   },
   {
     id: "local_whisper_word_timing",
@@ -488,7 +496,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const renderProfile = identity.render_profile ?? "smooth_subpixel_ken_burns";
   const minWpm = Number(identity.target_wpm_min ?? 195);
   const maxWpm = Number(identity.target_wpm_max ?? 220);
-  const nativeSpeed = Number(identity.qwen_native_speed ?? identity.voice_provider_options?.qwen_native_speed ?? 1.25);
+  const ttsPolicy = narrationTtsPolicyForIdentity(identity);
+  const nativeSpeed = Number(ttsPolicy.primary.native_speed);
   const pacePolicy = "diagnostic";
   const paceFlag = " --pace-policy diagnostic";
   const productionProfile = productionProfileForIdentity(identity);
@@ -505,7 +514,9 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
       : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
-    qwen_tts_stitch: `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`,
+    qwen_tts_stitch: isLegacyQwenIdentity(identity)
+      ? `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`
+      : `node bin/goldflow.mjs tts narrate ${base} --concurrency ${media.kokoro_tts_concurrency ?? media.tts_concurrency ?? 1}`,
     local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
     audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,

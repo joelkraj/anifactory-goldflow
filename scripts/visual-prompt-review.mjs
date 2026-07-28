@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import { sanitizeBackgroundPopulation } from "./lib/background-population-utils.mjs";
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, providerExclusionPayloadFindings } from "./lib/prompt-prose-findings.mjs";
 import {
   blockerImageIds,
@@ -376,7 +377,7 @@ Rules:
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. If it exists, review it for the same shot_manifest, visible subjects, action, location, and refs as image_prompt; preserve it when good and repair it only when needed.
 - Every scene prompt should preserve concise anime/manhwa style intent without adding boilerplate. Prefer a short phrase such as "16:9 landscape anime/manhwa frame" only when style would otherwise be ambiguous. Do not add long repeated style phrases such as clean line art, cel-shaded characters, cinematic webtoon lighting, or non-photorealistic painted background to every cut.
-- Background extras are allowed only when the beat calls for them. If the shot_manifest and beat excerpt show one named subject in a lonely, private, or solo investigation beat, keep the prompt visibly empty except for that subject and necessary objects; remove anonymous customers, staff, crowds, or audience figures that were imported from generic location assumptions.
+- Background extras are neither preferred nor forbidden. Preserve shot_manifest.background_population when presence is explicit or implied, and make its concrete population and subordinate staging visible in prompt prose. Do not erase implied witnesses from an active hearing, ceremony, class, market, public humiliation, audience reaction, staffed workplace, or assembled formation merely because the local clause omits a crowd noun. Do not add extras from a public location alone; keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Composition is beat-authored, not globally defaulted. Preserve or repair close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when that shot scale serves the current visual job and narration excerpt. Do not impose a universal wide/full-frame/medium-wide default.
 - Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
 - Every prompt in the same scene should have a different visual job. Prefer concrete shot jobs such as environment establishment, object insert, hand/action close-up, over-shoulder confrontation, impact frame, crowd reaction, UI reveal, aftermath, or transition.
@@ -726,6 +727,7 @@ function sanitizeShotManifest(value) {
     location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    background_population: sanitizeBackgroundPopulation(value.background_population),
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),

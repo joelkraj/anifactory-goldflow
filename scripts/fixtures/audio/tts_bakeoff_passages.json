@@ -1,0 +1,99 @@
+{
+  "schema": "goldflow_tts_bakeoff_passages_v1",
+  "description": "Owned-narrator TTS reliability field covering the defects observed in the 2026-W30 Death Ledger, Goblin Queen, and Afterlife productions.",
+  "passages": [
+    {
+      "id": "repeated_word_integrity",
+      "category": "text_fidelity",
+      "text": "And the mercy in that, the only mercy there is, is that you get to keep living in the proof of it. The repetition is intentional."
+    },
+    {
+      "id": "terminal_tail_integrity",
+      "category": "edge_integrity",
+      "text": "That miracle was financed by the orphan crypt beneath Saint Orison. Repossess."
+    },
+    {
+      "id": "attribution_and_action_integrity",
+      "category": "text_fidelity",
+      "text": "The ring snapped shut like a shackle. Her voice made the palace columns tremble. The nearest chain snapped. Joey ordered the guards to open the gates."
+    },
+    {
+      "id": "system_ui_and_numbers",
+      "category": "system_ui",
+      "text": "Emotional Certainty: forty-one percent. Eternal Heart Core: fifty out of fifty. Afterlife Treasury Balance: four hundred and eighteen gold crowns. Sovereign Authority Restored."
+    },
+    {
+      "id": "names_ranks_and_initialisms",
+      "category": "pronunciation",
+      "text": "Kane challenged Ausar while Ruk and Sorne guarded the gate. The Pact marked him as an S S S rank sovereign. The C E O watched the Manhwa broadcast live."
+    },
+    {
+      "id": "emotional_cadence_shift",
+      "category": "delivery",
+      "text": "His wife poisoned him and waited for the throne to become empty. Joey opened his eyes in the kingdom of the dead. The goddess offered him one honest bargain. He smiled, accepted, and began taking everything back."
+    },
+    {
+      "id": "death_join_left",
+      "category": "join_pair",
+      "pair_id": "death",
+      "side": "left",
+      "text": "That miracle was financed by the orphan crypt beneath Saint Orison. Repossess."
+    },
+    {
+      "id": "death_join_right",
+      "category": "join_pair",
+      "pair_id": "death",
+      "side": "right",
+      "text": "The halo shattered. Three seconds. Cassian used prophet sight to read Joey's next movement."
+    },
+    {
+      "id": "death_join_combined",
+      "category": "join_pair",
+      "pair_id": "death",
+      "side": "combined",
+      "text": "That miracle was financed by the orphan crypt beneath Saint Orison. Repossess. The halo shattered. Three seconds. Cassian used prophet sight to read Joey's next movement."
+    },
+    {
+      "id": "goblin_join_left",
+      "category": "join_pair",
+      "pair_id": "goblin",
+      "side": "left",
+      "text": "Mara found me as I was leaving. Of course she did. I knew she would."
+    },
+    {
+      "id": "goblin_join_right",
+      "category": "join_pair",
+      "pair_id": "goblin",
+      "side": "right",
+      "text": "A woman who trades a man for power comes running the moment the power turns out to be sitting in the wrong man's basement. She caught my sleeve in the marble lobby."
+    },
+    {
+      "id": "goblin_join_combined",
+      "category": "join_pair",
+      "pair_id": "goblin",
+      "side": "combined",
+      "text": "Mara found me as I was leaving. Of course she did. I knew she would. A woman who trades a man for power comes running the moment the power turns out to be sitting in the wrong man's basement. She caught my sleeve in the marble lobby."
+    },
+    {
+      "id": "afterlife_join_left",
+      "category": "join_pair",
+      "pair_id": "afterlife",
+      "side": "left",
+      "text": "Finally, before every government, guild, and surviving member of Eclipse, Cassian Vale lowered his divine blade. He turned east. Then he dropped to one knee. Sovereign Joey. Requesting assistance."
+    },
+    {
+      "id": "afterlife_join_right",
+      "category": "join_pair",
+      "pair_id": "afterlife",
+      "side": "right",
+      "text": "Joey approved one heartbeat of regeneration. It was enough. Now cut the chain behind you."
+    },
+    {
+      "id": "afterlife_join_combined",
+      "category": "join_pair",
+      "pair_id": "afterlife",
+      "side": "combined",
+      "text": "Finally, before every government, guild, and surviving member of Eclipse, Cassian Vale lowered his divine blade. He turned east. Then he dropped to one knee. Sovereign Joey. Requesting assistance. Joey approved one heartbeat of regeneration. It was enough. Now cut the chain behind you."
+    }
+  ]
+}

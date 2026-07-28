@@ -5,7 +5,14 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  identityUsesCanonicalNarrationContract,
+  resolveNarrationReportPath,
+} from "./lib/narration-artifacts.mjs";
+import { transcriptQaForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { softenPrimaryQa } from "./lib/tts-selection-policy.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -17,9 +24,12 @@ const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
-const episodeDir = path.join(weekDir, "episodes", episode);
-const scriptPath = path.join(episodeDir, "script_clean.md");
-const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const episodeDir = flags["episode-dir"]
+  ? path.resolve(flags["episode-dir"])
+  : path.join(weekDir, "episodes", episode);
+const scriptPath = flags.script ?? path.join(episodeDir, "script_clean.md");
+const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
+const qwenReportPath = narrationReportPath;
 const outputPath = flags.output ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 
 function parseFlags(parts) {
@@ -77,8 +87,10 @@ function narrationAudioPath(qwenReport) {
   throw new Error("No clean stitched narration audio path found. Pass --audio <path>.");
 }
 
-async function runFasterWhisper(audioPath) {
-  const model = flags.model ?? process.env.ANIFACTORY_WHISPER_MODEL ?? "small";
+async function runFasterWhisper(audioPath, { canonicalContract = false } = {}) {
+  const model = flags.model
+    ?? process.env.ANIFACTORY_WHISPER_MODEL
+    ?? (canonicalContract ? "medium" : "small");
   const device = flags.device ?? process.env.ANIFACTORY_WHISPER_DEVICE ?? "auto";
   const computeType = flags.computeType ?? flags["compute-type"] ?? process.env.ANIFACTORY_WHISPER_COMPUTE_TYPE ?? "auto";
   const language = flags.language ?? process.env.ANIFACTORY_WHISPER_LANGUAGE ?? "en";
@@ -181,15 +193,105 @@ function attachSegments(words, qwenReport) {
   });
 }
 
+export function deliveryFirstFullStreamFindingsForTests(transcriptQa) {
+  const lowWer = Number(transcriptQa?.word_error_rate ?? 1) <= 0.025;
+  return (transcriptQa?.findings ?? []).map((finding) => {
+    if (
+      lowWer
+      && finding?.severity === "blocker"
+      && finding.code === "tts_transcript_contiguous_words_missing"
+      && Number(finding.longest_deletion_run ?? transcriptQa?.longest_deletion_run ?? 0) <= 5
+    ) {
+      return {
+        ...finding,
+        severity: "warning",
+        original_severity: "blocker",
+        disposition_policy: "delivery_first_low_wer_short_contextual_asr_gap",
+      };
+    }
+    return finding;
+  });
+}
+
 async function main() {
-  const qwenReport = await readJson(qwenReportPath, null);
-  if (!qwenReport?.segments?.length) throw new Error(`Missing Qwen stitch report: ${qwenReportPath}`);
+  const [qwenReport, runIdentity] = await Promise.all([
+    readJson(qwenReportPath, null),
+    readJson(path.join(episodeDir, "run_identity.json"), {}),
+  ]);
+  if (!qwenReport?.segments?.length) throw new Error(`Missing narration stitch report: ${qwenReportPath}`);
+  const canonicalContract = identityUsesCanonicalNarrationContract(runIdentity);
   const audioPath = narrationAudioPath(qwenReport);
   const [scriptHash, audioHash] = await Promise.all([hashFile(scriptPath), hashFile(audioPath)]);
-  const transcription = await runFasterWhisper(audioPath);
+  const revalidateExisting = flags["revalidate-existing"] === "true";
+  const existingTiming = revalidateExisting ? await readJson(outputPath, null) : null;
+  if (revalidateExisting && (
+    !Array.isArray(existingTiming?.words)
+    || !existingTiming.words.length
+    || existingTiming.narration_audio_hash !== audioHash
+  )) {
+    throw new Error(`Existing Whisper timing cannot be revalidated because its words or current narration hash do not match: ${outputPath}`);
+  }
+  const transcription = revalidateExisting
+    ? {
+        model: existingTiming.alignment_model,
+        device: existingTiming.alignment_device,
+        compute_type: existingTiming.alignment_compute_type,
+        language: existingTiming.language,
+        language_probability: existingTiming.language_probability,
+        duration_sec: existingTiming.audio_duration_sec,
+        words: existingTiming.words.map((word) => ({
+          word: word.word,
+          start_sec: word.start_sec,
+          end_sec: word.end_sec,
+          probability: word.probability,
+        })),
+      }
+    : await runFasterWhisper(audioPath, { canonicalContract });
   const words = attachSegments(transcription.words ?? [], qwenReport);
+  const intendedSpokenText = (qwenReport.segments ?? [])
+    .map((segment) => segment.text ?? segment.stripped_text ?? segment.tts_spoken_text ?? "")
+    .filter((text) => String(text).trim())
+    .join(" ");
+  const recognizedText = words.map((word) => word.word).join(" ");
+  const asrEquivalentPhrases = (qwenReport.segments ?? []).flatMap((segment) => [
+    ...(Array.isArray(segment.asr_equivalent_phrases) ? segment.asr_equivalent_phrases : []),
+    ...(Array.isArray(segment.tts_override_replacements_applied)
+      ? segment.tts_override_replacements_applied.filter((row) => row?.asr_equivalence_allowed === true)
+      : []),
+  ]);
+  const rawTranscriptIntegrity = transcriptQaForTests(intendedSpokenText, recognizedText, {
+    maxWer: 0.05,
+    equivalentPhrases: asrEquivalentPhrases,
+    blockAnySubstitution: false,
+    blockIsolatedEdits: false,
+  });
+  rawTranscriptIntegrity.findings = deliveryFirstFullStreamFindingsForTests(rawTranscriptIntegrity);
+  const softenedTranscriptQa = softenPrimaryQa({
+    status: rawTranscriptIntegrity.findings.some((finding) => finding.severity === "blocker")
+      ? "blocked"
+      : "passed",
+    transcript: rawTranscriptIntegrity,
+    findings: rawTranscriptIntegrity.findings,
+  });
+  const transcriptIntegrity = {
+    ...rawTranscriptIntegrity,
+    findings: softenedTranscriptQa.findings,
+    delivery_first_gate: softenedTranscriptQa.delivery_first_gate,
+  };
+  const fullStreamBlockers = transcriptIntegrity.findings.filter((finding) => finding.severity === "blocker");
+  const fullStreamTranscriptQa = {
+    status: words.length && fullStreamBlockers.length === 0 ? "passed" : "blocked",
+    policy_version: "narration_full_stream_transcript_v1",
+    intended_text: intendedSpokenText,
+    recognized_text: recognizedText,
+    alignment_model: transcription.model,
+    ...transcriptIntegrity,
+    blockers: fullStreamBlockers,
+  };
   const report = {
-    status: words.length ? "passed" : "failed",
+    status: words.length && (!canonicalContract || fullStreamTranscriptQa.status === "passed")
+      ? "passed"
+      : "failed",
     channel,
     series_slug: series,
     week,
@@ -198,15 +300,18 @@ async function main() {
     source_script_path: scriptPath,
     narration_audio_path: audioPath,
     narration_audio_hash: audioHash,
+    narration_report_path: narrationReportPath,
     qwen_report_path: qwenReportPath,
     alignment_engine: "faster_whisper",
     alignment_model: transcription.model,
     alignment_device: transcription.device,
     alignment_compute_type: transcription.compute_type,
+    alignment_revalidated_without_transcription: revalidateExisting,
     language: transcription.language,
     language_probability: transcription.language_probability,
     audio_duration_sec: transcription.duration_sec,
     word_count: words.length,
+    full_stream_transcript_qa: fullStreamTranscriptQa,
     words,
     updated_at: nowIso(),
   };
@@ -222,12 +327,16 @@ async function main() {
   if (report.status !== "passed") process.exitCode = 1;
 }
 
-main().catch(async (error) => {
-  await writeJson(outputPath, {
-    status: "failed",
-    error: error instanceof Error ? error.message : String(error),
-    updated_at: nowIso(),
-  }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(outputPath, {
+      status: "failed",
+      narration_report_path: narrationReportPath,
+      qwen_report_path: qwenReportPath,
+      error: error instanceof Error ? error.message : String(error),
+      updated_at: nowIso(),
+    }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

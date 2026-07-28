@@ -255,10 +255,10 @@ async function main() {
     hook_milestone_report: hookReport,
     blocker: status === "passed" ? null : `Script hook timing has ${hookWarnings.length} blocker(s). Tighten the source/chatbot hook or rerun with --allow-hook-warnings true only for diagnostics.`,
     note: hookReport.configured === false
-      ? "Script-stage WPM is a target budget. No built-in story-family hook phrase gate is active; hook milestone checks require an explicit --hook-milestones config. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing."
+      ? "Script-stage WPM is a target budget. No built-in story-family hook phrase gate is active; hook milestone checks require an explicit --hook-milestones config. Actual spoken WPM measurement happens after narration stitch and local Whisper timing."
       : hookGateEnforced
-        ? "Script-stage WPM is a target budget; configured hook milestone timing is enforced here. Actual spoken WPM enforcement happens after Qwen stitch and local Whisper timing."
-        : "Script-stage WPM and configured hook milestone timing are recorded diagnostically for this run policy. Actual spoken WPM is measured after Qwen stitch and local Whisper timing.",
+        ? "Script-stage WPM is a target budget; configured hook milestone timing is enforced here. Actual spoken WPM measurement happens after narration stitch and local Whisper timing."
+        : "Script-stage WPM and configured hook milestone timing are recorded diagnostically for this run policy. Actual spoken WPM is measured after narration stitch and local Whisper timing.",
   };
   await writeJson(outputPath, report);
   console.log(JSON.stringify({ status: report.status, output_path: outputPath, target_wpm: `${targetMinWpm}-${targetMaxWpm}`, estimated_runtime_at_target_mid_sec: report.estimated_runtime_at_target_mid_sec }, null, 2));

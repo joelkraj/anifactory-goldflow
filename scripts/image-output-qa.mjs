@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { backgroundPopulationIsRequired } from "./lib/background-population-utils.mjs";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
@@ -102,6 +103,7 @@ export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   const action = `${prompt?.shot_manifest?.foreground_action ?? ""} ${prompt?.visual_beat_action ?? ""}`;
   if (job === "physical_action" || /\b(?:lift|carry|catch|pin|restrain|shield|stab|strike|hit|shove|grab|rescue|fight)\b/i.test(action)) reasons.push("physical_action_geometry");
   if (visibleCharacterCount(prompt) >= 3) reasons.push("dense_cast");
+  if (backgroundPopulationIsRequired(prompt?.shot_manifest?.background_population)) reasons.push("background_population");
   const referenceCount = Math.max(prompt?.reference_slots?.length ?? 0, prompt?.reference_requirements?.length ?? 0);
   if (referenceCount >= 4) reasons.push("four_reference_integration");
   const providerRoute = String(prompt?.target_provider_route ?? prompt?.image_provider_route ?? "");

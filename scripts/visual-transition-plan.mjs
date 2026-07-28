@@ -125,6 +125,27 @@ function buildBoundaries(prompts) {
   return boundaries;
 }
 
+function buildAdjacentBoundaries(prompts) {
+  const boundaries = [];
+  for (let index = 1; index < prompts.length; index += 1) {
+    const previous = prompts[index - 1];
+    const current = prompts[index];
+    const start = Number(current.start_sec);
+    if (!Number.isFinite(start)) continue;
+    boundaries.push({
+      boundary_id: `adjacent_boundary_${String(index).padStart(4, "0")}`,
+      from_image_id: previous.image_id,
+      to_image_id: current.image_id,
+      scene_id: current.scene_id,
+      start_sec: Number(start.toFixed(3)),
+      in_hook: start < hookDurationSec,
+      in_retention_ramp: start >= hookDurationSec && start < retentionRampSec,
+      scene_changed: Boolean(previous.scene_id && current.scene_id && previous.scene_id !== current.scene_id),
+    });
+  }
+  return boundaries;
+}
+
 function buildPrompt(boundaries) {
   return `You are the human-feel edit planner for an AniFactory manhwa recap.
 
@@ -263,17 +284,22 @@ async function main() {
   const boundaries = buildBoundaries(promptPlan.prompts);
   const boundariesById = new Map(boundaries.map((boundary) => [boundary.boundary_id, boundary]));
   if (flags["revalidate-existing"] === "true") {
-    const existing = await readJson(outputPath, null);
+    const existingPlanPath = flags["existing-plan"] ?? outputPath;
+    const existing = await readJson(existingPlanPath, null);
     if (existing?.status !== "passed" || !Array.isArray(existing.transition_events)) {
-      throw new Error(`Transition timing revalidation requires an existing passed plan: ${outputPath}`);
+      throw new Error(`Transition timing revalidation requires an existing passed plan: ${existingPlanPath}`);
     }
-    const boundaryByPair = new Map(boundaries.map((boundary) => [`${boundary.from_image_id}->${boundary.to_image_id}`, boundary]));
+    // Revalidation is not a new creative selection pass. Validate retained
+    // transitions against every current adjacent cut, not only the capped
+    // heuristic candidate shortlist used when authoring a new plan.
+    const boundaryByPair = new Map(buildAdjacentBoundaries(promptPlan.prompts)
+      .map((boundary) => [`${boundary.from_image_id}->${boundary.to_image_id}`, boundary]));
     const transitionEvents = existing.transition_events.map((event) => {
       const boundary = boundaryByPair.get(`${event.from_image_id}->${event.to_image_id}`);
       if (!boundary) throw new Error(`Transition timing revalidation could not find current boundary for ${event.from_image_id}->${event.to_image_id}.`);
       return {
         ...event,
-        boundary_id: boundary.boundary_id,
+        boundary_id: event.boundary_id ?? boundary.boundary_id,
         scene_id: boundary.scene_id,
         start_sec: boundary.start_sec,
         in_hook: boundary.in_hook,
@@ -296,6 +322,7 @@ async function main() {
         ...(existing.planner ?? {}),
         timing_revalidated_without_llm: true,
         timing_revalidated_at: nowIso(),
+        timing_revalidated_from_path: existingPlanPath,
       },
       candidate_boundary_count: boundaries.length,
       transition_event_count: transitionEvents.length,

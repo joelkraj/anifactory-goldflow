@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import sharp from "sharp";
 import { sha256File } from "./lib/file-hash.mjs";
 import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -29,7 +30,7 @@ const visualBeatPlanPath = flags.visualBeatPlan ?? flags["visual-beat-plan"] ?? 
 const imagegenReportPath = flags.imagegenReport ?? flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const audioBedReportPath = flags.audioBedReport ?? flags["audio-bed-report"] ?? path.join(episodeDir, `longform_audio_bed_report_${episode}.json`);
-const audioStitchReportPath = flags.audioStitchReport ?? flags["audio-stitch-report"] ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const audioStitchReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
 const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
 const imageOutputQaPath = flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
 const cutExecutionLedgerPath = flags["cut-execution-ledger"] ?? path.join(episodeDir, "cut_execution_ledger.json");
@@ -297,12 +298,13 @@ function timedCaptionSegments(stitchReport) {
     const end = cursor + duration;
     cursor = end;
     return {
+      unit_id: String(segment.unit_id ?? "").trim(),
       segment_id: segment.segment_id,
       start_sec: start,
       end_sec: end,
       caption_text: String(segment.caption_text ?? segment.stripped_text ?? segment.text ?? "").trim(),
     };
-  }).filter((segment) => segment.segment_id && segment.caption_text && segment.end_sec > segment.start_sec);
+  }).filter((segment) => (segment.unit_id || segment.segment_id) && segment.caption_text && segment.end_sec > segment.start_sec);
 }
 
 function initialWhisperSubtitleGroups(words) {
@@ -408,6 +410,156 @@ function whisperSubtitleGroups(words) {
   return initialWhisperSubtitleGroups(words);
 }
 
+function subtitleTokenKey(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function subtitleTokenSimilarity(left, right) {
+  const a = subtitleTokenKey(left);
+  const b = subtitleTokenKey(right);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) {
+    return Math.min(a.length, b.length) / Math.max(a.length, b.length);
+  }
+  const rows = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i += 1) rows[i][0] = i;
+  for (let j = 0; j <= b.length; j += 1) rows[0][j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      rows[i][j] = Math.min(
+        rows[i - 1][j] + 1,
+        rows[i][j - 1] + 1,
+        rows[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return 1 - (rows[a.length][b.length] / Math.max(a.length, b.length));
+}
+
+function captionTokenWordAnchors(captionTokensList, recognizedWords) {
+  const rows = captionTokensList.length;
+  const columns = recognizedWords.length;
+  const costs = Array.from({ length: rows + 1 }, () => new Array(columns + 1).fill(0));
+  const traces = Array.from({ length: rows + 1 }, () => new Array(columns + 1).fill(""));
+  for (let i = 1; i <= rows; i += 1) {
+    costs[i][0] = i;
+    traces[i][0] = "delete";
+  }
+  for (let j = 1; j <= columns; j += 1) {
+    costs[0][j] = j;
+    traces[0][j] = "insert";
+  }
+  for (let i = 1; i <= rows; i += 1) {
+    for (let j = 1; j <= columns; j += 1) {
+      const similarity = subtitleTokenSimilarity(captionTokensList[i - 1], recognizedWords[j - 1]?.word);
+      const diagonalCost = costs[i - 1][j - 1] + (similarity >= 0.999 ? 0 : similarity >= 0.55 ? 0.35 : 1.3);
+      const deleteCost = costs[i - 1][j] + 1;
+      const insertCost = costs[i][j - 1] + 1;
+      const best = Math.min(diagonalCost, deleteCost, insertCost);
+      costs[i][j] = best;
+      traces[i][j] = best === diagonalCost ? "diagonal" : best === deleteCost ? "delete" : "insert";
+    }
+  }
+  const anchors = [];
+  let i = rows;
+  let j = columns;
+  while (i > 0 || j > 0) {
+    const trace = traces[i][j];
+    if (trace === "diagonal") {
+      const similarity = subtitleTokenSimilarity(captionTokensList[i - 1], recognizedWords[j - 1]?.word);
+      if (similarity >= 0.55) anchors.push({ caption_index: i - 1, word_index: j - 1, similarity });
+      i -= 1;
+      j -= 1;
+    } else if (trace === "delete") {
+      i -= 1;
+    } else {
+      j -= 1;
+    }
+  }
+  return anchors.reverse();
+}
+
+function captionTokenGroups(tokens) {
+  const groups = [];
+  let start = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    if ((index - start + 1) >= 8 || /[.!?]$/.test(String(tokens[index]))) {
+      groups.push({ start, end: index + 1 });
+      start = index + 1;
+    }
+  }
+  if (start < tokens.length) groups.push({ start, end: tokens.length });
+  return groups;
+}
+
+function alignedCaptionEventsForUnit(segment, recognizedWords) {
+  const tokens = captionTokens(segment.caption_text);
+  if (!tokens.length) return [];
+  const words = [...recognizedWords].sort((left, right) => Number(left.start_sec) - Number(right.start_sec));
+  const anchors = captionTokenWordAnchors(tokens, words);
+  const firstWordStart = words.length ? Number(words[0].start_sec) : Number(segment.start_sec);
+  const lastWordEnd = words.length ? Number(words.at(-1).end_sec) : Number(segment.end_sec);
+  const points = [
+    { x: 0, y: firstWordStart },
+    ...anchors.map((anchor) => ({
+      x: anchor.caption_index + 0.5,
+      y: (Number(words[anchor.word_index].start_sec) + Number(words[anchor.word_index].end_sec)) / 2,
+    })),
+    { x: tokens.length, y: lastWordEnd },
+  ].sort((left, right) => left.x - right.x || left.y - right.y);
+  const monotonicPoints = [];
+  for (const point of points) {
+    const previous = monotonicPoints.at(-1);
+    if (previous && point.x === previous.x) {
+      previous.y = Math.max(previous.y, point.y);
+      continue;
+    }
+    monotonicPoints.push({ ...point, y: previous ? Math.max(previous.y, point.y) : point.y });
+  }
+  const timeAt = (position) => {
+    if (position <= monotonicPoints[0].x) return monotonicPoints[0].y;
+    for (let index = 1; index < monotonicPoints.length; index += 1) {
+      const right = monotonicPoints[index];
+      if (position > right.x) continue;
+      const left = monotonicPoints[index - 1];
+      const ratio = right.x === left.x ? 0 : (position - left.x) / (right.x - left.x);
+      return left.y + ((right.y - left.y) * ratio);
+    }
+    return monotonicPoints.at(-1).y;
+  };
+  const groups = captionTokenGroups(tokens);
+  return groups.map((group, index) => {
+    const start = index === 0 ? firstWordStart : timeAt(group.start);
+    const rawEnd = index === groups.length - 1 ? lastWordEnd : timeAt(group.end);
+    return {
+      start_sec: start,
+      end_sec: Math.max(start + 0.01, rawEnd),
+      text: tokens.slice(group.start, group.end).join(" "),
+    };
+  });
+}
+
+function validateSubtitleTimeline(events) {
+  let previousStart = -1;
+  let previousEnd = -1;
+  for (const [index, event] of events.entries()) {
+    const start = Number(event.start_sec);
+    const end = Number(event.end_sec);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      throw new Error(`Subtitle event ${index + 1} has an invalid interval (${start} -> ${end}).`);
+    }
+    if (start + 0.001 < previousStart || start + 0.001 < previousEnd) {
+      throw new Error(`Subtitle event ${index + 1} is non-monotonic (${start} after ${previousStart}/${previousEnd}).`);
+    }
+    previousStart = start;
+    previousEnd = end;
+  }
+}
+
 function alignExpandedZeroMultiplierCaptions(events, words) {
   const adjusted = (events ?? []).map((event) => ({ ...event }));
   const zeroTimesSpans = [];
@@ -464,44 +616,39 @@ export function alignExpandedZeroMultiplierCaptionsForTests(events, words) {
 function subtitleEventsFromScript(words, stitchReport) {
   const segments = timedCaptionSegments(stitchReport);
   if (!segments.length) return null;
-  const wordsBySegment = new Map();
-  for (const word of words) {
-    const segmentId = word.segment_id_guess;
-    if (!segmentId) continue;
-    if (!wordsBySegment.has(segmentId)) wordsBySegment.set(segmentId, []);
-    wordsBySegment.get(segmentId).push(word);
-  }
+  const sortedWords = [...words].sort((left, right) => Number(left.start_sec) - Number(right.start_sec));
   const events = [];
+  let wordCursor = 0;
   for (const segment of segments) {
-    const segmentWords = wordsBySegment.get(segment.segment_id) ?? [];
-    const groups = whisperSubtitleGroups(segmentWords);
+    const candidateWords = [];
+    const candidateGlobalIndices = [];
+    for (let index = wordCursor; index < sortedWords.length; index += 1) {
+      const word = sortedWords[index];
+      const midpoint = (Number(word.start_sec) + Number(word.end_sec)) / 2;
+      if (midpoint > Number(segment.end_sec) + 0.35) break;
+      if (midpoint < Number(segment.start_sec) - 0.35) continue;
+      candidateWords.push(word);
+      candidateGlobalIndices.push(index);
+    }
     const tokens = captionTokens(segment.caption_text);
-    if (!tokens.length) continue;
-    if (!groups.length) {
-      events.push({ start_sec: segment.start_sec, end_sec: segment.end_sec, text: segment.caption_text });
-      continue;
+    const localAnchors = captionTokenWordAnchors(tokens, candidateWords);
+    const firstAnchor = localAnchors[0] ?? null;
+    const lastAnchor = localAnchors.at(-1) ?? null;
+    let segmentWords;
+    if (firstAnchor && lastAnchor) {
+      segmentWords = candidateWords.slice(firstAnchor.word_index, lastAnchor.word_index + 1);
+      wordCursor = candidateGlobalIndices[lastAnchor.word_index] + 1;
+    } else {
+      segmentWords = candidateWords.filter((word) => {
+        const midpoint = (Number(word.start_sec) + Number(word.end_sec)) / 2;
+        return midpoint >= Number(segment.start_sec) && midpoint < Number(segment.end_sec);
+      });
     }
-    let tokenCursor = 0;
-    let wordCursor = 0;
-    const totalWords = Math.max(1, segmentWords.length);
-    for (let index = 0; index < groups.length; index += 1) {
-      const group = groups[index];
-      wordCursor += group.length;
-      const targetTokenEnd = index === groups.length - 1
-        ? tokens.length
-        : Math.max(tokenCursor + 1, Math.round((wordCursor / totalWords) * tokens.length));
-      const text = tokens.slice(tokenCursor, Math.min(tokens.length, targetTokenEnd)).join(" ").replace(/\s+/g, " ").trim();
-      tokenCursor = Math.min(tokens.length, targetTokenEnd);
-      if (text) {
-        events.push({
-          start_sec: Number(group[0].start_sec),
-          end_sec: Number(group.at(-1).end_sec),
-          text,
-        });
-      }
-    }
+    events.push(...alignedCaptionEventsForUnit(segment, segmentWords));
   }
-  return mergeShortSubtitleEvents(events.filter((row) => row.text && row.end_sec > row.start_sec));
+  const aligned = events.filter((row) => row.text && row.end_sec > row.start_sec);
+  validateSubtitleTimeline(aligned);
+  return aligned;
 }
 
 function subtitleEventsFromVisualBeats(words, visualBeatPlan) {
@@ -564,18 +711,18 @@ function subtitleEvents(words, stitchReport = null) {
 }
 
 function buildSubtitleEvents(wordTiming, audioStitchReport = null, visualBeatPlan = null) {
+  const scriptEvents = subtitleEventsFromScript(wordTiming.words ?? [], audioStitchReport);
+  if (scriptEvents?.length) {
+    return {
+      events: scriptEvents,
+      source: "audio_stitch_caption_text_word_aligned_to_whisper",
+    };
+  }
   const beatEvents = subtitleEventsFromVisualBeats(wordTiming.words ?? [], visualBeatPlan);
   if (beatEvents?.length) {
     return {
       events: beatEvents,
       source: "approved_visual_beat_script_text_timed_by_whisper",
-    };
-  }
-  const scriptEvents = subtitleEventsFromScript(wordTiming.words ?? [], audioStitchReport);
-  if (scriptEvents?.length) {
-    return {
-      events: scriptEvents,
-      source: "audio_stitch_caption_text_timed_by_whisper",
     };
   }
   return {
@@ -2336,8 +2483,13 @@ async function main() {
     image_output_integrity: imageIntegrity,
     word_timing_path: wordTimingPath,
     audio_bed_report_path: audioBedReportPath,
+    narration_report_path: audioStitchReportPath,
     audio_stitch_report_path: audioStitchReportPath,
     subtitle_text_source: subtitleRows.source,
+    subtitle_timing_policy: subtitleRows.source === "audio_stitch_caption_text_word_aligned_to_whisper"
+      ? "tts_unit_bounded_dynamic_word_alignment_v1"
+      : "legacy_fallback",
+    subtitle_timeline_validated: true,
     subtitle_style: "yellow text, black outline, no background box",
     subtitle_renderer: subtitleRenderer,
     subtitle_overlay_path: subtitleOverlay?.path ?? null,
@@ -2388,7 +2540,7 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(renderReportPath, { schema: "goldflow_render_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    await writeJson(renderReportPath, { schema: "goldflow_render_report_v1", status: "failed", narration_report_path: audioStitchReportPath, audio_stitch_report_path: audioStitchReportPath, error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

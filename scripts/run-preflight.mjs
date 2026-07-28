@@ -23,6 +23,18 @@ import {
   normalizeProductionProfile,
   productionProfileSummary,
 } from "./lib/production-profiles.mjs";
+import {
+  DEFAULT_NARRATOR_VOICE_ID,
+  DEFAULT_TTS_FALLBACK_PROVIDER,
+  DEFAULT_TTS_NATIVE_SPEED,
+  DEFAULT_TTS_PROVIDER,
+  KOKORO_MODEL_LOCK,
+  QWEN_LOCAL_FALLBACK_LOCK,
+  defaultNarrationVoiceProviderOptions,
+  normalizeTtsProvider,
+  narrationTtsPolicyForIdentity,
+  validateNarrationTtsPolicy,
+} from "./lib/narration-tts-policy.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,7 +57,7 @@ const imageFallbackCondition = normalizeImageFallbackCondition(
   flags["image-fallback-condition"] ?? (imageFallbackProvider ? MODELSLAB_CREDIT_EXHAUSTED : null),
 );
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
-const runIntent = flags.intent ?? flags["run-intent"] ?? "production";
+const runIntent = normalizeRunIntent(flags.intent ?? flags["run-intent"] ?? "production");
 const productionProfile = normalizeProductionProfile(
   flags["production-profile"] ?? flags.profile ?? DEFAULT_PRODUCTION_PROFILE,
 );
@@ -67,6 +79,41 @@ const parallaxFirstWindowTarget = boundedInteger(flags["parallax-first-window-ta
 const parallaxRetentionWindowTarget = boundedInteger(flags["parallax-retention-window-target"], 10, 0, parallaxTargetMax);
 const parallaxBackgroundProvider = normalizeParallaxBackgroundProvider(
   flags["parallax-background-provider"] ?? (imageProvider === "modelslab" ? "modelslab_flux_klein" : "local_blur_legacy"),
+);
+const explicitLegacyQwenFlags = flags["qwen-narrator-voice-id"] != null || flags["qwen-native-speed"] != null;
+const ttsProvider = normalizeTtsProvider(
+  flags["tts-provider"] ?? DEFAULT_TTS_PROVIDER,
+);
+if (!["kokoro_local", "modelslab_qwen"].includes(ttsProvider)) {
+  throw new Error(`New run preflight supports kokoro_local primary or explicit legacy modelslab_qwen; ${ttsProvider} is fallback-only.`);
+}
+if (explicitLegacyQwenFlags && flags["tts-provider"] == null) {
+  throw new Error("Legacy Qwen-primary flags no longer select the provider implicitly. Existing legacy identities remain resumable; a diagnostic migration must explicitly pass --tts-provider modelslab_qwen.");
+}
+if (runIntent === "production" && ttsProvider !== DEFAULT_TTS_PROVIDER) {
+  throw new Error(`New production runs require ${DEFAULT_TTS_PROVIDER} with ${DEFAULT_NARRATOR_VOICE_ID}. Qwen is the exact-unit fallback, not a selectable primary narrator.`);
+}
+const ttsFallbackProvider = ttsProvider === "kokoro_local"
+  ? normalizeTtsProvider(flags["tts-fallback-provider"] ?? DEFAULT_TTS_FALLBACK_PROVIDER)
+  : null;
+const narratorVoiceId = cleanOptionalId(
+  flags["narrator-voice-id"]
+  ?? flags["tts-voice-id"]
+  ?? (ttsProvider === "kokoro_local" ? DEFAULT_NARRATOR_VOICE_ID : null),
+);
+if (ttsProvider === "kokoro_local" && narratorVoiceId !== DEFAULT_NARRATOR_VOICE_ID) {
+  throw new Error(`New narration identities are Puck-only: --narrator-voice-id must be ${DEFAULT_NARRATOR_VOICE_ID}. Other Kokoro voices remain bakeoff-only.`);
+}
+if (ttsProvider === "kokoro_local" && ttsFallbackProvider !== DEFAULT_TTS_FALLBACK_PROVIDER) {
+  throw new Error(`New Puck narration identities require ${DEFAULT_TTS_FALLBACK_PROVIDER} as the exact-unit fallback.`);
+}
+const ttsNativeSpeed = boundedNumber(
+  flags["tts-native-speed"]
+  ?? (ttsProvider === "modelslab_qwen" ? flags["qwen-native-speed"] : null)
+  ?? process.env.ANIFACTORY_TTS_NATIVE_SPEED,
+  ttsProvider === "kokoro_local" ? DEFAULT_TTS_NATIVE_SPEED : 1.25,
+  0.75,
+  1.5,
 );
 const operatorQwenNarratorVoiceId = cleanOptionalId(flags["qwen-narrator-voice-id"] ?? flags["narrator-voice-id"] ?? null);
 const qwenNarratorVoiceId = operatorQwenNarratorVoiceId ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
@@ -101,6 +148,14 @@ function sha256(value) {
 function normalizeAudioTarget(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (!normalized || ["narrator", "narration", "narrator_only", "narration_only", "voice_only"].includes(normalized)) return "narrator_only";
+  return normalized;
+}
+
+function normalizeRunIntent(value) {
+  const normalized = String(value ?? "production").trim().toLowerCase();
+  if (!["production", "proof", "diagnostic", "test"].includes(normalized)) {
+    throw new Error(`Unknown run intent: ${value}. Expected production, proof, diagnostic, or test.`);
+  }
   return normalized;
 }
 
@@ -213,10 +268,16 @@ function parseProofScope(parsedFlags, intent) {
 }
 
 function lockedModelVersions() {
+  const genericTts = ttsProvider === "kokoro_local";
   return {
     planning_model: flags["planning-model"] ?? process.env.ANIFACTORY_CODEX_MODEL ?? DEFAULT_CODEX_MODEL,
     planning_reasoning_effort: flags["planning-reasoning-effort"] ?? process.env.ANIFACTORY_CODEX_REASONING_EFFORT ?? DEFAULT_CODEX_REASONING_EFFORT,
-    tts_model: flags["tts-model"] ?? "qwen-tts",
+    tts_model: flags["tts-model"] ?? (genericTts ? KOKORO_MODEL_LOCK.model_id : "qwen-tts"),
+    tts_model_revision: genericTts ? KOKORO_MODEL_LOCK.model_revision : null,
+    tts_runtime: genericTts ? `${KOKORO_MODEL_LOCK.runtime}@${KOKORO_MODEL_LOCK.runtime_version}` : null,
+    fallback_tts_model: genericTts ? QWEN_LOCAL_FALLBACK_LOCK.model_id : null,
+    fallback_tts_model_revision: genericTts ? QWEN_LOCAL_FALLBACK_LOCK.model_revision : null,
+    fallback_tts_runtime: genericTts ? `${QWEN_LOCAL_FALLBACK_LOCK.runtime}@${QWEN_LOCAL_FALLBACK_LOCK.runtime_version}` : null,
     image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
     reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
     render_profile: renderProfile,
@@ -273,6 +334,23 @@ function validateImageFallbackPolicy() {
 }
 
 function voiceProviderOptions() {
+  if (ttsProvider === "kokoro_local") {
+    const options = defaultNarrationVoiceProviderOptions({
+      provider: ttsProvider,
+      fallbackProvider: ttsFallbackProvider,
+      voiceId: narratorVoiceId,
+      nativeSpeed: ttsNativeSpeed,
+    });
+    validateNarrationTtsPolicy(narrationTtsPolicyForIdentity({
+      episode,
+      tts_provider: ttsProvider,
+      tts_fallback_provider: ttsFallbackProvider,
+      narrator_voice_id: narratorVoiceId,
+      tts_native_speed: ttsNativeSpeed,
+      voice_provider_options: options,
+    }), { production: runIntent === "production" });
+    return options;
+  }
   return {
     qwen_narrator_voice_id: qwenNarratorVoiceId,
     qwen_narrator_voice_policy: qwenNarratorVoicePolicy,
@@ -344,9 +422,17 @@ async function main() {
     image_provider: imageProvider,
     image_provider_options: imageProviderOptions(imageProvider),
     voice_provider_options: voiceProviderOptions(),
-    qwen_narrator_voice_id: qwenNarratorVoiceId,
-    qwen_narrator_voice_policy: qwenNarratorVoicePolicy,
-    qwen_native_speed: qwenNativeSpeed,
+    ...(ttsProvider === "kokoro_local" ? {
+      tts_provider: ttsProvider,
+      tts_fallback_provider: ttsFallbackProvider,
+      narrator_voice_id: narratorVoiceId,
+      tts_voice_id: narratorVoiceId,
+      tts_native_speed: ttsNativeSpeed,
+    } : {
+      qwen_narrator_voice_id: qwenNarratorVoiceId,
+      qwen_narrator_voice_policy: qwenNarratorVoicePolicy,
+      qwen_native_speed: qwenNativeSpeed,
+    }),
     audio_target: audioTarget,
     production_profile: productionProfile,
     production_profile_config: productionProfileConfig,
@@ -388,7 +474,23 @@ async function main() {
       image_fallback_condition: imageFallbackCondition,
       parallax_background_provider: parallaxBackgroundProvider,
       audio_target: audioTarget,
-      qwen_narrator_voice_id: qwenNarratorVoiceId,
+      tts_provider: ttsProvider,
+      tts_fallback_provider: ttsFallbackProvider,
+      narrator_voice_id: ttsProvider === "kokoro_local" ? narratorVoiceId : qwenNarratorVoiceId,
+      tts_native_speed: ttsProvider === "kokoro_local" ? ttsNativeSpeed : qwenNativeSpeed,
+      tts_model: lockedModelVersions().tts_model,
+      tts_model_revision: lockedModelVersions().tts_model_revision,
+      fallback_tts_model: lockedModelVersions().fallback_tts_model,
+      fallback_tts_model_revision: lockedModelVersions().fallback_tts_model_revision,
+      narrator_voice_identity: ttsProvider === "kokoro_local" ? DEFAULT_NARRATOR_VOICE_ID : qwenNarratorVoiceId,
+      fallback_voice_identity: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id : null,
+      fallback_reference_audio_sha256: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256 : null,
+      fallback_reference_metadata_sha256: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256 : null,
+      fallback_similarity_model_sha256: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256 : null,
+      fallback_similarity_calibration_sha256: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_calibration_sha256 : null,
+      fallback_minimum_cosine_similarity: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.minimum_cosine_similarity : null,
+      fallback_warning_below_cosine_similarity: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.warning_below_cosine_similarity : null,
+      qwen_narrator_voice_id: ttsProvider === "kokoro_local" ? null : qwenNarratorVoiceId,
       production_profile: productionProfile,
     },
     model_versions: lockedModelVersions(),
@@ -406,6 +508,8 @@ async function main() {
       proof_renders_must_be_labeled_and_must_not_replace_final_render: true,
       provider_native_tts_speed_required: true,
       post_tempo_normalization_default: false,
+      single_narrator_identity_required: ttsProvider === "kokoro_local",
+      fallback_must_clone_primary_voice_identity: ttsProvider === "kokoro_local",
       image_output_qa_required_before_render: true,
       directed_motion_plan_required_before_render: true,
       inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",
@@ -429,4 +533,8 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   });
 }
 
-export { parseProofScope as parseProofScopeForTests, validateDirtyWorktreePolicy };
+export {
+  normalizeRunIntent as normalizeRunIntentForTests,
+  parseProofScope as parseProofScopeForTests,
+  validateDirtyWorktreePolicy,
+};

@@ -19,6 +19,10 @@ import {
   referenceTargetsForScene,
 } from "./lib/visual-scope-utils.mjs";
 import { multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import {
+  backgroundPopulationFindings,
+  sanitizeBackgroundPopulation,
+} from "./lib/background-population-utils.mjs";
 import { promptTextForImageProvider } from "./lib/image-prompt-utils.mjs";
 import {
   normalizeImageProvider,
@@ -62,11 +66,28 @@ import {
   scopedQaRecoveryCommand,
 } from "./image-output-qa.mjs";
 import { focalAnalysisFromPixelsForTests } from "./image-focal-analysis.mjs";
-import { collectQwenUnitsForTests, ttsSafeTextForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { deliveryFirstFullStreamFindingsForTests } from "./local-whisper-word-timing.mjs";
+import {
+  audioQaFindingsForTests,
+  collectQwenUnitsForTests,
+  qwenRequestForUnitForTests,
+  requiredMediumQaReasonsForTests,
+  synthesisIdentityForTests,
+  stitchBoundaryPaddingForTests,
+  transcriptQaForTests,
+  ttsSafeTextForTests,
+  untranscribedActiveIntervalsForTests,
+  validateRegenerateUnitIdsForTests,
+} from "./modelslab-qwen-episode-audio.mjs";
 import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
+import { scaledSegmentsForTests } from "./narration-tempo-normalize.mjs";
 import { finalizeRenderReport } from "./render-report-finalize.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
-import { parseProofScopeForTests, validateDirtyWorktreePolicy } from "./run-preflight.mjs";
+import {
+  normalizeRunIntentForTests,
+  parseProofScopeForTests,
+  validateDirtyWorktreePolicy,
+} from "./run-preflight.mjs";
 import { validateFinalQaSourceHashesForTests } from "./final-qa.mjs";
 import {
   referencePlanApprovalContractSha256,
@@ -136,7 +157,13 @@ import {
   shouldSplitReferenceChunkForTests,
   visualReferenceCodexCacheEnabledForTests,
 } from "./visual-reference-plan.mjs";
-import { qwenGenerationPlanForTests, voiceDirectionMetadataForTests, voiceDirectionTransformForTests } from "./voice-direction-gate.mjs";
+import {
+  qwenGenerationPlanForTests,
+  qwenTextIntegrityCoverageForTests,
+  systemUiSpeechCoverageForTests,
+  voiceDirectionMetadataForTests,
+  voiceDirectionTransformForTests,
+} from "./voice-direction-gate.mjs";
 import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
@@ -153,6 +180,38 @@ import {
   normalizeProductionProfile,
   productionProfileForIdentity,
 } from "./lib/production-profiles.mjs";
+import {
+  KOKORO_MODEL_LOCK,
+  KOKORO_VOICE_LOCKS,
+  QWEN_LOCAL_FALLBACK_LOCK,
+  defaultNarrationVoiceProviderOptions,
+  hasExplicitLegacyQwenIdentity,
+  isLegacyQwenIdentity,
+  narrationArtifactVoiceIdentityFindings,
+  narrationPlanVoiceIdentityFindings,
+  narrationTtsPolicyForIdentity,
+  validateNarrationTtsPolicy,
+} from "./lib/narration-tts-policy.mjs";
+import {
+  QWEN_PUCK_MINIMUM_COSINE_SIMILARITY,
+  QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY,
+  candidateDisposition,
+  fullStreamDecision,
+  softenPrimaryQa,
+  validateSelectedUnitOrder,
+  voiceContinuityDecision,
+} from "./lib/tts-selection-policy.mjs";
+import {
+  equivalentPhrasesForTests,
+  joinQaFromPcmForTests,
+  selectedQaDecisionForTests,
+  validateNarrationTtsPolicyForTests,
+} from "./narration-tts-episode.mjs";
+import {
+  runIdentityTtsCompleteForTests,
+  selectedNarratorVoiceIdForTests,
+  ttsStatusIdentityFieldsForTests,
+} from "./run-status.mjs";
 import { plannerChunkIdentityFindings } from "./lib/planner-chunk-ledger.mjs";
 import {
   plannerInvocationScope,
@@ -204,7 +263,10 @@ import {
   semanticCodexCacheEnabledForTests,
   storyFactEvidenceFindingsForTests,
 } from "./semantic-scene-plan.mjs";
-import { scopedBaselineWordsForTests } from "./proof-baseline-import.mjs";
+import {
+  proofBaselineArtifactContractForTests,
+  scopedBaselineWordsForTests,
+} from "./proof-baseline-import.mjs";
 import { advanceCommandTokensForTests, autoAdvanceDecisionForTests } from "./run-advance.mjs";
 import { buildRetentionAttributionForTests, normalizeRetentionRowsForTests } from "./youtube-analytics-feedback.mjs";
 import {
@@ -245,6 +307,8 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("imagegen", "codex-work", { "references-only": "true" }), "reference_generation");
   assert.equal(commandStageFor("imagegen", "codex-work", { "qa-recovery": "true" }), "image_output_qa");
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
+  assert.equal(commandStageFor("tts", "narrate"), "qwen_tts_stitch");
+  assert.equal(commandStageFor("tts", "qwen"), "qwen_tts_stitch");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
 
@@ -274,9 +338,614 @@ function testParallelStageDependenciesAndOwnedOutputs() {
   assert.equal(stageOutputPathMatches("semantic_scene_plan", "semantic_scene_plan.json"), true);
   assert.equal(stageOutputPathMatches("semantic_scene_plan", "modelslab_qwen_tts_report_ep_01.json"), false);
   assert.equal(stageOutputPathMatches("qwen_tts_stitch", "modelslab_qwen_tts_report_ep_01.json"), true);
+  assert.equal(stageOutputPathMatches("qwen_tts_stitch", "narration_tts_report_ep_01.json"), true);
   assert.equal(stageOutputPathMatches("qwen_tts_stitch", "semantic_scene_plan.json"), false);
   assert.equal(stageOutputPathMatches("local_whisper_word_timing", "narration_word_timing_ep_01.json"), true);
   assert.equal(stageOutputPathMatches("local_whisper_word_timing", "story_fact_ledger.json"), false);
+}
+
+function testNarrationTtsProviderLocksAndLegacyRouting() {
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const identity = {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    tts_provider: "kokoro_local",
+    tts_fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    tts_native_speed: 1.2,
+    voice_provider_options: voiceProviderOptions,
+  };
+  const policy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity(identity));
+  assert.equal(policy.primary.model_id, KOKORO_MODEL_LOCK.model_id);
+  assert.equal(policy.primary.model_revision, KOKORO_MODEL_LOCK.model_revision);
+  assert.equal(policy.primary.voice_id, "am_puck");
+  assert.equal(policy.primary.native_speed, 1.2);
+  assert.equal(policy.fallback.provider, "qwen_local");
+  assert.equal(policy.fallback.fallback_scope, "failed_units_only");
+  assert.equal(policy.fallback.model_id, QWEN_LOCAL_FALLBACK_LOCK.model_id);
+  assert.equal(policy.fallback.model_revision, QWEN_LOCAL_FALLBACK_LOCK.model_revision);
+  assert.equal(policy.fallback.reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
+  assert.equal(policy.fallback.reference_text, QWEN_LOCAL_FALLBACK_LOCK.reference_text);
+  assert.equal(policy.fallback.reference_text_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256);
+  assert.equal(policy.fallback.reference_metadata_path, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_path);
+  assert.equal(policy.fallback.reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
+  assert.equal(policy.fallback.reference_voice_id, "am_puck");
+  assert.equal(policy.fallback.reference_origin_unit_id, "stp_voice_seg_10_5_2630f1d234dd");
+  assert.equal(policy.fallback.voice_continuity_contract, "clone_primary_puck_identity");
+  assert.deepEqual(voiceProviderOptions.allowed_production_voice_ids, ["am_puck"]);
+  assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_puck_with_puck_cloned_qwen_repair");
+  assert.equal("alternate_voice_ids" in voiceProviderOptions, false);
+  assert.equal(validateNarrationTtsPolicyForTests(identity).status, "passed");
+  assert.match(buildStageCommand("qwen_tts_stitch", identity), /tts narrate/);
+  assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
+  assert.match(buildStageCommand("qwen_tts_stitch", {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    qwen_native_speed: 1.25,
+  }), /tts qwen/);
+  assert.throws(
+    () => validateNarrationTtsPolicy(narrationTtsPolicyForIdentity({
+      ...identity,
+      narrator_voice_id: "am_michael",
+    })),
+    /single locked narrator voice am_puck/,
+  );
+  assert.throws(
+    () => defaultNarrationVoiceProviderOptions({ voiceId: "am_fenrir" }),
+    /require am_puck/,
+  );
+  assert.throws(
+    () => defaultNarrationVoiceProviderOptions({ fallbackProvider: "modelslab_qwen" }),
+    /require qwen_local/,
+  );
+}
+
+function testPuckOnlyNarrationIdentityFailClosedGates() {
+  assert.equal(normalizeRunIntentForTests(" Production "), "production");
+  assert.equal(normalizeRunIntentForTests("PROOF"), "proof");
+  assert.throws(
+    () => normalizeRunIntentForTests("prod"),
+    /Unknown run intent/,
+  );
+
+  const explicitLegacyV2 = {
+    schema: "goldflow_run_identity_v2",
+    qwen_narrator_voice_id: "joel_owned_narrator_clone",
+    qwen_narrator_voice_policy: "default_joel_owned_narrator_clone",
+    qwen_native_speed: 1.25,
+    voice_provider_options: {
+      qwen_narrator_voice_id: "joel_owned_narrator_clone",
+      qwen_narrator_voice_policy: "default_joel_owned_narrator_clone",
+      qwen_native_speed: 1.25,
+    },
+    provider_locks: {
+      qwen_narrator_voice_id: "joel_owned_narrator_clone",
+    },
+    model_versions: {
+      tts_model: "qwen-tts",
+    },
+  };
+  assert.equal(hasExplicitLegacyQwenIdentity(explicitLegacyV2), true);
+  assert.equal(isLegacyQwenIdentity(explicitLegacyV2), true);
+  assert.equal(
+    selectedNarratorVoiceIdForTests({
+      ...explicitLegacyV2,
+      run_identity_schema: explicitLegacyV2.schema,
+    }, {
+      "qwen-narrator-voice-id": "am_fenrir",
+      "narrator-voice-id": "am_michael",
+    }),
+    "joel_owned_narrator_clone",
+  );
+  const malformedV2 = {
+    schema: "goldflow_run_identity_v2",
+    provider_locks: { tts_provider: "kokoro_local" },
+    model_versions: { tts_model: KOKORO_MODEL_LOCK.model_id },
+  };
+  assert.equal(hasExplicitLegacyQwenIdentity(malformedV2), false);
+  assert.equal(isLegacyQwenIdentity(malformedV2), false);
+  assert.equal(runIdentityTtsCompleteForTests(malformedV2).done, false);
+  assert.match(
+    runIdentityTtsCompleteForTests(malformedV2).evidence,
+    /missing the generic narration identity/,
+  );
+
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const puckIdentity = {
+    schema: "goldflow_run_identity_v2",
+    tts_provider: "kokoro_local",
+    tts_fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    tts_voice_id: "am_puck",
+    tts_native_speed: 1.2,
+    voice_provider_options: voiceProviderOptions,
+  };
+  const statusIdentity = ttsStatusIdentityFieldsForTests(puckIdentity, {
+    "tts-provider": "modelslab_qwen",
+    "narrator-voice-id": "am_fenrir",
+    "tts-voice-id": "am_michael",
+    "qwen-narrator-voice-id": "joel_owned_narrator_clone",
+  });
+  assert.equal(statusIdentity.tts_provider, "kokoro_local");
+  assert.equal(statusIdentity.narrator_voice_id, "am_puck");
+  assert.equal(statusIdentity.tts_voice_id, "am_puck");
+
+  const policy = validateNarrationTtsPolicy(
+    narrationTtsPolicyForIdentity(puckIdentity),
+  );
+  const fallbackControls = {
+    target_voice_id: "am_puck",
+    target_voice_sha256: policy.primary.voice_sha256,
+    reference_audio_path: policy.fallback.reference_audio_path,
+    reference_audio_sha256: policy.fallback.reference_audio_sha256,
+    reference_transcript_path: policy.fallback.reference_text_path,
+    reference_transcript_sha256: policy.fallback.reference_text_sha256,
+    reference_transcript_file_sha256: policy.fallback.reference_text_file_sha256,
+    reference_metadata_path: policy.fallback.reference_metadata_path,
+    reference_metadata_sha256: policy.fallback.reference_metadata_sha256,
+    voice_continuity_contract: policy.fallback.voice_continuity_contract,
+    speaker_similarity_method: policy.fallback.speaker_similarity_method,
+    speaker_similarity_model_path: policy.fallback.speaker_similarity_model_path,
+    speaker_similarity_model_sha256: policy.fallback.speaker_similarity_model_sha256,
+    hard_minimum_cosine_similarity: policy.fallback.minimum_cosine_similarity,
+    warning_floor_cosine_similarity: policy.fallback.warning_floor_cosine_similarity,
+    fallback_scope: "exact_failed_unit_only",
+    exact_unit_only: true,
+    whole_episode_fallback_allowed: false,
+  };
+  const validPlan = {
+    narrator_voice_id: "am_puck",
+    narrator_voice_sha256: policy.primary.voice_sha256,
+    provider_controls: {
+      kokoro: { voice_id: "am_puck" },
+      qwen3: fallbackControls,
+    },
+    segments: [{
+      narration_units: [{
+        unit_id: "unit_001",
+        reference_id: "am_puck",
+        provider_controls: {
+          kokoro: { voice_id: "am_puck" },
+          qwen3: fallbackControls,
+        },
+      }],
+    }],
+  };
+  assert.deepEqual(narrationPlanVoiceIdentityFindings(validPlan, policy), []);
+  assert.equal(narrationPlanVoiceIdentityFindings({
+    ...validPlan,
+    provider_controls: {
+      ...validPlan.provider_controls,
+      kokoro: { voice_id: "am_fenrir" },
+    },
+  }, policy).some((finding) => finding.actual === "am_fenrir"), true);
+  assert.equal(narrationPlanVoiceIdentityFindings({
+    ...validPlan,
+    segments: [{
+      narration_units: [{
+        ...validPlan.segments[0].narration_units[0],
+        reference_id: "am_michael",
+      }],
+    }],
+  }, policy).some((finding) => finding.actual === "am_michael"), true);
+  assert.equal(narrationPlanVoiceIdentityFindings({
+    ...validPlan,
+    provider_controls: {
+      ...validPlan.provider_controls,
+      qwen3: { ...fallbackControls, target_voice_id: "joel_owned_narrator_clone" },
+    },
+  }, policy).some((finding) => finding.actual === "joel_owned_narrator_clone"), true);
+
+  const fallbackUsage = {
+    provider: "qwen_local",
+    target_voice_id: "am_puck",
+    target_voice_sha256: policy.primary.voice_sha256,
+    voice_continuity_contract: policy.fallback.voice_continuity_contract,
+    reference_audio_sha256: policy.fallback.reference_audio_sha256,
+    speaker_similarity_model_sha256: policy.fallback.speaker_similarity_model_sha256,
+    speaker_similarity_calibration_sha256:
+      policy.fallback.speaker_similarity_calibration_sha256,
+    minimum_cosine_similarity: policy.fallback.minimum_cosine_similarity,
+    warning_below_cosine_similarity: policy.fallback.warning_below_cosine_similarity,
+    exact_unit_only: true,
+    unit_ids: [],
+  };
+  const validArtifacts = {
+    ttsReport: {
+      narrator_voice_id: "am_puck",
+      primary: {
+        voice_id: "am_puck",
+        voice_sha256: policy.primary.voice_sha256,
+      },
+      fallback_usage: fallbackUsage,
+      results: [{
+        unit_id: "unit_001",
+        provider: "kokoro_local",
+        voice_id: "am_puck",
+        voice_continuity_contract: "native_puck_preset",
+      }],
+    },
+    unitQa: {
+      selected_units: [{
+        unit_id: "unit_001",
+        provider: "kokoro_local",
+        voice_id: "am_puck",
+        voice_continuity_contract: "native_puck_preset",
+      }],
+    },
+    stitchReport: {
+      segments: [{
+        unit_id: "unit_001",
+        tts_provider: "kokoro_local",
+        voice_id: "am_puck",
+        voice_continuity_contract: "native_puck_preset",
+      }],
+    },
+    policy,
+  };
+  assert.deepEqual(narrationArtifactVoiceIdentityFindings(validArtifacts), []);
+  assert.equal(narrationArtifactVoiceIdentityFindings({
+    ...validArtifacts,
+    ttsReport: {
+      ...validArtifacts.ttsReport,
+      primary: {
+        ...validArtifacts.ttsReport.primary,
+        voice_id: "am_fenrir",
+      },
+    },
+  }).some((finding) => finding.actual === "am_fenrir"), true);
+  assert.equal(narrationArtifactVoiceIdentityFindings({
+    ...validArtifacts,
+    unitQa: {
+      selected_units: [{
+        ...validArtifacts.unitQa.selected_units[0],
+        voice_id: "am_michael",
+      }],
+    },
+  }).some((finding) => finding.actual === "am_michael"), true);
+  assert.equal(narrationArtifactVoiceIdentityFindings({
+    ...validArtifacts,
+    ttsReport: {
+      ...validArtifacts.ttsReport,
+      fallback_usage: {
+        ...fallbackUsage,
+        target_voice_id: "joel_owned_narrator_clone",
+      },
+    },
+  }).some((finding) => finding.actual === "joel_owned_narrator_clone"), true);
+}
+
+function testNarrationTtsSelectionAndQaContracts() {
+  const isolatedDeletion = transcriptQaForTests(
+    "He crossed the broken bridge at dawn.",
+    "He crossed broken bridge at dawn.",
+  );
+  const isolatedSubstitution = transcriptQaForTests(
+    "He crossed the broken bridge at dawn.",
+    "He crossed the burning bridge at dawn.",
+  );
+  assert.equal(
+    isolatedDeletion.findings.some((finding) => (
+      finding.severity === "blocker"
+      && finding.code === "tts_transcript_isolated_word_deletion"
+    )),
+    true,
+  );
+  assert.equal(
+    candidateDisposition({ status: "blocked", findings: isolatedDeletion.findings }, "kokoro_local").status,
+    "accepted_primary",
+  );
+  assert.equal(
+    isolatedSubstitution.findings.some((finding) => (
+      finding.severity === "blocker"
+      && finding.code === "tts_transcript_isolated_substitution"
+    )),
+    true,
+  );
+  assert.equal(
+    candidateDisposition({ status: "blocked", findings: isolatedSubstitution.findings }, "kokoro_local").status,
+    "accepted_primary",
+  );
+  const softenedIsolatedDifference = softenPrimaryQa({
+    status: "blocked",
+    findings: isolatedSubstitution.findings,
+  });
+  assert.equal(softenedIsolatedDifference.status, "passed_with_warnings");
+  assert.equal(
+    softenedIsolatedDifference.findings.every((finding) => finding.severity !== "blocker"),
+    true,
+  );
+  const confirmedMissingPassage = {
+    status: "blocked",
+    transcript: {
+      longest_deletion_run: 5,
+      deletions: 5,
+      intended_canonical_token_count: 20,
+    },
+    findings: [{
+      severity: "blocker",
+      code: "tts_transcript_contiguous_words_missing",
+      longest_deletion_run: 5,
+    }],
+  };
+  assert.equal(
+    candidateDisposition(confirmedMissingPassage, "kokoro_local").status,
+    "fallback_required",
+  );
+  const shortContextualFullStreamGap = deliveryFirstFullStreamFindingsForTests({
+    word_error_rate: 0.011,
+    longest_deletion_run: 5,
+    findings: confirmedMissingPassage.findings,
+  });
+  assert.equal(shortContextualFullStreamGap[0].severity, "warning");
+  const longFullStreamGap = deliveryFirstFullStreamFindingsForTests({
+    word_error_rate: 0.011,
+    longest_deletion_run: 8,
+    findings: [{
+      ...confirmedMissingPassage.findings[0],
+      longest_deletion_run: 8,
+    }],
+  });
+  assert.equal(longFullStreamGap[0].severity, "blocker");
+  const mediumIsolatedDifference = transcriptQaForTests(
+    "This is not a story about whether I survive the fall.",
+    "This is not a story about whether I survived the fall.",
+    {
+      maxWer: 0.3,
+      blockAnySubstitution: false,
+      blockIsolatedEdits: false,
+    },
+  );
+  assert.equal(
+    mediumIsolatedDifference.findings.some((finding) => finding.severity === "blocker"),
+    false,
+  );
+
+  const possibleImpulseWarning = {
+    status: "passed_with_warnings",
+    findings: [{
+      severity: "warning",
+      code: "tts_audio_possible_impulsive_discontinuity",
+      maximum_sample_step_dbfs: -10.5,
+    }],
+  };
+  assert.deepEqual(candidateDisposition(possibleImpulseWarning, "kokoro_local"), {
+    status: "accepted_primary",
+    accepted: true,
+    blocker_codes: [],
+  });
+  const joinInputs = [
+    { unit_id: "unit_001", sample_count: 1 },
+    { unit_id: "unit_002", sample_count: 1 },
+  ];
+  const joinBoundaries = [{ after_unit_id: "unit_001", gap_sample_count: 0 }];
+  const warningJoinQa = joinQaFromPcmForTests(
+    Int16Array.from([0, 10000]),
+    24000,
+    joinInputs,
+    joinBoundaries,
+  );
+  assert.equal(warningJoinQa.status, "passed_with_warnings");
+  assert.equal(
+    warningJoinQa.warnings.some(
+      (finding) => finding.code === "tts_join_possible_impulsive_discontinuity",
+    ),
+    true,
+  );
+  const blockingJoinQa = joinQaFromPcmForTests(
+    Int16Array.from([0, 15000]),
+    24000,
+    joinInputs,
+    joinBoundaries,
+  );
+  assert.equal(blockingJoinQa.status, "blocked");
+  assert.equal(
+    blockingJoinQa.blockers.some(
+      (finding) => finding.code === "tts_join_impulsive_discontinuity",
+    ),
+    true,
+  );
+  const fullStreamWithJoinWarning = fullStreamDecision({
+    leading_deletion_run: 0,
+    trailing_deletion_run: 0,
+    longest_deletion_run: 0,
+    longest_insertion_run: 0,
+    deletions: 0,
+    insertions: 0,
+    word_error_rate: 0,
+    findings: [],
+  }, {
+    orderQa: { blockers: [] },
+    joinQa: warningJoinQa,
+  });
+  assert.equal(fullStreamWithJoinWarning.status, "passed");
+  assert.equal(
+    fullStreamWithJoinWarning.warnings.some(
+      (finding) => finding.code === "tts_join_possible_impulsive_discontinuity",
+    ),
+    true,
+  );
+  const deferredTranscriptDecision = fullStreamDecision(null, {
+    orderQa: { blockers: [] },
+    joinQa: { blockers: [], warnings: [] },
+    transcriptDeferred: true,
+  });
+  assert.equal(deferredTranscriptDecision.status, "passed");
+  assert.equal(
+    deferredTranscriptDecision.warnings.some(
+      (finding) => finding.code === "tts_full_stream_transcript_deferred_to_official_whisper_timing",
+    ),
+    true,
+  );
+
+  const approvedSpokenRewrite = "Whether I live through the fall, I will return.";
+  const sourceMeaning = "Whether I survive the fall, I will return.";
+  const semanticOverrideAudit = [{
+    from: "survive the fall",
+    to: "live through the fall",
+    asr_equivalence_allowed: false,
+  }];
+  assert.deepEqual(equivalentPhrasesForTests({
+    tts_override_replacements_applied: semanticOverrideAudit,
+  }), []);
+  assert.deepEqual(equivalentPhrasesForTests({
+    tts_override_replacements_applied: [{
+      ...semanticOverrideAudit[0],
+      asr_equivalence_allowed: true,
+    }],
+  }), [{
+    ...semanticOverrideAudit[0],
+    asr_equivalence_allowed: true,
+  }]);
+  const unapprovedEquivalence = transcriptQaForTests(approvedSpokenRewrite, sourceMeaning);
+  assert.equal(
+    unapprovedEquivalence.findings.some((finding) => finding.severity === "blocker"),
+    true,
+    "A semantic TTS rewrite must not become ASR-equivalent by mere presence in the override audit.",
+  );
+  const explicitlyAllowedEquivalence = transcriptQaForTests(
+    approvedSpokenRewrite,
+    sourceMeaning,
+    {
+      equivalentPhrases: [{
+        from: "survive the fall",
+        to: "live through the fall",
+        asr_equivalence_allowed: true,
+      }],
+    },
+  );
+  assert.equal(explicitlyAllowedEquivalence.word_error_rate, 0);
+  assert.deepEqual(explicitlyAllowedEquivalence.findings, []);
+
+  const plannedUnits = [{ unit_id: "unit_001" }, { unit_id: "unit_002" }];
+  const selectedRows = [
+    {
+      unit_id: "unit_001",
+      provider: "kokoro_local",
+      unit_qa: { status: "passed", findings: [] },
+    },
+    {
+      unit_id: "unit_002",
+      provider: "qwen_local",
+      unit_qa: { status: "passed", findings: [] },
+    },
+  ];
+  const rejectedCandidateHistory = [{
+    unit_id: "unit_002",
+    provider: "kokoro_local",
+    unit_qa: {
+      status: "blocked",
+      findings: [{ severity: "blocker", code: "tts_transcript_confirmed_deletion" }],
+    },
+  }];
+  assert.equal(rejectedCandidateHistory[0].unit_qa.status, "blocked");
+  assert.equal(candidateDisposition(selectedRows[1].unit_qa, "qwen_local").status, "accepted_fallback");
+  assert.equal(validateSelectedUnitOrder(plannedUnits, selectedRows).status, "passed");
+  assert.equal(selectedQaDecisionForTests(selectedRows, {
+    orderQa: validateSelectedUnitOrder(plannedUnits, selectedRows),
+  }).status, "passed");
+  const puckVoiceSha256 = KOKORO_VOICE_LOCKS.am_puck.voice_sha256;
+  const similarityModelSha256 = QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256;
+  const passingContinuity = voiceContinuityDecision({
+    status: "passed",
+    audio_sha256: "fallback-audio-hash",
+    reference_voice_id: "am_puck",
+    reference_voice_sha256: puckVoiceSha256,
+    similarity_model_sha256: similarityModelSha256,
+    cosine_similarity: 0.925,
+    minimum_cosine_similarity: QWEN_PUCK_MINIMUM_COSINE_SIMILARITY,
+    warning_below_cosine_similarity:
+      QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY,
+  }, {
+    audioSha256: "fallback-audio-hash",
+    referenceVoiceId: "am_puck",
+    referenceVoiceSha256: puckVoiceSha256,
+    similarityModelSha256,
+  });
+  assert.equal(passingContinuity.status, "passed");
+  const fenrirLikeContinuity = voiceContinuityDecision({
+    status: "passed",
+    audio_sha256: "fallback-audio-hash",
+    reference_voice_id: "am_puck",
+    reference_voice_sha256: puckVoiceSha256,
+    similarity_model_sha256: similarityModelSha256,
+    cosine_similarity: 0.863,
+    minimum_cosine_similarity: QWEN_PUCK_MINIMUM_COSINE_SIMILARITY,
+    warning_below_cosine_similarity:
+      QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY,
+  }, {
+    audioSha256: "fallback-audio-hash",
+    referenceVoiceId: "am_puck",
+    referenceVoiceSha256: puckVoiceSha256,
+    similarityModelSha256,
+  });
+  assert.equal(fenrirLikeContinuity.status, "blocked");
+  assert.equal(
+    fenrirLikeContinuity.findings.some(
+      (finding) => finding.code === "tts_fallback_voice_similarity_below_minimum",
+    ),
+    true,
+  );
+  const lowMarginPuckContinuity = voiceContinuityDecision({
+    status: "passed",
+    audio_sha256: "fallback-audio-hash",
+    reference_voice_id: "am_puck",
+    reference_voice_sha256: puckVoiceSha256,
+    similarity_model_sha256: similarityModelSha256,
+    cosine_similarity: 0.889,
+    minimum_cosine_similarity: QWEN_PUCK_MINIMUM_COSINE_SIMILARITY,
+    warning_below_cosine_similarity:
+      QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY,
+  }, {
+    audioSha256: "fallback-audio-hash",
+    referenceVoiceId: "am_puck",
+    referenceVoiceSha256: puckVoiceSha256,
+    similarityModelSha256,
+  });
+  assert.equal(lowMarginPuckContinuity.status, "passed");
+  assert.equal(
+    lowMarginPuckContinuity.findings.some(
+      (finding) => finding.code === "tts_fallback_voice_similarity_low_margin"
+        && finding.severity === "warning"
+        && finding.review_required === true,
+    ),
+    true,
+  );
+  assert.equal(voiceContinuityDecision(null, {
+    audioSha256: "fallback-audio-hash",
+    referenceVoiceId: "am_puck",
+    referenceVoiceSha256: puckVoiceSha256,
+    similarityModelSha256,
+  }).status, "blocked");
+
+  const fullStreamWithConfirmedIsolatedSkip = fullStreamDecision({
+    leading_deletion_run: 0,
+    trailing_deletion_run: 0,
+    longest_deletion_run: 1,
+    longest_insertion_run: 0,
+    deletions: 1,
+    insertions: 0,
+    word_error_rate: 0.02,
+    findings: [{
+      severity: "blocker",
+      code: "tts_transcript_isolated_word_deletion",
+      adjudication_policy: "medium_whisper_confirmed",
+    }],
+  }, {
+    orderQa: { blockers: [] },
+    joinQa: { blockers: [] },
+  });
+  assert.equal(fullStreamWithConfirmedIsolatedSkip.status, "blocked");
+  assert.equal(
+    fullStreamWithConfirmedIsolatedSkip.blockers.some(
+      (finding) => finding.code === "tts_transcript_isolated_word_deletion",
+    ),
+    true,
+  );
 }
 
 function testScopedOnlyPlannerRerunPolicy() {
@@ -286,6 +955,33 @@ function testScopedOnlyPlannerRerunPolicy() {
     status: "failed",
   }];
   assert.equal(plannerInvocationScope({ "cut-ids": "cut_001" }).scoped, true);
+  assert.equal(plannerRerunDecision({
+    stage: "visual_beat_plan",
+    flags: { "retime-locked-grouping": "true" },
+    priorEvents: [{
+      event_type: "stage_completed",
+      stage: "visual_beat_plan",
+      status: "passed",
+    }],
+  }).reason, "deterministic_non_authoring_revalidation");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_reference_plan",
+    flags: { "revalidate-existing": "true" },
+    priorEvents: [{
+      event_type: "stage_completed",
+      stage: "visual_reference_plan",
+      status: "passed",
+    }],
+  }).reason, "deterministic_non_authoring_revalidation");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: { "revalidate-existing": "true", "retime-existing": "true" },
+    priorEvents: [{
+      event_type: "stage_completed",
+      stage: "visual_prompt_plan",
+      status: "passed",
+    }],
+  }).reason, "deterministic_non_authoring_revalidation");
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
     flags: {},
@@ -715,6 +1411,23 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
     proof_end_sec: null,
     references_only: false,
   });
+  assert.deepEqual(executionScopeForTests({
+    "image-id": "cut_002",
+    "cut-ids": "cut_001,cut_002",
+    "reference-id": "ref_001",
+    "scene-id": "scene_001",
+    "regenerate-unit-ids": "tts_002,tts_001",
+    "regenerate-speakers": "system,NARRATOR",
+  }), {
+    cut_ids: ["cut_001", "cut_002"],
+    scene_ids: ["scene_001"],
+    reference_ids: ["ref_001"],
+    tts_unit_ids: ["tts_001", "tts_002"],
+    tts_speakers: ["NARRATOR", "SYSTEM"],
+    proof_start_sec: null,
+    proof_end_sec: null,
+    references_only: false,
+  });
 
   const episodeDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-provenance-truth-"));
   await writeJson(path.join(episodeDir, "cut_execution_ledger.json"), {
@@ -759,6 +1472,12 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
     flags: { "episode-dir": episodeDir },
   });
   await finishStageExecution(finalQa, { exitCode: 0 });
+  const ttsRetry = await beginStageExecution({
+    stage: "qwen_tts_stitch",
+    command: "tts qwen",
+    flags: { "episode-dir": episodeDir, "regenerate-unit-ids": "tts_001" },
+  });
+  await finishStageExecution(ttsRetry, { exitCode: 0 });
   const manifest = await materializeProductionManifest(episodeDir);
   assert.equal(manifest.status, "completed_with_retries");
   assert.equal(manifest.cut_execution.status, "passed");
@@ -766,7 +1485,7 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
   assert.equal(manifest.cut_execution.accepted_image_count, 2);
   assert.equal(manifest.cut_execution.recovered_manual_import_count, 1);
   assert.equal(manifest.telemetry.retry_calls, 0);
-  assert.equal(manifest.telemetry.scoped_execution_calls, 2);
+  assert.equal(manifest.telemetry.scoped_execution_calls, 3);
   const failedReport = JSON.parse(await fs.readFile(
     (await fs.readdir(path.join(episodeDir, "reports", "stages", "image_generation")))
       .map((name) => path.join(episodeDir, "reports", "stages", "image_generation", name))
@@ -1048,6 +1767,253 @@ function testBoundedProofBaselineScoping() {
   assert.equal(multilineScope.script, "First line.\n\n[Exact UI");
 }
 
+async function testProofBaselineImportSupportsGenericAndLegacyNarrationContracts() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-proof-import-"));
+  const baselineEpisodeDir = path.join(dataRoot, "baseline", "episodes", "ep_01");
+  const genericEpisodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "generic-proof", "episodes", "ep_01");
+  const legacyEpisodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "legacy-proof", "episodes", "ep_01");
+  const scriptText = "The ledger opened before dawn. Then the gate answered with a warning.";
+  const scriptHash = sha256(Buffer.from(scriptText));
+  const baselineAudioPath = path.join(baselineEpisodeDir, "assets", "audio", "narration.m4a");
+  await fs.mkdir(path.dirname(baselineAudioPath), { recursive: true });
+  await fs.writeFile(path.join(baselineEpisodeDir, "script_clean.md"), scriptText, "utf8");
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-f", "lavfi",
+    "-i", "anullsrc=r=24000:cl=mono",
+    "-t", "4",
+    "-c:a", "aac",
+    "-b:a", "96k",
+    baselineAudioPath,
+  ]);
+  const baselineAudioHash = sha256(await fs.readFile(baselineAudioPath));
+  const baselineWords = scriptText
+    .split(/\s+/)
+    .map((word, index) => ({
+      index,
+      word,
+      start_sec: Number((index * 0.3).toFixed(3)),
+      end_sec: Number((index * 0.3 + 0.24).toFixed(3)),
+    }));
+  await writeJson(path.join(baselineEpisodeDir, "narration_word_timing_ep_01.json"), {
+    schema: "goldflow_narration_word_timing_v1",
+    status: "passed",
+    source_script_hash: scriptHash,
+    narration_audio_path: baselineAudioPath,
+    narration_audio_hash: baselineAudioHash,
+    audio_duration_sec: 4,
+    word_count: baselineWords.length,
+    words: baselineWords,
+  });
+  await writeJson(path.join(baselineEpisodeDir, "longform_audio_bed_report_ep_01.json"), {
+    schema: "goldflow_longform_audio_bed_v1",
+    status: "completed",
+    narration_only: true,
+    mix: {
+      m4a_path: baselineAudioPath,
+      final_audio_sha256: baselineAudioHash,
+    },
+  });
+
+  const proofScope = {
+    mode: "bounded",
+    start_sec: 0,
+    end_sec: 2.1,
+    label: "proof_0_2.1",
+  };
+  const writeUpstreamGates = async (episodeDir) => {
+    await fs.mkdir(episodeDir, { recursive: true });
+    await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+    await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
+    await writeJson(path.join(episodeDir, "operator_script_approval.json"), {
+      operator_approved: true,
+      script_clean_hash: scriptHash,
+    });
+    await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
+    await writeJson(path.join(episodeDir, "script_pace_report.json"), {
+      status: "passed",
+      source_script_hash: scriptHash,
+      target_wpm_min: 195,
+      target_wpm_max: 220,
+    });
+    await writeJson(path.join(episodeDir, "script_speakability_report.json"), {
+      status: "passed",
+      source_script_hash: scriptHash,
+    });
+    await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), {
+      status: "passed",
+      source_script_hash: scriptHash,
+      replacements: [],
+    });
+    await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), {
+      status: "passed",
+      source_script_hash: scriptHash,
+    });
+    await writeJson(path.join(episodeDir, "story_fact_ledger.json"), {
+      status: "passed",
+      source_script_hash: scriptHash,
+    });
+  };
+  const importBaseline = async (episodeDir, week) => execFileAsync(process.execPath, [
+    "scripts/proof-baseline-import.mjs",
+    "--episode-dir", episodeDir,
+    "--baseline-episode-dir", baselineEpisodeDir,
+    "--channel", "test",
+    "--series", "series",
+    "--week", week,
+    "--episode", "ep_01",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const statusFor = async (episodeDir) => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      "scripts/run-status.mjs",
+      "--episode-dir", episodeDir,
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+    return JSON.parse(stdout);
+  };
+
+  await writeUpstreamGates(genericEpisodeDir);
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const genericIdentity = {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "generic-proof",
+    episode: "ep_01",
+    run_intent: "proof",
+    proof_scope: proofScope,
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+    tts_provider: "kokoro_local",
+    tts_fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    tts_native_speed: 1.2,
+    voice_provider_options: voiceProviderOptions,
+    provider_locks: {
+      tts_provider: "kokoro_local",
+      tts_fallback_provider: "qwen_local",
+      narrator_voice_id: "am_puck",
+      tts_native_speed: 1.2,
+      fallback_voice_identity: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
+      fallback_reference_audio_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256,
+      fallback_reference_metadata_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256,
+      fallback_similarity_model_sha256:
+        QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256,
+      fallback_similarity_calibration_sha256:
+        QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_calibration_sha256,
+      fallback_minimum_cosine_similarity:
+        QWEN_LOCAL_FALLBACK_LOCK.minimum_cosine_similarity,
+      fallback_warning_below_cosine_similarity:
+        QWEN_LOCAL_FALLBACK_LOCK.warning_below_cosine_similarity,
+    },
+    model_versions: {
+      tts_model: KOKORO_MODEL_LOCK.model_id,
+      tts_model_revision: KOKORO_MODEL_LOCK.model_revision,
+      fallback_tts_model: QWEN_LOCAL_FALLBACK_LOCK.model_id,
+      fallback_tts_model_revision: QWEN_LOCAL_FALLBACK_LOCK.model_revision,
+    },
+  };
+  assert.equal(proofBaselineArtifactContractForTests(genericIdentity), "canonical_narration");
+  await writeJson(path.join(genericEpisodeDir, "run_identity.json"), genericIdentity);
+  await importBaseline(genericEpisodeDir, "generic-proof");
+
+  const genericImportReport = await readJson(path.join(genericEpisodeDir, "proof_baseline_import_ep_01.json"));
+  const genericPlan = await readJson(path.join(genericEpisodeDir, "narration_generation_plan.json"));
+  const genericTts = await readJson(path.join(genericEpisodeDir, "narration_tts_report_ep_01.json"));
+  const genericUnitQa = await readJson(path.join(genericEpisodeDir, "narration_tts_unit_qa_ep_01.json"));
+  const genericFullQa = await readJson(path.join(genericEpisodeDir, "narration_full_stream_qa_ep_01.json"));
+  const genericStitch = await readJson(path.join(genericEpisodeDir, "audio_stitch_report_ep_01-narration.json"));
+  const genericTiming = await readJson(path.join(genericEpisodeDir, "narration_word_timing_ep_01.json"));
+  assert.equal(genericImportReport.schema, "goldflow_proof_baseline_import_v2");
+  assert.equal(genericImportReport.artifact_contract, "canonical_narration");
+  assert.equal(genericImportReport.synthesis_performed, false);
+  assert.equal(genericImportReport.provider_calls, 0);
+  assert.equal(genericPlan.artifact_mode, "audited_baseline_import");
+  assert.equal(genericPlan.configured_provider_contract.primary_provider, "kokoro_local");
+  assert.equal(genericPlan.synthesis_performed, false);
+  assert.equal(genericTts.configured_primary_provider, "kokoro_local");
+  assert.equal(genericTts.primary_provider, undefined);
+  assert.equal(genericTts.synthesis_performed, false);
+  assert.equal(genericTts.results[0].selected_provider, "imported_audited_baseline");
+  assert.equal(genericUnitQa.qa_mode, "baseline_audio_and_whisper_provenance");
+  assert.equal(genericFullQa.transcript_source, "baseline_local_whisper_word_timing");
+  assert.equal(genericStitch.stitch_performed, false);
+  assert.equal(genericStitch.segments[0].selected_provider, "imported_audited_baseline");
+  assert.equal(genericStitch.segments[0].voice_id, undefined);
+  assert.equal(genericTiming.full_stream_transcript_qa.status, "passed");
+  assert.equal(genericTiming.narration_report_path, path.join(genericEpisodeDir, "audio_stitch_report_ep_01-narration.json"));
+  assert.equal(
+    await fs.stat(path.join(genericEpisodeDir, "modelslab_qwen_tts_report_ep_01.json")).then(() => true).catch(() => false),
+    false,
+  );
+  let genericStatus = await statusFor(genericEpisodeDir);
+  assert.equal(genericStatus.current_stage, "audio_pace_check");
+  assert.equal(genericStatus.stage_ledger.find((row) => row.stage === "voice_plan").exists, true);
+  assert.match(genericStatus.stage_ledger.find((row) => row.stage === "voice_plan").evidence, /audited bounded baseline import/);
+  assert.equal(genericStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch").exists, true);
+  assert.match(genericStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch").evidence, /synthesis_performed=false/);
+  assert.equal(genericStatus.stage_ledger.find((row) => row.stage === "local_whisper_word_timing").exists, true);
+
+  await writeJson(path.join(genericEpisodeDir, "narration_tts_report_ep_01.json"), {
+    ...genericTts,
+    proof_baseline_provenance_sha256: "tampered",
+  });
+  genericStatus = await statusFor(genericEpisodeDir);
+  assert.equal(genericStatus.current_stage, "qwen_tts_stitch");
+  assert.match(
+    genericStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch").evidence,
+    /provenance hash missing or stale|hash differs from proof import report/,
+  );
+
+  await writeUpstreamGates(legacyEpisodeDir);
+  const legacyIdentity = {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "legacy-proof",
+    episode: "ep_01",
+    run_intent: "proof",
+    proof_scope: proofScope,
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+    qwen_native_speed: 1.25,
+    qwen_narrator_voice_id: "joel_owned_narrator_clone",
+    qwen_narrator_voice_policy: "default_joel_owned_narrator_clone",
+    voice_provider_options: {
+      qwen_native_speed: 1.25,
+      qwen_narrator_voice_id: "joel_owned_narrator_clone",
+      qwen_narrator_voice_policy: "default_joel_owned_narrator_clone",
+    },
+    provider_locks: {
+      qwen_narrator_voice_id: "joel_owned_narrator_clone",
+    },
+    model_versions: {
+      tts_model: "qwen-tts",
+    },
+  };
+  assert.equal(proofBaselineArtifactContractForTests(legacyIdentity), "legacy_qwen");
+  await writeJson(path.join(legacyEpisodeDir, "run_identity.json"), legacyIdentity);
+  await importBaseline(legacyEpisodeDir, "legacy-proof");
+  const legacyImportReport = await readJson(path.join(legacyEpisodeDir, "proof_baseline_import_ep_01.json"));
+  assert.equal(legacyImportReport.artifact_contract, "legacy_qwen");
+  assert.equal(legacyImportReport.synthesis_performed, false);
+  assert.equal(
+    await fs.stat(path.join(legacyEpisodeDir, "qwen_generation_plan.json")).then(() => true).catch(() => false),
+    true,
+  );
+  assert.equal(
+    await fs.stat(path.join(legacyEpisodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json")).then(() => true).catch(() => false),
+    true,
+  );
+  assert.equal(
+    await fs.stat(path.join(legacyEpisodeDir, "narration_tts_report_ep_01.json")).then(() => true).catch(() => false),
+    false,
+  );
+  const legacyStatus = await statusFor(legacyEpisodeDir);
+  assert.equal(legacyStatus.current_stage, "audio_pace_check");
+  assert.equal(legacyStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch").exists, true);
+  assert.equal(legacyStatus.stage_ledger.find((row) => row.stage === "local_whisper_word_timing").exists, true);
+}
+
 function testSemanticReconciliationEvidenceContract() {
   const script = "Joey entered Analytics Hall. He carried the silver key. Joey left for the roof.";
   const prompt = semanticReconciliationPromptForTests(script, {}, [{
@@ -1169,6 +2135,14 @@ function testEditorialBeatDirectorContracts() {
       entity_evidence: index === 3 ? { joey: "JOEY", victor: "VICTOR" } : { joey: "JOEY" },
       props: index === 0 ? [{ type: "personal_item", name: "silver key" }] : [],
       ui_elements: index === 1 ? [{ type: "system_window", text: "blue system panel" }] : [],
+      background_population: index === 0 ? {
+        presence: "implied",
+        description: "exam candidates waiting in the hall",
+        evidence: atom.text,
+        staging: "small seated groups behind Joey, subordinate to his entrance",
+      } : {
+        presence: "none",
+      },
       foreground_action: atom.text,
       foreground_action_evidence: atom.text,
       composition_intent: "Keep the named action and spatial relationship readable.",
@@ -1183,6 +2157,8 @@ function testEditorialBeatDirectorContracts() {
   assert.equal(normalized.beats[0].image_id_hint.startsWith("ep_01-w"), true);
   assert.deepEqual(normalized.beats[0].local_props, ["silver key"]);
   assert.deepEqual(normalized.beats[1].local_ui_elements, ["blue system panel"]);
+  assert.equal(normalized.beats[0].background_population.presence, "implied");
+  assert.equal(normalized.beats[1].background_population.presence, "none");
   assert.deepEqual(editorialBeatCoverageFindings(normalized.beats, spoken.length), []);
   assert.deepEqual(editorialRetentionRailFindings(closeVisualBeatTimelineForTests(normalized.beats, spoken.at(-1).end_sec)), []);
   const lockedBeats = normalized.beats.map((beat, index) => ({
@@ -1414,6 +2390,25 @@ function testPhraseAwareSubtitleGrouping() {
   assert.equal(lockedCaptionRows.events.map((row) => row.text).join(" "), "The system gave Joey Manhwa Role assigned.");
   assert.doesNotMatch(lockedCaptionRows.events.map((row) => row.text).join(" "), /Manwa|Roll/);
 
+  const repeatedSegmentUnits = buildSubtitleEventsForTests({
+    words: [
+      { word: "First", start_sec: 0.1, end_sec: 0.4 },
+      { word: "unit.", start_sec: 0.5, end_sec: 0.9 },
+      { word: "Second", start_sec: 1.1, end_sec: 1.5 },
+      { word: "unit.", start_sec: 1.6, end_sec: 1.9 },
+    ],
+  }, {
+    segments: [
+      { unit_id: "u1", segment_id: "voice_seg_01", duration_sec: 1, caption_text: "First unit." },
+      { unit_id: "u2", segment_id: "voice_seg_01", duration_sec: 1, caption_text: "Second unit." },
+    ],
+  });
+  assert.equal(repeatedSegmentUnits.source, "audio_stitch_caption_text_word_aligned_to_whisper");
+  assert.equal(repeatedSegmentUnits.events.map((row) => row.text).join(" "), "First unit. Second unit.");
+  assert.equal(repeatedSegmentUnits.events.every((row, index, rows) => (
+    row.end_sec > row.start_sec && (index === 0 || row.start_sec >= rows[index - 1].end_sec)
+  )), true);
+
   const alignedMultiplier = alignExpandedZeroMultiplierCaptionsForTests([
     { start_sec: 178.86, end_sec: 182.18, text: "730] [RECIPROCITY RETURN:" },
     { start_sec: 183.06, end_sec: 183.84, text: "0X]" },
@@ -1439,28 +2434,393 @@ function testQwenKeepsBracketedUiDialogueSpeakable() {
   assert.doesNotMatch(spoken, /[\[\]]/);
 }
 
-function testNarratorOnlyQwenMergesAcrossVoiceSegments() {
-  const unit = (segmentId, sourceSpeaker, text) => ({
+function testNarratorOnlyQwenHonorsSegmentAndInstructionBoundaries() {
+  const unit = (segmentId, unitIndex, sourceSpeaker, text, qwenInstruct = "Keep a firm recap cadence.") => ({
     segment_id: segmentId,
-    unit_index: 1,
+    unit_index: unitIndex,
     speaker: "NARRATOR",
     source_speaker: sourceSpeaker,
     qwen_spoken_text: text,
     caption_text: text,
+    qwen_instruct: qwenInstruct,
   });
   const plan = {
     segments: [
-      { segment_id: "voice_seg_01", qwen_generation_units: [unit("voice_seg_01", "NARRATOR", "Joey entered the hall.")] },
-      { segment_id: "voice_seg_02", qwen_generation_units: [unit("voice_seg_02", "VANESSA", "Vanessa told him to leave.")] },
+      {
+        segment_id: "voice_seg_01",
+        qwen_generation_units: [
+          unit("voice_seg_01", 1, "NARRATOR", "Joey entered the crowded eastern hall and checked every locked door."),
+          unit("voice_seg_01", 2, "NARRATOR", "He crossed the marble floor while the witnesses watched in silence."),
+          unit("voice_seg_01", 3, "NARRATOR", "Then the warning bell rang above the gate.", "Use a precise system-warning cadence."),
+        ],
+      },
+      {
+        segment_id: "voice_seg_02",
+        qwen_generation_units: [
+          unit("voice_seg_02", 1, "VANESSA", "Vanessa told him to leave before the guards arrived."),
+        ],
+      },
     ],
   };
   const lock = { narrator_voice_id: "owned_narrator" };
-  const merged = collectQwenUnitsForTests(plan, lock, { maxCharsLimit: 850, narratorOnly: true });
-  assert.equal(merged.length, 1);
-  assert.deepEqual(merged[0].source_segment_ids, ["voice_seg_01", "voice_seg_02"]);
-  assert.match(merged[0].text, /Joey entered the hall\. Vanessa told him to leave\./);
-  const cast = collectQwenUnitsForTests(plan, lock, { maxCharsLimit: 850, narratorOnly: false });
-  assert.equal(cast.length, 2);
+  const units = collectQwenUnitsForTests(plan, lock, {
+    maxCharsLimit: 420,
+    minWordsLimit: 20,
+    maxWordsLimit: 45,
+    narratorOnly: true,
+  });
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0].source_segment_ids, ["voice_seg_01", "voice_seg_02"]);
+  assert.deepEqual(units[0].source_speakers, ["NARRATOR", "VANESSA"]);
+  assert.deepEqual(units[0].authored_qwen_instructions, [
+    "Keep a firm recap cadence.",
+    "Use a precise system-warning cadence.",
+  ]);
+  assert.equal(units[0].chunk_policy.crossed_instruction_boundary, true);
+  assert.equal(units[0].chunk_policy.authored_instruction_submitted, false);
+  assert.match(units[0].text, /Joey entered.+Vanessa told him to leave/);
+  assert.ok(units.every((row) => row.word_count <= 45));
+  assert.equal(new Set(units.map((row) => row.unit_id)).size, units.length);
+  assert.deepEqual(validateRegenerateUnitIdsForTests(units, [units[0].unit_id]), [units[0].unit_id]);
+  assert.throws(
+    () => validateRegenerateUnitIdsForTests(units, ["tts_missing_unit"]),
+    /unknown unit id/,
+  );
+
+  const submittedInstructions = collectQwenUnitsForTests(plan, lock, {
+    maxCharsLimit: 420,
+    minWordsLimit: 20,
+    maxWordsLimit: 45,
+    narratorOnly: true,
+    instructionField: "qwen_instruct",
+  });
+  assert.equal(submittedInstructions.length, 3);
+  assert.equal(submittedInstructions[0].qwen_instruct, "Keep a firm recap cadence.");
+  assert.equal(submittedInstructions[1].qwen_instruct, "Use a precise system-warning cadence.");
+  assert.ok(submittedInstructions.every((row) => row.chunk_policy.crossed_instruction_boundary === false));
+  assert.equal(new Set(submittedInstructions.map((row) => row.segment_id)).size, submittedInstructions.length);
+
+  const captionPlan = {
+    segments: [
+      {
+        segment_id: "voice_seg_caption_01",
+        qwen_generation_units: [
+          {
+            ...unit(
+              "voice_seg_caption_01",
+              1,
+              "NARRATOR",
+              "The C E O approved four hundred and eighteen claims before sunrise.",
+            ),
+            caption_text: "The CEO approved 418 claims before sunrise.",
+          },
+        ],
+      },
+      {
+        segment_id: "voice_seg_caption_02",
+        qwen_generation_units: [
+          {
+            ...unit(
+              "voice_seg_caption_02",
+              1,
+              "NARRATOR",
+              "Then the C E O rejected forty-one percent of the appeals immediately.",
+            ),
+            caption_text: "Then the CEO rejected 41% of the appeals immediately.",
+          },
+        ],
+      },
+    ],
+  };
+  const captionUnits = collectQwenUnitsForTests(captionPlan, lock, {
+    maxCharsLimit: 100,
+    minWordsLimit: 6,
+    maxWordsLimit: 10,
+    narratorOnly: true,
+  });
+  assert.ok(captionUnits.length >= 2);
+  assert.equal(
+    captionUnits.map((row) => row.caption_text).filter(Boolean).join(" "),
+    "The CEO approved 418 claims before sunrise. Then the CEO rejected 41% of the appeals immediately.",
+  );
+  assert.ok(captionUnits.some((row) => row.source_segment_ids.length > 1));
+  assert.equal(captionUnits.some((row) => /\bC E O\b|four hundred|forty-one/i.test(row.caption_text)), false);
+  assert.equal(new Set(captionUnits.map((row) => row.segment_id)).size, captionUnits.length);
+}
+
+function testQwenTtsOutputQaContracts() {
+  assert.equal(
+    ttsSafeTextForTests("And the mercy in that, the only mercy there is, is that you get to keep living."),
+    "And the mercy in that, the only mercy there is, is that you get to keep living.",
+  );
+  assert.equal(ttsSafeTextForTests("That, that was the approved wording."), "That, that was the approved wording.");
+  assert.deepEqual(requiredMediumQaReasonsForTests({
+    speaker: "NARRATOR",
+    kind: "narration",
+    risk_flags: [],
+  }), []);
+  assert.deepEqual(requiredMediumQaReasonsForTests({
+    speaker: "SYSTEM",
+    kind: "narration",
+  }), ["system_ui_atomic"]);
+  assert.deepEqual(requiredMediumQaReasonsForTests({
+    speaker: "NARRATOR",
+    context_family: "system-ui",
+  }), ["system_ui_atomic"]);
+  assert.deepEqual(requiredMediumQaReasonsForTests({
+    speaker: "NARRATOR",
+    protected_terms: [{ spoken_form: "C E O" }],
+  }), ["protected_term_or_value"]);
+  assert.deepEqual(requiredMediumQaReasonsForTests({
+    speaker: "WARNING",
+    risk_flags: ["protected_term_or_value"],
+    protected_values: ["forty-one percent"],
+  }), ["system_ui_atomic", "protected_term_or_value"]);
+
+  const exactTranscript = transcriptQaForTests(
+    "The halo shattered and every witness stepped back.",
+    "The halo shattered and every witness stepped back.",
+  );
+  assert.equal(exactTranscript.findings.length, 0);
+  const skippedTranscript = transcriptQaForTests(
+    "The halo shattered and every frightened witness stepped back from the gate.",
+    "The halo shattered and stepped back from the gate.",
+  );
+  assert.equal(skippedTranscript.findings.some((finding) => finding.code === "tts_transcript_contiguous_words_missing"), true);
+  const clippedTranscript = transcriptQaForTests(
+    "The orphan crypt will repossess.",
+    "The orphan crypt will",
+  );
+  assert.equal(clippedTranscript.findings.some((finding) => finding.code === "tts_transcript_final_word_missing"), true);
+  const equivalentTranscript = transcriptQaForTests(
+    "Saint Orison told the C E O that S S S rank paid forty-one percent, fifty out of fifty, and four hundred and eighteen coins.",
+    "St. Orison told the CEO that SSS rank paid 41%, 50/50, and 418 coins.",
+  );
+  assert.equal(equivalentTranscript.word_error_rate, 0);
+  assert.deepEqual(equivalentTranscript.findings, []);
+  const equivalentAsrNumberNotation = transcriptQaForTests(
+    "For the last hundred years, nine hundred and eleven million records covered the Seventh Forge and a man in his twenties.",
+    "For the last 100 years, 911 million records covered the 7th Forge and a man in his 20s.",
+  );
+  assert.equal(equivalentAsrNumberNotation.word_error_rate, 0);
+  assert.deepEqual(equivalentAsrNumberNotation.findings, []);
+  const ordinaryItPronoun = transcriptQaForTests(
+    "It took the gate, and it did not take a person.",
+    "It took the gate, and it did not take a person.",
+  );
+  assert.equal(ordinaryItPronoun.word_error_rate, 0);
+  assert.deepEqual(ordinaryItPronoun.findings, []);
+  const asrContractedIDidNot = transcriptQaForTests(
+    "I did not take his power.",
+    "I'd not take his power.",
+  );
+  assert.equal(asrContractedIDidNot.word_error_rate, 0);
+  assert.deepEqual(asrContractedIDidNot.findings, []);
+  const asrCompoundSpacing = transcriptQaForTests(
+    "New status. Deedholder.",
+    "New status. Deed holder.",
+  );
+  assert.equal(asrCompoundSpacing.word_error_rate, 0);
+  assert.deepEqual(asrCompoundSpacing.findings, []);
+  const asrAdditionalCompoundSpacing = transcriptQaForTests(
+    "Foreclosure and counterclaim increased the balance ten thousandfold.",
+    "For closure and counter claim increased the balance 10,000 fold.",
+  );
+  assert.equal(asrAdditionalCompoundSpacing.word_error_rate, 0);
+  assert.deepEqual(asrAdditionalCompoundSpacing.findings, []);
+  const asrAfterlifeCompoundSpacing = transcriptQaForTests(
+    "Afterlife treasury balance.",
+    "After life treasury balance.",
+  );
+  assert.equal(asrAfterlifeCompoundSpacing.word_error_rate, 0);
+  assert.deepEqual(asrAfterlifeCompoundSpacing.findings, []);
+  const asrSeparatedDigitGroups = transcriptQaForTests(
+    "Eight thousand years and ten thousand coins.",
+    "8 ,000 years and 10 ,000 coins.",
+  );
+  assert.equal(asrSeparatedDigitGroups.word_error_rate, 0);
+  assert.deepEqual(asrSeparatedDigitGroups.findings, []);
+  const wrongInitialism = transcriptQaForTests(
+    "The C E O approved the claim.",
+    "The C O approved the claim.",
+  );
+  assert.equal(wrongInitialism.findings.some((finding) => finding.code === "tts_transcript_protected_value_mismatch"), true);
+  const wrongNumber = transcriptQaForTests(
+    "The levy was forty-one percent.",
+    "The levy was 42%.",
+  );
+  assert.equal(wrongNumber.findings.some((finding) => finding.code === "tts_transcript_protected_value_mismatch"), true);
+  const clippedOpening = transcriptQaForTests(
+    "The C E O opened the final gate.",
+    "opened the final gate.",
+  );
+  assert.equal(clippedOpening.findings.some((finding) => finding.code === "tts_transcript_opening_word_missing"), true);
+  const approvedOverrideAsr = transcriptQaForTests(
+    "The Mahn-wah recap became livestream video content.",
+    "The Manhwa recap became live content.",
+    {
+      equivalentPhrases: [
+        { from: "Manhwa", to: "Mahn-wah" },
+        { from: "live content", to: "livestream video content" },
+      ],
+    },
+  );
+  assert.equal(approvedOverrideAsr.word_error_rate, 0);
+  assert.deepEqual(approvedOverrideAsr.findings, []);
+  const damagedOverride = transcriptQaForTests(
+    "The Mahn-wah recap became livestream video content.",
+    "recap became unrelated content.",
+    {
+      equivalentPhrases: [
+        { from: "Manhwa", to: "Mahn-wah" },
+        { from: "live content", to: "livestream video content" },
+      ],
+    },
+  );
+  assert.equal(damagedOverride.findings.some((finding) => finding.code === "tts_transcript_opening_word_missing"), true);
+
+  const cleanMetrics = {
+    sample_count: 144000,
+    duration_sec: 6,
+    peak_dbfs: -4,
+    rms_dbfs: -22,
+    clipping_sample_count: 0,
+    clipping_ratio: 0,
+    first_sample_dbfs: null,
+    last_sample_dbfs: null,
+    leading_silence_sec: 0.025,
+    trailing_silence_sec: 0.09,
+    tail_10ms_peak_dbfs: -70,
+    tail_50ms_rms_dbfs: -65,
+  };
+  assert.deepEqual(audioQaFindingsForTests(cleanMetrics, { text: "Twenty words can fit inside this clean synthetic test sentence without an endpoint problem." }), []);
+  const clippedMetrics = {
+    ...cleanMetrics,
+    last_sample_dbfs: -24,
+    trailing_silence_sec: 0.002,
+    tail_10ms_peak_dbfs: -21,
+    tail_50ms_rms_dbfs: -25,
+  };
+  const audioFindings = audioQaFindingsForTests(clippedMetrics, { text: "The final word is clipped." });
+  assert.equal(audioFindings.some((finding) => finding.code === "tts_audio_endpoint_discontinuity"), true);
+  assert.equal(audioFindings.some((finding) => finding.code === "tts_audio_tail_not_settled"), true);
+  const clickFindings = audioQaFindingsForTests({
+    ...cleanMetrics,
+    maximum_sample_step_dbfs: -5,
+    large_sample_step_count: 1,
+    maximum_isolated_impulse_dbfs: -2.5,
+    isolated_impulse_count: 1,
+  }, { text: "A clean line should not contain a digital impulse." });
+  assert.equal(clickFindings.some((finding) => finding.code === "tts_audio_impulsive_discontinuity"), true);
+  const ordinarySharpSpeech = audioQaFindingsForTests({
+    ...cleanMetrics,
+    maximum_sample_step_dbfs: -4,
+    large_sample_step_count: 40,
+    maximum_isolated_impulse_dbfs: -12,
+    isolated_impulse_count: 0,
+  }, { text: "Sharp consonants are not isolated digital impulses." });
+  assert.equal(ordinarySharpSpeech.some((finding) => finding.code === "tts_audio_impulsive_discontinuity"), false);
+  assert.equal(
+    audioQaFindingsForTests({
+      ...cleanMetrics,
+      duration_sec: 0.46,
+      sample_count: 11040,
+    }, { text: "Mine." }).some((finding) => finding.code === "tts_audio_implausibly_short"),
+    false,
+  );
+  assert.equal(
+    audioQaFindingsForTests({
+      ...cleanMetrics,
+      duration_sec: 0.12,
+      sample_count: 2880,
+    }, { text: "Mine." }).some((finding) => finding.code === "tts_audio_implausibly_short"),
+    true,
+  );
+  assert.deepEqual(
+    untranscribedActiveIntervalsForTests({
+      active_intervals_sec: [
+        { start_sec: 0, end_sec: 0.8 },
+        { start_sec: 1.3, end_sec: 1.8 },
+        { start_sec: 2.2, end_sec: 3 },
+      ],
+    }, [
+      { word: "The", start_sec: 0.1, end_sec: 0.7 },
+      { word: "gate", start_sec: 2.3, end_sec: 2.9 },
+    ]),
+    [{ start_sec: 1.3, end_sec: 1.8, duration_sec: 0.5 }],
+  );
+
+  assert.deepEqual(
+    stitchBoundaryPaddingForTests(
+      { trailing_silence_sec: 0.2 },
+      { leading_silence_sec: 0.2 },
+      0.16,
+      0.025,
+    ),
+    {
+      target_gap_sec: 0.16,
+      retained_left_trailing_silence_sec: 0.025,
+      retained_right_leading_silence_sec: 0.025,
+      inserted_silence_sec: 0.11,
+      effective_gap_sec: 0.16,
+    },
+  );
+
+  const authoredUnit = {
+    text: "The gate opened.",
+    qwen_instruct: "Land the final word cleanly with no added breath.",
+  };
+  const unsupported = qwenRequestForUnitForTests(authoredUnit, { init_audio: "https://example.invalid/ref.wav" }, 0);
+  assert.equal(unsupported.instruction_delivery.submitted, false);
+  assert.equal(unsupported.instruction_delivery.provider_support_status, "unsupported_by_current_modelslab_v6_contract_not_submitted");
+  assert.equal("qwen_instruct" in unsupported.body, false);
+  const supported = qwenRequestForUnitForTests(authoredUnit, { init_audio: "https://example.invalid/ref.wav" }, 0, "qwen_instruct");
+  assert.equal(supported.instruction_delivery.submitted, true);
+  assert.equal(supported.body.qwen_instruct, authoredUnit.qwen_instruct);
+
+  const identityBase = synthesisIdentityForTests(
+    { ...authoredUnit, voice_id: "voice_a" },
+    {
+      id: "voice_a",
+      init_audio: "https://example.invalid/ref-a.wav",
+      reference_audio_sha256: "reference-hash-a",
+    },
+    { speed: 1.25, instructionField: null },
+  );
+  const identitySame = synthesisIdentityForTests(
+    { ...authoredUnit, voice_id: "voice_a" },
+    {
+      id: "voice_a",
+      init_audio: "https://example.invalid/ref-a.wav",
+      reference_audio_sha256: "reference-hash-a",
+    },
+    { speed: 1.25, instructionField: null },
+  );
+  assert.equal(identityBase.content_sha256, identitySame.content_sha256);
+  for (const changed of [
+    synthesisIdentityForTests(
+      { ...authoredUnit, voice_id: "voice_a" },
+      { id: "voice_a", init_audio: "https://example.invalid/ref-a.wav", reference_audio_sha256: "reference-hash-a" },
+      { speed: 1, instructionField: null },
+    ),
+    synthesisIdentityForTests(
+      { ...authoredUnit, qwen_instruct: "Use a different delivery.", voice_id: "voice_a" },
+      { id: "voice_a", init_audio: "https://example.invalid/ref-a.wav", reference_audio_sha256: "reference-hash-a" },
+      { speed: 1.25, instructionField: null },
+    ),
+    synthesisIdentityForTests(
+      { ...authoredUnit, voice_id: "voice_a" },
+      { id: "voice_a", init_audio: "https://example.invalid/ref-a.wav", reference_audio_sha256: "reference-hash-b" },
+      { speed: 1.25, instructionField: null },
+    ),
+    synthesisIdentityForTests(
+      { ...authoredUnit, voice_id: "voice_a" },
+      { id: "voice_a", init_audio: "https://example.invalid/ref-b.wav", reference_audio_sha256: "reference-hash-a" },
+      { speed: 1.25, instructionField: "qwen_instruct" },
+    ),
+  ]) {
+    assert.notEqual(identityBase.content_sha256, changed.content_sha256);
+  }
 }
 
 async function testEpisodeLocalAmbienceSpecContract() {
@@ -1492,6 +2852,19 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(reasons.includes("physical_action_geometry"), true);
   assert.equal(reasons.includes("dense_cast"), true);
   assert.equal(reasons.includes("four_reference_integration"), true);
+  const populationReasons = imageRiskReasons({
+    start_sec: 420,
+    shot_manifest: {
+      visible_characters: ["Joey"],
+      background_population: {
+        presence: "implied",
+        description: "silent hearing attendees",
+        evidence: "the hearing turned against him",
+        staging: "two restrained rows behind Joey",
+      },
+    },
+  });
+  assert.equal(populationReasons.includes("background_population"), true);
   assert.equal(donorRecoveryFinding({ donor_image_id: "cut_001", hash_perturbation: true }, "cut_002")?.code, "scene_image_donor_recovery_forbidden");
   assert.equal(donorRecoveryFinding({ editorial_reuse_approved: true, reuse_source_image_id: "cut_001" }, "cut_002"), null);
 
@@ -2353,7 +3726,29 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     "--dirty-reason", "fixture test",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const identity = await readJson(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"));
-  assert.equal(identity.qwen_native_speed, 1.25);
+  assert.equal(identity.tts_provider, "kokoro_local");
+  assert.equal(identity.tts_fallback_provider, "qwen_local");
+  assert.equal(identity.narrator_voice_id, "am_puck");
+  assert.equal(identity.tts_native_speed, 1.2);
+  assert.equal(identity.voice_provider_options.primary.provider, "kokoro_local");
+  assert.equal(identity.voice_provider_options.primary.voice_id, "am_puck");
+  assert.equal(identity.voice_provider_options.primary.native_speed, 1.2);
+  assert.equal(identity.voice_provider_options.primary.model_id, "mlx-community/Kokoro-82M-bf16");
+  assert.equal(identity.voice_provider_options.primary.model_revision, "a71e4d38b236d968966a2002c4c895dbd12b1c3c");
+  assert.equal(identity.voice_provider_options.primary.model_weights_sha256, KOKORO_MODEL_LOCK.model_weights_sha256);
+  assert.equal(identity.voice_provider_options.primary.model_config_sha256, KOKORO_MODEL_LOCK.model_config_sha256);
+  assert.equal(identity.voice_provider_options.primary.voice_sha256, "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89");
+  assert.equal(identity.voice_provider_options.fallback.provider, "qwen_local");
+  assert.equal(identity.voice_provider_options.fallback.model_id, QWEN_LOCAL_FALLBACK_LOCK.model_id);
+  assert.equal(identity.voice_provider_options.fallback.model_revision, QWEN_LOCAL_FALLBACK_LOCK.model_revision);
+  assert.equal(identity.voice_provider_options.fallback.reference_audio_path, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_path);
+  assert.equal(identity.voice_provider_options.fallback.reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
+  assert.equal(identity.voice_provider_options.fallback.reference_text, QWEN_LOCAL_FALLBACK_LOCK.reference_text);
+  assert.equal(identity.voice_provider_options.fallback.reference_text_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256);
+  assert.equal(identity.voice_provider_options.fallback.reference_metadata_path, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_path);
+  assert.equal(identity.voice_provider_options.fallback.reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
+  assert.equal(identity.voice_provider_options.fallback.reference_voice_id, "am_puck");
+  assert.equal(identity.voice_provider_options.fallback.voice_continuity_contract, "clone_primary_puck_identity");
   assert.equal(identity.production_profile, "fast_premium_v1");
   assert.equal(identity.production_profile_config.target_wall_clock_minutes, 180);
   assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
@@ -2373,12 +3768,30 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.parallax_retention_window_target, 10);
   assert.equal(identity.parallax_background_provider, "modelslab_flux_klein");
   assert.equal(identity.provider_locks.parallax_background_provider, "modelslab_flux_klein");
+  assert.equal(identity.provider_locks.tts_provider, "kokoro_local");
+  assert.equal(identity.provider_locks.tts_fallback_provider, "qwen_local");
+  assert.equal(identity.provider_locks.narrator_voice_id, "am_puck");
+  assert.equal(identity.provider_locks.narrator_voice_identity, "am_puck");
+  assert.equal(identity.provider_locks.fallback_voice_identity, "am_puck");
+  assert.equal(identity.provider_locks.fallback_reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
+  assert.equal(identity.provider_locks.fallback_reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
+  assert.equal(identity.provider_locks.fallback_similarity_model_sha256, QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256);
+  assert.equal(identity.provider_locks.fallback_similarity_calibration_sha256, QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_calibration_sha256);
+  assert.equal(identity.provider_locks.fallback_minimum_cosine_similarity, 0.88);
+  assert.equal(identity.provider_locks.fallback_warning_below_cosine_similarity, 0.9);
+  assert.equal(identity.provider_locks.tts_native_speed, 1.2);
+  assert.equal(identity.production_gates.single_narrator_identity_required, true);
+  assert.equal(identity.production_gates.fallback_must_clone_primary_voice_identity, true);
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");
   assert.equal(identity.git.commit.length, 40);
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "gpt-5.6-sol");
+  assert.equal(identity.model_versions.tts_model, "mlx-community/Kokoro-82M-bf16");
+  assert.equal(identity.model_versions.tts_model_revision, KOKORO_MODEL_LOCK.model_revision);
+  assert.equal(identity.model_versions.fallback_tts_model, QWEN_LOCAL_FALLBACK_LOCK.model_id);
+  assert.equal(identity.model_versions.fallback_tts_model_revision, QWEN_LOCAL_FALLBACK_LOCK.model_revision);
   assert.equal(identity.model_versions.image_model, "gpt-image-2-t2i");
   assert.equal(identity.model_versions.reference_model, "gpt-image-2-i2i");
   assert.deepEqual(identity.image_provider_options.fallback, {
@@ -2389,11 +3802,57 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   });
   assert.equal(codexCreditFallbackEnabled(identity), true);
   assert.match(buildStageCommand("reference_generation", identity), /--reference-image-model gpt-image-2-i2i/);
+  assert.match(buildStageCommand("qwen_tts_stitch", identity), /tts narrate/);
+  assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
   assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
   assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8/);
   assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 8/);
   assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 8/);
   assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8 --visual-chunk-validation-attempts 2/);
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      "scripts/run-preflight.mjs",
+      "--channel", "test",
+      "--series", "series",
+      "--week", "fenrir-production",
+      "--episode", "ep_01",
+      "--title", "Fenrir must not enter production",
+      "--run-intent", "production",
+      "--narrator-voice-id", "am_fenrir",
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
+    (error) => /Puck-only.*am_puck/i.test(String(error?.stderr ?? error?.message ?? error)),
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      "scripts/run-preflight.mjs",
+      "--channel", "test",
+      "--series", "series",
+      "--week", "qwen-primary-production",
+      "--episode", "ep_01",
+      "--title", "Qwen remains fallback only",
+      "--run-intent", "production",
+      "--tts-provider", "modelslab_qwen",
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
+    (error) => /Qwen is the exact-unit fallback, not a selectable primary narrator/i.test(
+      String(error?.stderr ?? error?.message ?? error),
+    ),
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      "scripts/run-preflight.mjs",
+      "--channel", "test",
+      "--series", "series",
+      "--week", "qwen-primary-production-case-bypass",
+      "--episode", "ep_01",
+      "--title", "Case variants remain production",
+      "--run-intent", "Production",
+      "--tts-provider", "modelslab_qwen",
+      "--qwen-narrator-voice-id", "joel_owned_narrator_clone",
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
+    (error) => /Qwen is the exact-unit fallback, not a selectable primary narrator/i.test(
+      String(error?.stderr ?? error?.message ?? error),
+    ),
+  );
 }
 
 function testModelslabCreditFallbackClassification() {
@@ -2418,6 +3877,52 @@ async function testPostTempoRequiresEmergencyApproval() {
   }
   assert.notEqual(error, null);
   assert.match(String(error.stderr ?? error.message), /emergency-only/i);
+}
+
+function testPostTempoScalesPreparedStitchTimeline() {
+  const [scaled] = scaledSegmentsForTests([{
+    unit_id: "tts_001",
+    duration_sec: 3.71,
+    raw_audio_duration_sec: 4,
+    prepared_audio_duration_sec: 3.6,
+    inserted_silence_sec: 0.11,
+    segment_gap_sec: 0.16,
+    unit_gap_sec: 0,
+  }], 2);
+  assert.equal(scaled.tempo_normalized_from_duration_sec, 3.71);
+  assert.equal(scaled.tempo_normalized_from_raw_audio_duration_sec, 4);
+  assert.equal(scaled.tempo_normalized_from_prepared_audio_duration_sec, 3.6);
+  assert.equal(scaled.tempo_normalized_from_inserted_silence_sec, 0.11);
+  assert.equal(scaled.raw_audio_duration_sec, 2);
+  assert.equal(scaled.prepared_audio_duration_sec, 1.8);
+  assert.equal(scaled.inserted_silence_sec, 0.055);
+  assert.equal(scaled.segment_gap_sec, 0.08);
+  assert.equal(scaled.unit_gap_sec, 0);
+  assert.equal(scaled.duration_sec, 1.855);
+  const [legacyScaled] = scaledSegmentsForTests([{
+    segment_id: "voice_seg_001",
+    duration_sec: 4.16,
+    raw_audio_duration_sec: 4,
+    prepared_audio_duration_sec: null,
+    inserted_silence_sec: null,
+    segment_gap_sec: 0.16,
+    unit_gap_sec: 0,
+  }], 2);
+  assert.equal(legacyScaled.raw_audio_duration_sec, 2);
+  assert.equal(legacyScaled.segment_gap_sec, 0.08);
+  assert.equal(legacyScaled.duration_sec, 2.08);
+  assert.equal(legacyScaled.prepared_audio_duration_sec, null);
+  assert.equal(legacyScaled.inserted_silence_sec, null);
+  const [legacyUnitGapScaled] = scaledSegmentsForTests([{
+    segment_id: "voice_seg_002",
+    duration_sec: 4.08,
+    raw_audio_duration_sec: 4,
+    segment_gap_sec: 0,
+    unit_gap_sec: 0.08,
+  }], 2);
+  assert.equal(legacyUnitGapScaled.segment_gap_sec, 0);
+  assert.equal(legacyUnitGapScaled.unit_gap_sec, 0.04);
+  assert.equal(legacyUnitGapScaled.duration_sec, 2.04);
 }
 
 function testLocationSceneIdsDerivation() {
@@ -3380,6 +4885,38 @@ function testConciseReferenceRoleContract() {
 }
 
 function testLocalBeatFidelityEditorialCases() {
+  const impliedPopulation = {
+    presence: "implied",
+    description: "silent hearing attendees",
+    evidence: "The hearing turned against Joey.",
+    staging: "two restrained rows behind Joey, subordinate to his reaction",
+  };
+  assert.deepEqual(sanitizeBackgroundPopulation(impliedPopulation), impliedPopulation);
+  assert.deepEqual(backgroundPopulationFindings({
+    image_id: "ep_01-cut-hearing",
+    provider_prompt: "Joey absorbs the ruling while silent hearing attendees remain seated in two restrained rows behind him.",
+    shot_manifest: { background_population: impliedPopulation },
+  }), []);
+  assert.equal(backgroundPopulationFindings({
+    image_id: "ep_01-cut-hearing-empty",
+    provider_prompt: "Joey stands completely alone in the hearing chamber.",
+    shot_manifest: { background_population: impliedPopulation },
+  }).some((finding) => finding.code === "background_population_missing_from_prompt"), true);
+  const droppedPopulationFindings = localBeatFidelityFindingsForTests([{
+    image_id: "ep_01-cut-hearing-dropped",
+    image_prompt: "Joey stands completely alone in the hearing chamber.",
+    shot_manifest: {
+      visible_characters: ["Joey"],
+      background_population: { presence: "none" },
+    },
+  }], [{
+    primary_subject: "Joey",
+    visible_subjects: ["Joey"],
+    visual_beat_script_excerpt: "The hearing turned against Joey.",
+    background_population: impliedPopulation,
+  }]);
+  assert.equal(droppedPopulationFindings.some((finding) => finding.includes("drops the beat's implied background population")), true);
+
   const allowedFindings = localBeatFidelityFindingsForTests([
     {
       image_id: "ep_01-cut-collective",
@@ -3814,25 +5351,63 @@ function testVoiceDirectionCharacterization() {
   assert.equal(cardinalNumbers.qwen_spoken_text, "four hundred and eighteen students connected to four thousand eight hundred and twelve shadows for one hundred thousand years.");
 
   const initialisms = voiceDirectionTransformForTests("The CEO told HR to send the NDA as a PDF through the API, but the SYSTEM stayed active.");
-  assert.equal(initialisms.qwen_spoken_text, "The C E O told H R to send the N D A as a P D F through the A P I, but the SYSTEM stayed active.");
+  assert.equal(initialisms.qwen_spoken_text, "The C E O told H R to send the N D A as a P D F through the A P I, but the System stayed active.");
+
+  const ranksDepartmentsTimesAndDecimals = voiceDirectionTransformForTests("SSS called NYPD at 10:53 PM, logged 1053 PM, checked again at 1:08 a.m., and recorded 1.08.");
+  assert.equal(
+    ranksDepartmentsTimesAndDecimals.qwen_spoken_text,
+    "S S S called N Y P D at ten fifty-three P M, logged ten fifty-three P M, checked again at one oh eight A M, and recorded one point zero eight.",
+  );
 
   const systemNumbers = voiceDirectionTransformForTests("BODY CLAIM: 41% SHARED BODY CLAIM: 50 / 50 HELL DURATION: 8.3 YEARS", { speaker: "SYSTEM" });
-  assert.equal(systemNumbers.qwen_spoken_text, "BODY CLAIM: forty-one percent SHARED BODY CLAIM: fifty out of fifty HELL DURATION: eight point three YEARS");
+  assert.equal(systemNumbers.qwen_spoken_text, "Body Claim: forty-one percent Shared Body Claim: fifty out of fifty Hell Duration: eight point three Years");
 
   const multipliers = voiceDirectionTransformForTests("RECIPROCITY RETURN: 0X. THE 10X SYSTEM ACTIVATED.", { speaker: "SYSTEM" });
-  assert.equal(multipliers.qwen_spoken_text, "RECIPROCITY RETURN: zero times. THE ten times SYSTEM ACTIVATED.");
+  assert.equal(multipliers.qwen_spoken_text, "Reciprocity Return: zero times. The ten times System Activated.");
+  const ordinarySystemWords = voiceDirectionTransformForTests("SYSTEM. EQUAL CROWNS RECOGNIZED. DEEDHOLDER CONFIRMED.", { speaker: "SYSTEM" });
+  assert.equal(ordinarySystemWords.qwen_spoken_text, "System. Equal Crowns Recognized. Deedholder Confirmed.");
   assert.equal(ttsSafeTextForTests("RECIPROCITY RETURN: 0X. 10X CASHBACK."), "Reciprocity Return: zero times. ten times Cashback.");
 
   const trailingAttribution = voiceDirectionTransformForTests("\"Run,\" he said.");
-  assert.deepEqual(trailingAttribution.paragraph_units.map((unit) => unit.text), ["Run."]);
+  assert.equal(trailingAttribution.clean_narration_attribution, "\"Run,\" he said.");
+  assert.deepEqual(trailingAttribution.paragraph_units.map((unit) => unit.text), ["Run.", "he said."]);
 
   const leadingAttribution = voiceDirectionTransformForTests("The clerk said, \"Door is locked.\"");
-  assert.equal(leadingAttribution.clean_narration_attribution, "\"Door is locked.\"");
-  assert.equal(leadingAttribution.qwen_spoken_text, "Door is locked.");
+  assert.equal(leadingAttribution.clean_narration_attribution, "The clerk said, \"Door is locked.\"");
+  assert.equal(leadingAttribution.qwen_spoken_text, "The clerk said, \"Door is locked.\"");
+  assert.deepEqual(leadingAttribution.paragraph_units.map((unit) => unit.text), ["The clerk said,", "\"Door is locked.\""]);
 
   const clean = voiceDirectionTransformForTests("The elevator doors opened with a soft chime.");
   assert.equal(clean.clean_narration_attribution, "The elevator doors opened with a soft chime.");
   assert.equal(clean.qwen_spoken_text, "The elevator doors opened with a soft chime.");
+
+  for (const regressionLine of [
+    "The ring snapped shut like a shackle.",
+    "The nearest chain snapped.",
+    "Joey continued.",
+    "Joey ordered the gates of the Afterlife opened.",
+    "Her voice broke through the channel.",
+    "The great Deathless Hero said nothing.",
+  ]) {
+    const transformed = voiceDirectionTransformForTests(regressionLine);
+    assert.equal(transformed.clean_narration_attribution, regressionLine);
+    assert.equal(transformed.qwen_spoken_text, regressionLine);
+    assert.deepEqual(transformed.paragraph_units.map((unit) => unit.text), [regressionLine]);
+  }
+
+  const colonSystemRecord = voiceDirectionTransformForTests("EMOTIONAL CERTAINTY: ONE HUNDRED PERCENT.");
+  assert.deepEqual(colonSystemRecord.paragraph_units.map((unit) => ({
+    kind: unit.kind,
+    speaker: unit.speaker,
+    text: unit.text,
+    caption_text: unit.caption_text,
+  })), [{
+    kind: "system_ui",
+    speaker: "SYSTEM",
+    text: "EMOTIONAL CERTAINTY: ONE HUNDRED PERCENT.",
+    caption_text: "EMOTIONAL CERTAINTY: ONE HUNDRED PERCENT.",
+  }]);
+  assert.equal(colonSystemRecord.qwen_spoken_text, "Emotional Certainty: One Hundred Percent.");
 
   const systemStack = voiceDirectionTransformForTests([
     "[Hidden skill awakened.]",
@@ -3857,6 +5432,233 @@ function testVoiceDirectionCharacterization() {
 
   const nonSpokenDirection = voiceDirectionTransformForTests("[SFX: cold system ping]");
   assert.deepEqual(nonSpokenDirection.paragraph_units.map((unit) => unit.kind), ["sound_design"]);
+}
+
+function testQwenTextIntegrityCoverageGate() {
+  const script = [
+    "The ring snapped shut like a shackle.",
+    "Her voice broke through the channel.",
+    "EMOTIONAL CERTAINTY: ONE HUNDRED PERCENT.",
+    "[Hidden skill awakened.]",
+    "[SFX: cold system ping]",
+    "Joey ordered the gates of the Afterlife opened.",
+  ].join("\n");
+  const performanceUnits = voiceDirectionTransformForTests(script).paragraph_units;
+  const plan = qwenGenerationPlanForTests([{
+    segment_id: "seg_integrity",
+    performance_units: performanceUnits,
+  }]);
+  const passed = qwenTextIntegrityCoverageForTests(script, plan);
+  assert.equal(passed.status, "passed");
+  assert.equal(passed.script_to_plan_source.status, "passed");
+  assert.equal(passed.plan_source_to_spoken.status, "passed");
+  const systemCoverage = systemUiSpeechCoverageForTests(script, plan);
+  assert.equal(systemCoverage.status, "passed");
+  assert.equal(systemCoverage.expected_count, 2);
+  assert.equal(systemCoverage.planned_count, 2);
+
+  const corrupt = structuredClone(plan);
+  corrupt.segments[0].qwen_generation_units[0].qwen_spoken_text = "shut like a shackle.";
+  const blocked = qwenTextIntegrityCoverageForTests(script, corrupt);
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.plan_source_to_spoken.status, "blocked");
+  assert.equal(blocked.plan_source_to_spoken.mismatch_unit_count, 1);
+  assert.equal(blocked.findings.some((finding) => finding.code === "qwen_plan_source_to_spoken_coverage_mismatch"), true);
+
+  const sourceCorrupt = structuredClone(plan);
+  sourceCorrupt.segments[0].qwen_generation_units[0].source_text = "shut like a shackle.";
+  sourceCorrupt.segments[0].qwen_generation_units[0].qwen_spoken_text = "shut like a shackle.";
+  const sourceBlocked = qwenTextIntegrityCoverageForTests(script, sourceCorrupt);
+  assert.equal(sourceBlocked.status, "blocked");
+  assert.equal(sourceBlocked.script_to_plan_source.status, "blocked");
+  assert.equal(sourceBlocked.findings.some((finding) => finding.code === "script_to_qwen_plan_source_coverage_mismatch"), true);
+
+  const overrideScript = "The clip became live content.";
+  const overrides = {
+    replacements: [{ from: "live content", to: "livestream video content", scope: "qwen_spoken_text" }],
+    pronunciation_map: [],
+  };
+  const overridePlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_override",
+    performance_units: voiceDirectionTransformForTests(overrideScript).paragraph_units,
+  }], { ttsOverrides: overrides });
+  assert.equal(qwenTextIntegrityCoverageForTests(overrideScript, overridePlan, { ttsOverrides: overrides }).status, "passed");
+}
+
+function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
+  const narrationTexts = [
+    "Ronan crossed the ruined courtyard while warning bells echoed behind him.",
+    "He counted every sealed doorway and watched the shadows gather overhead.",
+    "No guard answered, but the old gate kept trembling under pressure.",
+    "Then he found the ledger beneath a broken marble statue.",
+    "The final page carried his name beside a debt nobody remembered.",
+    "He closed the cover and walked toward the throne without looking back.",
+  ];
+  const performanceUnits = narrationTexts.map((text) => ({
+    kind: "narration",
+    speaker: "NARRATOR",
+    text,
+    performed_text: text,
+    caption_text: text,
+  }));
+  const groupedPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_kokoro_group",
+    delivery_mode: "exposition narration",
+    performance_units: performanceUnits,
+  }], { ttsProvider: "kokoro_local" });
+  const repeatedPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_kokoro_group",
+    delivery_mode: "exposition narration",
+    performance_units: performanceUnits,
+  }], { ttsProvider: "kokoro_local" });
+  const groupedUnits = groupedPlan.segments[0].narration_units;
+  assert.equal(groupedUnits.length, 2);
+  assert.deepEqual(groupedUnits.map((unit) => unit.word_count), [33, 33]);
+  assert.ok(groupedUnits.every((unit) => unit.word_count >= 24 && unit.word_count <= 50));
+  assert.deepEqual(groupedUnits.map((unit) => unit.order_index), [0, 1]);
+  assert.deepEqual(groupedUnits.map((unit) => unit.grouped_source_unit_count), [3, 3]);
+  assert.deepEqual(groupedUnits.map((unit) => unit.unit_id), repeatedPlan.units.map((unit) => unit.unit_id));
+  assert.deepEqual(
+    groupedUnits.flatMap((unit) => unit.source_unit_refs).map((ref) => ref.source_text),
+    narrationTexts,
+  );
+  assert.deepEqual(
+    groupedUnits.flatMap((unit) => unit.source_unit_refs).map((ref) => ref.caption_text),
+    narrationTexts,
+  );
+  for (const ref of groupedUnits.flatMap((unit) => unit.source_unit_refs)) {
+    assert.equal(ref.source_text_sha256, sha256(ref.source_text));
+    assert.equal(ref.caption_text_sha256, sha256(ref.caption_text));
+  }
+  assert.ok(groupedUnits.every((unit) => (
+    unit.spoken_text === unit.tts_spoken_text
+    && unit.tts_spoken_text === unit.qwen_spoken_text
+  )));
+  assert.ok(groupedUnits.every((unit) => unit.qwen_instruct === null));
+  assert.ok(groupedUnits.every((unit) => unit.provider_controls.qwen3.instruct === null));
+  assert.ok(groupedUnits.every((unit) => (
+    unit.provider_controls.qwen3.delivery_control === "base_icl_reference_audio_only"
+    && unit.provider_controls.qwen3.instruct_supported === false
+    && unit.provider_controls.qwen3.instruct_submitted === false
+    && /exact text/i.test(unit.provider_controls.qwen3.authored_delivery_note)
+  )));
+  const assertPuckFallbackIdentity = (control) => {
+    assert.equal(control.target_voice_id, "am_puck");
+    assert.equal(control.target_voice_sha256, "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89");
+    assert.equal(control.reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
+    assert.equal(control.reference_transcript_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256);
+    assert.equal(control.reference_transcript_file_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_text_file_sha256);
+    assert.equal(control.reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
+    assert.equal(control.voice_continuity_contract, "clone_primary_puck_identity");
+    assert.equal(control.speaker_similarity_model_sha256, QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256);
+    assert.equal(control.hard_minimum_cosine_similarity, 0.88);
+    assert.equal(control.warning_floor_cosine_similarity, 0.90);
+    assert.equal(control.fallback_scope, "exact_failed_unit_only");
+    assert.equal(control.exact_unit_only, true);
+    assert.equal(control.whole_episode_fallback_allowed, false);
+  };
+  assertPuckFallbackIdentity(groupedPlan.provider_controls.qwen3);
+  assertPuckFallbackIdentity(groupedPlan.instruction_delivery.qwen3);
+  for (const unit of groupedPlan.units) assertPuckFallbackIdentity(unit.provider_controls.qwen3);
+  assert.equal(groupedPlan.narrator_voice_id, "am_puck");
+  assert.equal(groupedPlan.narrator_voice_sha256, "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89");
+  assert.equal(groupedPlan.narrator_identity_policy, "single_puck_identity_with_qwen_exact_unit_clone");
+  assert.equal(groupedPlan.kokoro_unit_boundary_integrity.status, "passed");
+  assert.equal(groupedPlan.kokoro_unit_boundary_integrity.unit_count, groupedUnits.length);
+  assert.equal(groupedPlan.kokoro_unit_boundary_integrity.whole_source_units_only, true);
+  assert.equal(groupedPlan.kokoro_unit_boundary_integrity.clean_start_count, groupedUnits.length);
+  assert.equal(groupedPlan.kokoro_unit_boundary_integrity.terminal_punctuation_count, groupedUnits.length);
+  assert.doesNotMatch(JSON.stringify(groupedPlan), /joel_owned_narrator_clone|am_fenrir/i);
+  const explicitLegacyQwenPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_legacy_qwen",
+    performance_units: performanceUnits.slice(0, 1),
+  }], { ttsProvider: "qwen_local" });
+  assert.equal(explicitLegacyQwenPlan.provider_controls.qwen3.fallback, false);
+  assert.equal("target_voice_id" in explicitLegacyQwenPlan.provider_controls.qwen3, false);
+  assert.equal("target_voice_id" in explicitLegacyQwenPlan.instruction_delivery.qwen3, false);
+  assert.equal("narrator_voice_id" in explicitLegacyQwenPlan, false);
+  assert.equal(
+    qwenTextIntegrityCoverageForTests(narrationTexts.join("\n"), groupedPlan).status,
+    "passed",
+  );
+
+  const before = "Ronan stopped beside the gate and listened carefully for movement.";
+  const after = "The courtyard answered with another violent crack beneath his boots.";
+  const finalLine = "He kept moving because the warning had already named him.";
+  const systemUnit = {
+    kind: "system_ui",
+    speaker: "SYSTEM",
+    text: "Hidden skill awakened.",
+    performed_text: "Hidden skill awakened.",
+    caption_text: "[Hidden skill awakened.]",
+  };
+  const soundBarrier = {
+    kind: "sound_design",
+    speaker: "SFX",
+    text: "cold system ping",
+    performed_text: "cold system ping",
+    caption_text: "[SFX: cold system ping]",
+  };
+  const atomicScript = [
+    before,
+    "[Hidden skill awakened.]",
+    after,
+    "[SFX: cold system ping]",
+    finalLine,
+  ].join("\n");
+  const atomicPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_kokoro_atomic",
+    performance_units: [
+      { kind: "narration", speaker: "NARRATOR", text: before, performed_text: before, caption_text: before },
+      systemUnit,
+      { kind: "narration", speaker: "NARRATOR", text: after, performed_text: after, caption_text: after },
+      soundBarrier,
+      { kind: "narration", speaker: "NARRATOR", text: finalLine, performed_text: finalLine, caption_text: finalLine },
+    ],
+  }], { ttsProvider: "kokoro_local" });
+  const atomicUnits = atomicPlan.segments[0].narration_units;
+  const plannedSystemUnits = atomicUnits.filter((unit) => unit.kind === "system_ui");
+  assert.equal(plannedSystemUnits.length, 1);
+  assert.equal(plannedSystemUnits[0].source_text, "Hidden skill awakened.");
+  assert.equal(plannedSystemUnits[0].caption_text, "[Hidden skill awakened.]");
+  assert.equal(plannedSystemUnits[0].source_unit_refs.length, 1);
+  assert.equal(plannedSystemUnits[0].merge_barrier, true);
+  assert.equal(atomicUnits.some((unit) => (
+    unit.source_unit_refs.some((ref) => ref.unit_index === 3)
+    && unit.source_unit_refs.some((ref) => ref.unit_index === 5)
+  )), false);
+  assert.equal(qwenTextIntegrityCoverageForTests(atomicScript, atomicPlan).status, "passed");
+  assert.equal(systemUiSpeechCoverageForTests(atomicScript, atomicPlan).status, "passed");
+
+  const periodDelimitedUi = [
+    "SYSTEM. CLAIM ATTEMPT DETECTED.",
+    "TARGET. TERRITORY. FIRST GATE.",
+    "CONDITION. SURVIVE THE SOVEREIGN.",
+    "PENDING.",
+  ].join("\n");
+  const transformedUi = voiceDirectionTransformForTests(periodDelimitedUi);
+  assert.equal(transformedUi.paragraph_units.length, 1);
+  assert.equal(transformedUi.paragraph_units[0].kind, "system_ui");
+  assert.equal(transformedUi.paragraph_units[0].speaker, "SYSTEM");
+  assert.equal(
+    transformedUi.paragraph_units[0].text,
+    "SYSTEM. CLAIM ATTEMPT DETECTED. TARGET. TERRITORY. FIRST GATE. CONDITION. SURVIVE THE SOVEREIGN. PENDING.",
+  );
+  assert.equal(transformedUi.paragraph_units[0].caption_text, periodDelimitedUi);
+  const periodDelimitedPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_period_delimited_ui",
+    performance_units: transformedUi.paragraph_units,
+  }], { ttsProvider: "kokoro_local" });
+  assert.equal(periodDelimitedPlan.units.length, 1);
+  assert.equal(periodDelimitedPlan.units[0].kind, "system_ui");
+  assert.equal(periodDelimitedPlan.units[0].merge_barrier, true);
+  assert.ok(periodDelimitedPlan.units[0].risk_flags.includes("system_ui_atomic"));
+  assert.ok(periodDelimitedPlan.units[0].risk_flags.includes("speaker_or_performance_turn"));
+  assert.equal(qwenTextIntegrityCoverageForTests(periodDelimitedUi, periodDelimitedPlan).status, "passed");
+  assert.equal(systemUiSpeechCoverageForTests(periodDelimitedUi, periodDelimitedPlan).status, "passed");
+
+  const uppercaseDialogue = voiceDirectionTransformForTests('"GET OUT OF MY HOUSE."');
+  assert.equal(uppercaseDialogue.paragraph_units[0].kind, "narration");
 }
 
 function testVoiceDirectionPreservesFastRecapCadence() {
@@ -4092,8 +5894,9 @@ async function testTargetedSpeakabilityLiveContentHomograph() {
   assert.equal(overrides.replacements.some((replacement) => (
     replacement.from === "live content"
     && replacement.to === "livestream video content"
-    && replacement.scope === "qwen_spoken_text"
+    && replacement.scope === "tts_spoken_text"
   )), true);
+  assert.equal(overrides.accepted_scope_aliases.includes("qwen_spoken_text"), true);
   assert.equal(overrides.replacements.some((replacement) => replacement.from === "streaming live" && replacement.to === "livestreaming"), true);
   assert.equal(overrides.replacements.some((replacement) => replacement.from === "live stream" && replacement.to === "livestream"), true);
   assert.equal(overrides.replacements.some((replacement) => replacement.from === "stream content" && replacement.to === "stream videos"), true);
@@ -6064,8 +7867,8 @@ async function testRunCleanupPrunesNarratorOnlyLongformWav() {
   const legacyFishReportPath = path.join(episodeDir, "fish_reference_requirements_report.json");
   await fs.writeFile(legacyFishPath, "legacy fish narration text", "utf8");
   await writeJson(legacyFishReportPath, { status: "passed", tts_provider: "qwen3-tts" });
-  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", provider: "qwen3-tts", segments: [{ segment_id: "seg_001" }] });
-  await writeJson(path.join(episodeDir, "voice_reference_completeness_report.json"), { status: "passed", tts_provider: "qwen3-tts" });
+  await writeJson(path.join(episodeDir, "narration_generation_plan.json"), { status: "passed", tts_provider: "kokoro_local", segments: [{ segment_id: "seg_001" }] });
+  await writeJson(path.join(episodeDir, "voice_reference_completeness_report.json"), { status: "passed", tts_provider: "kokoro_local" });
   await writeJson(path.join(episodeDir, "longform_audio_bed_report_ep_01.json"), {
     status: "completed",
     audio_design_enabled: false,
@@ -6083,6 +7886,7 @@ async function testRunCleanupPrunesNarratorOnlyLongformWav() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const dryPayload = JSON.parse(dryRun.stdout);
   assert.equal(dryPayload.candidate_count, 3);
+  assert.equal(dryPayload.actions.filter((row) => row.type === "legacy_fish_voice_artifact_for_unit_narration_run").length, 2);
   assert.equal(await fs.stat(wavPath).then((stat) => stat.isFile()), true);
   assert.equal(await fs.stat(legacyFishPath).then((stat) => stat.isFile()), true);
   await execFileAsync(process.execPath, [
@@ -6160,6 +7964,581 @@ async function testRunStatusBlocksMissingQwenStitchedAudio() {
   assert.equal(status.current_stage, "qwen_tts_stitch");
   assert.equal(stage.exists, false);
   assert.match(stage.evidence, /stitched narration missing/);
+}
+
+async function testRunStatusHashBindsCurrentQwenStitch() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const scriptText = "Fixture script for hash-bound stitched audio.";
+  const scriptHash = sha256(Buffer.from(scriptText));
+  const audioPath = path.join(episodeDir, "assets", "audio", "narration.wav");
+  await fs.mkdir(path.dirname(audioPath), { recursive: true });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await fs.writeFile(audioPath, Buffer.from("fixture-audio"));
+  await writeJson(path.join(episodeDir, "run_identity.json"), { channel: "test", series_slug: "series", week: "run", episode: "ep_01", audio_target: "narrator_only", image_provider: "modelslab" });
+  await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "operator_script_approval.json"), { operator_approved: true, script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), { status: "passed", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220 });
+  await writeJson(path.join(episodeDir, "script_speakability_report.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), { status: "passed", source_script_hash: scriptHash, replacements: [] });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), { status: "passed", source_script_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "modelslab_qwen_tts_report_ep_01.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    unit_qa_policy_version: "fixture_current_policy",
+  });
+  const stitchReportPath = path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json");
+  const baseStitchReport = {
+    status: "passed",
+    source_script_hash: scriptHash,
+    output_path: audioPath,
+    unit_qa_policy_version: "fixture_current_policy",
+    stitch_policy: { padding_aware: true },
+  };
+  await writeJson(stitchReportPath, baseStitchReport);
+
+  const statusFor = async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      "scripts/run-status.mjs",
+      "--episode-dir", episodeDir,
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+    return JSON.parse(stdout);
+  };
+
+  const missingHashStatus = await statusFor();
+  let stage = missingHashStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /hash missing/);
+
+  await writeJson(stitchReportPath, { ...baseStitchReport, output_sha256: "not-the-current-hash" });
+  const wrongHashStatus = await statusFor();
+  stage = wrongHashStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /report requires not-the-current-hash/);
+
+  await writeJson(stitchReportPath, { ...baseStitchReport, output_sha256: sha256(Buffer.from("fixture-audio")) });
+  const matchingHashStatus = await statusFor();
+  stage = matchingHashStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, true);
+}
+
+async function testRunStatusAcceptsGenericNarrationWithSelectedFallbackRepair() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-generic-narration-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const scriptText = "The ledger opened. Then the gate answered.";
+  const scriptHash = sha256(Buffer.from(scriptText));
+  const audioBytes = Buffer.from("fixture-puck-and-fallback-audio");
+  const audioHash = sha256(audioBytes);
+  const audioPath = path.join(episodeDir, "assets", "audio", "narration.wav");
+  const m4aPath = path.join(episodeDir, "assets", "audio", "narration.m4a");
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const policy = narrationTtsPolicyForIdentity({
+    episode: "ep_01",
+    tts_provider: "kokoro_local",
+    tts_fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    tts_native_speed: 1.2,
+    voice_provider_options: voiceProviderOptions,
+  });
+  await fs.mkdir(path.dirname(audioPath), { recursive: true });
+  await fs.writeFile(path.join(episodeDir, "script_clean.md"), scriptText, "utf8");
+  await fs.writeFile(audioPath, audioBytes);
+  await fs.writeFile(m4aPath, audioBytes);
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    run_intent: "diagnostic",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+    tts_provider: "kokoro_local",
+    tts_fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    tts_native_speed: 1.2,
+    voice_provider_options: voiceProviderOptions,
+    provider_locks: {
+      tts_provider: "kokoro_local",
+      tts_fallback_provider: "qwen_local",
+      narrator_voice_id: "am_puck",
+      tts_native_speed: 1.2,
+      fallback_voice_identity: policy.fallback.reference_voice_id,
+      fallback_reference_audio_sha256: policy.fallback.reference_audio_sha256,
+      fallback_reference_metadata_sha256: policy.fallback.reference_metadata_sha256,
+      fallback_similarity_model_sha256:
+        policy.fallback.speaker_similarity_model_sha256,
+      fallback_similarity_calibration_sha256:
+        policy.fallback.speaker_similarity_calibration_sha256,
+      fallback_minimum_cosine_similarity:
+        policy.fallback.minimum_cosine_similarity,
+      fallback_warning_below_cosine_similarity:
+        policy.fallback.warning_below_cosine_similarity,
+    },
+    model_versions: {
+      tts_model: policy.primary.model_id,
+      tts_model_revision: policy.primary.model_revision,
+      fallback_tts_model: policy.fallback.model_id,
+      fallback_tts_model_revision: policy.fallback.model_revision,
+    },
+  });
+  await writeJson(path.join(episodeDir, "source_story_ingest_report.json"), { status: "passed" });
+  await writeJson(path.join(episodeDir, "operator_script_approval.json"), {
+    operator_approved: true,
+    script_clean_hash: scriptHash,
+  });
+  await writeJson(path.join(episodeDir, "script_lock.json"), { script_clean_hash: scriptHash });
+  await writeJson(path.join(episodeDir, "script_pace_report.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    target_wpm_min: 195,
+    target_wpm_max: 220,
+  });
+  await writeJson(path.join(episodeDir, "script_speakability_report.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+  });
+  await writeJson(path.join(episodeDir, "tts_spoken_overrides.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+    replacements: [],
+  });
+  await writeJson(path.join(episodeDir, "semantic_scene_plan.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+  });
+  await writeJson(path.join(episodeDir, "story_fact_ledger.json"), {
+    status: "passed",
+    source_script_hash: scriptHash,
+  });
+  const firstText = "The ledger opened.";
+  const fallbackText = "Then the gate answered.";
+  const firstTextHash = sha256(firstText);
+  const fallbackTextHash = sha256(fallbackText);
+  const planPath = path.join(episodeDir, "narration_generation_plan.json");
+  const ttsReportPath = path.join(episodeDir, "narration_tts_report_ep_01.json");
+  const unitQaPath = path.join(episodeDir, "narration_tts_unit_qa_ep_01.json");
+  const fullQaPath = path.join(episodeDir, "narration_full_stream_qa_ep_01.json");
+  const stitchReportPath = path.join(episodeDir, "audio_stitch_report_ep_01-narration.json");
+  const continuityReportPath = path.join(
+    episodeDir,
+    "assets/audio/narration_tts/runs/qwen-voice-continuity-attempt-1.json",
+  );
+  const planFallbackControls = {
+    target_voice_id: policy.primary.voice_id,
+    target_voice_sha256: policy.primary.voice_sha256,
+    reference_audio_path: policy.fallback.reference_audio_path,
+    reference_audio_sha256: policy.fallback.reference_audio_sha256,
+    reference_transcript_path: policy.fallback.reference_text_path,
+    reference_transcript_sha256: policy.fallback.reference_text_sha256,
+    reference_transcript_file_sha256: policy.fallback.reference_text_file_sha256,
+    reference_metadata_path: policy.fallback.reference_metadata_path,
+    reference_metadata_sha256: policy.fallback.reference_metadata_sha256,
+    voice_continuity_contract: policy.fallback.voice_continuity_contract,
+    speaker_similarity_method: policy.fallback.speaker_similarity_method,
+    speaker_similarity_model_path: policy.fallback.speaker_similarity_model_path,
+    speaker_similarity_model_sha256: policy.fallback.speaker_similarity_model_sha256,
+    hard_minimum_cosine_similarity: policy.fallback.minimum_cosine_similarity,
+    warning_floor_cosine_similarity: policy.fallback.warning_floor_cosine_similarity,
+    fallback_scope: "exact_failed_unit_only",
+    exact_unit_only: true,
+    whole_episode_fallback_allowed: false,
+  };
+  const basePlan = {
+    status: "passed",
+    source_script_hash: scriptHash,
+    primary_provider: "kokoro_local",
+    fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    narrator_voice_sha256: policy.primary.voice_sha256,
+    tts_native_speed: 1.2,
+    provider_controls: {
+      kokoro: { voice_id: policy.primary.voice_id },
+      qwen3: planFallbackControls,
+    },
+    text_integrity_coverage: { status: "passed" },
+    system_ui_speech_coverage: { status: "passed" },
+    segments: [{
+      segment_id: "seg_001",
+      narration_units: [
+        {
+          unit_id: "unit_001",
+          order_index: 0,
+          spoken_text: firstText,
+          tts_spoken_text: firstText,
+          spoken_text_sha256: firstTextHash,
+          caption_text: firstText,
+          reference_id: policy.primary.voice_id,
+          provider_controls: {
+            kokoro: { voice_id: policy.primary.voice_id },
+            qwen3: planFallbackControls,
+          },
+        },
+        {
+          unit_id: "unit_002",
+          order_index: 1,
+          spoken_text: fallbackText,
+          tts_spoken_text: fallbackText,
+          spoken_text_sha256: fallbackTextHash,
+          caption_text: fallbackText,
+          reference_id: policy.primary.voice_id,
+          provider_controls: {
+            kokoro: { voice_id: policy.primary.voice_id },
+            qwen3: planFallbackControls,
+          },
+        },
+      ],
+    }],
+  };
+  await writeJson(planPath, basePlan);
+  const planSha256 = sha256(await fs.readFile(planPath));
+  const passingUnitQa = { status: "passed", findings: [] };
+  await writeJson(continuityReportPath, {
+    schema: "goldflow_tts_voice_continuity_qa_v1",
+    status: "passed",
+  });
+  const continuityReportSha256 = sha256(await fs.readFile(continuityReportPath));
+  const passingFallbackContinuity = {
+    schema: "goldflow_tts_voice_continuity_unit_qa_v1",
+    status: "passed",
+    audio_sha256: audioHash,
+    cosine_similarity: 0.925,
+    minimum_cosine_similarity: policy.fallback.minimum_cosine_similarity,
+    warning_below_cosine_similarity:
+      policy.fallback.warning_below_cosine_similarity,
+    reference_voice_id: policy.primary.voice_id,
+    reference_voice_sha256: policy.primary.voice_sha256,
+    reference_audio_sha256: policy.fallback.reference_audio_sha256,
+    similarity_model_sha256: policy.fallback.speaker_similarity_model_sha256,
+    similarity_calibration_sha256:
+      policy.fallback.speaker_similarity_calibration_sha256,
+    voice_continuity_contract: policy.fallback.voice_continuity_contract,
+    report_path: continuityReportPath,
+    report_sha256: continuityReportSha256,
+  };
+  const passingFallbackUnitQa = {
+    status: "passed",
+    findings: [],
+    voice_continuity: passingFallbackContinuity,
+  };
+  const baseResults = [
+    {
+      unit_id: "unit_001",
+      selected_provider: "kokoro_local",
+      provider: "kokoro_local",
+      spoken_text_sha256: firstTextHash,
+      primary_spoken_text_sha256: firstTextHash,
+      selected_spoken_text_sha256: firstTextHash,
+      fallback_spoken_text_sha256: null,
+      voice_id: policy.primary.voice_id,
+      voice_continuity_contract: "native_puck_preset",
+      voice_continuity: null,
+      audio_path: audioPath,
+      audio_sha256: audioHash,
+      selected_qa: passingUnitQa,
+    },
+    {
+      unit_id: "unit_002",
+      selected_provider: "qwen_local",
+      provider: "qwen_local",
+      spoken_text_sha256: fallbackTextHash,
+      primary_spoken_text_sha256: fallbackTextHash,
+      selected_spoken_text_sha256: fallbackTextHash,
+      fallback_spoken_text_sha256: fallbackTextHash,
+      voice_id: policy.primary.voice_id,
+      voice_continuity_contract: policy.fallback.voice_continuity_contract,
+      voice_continuity: passingFallbackContinuity,
+      audio_path: audioPath,
+      audio_sha256: audioHash,
+      selected_qa: passingFallbackUnitQa,
+    },
+  ];
+  const baseTtsReport = {
+    schema: "goldflow_narration_tts_report_v1",
+    status: "passed",
+    source_script_hash: scriptHash,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: planSha256,
+    primary_provider: "kokoro_local",
+    primary_model_id: policy.primary.model_id,
+    primary_model_revision: policy.primary.model_revision,
+    narrator_voice_id: "am_puck",
+    voice_sha256: policy.primary.voice_sha256,
+    tts_native_speed: 1.2,
+    qa_policy: policy.qa_policy,
+    unit_qa_status: "passed",
+    full_stream_qa_status: "passed",
+    expected_unit_count: 2,
+    selected_unit_count: 2,
+    fallback_unit_ids: ["unit_002"],
+    fallback_selected_unit_ids: ["unit_002"],
+    fallback_usage: {
+      provider: policy.fallback.provider,
+      unit_ids: ["unit_002"],
+      exact_unit_only: true,
+      target_voice_id: policy.primary.voice_id,
+      target_voice_sha256: policy.primary.voice_sha256,
+      voice_continuity_contract: policy.fallback.voice_continuity_contract,
+      reference_audio_sha256: policy.fallback.reference_audio_sha256,
+      speaker_similarity_model_sha256: policy.fallback.speaker_similarity_model_sha256,
+      speaker_similarity_calibration_sha256:
+        policy.fallback.speaker_similarity_calibration_sha256,
+      minimum_cosine_similarity: policy.fallback.minimum_cosine_similarity,
+      warning_below_cosine_similarity:
+        policy.fallback.warning_below_cosine_similarity,
+    },
+    unit_qa_path: unitQaPath,
+    full_stream_qa_path: fullQaPath,
+    final_wav: audioPath,
+    final_wav_sha256: audioHash,
+    final_m4a: m4aPath,
+    final_m4a_sha256: audioHash,
+    results: baseResults,
+    candidate_history: [{
+      unit_id: "unit_002",
+      provider: "kokoro_local",
+      status: "rejected",
+      unit_qa: {
+        status: "blocked",
+        findings: [{
+          severity: "blocker",
+          code: "tts_transcript_confirmed_deletion",
+        }],
+      },
+    }],
+  };
+  const baseUnitQa = {
+    schema: "goldflow_narration_tts_unit_qa_v1",
+    status: "passed",
+    source_script_hash: scriptHash,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: planSha256,
+    selected_blocker_count: 0,
+    selected_blockers: [],
+    selected_units: baseResults.map((row) => ({
+      unit_id: row.unit_id,
+      provider: row.selected_provider,
+      voice_id: row.voice_id,
+      voice_continuity_contract: row.voice_continuity_contract,
+      spoken_text_sha256: row.spoken_text_sha256,
+      audio_path: row.audio_path,
+      audio_sha256: row.audio_sha256,
+      qa: row.selected_qa,
+    })),
+  };
+  const baseFullQa = {
+    schema: "goldflow_narration_full_stream_qa_v1",
+    status: "passed",
+    source_script_hash: scriptHash,
+    narration_generation_plan_sha256: planSha256,
+    audio_path: audioPath,
+    audio_sha256: audioHash,
+    intended_text_sha256: sha256(`${firstText} ${fallbackText}`),
+    order_qa: {
+      status: "passed",
+      expected_unit_ids: ["unit_001", "unit_002"],
+      actual_unit_ids: ["unit_001", "unit_002"],
+      blockers: [],
+    },
+    join_qa: {
+      status: "passed",
+      blockers: [],
+      warnings: [],
+    },
+    blockers: [],
+    warnings: [],
+  };
+  const baseSegments = [
+    {
+      unit_id: "unit_001",
+      text: firstText,
+      tts_provider: "kokoro_local",
+      voice_id: policy.primary.voice_id,
+      voice_continuity_contract: "native_puck_preset",
+      voice_continuity: null,
+      raw_audio_path: audioPath,
+      raw_audio_sha256: audioHash,
+      unit_qa: passingUnitQa,
+    },
+    {
+      unit_id: "unit_002",
+      text: fallbackText,
+      tts_provider: "qwen_local",
+      voice_id: policy.primary.voice_id,
+      voice_continuity_contract: policy.fallback.voice_continuity_contract,
+      voice_continuity: passingFallbackContinuity,
+      raw_audio_path: audioPath,
+      raw_audio_sha256: audioHash,
+      unit_qa: passingFallbackUnitQa,
+    },
+  ];
+  const baseStitchReport = {
+    schema: "goldflow_narration_stitch_report_v1",
+    status: "passed",
+    source_script_hash: scriptHash,
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: planSha256,
+    primary_provider: "kokoro_local",
+    native_speed: 1.2,
+    stitch_qa_status: "passed",
+    full_stream_qa_status: "passed",
+    output_path: audioPath,
+    output_sha256: audioHash,
+    final_m4a_path: m4aPath,
+    final_m4a_sha256: audioHash,
+    final_duration_sec: 1.8,
+    full_stream_qa_path: fullQaPath,
+    segments: baseSegments,
+  };
+  const restorePassingArtifacts = async () => {
+    await writeJson(continuityReportPath, {
+      schema: "goldflow_tts_voice_continuity_qa_v1",
+      status: "passed",
+    });
+    await writeJson(planPath, basePlan);
+    await writeJson(ttsReportPath, baseTtsReport);
+    await writeJson(unitQaPath, baseUnitQa);
+    await writeJson(fullQaPath, baseFullQa);
+    await writeJson(stitchReportPath, baseStitchReport);
+  };
+  await restorePassingArtifacts();
+
+  const statusFor = async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      "scripts/run-status.mjs",
+      "--episode-dir", episodeDir,
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+    return JSON.parse(stdout);
+  };
+  const repairedStatus = await statusFor();
+  let stage = repairedStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, true, stage.evidence);
+  assert.match(stage.evidence, /fallback_units=1/);
+  assert.equal(repairedStatus.current_stage, "local_whisper_word_timing");
+  assert.match(repairedStatus.next_command_shape, /audio whisper-timing/);
+
+  await writeJson(ttsReportPath, {
+    ...baseTtsReport,
+    results: baseResults.map((row) => (
+      row.unit_id === "unit_002"
+        ? {
+            ...row,
+            voice_continuity: {
+              ...row.voice_continuity,
+              cosine_similarity: 0.863,
+            },
+          }
+        : row
+    )),
+  });
+  const wrongVoiceStatus = await statusFor();
+  stage = wrongVoiceStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /lacks passing Puck voice-continuity evidence/);
+  await restorePassingArtifacts();
+
+  await writeJson(ttsReportPath, {
+    ...baseTtsReport,
+    results: baseResults.map((row) => (
+      row.unit_id === "unit_002"
+        ? { ...row, voice_id: "am_fenrir" }
+        : row
+    )),
+  });
+  const alternateVoiceIdentityStatus = await statusFor();
+  stage = alternateVoiceIdentityStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /is not declared as the selected Puck voice/);
+  await restorePassingArtifacts();
+
+  await writeJson(continuityReportPath, {
+    schema: "goldflow_tts_voice_continuity_qa_v1",
+    status: "tampered",
+  });
+  const staleContinuityReportStatus = await statusFor();
+  stage = staleContinuityReportStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /voice-continuity report hash is stale/);
+  await restorePassingArtifacts();
+
+  await writeJson(planPath, {
+    ...basePlan,
+    diagnostic_metadata: "changed after synthesis",
+  });
+  const stalePlanStatus = await statusFor();
+  stage = stalePlanStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /narration plan hash is missing or stale/);
+  await restorePassingArtifacts();
+
+  await writeJson(unitQaPath, {
+    ...baseUnitQa,
+    status: "blocked",
+  });
+  const tamperedUnitQaStatus = await statusFor();
+  stage = tamperedUnitQaStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /narration_tts_unit_qa_ep_01\.json.*status=blocked/);
+  await restorePassingArtifacts();
+
+  await writeJson(fullQaPath, {
+    ...baseFullQa,
+    audio_sha256: sha256("tampered-full-stream-audio"),
+  });
+  const tamperedFullQaStatus = await statusFor();
+  stage = tamperedFullQaStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /full-stream QA audio hash differs from stitched narration/);
+  await restorePassingArtifacts();
+
+  await writeJson(ttsReportPath, {
+    ...baseTtsReport,
+    results: [...baseResults].reverse(),
+  });
+  const swappedResultsStatus = await statusFor();
+  stage = swappedResultsStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /TTS result unit IDs are missing, reordered, duplicated, or unexpected/);
+  await restorePassingArtifacts();
+
+  await writeJson(ttsReportPath, {
+    ...baseTtsReport,
+    results: baseResults.map((row) => (
+      row.unit_id === "unit_002"
+        ? { ...row, spoken_text_sha256: sha256("Wrong selected text.") }
+        : row
+    )),
+  });
+  const wrongResultTextHashStatus = await statusFor();
+  stage = wrongResultTextHashStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /unit unit_002 TTS spoken text hash is stale/);
+  await restorePassingArtifacts();
+
+  await writeJson(stitchReportPath, {
+    ...baseStitchReport,
+    segments: [...baseSegments].reverse(),
+  });
+  const reorderedStitchStatus = await statusFor();
+  stage = reorderedStitchStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /stitch segment unit IDs are missing, reordered, duplicated, or unexpected/);
+  await restorePassingArtifacts();
+
+  await writeJson(ttsReportPath, {
+    ...baseTtsReport,
+    results: baseTtsReport.results.map((row) => (
+      row.unit_id === "unit_002"
+        ? { ...row, fallback_spoken_text_sha256: sha256("A changed fallback sentence.") }
+        : row
+    )),
+  });
+  const mismatchedFallbackStatus = await statusFor();
+  stage = mismatchedFallbackStatus.stage_ledger.find((row) => row.stage === "qwen_tts_stitch");
+  assert.equal(stage.exists, false);
+  assert.match(stage.evidence, /does not preserve the exact planned spoken text hash/);
 }
 
 async function testTimingBindMatchesPossessiveAnchorsAfterCursor() {
@@ -7001,6 +9380,50 @@ async function testSilentTransitionsWithoutSfxBank() {
   assert.equal(report.transition_events.every((event) => event.transition_sfx === false), true);
 }
 
+async function testTransitionRevalidationUsesAllAdjacentCuts() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  const prompts = Array.from({ length: 225 }, (_value, index) => ({
+    image_id: `ep_01-cut-${String(index + 1).padStart(3, "0")}`,
+    scene_id: `scene_${String(index + 1).padStart(3, "0")}`,
+    start_sec: index * 2,
+    visual_beat_action: "scene change",
+  }));
+  await writeJson(promptPath, { status: "passed", prompts });
+  const output = path.join(episodeDir, "transition_edit_plan_ep_01.json");
+  const existingPlan = path.join(episodeDir, "archived_transition_edit_plan_ep_01.json");
+  await writeJson(existingPlan, {
+    status: "passed",
+    transition_events: [{
+      boundary_id: "boundary_legacy_224",
+      from_image_id: "ep_01-cut-224",
+      to_image_id: "ep_01-cut-225",
+      start_sec: 999,
+      transition_sfx: false,
+      sfx_family: "none",
+    }],
+  });
+  await execFileAsync(process.execPath, [
+    "scripts/visual-transition-plan.mjs",
+    "--channel", "test",
+    "--series", "series",
+    "--week", "run",
+    "--episode", "ep_01",
+    "--prompts", promptPath,
+    "--output", output,
+    "--existing-plan", existingPlan,
+    "--transition-sfx", "false",
+    "--revalidate-existing", "true",
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const report = JSON.parse(await fs.readFile(output, "utf8"));
+  assert.equal(report.status, "passed");
+  assert.equal(report.transition_events[0].boundary_id, "boundary_legacy_224");
+  assert.equal(report.transition_events[0].start_sec, 448);
+  assert.equal(report.planner.timing_revalidated_without_llm, true);
+  assert.equal(report.planner.timing_revalidated_from_path, existingPlan);
+}
+
 async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
   const files = [
     "scripts/imagegen.mjs",
@@ -7142,6 +9565,10 @@ const FIXTURE_SUITES = {
   "stage-contract": [
     testAuthoritativeStageRegistry,
     testParallelStageDependenciesAndOwnedOutputs,
+    testNarrationTtsProviderLocksAndLegacyRouting,
+    testPuckOnlyNarrationIdentityFailClosedGates,
+    testNarrationTtsSelectionAndQaContracts,
+    testProofBaselineImportSupportsGenericAndLegacyNarrationContracts,
     testScopedOnlyPlannerRerunPolicy,
     testVisualWavefrontBatchPolicy,
     testRunIdentityV2Policies,
@@ -7160,11 +9587,14 @@ const FIXTURE_SUITES = {
     testPreflightLocksNativeTtsSpeedAndSmoothRender,
     testModelslabCreditFallbackClassification,
     testPostTempoRequiresEmergencyApproval,
+    testPostTempoScalesPreparedStitchTimeline,
     testHybridImageProviderRouting,
     testHybridOpeningWindowPersistsInRunIdentity,
     testRunStatusResumesBlockedVisualReviewWithoutFullReplan,
     testRunStatusBlocksLegacyScriptPaceHookWarnings,
     testRunStatusBlocksMissingQwenStitchedAudio,
+    testRunStatusHashBindsCurrentQwenStitch,
+    testRunStatusAcceptsGenericNarrationWithSelectedFallbackRepair,
     testRunStatusBlocksStaleVisualBeatSourceHashes,
     testRunStatusBlocksStaleVisualReferenceSourceHashes,
     testRunStatusSurfacesDraftReferenceApprovalCommand,
@@ -7252,7 +9682,8 @@ const FIXTURE_SUITES = {
   media: [
     testPhraseAwareSubtitleGrouping,
     testQwenKeepsBracketedUiDialogueSpeakable,
-    testNarratorOnlyQwenMergesAcrossVoiceSegments,
+    testNarratorOnlyQwenHonorsSegmentAndInstructionBoundaries,
+    testQwenTtsOutputQaContracts,
     testEpisodeLocalAmbienceSpecContract,
     testImageOutputQaRiskAndDonorPolicies,
     testExceptionDrivenQaAndAutomaticFocalAnalysis,
@@ -7265,6 +9696,8 @@ const FIXTURE_SUITES = {
     testIncrementalMotionClipPrebuildReusesExactCache,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,
+    testQwenTextIntegrityCoverageGate,
+    testKokoroNarrationUnitGroupingAndAtomicBarriers,
     testVoiceDirectionPreservesFastRecapCadence,
     testScriptMetaScanAllowsInStoryAnalyticsObjects,
     testQwenPlanAuditsAppliedTtsOverrides,
@@ -7281,6 +9714,7 @@ const FIXTURE_SUITES = {
     testImagegenReusesImportedCodexOpeningCut,
     testCodexImageWorkQueueContracts,
     testSilentTransitionsWithoutSfxBank,
+    testTransitionRevalidationUsesAllAdjacentCuts,
   ],
   integration: [
     testYoutubeRetentionAttribution,

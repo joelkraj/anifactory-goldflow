@@ -1,0 +1,36 @@
+{
+  "schema": "goldflow_tts_bakeoff_passages_v1",
+  "purpose": "Fast first-pass screening of fixed and preset voices for transcript fidelity, clean tails, narration cadence, and long-utterance coherence.",
+  "passages": [
+    {
+      "id": "repeated_word_integrity",
+      "text": "And the mercy in that, the only mercy there is, is that you get to keep living in the proof of it. The repetition is intentional.",
+      "category": "text_fidelity"
+    },
+    {
+      "id": "terminal_tail_integrity",
+      "text": "That miracle was financed by the orphan crypt beneath Saint Orison. Repossess.",
+      "category": "edge_integrity"
+    },
+    {
+      "id": "system_ui_and_numbers",
+      "text": "Emotional Certainty: forty-one percent. Eternal Heart Core: fifty out of fifty. Afterlife Treasury Balance: four hundred and eighteen gold crowns. Sovereign Authority Restored.",
+      "category": "system_ui"
+    },
+    {
+      "id": "names_ranks_and_initialisms",
+      "text": "Kane challenged Ausar while Ruk and Sorne guarded the gate. The Pact marked him as an S S S rank sovereign. The C E O watched the Manhwa broadcast live.",
+      "category": "pronunciation"
+    },
+    {
+      "id": "emotional_cadence_shift",
+      "text": "His wife poisoned him and waited for the throne to become empty. Joey opened his eyes in the kingdom of the dead. The goddess offered him one honest bargain. He smiled, accepted, and began taking everything back.",
+      "category": "delivery"
+    },
+    {
+      "id": "long_join_coherence",
+      "text": "Finally, before every government, guild, and surviving member of Eclipse, Cassian Vale lowered his divine blade. He turned east. Then he dropped to one knee. Sovereign Joey. Requesting assistance. Joey approved one heartbeat of regeneration. It was enough. Now cut the chain behind you.",
+      "category": "long_form"
+    }
+  ]
+}

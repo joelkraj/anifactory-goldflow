@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
+import { QWEN_LOCAL_FALLBACK_LOCK } from "./lib/narration-tts-policy.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -39,12 +40,45 @@ function cleanVoiceId(value) {
   return text ? text : null;
 }
 
+function normalizeTtsProvider(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (["kokoro", "kokoro_local", "local_kokoro", "mlx_kokoro"].includes(normalized)) return "kokoro_local";
+  if (["qwen", "qwen_local", "local_qwen", "local_qwen3", "modelslab_qwen", "qwen3"].includes(normalized)) return "qwen_local";
+  if (["fish", "fish_api", "fish_s2", "fish_s2_pro"].includes(normalized)) return "fish_api";
+  return normalized || null;
+}
+
+function identityLockedTtsProvider(identity = {}) {
+  return normalizeTtsProvider(
+    identity?.tts_provider
+      ?? identity?.provider_locks?.tts_provider
+      ?? identity?.voice_provider_options?.primary?.provider
+      ?? identity?.voice_provider_options?.tts_provider
+      ?? null,
+  );
+}
+
 function selectedQwenNarratorVoiceId(identity = {}) {
+  const lockedProvider = identityLockedTtsProvider(identity);
+  if (lockedProvider === "kokoro_local") {
+    return cleanVoiceId(identity?.voice_provider_options?.fallback?.reference_voice_id)
+      ?? QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id;
+  }
+  const legacyGenericNarratorFlag = !lockedProvider || lockedProvider === "qwen_local"
+    ? flags["narrator-voice-id"]
+    : null;
+  const legacyGenericNarratorVoiceId = !lockedProvider || lockedProvider === "qwen_local"
+    ? identity?.narrator_voice_id
+    : null;
   return cleanVoiceId(flags["qwen-narrator-voice-id"])
-    ?? cleanVoiceId(flags["narrator-voice-id"])
+    ?? cleanVoiceId(legacyGenericNarratorFlag)
     ?? cleanVoiceId(identity?.voice_provider_options?.qwen_narrator_voice_id)
     ?? cleanVoiceId(identity?.qwen_narrator_voice_id)
-    ?? cleanVoiceId(identity?.narrator_voice_id)
+    ?? cleanVoiceId(legacyGenericNarratorVoiceId)
     ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 }
 
@@ -323,17 +357,27 @@ async function loadDialogueContext() {
   const characterBible = await readJsonIfExists(path.join(seriesDir, "character_bible.json"), await readJsonIfExists(path.join(weekDir, "character_bible.json"), {}));
   const seriesPackage = await readJsonIfExists(path.join(seriesDir, "series_package.json"), await readJsonIfExists(path.join(weekDir, "series_package.json"), {}));
   const runIdentity = await readJsonIfExists(path.join(episodeDir, "run_identity.json"), {});
+  const puckPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "kokoro_local";
   const narratorVoiceId = selectedQwenNarratorVoiceId(runIdentity);
   const narratorVoice = await readGlobalQwenVoice(narratorVoiceId);
   const rawVoiceCastingLock = await readJsonIfExists(path.join(episodeDir, `voice_casting_lock_${episode}.json`), await readJsonIfExists(path.join(episodeDir, "voice_casting_lock_ep_01.json"), {}));
   const rawNarratorCast = rawVoiceCastingLock?.speaker_casting?.NARRATOR ?? rawVoiceCastingLock?.speaker_casting?.narrator ?? null;
   const rawNarratorVoiceId = cleanVoiceId(rawNarratorCast?.reference_id) ?? cleanVoiceId(rawNarratorCast?.id);
-  const narratorCast = rawNarratorVoiceId === narratorVoiceId ? rawNarratorCast
-    ?? narratorVoice
-    ?? { id: narratorVoiceId, reference_id: narratorVoiceId }
-    : narratorVoice
-      ?? rawNarratorCast
-      ?? { id: narratorVoiceId, reference_id: narratorVoiceId };
+  const narratorCast = puckPrimaryIdentity
+    ? {
+        id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
+        reference_id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
+        source_audio_path: QWEN_LOCAL_FALLBACK_LOCK.reference_audio_path,
+        source_transcript: QWEN_LOCAL_FALLBACK_LOCK.reference_text,
+        source_transcript_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256,
+        voice_source_policy: "puck_primary_qwen_exact_unit_clone",
+      }
+    : rawNarratorVoiceId === narratorVoiceId ? rawNarratorCast
+      ?? narratorVoice
+      ?? { id: narratorVoiceId, reference_id: narratorVoiceId }
+      : narratorVoice
+        ?? rawNarratorCast
+        ?? { id: narratorVoiceId, reference_id: narratorVoiceId };
   const voiceCastingLock = characterVoiceCastingEnabled()
     ? await applySeriesQwenCastingMap(rawVoiceCastingLock)
     : {
@@ -342,7 +386,9 @@ async function loadDialogueContext() {
         production_ready: rawVoiceCastingLock?.production_ready ?? true,
         narrator_voice_id: rawVoiceCastingLock?.narrator_voice_id ?? narratorVoiceId,
         requested_narrator_voice_id: rawVoiceCastingLock?.requested_narrator_voice_id ?? narratorVoiceId,
-        narrator_voice_policy: rawVoiceCastingLock?.narrator_voice_policy ?? runIdentity?.qwen_narrator_voice_policy ?? runIdentity?.voice_provider_options?.qwen_narrator_voice_policy ?? DEFAULT_QWEN_NARRATOR_VOICE_POLICY,
+        narrator_voice_policy: puckPrimaryIdentity
+          ? "single_puck_identity_with_qwen_exact_unit_clone"
+          : rawVoiceCastingLock?.narrator_voice_policy ?? runIdentity?.qwen_narrator_voice_policy ?? runIdentity?.voice_provider_options?.qwen_narrator_voice_policy ?? DEFAULT_QWEN_NARRATOR_VOICE_POLICY,
         voice_casting_mode: "narrator_only_default",
         character_voice_casting_enabled: false,
         run_identity_path: path.join(episodeDir, "run_identity.json"),
@@ -434,6 +480,7 @@ async function loadDialogueContext() {
     refByLabel,
     voiceCastingLock,
     seriesPackage,
+    runIdentity,
   };
 }
 
@@ -628,15 +675,29 @@ async function loadProviderRouting() {
   return readJsonIfExists(path.join(repoRoot, "config", "provider-routing.json"), {});
 }
 
-function requestedTtsProvider(providerRouting, voiceCastingLock = {}) {
-  return flags["tts-provider"]
-    ?? voiceCastingLock?.tts_provider
-    ?? providerRouting.audio?.production_tts_provider
+function requestedTtsProvider(providerRouting, voiceCastingLock = {}, runIdentity = {}) {
+  const lockedProvider = identityLockedTtsProvider(runIdentity);
+  const requestedProvider = normalizeTtsProvider(flags["tts-provider"]);
+  if (lockedProvider && requestedProvider && lockedProvider !== requestedProvider) {
+    throw new Error(`Refusing voice-plan provider drift: run_identity.json locks '${lockedProvider}', but --tts-provider requested '${requestedProvider}'.`);
+  }
+  return lockedProvider
+    ?? requestedProvider
+    ?? normalizeTtsProvider(voiceCastingLock?.tts_provider)
+    ?? normalizeTtsProvider(providerRouting.audio?.production_tts_provider)
     ?? "qwen_local";
 }
 
 function isQwenLocalProvider(ttsProvider) {
-  return /^(?:qwen_local|modelslab_qwen|qwen)$/i.test(String(ttsProvider ?? "").trim());
+  return normalizeTtsProvider(ttsProvider) === "qwen_local";
+}
+
+function isKokoroLocalProvider(ttsProvider) {
+  return normalizeTtsProvider(ttsProvider) === "kokoro_local";
+}
+
+function isUnitBasedNarratorProvider(ttsProvider) {
+  return isQwenLocalProvider(ttsProvider) || isKokoroLocalProvider(ttsProvider);
 }
 
 async function loadUniversalFishTags() {
@@ -707,11 +768,21 @@ function applySpokenOverrideRules(text, rules = []) {
   return applySpokenOverrideRulesWithAudit(text, rules).text;
 }
 
+function canonicalSpokenOverrideScope(value) {
+  const normalized = String(value ?? "tts_spoken_text").trim().toLowerCase();
+  if (["tts_spoken_text", "qwen_spoken_text", "narration_generation_plan.spoken_text", "qwen_generation_plan.qwen_spoken_text"].includes(normalized)) {
+    return "tts_spoken_text";
+  }
+  return normalized;
+}
+
 function applySpokenOverrideRulesWithAudit(text, rules = []) {
   let next = String(text ?? "");
   const applied = [];
   for (const [index, rule] of (rules ?? []).entries()) {
     if (!rule?.from || typeof rule.to !== "string") continue;
+    const scope = canonicalSpokenOverrideScope(rule.scope);
+    if (scope !== "tts_spoken_text") continue;
     const flagsValue = rule.flags ?? "g";
     const pattern = rule.regex === true
       ? new RegExp(rule.from, flagsValue)
@@ -723,7 +794,10 @@ function applySpokenOverrideRulesWithAudit(text, rules = []) {
         rule_index: index,
         from: rule.from,
         to: rule.to,
-        scope: rule.scope ?? "qwen_spoken_text",
+        scope,
+        source_scope: rule.scope ?? "tts_spoken_text",
+        asr_equivalence_allowed: rule.asr_equivalence_allowed === true,
+        provider_scope: Array.isArray(rule.provider_scope) ? rule.provider_scope.map(normalizeTtsProvider).filter(Boolean) : [],
       });
     }
   }
@@ -898,16 +972,12 @@ function inferQuoteSpeaker(paragraph, quote, dialogueContext = {}) {
 }
 
 function cleanNarrationAttribution(text) {
-  return text
-    .replace(/^,\s*(?:he|she|they|it)\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
-    .replace(/^(?:he|she|they|it)\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
-    .replace(/^,\s*(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*/i, "")
-    .replace(/^(?!The\b|This\b|That\b|A\b|An\b|His\b|Her\b)[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*/i, "")
-    .replace(/^\s*(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,2}\.?\s*/i, "")
-    .replace(/^\s*(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\s+the\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\.?\s*/i, "")
-    .replace(/^,\s*the\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
-    .replace(/^the\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\s+(said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered)(?:\s+\w+ly)?\.?\s*,?\s*/i, "")
-    .trim();
+  // Attribution is approved story text. A prior heuristic treated any leading
+  // noun followed by words such as "snapped", "ordered", or "continued" as a
+  // disposable dialogue tag. That deleted valid lines such as "The ring
+  // snapped..." and "Joey ordered...". Only an approved, hash-bound
+  // tts_spoken_overrides rule may remove or replace narration words.
+  return String(text ?? "").trim();
 }
 
 function applyRuleReplacements(text, rules, key = "replacements") {
@@ -930,49 +1000,6 @@ function naturalizePerformanceText(text, rules = {}) {
   return applyRuleReplacements(naturalizeDialogueLine(text, rules), rules, "performance_replacements")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-const ttsAttributionSpeechVerbPattern = "(?:said|asked|muttered|answered|called|laughed|whispered|warned|replied|rasped|snarled|shouted|snapped|hissed|sighed|continued|commanded|declared|announced|responded|ordered|repeated)";
-
-function isStandalonePronounAttributionDebris(text) {
-  const next = String(text ?? "").trim();
-  if (!next) return false;
-  return new RegExp(`^,?\\s*(?:I|he|she|they|it)\\s+${ttsAttributionSpeechVerbPattern}(?:\\s+\\w+ly)?\\.?\\s*,?$`, "i").test(next);
-}
-
-function cleanNarratorTtsOnlyAttributionDebris(text) {
-  let next = String(text ?? "").trim();
-  if (!next) return "";
-  if (isStandalonePronounAttributionDebris(next)) return "";
-  if (/^\s*,?\s*(?:stepping|turning|looking|without looking)\b[^.?!]*(?:[.?!]|,)?\s*$/i.test(next)) return "";
-  if (/^\s*,?\s*(?:her|his|their)\s+voice\s+[^.?!]*(?:[.?!]|,)?\s*$/i.test(next)) return "";
-  if (/^\s*to no one in particular\.?\s*$/i.test(next)) return "";
-  next = next
-    .replace(/\bto no one in particular\.?/gi, "")
-    .replace(/\s+([,.!?])/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-  return next;
-}
-
-function shouldSmoothSkippedAttributionJoin(previousRow, nextRow, skippedAttribution) {
-  const previous = String(previousRow?.qwen_spoken_text ?? "").trim();
-  const next = String(nextRow?.qwen_spoken_text ?? "").trim();
-  const skipped = String(skippedAttribution ?? "").trim();
-  const firstPersonAttribution = new RegExp(`^,?\\s*I\\s+${ttsAttributionSpeechVerbPattern}`, "i").test(skipped);
-  return /[A-Za-z0-9]\.\s*$/.test(previous)
-    && (/^[a-z]/.test(next) || (firstPersonAttribution && /^(?:is|are|am|was|were|I|you|we|he|she|they|it|and|but|because|then)\b/.test(next)));
-}
-
-function lowercaseContinuationJoinMark(nextText) {
-  const next = String(nextText ?? "").trim();
-  if (/^(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/i.test(next)) return ",";
-  return "";
-}
-
-function smoothPreviousQwenUnitBoundary(previousRow, joinMark = "") {
-  if (!previousRow) return;
-  previousRow.qwen_spoken_text = String(previousRow.qwen_spoken_text ?? "").replace(/\.\s*$/, joinMark);
 }
 
 function startsWithPerformanceTag(text) {
@@ -1073,6 +1100,63 @@ function systemUiUnit(text) {
     performed_text: spoken,
     caption_text: String(text ?? "").trim(),
     metadata_tags: ["SYSTEM_UI", "SPEAK_BRACKET_CONTENTS"],
+  };
+}
+
+const COLONLESS_SYSTEM_UI_OPENING = /^(?:SYSTEM|SYSTEM UI|UI|NOTICE|WARNING|MESSAGE|HOST STATUS|STATUS|ANALYZING|SKILL|SKILL ACQUIRED|CLAIM|CLAIM ATTEMPT|TARGET|CONDITION|CONDITION MET|PENDING|TERRITORY|NEW STATUS|TRANSFER|CONTROL|ASSET|PACT|CONTRACT|AGGRESSOR|CIVIC HALL|ROYAL MARRIAGE PACT|TENANT CHANGE)\b/u;
+
+function colonlessSystemUiBlock(text) {
+  const caption = String(text ?? "").trim();
+  if (!caption || /["“”]/u.test(caption)) return null;
+  const lines = caption.split(/\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length || lines.some((line) => /[a-z]/u.test(line) || !/[A-Z]/u.test(line))) return null;
+  const opening = lines[0];
+  if (!COLONLESS_SYSTEM_UI_OPENING.test(opening)) return null;
+  if (lines.some((line) => words(line).length > 28)) return null;
+  const spoken = lines.join(" ");
+  return {
+    kind: "system_ui",
+    speaker: "SYSTEM",
+    text: spoken,
+    performed_text: spoken,
+    caption_text: caption,
+    merge_barrier: true,
+    atomic: true,
+    metadata_tags: ["SYSTEM_UI", "SPEAK_COLONLESS_ALL_CAPS_BLOCK", "ATOMIC"],
+  };
+}
+
+function isKnownDialogueSpeakerLabel(label, dialogueContext = {}) {
+  const normalized = speakerLabel(label);
+  if (!normalized) return false;
+  if (dialogueContext?.roleByLabel?.has?.(normalized)) return true;
+  if ((dialogueContext?.entries ?? []).some((entry) => (
+    entry?.label === normalized
+    || (entry?.aliases ?? []).some((alias) => speakerLabel(alias) === normalized)
+  ))) return true;
+  return /^(?:NARRATOR|VOICEOVER|VOICE OVER|VO|V\.O\.|MC_INTERNAL|TRAINEE|BYSTANDER|CROWD|CIVILIAN|WORKER|STUDENT|HUNTER|GUARD|NURSE|CLERK|MAN|WOMAN|VOICE|ONLOOKER|SPECTATOR|WITNESS)(?:\s+\d+)?$/i.test(normalized);
+}
+
+function colonSystemUiUnit(text, dialogueContext = {}) {
+  const clean = String(text ?? "")
+    .trim()
+    .replace(/^\[COMMENT_BAIT\]\s*/i, "")
+    .replace(/^\[BREATH_BEAT\]\s*/i, "");
+  const match = clean.match(/^([A-Z][A-Z0-9 _'’. -]{1,80}):\s*(\S.*)$/);
+  if (!match) return null;
+  const label = match[1].trim();
+  const explicitInterfaceLabel = /^(?:SYSTEM|SYSTEM UI|UI|NOTICE|WARNING)\b/i.test(label);
+  const allCapsRecord = !/[a-z]/.test(clean)
+    && /[A-Z]/.test(match[2])
+    && !isKnownDialogueSpeakerLabel(label, dialogueContext);
+  if (!explicitInterfaceLabel && !allCapsRecord) return null;
+  return {
+    kind: "system_ui",
+    speaker: "SYSTEM",
+    text: clean,
+    performed_text: clean,
+    caption_text: clean,
+    metadata_tags: ["SYSTEM_UI", "SPEAK_COLON_LABEL_AND_VALUE"],
   };
 }
 
@@ -1374,9 +1458,20 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
   };
   const paragraphs = stripTitle(script).split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
   for (const paragraph of paragraphs) {
+    const colonlessInterface = colonlessSystemUiBlock(paragraph);
+    if (colonlessInterface) {
+      units.push(colonlessInterface);
+      units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
+      continue;
+    }
     const lines = paragraph.split(/\n/).map((line) => line.trim()).filter(Boolean);
-    if (lines.length > 1 && lines.some((line) => colonDialogueLine(line))) {
+    if (lines.length > 1 && lines.some((line) => colonSystemUiUnit(line, dialogueContext) || colonDialogueLine(line))) {
       for (const line of lines) {
+        const interfaceUnit = colonSystemUiUnit(line, dialogueContext);
+        if (interfaceUnit) {
+          units.push(interfaceUnit);
+          continue;
+        }
         const colon = colonDialogueLine(line);
         if (colon) {
           if (isNarratorSpeaker(colon.speaker)) {
@@ -1391,6 +1486,12 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
           rememberNarrationContext(line);
         }
       }
+      units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
+      continue;
+    }
+    const wholeLineInterface = colonSystemUiUnit(paragraph, dialogueContext);
+    if (wholeLineInterface) {
+      units.push(wholeLineInterface);
       units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
       continue;
     }
@@ -1699,11 +1800,15 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
   const targetWordMax = shortSlice ? 45 : testSlice ? 68 : 125;
   let current = [];
   let currentWords = 0;
+  const isSystemPerformanceUnit = (unit) => (
+    (unit?.kind === "dialogue" || unit?.kind === "system_ui")
+    && /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit?.speaker ?? ""))
+  );
   function currentSpeakerSwitchCount() {
-    return current.filter((unit) => unit.kind === "dialogue" || unit.kind === "performance_action").length;
+    return current.filter((unit) => unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "system_ui").length;
   }
   function currentHasDialogue() {
-    return current.some((unit) => unit.kind === "dialogue" || unit.kind === "performance_action");
+    return current.some((unit) => unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "system_ui");
   }
   function currentHasInternal() {
     return current.some((unit) => unit.kind === "mc_internal");
@@ -1712,7 +1817,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
     return current.some((unit) => unit.kind === "narration");
   }
   function currentHasSystemDialogue() {
-    return current.some((unit) => unit.kind === "dialogue" && /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? "")));
+    return current.some(isSystemPerformanceUnit);
   }
   function currentHasSoundDesign() {
     return current.some((unit) => unit.kind === "sound_design");
@@ -1734,7 +1839,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
     if (/\b(?:PIPIRU|LUNARIA|CHILD|GIRL CHILD|LITTLE GIRL|KAWAII|PRINCESS|CREATURE)\b/i.test(text)) return "child";
     if (/\b(?:MRS\.?|MS\.?|MISS|MIKA|ODA|MOTHER|AUNT|AUNTIE|GRANDMOTHER|GRANDMA|WOMAN|FEMALE|ELDER_FEMALE|ELDERLY)\b/i.test(text)) return "female";
     if (/\b(?:MR\.?|MISTER|MAN|FATHER|UNCLE|RENJI|DAE-HO|KAIDO|SHIROGANE|MALE)\b/i.test(text)) return "adult";
-    return unit.kind === "dialogue" || unit.kind === "performance_action" ? "dialogue" : unit.kind;
+    return unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "system_ui" ? "dialogue" : unit.kind;
   }
   function currentHasContrastFamily(family) {
     return current.some((unit) => speakerContrastFamily(unit) === family);
@@ -1828,7 +1933,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
     const captionBody = current.map((unit) => unit.caption_text ?? unit.text).join(" ").trim();
     const performedBody = speakable.map((unit) => unit.performed_text).join(" ").trim();
     const speakers = [...new Set(current.map((unit) => unit.speaker).filter(Boolean))];
-    const hasDialogue = speakable.some((unit) => unit.kind === "dialogue" || unit.kind === "performance_action");
+    const hasDialogue = speakable.some((unit) => unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "system_ui");
     const hasInternal = speakable.some((unit) => unit.kind === "mc_internal");
     const hasNarration = speakable.some((unit) => unit.kind === "narration");
     const explicitPerformanceSpeaker = hasInternal
@@ -1869,7 +1974,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
       dialogue_narration_transition: mode === "mc_internal" ? "drop room tone/crowd slightly and use close intimate MC internal delivery before returning to narrator-led pressure" : mode === "character_dialogue" ? "lightly embody speaker, then return to narrator tone on next narration segment" : "narrator-led",
       risk_notes: mode === "mc_internal" ? "Qwen should use the MC_INTERNAL casting slot; do not render this as narrator." : mode === "character_dialogue" ? "Do not flatten dialogue into generic narration." : "",
       narrative_function: segments.length === 0 ? "opening emotional engine" : mode,
-      dialogue_turn_count: current.filter((unit) => unit.kind === "dialogue" || unit.kind === "performance_action").length,
+      dialogue_turn_count: current.filter((unit) => unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "system_ui").length,
       sfx_cues: sfxCues,
       fish_generation_required: true,
       semantic_voice_context: recentNarrationContext,
@@ -1902,10 +2007,10 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
       continue;
     }
     const unitWords = words(unit.text).length;
-    const nextIsPerformance = unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "mc_internal";
+    const nextIsPerformance = unit.kind === "dialogue" || unit.kind === "performance_action" || unit.kind === "mc_internal" || unit.kind === "system_ui";
     const nextIsNarration = unit.kind === "narration";
     const nextIsSoundDesign = unit.kind === "sound_design";
-    const nextIsSystemDialogue = unit.kind === "dialogue" && /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? ""));
+    const nextIsSystemDialogue = isSystemPerformanceUnit(unit);
     const speakerSwitchNeedsOwnSegment = current.length
       && nextIsPerformance
       && (currentHasDialogue() || currentHasInternal())
@@ -1936,7 +2041,7 @@ function buildSegments(script, tags, speakabilityRules = {}, dialogueContext = {
         (nextIsNarration && currentWords >= Math.max(14, Math.floor(targetWordMin * 0.55)))
         || (nextIsPerformance && !nextIsSystemDialogue && currentWords >= 4)
       );
-    const shouldFlushForDialogueTurn = unit.kind === "dialogue" && currentWords >= targetWordMin;
+    const shouldFlushForDialogueTurn = (unit.kind === "dialogue" || unit.kind === "system_ui") && currentWords >= targetWordMin;
     const shouldFlushSplitLongDialogue = unit.kind === "dialogue" && unit.auto_split_from_long_dialogue && currentHasDialogue();
     const shouldFlushForSize = currentWords + unitWords > targetWordMax;
     const shouldIsolateSoundDesign = current.length && (nextIsSoundDesign || currentHasSoundDesign());
@@ -2095,7 +2200,7 @@ function auditDialoguePerformance(script, segments, speakabilityRules = {}) {
 }
 
 function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
-  const qwenLocal = isQwenLocalProvider(ttsProvider);
+  const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
   const voicedSegments = segments.filter((segment) => segment.fish_generation_required !== false && segment.delivery_mode !== "sound_design");
   const tags = voicedSegments.map((segment) => segment.tag);
   const counts = Object.fromEntries([...new Set(tags)].map((tag) => [tag, tags.filter((item) => item === tag).length]));
@@ -2114,7 +2219,15 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   const dialogueSegments = voicedSegments.filter((segment) => segment.dialogue_turn_count > 0 || segment.delivery_mode === "character_dialogue");
   const dialogueCovered = dialogueSegments.filter((segment) => !/calm,\s*cinematic narration|calm cinematic|cinematic narration|generic/i.test(segment.tag)).length;
   const genericTags = tags.filter((tag) => /calm, cinematic narration|calm cinematic|generic/i.test(tag)).length;
-  const spokenLabelSegments = voicedSegments.filter((segment) => containsSpokenSpeakerLabel(segment.text));
+  const spokenLabelSegments = voicedSegments.filter((segment) => {
+    if (!containsSpokenSpeakerLabel(segment.text)) return false;
+    const speakableUnits = (segment.performance_units ?? []).filter((unit) => unit.kind !== "sound_design");
+    const onlyApprovedSystemUi = speakableUnits.length > 0 && speakableUnits.every((unit) => (
+      unit.kind === "system_ui"
+      && /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? ""))
+    ));
+    return !onlyApprovedSystemUi;
+  });
   const screenplayMarkerSegments = voicedSegments.filter((segment) => containsScreenplayMarkerLeak(segment.text));
   const unknownDialogueSegments = voicedSegments.filter((segment) => (segment.performance_units ?? []).some((unit) => unit.kind === "dialogue" && /UNKNOWN_DIALOGUE/i.test(unit.speaker ?? "")));
   const pausePrimaryTagSegments = voicedSegments.filter((segment) => isPauseOnlyTag(segment.tag));
@@ -2124,9 +2237,15 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
     && (words(segment.stripped_text ?? "").length > 68 || Number(segment.expected_duration_sec ?? 0) > 24)
   );
   const buriedSystemNoticeSegments = voicedSegments.filter((segment) => {
-    const hasSystem = (segment.performance_units ?? []).some((unit) => unit.kind === "dialogue" && /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? "")));
+    const hasSystem = (segment.performance_units ?? []).some((unit) => (
+      (unit.kind === "dialogue" || unit.kind === "system_ui")
+      && /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? ""))
+    ));
     if (!hasSystem) return false;
-    const nonSystemDialogueCount = (segment.performance_units ?? []).filter((unit) => unit.kind === "dialogue" && !/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? ""))).length;
+    const nonSystemDialogueCount = (segment.performance_units ?? []).filter((unit) => (
+      (unit.kind === "dialogue" || unit.kind === "system_ui")
+      && !/^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(unit.speaker ?? ""))
+    )).length;
     return words(segment.stripped_text ?? "").length > 46 || nonSystemDialogueCount > 1 || Number(segment.expected_duration_sec ?? 0) > 18;
   });
   const tempoCounts = Object.fromEntries(["fast", "medium", "slow", "silent"].map((tempo) => [tempo, segments.filter((segment) => segment.pacing_tempo === tempo).length]));
@@ -2157,7 +2276,7 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   if (Object.keys(counts).length < minUniqueTags) failures.push({ code: "too_few_unique_tags", severity: "blocker", min_unique_tags: minUniqueTags });
   if (topPct > maxTopTagPct) failures.push({
     code: "top_tag_overused",
-    severity: qwenLocal ? "warning" : "blocker",
+    severity: unitBasedNarrator ? "warning" : "blocker",
     tag: top[0],
     pct: Number(topPct.toFixed(2)),
     max_pct: maxTopTagPct,
@@ -2221,14 +2340,14 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   }
   if (oversizedMixedDialogueSegments.length) {
     failures.push({
-      code: qwenLocal ? "mixed_dialogue_segment_uses_qwen_unit_stitch" : "oversized_mixed_dialogue_fish_segment",
-      severity: qwenLocal ? "warning" : "blocker",
+      code: unitBasedNarrator ? "mixed_dialogue_segment_uses_unit_stitch" : "oversized_mixed_dialogue_fish_segment",
+      severity: unitBasedNarrator ? "warning" : "blocker",
       segment_ids: oversizedMixedDialogueSegments.map((segment) => segment.segment_id),
-      reason: qwenLocal
-        ? "Qwen local production generates and stitches per performance unit, so mixed narrator/dialogue segments are allowed only when qwen_generation_units preserve setup, line, reaction, and follow-up beats."
+      reason: unitBasedNarrator
+        ? "The active local narrator provider generates and stitches bounded performance units, so mixed narrator/dialogue segments are allowed only when narration_generation_units preserve setup, line, reaction, and follow-up beats."
         : "Fish S2-Pro performs dialogue and narrator shifts better in compact context-rich beats. Long mixed segments cause voice bleed and muddy dialogue.",
-      suggested_fix: qwenLocal
-        ? "Verify qwen_generation_plan.json has clean per-speaker units and natural-language --instruct prompts for every mixed segment before local synthesis."
+      suggested_fix: unitBasedNarrator
+        ? "Verify narration_generation_plan.json has clean, sentence-bounded units and provider-appropriate controls for every mixed segment before local synthesis."
         : "Split mixed narration/dialogue/system sections into setup, line, reaction, and follow-up beats before audio generation.",
     });
   }
@@ -2244,11 +2363,11 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   if (topTempoPct > 60) {
     failures.push({
       code: "tempo_classification_dominates_episode",
-      severity: qwenLocal ? "warning" : "blocker",
+      severity: unitBasedNarrator ? "warning" : "blocker",
       tempo: topTempo[0],
       pct: Number(topTempoPct.toFixed(2)),
-      reason: qwenLocal
-        ? "More than 60% of Qwen segments share one pacing label. This is diagnostic only because recap narration may intentionally sustain a fast provider-native cadence; emotional variation must come from emphasis rather than forced slow tags."
+      reason: unitBasedNarrator
+        ? "More than 60% of local narrator units share one pacing label. This is diagnostic because recap narration may intentionally sustain a fast provider-native cadence; emotional variation must come from emphasis rather than forced slow tags."
         : "More than 60% of audio segments share one pacing tempo; the episode is likely flat or rushed.",
     });
   } else if (topTempoPct > 40) {
@@ -2337,8 +2456,8 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
     blockers,
     warnings,
     tts_provider: ttsProvider,
-    auto_repair_policy: qwenLocal
-      ? "Preserve story text, keep Qwen spoken text clean, and repair qwen_generation_units/instruct prompts before local synthesis."
+    auto_repair_policy: unitBasedNarrator
+      ? "Preserve exact story/caption text, keep TTS spoken text clean, and repair narration_generation_units or provider controls before local synthesis."
       : "Retag flagged segments from SeriesPackage palette while preserving stripped_text. Max 2 attempts before human review.",
   };
 }
@@ -2416,9 +2535,39 @@ function numberToSpokenWords(value) {
   return `${wholeWords} point ${[...decimal].map((digit) => numberWord(digit)).join(" ")}`;
 }
 
+function clockTimeToSpokenWords(hour, minute, meridiem) {
+  const hourWords = integerToSpokenWords(hour);
+  const minuteNumber = Number(minute);
+  const minuteWords = minuteNumber === 0
+    ? ""
+    : minuteNumber < 10
+      ? `oh ${numberWord(minuteNumber)}`
+      : integerToSpokenWords(minuteNumber);
+  const meridiemWords = String(meridiem ?? "").toUpperCase() === "AM" ? "A M" : "P M";
+  return [hourWords, minuteWords, meridiemWords].filter(Boolean).join(" ");
+}
+
+function normalizeOrdinaryAllCapsForTts(value) {
+  // Kokoro may interpret ordinary all-caps UI words as initialisms (for
+  // example CROWNS -> C R O W N S). Approved initialisms have already been
+  // expanded into separated single letters before this runs, so case-fold
+  // every remaining multi-letter all-caps token for the spoken layer only.
+  return String(value ?? "").replace(/\b[A-Z][A-Z0-9']+\b/g, (token) => (
+    `${token[0]}${token.slice(1).toLowerCase()}`
+  ));
+}
+
 function qwenPronunciationText(value) {
   const preserveInitialCase = (replacement) => (match) => /^[A-Z]/.test(match) ? `${replacement[0].toUpperCase()}${replacement.slice(1)}` : replacement;
-  return String(value ?? "")
+  const normalized = String(value ?? "")
+    .replace(/\b(\d{1,2}):([0-5]\d)\s*([AP])\.?M\.?(?=\s|[,;!?]|$)/gi, (_match, hour, minute, marker) => (
+      clockTimeToSpokenWords(hour, minute, `${marker}M`)
+    ))
+    .replace(/\b(\d{1,2})([0-5]\d)\s*([AP])\.?M\.?(?=\s|[,;!?]|$)/gi, (_match, hour, minute, marker) => (
+      Number(hour) >= 1 && Number(hour) <= 12
+        ? clockTimeToSpokenWords(hour, minute, `${marker}M`)
+        : _match
+    ))
     .replace(/\bTRUE\s+LEVEL\s*:\s*-\s*(\d{1,2})\b/gi, (_match, level) => `True level, negative ${numberWord(level)}`)
     .replace(/\bUNALLOCATED\s+STAT\s+POINTS\s*:\s*-\s*(\d{1,2})\b/gi, (_match, points) => `Unallocated stat points, negative ${numberWord(points)}`)
     .replace(/\bSSS(?:\s*[- ]\s*rank)?\b/gi, (match) => /rank/i.test(match) ? "S S S rank" : "S S S")
@@ -2443,6 +2592,7 @@ function qwenPronunciationText(value) {
     .replace(/\bUX\b/g, "U X")
     .replace(/\bAPI\b/g, "A P I")
     .replace(/\bFBI\b/g, "F B I")
+    .replace(/\bNYPD\b/g, "N Y P D")
     .replace(/\bIRS\b/g, "I R S")
     .replace(/\bSEC\b/g, "S E C")
     .replace(/\bNDA\b/g, "N D A")
@@ -2470,35 +2620,30 @@ function qwenPronunciationText(value) {
     .replace(/\b\d[\d,]*(?:\.\d+)?\b/g, (number) => numberToSpokenWords(number))
     .replace(/\s+/g, " ")
     .trim();
+  return normalizeOrdinaryAllCapsForTts(normalized);
 }
 
 function qwenSpokenText(value, speaker = "", ttsOverrides = {}) {
   return qwenSpokenTextDetailed(value, speaker, ttsOverrides).text;
 }
 
+function stripBalancedOuterDialogueQuotes(value) {
+  const text = String(value ?? "").trim();
+  const pairs = new Map([['"', '"'], ["“", "”"]]);
+  return pairs.get(text[0]) === text.at(-1) ? text.slice(1, -1).trim() : text;
+}
+
 function qwenSpokenTextDetailed(value, speaker = "", ttsOverrides = {}) {
-  const isInterfaceSpeaker = /^(SYSTEM|NOTICE|WARNING|UI)$/i.test(String(speaker ?? ""));
-  let clean = String(value ?? "")
+  const clean = stripBalancedOuterDialogueQuotes(String(value ?? "")
     .replace(/<\|speaker:\d+\|>/g, " ")
-    .replace(/^["“]|["”]$/g, "")
     .replace(/\s+/g, " ")
-    .trim();
+    .trim());
   const replacementResult = applySpokenOverrideRulesWithAudit(clean, ttsOverrides.replacements ?? []);
-  const replacementCandidate = replacementResult.text;
-  if (!isInterfaceSpeaker && replacementCandidate === clean) {
-    clean = clean
-      .replace(/^\s*[A-Z][A-Z0-9 _'’. -]{1,40}:\s*/, "")
-      .replace(/^:\s*/, "")
-      .trim();
-  }
   const overridden = applyPronunciationMap(
-    replacementCandidate === clean ? clean : replacementCandidate,
+    replacementResult.text,
     ttsOverrides.pronunciation_map ?? [],
   ).replace(/\[[^\]]+\]/g, " ").replace(/\s+/g, " ").trim();
   const normalized = qwenPronunciationText(overridden);
-  if (isInterfaceSpeaker) {
-    return { text: normalized, applied_replacements: replacementResult.applied };
-  }
   return { text: normalized, applied_replacements: replacementResult.applied };
 }
 
@@ -2522,6 +2667,36 @@ export function voiceDirectionTransformForTests(value, { speaker = "", ttsOverri
 
 export function qwenGenerationPlanForTests(segments, { ttsOverrides = {}, ttsProvider = "qwen_local" } = {}) {
   return buildQwenGenerationPlan(segments, {}, {}, ttsProvider, ttsOverrides);
+}
+
+export function buildExactSpokenPlanForDiagnostics(
+  script,
+  { ttsOverrides = {}, ttsProvider = "supertonic_local", dialogueContext = {} } = {},
+) {
+  const segments = buildSegments(String(script ?? ""), palette(), {}, dialogueContext);
+  const plan = buildQwenGenerationPlan(segments, {}, dialogueContext, ttsProvider, ttsOverrides);
+  const sourceScriptHash = sha256Text(script);
+  const textIntegrityCoverage = qwenTextIntegrityCoverageForTests(script, plan, {
+    ttsOverrides,
+    dialogueContext,
+  });
+  const systemUiSpeechCoverage = systemUiSpeechCoverageForTests(script, plan, dialogueContext);
+  plan.source_script_hash = sourceScriptHash;
+  plan.text_integrity_coverage = textIntegrityCoverage;
+  plan.system_ui_speech_coverage = systemUiSpeechCoverage;
+  plan.status = textIntegrityCoverage.status === "passed"
+    && systemUiSpeechCoverage.status === "passed"
+    && plan.kokoro_unit_boundary_integrity?.status !== "blocked"
+    ? "passed"
+    : "blocked";
+  return {
+    status: plan.status,
+    source_script_hash: sourceScriptHash,
+    segments,
+    plan,
+    text_integrity_coverage: textIntegrityCoverage,
+    system_ui_speech_coverage: systemUiSpeechCoverage,
+  };
 }
 
 export function voiceDirectionMetadataForTests(texts) {
@@ -2602,21 +2777,394 @@ function qwenInstructForUnit({ segment, unit, role, cast }) {
   ].join(" ");
 }
 
-function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}, ttsProvider = "qwen_local", ttsOverrides = {}) {
+function finitePositive(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function puckQwenFallbackIdentityControls() {
+  return {
+    target_voice_id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
+    target_voice_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_sha256,
+    reference_audio_path: QWEN_LOCAL_FALLBACK_LOCK.reference_audio_path,
+    reference_audio_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256,
+    reference_transcript_path: QWEN_LOCAL_FALLBACK_LOCK.reference_text_path,
+    reference_transcript_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256,
+    reference_transcript_file_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_text_file_sha256,
+    reference_metadata_path: QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_path,
+    reference_metadata_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256,
+    voice_continuity_contract: QWEN_LOCAL_FALLBACK_LOCK.voice_continuity_contract,
+    speaker_similarity_method: QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_method,
+    speaker_similarity_model_path: QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_path,
+    speaker_similarity_model_sha256: QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256,
+    hard_minimum_cosine_similarity: QWEN_LOCAL_FALLBACK_LOCK.minimum_cosine_similarity,
+    warning_floor_cosine_similarity: QWEN_LOCAL_FALLBACK_LOCK.warning_floor_cosine_similarity ?? 0.90,
+    fallback_scope: "exact_failed_unit_only",
+    exact_unit_only: true,
+    whole_episode_fallback_allowed: false,
+  };
+}
+
+function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider = "qwen_local") {
+  const provider = normalizeTtsProvider(ttsProvider) ?? "qwen_local";
+  const voiceOptions = runIdentity?.voice_provider_options ?? {};
+  const primary = voiceOptions?.primary ?? {};
+  const fallback = voiceOptions?.fallback ?? {};
+  const fallbackProvider = normalizeTtsProvider(
+    runIdentity?.tts_fallback_provider
+      ?? runIdentity?.fallback_tts_provider
+      ?? fallback?.provider
+      ?? voiceOptions?.fallback_tts_provider
+      ?? providerRouting?.audio?.fallback_tts_provider
+      ?? (provider === "kokoro_local" ? "qwen_local" : null),
+  );
+  const kokoroVoice = cleanVoiceId(
+    primary?.voice_id
+      ?? primary?.voice
+      ?? runIdentity?.tts_voice_id
+      ?? runIdentity?.narrator_voice_id
+      ?? voiceOptions?.kokoro_voice_id
+      ?? voiceOptions?.narrator_voice_id,
+  ) ?? "am_puck";
+  const kokoroSpeed = finitePositive(
+    primary?.native_speed
+      ?? runIdentity?.tts_native_speed
+      ?? voiceOptions?.tts_native_speed
+      ?? voiceOptions?.kokoro_native_speed,
+    1.2,
+  );
+  if (provider === "kokoro_local" && kokoroVoice !== QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id) {
+    throw new Error(`New Kokoro narration plans are Puck-only: expected ${QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id}, got ${kokoroVoice}. Other presets are bakeoff-only.`);
+  }
+  const puckQwenFallback = provider === "kokoro_local" && fallbackProvider === "qwen_local";
+  return {
+    primary_provider: provider,
+    fallback_provider: fallbackProvider,
+    kokoro: {
+      provider: "kokoro_local",
+      enabled: provider === "kokoro_local",
+      voice: kokoroVoice,
+      voice_id: kokoroVoice,
+      lang_code: String(primary?.lang_code ?? primary?.language_code ?? "a"),
+      native_speed: kokoroSpeed,
+      model_id: primary?.model_id ?? runIdentity?.tts_model ?? voiceOptions?.kokoro_model_id ?? "mlx-community/Kokoro-82M-bf16",
+      model_revision: primary?.model_revision ?? runIdentity?.tts_model_revision ?? voiceOptions?.kokoro_model_revision ?? null,
+      runtime: primary?.runtime ?? voiceOptions?.kokoro_runtime ?? "mlx-audio",
+      runtime_version: primary?.runtime_version ?? voiceOptions?.kokoro_runtime_version ?? null,
+      accepts_instruction: false,
+      instruction_submitted: false,
+      narrator_only: true,
+    },
+    qwen3: {
+      provider: "qwen_local",
+      enabled: provider === "qwen_local",
+      fallback: puckQwenFallback,
+      language: "English",
+      temperature: 0.6,
+      top_p: 0.8,
+      top_k: 50,
+      repetition_penalty: 1.2,
+      max_tokens: 1200,
+      ...(puckQwenFallback ? {
+        delivery_control: "base_icl_reference_audio_only",
+        instruct_supported: false,
+        instruct_submitted: false,
+        instruct: null,
+        ...puckQwenFallbackIdentityControls(),
+      } : {}),
+    },
+  };
+}
+
+function protectedTermsForUnit(sourceText, spokenText, ttsOverrides = {}, appliedReplacements = []) {
+  const source = String(sourceText ?? "");
+  const terms = [];
+  const addMatches = (pattern) => {
+    for (const match of source.matchAll(pattern)) {
+      const value = String(match[0] ?? "").trim();
+      if (value) terms.push(value);
+    }
+  };
+  addMatches(/[$£€¥]\s*\d[\d,]*(?:\.\d+)?/g);
+  addMatches(/\b\d[\d,]*(?:\.\d+)?(?:%|[xX])?\b/g);
+  addMatches(/\b(?:SSS|SS|XP|HP|MP|DPS|AOE|CEO|CFO|COO|CTO|CIO|CMO|HR|PR|AI|UI|UX|API|FBI|NYPD|IRS|SEC|NDA|LLC|IPO|IT|DNA|GPS|USB|PDF|URL|VIP|ID|MC)(?:\s*[- ]\s*rank)?\b/g);
+  for (const entry of ttsOverrides.pronunciation_map ?? []) {
+    if (!entry?.term) continue;
+    const pattern = new RegExp(entry.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    if (pattern.test(source)) terms.push(String(entry.term));
+  }
+  for (const applied of appliedReplacements ?? []) {
+    if (applied?.to) terms.push(String(applied.to));
+  }
+  if (/^(?:SYSTEM|NOTICE|WARNING|UI)\b/i.test(source)) {
+    const label = source.match(/^[A-Z][A-Z0-9 _'’. -]{1,80}(?=:)/)?.[0];
+    if (label) terms.push(label.trim());
+  }
+  return [...new Set(terms.map((term) => term.trim()).filter(Boolean))];
+}
+
+function riskFlagsForUnit({ unit, sourceText, spokenText, protectedTerms, appliedReplacements }) {
+  const flags = [];
+  const sourceSpeaker = String(unit?.speaker ?? "NARRATOR");
+  const kind = String(unit?.kind ?? "narration");
+  const wordTotal = words(spokenText).length;
+  if (/^(?:SYSTEM|NOTICE|WARNING|UI)$/i.test(sourceSpeaker) || kind === "system_ui") flags.push("system_ui_atomic");
+  if (kind !== "narration") flags.push("speaker_or_performance_turn");
+  if (wordTotal <= 4) flags.push("very_short_unit");
+  if (wordTotal > 50) flags.push("long_unit");
+  if (protectedTerms.length) flags.push("protected_term_or_value");
+  if ((appliedReplacements ?? []).length) flags.push("tts_override_applied");
+  if (/["“”]/u.test(sourceText)) flags.push("quoted_speech");
+  if (/[…]|--|—/u.test(sourceText)) flags.push("complex_punctuation");
+  if (/\b(?:live|content|read|lead|wind|tear|close|minute)\b/i.test(sourceText)) flags.push("homograph_risk");
+  if (/\b([\p{L}']+)(?:[\s,]+\1)\b/iu.test(sourceText)) flags.push("approved_repetition");
+  return [...new Set(flags)];
+}
+
+function stableNarrationUnitId(segmentId, sourceUnitRefs = []) {
+  const refs = (sourceUnitRefs ?? []).map((ref) => ({
+    segment_id: String(ref?.segment_id ?? segmentId ?? ""),
+    unit_index: Number(ref?.unit_index),
+    kind: String(ref?.kind ?? "narration"),
+    source_speaker: String(ref?.source_speaker ?? "NARRATOR"),
+    source_text_sha256: String(ref?.source_text_sha256 ?? ""),
+    caption_text_sha256: String(ref?.caption_text_sha256 ?? ""),
+  }));
+  const firstIndex = refs[0]?.unit_index ?? 0;
+  const finalIndex = refs.at(-1)?.unit_index ?? firstIndex;
+  const sourceRange = firstIndex === finalIndex
+    ? `u${String(firstIndex).padStart(3, "0")}`
+    : `u${String(firstIndex).padStart(3, "0")}-${String(finalIndex).padStart(3, "0")}`;
+  const segmentSlug = String(segmentId ?? "segment")
+    .replace(/[^a-z0-9]+/gi, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  return `narr_${segmentSlug}_${sourceRange}_${sha256Text(JSON.stringify(refs)).slice(0, 12)}`;
+}
+
+function sourceUnitHasExplicitMergeBarrier(unit = {}) {
+  const metadataTags = Array.isArray(unit?.metadata_tags) ? unit.metadata_tags : [];
+  return unit?.merge_barrier === true
+    || unit?.do_not_merge === true
+    || unit?.atomic === true
+    || Boolean(unit?.boundary_before)
+    || Boolean(unit?.boundary_after)
+    || metadataTags.some((tag) => /^(?:MERGE_BARRIER|ATOMIC|DO_NOT_MERGE)$/i.test(String(tag ?? "")));
+}
+
+function kokoroNarrationGroupCost(wordCount) {
+  if (wordCount < 24) return 85 + (24 - wordCount) * 6;
+  if (wordCount <= 46) return 5 + Math.abs(36 - wordCount) * 0.35;
+  return 35 + (wordCount - 46) * 4;
+}
+
+function partitionKokoroNarrationRun(rows) {
+  const count = rows.length;
+  if (count <= 1) return count ? [rows] : [];
+  const best = Array(count + 1).fill(null);
+  best[count] = { cost: 0, groups: [] };
+  for (let start = count - 1; start >= 0; start -= 1) {
+    let wordCount = 0;
+    for (let end = start; end < count; end += 1) {
+      wordCount += Number(rows[end]?.word_count ?? 0);
+      const oneUnavoidablyLongSourceUnit = end === start && wordCount > 54;
+      if (wordCount > 54 && !oneUnavoidablyLongSourceUnit) break;
+      const tail = best[end + 1];
+      if (!tail) continue;
+      const candidate = {
+        cost: kokoroNarrationGroupCost(wordCount) + tail.cost,
+        groups: [rows.slice(start, end + 1), ...tail.groups],
+      };
+      const current = best[start];
+      if (!current
+        || candidate.cost < current.cost - 1e-9
+        || (Math.abs(candidate.cost - current.cost) <= 1e-9 && candidate.groups.length < current.groups.length)) {
+        best[start] = candidate;
+      }
+      if (oneUnavoidablyLongSourceUnit) break;
+    }
+  }
+  return best[0]?.groups ?? rows.map((row) => [row]);
+}
+
+function mergeKokoroNarrationRows(rows, segment, providerContext) {
+  if (rows.length === 1) {
+    return {
+      ...rows[0],
+      grouped_source_unit_count: 1,
+      grouping_policy: "kokoro_safe_adjacent_narration_v1",
+    };
+  }
+  const first = rows[0];
+  const sourceUnitRefs = rows.flatMap((row) => row.source_unit_refs ?? []);
+  const sourceText = rows.map((row) => row.source_text).filter(Boolean).join(" ").trim();
+  const captionText = rows.map((row) => row.caption_text).filter(Boolean).join(" ").trim();
+  const spokenText = rows.map((row) => row.spoken_text).filter(Boolean).join(" ").trim();
+  const appliedReplacements = rows.flatMap((row) => row.tts_override_replacements_applied ?? []);
+  const protectedTerms = [...new Set(rows.flatMap((row) => row.protected_terms ?? []).filter(Boolean))];
+  const sourceSpeaker = first.source_speaker ?? "NARRATOR";
+  const fallbackInstruction = qwenInstructForUnit({
+    segment,
+    unit: { kind: "narration", speaker: sourceSpeaker, text: sourceText },
+    role: first.role,
+    cast: null,
+  });
+  const riskFlags = riskFlagsForUnit({
+    unit: { kind: "narration", speaker: sourceSpeaker },
+    sourceText,
+    spokenText,
+    protectedTerms,
+    appliedReplacements,
+  });
+  const merged = {
+    ...first,
+    unit_id: stableNarrationUnitId(segment.segment_id, sourceUnitRefs),
+    source_unit_index: sourceUnitRefs[0]?.unit_index ?? first.source_unit_index,
+    source_unit_end_index: sourceUnitRefs.at(-1)?.unit_index ?? first.source_unit_index,
+    source_unit_refs: sourceUnitRefs,
+    source_segment_ids: [...new Set(sourceUnitRefs.map((ref) => ref.segment_id).filter(Boolean))],
+    source_text: sourceText,
+    source_text_sha256: sha256Text(sourceText),
+    caption_text: captionText,
+    caption_text_sha256: sha256Text(captionText),
+    spoken_text: spokenText,
+    tts_spoken_text: spokenText,
+    qwen_spoken_text: spokenText,
+    spoken_text_sha256: sha256Text(spokenText),
+    word_count: words(spokenText).length,
+    risk_flags: [...new Set(["grouped_narration_unit", ...riskFlags])],
+    protected_tokens: protectedTerms,
+    protected_terms: protectedTerms,
+    merge_barrier: false,
+    boundary_before: first.boundary_before ?? null,
+    boundary_after: rows.at(-1)?.boundary_after ?? null,
+    qwen_instruct: null,
+    provider_controls: {
+      kokoro: {
+        ...providerContext.kokoro,
+        qwen_instruct_claimed: false,
+      },
+      qwen3: {
+        ...providerContext.qwen3,
+        delivery_control: "base_icl_reference_audio_only",
+        instruct_supported: false,
+        instruct_submitted: false,
+        instruct: null,
+        authored_delivery_note: fallbackInstruction,
+      },
+    },
+    grouped_source_unit_count: sourceUnitRefs.length,
+    grouping_policy: "kokoro_safe_adjacent_narration_v1",
+  };
+  if (appliedReplacements.length) merged.tts_override_replacements_applied = appliedReplacements;
+  else delete merged.tts_override_replacements_applied;
+  return merged;
+}
+
+function compactKokoroNarrationUnits(rows, segment, providerContext) {
+  const compacted = [];
+  let pending = [];
+  const flush = () => {
+    if (!pending.length) return;
+    for (const group of partitionKokoroNarrationRun(pending)) {
+      compacted.push(mergeKokoroNarrationRows(group, segment, providerContext));
+    }
+    pending = [];
+  };
+  for (const row of rows) {
+    const previous = pending.at(-1);
+    const consecutiveSourceUnits = !previous
+      || Number(row.source_unit_index) === Number(previous.source_unit_index) + 1;
+    const sameSpeaker = !previous
+      || (row.source_speaker === previous.source_speaker && row.speaker === previous.speaker);
+    const mergeableNarration = row.kind === "narration"
+      && row.merge_barrier !== true
+      && row.source_merge_barrier !== true
+      && !row.risk_flags?.includes("system_ui_atomic")
+      && !row.risk_flags?.includes("speaker_or_performance_turn");
+    if (!mergeableNarration || !consecutiveSourceUnits || !sameSpeaker) {
+      flush();
+      if (mergeableNarration) pending.push(row);
+      else compacted.push(row);
+      continue;
+    }
+    pending.push(row);
+  }
+  flush();
+  return compacted;
+}
+
+function kokoroUnitBoundaryIntegrity(units, enabled) {
+  if (!enabled) {
+    return {
+      status: "not_applicable",
+      enabled: false,
+      unit_count: units.length,
+      blockers: [],
+    };
+  }
+  const blockers = [];
+  for (const unit of units) {
+    const sourceText = String(unit?.source_text ?? "").trim();
+    const refs = Array.isArray(unit?.source_unit_refs) ? unit.source_unit_refs : [];
+    const exactSourceJoin = refs.map((ref) => String(ref?.source_text ?? "")).filter(Boolean).join(" ").trim();
+    if (!refs.length || sourceText !== exactSourceJoin) {
+      blockers.push({
+        code: "tts_unit_not_exact_whole_source_unit_join",
+        unit_id: unit?.unit_id ?? null,
+        source_text: sourceText,
+      });
+    }
+    if (!/^[\p{L}\p{N}"“‘(\[]/u.test(sourceText)) {
+      blockers.push({
+        code: "tts_unit_possible_mid_sentence_start",
+        unit_id: unit?.unit_id ?? null,
+        source_text: sourceText,
+      });
+    }
+    if (!/[.!?…]["”’\])]*$/u.test(sourceText)) {
+      blockers.push({
+        code: "tts_unit_missing_terminal_punctuation",
+        unit_id: unit?.unit_id ?? null,
+        source_text: sourceText,
+      });
+    }
+  }
+  return {
+    status: blockers.length ? "blocked" : "passed",
+    enabled: true,
+    unit_count: units.length,
+    whole_source_units_only: blockers.every((row) => row.code !== "tts_unit_not_exact_whole_source_unit_join"),
+    clean_start_count: units.length - blockers.filter((row) => row.code === "tts_unit_possible_mid_sentence_start").length,
+    terminal_punctuation_count: units.length - blockers.filter((row) => row.code === "tts_unit_missing_terminal_punctuation").length,
+    blocker_count: blockers.length,
+    blockers: blockers.slice(0, 50),
+    policy: "Every Kokoro request is assembled only from complete source units, starts on a clean sentence or paragraph boundary, and ends on terminal punctuation. Mid-sentence slicing is forbidden.",
+  };
+}
+
+function buildQwenGenerationPlan(
+  segments,
+  qwenConfig = {},
+  dialogueContext = {},
+  ttsProvider = "qwen_local",
+  ttsOverrides = {},
+  providerContext = providerPlanContext({}, {}, ttsProvider),
+) {
   const unitRows = [];
   const segmentRows = [];
   const appliedOverrideRules = new Map();
   for (const segment of segments) {
-    const units = (segment.performance_units?.length ? segment.performance_units : [{
+    const units = segment.performance_units?.length ? segment.performance_units : [{
       kind: segment.dialogue_turn_count ? "dialogue" : "narration",
       speaker: segment.speakers?.[0] ?? "NARRATOR",
       text: segment.stripped_text ?? segment.caption_text ?? segment.text,
       performed_text: segment.stripped_text ?? segment.caption_text ?? segment.text,
       caption_text: segment.caption_text ?? segment.stripped_text ?? segment.text,
-    }]).filter((unit) => unit.kind !== "sound_design" && !/^SFX$/i.test(String(unit.speaker ?? "")));
+    }];
     const qwenUnits = [];
-    let pendingNarratorAttributionJoin = null;
-    for (const unit of units) {
+    for (const [sourceUnitOffset, unit] of units.entries()) {
+      if (unit.kind === "sound_design" || /^SFX$/i.test(String(unit.speaker ?? ""))) continue;
       const sourceSpeaker = unit.speaker ?? "NARRATOR";
       const speaker = characterVoiceCastingEnabled() ? sourceSpeaker : "NARRATOR";
       const cast = castForSpeaker(speaker, dialogueContext);
@@ -2624,34 +3172,89 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
         ? cast?.role ?? speakerRoleFor(speaker, unit.text ?? "", segment, dialogueContext)
         : "narrator";
       const rawPerformanceText = unit.performed_text ?? unit.text ?? unit.caption_text;
-      const isNarratorTtsUnit = unit.kind === "narration" && speakerLabel(sourceSpeaker) === "NARRATOR";
-      const performanceText = isNarratorTtsUnit
-        ? cleanNarratorTtsOnlyAttributionDebris(rawPerformanceText)
-        : rawPerformanceText;
-      const spoken = qwenSpokenTextDetailed(performanceText, sourceSpeaker, ttsOverrides);
+      const spoken = qwenSpokenTextDetailed(rawPerformanceText, sourceSpeaker, ttsOverrides);
       const spokenText = spoken.text;
-      if (!isSpeakableQwenText(spokenText)) {
-        pendingNarratorAttributionJoin = isNarratorTtsUnit && isStandalonePronounAttributionDebris(rawPerformanceText)
-          ? String(rawPerformanceText ?? "").trim()
-          : null;
-        continue;
-      }
+      if (!isSpeakableQwenText(spokenText)) continue;
+      const sourceUnitIndex = sourceUnitOffset + 1;
+      const qwenInstruction = qwenInstructForUnit({ segment, unit: { ...unit, speaker: sourceSpeaker }, role, cast });
+      const protectedTerms = protectedTermsForUnit(unit.text ?? "", spokenText, ttsOverrides, spoken.applied_replacements);
+      const riskFlags = riskFlagsForUnit({
+        unit,
+        sourceText: unit.text ?? "",
+        spokenText,
+        protectedTerms,
+        appliedReplacements: spoken.applied_replacements,
+      });
+      const sourceText = unit.text ?? "";
+      const captionText = unit.caption_text ?? unit.text ?? "";
+      const isKokoroPrimary = providerContext.primary_provider === "kokoro_local";
+      const sourceUnitRef = {
+        segment_id: segment.segment_id,
+        unit_index: sourceUnitIndex,
+        kind: unit.kind ?? "narration",
+        source_speaker: sourceSpeaker,
+        source_text: sourceText,
+        source_text_sha256: sha256Text(sourceText),
+        caption_text: captionText,
+        caption_text_sha256: sha256Text(captionText),
+      };
+      const sourceMergeBarrier = sourceUnitHasExplicitMergeBarrier(unit);
+      const stableUnitId = stableNarrationUnitId(segment.segment_id, [sourceUnitRef]);
       const row = {
+        unit_id: stableUnitId,
+        order_index: null,
         segment_id: segment.segment_id,
         unit_index: qwenUnits.length + 1,
+        source_unit_index: sourceUnitIndex,
+        source_segment_ids: [segment.segment_id],
+        source_unit_refs: [sourceUnitRef],
         kind: unit.kind ?? "narration",
         speaker,
         source_speaker: sourceSpeaker,
         role,
+        spoken_text: spokenText,
+        tts_spoken_text: spokenText,
         qwen_spoken_text: spokenText,
-        caption_text: unit.caption_text ?? unit.text ?? "",
-        source_text: unit.text ?? "",
-        qwen_instruct: qwenInstructForUnit({ segment, unit: { ...unit, speaker: sourceSpeaker }, role, cast }),
+        spoken_text_sha256: sha256Text(spokenText),
+        word_count: words(spokenText).length,
+        caption_text: captionText,
+        caption_text_sha256: sha256Text(captionText),
+        source_text: sourceText,
+        source_text_sha256: sha256Text(sourceText),
+        delivery_class: segment.delivery_mode ?? "exposition narration",
+        risk_flags: riskFlags,
+        protected_tokens: protectedTerms,
+        protected_terms: protectedTerms,
+        source_merge_barrier: sourceMergeBarrier,
+        merge_barrier: sourceMergeBarrier || riskFlags.includes("system_ui_atomic") || riskFlags.includes("speaker_or_performance_turn") || riskFlags.includes("tts_override_applied"),
+        boundary_before: qwenUnits.length === 0 ? "segment" : null,
+        boundary_after: null,
+        qwen_instruct: isKokoroPrimary ? null : qwenInstruction,
+        provider_controls: {
+          kokoro: {
+            ...providerContext.kokoro,
+            qwen_instruct_claimed: false,
+          },
+          qwen3: {
+            ...providerContext.qwen3,
+            ...(isKokoroPrimary ? {
+              delivery_control: "base_icl_reference_audio_only",
+              instruct_supported: false,
+              instruct_submitted: false,
+              instruct: null,
+              authored_delivery_note: qwenInstruction,
+            } : {
+              instruct: qwenInstruction,
+            }),
+          },
+        },
         reference_audio_path: cast?.source_audio_path ?? cast?.sample_path ?? null,
         reference_text: cast?.source_transcript ?? null,
-        voice_source_policy: cast?.voice_source_policy ?? (speaker === "NARRATOR" ? "owned_qwen_narrator_reference_manifest" : "pending_voice_casting"),
+        voice_source_policy: isKokoroPrimary
+          ? "bundled_kokoro_preset_no_reference_audio_required"
+          : cast?.voice_source_policy ?? (speaker === "NARRATOR" ? "owned_qwen_narrator_reference_manifest" : "pending_voice_casting"),
         voice_casting_mode: characterVoiceCastingEnabled() ? "explicit_character_voice_casting" : "narrator_only_default",
-        reference_id: cast?.reference_id ?? null,
+        reference_id: isKokoroPrimary ? providerContext.kokoro.voice_id : cast?.reference_id ?? null,
       };
       if (spoken.applied_replacements?.length) {
         row.tts_override_replacements_applied = spoken.applied_replacements;
@@ -2674,41 +3277,96 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
           }
         }
       }
-      if (isNarratorTtsUnit && qwenUnits.at(-1) && shouldSmoothSkippedAttributionJoin(qwenUnits.at(-1), row, "lowercase continuation")) {
-        smoothPreviousQwenUnitBoundary(qwenUnits.at(-1), lowercaseContinuationJoinMark(row.qwen_spoken_text));
-      }
-      if (pendingNarratorAttributionJoin && isNarratorTtsUnit && shouldSmoothSkippedAttributionJoin(qwenUnits.at(-1), row, pendingNarratorAttributionJoin)) {
-        const joinMark = /^[a-z]/.test(String(row.qwen_spoken_text ?? "").trim()) ? "" : ",";
-        smoothPreviousQwenUnitBoundary(qwenUnits.at(-1), joinMark);
-      }
-      pendingNarratorAttributionJoin = null;
-      unitRows.push(row);
       qwenUnits.push(row);
+    }
+    const generationUnits = providerContext.primary_provider === "kokoro_local"
+      ? compactKokoroNarrationUnits(qwenUnits, segment, providerContext)
+      : qwenUnits;
+    for (const [segmentUnitOffset, unit] of generationUnits.entries()) {
+      unit.unit_index = segmentUnitOffset + 1;
+      unit.order_index = unitRows.length;
+      unitRows.push(unit);
+    }
+    if (generationUnits.length) {
+      generationUnits.at(-1).boundary_after = "segment";
+      generationUnits.at(-1).merge_barrier = true;
     }
     segmentRows.push({
       segment_id: segment.segment_id,
       delivery_mode: segment.delivery_mode,
       expected_duration_sec: segment.expected_duration_sec,
-      unit_count: qwenUnits.length,
-      speakers: [...new Set(qwenUnits.map((unit) => unit.speaker))],
-      qwen_generation_units: qwenUnits,
+      unit_count: generationUnits.length,
+      source_unit_count: qwenUnits.length,
+      speakers: [...new Set(generationUnits.map((unit) => unit.speaker))],
+      generation_units: generationUnits,
+      narration_units: generationUnits,
+      narration_generation_units: generationUnits,
+      qwen_generation_units: generationUnits,
     });
   }
   const loadedOverrides = (ttsOverrides.replacements ?? []).map((rule, index) => ({
     rule_index: index,
     from: rule.from ?? null,
     to: rule.to ?? null,
-    scope: rule.scope ?? "qwen_spoken_text",
+    scope: canonicalSpokenOverrideScope(rule.scope),
+    source_scope: rule.scope ?? "tts_spoken_text",
     regex: rule.regex === true,
   }));
   const appliedRules = [...appliedOverrideRules.values()];
   const appliedRuleIndexes = new Set(appliedRules.map((rule) => rule.rule_index));
   const unmatchedRules = loadedOverrides.filter((rule) => !appliedRuleIndexes.has(rule.rule_index));
+  if (unitRows.length) {
+    unitRows[0].risk_flags = [...new Set(["episode_opening_unit", ...unitRows[0].risk_flags])];
+    unitRows.at(-1).risk_flags = [...new Set([...unitRows.at(-1).risk_flags, "episode_final_unit"])];
+  }
+  const kokoroBoundaryIntegrity = kokoroUnitBoundaryIntegrity(
+    unitRows,
+    providerContext.primary_provider === "kokoro_local",
+  );
   return {
-    status: "passed",
-    provider: ttsProvider,
+    schema: "goldflow_tts_generation_plan_v2",
+    status: kokoroBoundaryIntegrity.status === "blocked" ? "blocked" : "passed",
+    provider: providerContext.primary_provider,
+    primary_provider: providerContext.primary_provider,
+    fallback_provider: providerContext.fallback_provider,
+    ...(providerContext.primary_provider === "kokoro_local" ? {
+      narrator_voice_id: providerContext.kokoro.voice_id,
+      narrator_voice_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_sha256,
+      narrator_identity_policy: "single_puck_identity_with_qwen_exact_unit_clone",
+    } : {}),
     generated_at: new Date().toISOString(),
-    policy: "Qwen local production plan: generate per speaker/per beat with clean spoken text, natural-language --instruct prompts, owned/consented reference audio, and stitched timing. Standalone system/UI dialogue is spoken without its brackets; bracketed emotion, sound-design, and production-direction tags never enter spoken text.",
+    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Kokoro uses its locked preset and native speed without claiming an instruction channel. The locked Qwen Base fallback inherits delivery only from its reference audio; any authored delivery note is advisory and is not submitted as an effective model instruction.",
+    provider_controls: {
+      kokoro: providerContext.kokoro,
+      qwen3: providerContext.qwen3,
+    },
+    kokoro_unit_grouping: {
+      enabled: providerContext.primary_provider === "kokoro_local",
+      target_spoken_words_min: 24,
+      target_spoken_words_max: 46,
+      hard_spoken_words_max: 54,
+      policy: "Compact only adjacent same-speaker narration inside one existing segment. System/UI, dialogue, performance, speaker changes, sound design, explicit merge barriers, source-index gaps, and segment boundaries remain atomic barriers. A single source sentence longer than the hard maximum remains intact.",
+    },
+    kokoro_unit_boundary_integrity: kokoroBoundaryIntegrity,
+    instruction_delivery: {
+      kokoro: {
+        supported: false,
+        submitted: false,
+        policy: "Kokoro Puck delivery is controlled by exact spoken text, punctuation, stable source-bound narration groups, locked voice, native speed, and stitch gaps. It cannot claim qwen_instruct delivery.",
+      },
+      qwen3: {
+        planned: providerContext.primary_provider === "qwen_local" || providerContext.fallback_provider === "qwen_local",
+        submitted_by_voice_plan: false,
+        supported: providerContext.primary_provider === "qwen_local",
+        fallback_delivery_control: providerContext.fallback_provider === "qwen_local"
+          ? "base_icl_reference_audio_only"
+          : null,
+        policy: providerContext.fallback_provider === "qwen_local"
+          ? "The locked Qwen3 Base ICL fallback ignores instruct; it uses exact spoken text plus the pinned reference audio and reference transcript only."
+          : "Per-unit instructions remain declarative controls only for an explicit Qwen route whose selected model/runtime supports them.",
+        ...(providerContext.qwen3.fallback ? puckQwenFallbackIdentityControls() : {}),
+      },
+    },
     qwen_config_policy: qwenConfig.prompting ?? null,
     pronunciation_protocol: {
       letter_ranks_are_spelled: true,
@@ -2726,14 +3384,27 @@ function buildQwenGenerationPlan(segments, qwenConfig = {}, dialogueContext = {}
     segment_count: segmentRows.length,
     unit_count: unitRows.length,
     system_ui_unit_count: unitRows.filter((unit) => /^SYSTEM$/i.test(String(unit.source_speaker ?? ""))).length,
+    units: unitRows,
     segments: segmentRows,
   };
 }
 
-function systemUiSpeechCoverage(script, plan) {
-  const expected = [...String(script ?? "").matchAll(/^\[([^\]\n]+)\]$/gm)]
-    .map((match) => standaloneSystemUiText(match[0]))
-    .filter(Boolean);
+function systemUiSpeechCoverage(script, plan, dialogueContext = {}) {
+  const expected = stripTitle(String(script ?? ""))
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .flatMap((paragraph) => {
+      const colonlessBlock = colonlessSystemUiBlock(paragraph);
+      if (colonlessBlock) return [colonlessBlock.text];
+      return paragraph.split(/\n/)
+        .map((line) => {
+          const bracketed = standaloneSystemUiText(line);
+          if (bracketed) return bracketed;
+          return colonSystemUiUnit(line, dialogueContext)?.text ?? null;
+        })
+        .filter(Boolean);
+    });
   const planned = (plan?.segments ?? [])
     .flatMap((segment) => segment.qwen_generation_units ?? [])
     .filter((unit) => /^SYSTEM$/i.test(String(unit.source_speaker ?? "")))
@@ -2758,7 +3429,142 @@ function systemUiSpeechCoverage(script, plan) {
     unexpected_count: unexpected.length,
     missing,
     unexpected,
-    policy: "Every standalone system/UI bracket line in the locked script must become one spoken SYSTEM source unit with only the outer brackets removed.",
+    policy: "Every standalone system/UI bracket line, detected colon label-and-value record, and consecutive all-caps period-delimited interface block in the locked script must become one spoken SYSTEM source unit. Only standalone outer brackets are removed; all-caps blocks preserve their line text and order.",
+  };
+}
+
+export function systemUiSpeechCoverageForTests(script, plan, dialogueContext = {}) {
+  return systemUiSpeechCoverage(script, plan, dialogueContext);
+}
+
+function coverageTokens(value) {
+  return (String(value ?? "")
+    .normalize("NFKC")
+    .match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) ?? [])
+    .map((token) => token.replaceAll("’", "'").toLowerCase());
+}
+
+function tokenCoverageComparison(expectedTokens, actualTokens) {
+  const sharedLength = Math.min(expectedTokens.length, actualTokens.length);
+  let firstMismatchIndex = -1;
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (expectedTokens[index] !== actualTokens[index]) {
+      firstMismatchIndex = index;
+      break;
+    }
+  }
+  if (firstMismatchIndex < 0 && expectedTokens.length !== actualTokens.length) firstMismatchIndex = sharedLength;
+  const contextStart = firstMismatchIndex < 0 ? 0 : Math.max(0, firstMismatchIndex - 6);
+  const contextEnd = firstMismatchIndex < 0 ? 0 : firstMismatchIndex + 10;
+  return {
+    status: firstMismatchIndex < 0 ? "passed" : "blocked",
+    expected_token_count: expectedTokens.length,
+    actual_token_count: actualTokens.length,
+    first_mismatch_token_index: firstMismatchIndex < 0 ? null : firstMismatchIndex,
+    expected_context: firstMismatchIndex < 0 ? [] : expectedTokens.slice(contextStart, contextEnd),
+    actual_context: firstMismatchIndex < 0 ? [] : actualTokens.slice(contextStart, contextEnd),
+  };
+}
+
+function scriptSpeakableFragmentsForCoverage(script, dialogueContext = {}) {
+  const fragments = [];
+  for (const rawLine of stripTitle(script).split(/\n/)) {
+    let line = String(rawLine ?? "").trim();
+    if (!line) continue;
+    line = line
+      .replace(/^\[COMMENT_BAIT\]\s*/i, "")
+      .replace(/^\[BREATH_BEAT\]\s*/i, "")
+      .replace(/^\[MC_INTERNAL\]\s*:?\s*/i, "")
+      .trim();
+    if (!line || isSoundDesignText(line)) continue;
+    const bracketedInterface = standaloneSystemUiText(line);
+    if (bracketedInterface) {
+      fragments.push(bracketedInterface);
+      continue;
+    }
+    if (/^\[[^\]\n]+\]$/.test(line)) continue;
+    const colonInterface = colonSystemUiUnit(line, dialogueContext);
+    if (colonInterface) {
+      fragments.push(colonInterface.text);
+      continue;
+    }
+    const colonDialogue = colonDialogueLine(line);
+    fragments.push(colonDialogue?.spoken ?? line);
+  }
+  return fragments;
+}
+
+function expectedSpokenTokensForUnit(unit, ttsOverrides = {}) {
+  const sourceText = String(unit?.source_text ?? "")
+    .replace(/<\|speaker:\d+\|>/g, " ")
+    .trim();
+  const replacement = applySpokenOverrideRules(sourceText, ttsOverrides.replacements ?? []);
+  const pronounced = applyPronunciationMap(replacement, ttsOverrides.pronunciation_map ?? []);
+  return coverageTokens(qwenPronunciationText(pronounced));
+}
+
+export function qwenTextIntegrityCoverageForTests(script, plan, { ttsOverrides = {}, dialogueContext = {} } = {}) {
+  const units = (plan?.segments ?? []).flatMap((segment) => segment.qwen_generation_units ?? []);
+  const expectedScriptTokens = coverageTokens(scriptSpeakableFragmentsForCoverage(script, dialogueContext).join(" "));
+  const plannedSourceTokens = coverageTokens(units.map((unit) => unit.source_text ?? "").join(" "));
+  const scriptToPlan = tokenCoverageComparison(expectedScriptTokens, plannedSourceTokens);
+  const spokenUnitFindings = [];
+  let expectedSpokenTokenCount = 0;
+  let actualSpokenTokenCount = 0;
+  for (const unit of units) {
+    const expectedTokens = expectedSpokenTokensForUnit(unit, ttsOverrides);
+    const actualTokens = coverageTokens(unit.qwen_spoken_text);
+    expectedSpokenTokenCount += expectedTokens.length;
+    actualSpokenTokenCount += actualTokens.length;
+    const comparison = tokenCoverageComparison(expectedTokens, actualTokens);
+    if (comparison.status !== "passed") {
+      spokenUnitFindings.push({
+        code: "qwen_spoken_unit_coverage_mismatch",
+        segment_id: unit.segment_id ?? null,
+        unit_index: unit.unit_index ?? null,
+        source_speaker: unit.source_speaker ?? null,
+        source_text: unit.source_text ?? "",
+        qwen_spoken_text: unit.qwen_spoken_text ?? "",
+        ...comparison,
+      });
+    }
+  }
+  const findings = [];
+  if (scriptToPlan.status !== "passed") {
+    findings.push({
+      code: "script_to_qwen_plan_source_coverage_mismatch",
+      severity: "blocker",
+      ...scriptToPlan,
+    });
+  }
+  if (spokenUnitFindings.length) {
+    findings.push({
+      code: "qwen_plan_source_to_spoken_coverage_mismatch",
+      severity: "blocker",
+      mismatch_unit_count: spokenUnitFindings.length,
+      mismatch_units: spokenUnitFindings.slice(0, 20),
+    });
+  }
+  return {
+    status: findings.length ? "blocked" : "passed",
+    policy: "Every speakable lexical token in the locked script must remain present and ordered in the Qwen plan and spoken text unless an approved, hash-bound tts_spoken_overrides rule or explicit pronunciation mapping accounts for the change.",
+    normalization_policy: [
+      "Coverage ignores case and punctuation but never ignores lexical words.",
+      "Markdown titles, scene headers, explicit production directions, and explicit sound-design cues are non-spoken.",
+      "Recognized character speaker labels are metadata; SYSTEM/UI label-and-value text remains spoken.",
+      "Outer dialogue quotes and standalone SYSTEM/UI brackets are syntax; their lexical contents remain spoken.",
+      "Numeric verbalization, approved initialism expansion, approved pronunciation mappings, and hash-bound TTS-only overrides are compared as intended spoken forms.",
+    ],
+    script_to_plan_source: scriptToPlan,
+    plan_source_to_spoken: {
+      status: spokenUnitFindings.length ? "blocked" : "passed",
+      unit_count: units.length,
+      expected_token_count: expectedSpokenTokenCount,
+      actual_token_count: actualSpokenTokenCount,
+      mismatch_unit_count: spokenUnitFindings.length,
+      mismatch_units: spokenUnitFindings.slice(0, 20),
+    },
+    findings,
   };
 }
 
@@ -3126,6 +3932,20 @@ function buildDialogueMap(segments, fishAudioConfig, dialogueContext = {}) {
   };
 }
 
+function canonicalPlanHash(value) {
+  function canonicalize(item) {
+    if (Array.isArray(item)) return item.map(canonicalize);
+    if (!item || typeof item !== "object") return item;
+    return Object.fromEntries(
+      Object.entries(item)
+        .filter(([key]) => !["generated_at", "plan_sha256", "canonical_plan_sha256"].includes(key))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalize(child)]),
+    );
+  }
+  return sha256Text(JSON.stringify(canonicalize(value)));
+}
+
 async function main() {
   const scriptPath = path.join(episodeDir, "script_clean.md");
   if (!existsSync(scriptPath)) throw new Error(`Missing locked script: ${scriptPath}`);
@@ -3141,8 +3961,14 @@ async function main() {
   const dialogueContext = await loadDialogueContext();
   const tags = { ...seriesTags, ...universalTags };
   const providerRouting = await loadProviderRouting();
-  const ttsProvider = requestedTtsProvider(providerRouting, dialogueContext.voiceCastingLock);
+  const runIdentity = dialogueContext.runIdentity ?? {};
+  const ttsProvider = requestedTtsProvider(providerRouting, dialogueContext.voiceCastingLock, runIdentity);
   const qwenLocal = isQwenLocalProvider(ttsProvider);
+  const kokoroLocal = isKokoroLocalProvider(ttsProvider);
+  const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
+  const providerContext = providerPlanContext(runIdentity, providerRouting, ttsProvider);
+  const narrationGenerationPlanPath = path.join(episodeDir, "narration_generation_plan.json");
+  const qwenGenerationPlanPath = path.join(episodeDir, "qwen_generation_plan.json");
   const qwenConfig = await readJsonIfExists(path.join(process.cwd(), "config", "qwen-tts.json"), {});
   const fishAudioConfig = await readJsonIfExists(path.join(process.cwd(), "config", "fish-audio.json"), {});
   const fishVoicesConfig = await readJsonIfExists(path.join(process.cwd(), "config", "fish-voices.json"), {});
@@ -3150,21 +3976,48 @@ async function main() {
     balanceTempoClassifications(buildSegments(script, tags, speakabilityRules, dialogueContext)),
     tags,
   ));
-  const applied = applyFishReferenceIds(voiceQualityAdjustedSegments, fishAudioConfig, dialogueContext);
+  const applied = unitBasedNarrator
+    ? { segments: voiceQualityAdjustedSegments, missingRefRoles: [] }
+    : applyFishReferenceIds(voiceQualityAdjustedSegments, fishAudioConfig, dialogueContext);
   const baseSegments = applied.segments ?? applied;
   const missingRefRoles = applied.missingRefRoles ?? [];
-  const qwenGenerationPlan = buildQwenGenerationPlan(baseSegments, qwenConfig, dialogueContext, ttsProvider, ttsSpokenOverrides);
-  qwenGenerationPlan.source_script_hash = sourceScriptHash;
-  qwenGenerationPlan.source_script_path = scriptPath;
-  qwenGenerationPlan.script_speakability_report_path = path.join(episodeDir, "script_speakability_report.json");
-  qwenGenerationPlan.tts_spoken_overrides_path = path.join(episodeDir, "tts_spoken_overrides.json");
-  const systemUiCoverage = systemUiSpeechCoverage(script, qwenGenerationPlan);
-  qwenGenerationPlan.system_ui_speech_coverage = systemUiCoverage;
-  const qwenUnitsBySegment = new Map((qwenGenerationPlan.segments ?? []).map((segment) => [segment.segment_id, segment.qwen_generation_units ?? []]));
+  const narrationGenerationPlan = buildQwenGenerationPlan(
+    baseSegments,
+    qwenConfig,
+    dialogueContext,
+    ttsProvider,
+    ttsSpokenOverrides,
+    providerContext,
+  );
+  const speakabilityReportPath = path.join(episodeDir, "script_speakability_report.json");
+  const ttsSpokenOverridesPath = path.join(episodeDir, "tts_spoken_overrides.json");
+  narrationGenerationPlan.source_script_hash = sourceScriptHash;
+  narrationGenerationPlan.source_script_path = scriptPath;
+  narrationGenerationPlan.script_speakability_report_path = speakabilityReportPath;
+  narrationGenerationPlan.tts_spoken_overrides_path = ttsSpokenOverridesPath;
+  narrationGenerationPlan.source_hashes = {
+    script_clean_sha256: sourceScriptHash,
+    script_speakability_report_sha256: existsSync(speakabilityReportPath) ? await sha256File(speakabilityReportPath) : null,
+    tts_spoken_overrides_sha256: existsSync(ttsSpokenOverridesPath) ? await sha256File(ttsSpokenOverridesPath) : null,
+    run_identity_sha256: existsSync(path.join(episodeDir, "run_identity.json")) ? await sha256File(path.join(episodeDir, "run_identity.json")) : null,
+  };
+  const narrationTextIntegrityCoverage = {
+    ...qwenTextIntegrityCoverageForTests(script, narrationGenerationPlan, { ttsOverrides: ttsSpokenOverrides, dialogueContext }),
+    generated_at: new Date().toISOString(),
+    source_script_hash: sourceScriptHash,
+    source_script_path: scriptPath,
+    narration_generation_plan_path: narrationGenerationPlanPath,
+  };
+  narrationGenerationPlan.text_integrity_coverage = narrationTextIntegrityCoverage;
+  const systemUiCoverage = systemUiSpeechCoverage(script, narrationGenerationPlan, dialogueContext);
+  narrationGenerationPlan.system_ui_speech_coverage = systemUiCoverage;
+  const generationUnitsBySegment = new Map((narrationGenerationPlan.segments ?? []).map((segment) => [segment.segment_id, segment.generation_units ?? []]));
   const segments = baseSegments.map((segment) => ({
     ...segment,
     tts_provider: ttsProvider,
-    qwen_generation_units: qwenUnitsBySegment.get(segment.segment_id) ?? [],
+    generation_units: generationUnitsBySegment.get(segment.segment_id) ?? [],
+    narration_generation_units: generationUnitsBySegment.get(segment.segment_id) ?? [],
+    qwen_generation_units: generationUnitsBySegment.get(segment.segment_id) ?? [],
   }));
   const dialogueMap = buildDialogueMap(segments, fishAudioConfig, dialogueContext);
   dialogueMap.source_script_hash = sourceScriptHash;
@@ -3190,21 +4043,42 @@ async function main() {
       sentence_boundaries_preserved: true,
     },
     palette: tags,
+    unit_tts_policy: {
+      enabled: unitBasedNarrator,
+      primary_provider: providerContext.primary_provider,
+      fallback_provider: providerContext.fallback_provider,
+      canonical_generation_plan_path: narrationGenerationPlanPath,
+      spoken_text_policy: "Use exact unit spoken_text/tts_spoken_text, preserve exact source and caption text separately, and never synthesize production-direction tags.",
+      boundary_policy: "Respect merge_barrier and system/UI atomic boundaries. Stitch only at declared unit boundaries.",
+    },
+    kokoro_local_policy: {
+      enabled: kokoroLocal,
+      voice_id: providerContext.kokoro.voice_id,
+      native_speed: providerContext.kokoro.native_speed,
+      model_id: providerContext.kokoro.model_id,
+      runtime: providerContext.kokoro.runtime,
+      source_audio_required: false,
+      instruction_delivery_supported: false,
+      qwen_instruct_claimed: false,
+      generation_plan_path: narrationGenerationPlanPath,
+      delivery_policy: "Puck delivery comes from clean spoken text, punctuation, bounded units, native speed, and stitch timing. Kokoro does not receive or claim Qwen instruction prompts.",
+    },
     qwen_local_policy: {
       enabled: qwenLocal,
+      available_as_fallback: providerContext.fallback_provider === "qwen_local",
       provider: qwenConfig.provider ?? "qwen3-tts",
       production_default: providerRouting.audio?.production_tts_provider ?? null,
-      fallback_provider: providerRouting.audio?.fallback_tts_provider ?? "fish_api",
+      fallback_provider: providerContext.fallback_provider,
       spoken_text_policy: "No bracketed emotion, breath, laugh, or stage tags in Qwen spoken text. Put all performance direction in --instruct.",
       instruct_policy: "Each Qwen unit carries voice identity, character, scene beat, emotion, intensity, pacing, exact-word preservation, accent limits, and pronunciation normalization.",
-      pronunciation_protocol: qwenGenerationPlan.pronunciation_protocol,
-      generation_plan_path: path.join(episodeDir, "qwen_generation_plan.json"),
+      pronunciation_protocol: narrationGenerationPlan.pronunciation_protocol,
+      generation_plan_path: qwenLocal ? qwenGenerationPlanPath : narrationGenerationPlanPath,
       script_speakability_status: scriptSpeakabilityReport.status ?? null,
       tts_spoken_overrides_loaded: ttsSpokenOverrides.replacements.length,
     },
     fish_s2_pro_policy: {
       model: fishAudioConfig.model ?? "s2-pro",
-      role: qwenLocal ? "fallback_or_bakeoff_only" : "production_provider",
+      role: unitBasedNarrator ? "fallback_or_bakeoff_only" : "production_provider",
       phrase_level_tags: true,
       dialogue_turns_tagged_inline: true,
       multi_speaker_reference_ids_supported: true,
@@ -3222,13 +4096,24 @@ async function main() {
       available_verified_voice_candidates: (fishVoicesConfig.voices ?? [])
         .filter((voice) => isProductionCandidateVoice(voice))
         .map((voice) => ({ id: voice.id, label: voice.label, reference_id: voice.fishReferenceId, can_use_publicly: voice.canUsePublicly ?? voice.publicUseAllowed ?? "unknown", tags: voice.resolvedTags ?? [] })),
-      note: qwenLocal
-        ? "Fish S2-Pro metadata is retained only for fallback/bakeoff compatibility. Production Qwen local uses qwen_generation_plan.json and local source_audio_path/sample_path references."
+      note: unitBasedNarrator
+        ? "Fish S2-Pro metadata is retained only for fallback/bakeoff compatibility. The active local narrator provider uses narration_generation_plan.json."
         : "Fish S2-Pro can use bracketed natural-language direction and, when explicitly configured, multiple reference IDs with speaker tags. Public/restricted rights still need review before publishing.",
     },
     audio_performance_segments: segments,
   };
   const report = qualityReport(segments, { ttsProvider });
+  if (narrationTextIntegrityCoverage.status !== "passed") {
+    const textIntegrityFailure = {
+      code: "narration_text_integrity_coverage_failed",
+      legacy_code: "qwen_text_integrity_coverage_failed",
+      severity: "blocker",
+      findings: narrationTextIntegrityCoverage.findings,
+    };
+    report.status = "failed_repairable";
+    report.failures.push(textIntegrityFailure);
+    report.blockers.push(textIntegrityFailure);
+  }
   if (systemUiCoverage.status !== "passed") {
     const systemUiFailure = {
       code: "system_ui_speech_coverage_missing",
@@ -3238,6 +4123,16 @@ async function main() {
     report.status = "failed_repairable";
     report.failures.push(systemUiFailure);
     report.blockers.push(systemUiFailure);
+  }
+  if (narrationGenerationPlan.kokoro_unit_boundary_integrity?.status === "blocked") {
+    const boundaryFailure = {
+      code: "kokoro_unit_boundary_integrity_failed",
+      severity: "blocker",
+      ...narrationGenerationPlan.kokoro_unit_boundary_integrity,
+    };
+    report.status = "failed_repairable";
+    report.failures.push(boundaryFailure);
+    report.blockers.push(boundaryFailure);
   }
   report.source_script_hash = sourceScriptHash;
   report.source_script_path = scriptPath;
@@ -3257,16 +4152,25 @@ async function main() {
     generated_at: new Date().toISOString(),
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
-    operating_rules: qwenLocal
+    operating_rules: kokoroLocal
+      ? [
+        `Kokoro local Puck (${providerContext.kokoro.voice_id}) is the production narrator at locked native speed ${providerContext.kokoro.native_speed}.`,
+        "Synthesize exact narration_generation_units spoken_text/tts_spoken_text with no bracketed emotion, breath, laugh, or production-direction tags.",
+        "Preserve exact source_text and caption_text separately; TTS-only pronunciation normalization must never leak into captions.",
+        "Respect merge_barrier, system/UI atomic units, sentence boundaries, and declared stitch timing.",
+        "Kokoro accepts no Qwen instruction prompt. Delivery comes from clean text, punctuation, unit boundaries, native speed, and the locked preset.",
+        "The locked Qwen3 Base fallback uses exact text plus its pinned reference audio/transcript only; do not claim that an authored delivery note is submitted as an effective instruct.",
+      ]
+      : qwenLocal
       ? [
         "Qwen local is the production TTS provider.",
         "Spoken text must be clean: no bracketed emotion, breath, laugh, or stage tags.",
-        "Use per-speaker/per-beat qwen_generation_units and stitch locally.",
+        "Use per-speaker/per-beat narration_generation_units and stitch locally.",
         "Put voice identity, scene beat, emotion, intensity, pacing, accent limits, and exact-word preservation in --instruct.",
-      "Spell ambiguous rank/acronym tokens in spoken text when needed, e.g. SSS -> S S S.",
-      "Preserve captions/story text separately from Qwen pronunciation-normalized spoken text.",
-      "Apply approved tts_spoken_overrides.json only to qwen_spoken_text, never to script_clean.md or captions.",
-    ]
+        "Spell ambiguous rank/acronym tokens in spoken text when needed, e.g. SSS -> S S S.",
+        "Preserve captions/story text separately from Qwen pronunciation-normalized spoken text.",
+        "Apply approved tts_spoken_overrides.json only to tts_spoken_text, never to script_clean.md or captions.",
+      ]
       : [
         "One dominant emotion per phrase.",
         "Tags apply to the following phrase.",
@@ -3275,7 +4179,8 @@ async function main() {
         "Preserve sentence boundaries and story facts.",
         "Dialogue receives speaker-aware performance tags.",
       ],
-    qwen_generation_plan_path: qwenLocal ? path.join(episodeDir, "qwen_generation_plan.json") : null,
+    narration_generation_plan_path: narrationGenerationPlanPath,
+    qwen_generation_plan_path: qwenLocal ? qwenGenerationPlanPath : null,
     segments,
   };
   const explicitFallbackAllowed = fishAudioConfig.missingDialogueReferencePolicy?.mode === "fallback_to_narrator_with_warning";
@@ -3296,16 +4201,30 @@ async function main() {
     ? qwenLockedSpeakerRows.filter((row) => row.speaker && !/^(NARRATOR|SFX)$/i.test(row.speaker) && row.source_audio_path && row.source_transcript && !/whisper/i.test(String(row.source_transcript_policy ?? "")))
     : [];
   const referenceReport = {
-    status: qwenLocal
+    status: kokoroLocal
+      ? "passed"
+      : qwenLocal
       ? missingQwenSourceRows.length ? "blocked_missing_qwen_voice_sources_or_transcripts" : "passed"
       : missingRefRoles.length ? explicitFallbackAllowed ? "missing_refs_fallback_allowed_for_tests" : "blocked_missing_dialogue_refs" : "passed",
-    production_ready: qwenLocal ? missingQwenSourceRows.length === 0 : missingRefRoles.length === 0,
-    test_ready_with_fallback: qwenLocal ? missingQwenSourceRows.length === 0 : missingRefRoles.length === 0 || explicitFallbackAllowed,
+    production_ready: kokoroLocal ? true : qwenLocal ? missingQwenSourceRows.length === 0 : missingRefRoles.length === 0,
+    test_ready_with_fallback: kokoroLocal ? true : qwenLocal ? missingQwenSourceRows.length === 0 : missingRefRoles.length === 0 || explicitFallbackAllowed,
     generated_at: new Date().toISOString(),
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
     tts_provider: ttsProvider,
-    qwen_generation_plan_path: qwenLocal ? path.join(episodeDir, "qwen_generation_plan.json") : null,
+    narration_generation_plan_path: narrationGenerationPlanPath,
+    qwen_generation_plan_path: qwenLocal ? qwenGenerationPlanPath : null,
+    source_audio_required: kokoroLocal ? false : qwenLocal ? characterVoiceCastingEnabled() : true,
+    preset_voice: kokoroLocal
+      ? {
+        voice_id: providerContext.kokoro.voice_id,
+        model_id: providerContext.kokoro.model_id,
+        model_revision: providerContext.kokoro.model_revision,
+        runtime: providerContext.kokoro.runtime,
+        native_speed: providerContext.kokoro.native_speed,
+        policy: "Bundled Kokoro voice preset; no cloned/source audio is required.",
+      }
+      : null,
     configured_character_reference_ids: fishAudioConfig.characterReferenceIds ?? {},
     required_roles_detected: [...new Set(segments.flatMap((segment) => segment.speaker_reference_roles ?? []))],
     missing_reference_roles: missingRefRoles,
@@ -3316,7 +4235,9 @@ async function main() {
     locked_speakers: Object.keys(dialogueContext.voiceCastingLock?.speaker_casting ?? {}),
     qwen_locked_speaker_sources: qwenLockedSpeakerRows,
     fallback_policy: fishAudioConfig.missingDialogueReferencePolicy ?? { mode: "fallback_to_narrator_with_warning" },
-    recommendation: qwenLocal
+    recommendation: kokoroLocal
+      ? `Kokoro preset ${providerContext.kokoro.voice_id} is complete and production-ready without source audio. Generate exact narration plan units and retain Qwen only as the declared fallback.`
+      : qwenLocal
       ? missingQwenSourceRows.length
         ? "Generate/apply Qwen local voice-source designs and harden their transcripts with Whisper for every detected speaker, then rerun voice-plan."
         : unverifiedQwenTranscriptRows.length
@@ -3327,11 +4248,11 @@ async function main() {
         : "All detected dialogue roles have configured reference IDs.",
   };
   await writeJson(path.join(episodeDir, "voice_reference_completeness_report.json"), referenceReport);
-  if (!qwenLocal || emitLegacyFishArtifacts) {
+  if (!unitBasedNarrator || emitLegacyFishArtifacts) {
     await writeJson(path.join(episodeDir, "fish_reference_requirements_report.json"), {
       ...referenceReport,
       legacy_artifact: true,
-      legacy_artifact_policy: qwenLocal
+      legacy_artifact_policy: unitBasedNarrator
         ? "emitted only because --emit-legacy-fish-artifacts true was passed"
         : "Fish is the active or fallback production TTS provider for this run",
     });
@@ -3373,20 +4294,43 @@ async function main() {
   }
   audioPerformancePlan.status = report.status === "passed" ? "passed" : "failed_repairable";
   strategy.status = report.status === "passed" ? "passed" : "failed_repairable";
-  qwenGenerationPlan.status = report.status === "passed" ? "passed" : "failed_repairable";
+  narrationGenerationPlan.status = report.status === "passed" ? "passed" : "failed_repairable";
+  narrationGenerationPlan.canonical_plan_path = narrationGenerationPlanPath;
+  narrationGenerationPlan.legacy_qwen_generation_plan_path = qwenLocal ? qwenGenerationPlanPath : null;
+  narrationGenerationPlan.plan_sha256 = canonicalPlanHash(narrationGenerationPlan);
   report.voice_artifact_contamination = voiceContaminationReport;
-  await writeJson(path.join(episodeDir, "qwen_generation_plan.json"), qwenGenerationPlan);
+  await writeJson(narrationGenerationPlanPath, narrationGenerationPlan);
+  if (qwenLocal) {
+    await writeJson(qwenGenerationPlanPath, {
+      ...narrationGenerationPlan,
+      legacy_artifact: true,
+      compatibility_role: "explicit_qwen_provider_plan_alias",
+      canonical_plan_path: narrationGenerationPlanPath,
+      canonical_plan_sha256: narrationGenerationPlan.plan_sha256,
+    });
+  }
+  await writeJson(path.join(episodeDir, "narration_text_integrity_coverage_report.json"), narrationTextIntegrityCoverage);
+  if (qwenLocal) {
+    await writeJson(path.join(episodeDir, "qwen_text_integrity_coverage_report.json"), {
+      ...narrationTextIntegrityCoverage,
+      legacy_artifact: true,
+      compatibility_role: "explicit_qwen_provider_integrity_alias",
+      canonical_plan_path: narrationGenerationPlanPath,
+    });
+  }
   await writeJson(path.join(episodeDir, "system_ui_speech_coverage_report.json"), {
     ...systemUiCoverage,
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
-    qwen_generation_plan_path: path.join(episodeDir, "qwen_generation_plan.json"),
+    narration_generation_plan_path: narrationGenerationPlanPath,
+    narration_generation_plan_sha256: narrationGenerationPlan.plan_sha256,
+    qwen_generation_plan_path: qwenLocal ? qwenGenerationPlanPath : null,
     generated_at: new Date().toISOString(),
   });
   await writeJson(path.join(episodeDir, "audio_performance_plan.json"), audioPerformancePlan);
   await writeJson(path.join(episodeDir, "voice_artifact_contamination_report.json"), voiceContaminationReport);
   await writeJson(path.join(episodeDir, `voice_artifact_contamination_report_${episode}.json`), voiceContaminationReport);
-  if (!qwenLocal || emitLegacyFishArtifacts) {
+  if (!unitBasedNarrator || emitLegacyFishArtifacts) {
     const fishDiff = {
       status: "passed",
       source: "voice-direction-gate",
@@ -3398,7 +4342,7 @@ async function main() {
       stripped_narration_hash: sha256Text(strippedText),
       sfx_segments_excluded_from_fish_generation: segments.filter((segment) => segment.fish_generation_required === false).map((segment) => segment.segment_id),
       legacy_artifact: true,
-      legacy_artifact_policy: qwenLocal
+      legacy_artifact_policy: unitBasedNarrator
         ? "emitted only because --emit-legacy-fish-artifacts true was passed"
         : "Fish is the active or fallback production TTS provider for this run",
       note: "Canonical Fish performance text is regenerated by voice-plan from audio_performance_plan; stale media-era scripts must not be used.",
@@ -3418,7 +4362,17 @@ async function main() {
   await writeJson(path.join(episodeDir, `dialogue_performance_audit_${episode}.json`), dialogueAudit);
   await writeJson(path.join(episodeDir, "dialogue_performance_audit_ep_01.json"), dialogueAudit);
   await writeJson(path.join(episodeDir, "dialogue_map.json"), dialogueMap);
-  console.log(JSON.stringify({ stage: "voice-plan", status: report.status, tts_provider: ttsProvider, unique_tags: report.unique_tags, segment_count: segments.length, qwen_generation_plan: qwenLocal ? path.join(episodeDir, "qwen_generation_plan.json") : null, failures: report.failures }, null, 2));
+  console.log(JSON.stringify({
+    stage: "voice-plan",
+    status: report.status,
+    tts_provider: ttsProvider,
+    unique_tags: report.unique_tags,
+    segment_count: segments.length,
+    narration_generation_plan: narrationGenerationPlanPath,
+    narration_generation_plan_sha256: narrationGenerationPlan.plan_sha256,
+    qwen_generation_plan: qwenLocal ? qwenGenerationPlanPath : null,
+    failures: report.failures,
+  }, null, 2));
   if (report.status !== "passed") process.exitCode = 1;
 }
 

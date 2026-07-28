@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
+import {
+  backgroundPopulationFindings,
+  sanitizeBackgroundPopulation,
+} from "./lib/background-population-utils.mjs";
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, providerExclusionPayloadFindings } from "./lib/prompt-prose-findings.mjs";
 import { outOfScopeLocationRefMentions } from "./lib/visual-scope-utils.mjs";
 import { sanitizeAuthoredMotionIntent } from "./lib/motion-plan-utils.mjs";
@@ -164,6 +168,7 @@ function sanitizeShotManifest(value) {
     location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    background_population: sanitizeBackgroundPopulation(value.background_population),
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
     forbidden_ref_ids: arrayOfStrings("forbidden_ref_ids"),
@@ -671,6 +676,11 @@ function sanitizePrompt(prompt, indexes) {
     { prompt }
   );
   let codexPromptTextValue = activeProviderRoute === "codex_imagegen" ? promptTextValue : null;
+  findings.push(...backgroundPopulationFindings({
+    ...prompt,
+    provider_prompt: promptTextValue,
+    shot_manifest: shotManifest,
+  }));
 
   const inputRequirements = shotManifest?.reference_slots?.length
     ? shotManifest.reference_slots

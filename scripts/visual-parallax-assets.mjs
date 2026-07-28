@@ -162,6 +162,58 @@ async function main() {
   const sourceHashes = Object.fromEntries(await Promise.all(
     [promptPath, imagegenPath, imageQaPath, identityPath, candidateOverridesPath].filter(Boolean).map(async (filePath) => [filePath, await sha256File(filePath)]),
   ));
+  if (isTrue(flags["revalidate-existing"])) {
+    const existing = await readJson(outputPath);
+    if (existing?.status !== "passed" || !Array.isArray(existing.candidates)) {
+      throw new Error(`Parallax revalidation requires an existing passed asset report: ${outputPath}`);
+    }
+    const promptById = new Map((promptPlan.prompts ?? []).map((prompt) => [String(prompt.image_id ?? ""), prompt]));
+    const acceptedHashes = imageQa.accepted_image_hashes ?? {};
+    const candidates = [];
+    for (const candidate of existing.candidates) {
+      const imageId = String(candidate.image_id ?? "");
+      const prompt = promptById.get(imageId);
+      if (!prompt) throw new Error(`Parallax revalidation could not find current prompt cut: ${imageId}`);
+      const imageHash = await sha256File(candidate.image_path);
+      if (!imageHash || imageHash !== candidate.image_sha256 || acceptedHashes[imageId] !== imageHash) {
+        throw new Error(`Parallax revalidation image hash mismatch: ${imageId}`);
+      }
+      for (const [assetPath, expectedHash] of [
+        [candidate.asset_report?.mask_path, candidate.asset_report?.mask_sha256],
+        [candidate.asset_report?.foreground_path, candidate.asset_report?.foreground_sha256],
+        [candidate.asset_report?.background_path, candidate.asset_report?.background_sha256],
+      ]) {
+        if (!assetPath || !expectedHash || await sha256File(assetPath) !== expectedHash) {
+          throw new Error(`Parallax revalidation asset hash mismatch for ${imageId}: ${assetPath ?? "<missing>"}`);
+        }
+      }
+      candidates.push({
+        ...candidate,
+        scene_id: prompt.scene_id ?? candidate.scene_id,
+        visual_beat_id: prompt.visual_beat_id ?? candidate.visual_beat_id,
+        start_sec: Number(prompt.start_sec ?? candidate.start_sec ?? 0),
+        duration_sec: Number(prompt.duration_sec ?? candidate.duration_sec ?? 0),
+      });
+    }
+    const report = {
+      ...existing,
+      source_hashes: sourceHashes,
+      candidates,
+      candidate_count: candidates.length,
+      timing_revalidated_without_asset_generation: true,
+      timing_revalidated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    report.asset_contract_sha256 = parallaxAssetContractSha256(report);
+    await writeJson(outputPath, report);
+    console.log(JSON.stringify({
+      status: report.status,
+      output_path: outputPath,
+      candidate_count: report.candidate_count,
+      timing_revalidated_without_asset_generation: true,
+    }, null, 2));
+    return;
+  }
   if (!selected.length) {
     const waiverRequested = isTrue(flags["no-suitable-parallax"]);
     const reviewer = String(flags.reviewer ?? "").trim();

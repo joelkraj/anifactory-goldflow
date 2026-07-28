@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,7 +31,8 @@ const sfxManifestPath = path.join(dataRoot, "sfx_bank", "sfx_manifest.json");
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const audioPlanPath = path.join(episodeDir, "audio_performance_plan.json");
 const dialogueMapPath = path.join(episodeDir, "dialogue_map.json");
-const qwenReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
+const qwenReportPath = narrationReportPath;
 const scorePlanPath = path.join(episodeDir, "score_chapter_plan.json");
 const scoreDropPlanPath = path.join(episodeDir, `score_drop_plan_${episode}.json`);
 const sfxPlanPath = path.join(episodeDir, `sfx_event_plan_${episode}.json`);
@@ -1215,7 +1217,7 @@ async function main() {
     readJson(wordTimingPath, null),
   ]);
   if (!script.trim()) throw new Error(`Missing script: ${scriptPath}`);
-  if (!Array.isArray(qwenReport.segments) || !qwenReport.segments.length) throw new Error(`Missing timed Qwen stitch segments: ${qwenReportPath}`);
+  if (!Array.isArray(qwenReport.segments) || !qwenReport.segments.length) throw new Error(`Missing timed narration stitch segments: ${qwenReportPath}`);
   const sourceScriptHash = sha256(script);
   const whisperTimingGate = await validateWhisperTimingForProduction(wordTiming, qwenReport, sourceScriptHash);
   const segments = selectSegments(qwenReport, wordTiming);
@@ -1370,6 +1372,7 @@ async function main() {
     episode,
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
+    narration_report_path: narrationReportPath,
     source_artifact_paths: [scriptPath, audioPlanPath, dialogueMapPath, qwenReportPath],
     source_hashes: Object.fromEntries((await Promise.all([scriptPath, audioPlanPath, dialogueMapPath, qwenReportPath, wordTimingPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: "local_whisper_word_timing",
@@ -1424,6 +1427,7 @@ async function main() {
     episode,
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
+    narration_report_path: narrationReportPath,
     source_artifact_paths: [scriptPath, qwenReportPath, dialogueMapPath],
     source_hashes: Object.fromEntries((await Promise.all([scriptPath, qwenReportPath, dialogueMapPath, wordTimingPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: "local_whisper_word_timing",
@@ -1470,6 +1474,7 @@ async function main() {
     episode,
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
+    narration_report_path: narrationReportPath,
     timing_source: "local_whisper_word_timing",
     timing_gate: whisperTimingGate,
     score_provider: "local_ace_step",
@@ -1502,6 +1507,7 @@ async function main() {
     week,
     episode,
     source_script_hash: sourceScriptHash,
+    narration_report_path: narrationReportPath,
     llm: {
       provider: llm.provider,
       model: llm.model,
@@ -1601,6 +1607,7 @@ async function main() {
     planner: plannerName,
     mode: "llm_enriched_primary",
     source_script_hash: sourceScriptHash,
+    narration_report_path: narrationReportPath,
     sfx_event_plan_path: sfxPlanPath,
     resolved_event_count: sfxPlan.resolved_event_count,
     total_resolved_sfx_cue_count: sfxPlan.total_resolved_sfx_cue_count,
@@ -1628,6 +1635,7 @@ main().catch(async (error) => {
   await writeJson(enrichmentReportPath, {
     status: "failed",
     planner: plannerName,
+    narration_report_path: narrationReportPath,
     error: message,
     updated_at: nowIso(),
   }).catch(() => {});

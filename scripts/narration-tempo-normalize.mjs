@@ -4,7 +4,9 @@ import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -16,7 +18,7 @@ const episode = flags.episode ?? "ep_01";
 const episodeDir = flags["episode-dir"]
   ? path.resolve(flags["episode-dir"])
   : path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
-const stitchReportPath = flags.qwenReport ?? flags["qwen-report"] ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const stitchReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
 const paceReportPath = flags.paceReport ?? flags["pace-report"] ?? path.join(episodeDir, `narration_pace_report_${episode}.json`);
 const outputReportPath = flags.output ?? flags.report ?? path.join(episodeDir, `narration_tempo_normalize_${episode}.json`);
 const targetWpm = Number(flags["target-wpm"] ?? process.env.GOLDFLOW_TARGET_WPM_MID ?? 208);
@@ -84,26 +86,56 @@ function atempoChain(factor) {
   return filters.join(",");
 }
 
-function scaledSegments(segments, factor) {
+export function scaledSegmentsForTests(segments, factor) {
   return (segments ?? []).map((segment) => {
     const raw = Number(segment.raw_audio_duration_sec ?? segment.duration_sec ?? 0);
-    const gap = Number(segment.segment_gap_sec ?? 0);
+    const segmentGap = Number(segment.segment_gap_sec ?? 0);
+    const unitGap = Number(segment.unit_gap_sec ?? 0);
     const scaledRaw = raw > 0 ? raw / factor : raw;
-    const scaledGap = gap > 0 ? gap / factor : gap;
+    const scaledSegmentGap = segmentGap > 0 ? segmentGap / factor : segmentGap;
+    const scaledUnitGap = unitGap > 0 ? unitGap / factor : unitGap;
+    const hasPreparedTimeline = segment.prepared_audio_duration_sec != null
+      || segment.inserted_silence_sec != null;
+    if (!hasPreparedTimeline) {
+      return {
+        ...segment,
+        tempo_normalized_from_duration_sec: segment.duration_sec ?? null,
+        tempo_normalized_from_raw_audio_duration_sec: segment.raw_audio_duration_sec ?? null,
+        raw_audio_duration_sec: Number(scaledRaw.toFixed(6)),
+        segment_gap_sec: Number(scaledSegmentGap.toFixed(6)),
+        unit_gap_sec: Number(scaledUnitGap.toFixed(6)),
+        duration_sec: Number((scaledRaw + scaledSegmentGap + scaledUnitGap).toFixed(6)),
+      };
+    }
+    const prepared = Number(segment.prepared_audio_duration_sec ?? raw);
+    const insertedSilence = Number(segment.inserted_silence_sec ?? 0);
+    const scaledPrepared = prepared > 0 ? prepared / factor : prepared;
+    const scaledInsertedSilence = insertedSilence > 0
+      ? insertedSilence / factor
+      : insertedSilence;
     return {
       ...segment,
       tempo_normalized_from_duration_sec: segment.duration_sec ?? null,
       tempo_normalized_from_raw_audio_duration_sec: segment.raw_audio_duration_sec ?? null,
+      tempo_normalized_from_prepared_audio_duration_sec:
+        segment.prepared_audio_duration_sec ?? null,
+      tempo_normalized_from_inserted_silence_sec:
+        segment.inserted_silence_sec ?? null,
       raw_audio_duration_sec: Number(scaledRaw.toFixed(6)),
-      segment_gap_sec: Number(scaledGap.toFixed(6)),
-      duration_sec: Number((scaledRaw + scaledGap).toFixed(6)),
+      prepared_audio_duration_sec: Number(scaledPrepared.toFixed(6)),
+      inserted_silence_sec: Number(scaledInsertedSilence.toFixed(6)),
+      segment_gap_sec: Number(scaledSegmentGap.toFixed(6)),
+      unit_gap_sec: Number(scaledUnitGap.toFixed(6)),
+      duration_sec: Number(
+        (scaledPrepared + scaledInsertedSilence).toFixed(6),
+      ),
     };
   });
 }
 
 async function main() {
   if (!operatorApprovedEmergency) {
-    throw new Error("Post-TTS tempo normalization is emergency-only. Regenerate Qwen with provider-native --native-speed first. Use --operator-approved-emergency true only after an explicit operator decision.");
+    throw new Error("Post-TTS tempo normalization is emergency-only. Regenerate narration with provider-native --native-speed first. Use --operator-approved-emergency true only after an explicit operator decision.");
   }
   if (!Number.isFinite(targetWpm) || targetWpm <= 0) throw new Error(`Invalid --target-wpm ${targetWpm}`);
   const stitch = await readJson(stitchReportPath, null);
@@ -141,6 +173,7 @@ async function main() {
     status: "passed",
     output_path: outputAudio,
     tempo_normalized: true,
+    post_tempo_normalized: true,
     tempo_normalize_report_path: outputReportPath,
     original_output_path: stitch.original_output_path ?? inputAudio,
     original_final_duration_sec: stitch.original_final_duration_sec ?? stitch.final_duration_sec ?? inputDuration,
@@ -148,7 +181,11 @@ async function main() {
     tempo_factor: factor,
     target_wpm: targetWpm,
     previous_actual_wpm: actualWpm,
-    segments: scaledSegments(stitch.segments ?? [], factor),
+    output_sha256: outputHash,
+    final_wav_sha256: outputHash,
+    final_m4a_path: null,
+    final_m4a_sha256: null,
+    segments: scaledSegmentsForTests(stitch.segments ?? [], factor),
   };
   if (replaceStitchReport) await writeJson(stitchReportPath, updatedStitch);
   const report = {
@@ -158,6 +195,7 @@ async function main() {
     series_slug: series,
     week,
     episode,
+    narration_report_path: stitchReportPath,
     stitch_report_path: stitchReportPath,
     pace_report_path: paceReportPath,
     input_audio_path: inputAudio,
@@ -172,15 +210,17 @@ async function main() {
     ffmpeg_filter: filter,
     stitch_report_updated: replaceStitchReport,
     operator_approved_emergency: true,
-    policy: "Emergency-only post-TTS tempo normalization. Normal production obtains pace from provider-native Qwen speed and delivery direction. Raw TTS is preserved; Whisper timing must be rerun after this stage.",
+    policy: "Emergency-only post-TTS tempo normalization. Normal production obtains pace from provider-native TTS speed and delivery direction. Raw TTS is preserved; Whisper timing must be rerun after this stage.",
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputReportPath, report);
   console.log(JSON.stringify({ status: "passed", report_path: outputReportPath, output_audio_path: outputAudio, tempo_factor: factor, output_duration_sec: report.output_duration_sec }, null, 2));
 }
 
-main().catch(async (error) => {
-  await writeJson(outputReportPath, { schema: "goldflow_narration_tempo_normalize_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(outputReportPath, { schema: "goldflow_narration_tempo_normalize_v1", status: "failed", narration_report_path: stitchReportPath, error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

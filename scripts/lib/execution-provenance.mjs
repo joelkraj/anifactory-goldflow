@@ -29,10 +29,16 @@ function scopeFromFlags(flags = {}) {
     .flatMap((name) => String(flags[name] ?? "").split(","))
     .map((value) => value.trim())
     .filter(Boolean))].sort();
+  const ttsUnitIds = list("regenerate-unit-ids", "unit-ids");
+  const ttsSpeakers = [...new Set(
+    list("regenerate-speakers").map((value) => value.toUpperCase()),
+  )].sort();
   return {
     cut_ids: list("cut-ids", "cut-id", "image-ids", "image-id", "only-cut-ids"),
     scene_ids: list("only-scenes", "scene-ids", "scene-id"),
     reference_ids: list("reference-ids", "reference-id"),
+    ...(ttsUnitIds.length ? { tts_unit_ids: ttsUnitIds } : {}),
+    ...(ttsSpeakers.length ? { tts_speakers: ttsSpeakers } : {}),
     proof_start_sec: Number.isFinite(Number(flags["proof-start-sec"] ?? flags["scope-start-sec"]))
       ? Number(flags["proof-start-sec"] ?? flags["scope-start-sec"])
       : null,
@@ -357,6 +363,8 @@ export async function materializeProductionManifest(episodeDir) {
         ...(row.scope?.cut_ids ?? []),
         ...(row.scope?.scene_ids ?? []),
         ...(row.scope?.reference_ids ?? []),
+        ...(row.scope?.tts_unit_ids ?? []),
+        ...(row.scope?.tts_speakers ?? []),
       ].length > 0).length,
       manual_image_import_calls: completed.filter((row) => /^imagegen import-(?:codex|staged-codex)$/i.test(String(row.command ?? ""))).length,
       total_wall_time_sec: Number(completed.reduce((sum, row) => sum + Number(row.wall_time_sec ?? 0), 0).toFixed(3)),

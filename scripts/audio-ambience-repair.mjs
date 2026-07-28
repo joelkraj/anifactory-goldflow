@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,7 +27,8 @@ const sfxAssetDir = path.join(dataRoot, "sfx_bank", "assets", "llm_enriched");
 const sfxManifestPath = path.join(dataRoot, "sfx_bank", "sfx_manifest.json");
 const sfxPlanPath = path.join(episodeDir, `sfx_event_plan_${episode}.json`);
 const enrichmentReportPath = path.join(episodeDir, `audio_enrichment_report_${episode}.json`);
-const qwenReportPath = path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
+const qwenReportPath = narrationReportPath;
 const wordTimingPath = path.join(episodeDir, `narration_word_timing_${episode}.json`);
 const timedScenePlanPath = path.join(episodeDir, "timed_scene_plan.json");
 const scoreDropPlanPath = path.join(episodeDir, `score_drop_plan_${episode}.json`);
@@ -451,7 +453,7 @@ async function main() {
   if (sfxPlan.timing_source !== "local_whisper_word_timing" || sfxPlan.timing_gate?.status !== "passed") {
     throw new Error("Refusing ambience repair: SFX plan is not stamped with current local Whisper timing.");
   }
-  if (!qwenReport?.segments?.length) throw new Error(`Missing Qwen stitch report segments: ${qwenReportPath}`);
+  if (!qwenReport?.segments?.length) throw new Error(`Missing narration stitch report segments: ${qwenReportPath}`);
   if (!timedScenePlan) throw new Error(`Missing timed scene plan: ${timedScenePlanPath}`);
   const knownSceneIds = (timedScenePlan?.scenes ?? timedScenePlan?.timed_scenes ?? []).map((scene) => String(scene.scene_id ?? "")).filter(Boolean);
   const sourceScriptHash = sfxPlan.source_script_hash ?? wordTiming?.source_script_hash ?? null;
@@ -490,6 +492,7 @@ async function main() {
   const nextSfxPlan = {
     ...sfxPlan,
     status: nextResolved.every((event) => event.asset_path && (event.validation?.status ?? "passed") !== "failed") ? "passed" : "failed",
+    narration_report_path: narrationReportPath,
     events: nextEvents,
     resolved_events: nextResolved,
     resolved_event_count: nextResolved.filter((event) => event.asset_path).length,
@@ -510,6 +513,7 @@ async function main() {
   const nextReport = {
     ...(enrichmentReport ?? {}),
     status: qualityGate.status === "passed" && (enrichmentReport?.score?.quality_gate?.issues ?? []).length === 0 ? "passed" : "needs_review",
+    narration_report_path: narrationReportPath,
     sfx: {
       ...(enrichmentReport?.sfx ?? {}),
       cue_count: nextResolved.length,
@@ -546,6 +550,7 @@ async function main() {
     planner: repairPlanner,
     timing_source: "local_whisper_word_timing",
     source_script_hash: nextSfxPlan.source_script_hash ?? null,
+    narration_report_path: narrationReportPath,
     ambience_spec_path: ambienceSpecPath,
     ambience_spec_sha256: await hashFile(ambienceSpecPath),
     sfx_plan_path: sfxPlanPath,
@@ -573,7 +578,7 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(repairReportPath, { schema: "goldflow_audio_ambience_repair_report_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: nowIso() }).catch(() => {});
+    await writeJson(repairReportPath, { schema: "goldflow_audio_ambience_repair_report_v1", status: "failed", narration_report_path: narrationReportPath, error: error instanceof Error ? error.message : String(error), updated_at: nowIso() }).catch(() => {});
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

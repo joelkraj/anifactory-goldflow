@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -14,7 +15,8 @@ const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week,
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const semanticPath = flags.semantic ?? path.join(episodeDir, "semantic_scene_plan.json");
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
-const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
+const qwenReportPath = narrationReportPath;
 const outputPath = flags.output ?? path.join(episodeDir, "timed_scene_plan.json");
 const maxSceneDurationSec = Number(flags["max-scene-duration-sec"] ?? process.env.ANIFACTORY_TIMING_MAX_SCENE_DURATION_SEC ?? 240);
 const allowTimingFallbacks = flags["allow-timing-fallbacks"] === "true" || process.env.ANIFACTORY_ALLOW_TIMING_FALLBACKS === "true";
@@ -336,6 +338,7 @@ async function main() {
     week,
     episode,
     source_script_hash: scriptHash,
+    narration_report_path: narrationReportPath,
     source_artifact_paths: [scriptPath, semanticPath, wordTimingPath, qwenReportPath],
     source_hashes: Object.fromEntries((await Promise.all([scriptPath, semanticPath, wordTimingPath, qwenReportPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: "local_whisper_word_timing",
@@ -349,7 +352,7 @@ async function main() {
 }
 
 main().catch(async (error) => {
-  await writeJson(outputPath, { schema: "goldflow_timed_scene_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+  await writeJson(outputPath, { schema: "goldflow_timed_scene_plan_v1", status: "failed", narration_report_path: narrationReportPath, error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

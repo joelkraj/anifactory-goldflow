@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sha256File } from "./lib/file-hash.mjs";
+import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,7 +31,8 @@ const scorePlanPath = flags.scorePlan ?? path.join(episodeDir, "score_chapter_pl
 const scoreDropPlanPath = flags.scoreDropPlan ?? flags["score-drop-plan"] ?? path.join(episodeDir, `score_drop_plan_${episode}.json`);
 const sfxPlanPath = flags.sfxPlan ?? path.join(episodeDir, `sfx_event_plan_${episode}.json`);
 const promptPlanPath = flags.promptPlan ?? flags["prompt-plan"] ?? path.join(episodeDir, "section_image_prompts_hardened.json");
-const qwenReportPath = flags.qwenReport ?? path.join(episodeDir, `audio_stitch_report_${episode}-modelslab-qwen.json`);
+const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
+const qwenReportPath = narrationReportPath;
 const forceScore = flags["force-score"] === "true";
 const forceScoreDrops = flags["force-score-drops"] === "true";
 const forceSfx = flags["force-sfx"] === "true";
@@ -55,7 +57,7 @@ const skipScore = flags["skip-score"] === "true";
 const skipSfx = narrationOnly || flags["skip-sfx"] === "true";
 const effectiveSkipScore = narrationOnly || skipScore;
 const transitionSfxEnabled = !skipSfx && flags["transition-sfx"] === "true";
-const outputBase = flags.outputBase ?? `${episode}-${channel}-modelslab-qwen-${narrationOnly ? "narrator-only" : "scored-sfx"}`;
+const outputBase = flags.outputBase ?? `${episode}-${channel}-narration-${narrationOnly ? "narrator-only" : "scored-sfx"}`;
 const keepIntermediateWav = flags["keep-wav"] === "true" || (!narrationOnly && flags["keep-wav"] !== "false");
 const transitionSfxMaxCount = Number(flags["transition-sfx-max-count"] ?? 100);
 const transitionSfxMinGapSec = Number(flags["transition-sfx-min-gap-sec"] ?? 6.5);
@@ -889,6 +891,8 @@ async function start() {
     narration_path: narrationPath,
     narration_duration_sec: narrationDuration,
     narration_sha256: narrationSha256,
+    narration_report_path: narrationReportPath,
+    narration_report_sha256: qwenReportSha256,
     qwen_report_path: qwenReportPath,
     qwen_report_sha256: qwenReportSha256,
     source_script_hash: qwenReport?.source_script_hash ?? null,

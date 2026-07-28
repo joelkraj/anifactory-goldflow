@@ -11,6 +11,8 @@ const profiles = {
       chunk_validation_attempts: 2,
     },
     media: {
+      tts_concurrency: 1,
+      kokoro_tts_concurrency: 1,
       qwen_tts_concurrency: 15,
       reference_concurrency: 15,
       image_concurrency: 15,
@@ -49,6 +51,8 @@ const profiles = {
       chunk_validation_attempts: 2,
     },
     media: {
+      tts_concurrency: 1,
+      kokoro_tts_concurrency: 1,
       qwen_tts_concurrency: 15,
       reference_concurrency: 15,
       image_concurrency: 15,

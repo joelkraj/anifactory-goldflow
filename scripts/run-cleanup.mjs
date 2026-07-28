@@ -130,12 +130,24 @@ async function collectArchiveCandidates() {
 
 async function collectLegacyFishArtifactCandidates() {
   const voiceReferencePath = path.join(episodeDir, "voice_reference_completeness_report.json");
-  const qwenPlanPath = path.join(episodeDir, "qwen_generation_plan.json");
-  if (!(await exists(voiceReferencePath)) || !(await exists(qwenPlanPath))) return [];
-  const qwenPlan = await readJson(qwenPlanPath, null);
+  const canonicalPlanPath = path.join(episodeDir, "narration_generation_plan.json");
+  const legacyQwenPlanPath = path.join(episodeDir, "qwen_generation_plan.json");
+  if (!(await exists(voiceReferencePath))) return [];
+  const activePlanPath = (await exists(canonicalPlanPath))
+    ? canonicalPlanPath
+    : (await exists(legacyQwenPlanPath))
+      ? legacyQwenPlanPath
+      : null;
+  if (!activePlanPath) return [];
+  const narrationPlan = await readJson(activePlanPath, null);
   const voiceReference = await readJson(voiceReferencePath, null);
-  const qwenActive = /qwen/i.test(String(qwenPlan?.provider ?? qwenPlan?.tts_provider ?? voiceReference?.tts_provider ?? ""));
-  if (!qwenActive && !qwenPlan?.segments?.length) return [];
+  const unitNarrationActive = /kokoro|qwen/i.test(String(
+    narrationPlan?.provider
+      ?? narrationPlan?.tts_provider
+      ?? voiceReference?.tts_provider
+      ?? "",
+  ));
+  if (!unitNarrationActive && !narrationPlan?.segments?.length) return [];
   const names = [
     "fish_reference_requirements_report.json",
     `narration_fish_performance_${episode}.txt`,
@@ -152,7 +164,7 @@ async function collectLegacyFishArtifactCandidates() {
     if (seen.has(filePath) || !(await exists(filePath))) continue;
     seen.add(filePath);
     candidates.push({
-      type: "legacy_fish_voice_artifact_for_qwen_run",
+      type: "legacy_fish_voice_artifact_for_unit_narration_run",
       path: filePath,
       size_bytes: await sizeBytes(filePath),
       report_path: voiceReferencePath,
@@ -223,7 +235,7 @@ async function applyCandidate(candidate) {
     await fs.rm(candidate.path, { recursive: true, force: true });
     return;
   }
-  if (candidate.type === "legacy_fish_voice_artifact_for_qwen_run") {
+  if (candidate.type === "legacy_fish_voice_artifact_for_unit_narration_run") {
     await fs.rm(candidate.path, { force: true });
     return;
   }

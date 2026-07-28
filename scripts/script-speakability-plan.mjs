@@ -195,18 +195,18 @@ function deterministicReplacementCandidates(script) {
       to,
       regex: false,
       flags: "g",
-      scope: "qwen_spoken_text",
+      scope: "tts_spoken_text",
       reason,
     });
   };
   for (const match of String(script ?? "").matchAll(/\b(?:go|went|going|goes|is|was|were|be|being|stayed|stay)\s+live\b/gi)) {
-    add(match[0], homographLiveSuggestion(match[0]), "Deterministic TTS homograph guard: force live-stream meaning for Qwen narration.");
+    add(match[0], homographLiveSuggestion(match[0]), "Deterministic TTS homograph guard: force live-stream meaning for narration.");
   }
   for (const match of String(script ?? "").matchAll(/\bstreaming\s+live\b/gi)) {
-    add(match[0], preserveCase(match[0], "livestreaming"), "Deterministic TTS homograph guard: force livestreaming pronunciation for Qwen narration.");
+    add(match[0], preserveCase(match[0], "livestreaming"), "Deterministic TTS homograph guard: force livestreaming pronunciation.");
   }
   for (const match of String(script ?? "").matchAll(/\blive\s+stream\b/gi)) {
-    add(match[0], preserveCase(match[0], "livestream"), "Deterministic TTS homograph guard: force livestream noun pronunciation for Qwen narration.");
+    add(match[0], preserveCase(match[0], "livestream"), "Deterministic TTS homograph guard: force livestream noun pronunciation.");
   }
   for (const match of String(script ?? "").matchAll(/\blive\s+content\b/gi)) {
     add(match[0], preserveCase(match[0], "livestream video content"), "Deterministic TTS homograph guard: force live-stream media-content meaning for Qwen narration.");
@@ -272,7 +272,7 @@ Return one valid JSON object:
       "to": "speakable replacement",
       "regex": false,
       "flags": "g",
-      "scope": "qwen_spoken_text",
+      "scope": "tts_spoken_text",
       "reason": "..."
     }
   ],
@@ -340,7 +340,7 @@ function normalizeReplacement(row) {
     to: String(row.to),
     regex: row.regex === true,
     flags: row.flags ?? "g",
-    scope: row.scope ?? "qwen_spoken_text",
+    scope: row.scope ?? "tts_spoken_text",
     reason: row.reason ?? "LLM speakability replacement.",
   };
 }
@@ -413,7 +413,12 @@ async function main() {
     episode,
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
-    apply_to: ["qwen_generation_plan.qwen_spoken_text"],
+    apply_to: [
+      "narration_generation_plan.spoken_text",
+      "narration_generation_plan.tts_spoken_text",
+      "qwen_generation_plan.qwen_spoken_text",
+    ],
+    accepted_scope_aliases: ["qwen_spoken_text"],
     script_text_policy: "Do not mutate script_clean.md, captions, semantic scenes, or visual prompts.",
     replacements,
     pronunciation_map: report.pronunciation_map,

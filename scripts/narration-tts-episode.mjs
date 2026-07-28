@@ -72,6 +72,40 @@ function boolFlag(value) {
   return /^(?:1|true|yes|on)$/i.test(String(value ?? ""));
 }
 
+export function recoveryScopeForTests(rawUnitIds, units) {
+  if (rawUnitIds == null || String(rawUnitIds).trim() === "") return null;
+  const requestedUnitIds = String(rawUnitIds)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!requestedUnitIds.length) {
+    throw new Error("--regenerate-unit-ids requires at least one unit ID");
+  }
+  const duplicateUnitIds = requestedUnitIds.filter(
+    (unitId, index) => requestedUnitIds.indexOf(unitId) !== index,
+  );
+  if (duplicateUnitIds.length) {
+    throw new Error(
+      `--regenerate-unit-ids contains duplicate unit IDs: ${[...new Set(duplicateUnitIds)].join(", ")}`,
+    );
+  }
+  const availableUnitIds = new Set(units.map((unit) => String(unit.unit_id)));
+  const unknownUnitIds = requestedUnitIds.filter((unitId) => !availableUnitIds.has(unitId));
+  if (unknownUnitIds.length) {
+    throw new Error(
+      `--regenerate-unit-ids contains IDs absent from the current narration plan: ${unknownUnitIds.join(", ")}`,
+    );
+  }
+  const requestedSet = new Set(requestedUnitIds);
+  return {
+    mode: "exact_failed_unit_recovery",
+    requested_unit_ids: units
+      .map((unit) => String(unit.unit_id))
+      .filter((unitId) => requestedSet.has(unitId)),
+    requested_unit_count: requestedUnitIds.length,
+  };
+}
+
 function sha256Text(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
@@ -1090,6 +1124,10 @@ async function main() {
   const units = normalizeNarrationUnitsForTests(plan, {
     voiceId: policy.primary.voice_id,
   });
+  const requestedRecoveryScope = recoveryScopeForTests(
+    flags["regenerate-unit-ids"],
+    units,
+  );
   const planSha256 = await sha256File(planPath);
   const [pythonStat, runnerStat, similarityPythonStat, similarityRunnerStat] = await Promise.all([
     fs.stat(python).catch(() => null),
@@ -1117,6 +1155,7 @@ async function main() {
     unit_ids: units.map((unit) => unit.unit_id),
     effective_concurrency: EFFECTIVE_CONCURRENCY,
     model_load_policy: "once_per_serial_route_attempt_invocation",
+    recovery_scope: requestedRecoveryScope,
     runtime_preflight: {
       status: "launcher_paths_validated_models_not_loaded",
       python_path: python,
@@ -1343,6 +1382,22 @@ async function main() {
 
   await qaSynthesis("kokoro", 1, units);
   let unresolved = units.filter((unit) => !selected.has(unit.unit_id));
+  let recoveryScope = requestedRecoveryScope;
+  if (requestedRecoveryScope) {
+    const requestedIds = requestedRecoveryScope.requested_unit_ids;
+    const unresolvedIds = unresolved.map((unit) => unit.unit_id);
+    if (JSON.stringify(unresolvedIds) !== JSON.stringify(requestedIds)) {
+      throw new Error(
+        "Exact-unit narration recovery scope does not match the hard-blocked Puck units. "
+        + `Requested ${JSON.stringify(requestedIds)}; unresolved ${JSON.stringify(unresolvedIds)}.`,
+      );
+    }
+    recoveryScope = {
+      ...requestedRecoveryScope,
+      status: "validated_against_current_primary_qa",
+      primary_unresolved_unit_ids: unresolvedIds,
+    };
+  }
   // Puck is stable enough that a second quality attempt mostly repeats the
   // first delivery. Preserve the first take and route only confirmed hard
   // failures to the exact-unit fallback.
@@ -1369,6 +1424,7 @@ async function main() {
   unitQaReport.narration_generation_plan_path = planPath;
   unitQaReport.narration_generation_plan_sha256 = planSha256;
   unitQaReport.selection_policy_version = NARRATION_TTS_SELECTION_POLICY_VERSION;
+  unitQaReport.recovery_scope = recoveryScope;
   unitQaReport.selected_units = selectedRows.map((row) => ({
     unit_id: row.unit_id,
     provider: row.provider,
@@ -1407,6 +1463,7 @@ async function main() {
       status: "not_run_due_to_unit_blockers",
       source_script_hash: scriptHash,
       narration_generation_plan_sha256: planSha256,
+      recovery_scope: recoveryScope,
       blockers,
     });
     await atomicWriteJson(stitchReportPath, {
@@ -1415,6 +1472,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      recovery_scope: recoveryScope,
       primary_provider: policy.primary.provider,
       native_speed: policy.primary.native_speed,
       post_tempo_normalized: false,
@@ -1429,6 +1487,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      recovery_scope: recoveryScope,
       policy,
       ...statusContract,
       unit_qa_path: unitQaPath,
@@ -1475,6 +1534,7 @@ async function main() {
       policy_version: QA_POLICY_VERSION,
       source_script_hash: scriptHash,
       narration_generation_plan_sha256: planSha256,
+      recovery_scope: recoveryScope,
       blockers,
     });
     await atomicWriteJson(stitchReportPath, {
@@ -1483,6 +1543,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      recovery_scope: recoveryScope,
       primary_provider: policy.primary.provider,
       native_speed: policy.primary.native_speed,
       post_tempo_normalized: false,
@@ -1498,6 +1559,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      recovery_scope: recoveryScope,
       policy,
       ...statusContract,
       unit_qa_path: unitQaPath,
@@ -1572,6 +1634,7 @@ async function main() {
     policy_version: QA_POLICY_VERSION,
     source_script_hash: scriptHash,
     narration_generation_plan_sha256: planSha256,
+    recovery_scope: recoveryScope,
     audio_path: finalWav,
     audio_sha256: await sha256File(finalWav),
     intended_text_sha256: sha256Text(intendedText),
@@ -1661,6 +1724,7 @@ async function main() {
     source_script_hash: scriptHash,
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
+    recovery_scope: recoveryScope,
     output_path: status === "passed" ? finalWav : null,
     output_sha256: status === "passed" ? finalWavSha256 : null,
     blocked_output_path: status === "blocked" ? finalWav : null,
@@ -1691,6 +1755,7 @@ async function main() {
     run_identity_path: identityPath,
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
+    recovery_scope: recoveryScope,
     policy,
     ...statusContract,
     selection_policy_version: NARRATION_TTS_SELECTION_POLICY_VERSION,

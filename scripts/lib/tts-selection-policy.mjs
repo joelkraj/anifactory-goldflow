@@ -38,6 +38,7 @@ const PRIMARY_HARD_BLOCKER_CODES = new Set([
   "tts_audio_empty",
   "tts_audio_implausibly_short",
   "tts_audio_clipping",
+  "tts_audio_impulsive_discontinuity",
   "tts_audio_untranscribed_internal_burst",
   "tts_transcript_empty",
 ]);

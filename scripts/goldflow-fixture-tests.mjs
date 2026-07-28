@@ -718,6 +718,22 @@ function testNarrationTtsSelectionAndQaContracts() {
     accepted: true,
     blocker_codes: [],
   });
+  const severeImpulse = {
+    status: "blocked",
+    findings: [{
+      severity: "blocker",
+      code: "tts_audio_impulsive_discontinuity",
+      maximum_sample_step_dbfs: -2.4,
+    }],
+  };
+  const softenedSevereImpulse = softenPrimaryQa(severeImpulse);
+  assert.equal(softenedSevereImpulse.status, "blocked");
+  assert.equal(softenedSevereImpulse.findings[0].severity, "blocker");
+  assert.deepEqual(candidateDisposition(softenedSevereImpulse, "kokoro_local"), {
+    status: "fallback_required",
+    accepted: false,
+    blocker_codes: ["tts_audio_impulsive_discontinuity"],
+  });
   const joinInputs = [
     { unit_id: "unit_001", sample_count: 1 },
     { unit_id: "unit_002", sample_count: 1 },

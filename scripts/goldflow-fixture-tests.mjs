@@ -252,6 +252,7 @@ import {
 } from "./lib/visual-resolution-utils.mjs";
 import {
   applyManualLocationRefRepairsForTests,
+  applyManualSemanticRepairsForTests,
   semanticBuildPromptForTests,
   semanticReconciliationPromptForTests,
   sanitizeCanonicalIdForTests,
@@ -1663,6 +1664,27 @@ function testSemanticSceneCoverageRejectsCollapsedTail() {
   ], script);
   assert.equal(findings.some((finding) => finding.code === "semantic_scene_span_too_large"), true);
   assert.equal(findings.some((finding) => finding.code === "semantic_final_scene_does_not_cover_script_end"), false);
+  const uncoveredGapFindings = semanticSceneCoverageFindingsForTests([
+    {
+      scene_id: "scene_001",
+      title: "First",
+      script_excerpt_start: "Joey entered.",
+      script_excerpt_end: "Joey entered.",
+    },
+    {
+      scene_id: "scene_002",
+      title: "Second",
+      script_excerpt_start: "Mira answered.",
+      script_excerpt_end: "Mira answered.",
+    },
+  ], "Joey entered. Two unassigned sentences remain. Mira answered.");
+  assert.equal(
+    uncoveredGapFindings.some(
+      (finding) => finding.code === "semantic_scene_gap_uncovered_words"
+        && finding.uncovered_word_count === 4,
+    ),
+    true,
+  );
 }
 
 function testSemanticSceneQualityFindings() {
@@ -1698,6 +1720,19 @@ function testSemanticSceneQualityFindings() {
     missingLocationFindings.some((finding) => finding.code === "semantic_physical_scene_missing_location_ref_requirement" && finding.severity === "blocker"),
     true
   );
+  const unsupportedRefKindFindings = semanticSceneQualityFindingsForTests([{
+    scene_id: "scene_003",
+    title: "Unsupported Organization Ref",
+    location: "abstract",
+    ref_requirements: [{ kind: "organization", ref_id: "apex_vanguard" }],
+  }]);
+  assert.equal(
+    unsupportedRefKindFindings.some(
+      (finding) => finding.code === "semantic_ref_requirement_kind_unsupported"
+        && finding.severity === "blocker",
+    ),
+    true,
+  );
   const repairedLocationScenes = applyManualLocationRefRepairsForTests(
     [{
       scene_id: "scene_002",
@@ -1732,6 +1767,84 @@ function testSemanticSceneQualityFindings() {
     false,
   );
   assert.equal(repairedLocationScenes.applied_repairs[0].scene_id, "scene_002");
+  const manualSemanticRepair = applyManualSemanticRepairsForTests(
+    [{
+      scene_id: "scene_001",
+      title: "Base",
+      script_excerpt_start: "Joey entered.",
+      script_excerpt_end: "Joey entered.",
+      location: "unsupported room",
+      ref_requirements: [{ kind: "organization", ref_id: "apex" }],
+    }],
+    {
+      canonical_locations: [],
+      state_transitions: [],
+    },
+    {
+      schema: "goldflow_semantic_manual_repair_v1",
+      status: "approved",
+      source_script_hash: "script_hash",
+      base_reconciliation_sha256: "base_hash",
+      scene_updates: [{
+        scene_id: "scene_001",
+        expected: {
+          location: "unsupported room",
+          ref_requirements: [{ kind: "organization", ref_id: "apex" }],
+        },
+        set: {
+          location: "abstract",
+          ref_requirements: [],
+        },
+      }],
+      scene_insertions: [{
+        after_scene_id: "scene_001",
+        inserted_scene_id: "scene_001a",
+        scene: {
+          title: "Inserted",
+          script_excerpt_start: "Mira answered.",
+          script_excerpt_end: "Mira answered.",
+          location: "abstract",
+          visible_subjects: ["Mira Kade"],
+          primary_subject: "Mira Kade",
+          visual_intent: "Preserve the missing beat.",
+          ui_text_on_screen: [],
+          sfx_cues: [],
+          character_states: [],
+          props: [],
+          ref_requirements: [],
+          action_staging: "Mira answers.",
+          continuity_notes: [],
+        },
+      }],
+      state_transition_appends: [{
+        source_scene_id: "scene_001",
+        entity_id: "joey",
+        state_kind: "injury",
+        from_state: "unhurt",
+        to_state: "hurt",
+        transition_evidence_excerpt: "Joey entered.",
+        evidence: [{ exact_excerpt: "Joey entered.", confidence: 1 }],
+      }],
+      canonical_location_appends: [{
+        location_id: "answer_area",
+        display_name: "Answer area",
+        aliases: [],
+        evidence: [{ exact_excerpt: "Mira answered.", confidence: 1 }],
+      }],
+    },
+    {
+      sourceScriptHash: "script_hash",
+      baseReconciliationSha256: "base_hash",
+      requestedSceneIds: ["scene_001"],
+    },
+  );
+  assert.deepEqual(
+    manualSemanticRepair.scenes.map((scene) => scene.scene_id),
+    ["scene_001", "scene_001a"],
+  );
+  assert.equal(manualSemanticRepair.scenes[0].location, "abstract");
+  assert.equal(manualSemanticRepair.ledger.state_transitions.length, 1);
+  assert.equal(manualSemanticRepair.ledger.canonical_locations[0].location_id, "answer_area");
 }
 
 function testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement() {

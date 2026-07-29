@@ -582,6 +582,13 @@ async function main() {
   if (plannerTokens[0] !== "node" || plannerTokens[1] !== "bin/goldflow.mjs") {
     throw new Error(`Cannot materialize visual prompt command: ${plannerCommand}`);
   }
+  const visualChunkValidationAttempts = flags["visual-chunk-validation-attempts"];
+  if (visualChunkValidationAttempts !== undefined) {
+    const attempts = Math.max(1, Number(visualChunkValidationAttempts) || 1);
+    const attemptsFlagIndex = plannerTokens.indexOf("--visual-chunk-validation-attempts");
+    if (attemptsFlagIndex >= 0) plannerTokens[attemptsFlagIndex + 1] = String(attempts);
+    else plannerTokens.push("--visual-chunk-validation-attempts", String(attempts));
+  }
   const plannerPromise = runNode([
     path.join(repoRoot, plannerTokens[1]),
     ...plannerTokens.slice(2),

@@ -47,6 +47,10 @@ import {
   validateLocalWhisperIdentityContract,
   validateLockedLocalWhisperReport,
 } from "./lib/local-whisper-policy.mjs";
+import {
+  ltxApprovalMatches,
+  ltxVideoEnabled,
+} from "./lib/ltx-video-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -1200,6 +1204,42 @@ async function parallaxAssetGenerationComplete(episodeDir, episode) {
     }
   }
   return { done: true, evidence: `${path.basename(reportPath)} candidates=${candidates.length}; review sheet=current` };
+}
+
+async function ltxVideoGenerationComplete(episodeDir, episode) {
+  const reportPath = path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_report_${episode}.json`);
+  const report = await readJson(reportPath, null);
+  if (!report) return { done: false, evidence: `${path.basename(reportPath)} missing` };
+  if (report.status !== "passed" || Number(report.failed_count ?? 0) > 0) {
+    return {
+      done: false,
+      state: report.status === "failed" ? "failed" : "blocked",
+      evidence: `${path.basename(reportPath)} status=${report.status ?? "missing"}; failed=${report.failed_count ?? "?"}`,
+    };
+  }
+  const sourceState = await sourceHashState(report.source_hashes);
+  if (!sourceState.count || sourceState.stale.length) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale or missing` };
+  }
+  for (const clip of report.clips ?? []) {
+    if (await fileSha256(clip.source_image_path) !== clip.source_image_sha256
+      || await fileSha256(clip.normalized_video_path) !== clip.normalized_video_sha256) {
+      return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale clip/source for ${clip.image_id}` };
+    }
+  }
+  return { done: true, evidence: `${path.basename(reportPath)} clips=${report.generated_count}; hashes=current` };
+}
+
+async function ltxVideoApprovalComplete(episodeDir, episode) {
+  const base = path.join(episodeDir, "assets", "motion", "ltx23");
+  const reportPath = path.join(base, `ltx_video_report_${episode}.json`);
+  const approvalPath = path.join(base, `ltx_video_approval_${episode}.json`);
+  const [report, approval] = await Promise.all([readJson(reportPath, null), readJson(approvalPath, null)]);
+  if (!report || !approval) return { done: false, evidence: `${path.basename(approvalPath)} missing` };
+  if (!await ltxApprovalMatches(report, approval, { reportPath })) {
+    return { done: false, state: "stale", evidence: `${path.basename(approvalPath)} decisions or hashes stale` };
+  }
+  return { done: true, evidence: `${path.basename(approvalPath)} accepted=${approval.accepted_count}; rejected=${approval.rejected_count}` };
 }
 
 async function parallaxAssetApprovalComplete(episodeDir, episode) {
@@ -3274,6 +3314,7 @@ async function main() {
     pace_targets: runIdentity.pace_targets ?? null,
     render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_subpixel_ken_burns",
     motion_policy: runIdentity.motion_policy ?? null,
+    ltx_video_policy: runIdentity.ltx_video_policy ?? "disabled",
     parallax_policy: runIdentity.parallax_policy ?? null,
     parallax_target_max: runIdentity.parallax_target_max ?? null,
     parallax_min_spacing_sec: runIdentity.parallax_min_spacing_sec ?? null,
@@ -3332,6 +3373,9 @@ async function main() {
   const focalAnalysisContractCurrent = String(identity.stage_registry_version ?? "") >= "2026-07-12.2";
   const imageFocalAnalysis = focalAnalysisContractCurrent ? await imageFocalAnalysisComplete(episodeDir, episode) : null;
   const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
+  const ltxVideoPolicyCurrent = ltxVideoEnabled(identity);
+  const ltxVideoGeneration = ltxVideoPolicyCurrent ? await ltxVideoGenerationComplete(episodeDir, episode) : null;
+  const ltxVideoApproval = ltxVideoPolicyCurrent ? await ltxVideoApprovalComplete(episodeDir, episode) : null;
   const parallaxPolicyCurrent = identity.parallax_policy === "selective_inspected";
   const parallaxGeneration = parallaxPolicyCurrent ? await parallaxAssetGenerationComplete(episodeDir, episode) : null;
   const parallaxApproval = parallaxPolicyCurrent ? await parallaxAssetApprovalComplete(episodeDir, episode) : null;
@@ -3420,6 +3464,12 @@ async function main() {
     image_output_qa: legacyIdentity && !imageOutputQaRequired(identity)
       ? { state: "skipped_with_waiver", evidence: "legacy run predates required per-cut image QA" }
       : imageOutputQa,
+    generated_video_motion: ltxVideoPolicyCurrent
+      ? ltxVideoGeneration
+      : { state: "skipped_with_waiver", evidence: "ltx_video_policy disabled in run identity" },
+    generated_video_motion_approval: ltxVideoPolicyCurrent
+      ? ltxVideoApproval
+      : { state: "skipped_with_waiver", evidence: "ltx_video_policy disabled in run identity" },
     parallax_asset_generation: parallaxPolicyCurrent
       ? parallaxGeneration
       : { state: "skipped_with_waiver", evidence: identity.parallax_policy === "disabled" ? "parallax explicitly disabled in run identity" : "run predates selective inspected parallax contract" },

@@ -1683,6 +1683,9 @@ async function buildMotionClips(
     }
     const depthTreatment = motionIntent?.depth_treatment ? sanitizeLayeredParallaxTreatment(motionIntent.depth_treatment) : null;
     if (motionIntent?.depth_treatment && !depthTreatment) throw new Error(`Invalid layered parallax contract for ${prompt.image_id}.`);
+    const generatedVideoTreatment = motionIntent?.generated_video_treatment?.mode === "generated_video_ltx23"
+      ? motionIntent.generated_video_treatment
+      : null;
     if (depthTreatment) layeredParallaxClipCount += 1;
     const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
     const transition = transitionProfile(duration, profile, prompt, startSec, previousPrompt, index);
@@ -1692,7 +1695,7 @@ async function buildMotionClips(
     if (profile.hook) hookClipIds.push(prompt.image_id);
     if (transition.name !== "polished_motion") transitionClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
-    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent, depthTreatment });
+    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent, depthTreatment, generatedVideoTreatment });
   }
   const selectedXfadeDurations = new Map();
   const selectedBoundaryRows = [];
@@ -1748,6 +1751,19 @@ async function buildMotionClips(
       }
       depthSourceHashes = { background_sha256: backgroundSha256, foreground_sha256: foregroundSha256 };
     }
+    let generatedVideoSha256 = null;
+    if (row.generatedVideoTreatment) {
+      if (row.generatedVideoTreatment.source_image_sha256 !== imageSha256) {
+        throw new Error(`Generated LTX video source image is stale for ${row.prompt.image_id}.`);
+      }
+      if (!(await exists(row.generatedVideoTreatment.video_path))) {
+        throw new Error(`Generated LTX video is missing for ${row.prompt.image_id}: ${row.generatedVideoTreatment.video_path}`);
+      }
+      generatedVideoSha256 = await hashFile(row.generatedVideoTreatment.video_path);
+      if (generatedVideoSha256 !== row.generatedVideoTreatment.video_sha256) {
+        throw new Error(`Generated LTX video hash is stale for ${row.prompt.image_id}.`);
+      }
+    }
     const motionProfileHash = sha256(JSON.stringify({
       profile: row.profile,
       filter,
@@ -1758,10 +1774,12 @@ async function buildMotionClips(
       motion_strength: motionStrength,
       foreground_scale: foregroundScale,
       depth_treatment: row.depthTreatment,
+      generated_video_treatment: row.generatedVideoTreatment,
     }));
     const cacheKey = sha256(JSON.stringify({
       image_sha256: imageSha256,
       depth_source_hashes: depthSourceHashes,
+      generated_video_sha256: generatedVideoSha256,
       motion_profile_hash: motionProfileHash,
       start_sec: Number(row.startSec.toFixed(6)),
       duration_sec: Number(renderDuration.toFixed(6)),
@@ -1783,24 +1801,51 @@ async function buildMotionClips(
           return;
         }
       }
-      await execFile(ffmpegBin, [
-        "-y",
-        ...(row.depthTreatment
-          ? [
-              "-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.depthTreatment.background_path,
-              "-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.depthTreatment.foreground_path,
-            ]
-          : ["-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.imagePath]),
-        "-filter_complex", filter,
-        "-an",
-        "-c:v", "libx264",
-        "-preset", clipPreset,
-        "-crf", "20",
-        "-pix_fmt", "yuv420p",
-        "-r", String(fps),
-        "-frames:v", String(frameCount),
-        row.clipPath,
-      ], { maxBuffer: 1024 * 1024 * 32 });
+      if (row.generatedVideoTreatment) {
+        const generatedFilter = [
+          `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase`,
+          `crop=${width}:${height}`,
+          `fps=${fps}`,
+          "setsar=1",
+          `trim=duration=${Math.min(renderDuration, Number(row.generatedVideoTreatment.native_duration_sec ?? renderDuration)).toFixed(6)}`,
+          "setpts=PTS-STARTPTS",
+          `tpad=stop_mode=clone:stop_duration=${renderDuration.toFixed(6)}`,
+          "format=yuv420p[v]",
+        ].join(",");
+        await execFile(ffmpegBin, [
+          "-y",
+          "-i", row.generatedVideoTreatment.video_path,
+          "-filter_complex", generatedFilter,
+          "-map", "[v]",
+          "-an",
+          "-c:v", "libx264",
+          "-preset", clipPreset,
+          "-crf", "20",
+          "-pix_fmt", "yuv420p",
+          "-r", String(fps),
+          "-frames:v", String(frameCount),
+          row.clipPath,
+        ], { maxBuffer: 1024 * 1024 * 32 });
+      } else {
+        await execFile(ffmpegBin, [
+          "-y",
+          ...(row.depthTreatment
+            ? [
+                "-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.depthTreatment.background_path,
+                "-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.depthTreatment.foreground_path,
+              ]
+            : ["-loop", "1", "-t", renderDuration.toFixed(3), "-i", row.imagePath]),
+          "-filter_complex", filter,
+          "-an",
+          "-c:v", "libx264",
+          "-preset", clipPreset,
+          "-crf", "20",
+          "-pix_fmt", "yuv420p",
+          "-r", String(fps),
+          "-frames:v", String(frameCount),
+          row.clipPath,
+        ], { maxBuffer: 1024 * 1024 * 32 });
+      }
       const actualDuration = await mediaDuration(row.clipPath);
       const expectedDuration = frameCount / fps;
       if (Math.abs(actualDuration - expectedDuration) > Math.max(0.1, expectedDuration * 0.03)) {
@@ -1816,6 +1861,7 @@ async function buildMotionClips(
         image_path: row.imagePath,
         image_sha256: imageSha256,
         depth_source_hashes: depthSourceHashes,
+        generated_video_sha256: generatedVideoSha256,
         motion_profile_hash: motionProfileHash,
         motion_clip_path: row.clipPath,
         motion_clip_sha256: row.motionClipSha256,

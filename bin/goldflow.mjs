@@ -310,6 +310,10 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("visual-parallax-assets.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-parallax") {
   run("parallax-asset-approve.mjs", flags);
+} else if (command === "visual" && subcommand === "ltx-video") {
+  run("ltx-video-generate.mjs", flags);
+} else if (command === "visual" && subcommand === "approve-ltx-video") {
+  run("ltx-video-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "parallax-proof-assets") {
   run("editorial-parallax-assets.mjs", flags);
 } else if (command === "visual" && subcommand === "motion-proof-plan") {

@@ -2,6 +2,7 @@ import "./qwen-liam-selection-tests.mjs";
 import "./qwen-liam-batch4-tests.mjs";
 import "./modelslab-stt-candidate-tests.mjs";
 import "./tts-qwen-throughput-bakeoff-tests.mjs";
+import "./ltx-video-tests.mjs";
 import { runFixtureSuite } from "../goldflow-fixture-tests.mjs";
 
 await runFixtureSuite("media");

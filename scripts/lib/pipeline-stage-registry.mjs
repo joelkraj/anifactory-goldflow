@@ -7,8 +7,9 @@ import {
   localWhisperCommandFlags,
   localWhisperContractForIdentity,
 } from "./local-whisper-policy.mjs";
+import { ltxVideoEnabled } from "./ltx-video-contract.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-29.2";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-29.3";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -291,6 +292,26 @@ const stages = [
     commands: ["imagegen qa"],
   },
   {
+    id: "generated_video_motion",
+    title: "Hash-bound LTX generated motion",
+    required_input: "accepted image hashes + hardened prompts",
+    output_artifact: "assets/motion/ltx23/ltx_video_report_<episode>.json + normalized clips",
+    approval: "automatic",
+    validator: "ltx_video_clip_hashes_and_source_images",
+    skip: "ltx_video_policy_disabled",
+    commands: ["visual ltx-video"],
+  },
+  {
+    id: "generated_video_motion_approval",
+    title: "Generated LTX motion approval",
+    required_input: "hash-bound LTX clips + contact sheet",
+    output_artifact: "assets/motion/ltx23/ltx_video_approval_<episode>.json",
+    approval: "operator_or_agent",
+    validator: "ltx_video_per_clip_decisions",
+    skip: "ltx_video_policy_disabled",
+    commands: ["visual approve-ltx-video"],
+  },
+  {
     id: "parallax_asset_generation",
     title: "Selective parallax assets",
     required_input: "accepted image hashes + LLM-authored depth candidates",
@@ -390,10 +411,13 @@ export function commandStageFor(commandName, subcommandName, flags = {}) {
 export function stageChecklistFor(identity = {}) {
   const narratorOnly = String(identity.audio_target ?? "narrator_only") === "narrator_only";
   const parallaxDisabled = String(identity.parallax_policy ?? "selective_inspected") !== "selective_inspected";
+  const ltxDisabled = !ltxVideoEnabled(identity);
   return PIPELINE_STAGE_REGISTRY.map((entry) => ({
     stage: entry.id,
     status: entry.id === "sfx_score_plan" && narratorOnly
       ? "skipped_with_waiver"
+      : ["generated_video_motion", "generated_video_motion_approval"].includes(entry.id) && ltxDisabled
+        ? "skipped_with_waiver"
       : ["parallax_asset_generation", "parallax_asset_approval"].includes(entry.id) && parallaxDisabled
         ? "skipped_with_waiver"
         : "missing",
@@ -557,6 +581,8 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${media.image_concurrency} --reference-concurrency ${media.reference_concurrency}`,
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
+    generated_video_motion: `node bin/goldflow.mjs visual ltx-video ${base} --concurrency ${media.image_concurrency}`,
+    generated_video_motion_approval: `node bin/goldflow.mjs visual approve-ltx-video ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,

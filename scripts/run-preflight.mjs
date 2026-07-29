@@ -39,6 +39,11 @@ import {
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
+import {
+  LTX_VIDEO_MODEL_ID,
+  LTX_VIDEO_PROVIDER,
+  normalizeLtxVideoPolicy,
+} from "./lib/ltx-video-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -77,6 +82,7 @@ const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] 
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 220);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
+const ltxVideoPolicy = normalizeLtxVideoPolicy(flags["ltx-video-policy"] ?? "disabled");
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
 const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 15, 0, 20);
 const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 3, 0, 120);
@@ -480,6 +486,9 @@ async function main() {
     },
     render_profile: renderProfile,
     motion_policy: motionPolicy,
+    ltx_video_policy: ltxVideoPolicy,
+    ltx_video_provider: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_PROVIDER,
+    ltx_video_model: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_MODEL_ID,
     parallax_policy: parallaxPolicy,
     parallax_target_max: parallaxTargetMax,
     parallax_min_spacing_sec: parallaxMinSpacingSec,
@@ -506,6 +515,8 @@ async function main() {
       image_fallback_provider: imageFallbackProvider,
       image_fallback_condition: imageFallbackCondition,
       parallax_background_provider: parallaxBackgroundProvider,
+      ltx_video_provider: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_PROVIDER,
+      ltx_video_model: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_MODEL_ID,
       audio_target: audioTarget,
       local_whisper_timing: structuredClone(localWhisperTimingContract),
       tts_provider: ttsProvider,
@@ -618,11 +629,12 @@ async function main() {
       image_output_qa_required_before_render: true,
       directed_motion_plan_required_before_render: true,
       inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",
+      generated_video_approval_required_before_motion: ltxVideoPolicy !== "disabled",
       automatic_stage_spend_authorized_by_profile: productionProfileConfig.advance.authorize_planner_spend
         && productionProfileConfig.advance.authorize_media_spend
         && productionProfileConfig.advance.authorize_render,
     },
-    stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy }),
+    stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy, ltx_video_policy: ltxVideoPolicy }),
     episode_dir: episodeDir,
     updated_at: now,
   };

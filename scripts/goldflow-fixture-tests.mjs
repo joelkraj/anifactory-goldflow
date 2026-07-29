@@ -309,9 +309,11 @@ function sha256(value) {
 function testAuthoritativeStageRegistry() {
   const ids = PIPELINE_STAGE_REGISTRY.map((stage) => stage.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual(ids.slice(-8), [
+  assert.deepEqual(ids.slice(-10), [
     "image_focal_analysis",
     "image_output_qa",
+    "generated_video_motion",
+    "generated_video_motion_approval",
     "parallax_asset_generation",
     "parallax_asset_approval",
     "motion_edit_plan",
@@ -330,6 +332,9 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("imagegen", "codex-work", { "references-only": "true" }), "reference_generation");
   assert.equal(commandStageFor("imagegen", "codex-work", { "qa-recovery": "true" }), "image_output_qa");
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
+  assert.equal(commandStageFor("visual", "ltx-video"), "generated_video_motion");
+  assert.equal(commandStageFor("visual", "approve-ltx-video"), "generated_video_motion_approval");
+  assert.equal(stageChecklistFor({ ltx_video_policy: "disabled" }).find((row) => row.stage === "generated_video_motion")?.status, "skipped_with_waiver");
   assert.equal(commandStageFor("tts", "narrate"), "qwen_tts_stitch");
   assert.equal(commandStageFor("tts", "qwen"), "qwen_tts_stitch");
   assert.equal(narratorOnly.every((row) => row.validator), true);

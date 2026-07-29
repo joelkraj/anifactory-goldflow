@@ -1,0 +1,167 @@
+#!/usr/bin/env node
+
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  animationPolicyForIdentity,
+  clampLtxDuration,
+  hashFile,
+  ltxMotionPromptForCut,
+  ltxNegativePrompt,
+  ltxVideoEnabled,
+  sanitizeAnimationIntent,
+} from "./lib/ltx-video-contract.mjs";
+
+const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const flags = parseFlags(process.argv.slice(2));
+const channel = flags.channel ?? "53rebirth";
+const series = flags.series ?? flags.seriesSlug ?? "series";
+const week = flags.week ?? "current";
+const episode = flags.episode ?? "ep_01";
+const episodeDir = path.resolve(flags["episode-dir"] ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode));
+const identityPath = path.resolve(flags["run-identity"] ?? path.join(episodeDir, "run_identity.json"));
+const beatPath = path.resolve(flags.beats ?? path.join(episodeDir, "visual_beat_plan.json"));
+const promptPath = path.resolve(flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json"));
+const imagegenPath = path.resolve(flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`));
+const imageQaPath = path.resolve(flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`));
+const outputPath = path.resolve(flags.output ?? path.join(episodeDir, `animation_direction_plan_${episode}.json`));
+
+function parseFlags(parts) {
+  const parsed = {};
+  for (let index = 0; index < parts.length; index += 1) {
+    if (!parts[index].startsWith("--")) continue;
+    const key = parts[index].slice(2);
+    const value = parts[index + 1] && !parts[index + 1].startsWith("--") ? parts[index + 1] : "true";
+    parsed[key] = value;
+    if (value !== "true") index += 1;
+  }
+  return parsed;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function readJson(filePath) {
+  return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+async function writeJson(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function riskAndCandidateCount(intent, prompt) {
+  const highRisk = ["physical_contact", "locomotion_action", "effect_or_impact"].includes(intent.shot_class);
+  const denseCast = (prompt.shot_manifest?.visible_characters ?? []).length >= 3;
+  return {
+    risk: highRisk || denseCast ? "high" : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? "medium" : "low",
+    candidate_count: highRisk || denseCast ? 3 : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? 2 : 1,
+  };
+}
+
+async function main() {
+  const [identity, beatPlan, promptPlan, imagegen, imageQa] = await Promise.all([
+    readJson(identityPath),
+    readJson(beatPath),
+    readJson(promptPath),
+    readJson(imagegenPath),
+    readJson(imageQaPath),
+  ]);
+  if (!ltxVideoEnabled(identity)) throw new Error("Animation direction is disabled in run_identity.json.");
+  if (beatPlan?.status !== "passed" || !Array.isArray(beatPlan.beats)) throw new Error(`Missing passed visual beat plan: ${beatPath}`);
+  if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
+  if (imagegen?.status !== "passed" || !Array.isArray(imagegen.results)) throw new Error(`Missing passed image generation report: ${imagegenPath}`);
+  if (imageQa?.status !== "passed") throw new Error(`Missing passed image QA: ${imageQaPath}`);
+  const policy = animationPolicyForIdentity(identity);
+  const beatById = new Map(beatPlan.beats.map((row) => [String(row.visual_beat_id ?? ""), row]));
+  const imageById = new Map(imagegen.results.map((row) => [String(row.image_id ?? ""), row]));
+  const accepted = imageQa.accepted_image_hashes ?? {};
+  const eligiblePrompts = promptPlan.prompts.filter((row) => row.image_generation_required !== false);
+  const directions = [];
+  for (const [index, prompt] of eligiblePrompts.entries()) {
+    const beat = beatById.get(String(prompt.visual_beat_id ?? ""));
+    const intent = sanitizeAnimationIntent(prompt.shot_manifest?.animation_intent ?? beat?.animation_intent);
+    if (!intent) throw new Error(`Animation-enabled cut ${prompt.image_id} has no valid beat-authored animation_intent.`);
+    if (policy === "selective_ltx23" && intent.eligibility !== "animate") continue;
+    const image = imageById.get(String(prompt.image_id ?? ""));
+    const imagePath = image?.image_path ? path.resolve(image.image_path) : null;
+    const imageHash = imagePath ? await hashFile(imagePath) : null;
+    if (!imagePath || !imageHash || accepted[prompt.image_id] !== imageHash) {
+      throw new Error(`Animation direction requires the current accepted image hash for ${prompt.image_id}.`);
+    }
+    const prior = eligiblePrompts[index - 1];
+    const next = eligiblePrompts[index + 1];
+    const risk = riskAndCandidateCount(intent, prompt);
+    const directedPrompt = {
+      ...prompt,
+      duration_sec: Number(prompt.duration_sec ?? 5),
+      animation_intent: intent,
+      shot_manifest: { ...(prompt.shot_manifest ?? {}), animation_intent: intent },
+    };
+    directions.push({
+      image_id: prompt.image_id,
+      scene_id: prompt.scene_id ?? null,
+      visual_beat_id: prompt.visual_beat_id ?? null,
+      start_sec: Number(prompt.start_sec ?? 0),
+      cut_duration_sec: Number(prompt.duration_sec ?? 5),
+      requested_generation_duration_sec: clampLtxDuration(prompt.duration_sec ?? 5),
+      source_image_path: imagePath,
+      source_image_sha256: imageHash,
+      source_prompt_sha256: sha256(JSON.stringify(prompt)),
+      animation_intent: intent,
+      risk_class: risk.risk,
+      candidate_count: risk.candidate_count,
+      scene_continuity: {
+        previous_image_id: prior?.scene_id === prompt.scene_id ? prior.image_id : null,
+        previous_action: prior?.scene_id === prompt.scene_id ? prior.visual_beat_action ?? null : null,
+        next_image_id: next?.scene_id === prompt.scene_id ? next.image_id : null,
+        next_action: next?.scene_id === prompt.scene_id ? next.visual_beat_action ?? null : null,
+      },
+      motion_prompt: ltxMotionPromptForCut(directedPrompt),
+      negative_prompt: ltxNegativePrompt(),
+    });
+  }
+  if (!directions.length) throw new Error("Animation policy selected no cuts.");
+  const sourcePaths = [identityPath, beatPath, promptPath, imagegenPath, imageQaPath];
+  const report = {
+    schema: "goldflow_animation_direction_plan_v1",
+    status: "passed",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    animation_policy: policy,
+    provider: "modelslab",
+    model_id: "ltx-2.3",
+    source_paths: sourcePaths,
+    source_hashes: Object.fromEntries(await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))),
+    direction_count: directions.length,
+    candidate_generation_count: directions.reduce((sum, row) => sum + row.candidate_count, 0),
+    ui_policy: "ui_and_screen_shots_are_animation_eligible; exact_generated_text_legibility_not_required",
+    directions,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(outputPath, report);
+  console.log(JSON.stringify({
+    status: "passed",
+    output_path: outputPath,
+    direction_count: report.direction_count,
+    candidate_generation_count: report.candidate_generation_count,
+  }, null, 2));
+}
+
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    await writeJson(outputPath, {
+      schema: "goldflow_animation_direction_plan_v1",
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+      updated_at: new Date().toISOString(),
+    }).catch(() => {});
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

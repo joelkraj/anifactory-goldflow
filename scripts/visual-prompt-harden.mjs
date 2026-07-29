@@ -11,6 +11,7 @@ import {
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, providerExclusionPayloadFindings } from "./lib/prompt-prose-findings.mjs";
 import { outOfScopeLocationRefMentions } from "./lib/visual-scope-utils.mjs";
 import { sanitizeAuthoredMotionIntent } from "./lib/motion-plan-utils.mjs";
+import { sanitizeAnimationIntent } from "./lib/ltx-video-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -175,6 +176,7 @@ function sanitizeShotManifest(value) {
     reference_slots: referenceSlots,
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
     motion_intent: sanitizeAuthoredMotionIntent(value.motion_intent),
+    animation_intent: sanitizeAnimationIntent(value.animation_intent),
     character_staging: sanitizeCharacterStaging(value.character_staging),
   };
 }

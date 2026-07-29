@@ -18,6 +18,7 @@ import {
   projectActiveStateConstraints,
   retimeLockedEditorialBeats,
 } from "./lib/editorial-beat-director.mjs";
+import { ltxVideoEnabled } from "./lib/ltx-video-contract.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -1342,11 +1343,11 @@ async function callEditorialLlm(prompt, stageName) {
   return { parsed: extractJson(call.content), provider: "codex", model: call.model, reasoning_effort: call.reasoning_effort, output_path: outputPath, reused: false };
 }
 
-async function directEditorialBeats(atoms, factLedger, timedScenes) {
+async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}) {
   const chunks = editorialAtomChunks(atoms, Math.max(8, Number(flags["editorial-chunk-atoms"] ?? 40)));
   const concurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 8)));
   const results = await runPool(chunks, concurrency, async (chunk, index) => {
-    const basePrompt = buildEditorialDirectorPrompt(chunk, factLedger, timedScenes);
+    const basePrompt = buildEditorialDirectorPrompt(chunk, factLedger, timedScenes, options);
     const chunkId = `editorial_${String(index + 1).padStart(3, "0")}`;
     const inputHash = sha256(basePrompt);
     let lastError = null;
@@ -1356,7 +1357,7 @@ async function directEditorialBeats(atoms, factLedger, timedScenes) {
         : `${basePrompt}\n\nCorrection pass: the prior grouping failed deterministic validation with: ${lastError?.message}. Return complete corrected JSON satisfying atom coverage, transition barriers, evidence, and timing rails.`;
       try {
         const call = await callEditorialLlm(prompt, `${episode}_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_${attempt}`);
-        const normalized = normalizeEditorialGrouping(call.parsed, chunk, factLedger, episode);
+        const normalized = normalizeEditorialGrouping(call.parsed, chunk, factLedger, episode, options);
         await recordPlannerChunkCheckpoint({
           episodeDir,
           plannerStage: "visual_beat_plan",
@@ -1436,7 +1437,7 @@ async function existingGroupingLock() {
   return null;
 }
 
-async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) {
+async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, options = {}) {
   const locked = await existingGroupingLock();
   const reprojectActiveStateOnly = flags["reproject-active-state-only"] === "true";
   const retimeLockedGrouping = flags["retime-locked-grouping"] === "true";
@@ -1469,7 +1470,7 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) 
           throw new Error(`Scoped locked-tail regrouping boundary ${regroupLockedTailFromSec}s does not leave both a preserved prefix and a regenerable suffix.`);
         }
         const suffixAtoms = atoms.slice(consumedAtomCount);
-        const suffix = await directEditorialBeats(suffixAtoms, factLedger, timedPlan.scenes);
+        const suffix = await directEditorialBeats(suffixAtoms, factLedger, timedPlan.scenes, options);
         return {
           beats: [...prefix, ...suffix.beats],
           planner: {
@@ -1502,7 +1503,7 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger) 
           prior_visual_beat_plan_sha256: locked.approval.visual_beat_plan_sha256,
         },
       }
-    : await directEditorialBeats(atoms, factLedger, timedPlan.scenes);
+    : await directEditorialBeats(atoms, factLedger, timedPlan.scenes, options);
   const projectedBase = projectActiveStateConstraints(directed.beats, atoms, factLedger, timedPlan.scenes)
     .map((beat) => enrichEditorialBeat(beat, timedPlan.scenes));
   const projected = projectedBase.map((beat, index) => ({
@@ -1541,7 +1542,9 @@ async function main() {
     if (!factLedgerMatchesScriptForTests(factLedger, scriptPath, scriptHash)) {
       throw new Error(`Editorial beat direction requires current passed story_fact_ledger.json: ${storyFactLedgerPath}`);
     }
-    editorialResult = await editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger);
+    editorialResult = await editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, {
+      animationEnabled: ltxVideoEnabled(runIdentity),
+    });
     if (editorialResult.reused) {
       console.log(JSON.stringify({ status: "passed", output_path: outputPath, reused_grouping_lock: true, visual_beat_count: editorialResult.report.visual_beat_count }, null, 2));
       return;
@@ -1642,6 +1645,8 @@ async function main() {
     hook_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) < hookDurationSec).length,
     retention_ramp_sec: retentionRampSec,
     retention_ramp_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) >= hookDurationSec && Number(beat.start_sec) < retentionRampSec).length,
+    animation_policy: runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
+    animation_intent_count: beatsWithQuality.filter((beat) => beat.animation_intent).length,
     editorial_cue_counts: cueCounts,
     visual_beat_quality_findings: qualityFindings,
     visual_beat_quality_summary: {

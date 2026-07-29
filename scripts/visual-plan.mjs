@@ -24,6 +24,10 @@ import {
   editorialMotionDistributionFindings,
   sanitizeAuthoredMotionIntent,
 } from "./lib/motion-plan-utils.mjs";
+import {
+  ltxVideoEnabled,
+  sanitizeAnimationIntent,
+} from "./lib/ltx-video-contract.mjs";
 import { mergeScopedPromptReplacements } from "./lib/visual-resolution-utils.mjs";
 import {
   longLocationSpanFindings,
@@ -394,6 +398,7 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     wardrobe: scene.wardrobe ?? null,
     props: compactList(scene.local_props ?? scene.props ?? [], 8),
     action_staging: truncateText(scene.action_staging ?? "", 500),
+    animation_intent: sanitizeAnimationIntent(scene.animation_intent),
     continuity_notes: compactList(scene.continuity_notes ?? [], 4, 220),
   };
 }
@@ -602,6 +607,7 @@ function compactAuthorRiskRules(compactTimedPlan) {
 function buildCompactAuthorPrompt({ compactTimedPlan, compactSemanticPlan, correctionDirectives, activeProvider, activeProviderOptions }) {
   const unitLabel = compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene";
   const riskRules = compactAuthorRiskRules(compactTimedPlan);
+  const animationEnabled = Boolean(compactTimedPlan.animation_direction?.enabled);
   return `Author one production image prompt for every ${unitLabel} below.
 
 ${providerPromptGuidance(activeProvider, activeProviderOptions)}
@@ -625,6 +631,8 @@ Core contract:
 - Motion anchors must correspond to authored screen positions and remain between 0 and 1. Keep normal scales between 1.0 and 1.12 so the move does not crop away the evidence the cut was built to show. motion_keyframes use normalized at values from exactly 0 to exactly 1 in strict order; each row carries anchor, scale, and easing_to_next. Avoid fast scale reversals and ease_out movement directly from frame zero. Use keyframes selectively, not as compulsory motion on every cut.
 - Every motion_intent includes depth_candidate. Set eligible true only for a moving shot with one cleanly separable foreground subject and a coherent background plane. A true static_hold is not eligible because layered depth is movement. Supply a 0-100 editorial priority, high/medium/low separation confidence, the exact foreground subject, the background plane, and why depth improves this beat. Follow the run's parallax_direction retention targets across the supplied timestamps when enough safe frames exist; do not impose a one-candidate-per-chunk cap, and do not force crowded, overlapping, translucent, edge-clipped, or visually tangled frames merely to hit a quota.
 - Vary behavior and direction across the local chunk. Do not repeat the same motion pattern more than twice in succession unless the repeated hold is an intentional continuity choice.
+${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete animation_intent into shot_manifest.animation_intent and make provider_prompt an animation-ready first keyframe: clear silhouettes, visible limbs, unambiguous contact, movement room, and separable depth when supported. Do not invent new action. UI/screen beats remain eligible and exact generated text legibility is not required.
+- The still is the exact starting frame, not the whole performance. Pose subjects at animation_intent.start_state with space to complete subject_motion and reach end_state. For physical_contact, keep the contact point explicit and anatomically readable. For locomotion_action, preserve a visible path and screen direction.` : "- ANIMATION MODE IS DISABLED. Do not author shot_manifest.animation_intent or alter compositions for generated video."}
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
 - Background extras are neither preferred nor forbidden. Copy the beat's background_population contract into shot_manifest. Preserve explicit groups, and preserve implied population when the editorial beat says an active social situation needs anonymous people to read correctly. Describe those people and their subordinate staging in provider prose. Never infer extras from a public location alone, and keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
@@ -673,6 +681,7 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
       "reference_slots": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
       "continuity_notes": "current-beat continuity",
       "motion_intent": {"behavior":"static_hold|slow_push_in|reveal_zoom_out|lateral_follow|diagonal_follow|focus_shift|impact_push|reaction_hold|ui_focus|aftermath_reveal","focal_subject":"visible focal subject","start_anchor":{"x":0.5,"y":0.5},"end_anchor":{"x":0.5,"y":0.5},"start_scale":1.0,"end_scale":1.05,"easing":"linear|ease_in|ease_out|ease_in_out","motion_keyframes":[{"at":0,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"linear"},{"at":0.15,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"ease_in_out"},{"at":0.7,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"},{"at":1,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"}],"reason":"what this movement reveals, tracks, or emphasizes","depth_candidate":{"eligible":false,"priority":0,"separation_confidence":"low","foreground_subject":null,"background_plane":null,"editorial_reason":"ordinary single-plane cut"}},
+      ${animationEnabled ? `"animation_intent": "copy the complete animation_intent object from this visual beat",` : ""}
       "character_staging": [{"name":"Name","ref_id":"state_ref","screen_position":"frame-left","wardrobe_from":"character_state_ref:state_ref","pose":"current pose/action"}]
     }
   }],
@@ -791,6 +800,10 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
       first_window_target: Number(runIdentity?.parallax_first_window_target ?? 0),
       retention_window_end_sec: Number(runIdentity?.parallax_opening_window_sec ?? 180),
       retention_window_target: Number(runIdentity?.parallax_retention_window_target ?? 0),
+    },
+    animation_direction: {
+      enabled: ltxVideoEnabled(runIdentity),
+      policy: runIdentity?.animation_policy ?? runIdentity?.ltx_video_policy ?? "disabled",
     },
     entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows),
     location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows),
@@ -1320,6 +1333,9 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const requestedReuse = String(row.image_strategy ?? "fresh").toLowerCase() === "reuse_prior_approved";
   const validEditorialReuse = requestedReuse && requestedReuseSource && reuseCandidates.has(requestedReuseSource);
   const manifest = sanitizeShotManifest(row.shot_manifest);
+  if (manifest && !manifest.animation_intent && sourceUnit?.animation_intent) {
+    manifest.animation_intent = sanitizeAnimationIntent(sourceUnit.animation_intent);
+  }
   if (manifest && !manifest.reference_slots.length && Array.isArray(row.reference_requirements)) {
     manifest.reference_slots = row.reference_requirements.map((slot, slotIndex) => ({
       ref_id: String(slot?.ref_id ?? "").trim(),
@@ -1562,6 +1578,7 @@ function sanitizeShotManifest(value) {
     })).filter((slot) => slot.ref_id),
     continuity_notes: value.continuity_notes ? String(value.continuity_notes) : null,
     motion_intent: sanitizeAuthoredMotionIntent(value.motion_intent),
+    animation_intent: sanitizeAnimationIntent(value.animation_intent),
     character_staging: sanitizeCharacterStaging(value.character_staging),
   };
 }

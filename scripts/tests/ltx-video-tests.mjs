@@ -7,7 +7,9 @@ import {
   hashFile,
   ltxApprovalMatches,
   ltxMotionPromptForCut,
+  ltxNegativePrompt,
   normalizeLtxVideoPolicy,
+  sanitizeAnimationIntent,
 } from "../lib/ltx-video-contract.mjs";
 
 assert.equal(normalizeLtxVideoPolicy("selective-ltx23"), "selective_ltx23");
@@ -27,9 +29,32 @@ const fallbackPrompt = ltxMotionPromptForCut({
     },
   },
 });
-assert.match(fallbackPrompt, /Preserve the exact accepted anime\/manhwa frame/);
+assert.match(fallbackPrompt, /accepted image as the exact first frame/);
 assert.match(fallbackPrompt, /slow_push_in/);
 assert.match(fallbackPrompt, /No new people/);
+const richFallbackPrompt = ltxMotionPromptForCut({
+  modelslab_image_prompt: "",
+  image_prompt: "A complete apartment confrontation with two characters and a desk.",
+  duration_sec: 2,
+  animation_intent: {
+    eligibility: "animate",
+    shot_class: "dialogue_pair",
+    start_state: "both characters face each other",
+    subject_motion: "the woman looks away while the man raises his eyes",
+    camera_motion: "a slow push toward the man",
+    environmental_motion: "a curtain moves gently",
+    end_state: "both settle with visible emotional distance",
+    timing_priority: "early_action",
+    animation_ready_composition: "separate silhouettes",
+    continuity_bridge: "the woman is ready to leave",
+    locked_elements: ["faces", "wardrobe", "desk"],
+  },
+});
+assert.match(richFallbackPrompt, /complete apartment confrontation/);
+assert.match(richFallbackPrompt, /From 0\.0 to 1\.8 seconds/);
+assert.match(richFallbackPrompt, /Existing UI may animate naturally/);
+assert.doesNotMatch(ltxNegativePrompt(), /text mutation/);
+assert.equal(sanitizeAnimationIntent({ eligibility: "animate", shot_class: "ui_or_screen", subject_motion: "screen pulses", camera_motion: "locked", end_state: "settles" })?.shot_class, "ui_or_screen");
 assert.equal(ltxMotionPromptForCut({ ltx_video_prompt: "Authored motion." }), "Authored motion.");
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-ltx-test-"));
@@ -43,6 +68,7 @@ const report = {
   status: "passed",
   clips: [{
     image_id: "cut_001",
+    candidate_id: "cut_001-candidate-01",
     source_image_sha256: await hashFile(sourcePath),
     normalized_video_path: videoPath,
     normalized_video_sha256: await hashFile(videoPath),
@@ -55,6 +81,7 @@ const approval = {
   report_sha256: await hashFile(reportPath),
   decisions: [{
     image_id: "cut_001",
+    candidate_id: "cut_001-candidate-01",
     decision: "accepted",
     source_image_sha256: report.clips[0].source_image_sha256,
     video_sha256: report.clips[0].normalized_video_sha256,

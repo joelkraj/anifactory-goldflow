@@ -292,6 +292,16 @@ const stages = [
     commands: ["imagegen qa"],
   },
   {
+    id: "animation_direction_plan",
+    title: "Image-aware animation direction",
+    required_input: "beat-authored animation intent + accepted image hashes + hardened prompts",
+    output_artifact: "animation_direction_plan_<episode>.json",
+    approval: "automatic",
+    validator: "animation_direction_hashes_timing_and_scene_continuity",
+    skip: "animation_policy_disabled",
+    commands: ["visual animation-plan"],
+  },
+  {
     id: "generated_video_motion",
     title: "Hash-bound LTX generated motion",
     required_input: "accepted image hashes + hardened prompts",
@@ -416,7 +426,7 @@ export function stageChecklistFor(identity = {}) {
     stage: entry.id,
     status: entry.id === "sfx_score_plan" && narratorOnly
       ? "skipped_with_waiver"
-      : ["generated_video_motion", "generated_video_motion_approval"].includes(entry.id) && ltxDisabled
+      : ["animation_direction_plan", "generated_video_motion", "generated_video_motion_approval"].includes(entry.id) && ltxDisabled
         ? "skipped_with_waiver"
       : ["parallax_asset_generation", "parallax_asset_approval"].includes(entry.id) && parallaxDisabled
         ? "skipped_with_waiver"
@@ -581,6 +591,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${media.image_concurrency} --reference-concurrency ${media.reference_concurrency}`,
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
+    animation_direction_plan: `node bin/goldflow.mjs visual animation-plan ${base}`,
     generated_video_motion: `node bin/goldflow.mjs visual ltx-video ${base} --concurrency ${media.image_concurrency}`,
     generated_video_motion_approval: `node bin/goldflow.mjs visual approve-ltx-video ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,

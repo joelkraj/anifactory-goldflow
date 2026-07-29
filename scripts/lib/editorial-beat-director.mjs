@@ -445,7 +445,8 @@ function canonicalDictionaries(factLedger) {
   return { entities, locations };
 }
 
-export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = []) {
+export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = [], options = {}) {
+  const animationEnabled = Boolean(options.animationEnabled);
   const dictionaries = canonicalDictionaries(factLedger);
   const sceneIds = new Set(atoms.map((atom) => atom.scene_id).filter(Boolean));
   const sceneContext = (timedScenes ?? []).filter((scene) => sceneIds.has(scene.scene_id)).map((scene) => ({
@@ -476,6 +477,9 @@ Hard rails:
 - Background population is neither a default nor forbidden. Use presence=explicit when the grouped atoms name a crowd/group. Use presence=implied only when a concrete local social situation logically needs anonymous people to read correctly—for example an active hearing, ceremony, class, market, public humiliation, audience reaction, staffed workplace, or assembled formation—even if the exact clause does not use the word crowd. A merely public location is insufficient. Use presence=none for private, lonely, abandoned, after-hours, isolated, or object/UI-only beats.
 - Anonymous background population is not a canonical character and does not belong in physically_visible_entity_ids. Give it a concrete description, exact local evidence for the social situation, and subordinate staging that preserves the focal subject.
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
+${animationEnabled ? `- ANIMATION MODE IS LOCKED FOR THIS PRODUCTION. Author animation_intent for every beat. This is pre-image direction: choose an animation-ready starting composition, one coherent subject action, one camera move, restrained environmental motion, a readable end state, continuity into the next shot, and immutable elements. UI/screen shots remain eligible; exact generated text legibility is not required.
+- Set eligibility=animate when generated motion adds story value. Use still_preferred only when motion would undermine a decisive frozen tableau. Never invent an action beyond local evidence.
+- Favor animation-ready staging: clear silhouettes, visible limbs, unambiguous contact, movement room, and separated depth planes. For physical contact, lock the contact point and keep the action small. For locomotion, state direction and destination. For reactions, prefer eyes, posture, breathing, hair, and one restrained gesture.` : "- ANIMATION MODE IS DISABLED. Do not return animation_intent or animation-specific direction."}
 
 ATOMS:
 ${JSON.stringify(atoms.map((atom) => ({
@@ -525,6 +529,19 @@ Return JSON only:
     "foreground_action_evidence": "exact excerpt from grouped atoms",
     "composition_intent": "specific framing, focal subject, and spatial relationship",
     "continuity_note": "local continuity only",
+    ${animationEnabled ? `"animation_intent": {
+      "eligibility": "animate|still_preferred",
+      "shot_class": "portrait_reaction|dialogue_pair|physical_contact|locomotion_action|object_insert|ui_or_screen|environment_establishing|effect_or_impact",
+      "start_state": "visible state at the accepted first frame",
+      "subject_motion": "one evidence-constrained action",
+      "camera_motion": "one continuous camera move or locked camera",
+      "environmental_motion": "restrained secondary motion",
+      "end_state": "readable end pose/state",
+      "timing_priority": "early_action|even_action|settle_hold",
+      "animation_ready_composition": "how the source still should leave room for this motion",
+      "continuity_bridge": "how the ending supports the following beat",
+      "locked_elements": ["identity, wardrobe, anatomy, props, spatial facts"]
+    },` : ""}
     "editorial_cues": [],
     "rail_exception": null
   }],
@@ -601,7 +618,8 @@ function groupingFindings(rows, atoms, factLedger) {
   return findings;
 }
 
-export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
+export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, options = {}) {
+  const animationEnabled = Boolean(options.animationEnabled);
   const rows = Array.isArray(raw?.beats) ? raw.beats.map((row) => ({
     ...row,
     location_id: canonicalId(row.location_id),
@@ -615,6 +633,21 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
   })) : [];
   if (!rows.length) throw new Error("Editorial beat director returned no beats.");
   const findings = groupingFindings(rows, atoms, factLedger);
+  if (animationEnabled) {
+    rows.forEach((row, rowIndex) => {
+      const intent = row.animation_intent;
+      const valid = intent && typeof intent === "object"
+        && ["animate", "still_preferred"].includes(String(intent.eligibility ?? ""))
+        && [
+          "portrait_reaction", "dialogue_pair", "physical_contact", "locomotion_action",
+          "object_insert", "ui_or_screen", "environment_establishing", "effect_or_impact",
+        ].includes(String(intent.shot_class ?? ""))
+        && String(intent.subject_motion ?? "").trim()
+        && String(intent.camera_motion ?? "").trim()
+        && String(intent.end_state ?? "").trim();
+      if (!valid) findings.push({ severity: "blocker", code: "editorial_animation_intent_missing_or_invalid", row_index: rowIndex });
+    });
+  }
   const blockers = findings.filter((finding) => finding.severity === "blocker");
   if (blockers.length) throw new Error(`Editorial beat contract failed: ${blockers.slice(0, 12).map((finding) => `${finding.code}[row=${finding.row_index ?? "?"}${finding.entity_id ? `,entity=${finding.entity_id}` : ""}]`).join(", ")}`);
   const atomMap = new Map(atoms.map((atom) => [atom.atom_id, atom]));
@@ -673,6 +706,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
       editorial_cues: unique(row.editorial_cues ?? []),
       visual_novelty_directive: normalizeText(row.composition_intent),
       local_continuity_note: normalizeText(row.continuity_note),
+      ...(animationEnabled ? { animation_intent: row.animation_intent } : {}),
       rail_exception: normalizeText(row.rail_exception) || null,
       retention_rail: retentionRailForTime(first.start_sec),
       hook_visual: first.start_sec < 30,

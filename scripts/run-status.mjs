@@ -1230,6 +1230,25 @@ async function ltxVideoGenerationComplete(episodeDir, episode) {
   return { done: true, evidence: `${path.basename(reportPath)} clips=${report.generated_count}; hashes=current` };
 }
 
+async function animationDirectionPlanComplete(episodeDir, episode) {
+  const reportPath = path.join(episodeDir, `animation_direction_plan_${episode}.json`);
+  const report = await readJson(reportPath, null);
+  if (!report) return { done: false, evidence: `${path.basename(reportPath)} missing` };
+  if (report.schema !== "goldflow_animation_direction_plan_v1" || report.status !== "passed" || !(report.directions ?? []).length) {
+    return { done: false, state: report.status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} invalid or empty` };
+  }
+  const sourceState = await sourceHashState(report.source_hashes);
+  if (!sourceState.count || sourceState.stale.length) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale or missing` };
+  }
+  for (const row of report.directions ?? []) {
+    if (await fileSha256(row.source_image_path) !== row.source_image_sha256 || !String(row.motion_prompt ?? "").trim()) {
+      return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale image or missing direction for ${row.image_id}` };
+    }
+  }
+  return { done: true, evidence: `${path.basename(reportPath)} directions=${report.direction_count}; candidates=${report.candidate_generation_count}; hashes=current` };
+}
+
 async function ltxVideoApprovalComplete(episodeDir, episode) {
   const base = path.join(episodeDir, "assets", "motion", "ltx23");
   const reportPath = path.join(base, `ltx_video_report_${episode}.json`);
@@ -3314,7 +3333,8 @@ async function main() {
     pace_targets: runIdentity.pace_targets ?? null,
     render_profile: flags["render-profile"] ?? runIdentity.render_profile ?? "smooth_subpixel_ken_burns",
     motion_policy: runIdentity.motion_policy ?? null,
-    ltx_video_policy: runIdentity.ltx_video_policy ?? "disabled",
+    animation_policy: runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
+    ltx_video_policy: runIdentity.ltx_video_policy ?? runIdentity.animation_policy ?? "disabled",
     parallax_policy: runIdentity.parallax_policy ?? null,
     parallax_target_max: runIdentity.parallax_target_max ?? null,
     parallax_min_spacing_sec: runIdentity.parallax_min_spacing_sec ?? null,
@@ -3361,6 +3381,17 @@ async function main() {
       };
     }
   }
+  if (!legacyIdentity && visualBeatPlan.done && ltxVideoEnabled(identity)) {
+    const beatArtifact = await readJson(visualBeatPlanPath, null);
+    const missingAnimationIntent = (beatArtifact?.beats ?? []).find((beat) => !beat.animation_intent);
+    if (missingAnimationIntent) {
+      visualBeatPlan = {
+        done: false,
+        state: "stale",
+        evidence: `visual_beat_plan.json lacks animation_intent for ${missingAnimationIntent.visual_beat_id ?? "an animation-enabled beat"}`,
+      };
+    }
+  }
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
   const visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
@@ -3374,6 +3405,7 @@ async function main() {
   const imageFocalAnalysis = focalAnalysisContractCurrent ? await imageFocalAnalysisComplete(episodeDir, episode) : null;
   const imageOutputQa = await imageOutputQaComplete(episodeDir, episode, identity);
   const ltxVideoPolicyCurrent = ltxVideoEnabled(identity);
+  const animationDirectionPlan = ltxVideoPolicyCurrent ? await animationDirectionPlanComplete(episodeDir, episode) : null;
   const ltxVideoGeneration = ltxVideoPolicyCurrent ? await ltxVideoGenerationComplete(episodeDir, episode) : null;
   const ltxVideoApproval = ltxVideoPolicyCurrent ? await ltxVideoApprovalComplete(episodeDir, episode) : null;
   const parallaxPolicyCurrent = identity.parallax_policy === "selective_inspected";
@@ -3464,6 +3496,9 @@ async function main() {
     image_output_qa: legacyIdentity && !imageOutputQaRequired(identity)
       ? { state: "skipped_with_waiver", evidence: "legacy run predates required per-cut image QA" }
       : imageOutputQa,
+    animation_direction_plan: ltxVideoPolicyCurrent
+      ? animationDirectionPlan
+      : { state: "skipped_with_waiver", evidence: "animation_policy disabled in run identity" },
     generated_video_motion: ltxVideoPolicyCurrent
       ? ltxVideoGeneration
       : { state: "skipped_with_waiver", evidence: "ltx_video_policy disabled in run identity" },

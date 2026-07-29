@@ -44,6 +44,10 @@ const AUTOMATIC_CONFIRMED_RETRY_CODES = new Set([
   "tts_audio_duration_too_short_for_text",
 ]);
 
+export function isAutomaticConfirmedRetryCode(code) {
+  return AUTOMATIC_CONFIRMED_RETRY_CODES.has(String(code ?? ""));
+}
+
 function isUncertainAsrCode(code) {
   return String(code ?? "").startsWith("tts_transcript_")
     || String(code ?? "") === "tts_required_medium_qa_missing"
@@ -130,7 +134,7 @@ export function candidateDisposition(qa, provider) {
   const blockerCodes = primaryHardBlockerCodes(qa);
   if (blockerCodes.length) {
     const manualReviewCodes = blockerCodes.filter(
-      (code) => !AUTOMATIC_CONFIRMED_RETRY_CODES.has(code),
+      (code) => !isAutomaticConfirmedRetryCode(code),
     );
     return {
       status: manualReviewCodes.length

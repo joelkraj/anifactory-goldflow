@@ -5,7 +5,9 @@ import {
   voiceContinuityDecision,
 } from "../lib/tts-selection-policy.mjs";
 import {
+  adjudicateManualReviewQaForTests,
   validateConfirmedRetryEvidenceForTests,
+  validateManualReviewEvidenceForTests,
 } from "../narration-tts-episode.mjs";
 
 function blockedQa(code) {
@@ -146,5 +148,159 @@ function testConfirmedRetryEvidenceBindsExactListenedArtifact() {
   }), /does not match the listened pre-retry artifact/i);
 }
 
+function manualReviewFixture(blockerCodes = ["tts_audio_tail_not_settled"]) {
+  const qa = {
+    status: "blocked",
+    audio_sha256: "audio-sha",
+    findings: blockerCodes.map((code) => ({ severity: "blocker", code })),
+    delivery_first_gate: { hard_blocker_codes: blockerCodes },
+  };
+  const candidate = {
+    unit_id: "unit_001",
+    provider: "qwen_local",
+    model_id: "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+    voice_id: "am_liam",
+    attempt: 1,
+    spoken_text_sha256: "text-sha",
+    synthesis_identity_sha256: "synthesis-sha",
+    audio_path: "/tmp/unit_001.wav",
+    audio_sha256: "audio-sha",
+    duration_sec: 3.5,
+    qa,
+    disposition: {
+      status: "blocked_manual_review",
+      accepted: false,
+      blocker_codes: blockerCodes,
+    },
+  };
+  const priorReport = {
+    status: "blocked",
+    narration_generation_plan_sha256: "plan-sha",
+  };
+  const priorUnitQa = {
+    status: "blocked",
+    narration_generation_plan_sha256: "plan-sha",
+    candidates: [candidate],
+    selected_units: [],
+  };
+  const evidence = {
+    schema: "goldflow_narration_tts_manual_review_v1",
+    status: "approved",
+    reviewer: "operator",
+    note: "Exact first take was heard and accepted.",
+    reviewed_at: "2026-07-29T00:00:00.000Z",
+    narration_generation_plan_sha256: "plan-sha",
+    pre_review_narration_report_sha256: "report-sha",
+    pre_review_unit_qa_sha256: "unit-qa-sha",
+    accepted_unit_count: 1,
+    accepted_units: [{
+      unit_id: "unit_001",
+      decision: "accept_first_take",
+      provider: "qwen_local",
+      attempt: 1,
+      audio_path: "/tmp/unit_001.wav",
+      audio_sha256: "audio-sha",
+      synthesis_identity_sha256: "synthesis-sha",
+      reviewed_blocker_codes: blockerCodes,
+      listen_note: "Complete, smooth, correct voice, and clean endpoint.",
+      audible_review: {
+        speech_complete: true,
+        no_skip: true,
+        no_truncation: true,
+        no_stutter: true,
+        voice_identity_acceptable: true,
+        endpoint_acceptable: true,
+      },
+    }],
+  };
+  return {
+    qa,
+    candidate,
+    priorReport,
+    priorUnitQa,
+    evidence,
+    args: {
+      planSha256: "plan-sha",
+      preReviewNarrationReport: priorReport,
+      preReviewNarrationReportSha256: "report-sha",
+      preReviewUnitQa: priorUnitQa,
+      preReviewUnitQaSha256: "unit-qa-sha",
+    },
+  };
+}
+
+function testManualAcceptanceIsExactHashBoundAndPreservesFindings() {
+  const fixture = manualReviewFixture([
+    "tts_primary_voice_continuity_not_passed",
+    "tts_primary_voice_similarity_below_minimum",
+  ]);
+  const validated = validateManualReviewEvidenceForTests({
+    evidence: fixture.evidence,
+    ...fixture.args,
+  });
+  assert.equal(validated.accepted_units.length, 1);
+  assert.equal(validated.accepted_units[0].candidate, fixture.candidate);
+
+  const adjudicated = adjudicateManualReviewQaForTests(fixture.qa, {
+    reviewer: validated.reviewer,
+    reviewedAt: validated.reviewed_at,
+    listenNote: validated.accepted_units[0].listen_note,
+    reviewedBlockerCodes: validated.accepted_units[0].reviewed_blocker_codes,
+    evidencePath: "/episode/manual-review.json",
+    evidenceSha256: "evidence-sha",
+    preReviewNarrationReportPath: "/archive/report.json",
+    preReviewNarrationReportSha256: "report-sha",
+    preReviewUnitQaPath: "/archive/unit-qa.json",
+    preReviewUnitQaSha256: "unit-qa-sha",
+  });
+  assert.equal(adjudicated.status, "passed_with_warnings");
+  assert.equal(
+    adjudicated.findings.every((finding) => (
+      finding.severity === "warning"
+      && finding.original_severity === "blocker"
+      && finding.disposition_policy === "hash_bound_manual_accept_first_take"
+    )),
+    true,
+  );
+  assert.deepEqual(
+    adjudicated.manual_review_disposition.reviewed_blocker_codes,
+    fixture.evidence.accepted_units[0].reviewed_blocker_codes.slice().sort(),
+  );
+
+  for (const stale of [
+    { narration_generation_plan_sha256: "stale-plan" },
+    { pre_review_narration_report_sha256: "stale-report" },
+    { pre_review_unit_qa_sha256: "stale-unit-qa" },
+  ]) {
+    assert.throws(() => validateManualReviewEvidenceForTests({
+      evidence: { ...fixture.evidence, ...stale },
+      ...fixture.args,
+    }), /not bound/i);
+  }
+  assert.throws(() => validateManualReviewEvidenceForTests({
+    evidence: {
+      ...fixture.evidence,
+      accepted_units: [{
+        ...fixture.evidence.accepted_units[0],
+        reviewed_blocker_codes: ["tts_audio_endpoint_discontinuity"],
+      }],
+    },
+    ...fixture.args,
+  }), /exact current blocker codes/i);
+}
+
+function testManualAcceptanceCannotWaiveAutomaticRetryCandidates() {
+  const fixture = manualReviewFixture([
+    "tts_audio_empty",
+    "tts_audio_tail_not_settled",
+  ]);
+  assert.throws(() => validateManualReviewEvidenceForTests({
+    evidence: fixture.evidence,
+    ...fixture.args,
+  }), /cannot waive failed, empty, or objectively short audio/i);
+}
+
 testHardFailuresAreNotSoftenedOrBlindlyRetried();
 testConfirmedRetryEvidenceBindsExactListenedArtifact();
+testManualAcceptanceIsExactHashBoundAndPreservesFindings();
+testManualAcceptanceCannotWaiveAutomaticRetryCandidates();

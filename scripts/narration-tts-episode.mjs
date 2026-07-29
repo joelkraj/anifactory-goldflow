@@ -14,6 +14,7 @@ import {
   confirmableDeliveryFindingCodes,
   deterministicTtsSeed,
   fullStreamDecision,
+  isAutomaticConfirmedRetryCode,
   softenPrimaryQa,
   validateSelectedUnitOrder,
   voiceContinuityDecision,
@@ -188,6 +189,268 @@ export function validateConfirmedRetryEvidenceForTests({
     });
   }
   return validated;
+}
+
+function normalizedCodeList(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean))]
+    .sort();
+}
+
+function exactStringLists(left, right) {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+export function validateManualReviewEvidenceForTests({
+  evidence,
+  planSha256,
+  preReviewNarrationReport,
+  preReviewNarrationReportSha256,
+  preReviewUnitQa,
+  preReviewUnitQaSha256,
+} = {}) {
+  if (!evidence || typeof evidence !== "object") {
+    throw new Error("Manual TTS review evidence must be a JSON object.");
+  }
+  if (evidence.schema !== "goldflow_narration_tts_manual_review_v1"
+    || evidence.status !== "approved") {
+    throw new Error(
+      "Manual TTS review evidence requires schema "
+      + "goldflow_narration_tts_manual_review_v1 and status approved.",
+    );
+  }
+  if (!String(evidence.reviewer ?? "").trim()
+    || !String(evidence.note ?? "").trim()
+    || !String(evidence.reviewed_at ?? "").trim()) {
+    throw new Error(
+      "Manual TTS review evidence requires reviewer, note, and reviewed_at.",
+    );
+  }
+  if (evidence.narration_generation_plan_sha256 !== planSha256) {
+    throw new Error(
+      "Manual TTS review evidence is not bound to the current narration plan hash.",
+    );
+  }
+  if (!preReviewNarrationReport
+    || preReviewNarrationReport.status !== "blocked"
+    || preReviewNarrationReport.narration_generation_plan_sha256 !== planSha256
+    || evidence.pre_review_narration_report_sha256
+      !== preReviewNarrationReportSha256) {
+    throw new Error(
+      "Manual TTS review evidence is not bound to the exact blocked pre-review narration report.",
+    );
+  }
+  if (!preReviewUnitQa
+    || preReviewUnitQa.status !== "blocked"
+    || preReviewUnitQa.narration_generation_plan_sha256 !== planSha256
+    || evidence.pre_review_unit_qa_sha256 !== preReviewUnitQaSha256) {
+    throw new Error(
+      "Manual TTS review evidence is not bound to the exact blocked pre-review unit-QA report.",
+    );
+  }
+  const acceptedUnits = Array.isArray(evidence.accepted_units)
+    ? evidence.accepted_units
+    : [];
+  if (!acceptedUnits.length) {
+    throw new Error(
+      "Manual TTS review evidence requires at least one accepted first-take unit.",
+    );
+  }
+  if (evidence.accepted_unit_count != null
+    && Number(evidence.accepted_unit_count) !== acceptedUnits.length) {
+    throw new Error(
+      "Manual TTS review accepted_unit_count does not match accepted_units.",
+    );
+  }
+  const duplicateIds = acceptedUnits
+    .map((row) => String(row?.unit_id ?? ""))
+    .filter((unitId, index, rows) => rows.indexOf(unitId) !== index);
+  if (duplicateIds.length) {
+    throw new Error(
+      `Manual TTS review evidence contains duplicate unit IDs: ${[
+        ...new Set(duplicateIds),
+      ].join(", ")}`,
+    );
+  }
+  const candidates = Array.isArray(preReviewUnitQa.candidates)
+    ? preReviewUnitQa.candidates
+    : [];
+  const previouslySelectedIds = new Set(
+    (preReviewUnitQa.selected_units ?? []).map((row) => String(row?.unit_id ?? "")),
+  );
+  return {
+    reviewer: String(evidence.reviewer).trim(),
+    note: String(evidence.note).trim(),
+    reviewed_at: String(evidence.reviewed_at).trim(),
+    accepted_units: acceptedUnits.map((row) => {
+      const unitId = String(row?.unit_id ?? "").trim();
+      if (!unitId) throw new Error("Manual TTS review evidence has a missing unit_id.");
+      if (row.decision !== "accept_first_take"
+        || Number(row.attempt) !== 1
+        || row.provider !== PRIMARY_TTS_PROVIDER) {
+        throw new Error(
+          `Manual TTS review for ${unitId} must be an accept_first_take `
+          + `decision for ${PRIMARY_TTS_PROVIDER} attempt 1.`,
+        );
+      }
+      if (!String(row.listen_note ?? "").trim()) {
+        throw new Error(`Manual TTS review for ${unitId} requires a listen_note.`);
+      }
+      const audibleReview = row.audible_review ?? {};
+      for (const field of [
+        "speech_complete",
+        "no_skip",
+        "no_truncation",
+        "no_stutter",
+        "voice_identity_acceptable",
+        "endpoint_acceptable",
+      ]) {
+        if (audibleReview[field] !== true) {
+          throw new Error(
+            `Manual TTS review for ${unitId} must explicitly confirm audible_review.${field}=true.`,
+          );
+        }
+      }
+      if (previouslySelectedIds.has(unitId)) {
+        throw new Error(
+          `Manual TTS review may accept only unresolved blocked_manual_review candidates; ${unitId} was already selected.`,
+        );
+      }
+      const matches = candidates.filter((candidate) => (
+        String(candidate?.unit_id ?? "") === unitId
+        && Number(candidate?.attempt) === 1
+        && candidate?.provider === PRIMARY_TTS_PROVIDER
+        && candidate?.audio_sha256 === row.audio_sha256
+        && candidate?.synthesis_identity_sha256 === row.synthesis_identity_sha256
+      ));
+      if (matches.length !== 1) {
+        throw new Error(
+          `Manual TTS review for ${unitId} does not resolve to exactly one current first-take candidate.`,
+        );
+      }
+      const candidate = matches[0];
+      if (candidate.disposition?.status !== "blocked_manual_review"
+        || candidate.disposition?.accepted !== false
+        || candidate.qa?.status !== "blocked"
+        || !candidate.audio_path
+        || !candidate.audio_sha256
+        || !candidate.synthesis_identity_sha256
+        || !(Number(candidate.duration_sec) > 0)) {
+        throw new Error(
+          `Manual TTS review for ${unitId} may accept only a complete blocked_manual_review audio candidate.`,
+        );
+      }
+      if (row.audio_path != null && row.audio_path !== candidate.audio_path) {
+        throw new Error(
+          `Manual TTS review for ${unitId} is bound to a stale audio path.`,
+        );
+      }
+      const actualBlockerCodes = normalizedCodeList(
+        (candidate.qa?.findings ?? [])
+          .filter((finding) => finding?.severity === "blocker")
+          .map((finding) => finding?.code),
+      );
+      const dispositionBlockerCodes = normalizedCodeList(
+        candidate.disposition?.blocker_codes,
+      );
+      const reviewedBlockerCodes = normalizedCodeList(row.reviewed_blocker_codes);
+      if (!actualBlockerCodes.length
+        || !exactStringLists(actualBlockerCodes, dispositionBlockerCodes)
+        || !exactStringLists(actualBlockerCodes, reviewedBlockerCodes)) {
+        throw new Error(
+          `Manual TTS review for ${unitId} must enumerate the exact current blocker codes.`,
+        );
+      }
+      const forbiddenCodes = actualBlockerCodes.filter(
+        (code) => isAutomaticConfirmedRetryCode(code),
+      );
+      if (forbiddenCodes.length) {
+        throw new Error(
+          `Manual TTS review cannot waive failed, empty, or objectively short audio for ${unitId}: ${forbiddenCodes.join(", ")}`,
+        );
+      }
+      return {
+        unit_id: unitId,
+        candidate,
+        decision: row.decision,
+        listen_note: String(row.listen_note).trim(),
+        reviewed_blocker_codes: reviewedBlockerCodes,
+        audible_review: {
+          speech_complete: true,
+          no_skip: true,
+          no_truncation: true,
+          no_stutter: true,
+          voice_identity_acceptable: true,
+          endpoint_acceptable: true,
+        },
+      };
+    }),
+  };
+}
+
+export function adjudicateManualReviewQaForTests(qa, {
+  reviewer,
+  reviewedAt,
+  listenNote,
+  reviewedBlockerCodes,
+  evidencePath = null,
+  evidenceSha256 = null,
+  preReviewNarrationReportPath = null,
+  preReviewNarrationReportSha256 = null,
+  preReviewUnitQaPath = null,
+  preReviewUnitQaSha256 = null,
+} = {}) {
+  const reviewedCodes = new Set(normalizedCodeList(reviewedBlockerCodes));
+  const findings = (qa?.findings ?? []).map((finding) => (
+    finding?.severity === "blocker" && reviewedCodes.has(String(finding.code ?? ""))
+      ? {
+          ...finding,
+          severity: "warning",
+          original_severity: "blocker",
+          disposition_policy: "hash_bound_manual_accept_first_take",
+          reviewed_by: reviewer,
+          reviewed_at: reviewedAt,
+          listen_note: listenNote,
+        }
+      : finding
+  ));
+  const remainingBlockers = findings.filter((finding) => finding?.severity === "blocker");
+  if (remainingBlockers.length) {
+    throw new Error(
+      `Manual TTS adjudication left unreviewed blockers: ${remainingBlockers
+        .map((finding) => finding.code)
+        .join(", ")}`,
+    );
+  }
+  return {
+    ...qa,
+    status: findings.length ? "passed_with_warnings" : "passed",
+    findings,
+    delivery_first_gate: qa?.delivery_first_gate
+      ? {
+          ...qa.delivery_first_gate,
+          hard_blocker_codes: [],
+          manually_reviewed_blocker_codes: [...reviewedCodes].sort(),
+        }
+      : qa?.delivery_first_gate,
+    manual_review_disposition: {
+      schema: "goldflow_narration_tts_manual_review_disposition_v1",
+      decision: "accept_first_take",
+      reviewer,
+      reviewed_at: reviewedAt,
+      listen_note: listenNote,
+      reviewed_blocker_codes: [...reviewedCodes].sort(),
+      evidence_path: evidencePath,
+      evidence_sha256: evidenceSha256,
+      pre_review_narration_report_path: preReviewNarrationReportPath,
+      pre_review_narration_report_sha256: preReviewNarrationReportSha256,
+      pre_review_unit_qa_path: preReviewUnitQaPath,
+      pre_review_unit_qa_sha256: preReviewUnitQaSha256,
+      original_qa_status: qa?.status ?? null,
+    },
+  };
 }
 
 function sha256Text(value) {
@@ -695,6 +958,7 @@ function ttsStatusContract({
   candidates,
   unitQaStatus,
   fullStreamQaStatus,
+  recoveryScope = null,
 }) {
   const results = selectedResultsForReport(units, selectedRows, candidates);
   return {
@@ -716,7 +980,9 @@ function ttsStatusContract({
     },
     post_tempo_normalized: false,
     effective_concurrency: EFFECTIVE_CONCURRENCY,
-    model_load_policy: "once_per_serial_qwen_attempt_invocation",
+    model_load_policy: recoveryScope?.mode === "hash_bound_manual_accept_first_take"
+      ? "manual_review_existing_candidates_no_model_load"
+      : "once_per_serial_qwen_attempt_invocation",
     qa_policy: QA_POLICY_VERSION,
     unit_qa_policy_version: QA_POLICY_VERSION,
     unit_qa_status: unitQaStatus,
@@ -1383,6 +1649,17 @@ async function main() {
     flags["confirmed-retry-unit-ids"] ?? flags["regenerate-unit-ids"],
     units,
   );
+  const manualReviewEvidencePath = String(
+    flags["manual-review-evidence"] ?? "",
+  ).trim()
+    ? path.resolve(flags["manual-review-evidence"])
+    : null;
+  if (manualReviewEvidencePath && requestedRecoveryScope) {
+    throw new Error(
+      "--manual-review-evidence and --confirmed-retry-unit-ids are mutually exclusive. "
+      + "Accept reviewed first takes or retry confirmed defects in separate guarded calls.",
+    );
+  }
   if (requestedRecoveryScope && !String(
     flags["confirmed-retry-evidence"] ?? "",
   ).trim()) {
@@ -1392,8 +1669,11 @@ async function main() {
     );
   }
   const planSha256 = await sha256File(planPath);
-  const priorNarrationReportBuffer = requestedRecoveryScope
+  const priorNarrationReportBuffer = requestedRecoveryScope || manualReviewEvidencePath
     ? await fs.readFile(reportPath).catch(() => null)
+    : null;
+  const priorUnitQaBuffer = manualReviewEvidencePath
+    ? await fs.readFile(unitQaPath).catch(() => null)
     : null;
   const priorNarrationReport = priorNarrationReportBuffer
     ? JSON.parse(priorNarrationReportBuffer.toString("utf8"))
@@ -1401,20 +1681,34 @@ async function main() {
   const priorNarrationReportSha256 = priorNarrationReportBuffer
     ? createHash("sha256").update(priorNarrationReportBuffer).digest("hex")
     : null;
-  const [pythonStat, runnerStat, similarityPythonStat, similarityRunnerStat] = await Promise.all([
-    fs.stat(python).catch(() => null),
-    fs.stat(runnerPath).catch(() => null),
-    fs.stat(similarityPython).catch(() => null),
-    fs.stat(similarityRunnerPath).catch(() => null),
-  ]);
-  if (!pythonStat?.isFile()) throw new Error(`Pinned local TTS Python is missing: ${python}`);
-  if (!runnerStat?.isFile()) throw new Error(`Local TTS production runner is missing: ${runnerPath}`);
-  if (!similarityPythonStat?.isFile()) {
-    throw new Error(`Pinned speaker-similarity Python is missing: ${similarityPython}`);
+  const priorUnitQa = priorUnitQaBuffer
+    ? JSON.parse(priorUnitQaBuffer.toString("utf8"))
+    : null;
+  const priorUnitQaSha256 = priorUnitQaBuffer
+    ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
+    : null;
+  if (!manualReviewEvidencePath) {
+    const [pythonStat, runnerStat, similarityPythonStat, similarityRunnerStat] = await Promise.all([
+      fs.stat(python).catch(() => null),
+      fs.stat(runnerPath).catch(() => null),
+      fs.stat(similarityPython).catch(() => null),
+      fs.stat(similarityRunnerPath).catch(() => null),
+    ]);
+    if (!pythonStat?.isFile()) throw new Error(`Pinned local TTS Python is missing: ${python}`);
+    if (!runnerStat?.isFile()) throw new Error(`Local TTS production runner is missing: ${runnerPath}`);
+    if (!similarityPythonStat?.isFile()) {
+      throw new Error(`Pinned speaker-similarity Python is missing: ${similarityPython}`);
+    }
+    if (!similarityRunnerStat?.isFile()) {
+      throw new Error(`Speaker-similarity runner is missing: ${similarityRunnerPath}`);
+    }
   }
-  if (!similarityRunnerStat?.isFile()) {
-    throw new Error(`Speaker-similarity runner is missing: ${similarityRunnerPath}`);
-  }
+  const initialRecoveryScope = manualReviewEvidencePath
+    ? {
+        mode: "hash_bound_manual_accept_first_take",
+        evidence_path: manualReviewEvidencePath,
+      }
+    : requestedRecoveryScope;
   const validation = {
     schema: "goldflow_narration_tts_plan_validation_v1",
     status: "validated_plan_only_not_synthesized",
@@ -1426,14 +1720,18 @@ async function main() {
     unit_count: units.length,
     unit_ids: units.map((unit) => unit.unit_id),
     effective_concurrency: EFFECTIVE_CONCURRENCY,
-    model_load_policy: "once_per_serial_qwen_attempt_invocation",
-    recovery_scope: requestedRecoveryScope,
+    model_load_policy: manualReviewEvidencePath
+      ? "manual_review_existing_candidates_no_model_load"
+      : "once_per_serial_qwen_attempt_invocation",
+    recovery_scope: initialRecoveryScope,
     runtime_preflight: {
-      status: "launcher_paths_validated_models_not_loaded",
-      python_path: python,
-      runner_path: runnerPath,
-      similarity_python_path: similarityPython,
-      similarity_runner_path: similarityRunnerPath,
+      status: manualReviewEvidencePath
+        ? "manual_review_existing_candidates_no_synthesis_runtime_required"
+        : "launcher_paths_validated_models_not_loaded",
+      python_path: manualReviewEvidencePath ? null : python,
+      runner_path: manualReviewEvidencePath ? null : runnerPath,
+      similarity_python_path: manualReviewEvidencePath ? null : similarityPython,
+      similarity_runner_path: manualReviewEvidencePath ? null : similarityRunnerPath,
       model_pins_checked_during_plan_only: false,
     },
     policy,
@@ -1481,7 +1779,7 @@ async function main() {
   ensureArg("--unit-qa-whisper-model", "small");
   const helpers = await import("./modelslab-qwen-episode-audio.mjs");
 
-  const previousQa = await readJson(unitQaPath, null);
+  const previousQa = priorUnitQa ?? await readJson(unitQaPath, null);
   const previousQaByAudioHash = new Map(
     (previousQa?.candidates ?? []).flatMap((candidate) => (
       candidate?.qa?.audio_sha256 ? [[candidate.qa.audio_sha256, candidate.qa]] : []
@@ -1490,6 +1788,23 @@ async function main() {
   const candidates = [];
   const attemptEvents = [];
   const selected = new Map();
+  const existingCandidateRow = (unit, candidate, unitQa) => ({
+    ...unit,
+    text: unit.spoken_text,
+    segment_id: unit.segment_id
+      ?? unit.source_segment_ids?.[0]
+      ?? unit.inherited_segment_id
+      ?? unit.unit_id,
+    speaker: unit.speaker ?? "NARRATOR",
+    voice_id: policy.primary.voice_id,
+    provider: candidate.provider,
+    model_id: candidate.model_id,
+    attempt: candidate.attempt,
+    wav: candidate.audio_path,
+    duration_sec: candidate.duration_sec,
+    synthesis_identity_sha256: candidate.synthesis_identity_sha256,
+    unit_qa: unitQa,
+  });
 
   const qaSynthesis = async (route, attempt, targetUnits) => {
     const provider = PRIMARY_TTS_PROVIDER;
@@ -1655,52 +1970,188 @@ async function main() {
     return rows;
   };
 
-  await qaSynthesis("qwen", 1, units);
-  let unresolved = units.filter((unit) => !selected.has(unit.unit_id));
-  const automaticRetryIds = new Set(
-    candidates
-      .filter((candidate) => (
-        candidate.attempt === 1
-        && candidate.disposition?.status === "confirmed_retry_required"
-      ))
-      .map((candidate) => String(candidate.unit_id)),
-  );
   let recoveryScope = requestedRecoveryScope;
-  if (requestedRecoveryScope) {
-    const requestedIds = requestedRecoveryScope.requested_unit_ids;
-    const evidencePath = path.resolve(flags["confirmed-retry-evidence"]);
-    const evidence = await readJson(evidencePath, null);
-    const validatedEvidence = validateConfirmedRetryEvidenceForTests({
+  if (manualReviewEvidencePath) {
+    const evidenceBuffer = await fs.readFile(manualReviewEvidencePath);
+    const evidenceSha256 = createHash("sha256").update(evidenceBuffer).digest("hex");
+    const evidence = JSON.parse(evidenceBuffer.toString("utf8"));
+    const validatedReview = validateManualReviewEvidenceForTests({
       evidence,
-      requestedUnitIds: requestedIds,
       planSha256,
-      priorReport: priorNarrationReport,
-      priorReportSha256: priorNarrationReportSha256,
-      currentCandidates: candidates,
+      preReviewNarrationReport: priorNarrationReport,
+      preReviewNarrationReportSha256: priorNarrationReportSha256,
+      preReviewUnitQa: previousQa,
+      preReviewUnitQaSha256: priorUnitQaSha256,
     });
-    for (const unitId of requestedIds) selected.delete(unitId);
-    for (const unitId of requestedIds) automaticRetryIds.add(unitId);
-    unresolved = units.filter((unit) => !selected.has(unit.unit_id));
+    const preReviewArchiveDir = path.join(
+      episodeDir,
+      "reports",
+      "recovery",
+      `${invocationId}-tts-manual-review`,
+    );
+    const preReviewNarrationReportPath = path.join(
+      preReviewArchiveDir,
+      `pre_review_narration_tts_report_${episode}.json`,
+    );
+    const preReviewUnitQaPath = path.join(
+      preReviewArchiveDir,
+      `pre_review_narration_tts_unit_qa_${episode}.json`,
+    );
+    await fs.mkdir(preReviewArchiveDir, { recursive: true });
+    await Promise.all([
+      fs.writeFile(preReviewNarrationReportPath, priorNarrationReportBuffer),
+      fs.writeFile(preReviewUnitQaPath, priorUnitQaBuffer),
+    ]);
+    candidates.push(...(previousQa.candidates ?? []));
+    const candidateRows = previousQa.candidates ?? [];
+    const previousSelectionById = new Map(
+      (previousQa.selected_units ?? []).map((row) => [String(row.unit_id), row]),
+    );
+    const reviewedById = new Map(
+      validatedReview.accepted_units.map((row) => [row.unit_id, row]),
+    );
+    for (const unit of units) {
+      const reviewed = reviewedById.get(unit.unit_id);
+      const previousSelection = previousSelectionById.get(unit.unit_id);
+      let candidate = null;
+      let selectedQa = null;
+      if (reviewed) {
+        candidate = reviewed.candidate;
+        const sidecarPath = String(candidate.audio_path).replace(/\.wav$/iu, ".json");
+        const sidecar = await readJson(sidecarPath, null);
+        if (!sidecar
+          || sidecar.output_sha256 !== candidate.audio_sha256
+          || sidecar.synthesis_identity_sha256
+            !== candidate.synthesis_identity_sha256) {
+          throw new Error(
+            `Manual TTS review candidate ${unit.unit_id} lacks a matching synthesis sidecar.`,
+          );
+        }
+        selectedQa = adjudicateManualReviewQaForTests(candidate.qa, {
+          reviewer: validatedReview.reviewer,
+          reviewedAt: validatedReview.reviewed_at,
+          listenNote: reviewed.listen_note,
+          reviewedBlockerCodes: reviewed.reviewed_blocker_codes,
+          evidencePath: manualReviewEvidencePath,
+          evidenceSha256,
+          preReviewNarrationReportPath,
+          preReviewNarrationReportSha256: priorNarrationReportSha256,
+          preReviewUnitQaPath,
+          preReviewUnitQaSha256: priorUnitQaSha256,
+        });
+        const event = {
+          schema: "goldflow_narration_tts_manual_review_event_v1",
+          invocation_id: invocationId,
+          recorded_at: new Date().toISOString(),
+          unit_id: unit.unit_id,
+          provider: candidate.provider,
+          attempt: candidate.attempt,
+          status: "accepted_first_take_after_hash_bound_manual_review",
+          spoken_text_sha256: candidate.spoken_text_sha256,
+          audio_sha256: candidate.audio_sha256,
+          synthesis_identity_sha256: candidate.synthesis_identity_sha256,
+          reviewed_blocker_codes: reviewed.reviewed_blocker_codes,
+          review_evidence_path: manualReviewEvidencePath,
+          review_evidence_sha256: evidenceSha256,
+        };
+        attemptEvents.push(event);
+        await fs.appendFile(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
+      } else if (previousSelection) {
+        const matches = candidateRows.filter((row) => (
+          String(row?.unit_id ?? "") === unit.unit_id
+          && Number(row?.attempt) === Number(previousSelection.attempt)
+          && row?.audio_sha256 === previousSelection.audio_sha256
+          && row?.synthesis_identity_sha256
+            === previousSelection.synthesis_identity_sha256
+        ));
+        if (matches.length !== 1
+          || candidateDisposition(previousSelection.qa, PRIMARY_TTS_PROVIDER).accepted !== true) {
+          throw new Error(
+            `Pre-review selected candidate provenance is stale for ${unit.unit_id}.`,
+          );
+        }
+        [candidate] = matches;
+        selectedQa = previousSelection.qa;
+      }
+      if (!candidate) continue;
+      if (candidate.spoken_text_sha256 !== unit.spoken_text_sha256
+        || candidate.provider !== policy.primary.provider
+        || candidate.voice_id !== policy.primary.voice_id
+        || candidate.model_id !== policy.primary.model_id
+        || candidate.audio_sha256 !== selectedQa?.audio_sha256
+        || await sha256File(candidate.audio_path) !== candidate.audio_sha256) {
+        throw new Error(
+          `Existing reviewed TTS candidate identity or audio hash is stale for ${unit.unit_id}.`,
+        );
+      }
+      selected.set(
+        unit.unit_id,
+        existingCandidateRow(unit, candidate, selectedQa),
+      );
+    }
     recoveryScope = {
-      ...requestedRecoveryScope,
-      status: "validated_against_confirmed_listen_evidence",
-      evidence_path: evidencePath,
-      evidence_sha256: await sha256File(evidencePath),
-      pre_retry_narration_report_sha256: priorNarrationReportSha256,
-      confirmed_artifacts: validatedEvidence,
-      primary_unresolved_unit_ids: unresolved.map((unit) => unit.unit_id),
+      mode: "hash_bound_manual_accept_first_take",
+      status: "validated_existing_candidates_no_synthesis",
+      evidence_path: manualReviewEvidencePath,
+      evidence_sha256: evidenceSha256,
+      pre_review_narration_report_sha256: priorNarrationReportSha256,
+      pre_review_narration_report_path: preReviewNarrationReportPath,
+      pre_review_unit_qa_sha256: priorUnitQaSha256,
+      pre_review_unit_qa_path: preReviewUnitQaPath,
+      reviewer: validatedReview.reviewer,
+      reviewed_at: validatedReview.reviewed_at,
+      accepted_unit_ids: validatedReview.accepted_units.map((row) => row.unit_id),
+      accepted_unit_count: validatedReview.accepted_units.length,
+      model_loaded: false,
+      synthesis_invoked: false,
     };
+  } else {
+    await qaSynthesis("qwen", 1, units);
+    const automaticRetryIds = new Set(
+      candidates
+        .filter((candidate) => (
+          candidate.attempt === 1
+          && candidate.disposition?.status === "confirmed_retry_required"
+        ))
+        .map((candidate) => String(candidate.unit_id)),
+    );
+    if (requestedRecoveryScope) {
+      const requestedIds = requestedRecoveryScope.requested_unit_ids;
+      const evidencePath = path.resolve(flags["confirmed-retry-evidence"]);
+      const evidence = await readJson(evidencePath, null);
+      const validatedEvidence = validateConfirmedRetryEvidenceForTests({
+        evidence,
+        requestedUnitIds: requestedIds,
+        planSha256,
+        priorReport: priorNarrationReport,
+        priorReportSha256: priorNarrationReportSha256,
+        currentCandidates: candidates,
+      });
+      for (const unitId of requestedIds) selected.delete(unitId);
+      for (const unitId of requestedIds) automaticRetryIds.add(unitId);
+      recoveryScope = {
+        ...requestedRecoveryScope,
+        status: "validated_against_confirmed_listen_evidence",
+        evidence_path: evidencePath,
+        evidence_sha256: await sha256File(evidencePath),
+        pre_retry_narration_report_sha256: priorNarrationReportSha256,
+        confirmed_artifacts: validatedEvidence,
+      };
+    }
+    // Keep first takes unless synthesis objectively failed/returned empty or
+    // too-short audio, or a hash-bound human listen confirms a skip,
+    // truncation, or stutter. Other acoustic/identity blockers stop for review;
+    // they never trigger an automatic regeneration.
+    const automaticRetryUnits = units.filter(
+      (unit) => automaticRetryIds.has(String(unit.unit_id)),
+    );
+    if (automaticRetryUnits.length) {
+      await qaSynthesis("qwen", 2, automaticRetryUnits);
+    }
   }
-  // Keep first takes unless synthesis objectively failed/returned empty or
-  // too-short audio, or a hash-bound human listen confirms a skip,
-  // truncation, or stutter. Other acoustic/identity blockers stop for review;
-  // they never trigger an automatic regeneration.
-  const automaticRetryUnits = units.filter(
-    (unit) => automaticRetryIds.has(String(unit.unit_id)),
-  );
-  if (automaticRetryUnits.length) {
-    await qaSynthesis("qwen", 2, automaticRetryUnits);
-    unresolved = unresolved.filter((unit) => !selected.has(unit.unit_id));
+  let unresolved = units.filter((unit) => !selected.has(unit.unit_id));
+  if (recoveryScope) {
+    recoveryScope.primary_unresolved_unit_ids = unresolved.map((unit) => unit.unit_id);
   }
 
   const selectedRows = units.flatMap((unit) => {
@@ -1753,6 +2204,7 @@ async function main() {
       candidates,
       unitQaStatus: unitQaReport.status,
       fullStreamQaStatus: "not_run_due_to_unit_blockers",
+      recoveryScope,
     });
     await atomicWriteJson(fullQaPath, {
       schema: "goldflow_narration_full_stream_qa_v1",
@@ -1834,6 +2286,7 @@ async function main() {
       candidates,
       unitQaStatus: unitQaReport.status,
       fullStreamQaStatus,
+      recoveryScope,
     });
     await atomicWriteJson(fullQaPath, {
       schema: "goldflow_narration_full_stream_qa_v1",
@@ -2035,6 +2488,7 @@ async function main() {
     candidates,
     unitQaStatus: unitQaReport.status,
     fullStreamQaStatus: fullQaReport.status,
+    recoveryScope,
   });
   await atomicWriteJson(stitchReportPath, {
     schema: "goldflow_narration_stitch_report_v1",

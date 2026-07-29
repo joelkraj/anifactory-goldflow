@@ -753,6 +753,9 @@ export function validateNarrationTtsPolicyForTests(identity) {
     fallback: null,
     unit_contract: policy.unit_contract,
     stitch_contract: policy.stitch_contract,
+    retry_policy: policy.retry_policy,
+    retry_contract: policy.retry_contract,
+    synthesis_contract: policy.synthesis_contract,
     qa_policy: policy.qa_policy,
   };
 }

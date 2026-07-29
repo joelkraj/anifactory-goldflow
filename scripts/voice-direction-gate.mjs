@@ -3382,6 +3382,12 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
   const blockers = [];
   for (const unit of units) {
     const sourceText = String(unit?.source_text ?? "").trim();
+    const spokenText = String(
+      unit?.spoken_text
+        ?? unit?.tts_spoken_text
+        ?? unit?.qwen_spoken_text
+        ?? "",
+    ).trim();
     const refs = Array.isArray(unit?.source_unit_refs) ? unit.source_unit_refs : [];
     const exactSourceJoin = refs.map((ref) => String(ref?.source_text ?? "")).filter(Boolean).join(" ").trim();
     if (!refs.length || sourceText !== exactSourceJoin) {
@@ -3409,14 +3415,15 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
         source_text: sourceText,
       });
     }
-    if (!/[.!?…]["”’\])]*$/u.test(sourceText)) {
+    if (!/[.!?…]["”’\])]*$/u.test(spokenText)) {
       blockers.push({
         code: "tts_unit_missing_terminal_punctuation",
         unit_id: unit?.unit_id ?? null,
         source_text: sourceText,
+        spoken_text: spokenText,
       });
     }
-    const spokenWordCount = words(unit?.spoken_text ?? "").length;
+    const spokenWordCount = words(spokenText).length;
     if (spokenWordCount > 60) {
       blockers.push({
         code: "tts_unit_exceeds_hard_word_maximum",

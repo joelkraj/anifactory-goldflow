@@ -6736,6 +6736,39 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
     "passed",
   );
 
+  const attributionSource = "She looked directly at Joey and said,";
+  const attributionPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_attribution_override",
+    performance_units: [{
+      kind: "narration",
+      speaker: "NARRATOR",
+      text: attributionSource,
+      performed_text: attributionSource,
+      caption_text: attributionSource,
+    }],
+  }], {
+    ttsProvider: "qwen_local",
+    ttsOverrides: {
+      replacements: [{
+        from: attributionSource,
+        to: "She looked directly at Joey and spoke.",
+        scope: "tts_spoken_text",
+      }],
+      pronunciation_map: [],
+    },
+  });
+  assert.equal(attributionPlan.status, "passed");
+  assert.equal(attributionPlan.units[0].source_text, attributionSource);
+  assert.equal(attributionPlan.units[0].caption_text, attributionSource);
+  assert.equal(
+    attributionPlan.units[0].spoken_text,
+    "She looked directly at Joey and spoke.",
+  );
+  assert.equal(
+    attributionPlan.sentence_unit_boundary_integrity.status,
+    "passed",
+  );
+
   const before = "Ronan stopped beside the gate and listened carefully for movement.";
   const after = "The courtyard answered with another violent crack beneath his boots.";
   const finalLine = "He kept moving because the warning had already named him.";

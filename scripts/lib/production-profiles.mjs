@@ -13,7 +13,8 @@ const profiles = {
     media: {
       tts_concurrency: 1,
       kokoro_tts_concurrency: 1,
-      qwen_tts_concurrency: 15,
+      local_qwen_tts_concurrency: 1,
+      qwen_tts_concurrency: 1,
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,
@@ -53,7 +54,8 @@ const profiles = {
     media: {
       tts_concurrency: 1,
       kokoro_tts_concurrency: 1,
-      qwen_tts_concurrency: 15,
+      local_qwen_tts_concurrency: 1,
+      qwen_tts_concurrency: 1,
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,

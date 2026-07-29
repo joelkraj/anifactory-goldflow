@@ -23,7 +23,7 @@ const stages = [
     output_artifact: "run_identity.json",
     approval: "automatic",
     validator: "run_identity_v2_or_legacy_adapter",
-    commands: ["run preflight"],
+    commands: ["run preflight", "run relock-tts"],
   },
   {
     id: "source_ingest",

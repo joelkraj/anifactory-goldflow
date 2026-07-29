@@ -2,11 +2,16 @@
 
 Date: 2026-07-26
 
-## Fixed-voice follow-up
+> Historical audit and bake-off evidence. Its provider recommendations were
+> superseded by the operator-approved Qwen3-TTS 1.7B Base route with the exact
+> Liam reference clone. See
+> `docs/audits/2026-07-28-qwen-liam-production-default.md`.
+
+## Historical fixed-voice follow-up
 
 The later operator clarification removed Joel voice-clone similarity from the
-requirement. A current fixed/preset-voice screen and full bake-off therefore
-supersedes the continuity-first provider recommendation for future narration:
+requirement. A fixed/preset-voice screen and full bake-off then superseded the
+continuity-first provider recommendation:
 Supertonic 3 `M3`, 8 steps, speed 1.12 is the recommended bounded production proof
 for clean, fast, coherent local TTS. See
 `docs/audits/2026-07-26-fixed-voice-local-tts-bakeoff.md`. Existing productions

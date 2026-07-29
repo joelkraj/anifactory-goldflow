@@ -77,6 +77,26 @@ const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REF
 
 let cachedKey = null;
 
+function isDeliveryFirstLocalNarrator(provider) {
+  return ["kokoro_local", "qwen_local"].includes(String(provider ?? ""));
+}
+
+function softenUncertainTranscriptFindings(findings, provider) {
+  if (!isDeliveryFirstLocalNarrator(provider)) return findings;
+  return (findings ?? []).map((finding) => (
+    finding?.severity === "blocker"
+      && String(finding?.code ?? "").startsWith("tts_transcript_")
+      ? {
+          ...finding,
+          severity: "warning",
+          original_severity: "blocker",
+          disposition_policy: "uncertain_asr_warning_confirm_by_listen",
+          automatic_retry_allowed: false,
+        }
+      : finding
+  ));
+}
+
 function parseFlags(parts) {
   const parsed = {};
   for (let index = 0; index < parts.length; index += 1) {
@@ -1396,6 +1416,8 @@ function pcmMetricsFromBuffer(buffer, sampleRate) {
       rms_dbfs: null,
       leading_silence_sec: 0,
       trailing_silence_sec: 0,
+      leading_silence_sample_count: 0,
+      trailing_silence_sample_count: 0,
     };
   }
   let peak = 0;
@@ -1493,6 +1515,12 @@ function pcmMetricsFromBuffer(buffer, sampleRate) {
     last_sample_dbfs: dbfs(samples[sampleCount - 1]),
     leading_silence_sec: Number(leadingSilenceSec.toFixed(6)),
     trailing_silence_sec: Number(trailingSilenceSec.toFixed(6)),
+    leading_silence_sample_count: firstActiveSample === sampleCount
+      ? sampleCount
+      : firstActiveSample,
+    trailing_silence_sample_count: lastActiveSample < 0
+      ? sampleCount
+      : Math.max(0, sampleCount - lastActiveSample - 1),
     active_start_sec: Number((firstActiveSample === sampleCount ? 0 : firstActiveSample / sampleRate).toFixed(6)),
     active_end_sec: Number((lastActiveSample < 0 ? 0 : (lastActiveSample + 1) / sampleRate).toFixed(6)),
     active_intervals_sec: activeIntervals.map((row) => ({
@@ -2224,7 +2252,7 @@ async function runUnitOutputQa(results) {
   const rows = measurements.map(({ row, audio_sha256, metrics }) => {
     const recognized = reusableTranscripts.get(String(row.unit_id)) ?? freshTranscripts.get(String(row.unit_id)) ?? null;
     const audioFindings = audioQaFindings(metrics, row);
-    const deliveryFirstPrimary = String(row.provider ?? "") === "kokoro_local";
+    const deliveryFirstPrimary = isDeliveryFirstLocalNarrator(row.provider);
     const transcriptQaRequired = unitTranscriptQa && !deliveryFirstPrimary;
     const transcript = recognized ? transcriptQa(row.text, recognized.text, {
       equivalentPhrases: transcriptEquivalentPhrases(row),
@@ -2232,7 +2260,13 @@ async function runUnitOutputQa(results) {
       blockAnySubstitution: !deliveryFirstPrimary,
       blockIsolatedEdits: !deliveryFirstPrimary,
     }) : null;
-    const findings = [...audioFindings, ...(transcript?.findings ?? [])];
+    let findings = [
+      ...audioFindings,
+      ...softenUncertainTranscriptFindings(
+        transcript?.findings ?? [],
+        row.provider,
+      ),
+    ];
     if (transcriptQaRequired && transcriptEngineError && !recognized) {
       findings.push({
         severity: "blocker",
@@ -2252,7 +2286,7 @@ async function runUnitOutputQa(results) {
           ? "tts_primary_transcript_qa_deferred_to_full_stream"
           : "tts_transcript_qa_explicitly_disabled",
         note: deliveryFirstPrimary
-          ? "Puck unit transcript QA is intentionally deferred to stitched-stream Whisper and official word timing."
+          ? "Local narrator transcript QA is diagnostic; uncertain ASR differences require listening and never trigger automatic regeneration."
           : "Acoustic QA ran, but transcript fidelity was not independently checked.",
       });
     }
@@ -2314,7 +2348,7 @@ async function runUnitOutputQa(results) {
   const transcriptOnlyBlockedIndexes = rows
     .map((row, index) => ({ row, index }))
     .filter(({ row, index }) => {
-      if (String(measurements[index]?.row?.provider ?? "") === "kokoro_local") {
+      if (isDeliveryFirstLocalNarrator(measurements[index]?.row?.provider)) {
         return false;
       }
       const blockers = row.findings.filter((finding) => finding.severity === "blocker");
@@ -2325,7 +2359,7 @@ async function runUnitOutputQa(results) {
     measurements
       .map(({ row }, index) => [
         index,
-        String(row.provider ?? "") === "kokoro_local" ? [] : requiredMediumQaReasons(row),
+        isDeliveryFirstLocalNarrator(row.provider) ? [] : requiredMediumQaReasons(row),
       ])
       .filter(([, reasons]) => reasons.length > 0),
   );
@@ -2451,36 +2485,178 @@ function concatLine(filePath) {
   return `file '${filePath.replaceAll("'", "'\\''")}'`;
 }
 
-async function writeSilenceWav(filePath, durationSec) {
-  if (durationSec <= 0) return null;
+function secondsToSampleCount(value, sampleRate = stitchSampleRate) {
+  return Math.max(0, Math.round(Number(value ?? 0) * sampleRate));
+}
+
+function metricSilenceSampleCount(metrics, sampleField, secondsField, sampleRate) {
+  const exact = Number(metrics?.[sampleField]);
+  if (Number.isInteger(exact) && exact >= 0) return exact;
+  return secondsToSampleCount(metrics?.[secondsField], sampleRate);
+}
+
+async function writeSilenceWav(filePath, sampleCount) {
+  if (!Number.isInteger(sampleCount) || sampleCount <= 0) return null;
   if (await exists(filePath)) return filePath;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await run("ffmpeg", [
     "-y",
     "-f", "lavfi",
     "-i", `anullsrc=r=${stitchSampleRate}:cl=mono`,
-    "-t", durationSec.toFixed(3),
+    "-af", `atrim=end_sample=${sampleCount}`,
     "-acodec", "pcm_s16le",
     filePath,
   ]);
   return filePath;
 }
 
-function stitchBoundaryPadding(leftMetrics, rightMetrics, targetGapSec, edgePadSec = stitchEdgePadSec) {
-  const retainedLeft = Math.min(edgePadSec, Math.max(0, Number(leftMetrics?.trailing_silence_sec ?? 0)));
-  const retainedRight = Math.min(edgePadSec, Math.max(0, Number(rightMetrics?.leading_silence_sec ?? 0)));
-  const inserted = Math.max(0, targetGapSec - retainedLeft - retainedRight);
+function balancedRetainedSamples(leftAvailable, rightAvailable, targetSamples) {
+  if (leftAvailable + rightAvailable <= targetSamples) {
+    return { left: leftAvailable, right: rightAvailable };
+  }
+  const leftHalf = Math.floor(targetSamples / 2);
+  const rightHalf = targetSamples - leftHalf;
+  if (leftAvailable < leftHalf) {
+    return { left: leftAvailable, right: targetSamples - leftAvailable };
+  }
+  if (rightAvailable < rightHalf) {
+    return { left: targetSamples - rightAvailable, right: rightAvailable };
+  }
+  return { left: leftHalf, right: rightHalf };
+}
+
+function stitchBoundaryPadding(
+  leftMetrics,
+  rightMetrics,
+  targetGapSec,
+  edgePadSec = stitchEdgePadSec,
+  sampleRate = stitchSampleRate,
+) {
+  const targetSamples = secondsToSampleCount(targetGapSec, sampleRate);
+  const edgePadSamples = secondsToSampleCount(edgePadSec, sampleRate);
+  const leftAvailable = Math.min(
+    edgePadSamples,
+    metricSilenceSampleCount(
+      leftMetrics,
+      "trailing_silence_sample_count",
+      "trailing_silence_sec",
+      sampleRate,
+    ),
+  );
+  const rightAvailable = Math.min(
+    edgePadSamples,
+    metricSilenceSampleCount(
+      rightMetrics,
+      "leading_silence_sample_count",
+      "leading_silence_sec",
+      sampleRate,
+    ),
+  );
+  const retained = balancedRetainedSamples(
+    leftAvailable,
+    rightAvailable,
+    targetSamples,
+  );
+  const insertedSamples = targetSamples - retained.left - retained.right;
   return {
-    target_gap_sec: Number(targetGapSec.toFixed(6)),
-    retained_left_trailing_silence_sec: Number(retainedLeft.toFixed(6)),
-    retained_right_leading_silence_sec: Number(retainedRight.toFixed(6)),
-    inserted_silence_sec: Number(inserted.toFixed(6)),
-    effective_gap_sec: Number((retainedLeft + retainedRight + inserted).toFixed(6)),
+    sample_rate_hz: sampleRate,
+    target_gap_sample_count: targetSamples,
+    available_left_trailing_silence_sample_count: leftAvailable,
+    available_right_leading_silence_sample_count: rightAvailable,
+    retained_left_trailing_silence_sample_count: retained.left,
+    retained_right_leading_silence_sample_count: retained.right,
+    trimmed_left_trailing_silence_sample_count: leftAvailable - retained.left,
+    trimmed_right_leading_silence_sample_count: rightAvailable - retained.right,
+    inserted_silence_sample_count: insertedSamples,
+    effective_gap_sample_count: retained.left + retained.right + insertedSamples,
+    target_gap_sec: Number((targetSamples / sampleRate).toFixed(6)),
+    retained_left_trailing_silence_sec: Number((retained.left / sampleRate).toFixed(6)),
+    retained_right_leading_silence_sec: Number((retained.right / sampleRate).toFixed(6)),
+    inserted_silence_sec: Number((insertedSamples / sampleRate).toFixed(6)),
+    effective_gap_sec: Number((
+      (retained.left + retained.right + insertedSamples) / sampleRate
+    ).toFixed(6)),
   };
 }
 
-export function stitchBoundaryPaddingForTests(leftMetrics, rightMetrics, targetGapSec, edgePadSec) {
-  return stitchBoundaryPadding(leftMetrics, rightMetrics, targetGapSec, edgePadSec);
+export function stitchBoundaryPaddingForTests(
+  leftMetrics,
+  rightMetrics,
+  targetGapSec,
+  edgePadSec,
+  sampleRate = 24000,
+) {
+  return stitchBoundaryPadding(
+    leftMetrics,
+    rightMetrics,
+    targetGapSec,
+    edgePadSec,
+    sampleRate,
+  );
+}
+
+function stitchEffectiveBoundaryContract(
+  leftMetrics,
+  rightMetrics,
+  targetGapSec,
+  insertedSilenceSampleCount,
+  sampleRate = stitchSampleRate,
+) {
+  const targetSamples = secondsToSampleCount(targetGapSec, sampleRate);
+  const retainedLeft = metricSilenceSampleCount(
+    leftMetrics,
+    "trailing_silence_sample_count",
+    "trailing_silence_sec",
+    sampleRate,
+  );
+  const retainedRight = metricSilenceSampleCount(
+    rightMetrics,
+    "leading_silence_sample_count",
+    "leading_silence_sec",
+    sampleRate,
+  );
+  const insertedSamples = Number.isInteger(insertedSilenceSampleCount)
+    ? Math.max(0, insertedSilenceSampleCount)
+    : Math.max(0, targetSamples - retainedLeft - retainedRight);
+  const effectiveSamples = retainedLeft + retainedRight + insertedSamples;
+  const exact = effectiveSamples === targetSamples;
+  return {
+    status: exact ? "passed" : "blocked",
+    sample_rate_hz: sampleRate,
+    target_gap_sample_count: targetSamples,
+    retained_left_trailing_silence_sample_count: retainedLeft,
+    retained_right_leading_silence_sample_count: retainedRight,
+    inserted_silence_sample_count: insertedSamples,
+    effective_gap_sample_count: effectiveSamples,
+    target_gap_sec: Number((targetSamples / sampleRate).toFixed(6)),
+    retained_left_trailing_silence_sec: Number((retainedLeft / sampleRate).toFixed(6)),
+    retained_right_leading_silence_sec: Number((retainedRight / sampleRate).toFixed(6)),
+    inserted_silence_sec: Number((insertedSamples / sampleRate).toFixed(6)),
+    effective_gap_sec: Number((effectiveSamples / sampleRate).toFixed(6)),
+    blocker: exact ? null : {
+      code: retainedLeft + retainedRight > targetSamples
+        ? "tts_join_retained_edge_silence_exceeds_target"
+        : "tts_join_effective_gap_sample_count_mismatch",
+      expected_sample_count: targetSamples,
+      actual_sample_count: effectiveSamples,
+    },
+  };
+}
+
+export function stitchEffectiveBoundaryContractForTests(
+  leftMetrics,
+  rightMetrics,
+  targetGapSec,
+  insertedSilenceSampleCount,
+  sampleRate = 24000,
+) {
+  return stitchEffectiveBoundaryContract(
+    leftMetrics,
+    rightMetrics,
+    targetGapSec,
+    insertedSilenceSampleCount,
+    sampleRate,
+  );
 }
 
 function firstSourceSegmentId(row) {
@@ -2496,23 +2672,67 @@ async function prepareStitchInput(row, index, options = {}) {
   if (!metrics || row.unit_qa?.status === "blocked") {
     throw new Error(`Refusing to prepare stitch input ${row?.unit_id ?? index}: per-unit audio QA is missing or blocked.`);
   }
-  const leading = Math.max(0, Number(metrics.leading_silence_sec ?? 0));
-  const trailing = Math.max(0, Number(metrics.trailing_silence_sec ?? 0));
   const duration = Math.max(0, Number(metrics.duration_sec ?? row.duration_sec ?? 0));
-  const trimStart = Math.max(0, leading - stitchEdgePadSec);
-  const trimEnd = Math.min(duration, duration - Math.max(0, trailing - stitchEdgePadSec));
-  const contentDuration = trimEnd - trimStart;
+  const sourceSampleCount = Number.isInteger(Number(metrics.sample_count))
+    && Number(metrics.sample_count) > 0
+    ? Number(metrics.sample_count)
+    : secondsToSampleCount(duration);
+  const leadingSamples = Math.min(
+    sourceSampleCount,
+    metricSilenceSampleCount(
+      metrics,
+      "leading_silence_sample_count",
+      "leading_silence_sec",
+      stitchSampleRate,
+    ),
+  );
+  const trailingSamples = Math.min(
+    sourceSampleCount,
+    metricSilenceSampleCount(
+      metrics,
+      "trailing_silence_sample_count",
+      "trailing_silence_sec",
+      stitchSampleRate,
+    ),
+  );
+  const edgePadSamples = secondsToSampleCount(stitchEdgePadSec);
+  const retainedLeadingSamples = Math.min(
+    leadingSamples,
+    Number.isInteger(options.retainedLeadingSampleCap)
+      ? Math.max(0, options.retainedLeadingSampleCap)
+      : edgePadSamples,
+  );
+  const retainedTrailingSamples = Math.min(
+    trailingSamples,
+    Number.isInteger(options.retainedTrailingSampleCap)
+      ? Math.max(0, options.retainedTrailingSampleCap)
+      : edgePadSamples,
+  );
+  const trimStartSamples = Math.max(0, leadingSamples - retainedLeadingSamples);
+  const trimEndSamples = Math.min(
+    sourceSampleCount,
+    sourceSampleCount - Math.max(0, trailingSamples - retainedTrailingSamples),
+  );
+  const contentSampleCount = trimEndSamples - trimStartSamples;
+  const contentDuration = contentSampleCount / stitchSampleRate;
   if (contentDuration < 0.2) throw new Error(`Refusing to stitch ${row.unit_id}: padding-aware trim would leave ${contentDuration.toFixed(3)}s.`);
   const repairTailSilenceSec = options?.repairTailUnitIds?.has(String(row.unit_id))
     ? Math.max(0.06, Number(options.repairTailSilenceSec ?? 0.06))
     : 0;
-  const preparedDuration = contentDuration + repairTailSilenceSec;
+  const repairTailSilenceSampleCount = secondsToSampleCount(repairTailSilenceSec);
+  const preparedSampleCount = contentSampleCount + repairTailSilenceSampleCount;
+  const preparedDuration = preparedSampleCount / stitchSampleRate;
   const hashPrefix = String(row.unit_qa.audio_sha256 ?? "unhashed").slice(0, 12);
   const preparationPolicy = {
     sample_rate: stitchSampleRate,
     edge_pad_sec: stitchEdgePadSec,
     fade_sec: stitchFadeSec,
-    diagnostic_repair_tail_silence_sec: repairTailSilenceSec,
+    retained_leading_sample_cap: options.retainedLeadingSampleCap ?? null,
+    retained_trailing_sample_cap: options.retainedTrailingSampleCap ?? null,
+    retained_leading_sample_count: retainedLeadingSamples,
+    retained_trailing_sample_count:
+      retainedTrailingSamples + repairTailSilenceSampleCount,
+    diagnostic_repair_tail_silence_sample_count: repairTailSilenceSampleCount,
   };
   const policyHash = sha256Text(JSON.stringify(preparationPolicy)).slice(0, 12);
   const preparedDir = path.join(outDir, "stitch-inputs");
@@ -2522,12 +2742,13 @@ async function prepareStitchInput(row, index, options = {}) {
     const fade = Math.min(stitchFadeSec, contentDuration / 4);
     const fadeOutStart = Math.max(0, contentDuration - fade);
     const filter = [
-      `atrim=start=${trimStart.toFixed(6)}:end=${trimEnd.toFixed(6)}`,
+      `aresample=${stitchSampleRate}`,
+      `atrim=start_sample=${trimStartSamples}:end_sample=${trimEndSamples}`,
       "asetpts=PTS-STARTPTS",
       `afade=t=in:st=0:d=${fade.toFixed(6)}`,
       `afade=t=out:st=${fadeOutStart.toFixed(6)}:d=${fade.toFixed(6)}`,
-      ...(repairTailSilenceSec > 0
-        ? [`apad=pad_dur=${repairTailSilenceSec.toFixed(6)}`]
+      ...(repairTailSilenceSampleCount > 0
+        ? [`apad=pad_len=${repairTailSilenceSampleCount}`]
         : []),
     ].join(",");
     await run("ffmpeg", [
@@ -2547,14 +2768,25 @@ async function prepareStitchInput(row, index, options = {}) {
     source_wav: row.wav,
     prepared_wav: preparedPath,
     source_duration_sec: duration,
-    trim_start_sec: Number(trimStart.toFixed(6)),
-    trim_end_sec: Number(trimEnd.toFixed(6)),
+    source_sample_count: sourceSampleCount,
+    trim_start_sample: trimStartSamples,
+    trim_end_sample: trimEndSamples,
+    trim_start_sec: Number((trimStartSamples / stitchSampleRate).toFixed(6)),
+    trim_end_sec: Number((trimEndSamples / stitchSampleRate).toFixed(6)),
+    content_sample_count: contentSampleCount,
     content_duration_sec: Number(contentDuration.toFixed(6)),
+    prepared_sample_count: preparedSampleCount,
     prepared_duration_sec: Number(preparedDuration.toFixed(6)),
-    retained_leading_silence_sec: Number(Math.min(stitchEdgePadSec, leading).toFixed(6)),
-    retained_trailing_silence_sec: Number(
-      (Math.min(stitchEdgePadSec, trailing) + repairTailSilenceSec).toFixed(6),
+    retained_leading_silence_sample_count: retainedLeadingSamples,
+    retained_trailing_silence_sample_count:
+      retainedTrailingSamples + repairTailSilenceSampleCount,
+    retained_leading_silence_sec: Number(
+      (retainedLeadingSamples / stitchSampleRate).toFixed(6),
     ),
+    retained_trailing_silence_sec: Number((
+      (retainedTrailingSamples + repairTailSilenceSampleCount) / stitchSampleRate
+    ).toFixed(6)),
+    diagnostic_repair_tail_silence_sample_count: repairTailSilenceSampleCount,
     diagnostic_repair_tail_silence_sec: Number(repairTailSilenceSec.toFixed(6)),
     fade_sec: Number(Math.min(stitchFadeSec, contentDuration / 4).toFixed(6)),
     preparation_policy: preparationPolicy,
@@ -2586,16 +2818,21 @@ async function qaRenderedAudioRows(sourceRows, renderedRows, stage) {
       sha256File(rendered.wav),
     ]);
     const recognized = transcriptMap.get(String(rendered.unit_id)) ?? null;
-    const deliveryFirstPrimary = String(source.provider ?? "") === "kokoro_local";
+    const deliveryFirstPrimary = isDeliveryFirstLocalNarrator(source.provider);
     const transcript = recognized ? transcriptQa(source.text, recognized.text, {
       equivalentPhrases: transcriptEquivalentPhrases(source),
     }) : null;
-    const renderedEdgeMinimum = /^(?:prepared_stitch_input|final_stitch_boundary)$/u.test(stage)
-      ? Math.max(0.01, stitchEdgePadSec - 0.001)
-      : unitQaMinTrailingSilenceSec;
+    const renderedEdgeMinimum = stage === "prepared_stitch_input"
+      ? 0.01
+      : stage === "final_stitch_boundary"
+        ? Math.max(0.01, stitchEdgePadSec - 0.001)
+        : unitQaMinTrailingSilenceSec;
     const findings = [
       ...audioQaFindings(metrics, source, { minTrailingSilence: renderedEdgeMinimum }),
-      ...(transcript?.findings ?? []),
+      ...softenUncertainTranscriptFindings(
+        transcript?.findings ?? [],
+        source.provider,
+      ),
     ];
     if (!recognized && !deliveryFirstPrimary) {
       findings.push({
@@ -2629,7 +2866,7 @@ async function qaRenderedAudioRows(sourceRows, renderedRows, stage) {
   }
   const transcriptOnlyBlocked = units.filter((row) => {
     const source = sourceRows[units.indexOf(row)];
-    if (String(source?.provider ?? "") === "kokoro_local") return false;
+    if (isDeliveryFirstLocalNarrator(source?.provider)) return false;
     const blockers = row.findings.filter((finding) => finding.severity === "blocker");
     return blockers.length > 0 && blockers.every((finding) => String(finding.code ?? "").startsWith("tts_transcript_"));
   });
@@ -2782,10 +3019,37 @@ async function finalStitchQa(finalWav, usable, prepared) {
 async function stitchWavs(results, finalWav, options = {}) {
   const usable = results.filter((row) => row.wav);
   if (!usable.length) return null;
+  const boundaryRetentionPlans = [];
+  const retainedLeadingCaps = Array(usable.length).fill(null);
+  const retainedTrailingCaps = Array(usable.length).fill(null);
+  for (let index = 0; index < usable.length - 1; index += 1) {
+    const crossesSegment = lastSourceSegmentId(usable[index])
+      !== firstSourceSegmentId(usable[index + 1]);
+    const targetGapSec = crossesSegment ? segmentGapSec : unitGapSec;
+    const plan = stitchBoundaryPadding(
+      usable[index].unit_qa?.metrics,
+      usable[index + 1].unit_qa?.metrics,
+      targetGapSec,
+    );
+    boundaryRetentionPlans[index] = {
+      after_unit_id: usable[index].unit_id,
+      before_unit_id: usable[index + 1].unit_id,
+      crosses_segment: crossesSegment,
+      ...plan,
+    };
+    retainedTrailingCaps[index] =
+      plan.retained_left_trailing_silence_sample_count;
+    retainedLeadingCaps[index + 1] =
+      plan.retained_right_leading_silence_sample_count;
+  }
   const prepared = await mapPool(
     usable,
     4,
-    (row, index) => prepareStitchInput(row, index, options),
+    (row, index) => prepareStitchInput(row, index, {
+      ...options,
+      retainedLeadingSampleCap: retainedLeadingCaps[index],
+      retainedTrailingSampleCap: retainedTrailingCaps[index],
+    }),
   );
   const preparedQa = await qaRenderedAudioRows(
     usable,
@@ -2800,6 +3064,7 @@ async function stitchWavs(results, finalWav, options = {}) {
       status: "blocked",
       prepared_inputs: prepared,
       prepared_qa: preparedQa,
+      boundary_qa: null,
       boundaries: [],
       final_qa: null,
       policy: {
@@ -2814,32 +3079,84 @@ async function stitchWavs(results, finalWav, options = {}) {
   const concatPath = path.join(outDir, `concat-${retryInvocationId}.txt`);
   const lines = [];
   const boundaries = [];
+  const boundaryBlockers = [];
   for (let index = 0; index < prepared.length; index += 1) {
     lines.push(concatLine(prepared[index].prepared_wav));
     if (index >= prepared.length - 1) continue;
-    const crossesSegment = lastSourceSegmentId(usable[index]) !== firstSourceSegmentId(usable[index + 1]);
-    const targetGapSec = crossesSegment ? segmentGapSec : unitGapSec;
-    const padding = stitchBoundaryPadding(
-      usable[index].unit_qa?.metrics,
-      usable[index + 1].unit_qa?.metrics,
+    const plan = boundaryRetentionPlans[index];
+    const targetGapSec = plan.target_gap_sec;
+    const provisionalContract = stitchEffectiveBoundaryContract(
+      preparedQa.units[index]?.metrics,
+      preparedQa.units[index + 1]?.metrics,
       targetGapSec,
+      null,
     );
     let gapPath = null;
-    if (padding.inserted_silence_sec > 0) {
-      const gapMicros = Math.round(padding.inserted_silence_sec * 1_000_000);
+    if (provisionalContract.inserted_silence_sample_count > 0) {
       gapPath = await writeSilenceWav(
-        path.join(outDir, `padding-gap-${stitchSampleRate}hz-${gapMicros}us.wav`),
-        padding.inserted_silence_sec,
+        path.join(
+          outDir,
+          `padding-gap-${stitchSampleRate}hz-${provisionalContract.inserted_silence_sample_count}samples.wav`,
+        ),
+        provisionalContract.inserted_silence_sample_count,
       );
-      lines.push(concatLine(gapPath));
     }
-    boundaries.push({
+    const actualGapSampleCount = gapPath
+      ? Number((await audioPcmMetrics(gapPath)).sample_count)
+      : 0;
+    const contract = stitchEffectiveBoundaryContract(
+      preparedQa.units[index]?.metrics,
+      preparedQa.units[index + 1]?.metrics,
+      targetGapSec,
+      actualGapSampleCount,
+    );
+    const boundary = {
       after_unit_id: usable[index].unit_id,
       before_unit_id: usable[index + 1].unit_id,
-      crosses_segment: crossesSegment,
+      crosses_segment: plan.crosses_segment,
       gap_wav: gapPath,
-      ...padding,
-    });
+      gap_sample_count: actualGapSampleCount,
+      retention_plan: plan,
+      ...contract,
+    };
+    boundaries.push(boundary);
+    if (contract.blocker) {
+      boundaryBlockers.push({
+        after_unit_id: boundary.after_unit_id,
+        before_unit_id: boundary.before_unit_id,
+        ...contract.blocker,
+      });
+    } else if (gapPath) {
+      lines.push(concatLine(gapPath));
+    }
+  }
+  const boundaryQa = {
+    status: boundaryBlockers.length ? "blocked" : "passed",
+    sample_rate_hz: stitchSampleRate,
+    target_gap_policy: "exact_80ms_effective_gap_including_retained_edges",
+    exact_effective_gap_sample_count_required: true,
+    boundary_count: boundaries.length,
+    boundaries,
+    blockers: boundaryBlockers,
+  };
+  if (boundaryBlockers.length) {
+    return {
+      status: "blocked",
+      concat_path: null,
+      prepared_inputs: prepared,
+      prepared_qa: preparedQa,
+      boundary_qa: boundaryQa,
+      boundaries,
+      final_qa: null,
+      policy: {
+        edge_pad_sec: stitchEdgePadSec,
+        fade_sec: stitchFadeSec,
+        sample_rate: stitchSampleRate,
+        padding_aware: true,
+        exact_effective_gap_sample_count: true,
+        trims_verified_silence_only: true,
+      },
+    };
   }
   await fs.writeFile(concatPath, lines.join("\n"));
   await run("ffmpeg", [
@@ -2860,6 +3177,7 @@ async function stitchWavs(results, finalWav, options = {}) {
     concat_path: concatPath,
     prepared_inputs: prepared,
     prepared_qa: preparedQa,
+    boundary_qa: boundaryQa,
     boundaries,
     final_qa: finalQa,
     loudness_check: {
@@ -2875,6 +3193,7 @@ async function stitchWavs(results, finalWav, options = {}) {
       fade_sec: stitchFadeSec,
       sample_rate: stitchSampleRate,
       padding_aware: true,
+      exact_effective_gap_sample_count: true,
       trims_verified_silence_only: true,
     },
   };

@@ -1,8 +1,13 @@
-export const DEFAULT_TTS_PROVIDER = "kokoro_local";
-export const DEFAULT_TTS_FALLBACK_PROVIDER = "qwen_local";
-export const DEFAULT_NARRATOR_VOICE_ID = "am_puck";
-export const DEFAULT_TTS_NATIVE_SPEED = 1.2;
+export const DEFAULT_TTS_PROVIDER = "qwen_local";
+export const DEFAULT_TTS_FALLBACK_PROVIDER = null;
+export const DEFAULT_NARRATOR_VOICE_ID = "am_liam";
+export const DEFAULT_TTS_NATIVE_SPEED = null;
+export const DEFAULT_TTS_UNIT_TARGET_WORDS_MIN = 45;
+export const DEFAULT_TTS_UNIT_TARGET_WORDS_MAX = 60;
+export const DEFAULT_TTS_UNIT_HARD_WORDS_MAX = 60;
+export const DEFAULT_TTS_JOIN_SILENCE_MS = 80;
 export const NARRATION_TTS_QA_POLICY_VERSION = "narration_tts_qa_v1";
+const LEGACY_KOKORO_NATIVE_SPEED = 1.2;
 
 export const KOKORO_MODEL_LOCK = Object.freeze({
   provider: "kokoro_local",
@@ -27,7 +32,7 @@ export const KOKORO_VOICE_LOCKS = Object.freeze({
   }),
 });
 
-export const QWEN_LOCAL_FALLBACK_LOCK = Object.freeze({
+const QWEN_LOCAL_MODEL_LOCK = Object.freeze({
   provider: "qwen_local",
   model_id: "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
   model_name: "Qwen3-TTS 12Hz 1.7B Base 8-bit",
@@ -40,6 +45,72 @@ export const QWEN_LOCAL_FALLBACK_LOCK = Object.freeze({
   runtime: "mlx-audio",
   runtime_version: "0.4.6",
   sample_rate_hz: 24000,
+});
+
+export const QWEN_LIAM_UNIT_CONTRACT = Object.freeze({
+  sentence_complete: true,
+  target_words_min: DEFAULT_TTS_UNIT_TARGET_WORDS_MIN,
+  target_words_max: DEFAULT_TTS_UNIT_TARGET_WORDS_MAX,
+  hard_words_max: DEFAULT_TTS_UNIT_HARD_WORDS_MAX,
+  continuous_requests: false,
+});
+
+export const QWEN_LIAM_STITCH_CONTRACT = Object.freeze({
+  join_silence_ms: DEFAULT_TTS_JOIN_SILENCE_MS,
+  post_tempo_processing: false,
+});
+
+export const QWEN_LIAM_RETRY_CONTRACT = Object.freeze({
+  retry_policy: "confirmed_skips_truncations_or_stutters_only",
+  automatic_asr_retry: false,
+  confirmed_defect_types: Object.freeze(["skip", "truncation", "stutter"]),
+});
+
+export const QWEN_LIAM_PRIMARY_LOCK = Object.freeze({
+  ...QWEN_LOCAL_MODEL_LOCK,
+  voice_id: "am_liam",
+  voice_sha256: "66b65a96e16c3d91035a6e9019d9986ed524d27ce35b487270cdf61c99e3ebad",
+  reference_audio_path: "/Users/joel/AniFactoryData/voice_bank/proofs/2026-07-27-qwen-liam-clone-delivery-v1/liam_reference/liam_clone_reference.wav",
+  reference_audio_sha256: "6200eb0dcc2d5f9c9d0ab52a2532d033a3db126e9d1570e78d4463cc282ee0af",
+  reference_text: "Because a deed is not a toy. A deed is the only word in any language that means this is mine and the world has to agree. The breathing got closer. Out of the black came a shape too big to be a man and too graceful to be a beast. A broken crown curved between its horns.",
+  reference_text_sha256: "2630f1d234dd38762cf538ee7b817026711f2c9642a26dd3678242647e5a720c",
+  reference_manifest_path: "/Users/joel/AniFactoryData/voice_bank/proofs/2026-07-27-qwen-liam-clone-delivery-v1/liam_reference_manifest.json",
+  reference_manifest_sha256: "6da7f9797caba9e872862fec31097cfe0b6e171b343096b9644d1846d635ad7c",
+  reference_metadata_path: "/Users/joel/AniFactoryData/voice_bank/proofs/2026-07-27-qwen-liam-clone-delivery-v1/liam_reference/run.json",
+  reference_metadata_sha256: "4357626dda4f07e0cb22ac304e593611d9ecce080aad895b7f2a10ad0737a811",
+  reference_voice_id: "am_liam",
+  reference_voice_sha256: "66b65a96e16c3d91035a6e9019d9986ed524d27ce35b487270cdf61c99e3ebad",
+  reference_source_provider: "kokoro_local",
+  reference_source_model_id: KOKORO_MODEL_LOCK.model_id,
+  reference_source_model_revision: KOKORO_MODEL_LOCK.model_revision,
+  reference_origin_unit_id: "liam_clone_reference",
+  voice_continuity_contract: "qwen_icl_clone_of_liam_reference",
+  delivery_control: "base_icl_reference_audio_only",
+  instruct_supported: false,
+  speed_control_supported: false,
+  native_speed: null,
+  temperature: 0.6,
+  top_p: 0.8,
+  top_k: 50,
+  repetition_penalty: 1.2,
+  max_tokens: 1200,
+  speaker_similarity_method: "WeSpeaker VoxCeleb ResNet34 LM cosine similarity",
+  speaker_similarity_model_path: "/Users/joel/AniFactoryData/voice_bank/bakeoff/model-downloads/wespeaker/wespeaker_en_voxceleb_resnet34.onnx",
+  speaker_similarity_model_sha256: "5ef208a9da1453335308a6b6f4e6dfbd7e183a38b604de0a57664f45d257fe94",
+  speaker_similarity_calibration_path: "/Users/joel/AniFactoryData/voice_bank/proofs/2026-07-27-qwen-liam-clone-delivery-v1/qwen_liam_clone/speaker_similarity.json",
+  speaker_similarity_calibration_sha256: "669ce9fc2903819dff7c361f4a0a4698a9576eebb1f07869d57fbd2369303a42",
+  minimum_cosine_similarity: 0.88,
+  warning_below_cosine_similarity: 0.90,
+  warning_floor_cosine_similarity: 0.90,
+  unit_contract: QWEN_LIAM_UNIT_CONTRACT,
+  stitch_contract: QWEN_LIAM_STITCH_CONTRACT,
+  retry_contract: QWEN_LIAM_RETRY_CONTRACT,
+});
+
+// Retained only so already-created Kokoro/Puck identities remain readable
+// through their explicit compatibility contract.
+export const QWEN_LOCAL_FALLBACK_LOCK = Object.freeze({
+  ...QWEN_LOCAL_MODEL_LOCK,
   reference_audio_path: "/Users/joel/AniFactoryData/voice_bank/kokoro/reference_samples/am_puck/am_puck_qwen_fallback_reference_v1.wav",
   reference_audio_sha256: "934de29bed0d3da6b8c8fb2a6c611202a967498422702f8c30f85b4bb10019d0",
   reference_text: "Because a deed is not a toy. A deed is the only word in any language that means this is mine and the world has to agree. The breathing got closer. Out of the black came a shape too big to be a man and too graceful to be a beast. A broken crown curved between its horns.",
@@ -48,7 +119,7 @@ export const QWEN_LOCAL_FALLBACK_LOCK = Object.freeze({
   reference_text_file_sha256: "b044c91dd10a8a9f5c2363650e64b95310256dcbcdf4c91d00caf5b19b09b77f",
   reference_metadata_path: "/Users/joel/AniFactoryData/voice_bank/kokoro/reference_samples/am_puck/am_puck_qwen_fallback_reference_v1.json",
   reference_metadata_sha256: "e51394242bdac5e604e629ac1a575673fb4f857a15dd32317aeeee59bddb9955",
-  reference_voice_id: DEFAULT_NARRATOR_VOICE_ID,
+  reference_voice_id: "am_puck",
   reference_voice_sha256: "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89",
   reference_source_provider: "kokoro_local",
   reference_source_model_id: KOKORO_MODEL_LOCK.model_id,
@@ -85,6 +156,10 @@ function cleanId(value) {
 function positiveNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function explicitValue(...values) {
+  return values.find((value) => value !== undefined);
 }
 
 export function normalizeTtsProvider(value, fallback = DEFAULT_TTS_PROVIDER) {
@@ -171,37 +246,59 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
   const primaryProvider = normalizeTtsProvider(
     identity.tts_provider ?? identity.voice_provider_options?.primary?.provider,
   );
-  const fallbackValue = identity.tts_fallback_provider
-    ?? identity.voice_provider_options?.fallback?.provider
-    ?? DEFAULT_TTS_FALLBACK_PROVIDER;
+  const fallbackValue = explicitValue(
+    identity.tts_fallback_provider,
+    identity.voice_provider_options?.fallback?.provider,
+    DEFAULT_TTS_FALLBACK_PROVIDER,
+  );
   const fallbackProvider = fallbackValue ? normalizeTtsProvider(fallbackValue) : null;
   const voiceId = cleanId(
     identity.narrator_voice_id
     ?? identity.tts_voice_id
     ?? identity.voice_provider_options?.primary?.voice_id,
   ) ?? DEFAULT_NARRATOR_VOICE_ID;
-  const nativeSpeed = positiveNumber(
-    identity.tts_native_speed ?? identity.voice_provider_options?.primary?.native_speed,
-    DEFAULT_TTS_NATIVE_SPEED,
+  const rawNativeSpeed = explicitValue(
+    identity.tts_native_speed,
+    identity.voice_provider_options?.primary?.native_speed,
+    primaryProvider === "kokoro_local" ? LEGACY_KOKORO_NATIVE_SPEED : DEFAULT_TTS_NATIVE_SPEED,
   );
+  const nativeSpeed = rawNativeSpeed == null
+    ? null
+    : positiveNumber(rawNativeSpeed, null);
+  const contract = primaryProvider === "qwen_local"
+    ? "qwen_liam_primary_v1"
+    : primaryProvider === "kokoro_local"
+      ? "legacy_kokoro_puck"
+      : "generic_narration_v1";
 
   return {
-    contract: "generic_narration_v1",
+    contract,
     primary: {
       ...(primaryProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : {}),
+      ...(primaryProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK : {}),
       ...(identity.voice_provider_options?.primary ?? {}),
       provider: primaryProvider,
       voice_id: voiceId,
       native_speed: nativeSpeed,
-      ...(KOKORO_VOICE_LOCKS[voiceId] ?? {}),
+      ...(primaryProvider === "kokoro_local" ? KOKORO_VOICE_LOCKS[voiceId] ?? {} : {}),
     },
     fallback: fallbackProvider
       ? {
-          ...(fallbackProvider === "qwen_local" ? QWEN_LOCAL_FALLBACK_LOCK : {}),
+          ...(fallbackProvider === "qwen_local" && primaryProvider === "kokoro_local"
+            ? QWEN_LOCAL_FALLBACK_LOCK
+            : {}),
           ...(identity.voice_provider_options?.fallback ?? {}),
           provider: fallbackProvider,
         }
       : null,
+    unit_contract: identity.voice_provider_options?.unit_contract
+      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_UNIT_CONTRACT : null),
+    stitch_contract: identity.voice_provider_options?.stitch_contract
+      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_STITCH_CONTRACT : null),
+    retry_policy: identity.voice_provider_options?.retry_policy
+      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_RETRY_CONTRACT.retry_policy : null),
+    retry_contract: identity.voice_provider_options?.retry_contract
+      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_RETRY_CONTRACT : null),
     qa_policy: identity.voice_provider_options?.qa_policy
       ?? identity.tts_qa_policy
       ?? NARRATION_TTS_QA_POLICY_VERSION,
@@ -238,9 +335,9 @@ function identityAliasFindings(values, expected, pathLabel, { required = false }
 function exactControlFindings(control, expected, pathLabel) {
   if (!control || typeof control !== "object") {
     return [{
-      code: "narration_fallback_identity_controls_missing",
+      code: "narration_voice_identity_controls_missing",
       path: pathLabel,
-      expected: "locked Puck fallback controls",
+      expected: "locked narration voice controls",
       actual: null,
     }];
   }
@@ -248,7 +345,7 @@ function exactControlFindings(control, expected, pathLabel) {
     control[field] === value
       ? []
       : [{
-          code: "narration_fallback_identity_control_mismatch",
+          code: "narration_voice_identity_control_mismatch",
           path: `${pathLabel}.${field}`,
           expected: value,
           actual: control[field] ?? null,
@@ -257,6 +354,7 @@ function exactControlFindings(control, expected, pathLabel) {
 }
 
 function narrationPlanUnits(plan = {}) {
+  if (Array.isArray(plan.units) && plan.units.length) return plan.units;
   return (plan.segments ?? []).flatMap((segment) => (
     segment?.narration_units
     ?? segment?.tts_generation_units
@@ -270,18 +368,56 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
   const findings = [];
   const primary = policy.primary ?? {};
   const fallback = policy.fallback ?? {};
-  const topKokoro = plan.provider_controls?.kokoro
-    ?? plan.provider_controls?.kokoro_local
+  const topPrimary = primary.provider === "qwen_local"
+    ? plan.provider_controls?.qwen3 ?? plan.provider_controls?.qwen_local
+    : plan.provider_controls?.kokoro ?? plan.provider_controls?.kokoro_local
     ?? null;
   findings.push(...identityAliasFindings([
     plan.narrator_voice_id,
-    topKokoro?.voice_id,
-    topKokoro?.voice,
+    topPrimary?.voice_id,
+    topPrimary?.voice,
+    topPrimary?.reference_voice_id,
+    topPrimary?.target_voice_id,
   ], primary.voice_id, "plan narrator voice", { required: true }));
   findings.push(...identityAliasFindings([
     plan.narrator_voice_sha256,
-    topKokoro?.voice_sha256,
+    topPrimary?.voice_sha256,
+    topPrimary?.reference_voice_sha256,
+    topPrimary?.target_voice_sha256,
   ], primary.voice_sha256, "plan narrator voice hash"));
+
+  const expectedPrimaryControls = primary.provider === "qwen_local"
+    ? {
+        provider: primary.provider,
+        model_id: primary.model_id,
+        model_revision: primary.model_revision,
+        target_voice_id: primary.voice_id,
+        target_voice_sha256: primary.voice_sha256,
+        reference_audio_path: primary.reference_audio_path,
+        reference_audio_sha256: primary.reference_audio_sha256,
+        reference_transcript: primary.reference_text,
+        reference_transcript_sha256: primary.reference_text_sha256,
+        reference_manifest_path: primary.reference_manifest_path,
+        reference_manifest_sha256: primary.reference_manifest_sha256,
+        reference_metadata_path: primary.reference_metadata_path,
+        reference_metadata_sha256: primary.reference_metadata_sha256,
+        voice_continuity_contract: primary.voice_continuity_contract,
+        delivery_control: primary.delivery_control,
+        instruct_supported: false,
+        instruct_submitted: false,
+        instruct: null,
+        speed_control_supported: false,
+        native_speed: null,
+        continuous_requests: false,
+      }
+    : null;
+  if (expectedPrimaryControls) {
+    findings.push(...exactControlFindings(
+      topPrimary,
+      expectedPrimaryControls,
+      "plan.provider_controls.qwen3",
+    ));
+  }
 
   const expectedFallbackControls = fallback?.provider === "qwen_local"
     ? {
@@ -315,19 +451,31 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
 
   for (const [index, unit] of narrationPlanUnits(plan).entries()) {
     const unitPath = `plan unit ${unit?.unit_id ?? index}`;
-    const kokoro = unit?.provider_controls?.kokoro
-      ?? unit?.provider_controls?.kokoro_local
+    const unitPrimary = primary.provider === "qwen_local"
+      ? unit?.provider_controls?.qwen3 ?? unit?.provider_controls?.qwen_local
+      : unit?.provider_controls?.kokoro ?? unit?.provider_controls?.kokoro_local
       ?? null;
     findings.push(...identityAliasFindings([
       unit?.reference_id,
       unit?.voice_id,
-      kokoro?.voice_id,
-      kokoro?.voice,
+      unitPrimary?.voice_id,
+      unitPrimary?.voice,
+      unitPrimary?.reference_voice_id,
+      unitPrimary?.target_voice_id,
     ], primary.voice_id, `${unitPath} voice`, { required: true }));
     findings.push(...identityAliasFindings([
       unit?.voice_sha256,
-      kokoro?.voice_sha256,
+      unitPrimary?.voice_sha256,
+      unitPrimary?.reference_voice_sha256,
+      unitPrimary?.target_voice_sha256,
     ], primary.voice_sha256, `${unitPath} voice hash`));
+    if (expectedPrimaryControls) {
+      findings.push(...exactControlFindings(
+        unitPrimary,
+        expectedPrimaryControls,
+        `${unitPath}.provider_controls.qwen3`,
+      ));
+    }
     if (expectedFallbackControls) {
       findings.push(...exactControlFindings(
         unit?.provider_controls?.qwen3 ?? unit?.provider_controls?.qwen_local,
@@ -364,6 +512,27 @@ export function narrationArtifactVoiceIdentityFindings({
     stitchReport.primary?.voice_sha256,
     stitchReport.voice_sha256,
   ], primary.voice_sha256, "narration report voice hash", { required: true }));
+  if (primary.provider === "qwen_local") {
+    findings.push(...exactControlFindings(ttsReport.primary, {
+      provider: primary.provider,
+      model_id: primary.model_id,
+      model_revision: primary.model_revision,
+      voice_id: primary.voice_id,
+      voice_sha256: primary.voice_sha256,
+      native_speed: null,
+      reference_audio_sha256: primary.reference_audio_sha256,
+      reference_manifest_sha256: primary.reference_manifest_sha256,
+      voice_continuity_contract: primary.voice_continuity_contract,
+    }, "ttsReport.primary"));
+    findings.push(...exactControlFindings(stitchReport.primary, {
+      provider: primary.provider,
+      model_id: primary.model_id,
+      model_revision: primary.model_revision,
+      voice_id: primary.voice_id,
+      voice_sha256: primary.voice_sha256,
+      voice_continuity_contract: primary.voice_continuity_contract,
+    }, "stitchReport.primary"));
+  }
 
   const results = Array.isArray(ttsReport.results) ? ttsReport.results : [];
   const selectedUnits = Array.isArray(unitQa.selected_units) ? unitQa.selected_units : [];
@@ -375,9 +544,9 @@ export function narrationArtifactVoiceIdentityFindings({
   ]) {
     for (const [index, row] of rows.entries()) {
       const provider = row?.selected_provider ?? row?.tts_provider ?? row?.provider;
-      const expectedContract = provider === fallback.provider
-        ? fallback.voice_continuity_contract
-        : "native_puck_preset";
+      const expectedContract = provider === fallback?.provider
+        ? fallback?.voice_continuity_contract
+        : primary.voice_continuity_contract ?? "native_puck_preset";
       const rowPath = `${label} ${row?.unit_id ?? index}`;
       findings.push(...identityAliasFindings(
         [row?.voice_id],
@@ -399,7 +568,7 @@ export function narrationArtifactVoiceIdentityFindings({
     }
   }
 
-  if (fallback.provider === "qwen_local") {
+  if (fallback?.provider === "qwen_local") {
     findings.push(...exactControlFindings(ttsReport.fallback_usage, {
       provider: fallback.provider,
       target_voice_id: primary.voice_id,
@@ -419,43 +588,41 @@ export function narrationArtifactVoiceIdentityFindings({
 export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
   if (!policy || typeof policy !== "object") throw new Error("Missing narration TTS policy.");
   if (policy.contract === "legacy_qwen") return policy;
-  if (policy.primary?.provider !== "kokoro_local") {
-    throw new Error(`The production narration lane currently requires kokoro_local primary; got ${policy.primary?.provider ?? "missing"}.`);
-  }
-  if (policy.primary.voice_id !== DEFAULT_NARRATOR_VOICE_ID) {
-    throw new Error(`New narration identities require the single locked narrator voice ${DEFAULT_NARRATOR_VOICE_ID}; got ${policy.primary.voice_id ?? "missing"}. Other Kokoro presets are bakeoff-only.`);
-  }
-  const exactPrimaryLock = {
-    ...KOKORO_MODEL_LOCK,
-    ...KOKORO_VOICE_LOCKS[policy.primary.voice_id],
-  };
-  const primaryLockFields = [
-    "provider",
-    "model_id",
-    "model_revision",
-    "model_weights_sha256",
-    "model_config_sha256",
-    "runtime",
-    "runtime_version",
-    "runtime_revision",
-    "language_code",
-    "sample_rate_hz",
-    "voice_id",
-    "voice_sha256",
-  ];
-  const primaryMismatches = primaryLockFields.filter(
-    (field) => policy.primary?.[field] !== exactPrimaryLock[field],
-  );
-  if (primaryMismatches.length) {
-    throw new Error(`Kokoro production lock differs from the audited model/voice assets: ${primaryMismatches.join(", ")}.`);
-  }
-  if (production && policy.fallback?.provider !== "qwen_local") {
-    throw new Error("Production Kokoro narration requires qwen_local as the locked fallback provider.");
-  }
-  if (Math.abs(Number(policy.primary.native_speed) - DEFAULT_TTS_NATIVE_SPEED) > 0.0001) {
-    throw new Error(`Kokoro production speed must be ${DEFAULT_TTS_NATIVE_SPEED}; got ${policy.primary.native_speed}.`);
-  }
-  if (policy.fallback?.provider === "qwen_local") {
+  if (policy.contract === "legacy_kokoro_puck") {
+    if (policy.primary?.provider !== "kokoro_local"
+      || policy.primary.voice_id !== "am_puck") {
+      throw new Error("Legacy Kokoro compatibility requires kokoro_local/am_puck.");
+    }
+    const exactPrimaryLock = {
+      ...KOKORO_MODEL_LOCK,
+      ...KOKORO_VOICE_LOCKS.am_puck,
+    };
+    const primaryLockFields = [
+      "provider",
+      "model_id",
+      "model_revision",
+      "model_weights_sha256",
+      "model_config_sha256",
+      "runtime",
+      "runtime_version",
+      "runtime_revision",
+      "language_code",
+      "sample_rate_hz",
+      "voice_id",
+      "voice_sha256",
+    ];
+    const primaryMismatches = primaryLockFields.filter(
+      (field) => policy.primary?.[field] !== exactPrimaryLock[field],
+    );
+    if (primaryMismatches.length) {
+      throw new Error(`Legacy Kokoro lock differs from its audited assets: ${primaryMismatches.join(", ")}.`);
+    }
+    if (Math.abs(Number(policy.primary.native_speed) - LEGACY_KOKORO_NATIVE_SPEED) > 0.0001) {
+      throw new Error(`Legacy Kokoro speed must be ${LEGACY_KOKORO_NATIVE_SPEED}; got ${policy.primary.native_speed}.`);
+    }
+    if (production && policy.fallback?.provider !== "qwen_local") {
+      throw new Error("Legacy production Kokoro narration requires its locked qwen_local fallback.");
+    }
     const fallbackLockFields = [
       "provider",
       "model_id",
@@ -499,6 +666,87 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
     if (fallbackMismatches.length) {
       throw new Error(`Qwen fallback lock differs from the audited model/reference assets: ${fallbackMismatches.join(", ")}.`);
     }
+  } else {
+    if (policy.contract !== "qwen_liam_primary_v1"
+      || policy.primary?.provider !== "qwen_local") {
+      throw new Error(`The production narration lane requires qwen_local Liam primary; got ${policy.primary?.provider ?? "missing"}.`);
+    }
+    if (policy.primary.voice_id !== DEFAULT_NARRATOR_VOICE_ID) {
+      throw new Error(`New narration identities require the single locked narrator voice ${DEFAULT_NARRATOR_VOICE_ID}; got ${policy.primary.voice_id ?? "missing"}.`);
+    }
+    const primaryLockFields = [
+      "provider",
+      "model_id",
+      "model_revision",
+      "model_weights_sha256",
+      "model_config_sha256",
+      "generation_config_sha256",
+      "speech_tokenizer_weights_sha256",
+      "speech_tokenizer_config_sha256",
+      "runtime",
+      "runtime_version",
+      "sample_rate_hz",
+      "voice_id",
+      "voice_sha256",
+      "reference_audio_path",
+      "reference_audio_sha256",
+      "reference_text",
+      "reference_text_sha256",
+      "reference_manifest_path",
+      "reference_manifest_sha256",
+      "reference_metadata_path",
+      "reference_metadata_sha256",
+      "reference_voice_id",
+      "reference_voice_sha256",
+      "reference_source_provider",
+      "reference_source_model_id",
+      "reference_source_model_revision",
+      "reference_origin_unit_id",
+      "voice_continuity_contract",
+      "delivery_control",
+      "instruct_supported",
+      "speed_control_supported",
+      "native_speed",
+      "temperature",
+      "top_p",
+      "top_k",
+      "repetition_penalty",
+      "max_tokens",
+      "speaker_similarity_method",
+      "speaker_similarity_model_path",
+      "speaker_similarity_model_sha256",
+      "speaker_similarity_calibration_path",
+      "speaker_similarity_calibration_sha256",
+      "minimum_cosine_similarity",
+      "warning_below_cosine_similarity",
+      "warning_floor_cosine_similarity",
+    ];
+    const primaryMismatches = primaryLockFields.filter(
+      (field) => policy.primary?.[field] !== QWEN_LIAM_PRIMARY_LOCK[field],
+    );
+    if (primaryMismatches.length) {
+      throw new Error(`Qwen Liam production lock differs from the audited model/reference assets: ${primaryMismatches.join(", ")}.`);
+    }
+    if (policy.fallback != null) {
+      throw new Error("Qwen Liam is the sole production voice; fallback must be null.");
+    }
+    if (policy.primary.native_speed != null
+      || policy.primary.speed_control_supported !== false) {
+      throw new Error("Qwen Liam production does not support a native-speed control.");
+    }
+    if (JSON.stringify(policy.unit_contract) !== JSON.stringify(QWEN_LIAM_UNIT_CONTRACT)
+      || JSON.stringify(policy.primary.unit_contract) !== JSON.stringify(QWEN_LIAM_UNIT_CONTRACT)) {
+      throw new Error("Qwen Liam unit contract must be sentence-complete, target 45-60 words, hard maximum 60, and non-continuous.");
+    }
+    if (JSON.stringify(policy.stitch_contract) !== JSON.stringify(QWEN_LIAM_STITCH_CONTRACT)
+      || JSON.stringify(policy.primary.stitch_contract) !== JSON.stringify(QWEN_LIAM_STITCH_CONTRACT)) {
+      throw new Error("Qwen Liam stitch contract must use 80 ms joins and no post-tempo processing.");
+    }
+    if (policy.retry_policy !== QWEN_LIAM_RETRY_CONTRACT.retry_policy
+      || JSON.stringify(policy.retry_contract) !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT)
+      || JSON.stringify(policy.primary.retry_contract) !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT)) {
+      throw new Error("Qwen Liam retry contract permits retries only for confirmed skips, truncations, or stutters; uncertain ASR findings are non-blocking.");
+    }
   }
   if (policy.qa_policy !== NARRATION_TTS_QA_POLICY_VERSION) {
     throw new Error(`Narration QA policy must be ${NARRATION_TTS_QA_POLICY_VERSION}; got ${policy.qa_policy ?? "missing"}.`);
@@ -514,34 +762,51 @@ export function defaultNarrationVoiceProviderOptions({
 } = {}) {
   const primaryProvider = normalizeTtsProvider(provider);
   const fallback = fallbackProvider ? normalizeTtsProvider(fallbackProvider) : null;
-  if (primaryProvider !== "kokoro_local") {
-    throw new Error("New generic run identities currently support Kokoro as the primary production provider.");
+  if (primaryProvider === "kokoro_local") {
+    if (voiceId !== "am_puck") {
+      throw new Error(`Legacy Kokoro compatibility requires am_puck; ${voiceId ?? "missing"} is not valid.`);
+    }
+    if (fallback !== "qwen_local") {
+      throw new Error("Legacy Kokoro compatibility requires qwen_local fallback.");
+    }
+    if (Math.abs(Number(nativeSpeed) - LEGACY_KOKORO_NATIVE_SPEED) > 0.0001) {
+      throw new Error(`Legacy Kokoro compatibility requires speed ${LEGACY_KOKORO_NATIVE_SPEED}.`);
+    }
+    return {
+      primary: {
+        ...KOKORO_MODEL_LOCK,
+        ...KOKORO_VOICE_LOCKS.am_puck,
+        native_speed: LEGACY_KOKORO_NATIVE_SPEED,
+      },
+      fallback: QWEN_LOCAL_FALLBACK_LOCK,
+      qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
+      pace_strategy: "provider_native_speed_no_post_tempo",
+      narrator_identity_policy: "legacy_single_voice_puck_with_puck_cloned_qwen_repair",
+      allowed_production_voice_ids: ["am_puck"],
+    };
+  }
+  if (primaryProvider !== DEFAULT_TTS_PROVIDER) {
+    throw new Error(`New generic run identities require ${DEFAULT_TTS_PROVIDER}.`);
   }
   if (voiceId !== DEFAULT_NARRATOR_VOICE_ID) {
     throw new Error(`New narration identities require ${DEFAULT_NARRATOR_VOICE_ID}; ${voiceId ?? "missing"} is not selectable for production.`);
   }
-  if (fallback !== DEFAULT_TTS_FALLBACK_PROVIDER) {
-    throw new Error(`New narration identities require ${DEFAULT_TTS_FALLBACK_PROVIDER} as the exact-unit voice-continuity fallback.`);
+  if (fallback !== null) {
+    throw new Error("Qwen Liam is the sole production voice; fallback must be null.");
   }
-  const voice = KOKORO_VOICE_LOCKS[voiceId];
-  if (!voice) throw new Error(`Unapproved Kokoro voice: ${voiceId}`);
+  if (nativeSpeed != null) {
+    throw new Error("Qwen Liam has no native-speed control; omit nativeSpeed.");
+  }
   return {
-    primary: {
-      ...KOKORO_MODEL_LOCK,
-      ...voice,
-      provider: primaryProvider,
-      voice_id: voiceId,
-      native_speed: nativeSpeed,
-    },
-    fallback: fallback
-      ? {
-          ...(fallback === "qwen_local" ? QWEN_LOCAL_FALLBACK_LOCK : {}),
-          provider: fallback,
-        }
-      : null,
+    primary: QWEN_LIAM_PRIMARY_LOCK,
+    fallback: null,
     qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
-    pace_strategy: "provider_native_speed_no_post_tempo",
-    narrator_identity_policy: "single_voice_puck_with_puck_cloned_qwen_repair",
+    pace_strategy: "qwen_reference_native_cadence_no_speed_no_post_tempo",
+    narrator_identity_policy: "single_voice_qwen_liam_icl",
     allowed_production_voice_ids: [DEFAULT_NARRATOR_VOICE_ID],
+    unit_contract: QWEN_LIAM_UNIT_CONTRACT,
+    stitch_contract: QWEN_LIAM_STITCH_CONTRACT,
+    retry_policy: QWEN_LIAM_RETRY_CONTRACT.retry_policy,
+    retry_contract: QWEN_LIAM_RETRY_CONTRACT,
   };
 }

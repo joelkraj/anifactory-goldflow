@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 
-export const NARRATION_TTS_SELECTION_POLICY_VERSION = "narration_tts_selection_v2_delivery_first";
-export const PRIMARY_TTS_PROVIDER = "kokoro_local";
-export const FALLBACK_TTS_PROVIDER = "qwen_local";
-export const QWEN_PUCK_MINIMUM_COSINE_SIMILARITY = 0.88;
-export const QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY = 0.90;
+export const NARRATION_TTS_SELECTION_POLICY_VERSION = "narration_tts_selection_v3_qwen_liam_confirmed_retry_only";
+export const PRIMARY_TTS_PROVIDER = "qwen_local";
+export const FALLBACK_TTS_PROVIDER = null;
+export const QWEN_LIAM_MINIMUM_COSINE_SIMILARITY = 0.88;
+export const QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY = 0.90;
+// Legacy aliases remain exported so historical Puck reports and fixtures can
+// still be inspected. New production selection uses the Liam-named constants.
+export const QWEN_PUCK_MINIMUM_COSINE_SIMILARITY = QWEN_LIAM_MINIMUM_COSINE_SIMILARITY;
+export const QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY =
+  QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY;
 
 export function deterministicTtsSeed(unitId, provider, attempt = 1) {
   const payload = [
@@ -32,56 +37,69 @@ export function qaBlockerCodes(qa) {
   return codes;
 }
 
-const PRIMARY_HARD_BLOCKER_CODES = new Set([
-  "tts_unit_qa_missing",
+const AUTOMATIC_CONFIRMED_RETRY_CODES = new Set([
   "tts_synthesis_job_failed",
   "tts_audio_empty",
   "tts_audio_implausibly_short",
-  "tts_audio_clipping",
-  "tts_audio_impulsive_discontinuity",
-  "tts_audio_untranscribed_internal_burst",
-  "tts_transcript_empty",
+  "tts_audio_duration_too_short_for_text",
 ]);
+
+function isUncertainAsrCode(code) {
+  return String(code ?? "").startsWith("tts_transcript_")
+    || String(code ?? "") === "tts_required_medium_qa_missing"
+    || String(code ?? "") === "tts_rendered_transcript_qa_missing";
+}
 
 export function primaryHardBlockerCodes(qa) {
   const findings = Array.isArray(qa?.findings) ? qa.findings : [];
-  const hardCodes = findings
+  const blockerCodes = findings
     .filter((finding) => finding?.severity === "blocker")
-    .filter((finding) => {
-      const code = String(finding.code ?? "");
-      if (PRIMARY_HARD_BLOCKER_CODES.has(code)) return true;
-      if (code === "tts_transcript_contiguous_words_missing") {
-        return Number(finding.longest_deletion_run ?? qa?.transcript?.longest_deletion_run ?? 0) >= 4;
-      }
-      if (code === "tts_transcript_excessive_deletions") {
-        const deletions = Number(finding.deletions ?? qa?.transcript?.deletions ?? 0);
-        const intended = Number(
-          finding.intended_word_count ?? qa?.transcript?.intended_canonical_token_count ?? 0,
-        );
-        return deletions >= 4 && intended > 0 && deletions / intended >= 0.2;
-      }
-      if (code === "tts_transcript_unexpected_word_burst") {
-        return Number(finding.longest_insertion_run ?? qa?.transcript?.longest_insertion_run ?? 0) >= 4;
-      }
-      return false;
-    })
+    .filter((finding) => !isUncertainAsrCode(finding.code))
     .map((finding) => String(finding.code));
-  if (!qa || typeof qa !== "object") hardCodes.push("tts_unit_qa_missing");
-  return [...new Set(hardCodes)];
+  if (!qa || typeof qa !== "object") blockerCodes.push("tts_unit_qa_missing");
+  if (!blockerCodes.length
+    && String(qa?.status ?? "").toLowerCase() === "blocked"
+    && !(findings.some((finding) => (
+      finding?.severity === "blocker" && isUncertainAsrCode(finding.code)
+    )))) {
+    blockerCodes.push("tts_unit_qa_blocked_without_finding");
+  }
+  return [...new Set(blockerCodes)];
+}
+
+const CONFIRMABLE_DELIVERY_CODES = new Set([
+  "tts_transcript_empty",
+  "tts_transcript_contiguous_words_missing",
+  "tts_transcript_opening_word_missing",
+  "tts_transcript_final_word_missing",
+  "tts_transcript_excessive_deletions",
+  "tts_transcript_unexpected_word_burst",
+  "tts_transcript_word_substitutions",
+  "tts_transcript_isolated_substitution",
+  "tts_transcript_isolated_word_deletion",
+  "tts_transcript_isolated_insertion",
+]);
+
+export function confirmableDeliveryFindingCodes(qa) {
+  return [...new Set((qa?.findings ?? [])
+    .map((finding) => String(finding?.code ?? ""))
+    .filter((code) => CONFIRMABLE_DELIVERY_CODES.has(code)))];
 }
 
 export function softenPrimaryQa(qa) {
   if (!qa || typeof qa !== "object") return qa;
-  const hardCodes = new Set(primaryHardBlockerCodes(qa));
   const findings = (qa.findings ?? []).map((finding) => {
-    if (finding?.severity !== "blocker" || hardCodes.has(String(finding.code ?? ""))) {
+    if (finding?.severity !== "blocker" || !isUncertainAsrCode(finding.code)) {
       return finding;
     }
     return {
       ...finding,
       severity: "warning",
       original_severity: "blocker",
-      disposition_policy: "delivery_first_primary_warning",
+      disposition_policy: "qwen_liam_uncertain_diagnostic_warning",
+      retry_requires_confirmed_listen: CONFIRMABLE_DELIVERY_CODES.has(
+        String(finding.code ?? ""),
+      ),
     };
   });
   const blockers = findings.filter((finding) => finding?.severity === "blocker");
@@ -91,27 +109,39 @@ export function softenPrimaryQa(qa) {
     findings,
     delivery_first_gate: {
       policy_version: NARRATION_TTS_SELECTION_POLICY_VERSION,
-      hard_blocker_codes: [...hardCodes],
+      hard_blocker_codes: primaryHardBlockerCodes({ ...qa, findings }),
       demoted_diagnostic_count: findings.filter(
-        (finding) => finding?.disposition_policy === "delivery_first_primary_warning",
+        (finding) => finding?.disposition_policy === "qwen_liam_uncertain_diagnostic_warning",
       ).length,
+      retry_policy:
+        "Retry only exact units with a confirmed skip, truncation, or stutter. Empty, failed, or objectively too-short synthesis counts as confirmed truncation; ASR-only uncertainty is warning-only. Other blockers require review and are never auto-retried.",
     },
   };
 }
 
 export function candidateDisposition(qa, provider) {
-  const blockerCodes = provider === PRIMARY_TTS_PROVIDER
-    ? primaryHardBlockerCodes(qa)
-    : qaBlockerCodes(qa);
-  if (blockerCodes.length) {
+  if (provider !== PRIMARY_TTS_PROVIDER) {
     return {
-      status: provider === PRIMARY_TTS_PROVIDER ? "fallback_required" : "rejected",
+      status: "rejected_unknown_provider",
+      accepted: false,
+      blocker_codes: qaBlockerCodes(qa),
+    };
+  }
+  const blockerCodes = primaryHardBlockerCodes(qa);
+  if (blockerCodes.length) {
+    const manualReviewCodes = blockerCodes.filter(
+      (code) => !AUTOMATIC_CONFIRMED_RETRY_CODES.has(code),
+    );
+    return {
+      status: manualReviewCodes.length
+        ? "blocked_manual_review"
+        : "confirmed_retry_required",
       accepted: false,
       blocker_codes: blockerCodes,
     };
   }
   return {
-    status: provider === PRIMARY_TTS_PROVIDER ? "accepted_primary" : "accepted_fallback",
+    status: "accepted_primary",
     accepted: true,
     blocker_codes: [],
   };
@@ -119,11 +149,11 @@ export function candidateDisposition(qa, provider) {
 
 export function voiceContinuityDecision(continuityQa, {
   audioSha256,
-  referenceVoiceId = "am_puck",
+  referenceVoiceId = "am_liam",
   referenceVoiceSha256,
   similarityModelSha256,
-  minimumCosineSimilarity = QWEN_PUCK_MINIMUM_COSINE_SIMILARITY,
-  warningBelowCosineSimilarity = QWEN_PUCK_WARNING_BELOW_COSINE_SIMILARITY,
+  minimumCosineSimilarity = QWEN_LIAM_MINIMUM_COSINE_SIMILARITY,
+  warningBelowCosineSimilarity = QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY,
 } = {}) {
   const findings = [];
   const addBlocker = (code, details = {}) => findings.push({
@@ -137,35 +167,35 @@ export function voiceContinuityDecision(continuityQa, {
     ...details,
   });
   if (!continuityQa || typeof continuityQa !== "object") {
-    addBlocker("tts_fallback_voice_continuity_qa_missing");
+    addBlocker("tts_primary_voice_continuity_qa_missing");
   } else {
     if (continuityQa.status !== "passed") {
-      addBlocker("tts_fallback_voice_continuity_not_passed", {
+      addBlocker("tts_primary_voice_continuity_not_passed", {
         status: continuityQa.status ?? null,
       });
     }
     if (!audioSha256 || continuityQa.audio_sha256 !== audioSha256) {
-      addBlocker("tts_fallback_voice_continuity_audio_hash_mismatch", {
+      addBlocker("tts_primary_voice_continuity_audio_hash_mismatch", {
         expected: audioSha256 ?? null,
         actual: continuityQa.audio_sha256 ?? null,
       });
     }
     if (continuityQa.reference_voice_id !== referenceVoiceId) {
-      addBlocker("tts_fallback_reference_voice_id_mismatch", {
+      addBlocker("tts_primary_reference_voice_id_mismatch", {
         expected: referenceVoiceId,
         actual: continuityQa.reference_voice_id ?? null,
       });
     }
     if (!referenceVoiceSha256
       || continuityQa.reference_voice_sha256 !== referenceVoiceSha256) {
-      addBlocker("tts_fallback_reference_voice_hash_mismatch", {
+      addBlocker("tts_primary_reference_voice_hash_mismatch", {
         expected: referenceVoiceSha256 ?? null,
         actual: continuityQa.reference_voice_sha256 ?? null,
       });
     }
     if (!similarityModelSha256
       || continuityQa.similarity_model_sha256 !== similarityModelSha256) {
-      addBlocker("tts_fallback_similarity_model_hash_mismatch", {
+      addBlocker("tts_primary_similarity_model_hash_mismatch", {
         expected: similarityModelSha256 ?? null,
         actual: continuityQa.similarity_model_sha256 ?? null,
       });
@@ -173,12 +203,12 @@ export function voiceContinuityDecision(continuityQa, {
     const similarity = Number(continuityQa.cosine_similarity);
     if (!Number.isFinite(similarity)
       || similarity < Number(minimumCosineSimilarity)) {
-      addBlocker("tts_fallback_voice_similarity_below_minimum", {
+      addBlocker("tts_primary_voice_similarity_below_minimum", {
         cosine_similarity: Number.isFinite(similarity) ? similarity : null,
         minimum_cosine_similarity: minimumCosineSimilarity,
       });
     } else if (similarity < Number(warningBelowCosineSimilarity)) {
-      addWarning("tts_fallback_voice_similarity_low_margin", {
+      addWarning("tts_primary_voice_similarity_low_margin", {
         cosine_similarity: similarity,
         minimum_cosine_similarity: minimumCosineSimilarity,
         warning_below_cosine_similarity: warningBelowCosineSimilarity,
@@ -187,14 +217,14 @@ export function voiceContinuityDecision(continuityQa, {
     }
     if (Number(continuityQa.minimum_cosine_similarity)
       !== Number(minimumCosineSimilarity)) {
-      addBlocker("tts_fallback_voice_similarity_policy_mismatch", {
+      addBlocker("tts_primary_voice_similarity_policy_mismatch", {
         expected: minimumCosineSimilarity,
         actual: continuityQa.minimum_cosine_similarity ?? null,
       });
     }
     if (Number(continuityQa.warning_below_cosine_similarity)
       !== Number(warningBelowCosineSimilarity)) {
-      addBlocker("tts_fallback_voice_similarity_warning_policy_mismatch", {
+      addBlocker("tts_primary_voice_similarity_warning_policy_mismatch", {
         expected: warningBelowCosineSimilarity,
         actual: continuityQa.warning_below_cosine_similarity ?? null,
       });

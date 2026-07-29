@@ -16,7 +16,7 @@ Why this matters: ModelsLab, Codex Imagen, GPT Image, and future providers each 
 
 ## 3. TTS Calibration Proof
 
-Create a short, representative TTS calibration stage before full synthesis. Generate several 60-90 second samples covering hook narration, dialogue, system lines, names, numbers, and emotional escalation. Whisper-measure actual WPM, compare ASR against the intended spoken plan, spot-listen, then lock voice model and native speed for the run.
+Create a short, representative TTS calibration stage before full synthesis. Generate several 60-90 second samples covering hook narration, dialogue, system lines, names, numbers, and emotional escalation. Whisper-measure actual WPM, compare ASR against the intended spoken plan, and spot-listen. For the current production route, lock Qwen3-TTS 1.7B Base, the exact Liam reference hashes, sentence-complete 45-60-word units with a hard 60-word maximum, and 80 ms joins. Qwen Base has no effective native-speed control, so do not use a continuous longform request or post-TTS tempo processing to force cadence.
 
 Why this matters: production speed and pronunciation should be selected before an entire episode is synthesized, not repaired afterward.
 

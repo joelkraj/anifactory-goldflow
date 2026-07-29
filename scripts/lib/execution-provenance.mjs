@@ -29,7 +29,11 @@ function scopeFromFlags(flags = {}) {
     .flatMap((name) => String(flags[name] ?? "").split(","))
     .map((value) => value.trim())
     .filter(Boolean))].sort();
-  const ttsUnitIds = list("regenerate-unit-ids", "unit-ids");
+  const ttsUnitIds = list(
+    "confirmed-retry-unit-ids",
+    "regenerate-unit-ids",
+    "unit-ids",
+  );
   const ttsSpeakers = [...new Set(
     list("regenerate-speakers").map((value) => value.toUpperCase()),
   )].sort();

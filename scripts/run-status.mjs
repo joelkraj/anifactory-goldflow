@@ -30,6 +30,10 @@ import {
   narrationArtifactVoiceIdentityFindings,
   narrationPlanVoiceIdentityFindings,
   narrationTtsPolicyForIdentity,
+  QWEN_LIAM_PRIMARY_LOCK,
+  QWEN_LIAM_RETRY_CONTRACT,
+  QWEN_LIAM_STITCH_CONTRACT,
+  QWEN_LIAM_UNIT_CONTRACT,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
 
@@ -280,26 +284,71 @@ function runIdentityTtsComplete(runIdentity = {}) {
     });
     const mismatches = [];
     if (runIdentity.provider_locks?.tts_provider !== policy.primary.provider) mismatches.push("provider_locks.tts_provider");
-    if (runIdentity.provider_locks?.tts_fallback_provider !== policy.fallback?.provider) mismatches.push("provider_locks.tts_fallback_provider");
+    if ((runIdentity.provider_locks?.tts_fallback_provider ?? null) !== (policy.fallback?.provider ?? null)) mismatches.push("provider_locks.tts_fallback_provider");
     if (runIdentity.provider_locks?.narrator_voice_id !== policy.primary.voice_id) mismatches.push("provider_locks.narrator_voice_id");
-    if (Number(runIdentity.provider_locks?.tts_native_speed) !== Number(policy.primary.native_speed)) mismatches.push("provider_locks.tts_native_speed");
     if (runIdentity.model_versions?.tts_model !== policy.primary.model_id) mismatches.push("model_versions.tts_model");
     if (runIdentity.model_versions?.tts_model_revision !== policy.primary.model_revision) mismatches.push("model_versions.tts_model_revision");
-    if (runIdentity.model_versions?.fallback_tts_model !== policy.fallback?.model_id) mismatches.push("model_versions.fallback_tts_model");
-    if (runIdentity.model_versions?.fallback_tts_model_revision !== policy.fallback?.model_revision) mismatches.push("model_versions.fallback_tts_model_revision");
-    if (runIdentity.provider_locks?.fallback_voice_identity !== policy.fallback?.reference_voice_id) mismatches.push("provider_locks.fallback_voice_identity");
-    if (runIdentity.provider_locks?.fallback_reference_audio_sha256 !== policy.fallback?.reference_audio_sha256) mismatches.push("provider_locks.fallback_reference_audio_sha256");
-    if (runIdentity.provider_locks?.fallback_reference_metadata_sha256 !== policy.fallback?.reference_metadata_sha256) mismatches.push("provider_locks.fallback_reference_metadata_sha256");
-    if (runIdentity.provider_locks?.fallback_similarity_model_sha256 !== policy.fallback?.speaker_similarity_model_sha256) mismatches.push("provider_locks.fallback_similarity_model_sha256");
-    if (runIdentity.provider_locks?.fallback_similarity_calibration_sha256 !== policy.fallback?.speaker_similarity_calibration_sha256) mismatches.push("provider_locks.fallback_similarity_calibration_sha256");
-    if (Number(runIdentity.provider_locks?.fallback_minimum_cosine_similarity) !== Number(policy.fallback?.minimum_cosine_similarity)) mismatches.push("provider_locks.fallback_minimum_cosine_similarity");
-    if (Number(runIdentity.provider_locks?.fallback_warning_below_cosine_similarity) !== Number(policy.fallback?.warning_below_cosine_similarity)) mismatches.push("provider_locks.fallback_warning_below_cosine_similarity");
+    if ((runIdentity.model_versions?.fallback_tts_model ?? null) !== (policy.fallback?.model_id ?? null)) mismatches.push("model_versions.fallback_tts_model");
+    if ((runIdentity.model_versions?.fallback_tts_model_revision ?? null) !== (policy.fallback?.model_revision ?? null)) mismatches.push("model_versions.fallback_tts_model_revision");
+    if (policy.primary.provider === "qwen_local") {
+      const exactQwenLocks = {
+        tts_native_speed: null,
+        tts_speed_control: "unsupported",
+        primary_reference_audio_sha256: policy.primary.reference_audio_sha256,
+        primary_reference_manifest_sha256: policy.primary.reference_manifest_sha256,
+        primary_reference_metadata_sha256: policy.primary.reference_metadata_sha256,
+        primary_voice_sha256: policy.primary.voice_sha256,
+        primary_similarity_model_sha256: policy.primary.speaker_similarity_model_sha256,
+        primary_similarity_calibration_sha256: policy.primary.speaker_similarity_calibration_sha256,
+        primary_minimum_cosine_similarity: policy.primary.minimum_cosine_similarity,
+        primary_warning_below_cosine_similarity: policy.primary.warning_below_cosine_similarity,
+        primary_voice_continuity_contract: policy.primary.voice_continuity_contract,
+        tts_unit_target_words_min: QWEN_LIAM_UNIT_CONTRACT.target_words_min,
+        tts_unit_target_words_max: QWEN_LIAM_UNIT_CONTRACT.target_words_max,
+        tts_unit_hard_words_max: QWEN_LIAM_UNIT_CONTRACT.hard_words_max,
+        tts_sentence_complete_units: QWEN_LIAM_UNIT_CONTRACT.sentence_complete,
+        tts_continuous_requests: QWEN_LIAM_UNIT_CONTRACT.continuous_requests,
+        tts_join_silence_ms: QWEN_LIAM_STITCH_CONTRACT.join_silence_ms,
+        post_tempo_processing: QWEN_LIAM_STITCH_CONTRACT.post_tempo_processing,
+        tts_retry_policy: QWEN_LIAM_RETRY_CONTRACT.retry_policy,
+        tts_automatic_asr_retry: QWEN_LIAM_RETRY_CONTRACT.automatic_asr_retry,
+      };
+      for (const [field, expected] of Object.entries(exactQwenLocks)) {
+        if (runIdentity.provider_locks?.[field] !== expected) {
+          mismatches.push(`provider_locks.${field}`);
+        }
+      }
+      if (JSON.stringify(runIdentity.provider_locks?.tts_confirmed_defect_types)
+        !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT.confirmed_defect_types)) {
+        mismatches.push("provider_locks.tts_confirmed_defect_types");
+      }
+      if (runIdentity.production_gates?.tts_speed_control_supported !== false) {
+        mismatches.push("production_gates.tts_speed_control_supported");
+      }
+      if (runIdentity.production_gates?.sentence_complete_tts_units_required !== true) {
+        mismatches.push("production_gates.sentence_complete_tts_units_required");
+      }
+      if (runIdentity.production_gates?.continuous_longform_tts_requests_forbidden !== true) {
+        mismatches.push("production_gates.continuous_longform_tts_requests_forbidden");
+      }
+    } else {
+      if (Number(runIdentity.provider_locks?.tts_native_speed) !== Number(policy.primary.native_speed)) mismatches.push("provider_locks.tts_native_speed");
+      if ((runIdentity.provider_locks?.fallback_voice_identity ?? null) !== (policy.fallback?.reference_voice_id ?? null)) mismatches.push("provider_locks.fallback_voice_identity");
+      if ((runIdentity.provider_locks?.fallback_reference_audio_sha256 ?? null) !== (policy.fallback?.reference_audio_sha256 ?? null)) mismatches.push("provider_locks.fallback_reference_audio_sha256");
+      if ((runIdentity.provider_locks?.fallback_reference_metadata_sha256 ?? null) !== (policy.fallback?.reference_metadata_sha256 ?? null)) mismatches.push("provider_locks.fallback_reference_metadata_sha256");
+      if ((runIdentity.provider_locks?.fallback_similarity_model_sha256 ?? null) !== (policy.fallback?.speaker_similarity_model_sha256 ?? null)) mismatches.push("provider_locks.fallback_similarity_model_sha256");
+      if ((runIdentity.provider_locks?.fallback_similarity_calibration_sha256 ?? null) !== (policy.fallback?.speaker_similarity_calibration_sha256 ?? null)) mismatches.push("provider_locks.fallback_similarity_calibration_sha256");
+      if (Number(runIdentity.provider_locks?.fallback_minimum_cosine_similarity) !== Number(policy.fallback?.minimum_cosine_similarity)) mismatches.push("provider_locks.fallback_minimum_cosine_similarity");
+      if (Number(runIdentity.provider_locks?.fallback_warning_below_cosine_similarity) !== Number(policy.fallback?.warning_below_cosine_similarity)) mismatches.push("provider_locks.fallback_warning_below_cosine_similarity");
+    }
     if (mismatches.length) {
       return { done: false, evidence: `run_identity.json narration locks missing/stale: ${mismatches.join(", ")}` };
     }
     return {
       done: true,
-      evidence: `run_identity.json TTS locked: ${policy.primary.provider}/${policy.primary.voice_id}@${policy.primary.native_speed}; fallback=${policy.fallback?.provider ?? "none"}`,
+      evidence: policy.primary.provider === "qwen_local"
+        ? `run_identity.json TTS locked: ${policy.primary.provider}/${policy.primary.voice_id}; Liam reference clone; 45-60 words (hard 60); 80 ms joins; sequential; no fallback/speed/continuous/post-tempo`
+        : `run_identity.json TTS locked: ${policy.primary.provider}/${policy.primary.voice_id}@${policy.primary.native_speed}; fallback=${policy.fallback?.provider ?? "none"}`,
     };
   } catch (error) {
     return { done: false, evidence: `run_identity.json TTS policy invalid: ${error instanceof Error ? error.message : String(error)}` };
@@ -1614,7 +1663,8 @@ async function synthesizedNarrationArtifactsComplete({
         }
       }
     }
-    if (provider === policy.fallback?.provider) {
+    if (policy.fallback && provider === policy.fallback.provider) {
+      const fallbackPolicy = policy.fallback;
       const primaryHash = result.primary_spoken_text_sha256;
       const fallbackHash = result.fallback_spoken_text_sha256;
       if (!primaryHash
@@ -1637,7 +1687,7 @@ async function synthesizedNarrationArtifactsComplete({
         segment.voice_continuity_contract,
       ];
       if (contracts.some(
-        (contract) => contract !== policy.fallback.voice_continuity_contract,
+        (contract) => contract !== fallbackPolicy.voice_continuity_contract,
       )) {
         add(`fallback unit ${planned.unit_id} voice-continuity contract is missing or stale`);
       }
@@ -1652,19 +1702,19 @@ async function synthesizedNarrationArtifactsComplete({
           || continuity?.audio_sha256 !== result.audio_sha256
           || continuity?.reference_voice_id !== policy.primary.voice_id
           || continuity?.reference_voice_sha256 !== policy.primary.voice_sha256
-          || continuity?.reference_audio_sha256 !== policy.fallback.reference_audio_sha256
+          || continuity?.reference_audio_sha256 !== fallbackPolicy.reference_audio_sha256
           || continuity?.similarity_model_sha256
-            !== policy.fallback.speaker_similarity_model_sha256
+            !== fallbackPolicy.speaker_similarity_model_sha256
           || continuity?.similarity_calibration_sha256
-            !== policy.fallback.speaker_similarity_calibration_sha256
+            !== fallbackPolicy.speaker_similarity_calibration_sha256
           || continuity?.voice_continuity_contract
-            !== policy.fallback.voice_continuity_contract
+            !== fallbackPolicy.voice_continuity_contract
           || Number(continuity?.minimum_cosine_similarity)
-            !== Number(policy.fallback.minimum_cosine_similarity)
+            !== Number(fallbackPolicy.minimum_cosine_similarity)
           || Number(continuity?.warning_below_cosine_similarity)
-            !== Number(policy.fallback.warning_below_cosine_similarity)
+            !== Number(fallbackPolicy.warning_below_cosine_similarity)
           || !Number.isFinite(similarity)
-          || similarity < Number(policy.fallback.minimum_cosine_similarity)) {
+          || similarity < Number(fallbackPolicy.minimum_cosine_similarity)) {
           add(`fallback unit ${planned.unit_id} ${label} lacks passing Puck voice-continuity evidence`);
         }
       }
@@ -1680,9 +1730,11 @@ async function synthesizedNarrationArtifactsComplete({
     }
   }
 
-  const expectedFallbackIds = results
-    .filter((row) => (row.selected_provider ?? row.provider) === policy.fallback?.provider)
-    .map((row) => String(row.unit_id));
+  const expectedFallbackIds = policy.fallback
+    ? results
+        .filter((row) => (row.selected_provider ?? row.provider) === policy.fallback.provider)
+        .map((row) => String(row.unit_id))
+    : [];
   const declaredFallbackIdsValue = ttsReport.fallback_unit_ids
     ?? ttsReport.fallback_selected_unit_ids
     ?? ttsReport.fallback_usage?.unit_ids
@@ -1693,23 +1745,24 @@ async function synthesizedNarrationArtifactsComplete({
   if (!exactOrderedIds(expectedFallbackIds, declaredFallbackIds)) {
     add("declared fallback unit IDs differ from selected result providers");
   }
-  if (expectedFallbackIds.length) {
+  if (expectedFallbackIds.length && policy.fallback) {
+    const fallbackPolicy = policy.fallback;
     const fallbackUsage = ttsReport.fallback_usage ?? {};
-    if (fallbackUsage.provider !== policy.fallback.provider
+    if (fallbackUsage.provider !== fallbackPolicy.provider
       || fallbackUsage.target_voice_id !== policy.primary.voice_id
       || fallbackUsage.target_voice_sha256 !== policy.primary.voice_sha256
       || fallbackUsage.voice_continuity_contract
-        !== policy.fallback.voice_continuity_contract
+        !== fallbackPolicy.voice_continuity_contract
       || fallbackUsage.reference_audio_sha256
-        !== policy.fallback.reference_audio_sha256
+        !== fallbackPolicy.reference_audio_sha256
       || fallbackUsage.speaker_similarity_model_sha256
-        !== policy.fallback.speaker_similarity_model_sha256
+        !== fallbackPolicy.speaker_similarity_model_sha256
       || fallbackUsage.speaker_similarity_calibration_sha256
-        !== policy.fallback.speaker_similarity_calibration_sha256
+        !== fallbackPolicy.speaker_similarity_calibration_sha256
       || Number(fallbackUsage.minimum_cosine_similarity)
-        !== Number(policy.fallback.minimum_cosine_similarity)
+        !== Number(fallbackPolicy.minimum_cosine_similarity)
       || Number(fallbackUsage.warning_below_cosine_similarity)
-        !== Number(policy.fallback.warning_below_cosine_similarity)
+        !== Number(fallbackPolicy.warning_below_cosine_similarity)
       || fallbackUsage.exact_unit_only !== true) {
       add("declared fallback usage lacks the locked Puck clone continuity provenance");
     }
@@ -1756,6 +1809,147 @@ async function synthesizedNarrationArtifactsComplete({
 
 function firstPresent(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
+export function qwenLiamBoundaryContractFindingsForTests(
+  stitchReport = {},
+  fullQa = {},
+) {
+  const findings = [];
+  const segments = Array.isArray(stitchReport.segments)
+    ? stitchReport.segments
+    : [];
+  const boundaries = Array.isArray(stitchReport.boundaries)
+    ? stitchReport.boundaries
+    : [];
+  const joins = Array.isArray(fullQa?.join_qa?.joins)
+    ? fullQa.join_qa.joins
+    : [];
+  const sampleRate = Number(stitchReport.stitch_sample_rate);
+  const expectedSamples = Number.isInteger(sampleRate) && sampleRate > 0
+    ? Math.round(QWEN_LIAM_STITCH_CONTRACT.join_silence_ms * sampleRate / 1000)
+    : null;
+  const add = (code, details = {}) => findings.push({ code, ...details });
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
+    add("tts_join_stitch_sample_rate_missing", {
+      expected: QWEN_LIAM_PRIMARY_LOCK.sample_rate_hz,
+      actual: stitchReport.stitch_sample_rate ?? null,
+    });
+  } else if (sampleRate !== QWEN_LIAM_PRIMARY_LOCK.sample_rate_hz) {
+    add("tts_join_stitch_sample_rate_mismatch", {
+      expected: QWEN_LIAM_PRIMARY_LOCK.sample_rate_hz,
+      actual: sampleRate,
+    });
+  }
+  if (boundaries.length !== Math.max(0, segments.length - 1)) {
+    add("tts_join_boundary_count_mismatch", {
+      expected: Math.max(0, segments.length - 1),
+      actual: boundaries.length,
+    });
+  }
+  if (stitchReport.boundary_qa?.status !== "passed"
+    || stitchReport.boundary_qa?.boundary_count !== boundaries.length
+    || (stitchReport.boundary_qa?.blockers ?? []).length > 0) {
+    add("tts_join_boundary_qa_not_passed");
+  }
+  if (fullQa?.join_qa?.exact_effective_gap_sample_count_required !== true
+    || Number(fullQa?.join_qa?.required_effective_gap_sample_count)
+      !== expectedSamples) {
+    add("tts_join_full_stream_exact_gap_contract_missing", {
+      expected: expectedSamples,
+      actual: fullQa?.join_qa?.required_effective_gap_sample_count ?? null,
+    });
+  }
+  for (let index = 0; index < boundaries.length; index += 1) {
+    const boundary = boundaries[index];
+    const left = segments[index];
+    const right = segments[index + 1];
+    const join = joins[index];
+    const retainedLeft = Number(left?.prepared_trailing_silence_sample_count);
+    const retainedRight = Number(right?.prepared_leading_silence_sample_count);
+    const inserted = Number(boundary?.gap_sample_count);
+    const actualEffective = retainedLeft + inserted + retainedRight;
+    const context = {
+      after_unit_id: boundary?.after_unit_id ?? left?.unit_id ?? null,
+      before_unit_id: boundary?.before_unit_id ?? right?.unit_id ?? null,
+    };
+    if (boundary?.after_unit_id !== left?.unit_id
+      || boundary?.before_unit_id !== right?.unit_id) {
+      add("tts_join_boundary_unit_order_mismatch", context);
+    }
+    for (const [field, value] of [
+      ["prepared_trailing_silence_sample_count", retainedLeft],
+      ["gap_sample_count", inserted],
+      ["prepared_leading_silence_sample_count", retainedRight],
+    ]) {
+      if (!Number.isInteger(value) || value < 0) {
+        add("tts_join_actual_sample_evidence_missing", {
+          ...context,
+          field,
+          actual: Number.isFinite(value) ? value : null,
+        });
+      }
+    }
+    if (Number(boundary?.target_gap_sample_count) !== expectedSamples) {
+      add("tts_join_target_gap_sample_count_mismatch", {
+        ...context,
+        expected: expectedSamples,
+        actual: boundary?.target_gap_sample_count ?? null,
+      });
+    }
+    if (Number(boundary?.retained_left_trailing_silence_sample_count)
+      !== retainedLeft
+      || Number(boundary?.retained_right_leading_silence_sample_count)
+        !== retainedRight
+      || Number(boundary?.inserted_silence_sample_count) !== inserted) {
+      add("tts_join_boundary_sample_provenance_mismatch", context);
+    }
+    if (actualEffective !== expectedSamples
+      || Number(boundary?.effective_gap_sample_count) !== actualEffective) {
+      add("tts_join_effective_gap_sample_count_mismatch", {
+        ...context,
+        expected: expectedSamples,
+        actual: actualEffective,
+      });
+    }
+    if (boundary?.status !== "passed" || boundary?.blocker != null) {
+      add("tts_join_boundary_status_not_passed", context);
+    }
+    if (!join
+      || join.after_unit_id !== boundary.after_unit_id
+      || join.before_unit_id !== boundary.before_unit_id
+      || Number(join.target_gap_sample_count) !== expectedSamples
+      || Number(join.retained_left_trailing_silence_sample_count)
+        !== retainedLeft
+      || Number(join.retained_right_leading_silence_sample_count)
+        !== retainedRight
+      || Number(join.inserted_silence_sample_count) !== inserted
+      || Number(join.effective_gap_sample_count) !== actualEffective
+      || !["passed", "passed_with_warning", "passed_with_warnings"].includes(
+        String(join.status ?? "").toLowerCase(),
+      )) {
+      add("tts_join_full_stream_boundary_evidence_mismatch", context);
+    }
+  }
+  if (joins.length !== boundaries.length) {
+    add("tts_join_full_stream_join_count_mismatch", {
+      expected: boundaries.length,
+      actual: joins.length,
+    });
+  }
+  return findings;
+}
+
+async function wavPcm16SampleCount(filePath) {
+  const buffer = await fs.readFile(filePath);
+  let offset = 12;
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString("ascii", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    if (chunkId === "data") return Math.floor(chunkSize / 2);
+    offset += 8 + chunkSize + (chunkSize % 2);
+  }
+  throw new Error(`Could not find WAV data chunk: ${filePath}`);
 }
 
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
@@ -1844,18 +2038,25 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     ttsReport.model?.voice_sha256,
     ttsReport.voice_sha256,
   );
-  const reportedSpeed = Number(firstPresent(
+  const reportedSpeedValues = [
     ttsReport.tts_native_speed,
     ttsReport.primary?.native_speed,
     ttsReport.native_speed,
     stitchReport.native_speed,
-  ));
+  ];
+  const reportedSpeedValue = firstPresent(...reportedSpeedValues);
+  const reportedSpeed = Number(reportedSpeedValue);
   const pinMismatches = [];
   if (reportedModelId !== policy.primary.model_id) pinMismatches.push(`model=${reportedModelId ?? "missing"}`);
   if (reportedRevision !== policy.primary.model_revision) pinMismatches.push(`revision=${reportedRevision ?? "missing"}`);
   if (reportedVoiceId !== policy.primary.voice_id) pinMismatches.push(`voice=${reportedVoiceId ?? "missing"}`);
   if (reportedVoiceHash !== policy.primary.voice_sha256) pinMismatches.push(`voice_hash=${reportedVoiceHash ?? "missing"}`);
-  if (!Number.isFinite(reportedSpeed) || Math.abs(reportedSpeed - Number(policy.primary.native_speed)) > 0.001) {
+  if (policy.primary.provider === "qwen_local") {
+    if (reportedSpeedValues.some((value) => value !== undefined && value !== null)) {
+      pinMismatches.push(`speed=${reportedSpeedValue ?? "unexpected"}`);
+    }
+  } else if (!Number.isFinite(reportedSpeed)
+    || Math.abs(reportedSpeed - Number(policy.primary.native_speed)) > 0.001) {
     pinMismatches.push(`speed=${Number.isFinite(reportedSpeed) ? reportedSpeed : "missing"}`);
   }
   if (pinMismatches.length) {
@@ -1863,6 +2064,64 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
   }
   if (ttsReport.post_tempo_normalized === true || stitchReport.post_tempo_normalized === true) {
     return { done: false, evidence: "stitched narration uses forbidden post-TTS tempo processing" };
+  }
+  if (policy.primary.provider === "qwen_local") {
+    if (Number(ttsReport.effective_concurrency) !== 1) {
+      return { done: false, evidence: `Qwen Liam effective concurrency=${ttsReport.effective_concurrency ?? "missing"}; required 1` };
+    }
+    if (Number(stitchReport.unit_gap_sec) !== QWEN_LIAM_STITCH_CONTRACT.join_silence_ms / 1000
+      || Number(stitchReport.segment_gap_sec) !== QWEN_LIAM_STITCH_CONTRACT.join_silence_ms / 1000) {
+      return { done: false, evidence: `Qwen Liam joins must be ${QWEN_LIAM_STITCH_CONTRACT.join_silence_ms} ms at every unit/segment boundary` };
+    }
+    const declaredFallbackIds = ttsReport.fallback_unit_ids
+      ?? ttsReport.fallback_selected_unit_ids
+      ?? [];
+    if ((Array.isArray(declaredFallbackIds) && declaredFallbackIds.length)
+      || ttsReport.fallback_usage != null) {
+      return { done: false, evidence: "Qwen Liam narration must not select a fallback provider or voice" };
+    }
+    if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
+      || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== true
+      || ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true
+      || ttsReport.retry_policy?.other_acoustic_or_voice_identity_blockers_require_review !== true) {
+      return { done: false, evidence: "Qwen Liam retry policy must keep uncertain ASR non-blocking, stop unconfirmed acoustic/voice blockers for review, and retry only confirmed skips, truncations, or stutters (including objectively failed/empty/truncated synthesis)" };
+    }
+    const fullQaForBoundaryContract = await readJson(
+      path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
+      null,
+    );
+    const boundaryFindings = qwenLiamBoundaryContractFindingsForTests(
+      stitchReport,
+      fullQaForBoundaryContract,
+    );
+    if (boundaryFindings.length) {
+      return {
+        done: false,
+        evidence: `Qwen Liam exact 80 ms boundary contract stale: ${boundaryFindings
+          .slice(0, 8)
+          .map((finding) => finding.code)
+          .join(", ")}`,
+      };
+    }
+    for (const boundary of stitchReport.boundaries ?? []) {
+      const gapPath = boundary?.gap_wav;
+      const declaredGapSamples = Number(boundary?.gap_sample_count);
+      if (declaredGapSamples > 0) {
+        if (!gapPath || !(await exists(gapPath))) {
+          return {
+            done: false,
+            evidence: `Qwen Liam boundary ${boundary.after_unit_id ?? "unknown"} gap WAV missing`,
+          };
+        }
+        const actualGapSamples = await wavPcm16SampleCount(gapPath).catch(() => null);
+        if (actualGapSamples !== declaredGapSamples) {
+          return {
+            done: false,
+            evidence: `Qwen Liam boundary ${boundary.after_unit_id ?? "unknown"} gap WAV samples=${actualGapSamples ?? "unreadable"}; report requires ${declaredGapSamples}`,
+          };
+        }
+      }
+    }
   }
 
   const unitQaStatus = firstPresent(ttsReport.unit_qa_status, ttsReport.unit_qa?.status);
@@ -2074,34 +2333,72 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
   }
   const planProvider = plan?.primary_provider ?? plan?.provider ?? plan?.tts_provider;
   const planFallback = plan?.fallback_provider ?? plan?.provider_policy?.fallback_provider ?? null;
+  const primaryControls = policy.primary.provider === "qwen_local"
+    ? plan?.provider_controls?.qwen3 ?? plan?.provider_controls?.qwen_local ?? {}
+    : plan?.provider_controls?.kokoro ?? plan?.provider_controls?.kokoro_local ?? {};
   const planVoiceId = plan?.narrator_voice_id
-    ?? plan?.provider_controls?.kokoro?.voice_id
-    ?? plan?.provider_controls?.kokoro?.voice
+    ?? primaryControls.voice_id
+    ?? primaryControls.voice
+    ?? primaryControls.reference_voice_id
+    ?? primaryControls.target_voice_id
     ?? null;
-  const planSpeed = Number(
-    plan?.tts_native_speed
-    ?? plan?.provider_controls?.kokoro?.native_speed
-    ?? plan?.provider_controls?.kokoro?.speed,
-  );
+  const rawPlanSpeed = plan?.tts_native_speed
+    ?? primaryControls.native_speed
+    ?? primaryControls.speed
+    ?? null;
+  const planSpeed = rawPlanSpeed == null ? null : Number(rawPlanSpeed);
+  const speedMismatch = policy.primary.provider === "qwen_local"
+    ? rawPlanSpeed != null || primaryControls.speed_control_supported !== false
+    : !Number.isFinite(planSpeed)
+      || Math.abs(planSpeed - Number(policy.primary.native_speed)) > 0.001;
   if (planProvider !== policy.primary.provider
-    || planFallback !== policy.fallback?.provider
+    || (planFallback ?? null) !== (policy.fallback?.provider ?? null)
     || planVoiceId !== policy.primary.voice_id
-    || !Number.isFinite(planSpeed)
-    || Math.abs(planSpeed - Number(policy.primary.native_speed)) > 0.001) {
+    || speedMismatch) {
     return {
       done: false,
-      evidence: `${label} provider lock mismatch: primary=${planProvider ?? "missing"}, fallback=${planFallback ?? "missing"}, voice=${planVoiceId ?? "missing"}, speed=${Number.isFinite(planSpeed) ? planSpeed : "missing"}`,
+      evidence: `${label} provider lock mismatch: primary=${planProvider ?? "missing"}, fallback=${planFallback ?? "none"}, voice=${planVoiceId ?? "missing"}, speed=${rawPlanSpeed == null ? "unsupported" : Number.isFinite(planSpeed) ? planSpeed : "invalid"}`,
     };
   }
-  const units = (plan?.segments ?? []).flatMap((segment) => (
-    segment?.narration_units ?? segment?.tts_generation_units ?? segment?.qwen_generation_units ?? []
-  ));
+  const units = Array.isArray(plan?.units) && plan.units.length
+    ? plan.units
+    : (plan?.segments ?? []).flatMap((segment) => (
+        segment?.narration_units
+        ?? segment?.narration_generation_units
+        ?? segment?.tts_generation_units
+        ?? segment?.qwen_generation_units
+        ?? []
+      ));
   if (!units.length) return { done: false, evidence: `${label} contains no narration units` };
+  if (policy.primary.provider === "qwen_local") {
+    const qwenGrouping = plan?.qwen_liam_unit_grouping ?? {};
+    const groupingMismatches = [
+      qwenGrouping.enabled !== true ? "enabled" : null,
+      qwenGrouping.sentence_complete !== QWEN_LIAM_UNIT_CONTRACT.sentence_complete ? "sentence_complete" : null,
+      Number(qwenGrouping.target_spoken_words_min) !== QWEN_LIAM_UNIT_CONTRACT.target_words_min ? "target_spoken_words_min" : null,
+      Number(qwenGrouping.target_spoken_words_max) !== QWEN_LIAM_UNIT_CONTRACT.target_words_max ? "target_spoken_words_max" : null,
+      Number(qwenGrouping.hard_spoken_words_max) !== QWEN_LIAM_UNIT_CONTRACT.hard_words_max ? "hard_spoken_words_max" : null,
+      qwenGrouping.continuous_requests_allowed !== QWEN_LIAM_UNIT_CONTRACT.continuous_requests ? "continuous_requests_allowed" : null,
+      plan?.sentence_unit_boundary_integrity?.status !== "passed" ? "sentence_unit_boundary_integrity.status" : null,
+    ].filter(Boolean);
+    const invalidUnit = units.find((unit) => {
+      const text = String(unit?.spoken_text ?? unit?.tts_spoken_text ?? "").trim();
+      const wordCount = text.split(/\s+/).filter(Boolean).length;
+      return wordCount > QWEN_LIAM_UNIT_CONTRACT.hard_words_max
+        || !/[.!?…]["”’\])]*$/u.test(text);
+    });
+    if (groupingMismatches.length || invalidUnit) {
+      return {
+        done: false,
+        evidence: `${label} Qwen Liam unit contract mismatch${groupingMismatches.length ? `: ${groupingMismatches.join(", ")}` : ""}${invalidUnit ? `; invalid unit=${invalidUnit.unit_id ?? "unknown"} (must end at a sentence and stay at or below 60 words)` : ""}`,
+      };
+    }
+  }
   const voiceIdentityFindings = narrationPlanVoiceIdentityFindings(plan, policy);
   if (voiceIdentityFindings.length) {
     return {
       done: false,
-      evidence: `${label} Puck-only identity mismatch: ${voiceIdentityFindings
+      evidence: `${label} narration identity mismatch: ${voiceIdentityFindings
         .slice(0, 8)
         .map((finding) => `${finding.path}=${finding.actual ?? "missing"} (required ${finding.expected})`)
         .join("; ")}`,

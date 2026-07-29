@@ -2,13 +2,13 @@
 
 Date: 2026-07-26
 
-> Superseded production decision: this machine-scored screen recommended a
-> Supertonic proof before the later three-minute listening round. The operator
-> selected Kokoro `am_puck`, with `am_fenrir` second, after hearing that proof.
-> See `docs/audits/2026-07-27-puck-production-default.md`. The measurements below
-> remain a historical comparison, not the current Goldflow default. Fenrir's
-> second-place listening rank does not make it a selectable production alternate;
-> new production is Puck-only.
+> Historical comparison only. This machine-scored screen recommended a
+> Supertonic proof; a later listening round temporarily selected Kokoro
+> `am_puck`, with `am_fenrir` second. Both policies are superseded by the
+> operator-approved Qwen3-TTS 1.7B Base route with the exact Liam reference
+> clone. See
+> `docs/audits/2026-07-28-qwen-liam-production-default.md`. Neither Puck nor
+> Fenrir is a selectable current production alternate.
 
 ## Decision
 

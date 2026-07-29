@@ -43,6 +43,10 @@ KOKORO_VOICES = {
 }
 PUCK_VOICE_ID = "am_puck"
 PUCK_VOICE_SHA256 = KOKORO_VOICES[PUCK_VOICE_ID]
+LIAM_VOICE_ID = "am_liam"
+LIAM_VOICE_SHA256 = (
+    "66b65a96e16c3d91035a6e9019d9986ed524d27ce35b487270cdf61c99e3ebad"
+)
 QWEN = {
     "provider": "qwen_local",
     "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
@@ -55,7 +59,64 @@ QWEN = {
     "speech_tokenizer_weights_sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
     "speech_tokenizer_config_sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
 }
+QWEN_LIAM_REFERENCE = {
+    "contract_id": "qwen_liam_primary_v1",
+    "voice_continuity_contract": "qwen_icl_clone_of_liam_reference",
+    "voice_clone_contract": "qwen_icl_clone_of_selected_liam_reference",
+    "voice_id": LIAM_VOICE_ID,
+    "voice_sha256": LIAM_VOICE_SHA256,
+    "audio_path": (
+        "/Users/joel/AniFactoryData/voice_bank/proofs/"
+        "2026-07-27-qwen-liam-clone-delivery-v1/liam_reference/"
+        "liam_clone_reference.wav"
+    ),
+    "audio_sha256": (
+        "6200eb0dcc2d5f9c9d0ab52a2532d033a3db126e9d1570e78d4463cc282ee0af"
+    ),
+    "text": (
+        "Because a deed is not a toy. A deed is the only word in any language "
+        "that means this is mine and the world has to agree. The breathing got "
+        "closer. Out of the black came a shape too big to be a man and too "
+        "graceful to be a beast. A broken crown curved between its horns."
+    ),
+    "text_sha256": (
+        "2630f1d234dd38762cf538ee7b817026711f2c9642a26dd3678242647e5a720c"
+    ),
+    "manifest_path": (
+        "/Users/joel/AniFactoryData/voice_bank/proofs/"
+        "2026-07-27-qwen-liam-clone-delivery-v1/"
+        "liam_reference_manifest.json"
+    ),
+    "manifest_sha256": (
+        "6da7f9797caba9e872862fec31097cfe0b6e171b343096b9644d1846d635ad7c"
+    ),
+    "metadata_path": (
+        "/Users/joel/AniFactoryData/voice_bank/proofs/"
+        "2026-07-27-qwen-liam-clone-delivery-v1/"
+        "liam_reference/run.json"
+    ),
+    "metadata_sha256": (
+        "4357626dda4f07e0cb22ac304e593611d9ecce080aad895b7f2a10ad0737a811"
+    ),
+    "source_provider": KOKORO["provider"],
+    "source_model_id": KOKORO["model_id"],
+    "source_model_revision": KOKORO["revision"],
+    "source_unit_id": "liam_clone_reference",
+    "legacy_compatibility": False,
+    "generation_parameters": {
+        "temperature": 0.6,
+        "top_p": 0.8,
+        "top_k": 50,
+        "repetition_penalty": 1.2,
+        "max_tokens": 1200,
+    },
+}
 QWEN_PUCK_REFERENCE = {
+    "contract_id": "qwen_puck_legacy_fallback_v1",
+    "voice_continuity_contract": "clone_primary_puck_identity",
+    "voice_clone_contract": "qwen_icl_clone_of_selected_puck_reference",
+    "voice_id": PUCK_VOICE_ID,
+    "voice_sha256": PUCK_VOICE_SHA256,
     "audio_path": (
         "/Users/joel/AniFactoryData/voice_bank/kokoro/reference_samples/"
         "am_puck/am_puck_qwen_fallback_reference_v1.wav"
@@ -83,6 +144,18 @@ QWEN_PUCK_REFERENCE = {
     "source_model_id": KOKORO["model_id"],
     "source_model_revision": KOKORO["revision"],
     "source_unit_id": "stp_voice_seg_10_5_2630f1d234dd",
+    "legacy_compatibility": True,
+    "generation_parameters": {
+        "temperature": 0.6,
+        "top_p": 0.8,
+        "top_k": 50,
+        "repetition_penalty": 1.5,
+        "max_tokens": 1200,
+    },
+}
+QWEN_REFERENCE_CONTRACTS = {
+    QWEN_LIAM_REFERENCE["voice_continuity_contract"]: QWEN_LIAM_REFERENCE,
+    QWEN_PUCK_REFERENCE["voice_continuity_contract"]: QWEN_PUCK_REFERENCE,
 }
 MLX_AUDIO_VERSION = "0.4.6"
 
@@ -224,6 +297,56 @@ def validate_jobs(value: Any) -> list[dict[str, Any]]:
     return output
 
 
+def resolve_qwen_reference_contract(
+    jobs_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    contract_name = str(
+        jobs_manifest.get("qwen_voice_continuity_contract") or ""
+    ).strip()
+    contract = QWEN_REFERENCE_CONTRACTS.get(contract_name)
+    if contract is None:
+        raise ValueError(
+            "Unapproved Qwen voice continuity contract: "
+            f"{contract_name!r}; expected one of "
+            f"{sorted(QWEN_REFERENCE_CONTRACTS)}"
+        )
+    if (
+        jobs_manifest.get("qwen_reference_voice_id") != contract["voice_id"]
+        or jobs_manifest.get("qwen_reference_voice_sha256")
+        != contract["voice_sha256"]
+    ):
+        raise ValueError(
+            "Qwen reference voice identity does not match the selected "
+            f"{contract['contract_id']} contract"
+        )
+    if (
+        contract is QWEN_LIAM_REFERENCE
+        and jobs_manifest.get("qwen_reference_manifest_sha256")
+        != contract["manifest_sha256"]
+    ):
+        raise ValueError(
+            "Qwen Liam primary jobs must carry the pinned reference "
+            "manifest hash"
+        )
+    return contract
+
+
+def validate_qwen_output_conditioning(jobs_manifest: dict[str, Any]) -> None:
+    if jobs_manifest.get("qwen_post_tts_tempo_processing") not in (None, False):
+        raise ValueError(
+            "Qwen production synthesis forbids post-TTS tempo processing"
+        )
+    if jobs_manifest.get("post_tts_tempo_processing") not in (None, False):
+        raise ValueError(
+            "Qwen production synthesis forbids post-TTS tempo processing"
+        )
+    requested_speed = jobs_manifest.get("qwen_native_speed")
+    if requested_speed is not None and float(requested_speed) != 1.0:
+        raise ValueError(
+            "Qwen Base does not expose a supported native speed control"
+        )
+
+
 def synthesis_identity(
     route: str,
     pin: dict[str, Any],
@@ -231,6 +354,7 @@ def synthesis_identity(
     reference_audio: Path | None,
     reference_text: str | None,
     kokoro_voice_id: str | None,
+    qwen_reference_contract: dict[str, Any] | None,
 ) -> dict[str, Any]:
     value = {
         "schema": "goldflow_local_tts_synthesis_identity_v1",
@@ -260,12 +384,26 @@ def synthesis_identity(
         )
     else:
         if reference_audio is None or reference_text is None:
-            raise ValueError("Qwen fallback requires reference audio and exact text")
+            raise ValueError("Qwen production requires reference audio and exact text")
+        if qwen_reference_contract is None:
+            raise ValueError("Qwen production requires a pinned voice contract")
+        generation_parameters = qwen_reference_contract[
+            "generation_parameters"
+        ]
         value.update(
             {
-                "voice": PUCK_VOICE_ID,
-                "voice_sha256": PUCK_VOICE_SHA256,
-                "voice_clone_contract": "qwen_icl_clone_of_selected_puck_reference",
+                "voice": qwen_reference_contract["voice_id"],
+                "voice_sha256": qwen_reference_contract["voice_sha256"],
+                "voice_clone_contract": qwen_reference_contract[
+                    "voice_clone_contract"
+                ],
+                "voice_contract_id": qwen_reference_contract["contract_id"],
+                "voice_continuity_contract": qwen_reference_contract[
+                    "voice_continuity_contract"
+                ],
+                "legacy_voice_contract": qwen_reference_contract[
+                    "legacy_compatibility"
+                ],
                 "generation_config_sha256": pin["generation_config_sha256"],
                 "speech_tokenizer_weights_sha256": pin[
                     "speech_tokenizer_weights_sha256"
@@ -277,32 +415,39 @@ def synthesis_identity(
                 "reference_audio_sha256": sha256_file(reference_audio),
                 "reference_text": reference_text,
                 "reference_text_sha256": sha256_text(reference_text),
-                "reference_voice_id": PUCK_VOICE_ID,
-                "reference_voice_sha256": PUCK_VOICE_SHA256,
-                "reference_source_provider": QWEN_PUCK_REFERENCE[
+                "reference_voice_id": qwen_reference_contract["voice_id"],
+                "reference_voice_sha256": qwen_reference_contract[
+                    "voice_sha256"
+                ],
+                "reference_source_provider": qwen_reference_contract[
                     "source_provider"
                 ],
-                "reference_source_model_id": QWEN_PUCK_REFERENCE[
+                "reference_source_model_id": qwen_reference_contract[
                     "source_model_id"
                 ],
-                "reference_source_model_revision": QWEN_PUCK_REFERENCE[
+                "reference_source_model_revision": qwen_reference_contract[
                     "source_model_revision"
                 ],
-                "reference_source_unit_id": QWEN_PUCK_REFERENCE[
+                "reference_source_unit_id": qwen_reference_contract[
                     "source_unit_id"
                 ],
-                "reference_metadata_path": QWEN_PUCK_REFERENCE[
+                "reference_manifest_path": qwen_reference_contract.get(
+                    "manifest_path"
+                ),
+                "reference_manifest_sha256": qwen_reference_contract.get(
+                    "manifest_sha256"
+                ),
+                "reference_metadata_path": qwen_reference_contract.get(
                     "metadata_path"
-                ],
-                "reference_metadata_sha256": QWEN_PUCK_REFERENCE[
+                ),
+                "reference_metadata_sha256": qwen_reference_contract.get(
                     "metadata_sha256"
-                ],
+                ),
                 "delivery_control": "base_icl_reference_audio_only",
-                "temperature": 0.6,
-                "top_p": 0.8,
-                "top_k": 50,
-                "repetition_penalty": 1.5,
-                "max_tokens": 1200,
+                "native_speed_supported": False,
+                "native_speed_applied": None,
+                "post_tts_tempo_processing": False,
+                **generation_parameters,
             }
         )
     return value
@@ -315,6 +460,7 @@ def generate_audio(
     reference_audio: Path | None,
     reference_text: str | None,
     kokoro_voice_id: str | None,
+    qwen_reference_contract: dict[str, Any] | None,
 ) -> tuple[np.ndarray, int, list[Any]]:
     mx.random.seed(int(job["seed"]))
     if route == "kokoro":
@@ -329,15 +475,13 @@ def generate_audio(
             )
         )
     else:
+        if qwen_reference_contract is None:
+            raise ValueError("Qwen production requires a pinned voice contract")
         generate_kwargs = {
             "text": job["spoken_text"],
             "ref_audio": str(reference_audio),
             "ref_text": reference_text,
-            "temperature": 0.6,
-            "top_p": 0.8,
-            "top_k": 50,
-            "repetition_penalty": 1.5,
-            "max_tokens": 1200,
+            **qwen_reference_contract["generation_parameters"],
             "verbose": False,
         }
         generated = list(
@@ -396,37 +540,47 @@ def main() -> None:
         else None
     )
     reference_text = args.qwen_reference_text
+    qwen_reference_contract: dict[str, Any] | None = None
     if args.route == "qwen":
+        validate_qwen_output_conditioning(jobs_manifest)
+        qwen_reference_contract = resolve_qwen_reference_contract(
+            jobs_manifest
+        )
         if reference_audio is None or not reference_audio.is_file():
-            raise FileNotFoundError("Missing pinned Qwen fallback reference audio")
+            raise FileNotFoundError("Missing pinned Qwen production reference audio")
         expected_reference_sha256 = jobs_manifest.get("qwen_reference_audio_sha256")
         if (
             not expected_reference_sha256
             or sha256_file(reference_audio) != expected_reference_sha256
         ):
-            raise ValueError("Qwen fallback reference audio hash mismatch")
-        if not reference_text or reference_text != jobs_manifest.get("qwen_reference_text"):
-            raise ValueError("Qwen fallback reference text mismatch")
+            raise ValueError("Qwen production reference audio hash mismatch")
         if (
-            str(reference_audio) != QWEN_PUCK_REFERENCE["audio_path"]
-            or sha256_file(reference_audio) != QWEN_PUCK_REFERENCE["audio_sha256"]
-            or reference_text != QWEN_PUCK_REFERENCE["text"]
-            or sha256_text(reference_text) != QWEN_PUCK_REFERENCE["text_sha256"]
+            not reference_text
+            or reference_text != jobs_manifest.get("qwen_reference_text")
         ):
-            raise ValueError("Qwen fallback reference is not the pinned Puck asset")
-        reference_metadata = Path(QWEN_PUCK_REFERENCE["metadata_path"])
-        validate_file(
-            reference_metadata,
-            QWEN_PUCK_REFERENCE["metadata_sha256"],
-        )
+            raise ValueError("Qwen production reference text mismatch")
         if (
-            jobs_manifest.get("qwen_reference_voice_id") != PUCK_VOICE_ID
-            or jobs_manifest.get("qwen_reference_voice_sha256")
-            != PUCK_VOICE_SHA256
-            or jobs_manifest.get("qwen_voice_continuity_contract")
-            != "clone_primary_puck_identity"
+            str(reference_audio) != qwen_reference_contract["audio_path"]
+            or sha256_file(reference_audio)
+            != qwen_reference_contract["audio_sha256"]
+            or reference_text != qwen_reference_contract["text"]
+            or sha256_text(reference_text)
+            != qwen_reference_contract["text_sha256"]
         ):
-            raise ValueError("Qwen fallback must clone the selected Puck voice")
+            raise ValueError(
+                "Qwen reference does not match the selected pinned voice "
+                f"contract: {qwen_reference_contract['contract_id']}"
+            )
+        if qwen_reference_contract.get("manifest_path"):
+            validate_file(
+                Path(qwen_reference_contract["manifest_path"]),
+                qwen_reference_contract["manifest_sha256"],
+            )
+        if qwen_reference_contract.get("metadata_path"):
+            validate_file(
+                Path(qwen_reference_contract["metadata_path"]),
+                qwen_reference_contract["metadata_sha256"],
+            )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     load_started = time.perf_counter()
@@ -454,6 +608,7 @@ def main() -> None:
                 reference_audio,
                 reference_text,
                 kokoro_voice_id,
+                qwen_reference_contract,
             )
             identity_sha256 = canonical_sha256(identity)
             safe_unit_id = re.sub(
@@ -492,6 +647,7 @@ def main() -> None:
                 reference_audio,
                 reference_text,
                 kokoro_voice_id,
+                qwen_reference_contract,
             )
             if sample_rate != 24000:
                 raise RuntimeError(
@@ -510,7 +666,9 @@ def main() -> None:
                 "provider": pin["provider"],
                 "model_id": pin["model_id"],
                 "voice_id": (
-                    kokoro_voice_id if args.route == "kokoro" else PUCK_VOICE_ID
+                    kokoro_voice_id
+                    if args.route == "kokoro"
+                    else qwen_reference_contract["voice_id"]
                 ),
                 "status": "generated",
                 "attempt": int(job["attempt"]),
@@ -538,7 +696,9 @@ def main() -> None:
                     "provider": pin["provider"],
                     "model_id": pin["model_id"],
                     "voice_id": (
-                        kokoro_voice_id if args.route == "kokoro" else PUCK_VOICE_ID
+                        kokoro_voice_id
+                        if args.route == "kokoro"
+                        else qwen_reference_contract["voice_id"]
                     ),
                     "status": "failed",
                     "attempt": int(job["attempt"]),
@@ -566,17 +726,34 @@ def main() -> None:
         "model_source": pin["source"],
         "model_revision": pin["revision"],
         "voice_id": (
-            kokoro_voice_id if args.route == "kokoro" else PUCK_VOICE_ID
+            kokoro_voice_id
+            if args.route == "kokoro"
+            else qwen_reference_contract["voice_id"]
         ),
         "voice_sha256": (
             KOKORO_VOICES[kokoro_voice_id]
             if args.route == "kokoro"
-            else PUCK_VOICE_SHA256
+            else qwen_reference_contract["voice_sha256"]
         ),
         "voice_clone_contract": (
             None
             if args.route == "kokoro"
-            else "qwen_icl_clone_of_selected_puck_reference"
+            else qwen_reference_contract["voice_clone_contract"]
+        ),
+        "voice_contract_id": (
+            None
+            if args.route == "kokoro"
+            else qwen_reference_contract["contract_id"]
+        ),
+        "voice_continuity_contract": (
+            None
+            if args.route == "kokoro"
+            else qwen_reference_contract["voice_continuity_contract"]
+        ),
+        "legacy_voice_contract": (
+            False
+            if args.route == "kokoro"
+            else qwen_reference_contract["legacy_compatibility"]
         ),
         "reference_audio_path": (
             str(reference_audio) if args.route == "qwen" else None
@@ -592,13 +769,32 @@ def main() -> None:
             else None
         ),
         "reference_voice_id": (
-            PUCK_VOICE_ID if args.route == "qwen" else None
+            qwen_reference_contract["voice_id"]
+            if args.route == "qwen"
+            else None
         ),
         "reference_voice_sha256": (
-            PUCK_VOICE_SHA256 if args.route == "qwen" else None
+            qwen_reference_contract["voice_sha256"]
+            if args.route == "qwen"
+            else None
+        ),
+        "reference_manifest_path": (
+            qwen_reference_contract.get("manifest_path")
+            if args.route == "qwen"
+            else None
+        ),
+        "reference_manifest_sha256": (
+            qwen_reference_contract.get("manifest_sha256")
+            if args.route == "qwen"
+            else None
+        ),
+        "reference_metadata_path": (
+            qwen_reference_contract.get("metadata_path")
+            if args.route == "qwen"
+            else None
         ),
         "reference_metadata_sha256": (
-            QWEN_PUCK_REFERENCE["metadata_sha256"]
+            qwen_reference_contract.get("metadata_sha256")
             if args.route == "qwen"
             else None
         ),
@@ -631,6 +827,23 @@ def main() -> None:
             if args.route == "kokoro"
             else "base_icl_reference_audio_only"
         ),
+        "generation_parameters": (
+            qwen_reference_contract["generation_parameters"]
+            if args.route == "qwen"
+            else None
+        ),
+        "output_conditioning": {
+            "native_speed_supported": args.route == "kokoro",
+            "native_speed_applied": (
+                KOKORO["native_speed"] if args.route == "kokoro" else None
+            ),
+            "post_tts_tempo_processing": False,
+            "loudness_normalization": False,
+            "trimming": False,
+            "fading": False,
+            "declicking": False,
+            "resampling": False,
+        },
         "ignored_qwen_instruct_job_count": (
             sum(bool(str(job.get("qwen_instruct") or "").strip()) for job in jobs)
             if args.route == "qwen"

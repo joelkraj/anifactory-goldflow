@@ -6,7 +6,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
-import { QWEN_LOCAL_FALLBACK_LOCK } from "./lib/narration-tts-policy.mjs";
+import {
+  QWEN_LIAM_PRIMARY_LOCK,
+  QWEN_LOCAL_FALLBACK_LOCK,
+} from "./lib/narration-tts-policy.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -79,7 +82,9 @@ function selectedQwenNarratorVoiceId(identity = {}) {
     ?? cleanVoiceId(identity?.voice_provider_options?.qwen_narrator_voice_id)
     ?? cleanVoiceId(identity?.qwen_narrator_voice_id)
     ?? cleanVoiceId(legacyGenericNarratorVoiceId)
-    ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
+    ?? (lockedProvider === "qwen_local"
+      ? QWEN_LIAM_PRIMARY_LOCK.voice_id
+      : DEFAULT_QWEN_NARRATOR_VOICE_ID);
 }
 
 function parseFlags(parts) {
@@ -358,12 +363,23 @@ async function loadDialogueContext() {
   const seriesPackage = await readJsonIfExists(path.join(seriesDir, "series_package.json"), await readJsonIfExists(path.join(weekDir, "series_package.json"), {}));
   const runIdentity = await readJsonIfExists(path.join(episodeDir, "run_identity.json"), {});
   const puckPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "kokoro_local";
+  const liamPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "qwen_local"
+    && selectedQwenNarratorVoiceId(runIdentity) === QWEN_LIAM_PRIMARY_LOCK.voice_id;
   const narratorVoiceId = selectedQwenNarratorVoiceId(runIdentity);
   const narratorVoice = await readGlobalQwenVoice(narratorVoiceId);
   const rawVoiceCastingLock = await readJsonIfExists(path.join(episodeDir, `voice_casting_lock_${episode}.json`), await readJsonIfExists(path.join(episodeDir, "voice_casting_lock_ep_01.json"), {}));
   const rawNarratorCast = rawVoiceCastingLock?.speaker_casting?.NARRATOR ?? rawVoiceCastingLock?.speaker_casting?.narrator ?? null;
   const rawNarratorVoiceId = cleanVoiceId(rawNarratorCast?.reference_id) ?? cleanVoiceId(rawNarratorCast?.id);
-  const narratorCast = puckPrimaryIdentity
+  const narratorCast = liamPrimaryIdentity
+    ? {
+        id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+        reference_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+        source_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
+        source_transcript: QWEN_LIAM_PRIMARY_LOCK.reference_text,
+        source_transcript_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_text_sha256,
+        voice_source_policy: "qwen_liam_primary_reference_clone",
+      }
+    : puckPrimaryIdentity
     ? {
         id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
         reference_id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
@@ -386,7 +402,9 @@ async function loadDialogueContext() {
         production_ready: rawVoiceCastingLock?.production_ready ?? true,
         narrator_voice_id: rawVoiceCastingLock?.narrator_voice_id ?? narratorVoiceId,
         requested_narrator_voice_id: rawVoiceCastingLock?.requested_narrator_voice_id ?? narratorVoiceId,
-        narrator_voice_policy: puckPrimaryIdentity
+        narrator_voice_policy: liamPrimaryIdentity
+          ? "single_qwen_liam_reference_clone"
+          : puckPrimaryIdentity
           ? "single_puck_identity_with_qwen_exact_unit_clone"
           : rawVoiceCastingLock?.narrator_voice_policy ?? runIdentity?.qwen_narrator_voice_policy ?? runIdentity?.voice_provider_options?.qwen_narrator_voice_policy ?? DEFAULT_QWEN_NARRATOR_VOICE_POLICY,
         voice_casting_mode: "narrator_only_default",
@@ -2805,6 +2823,45 @@ function puckQwenFallbackIdentityControls() {
   };
 }
 
+function qwenLiamPrimaryIdentityControls() {
+  return {
+    model_id: QWEN_LIAM_PRIMARY_LOCK.model_id,
+    model_revision: QWEN_LIAM_PRIMARY_LOCK.model_revision,
+    target_voice_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+    target_voice_sha256: QWEN_LIAM_PRIMARY_LOCK.voice_sha256,
+    reference_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
+    reference_audio_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256,
+    reference_text: QWEN_LIAM_PRIMARY_LOCK.reference_text,
+    reference_text_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_text_sha256,
+    reference_transcript: QWEN_LIAM_PRIMARY_LOCK.reference_text,
+    reference_transcript_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_text_sha256,
+    reference_manifest_path: QWEN_LIAM_PRIMARY_LOCK.reference_manifest_path,
+    reference_manifest_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256,
+    reference_metadata_path: QWEN_LIAM_PRIMARY_LOCK.reference_metadata_path,
+    reference_metadata_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256,
+    reference_voice_id: QWEN_LIAM_PRIMARY_LOCK.reference_voice_id,
+    reference_voice_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_voice_sha256,
+    voice_continuity_contract: QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract,
+    speaker_similarity_method: QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_method,
+    speaker_similarity_model_path: QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_path,
+    speaker_similarity_model_sha256:
+      QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_sha256,
+    hard_minimum_cosine_similarity:
+      QWEN_LIAM_PRIMARY_LOCK.minimum_cosine_similarity,
+    warning_floor_cosine_similarity:
+      QWEN_LIAM_PRIMARY_LOCK.warning_floor_cosine_similarity,
+    delivery_control: "base_icl_reference_audio_only",
+    instruct_supported: false,
+    instruct_submitted: false,
+    instruct: null,
+    speed_control_supported: false,
+    native_speed: null,
+    continuous_requests: false,
+    unit_contract: QWEN_LIAM_PRIMARY_LOCK.unit_contract,
+    stitch_contract: QWEN_LIAM_PRIMARY_LOCK.stitch_contract,
+  };
+}
+
 function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider = "qwen_local") {
   const provider = normalizeTtsProvider(ttsProvider) ?? "qwen_local";
   const voiceOptions = runIdentity?.voice_provider_options ?? {};
@@ -2837,6 +2894,20 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
     throw new Error(`New Kokoro narration plans are Puck-only: expected ${QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id}, got ${kokoroVoice}. Other presets are bakeoff-only.`);
   }
   const puckQwenFallback = provider === "kokoro_local" && fallbackProvider === "qwen_local";
+  const qwenLiamPrimary = provider === "qwen_local"
+    && cleanVoiceId(
+      primary?.voice_id
+        ?? runIdentity?.narrator_voice_id
+        ?? runIdentity?.tts_voice_id,
+    ) === QWEN_LIAM_PRIMARY_LOCK.voice_id;
+  if (provider === "qwen_local" && !qwenLiamPrimary) {
+    throw new Error(
+      `New local Qwen narration plans are Liam-only: expected ${QWEN_LIAM_PRIMARY_LOCK.voice_id}.`,
+    );
+  }
+  if (provider === "qwen_local" && fallbackProvider) {
+    throw new Error("Qwen Liam production uses one provider and one voice; fallback must be null.");
+  }
   return {
     primary_provider: provider,
     fallback_provider: fallbackProvider,
@@ -2860,11 +2931,12 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
       enabled: provider === "qwen_local",
       fallback: puckQwenFallback,
       language: "English",
-      temperature: 0.6,
-      top_p: 0.8,
-      top_k: 50,
-      repetition_penalty: 1.2,
-      max_tokens: 1200,
+      temperature: QWEN_LIAM_PRIMARY_LOCK.temperature,
+      top_p: QWEN_LIAM_PRIMARY_LOCK.top_p,
+      top_k: QWEN_LIAM_PRIMARY_LOCK.top_k,
+      repetition_penalty: QWEN_LIAM_PRIMARY_LOCK.repetition_penalty,
+      max_tokens: QWEN_LIAM_PRIMARY_LOCK.max_tokens,
+      ...(qwenLiamPrimary ? qwenLiamPrimaryIdentityControls() : {}),
       ...(puckQwenFallback ? {
         delivery_control: "base_icl_reference_audio_only",
         instruct_supported: false,
@@ -3094,7 +3166,171 @@ function compactKokoroNarrationUnits(rows, segment, providerContext) {
   return compacted;
 }
 
-function kokoroUnitBoundaryIntegrity(units, enabled) {
+function qwenLiamNarrationGroupCost(wordCount) {
+  if (wordCount < 45) return 100 + (45 - wordCount) * 6;
+  if (wordCount <= 60) return Math.abs(52 - wordCount) * 0.25;
+  return Number.POSITIVE_INFINITY;
+}
+
+function partitionQwenLiamNarrationRun(rows) {
+  const count = rows.length;
+  if (count <= 1) return count ? [rows] : [];
+  const best = Array(count + 1).fill(null);
+  best[count] = { cost: 0, groups: [] };
+  for (let start = count - 1; start >= 0; start -= 1) {
+    let wordCount = 0;
+    for (let end = start; end < count; end += 1) {
+      wordCount += Number(rows[end]?.word_count ?? 0);
+      if (wordCount > 60) break;
+      const tail = best[end + 1];
+      if (!tail) continue;
+      const candidate = {
+        cost: qwenLiamNarrationGroupCost(wordCount) + tail.cost,
+        groups: [rows.slice(start, end + 1), ...tail.groups],
+      };
+      const current = best[start];
+      if (!current
+        || candidate.cost < current.cost - 1e-9
+        || (Math.abs(candidate.cost - current.cost) <= 1e-9
+          && candidate.groups.length < current.groups.length)) {
+        best[start] = candidate;
+      }
+    }
+  }
+  // A source sentence above 60 words is intentionally left intact so the
+  // boundary validator can block it before synthesis. We never split prose in
+  // the middle of a sentence merely to satisfy the cap.
+  return best[0]?.groups ?? rows.map((row) => [row]);
+}
+
+function mergeQwenLiamNarrationRows(rows, providerContext) {
+  if (rows.length === 1) {
+    return {
+      ...rows[0],
+      grouped_source_unit_count: 1,
+      grouping_policy: "qwen_liam_sentence_complete_45_60_v1",
+      qwen_instruct: null,
+      reference_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
+      reference_text: QWEN_LIAM_PRIMARY_LOCK.reference_text,
+      reference_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+      voice_source_policy: "qwen_liam_primary_reference_clone",
+    };
+  }
+  const first = rows[0];
+  const sourceUnitRefs = rows.flatMap((row) => row.source_unit_refs ?? []);
+  const sourceText = rows.map((row) => row.source_text).filter(Boolean).join(" ").trim();
+  const captionText = rows.map((row) => row.caption_text).filter(Boolean).join(" ").trim();
+  const spokenText = rows.map((row) => row.spoken_text).filter(Boolean).join(" ").trim();
+  const appliedReplacements = rows.flatMap(
+    (row) => row.tts_override_replacements_applied ?? [],
+  );
+  const protectedTerms = [...new Set(
+    rows.flatMap((row) => row.protected_terms ?? []).filter(Boolean),
+  )];
+  const riskFlags = riskFlagsForUnit({
+    unit: { kind: "narration", speaker: first.source_speaker ?? "NARRATOR" },
+    sourceText,
+    spokenText,
+    protectedTerms,
+    appliedReplacements,
+  });
+  const merged = {
+    ...first,
+    unit_id: stableNarrationUnitId(first.segment_id, sourceUnitRefs),
+    source_unit_index: sourceUnitRefs[0]?.unit_index ?? first.source_unit_index,
+    source_unit_end_index: sourceUnitRefs.at(-1)?.unit_index ?? first.source_unit_index,
+    source_unit_refs: sourceUnitRefs,
+    source_segment_ids: [...new Set(
+      sourceUnitRefs.map((ref) => ref.segment_id).filter(Boolean),
+    )],
+    source_text: sourceText,
+    source_text_sha256: sha256Text(sourceText),
+    caption_text: captionText,
+    caption_text_sha256: sha256Text(captionText),
+    spoken_text: spokenText,
+    tts_spoken_text: spokenText,
+    qwen_spoken_text: spokenText,
+    spoken_text_sha256: sha256Text(spokenText),
+    word_count: words(spokenText).length,
+    risk_flags: [...new Set(["grouped_narration_unit", ...riskFlags])],
+    protected_tokens: protectedTerms,
+    protected_terms: protectedTerms,
+    merge_barrier: false,
+    boundary_before: null,
+    boundary_after: null,
+    qwen_instruct: null,
+    provider_controls: {
+      ...first.provider_controls,
+      qwen3: {
+        ...providerContext.qwen3,
+        delivery_control: "base_icl_reference_audio_only",
+        instruct_supported: false,
+        instruct_submitted: false,
+        instruct: null,
+      },
+    },
+    reference_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
+    reference_text: QWEN_LIAM_PRIMARY_LOCK.reference_text,
+    reference_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+    voice_source_policy: "qwen_liam_primary_reference_clone",
+    grouped_source_unit_count: sourceUnitRefs.length,
+    grouping_policy: "qwen_liam_sentence_complete_45_60_v1",
+  };
+  if (appliedReplacements.length) {
+    merged.tts_override_replacements_applied = appliedReplacements;
+  } else {
+    delete merged.tts_override_replacements_applied;
+  }
+  return merged;
+}
+
+function compactQwenLiamNarrationUnits(rows, providerContext) {
+  const normalizedRows = rows.map((row) => {
+    const explicitOrAtomicBarrier = row.source_merge_barrier === true
+      || row.risk_flags?.includes("system_ui_atomic")
+      || row.risk_flags?.includes("speaker_or_performance_turn");
+    return {
+      ...row,
+      // Voice-direction segments are delivery metadata, not request
+      // boundaries. Qwen groups may cross them when the source sentences stay
+      // adjacent and no real performance barrier intervenes.
+      boundary_before: row.boundary_before === "segment" ? null : row.boundary_before,
+      boundary_after: row.boundary_after === "segment" ? null : row.boundary_after,
+      merge_barrier: explicitOrAtomicBarrier,
+    };
+  });
+  const compacted = [];
+  let pending = [];
+  const flush = () => {
+    if (!pending.length) return;
+    for (const group of partitionQwenLiamNarrationRun(pending)) {
+      compacted.push(mergeQwenLiamNarrationRows(group, providerContext));
+    }
+    pending = [];
+  };
+  for (const row of normalizedRows) {
+    const previous = pending.at(-1);
+    const sameSpeaker = !previous
+      || (row.source_speaker === previous.source_speaker
+        && row.speaker === previous.speaker);
+    const mergeableNarration = row.kind === "narration"
+      && row.merge_barrier !== true
+      && row.source_merge_barrier !== true
+      && !row.risk_flags?.includes("system_ui_atomic")
+      && !row.risk_flags?.includes("speaker_or_performance_turn");
+    if (!mergeableNarration || !sameSpeaker) {
+      flush();
+      if (mergeableNarration) pending.push(row);
+      else compacted.push(mergeQwenLiamNarrationRows([row], providerContext));
+      continue;
+    }
+    pending.push(row);
+  }
+  flush();
+  return compacted;
+}
+
+function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
   if (!enabled) {
     return {
       status: "not_applicable",
@@ -3129,6 +3365,15 @@ function kokoroUnitBoundaryIntegrity(units, enabled) {
         source_text: sourceText,
       });
     }
+    const spokenWordCount = words(unit?.spoken_text ?? "").length;
+    if (spokenWordCount > 60) {
+      blockers.push({
+        code: "tts_unit_exceeds_hard_word_maximum",
+        unit_id: unit?.unit_id ?? null,
+        spoken_word_count: spokenWordCount,
+        hard_spoken_words_max: 60,
+      });
+    }
   }
   return {
     status: blockers.length ? "blocked" : "passed",
@@ -3137,9 +3382,11 @@ function kokoroUnitBoundaryIntegrity(units, enabled) {
     whole_source_units_only: blockers.every((row) => row.code !== "tts_unit_not_exact_whole_source_unit_join"),
     clean_start_count: units.length - blockers.filter((row) => row.code === "tts_unit_possible_mid_sentence_start").length,
     terminal_punctuation_count: units.length - blockers.filter((row) => row.code === "tts_unit_missing_terminal_punctuation").length,
+    within_hard_word_maximum_count: units.length
+      - blockers.filter((row) => row.code === "tts_unit_exceeds_hard_word_maximum").length,
     blocker_count: blockers.length,
     blockers: blockers.slice(0, 50),
-    policy: "Every Kokoro request is assembled only from complete source units, starts on a clean sentence or paragraph boundary, and ends on terminal punctuation. Mid-sentence slicing is forbidden.",
+    policy: "Every request is assembled only from complete source sentences or atomic system/dialogue units, starts on a clean sentence or paragraph boundary, ends on terminal punctuation, and contains no more than 60 spoken words. Mid-sentence slicing is forbidden.",
   };
 }
 
@@ -3149,10 +3396,24 @@ function buildQwenGenerationPlan(
   dialogueContext = {},
   ttsProvider = "qwen_local",
   ttsOverrides = {},
-  providerContext = providerPlanContext({}, {}, ttsProvider),
+  providerContext = providerPlanContext({
+    tts_provider: ttsProvider,
+    tts_fallback_provider: ttsProvider === "qwen_local" ? null : "qwen_local",
+    narrator_voice_id: ttsProvider === "qwen_local"
+      ? QWEN_LIAM_PRIMARY_LOCK.voice_id
+      : QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
+    voice_provider_options: {
+      primary: ttsProvider === "qwen_local"
+        ? { ...QWEN_LIAM_PRIMARY_LOCK }
+        : { voice_id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id },
+      fallback: ttsProvider === "qwen_local"
+        ? null
+        : { ...QWEN_LOCAL_FALLBACK_LOCK },
+    },
+  }, {}, ttsProvider),
 ) {
   const unitRows = [];
-  const segmentRows = [];
+  let segmentRows = [];
   const appliedOverrideRules = new Map();
   for (const segment of segments) {
     const units = segment.performance_units?.length ? segment.performance_units : [{
@@ -3229,7 +3490,7 @@ function buildQwenGenerationPlan(
         merge_barrier: sourceMergeBarrier || riskFlags.includes("system_ui_atomic") || riskFlags.includes("speaker_or_performance_turn") || riskFlags.includes("tts_override_applied"),
         boundary_before: qwenUnits.length === 0 ? "segment" : null,
         boundary_after: null,
-        qwen_instruct: isKokoroPrimary ? null : qwenInstruction,
+        qwen_instruct: null,
         provider_controls: {
           kokoro: {
             ...providerContext.kokoro,
@@ -3244,17 +3505,27 @@ function buildQwenGenerationPlan(
               instruct: null,
               authored_delivery_note: qwenInstruction,
             } : {
-              instruct: qwenInstruction,
+              delivery_control: "base_icl_reference_audio_only",
+              instruct_supported: false,
+              instruct_submitted: false,
+              instruct: null,
+              authored_delivery_note: qwenInstruction,
             }),
           },
         },
-        reference_audio_path: cast?.source_audio_path ?? cast?.sample_path ?? null,
-        reference_text: cast?.source_transcript ?? null,
+        reference_audio_path: isKokoroPrimary
+          ? null
+          : QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
+        reference_text: isKokoroPrimary
+          ? null
+          : QWEN_LIAM_PRIMARY_LOCK.reference_text,
         voice_source_policy: isKokoroPrimary
           ? "bundled_kokoro_preset_no_reference_audio_required"
-          : cast?.voice_source_policy ?? (speaker === "NARRATOR" ? "owned_qwen_narrator_reference_manifest" : "pending_voice_casting"),
+          : "qwen_liam_primary_reference_clone",
         voice_casting_mode: characterVoiceCastingEnabled() ? "explicit_character_voice_casting" : "narrator_only_default",
-        reference_id: isKokoroPrimary ? providerContext.kokoro.voice_id : cast?.reference_id ?? null,
+        reference_id: isKokoroPrimary
+          ? providerContext.kokoro.voice_id
+          : QWEN_LIAM_PRIMARY_LOCK.voice_id,
       };
       if (spoken.applied_replacements?.length) {
         row.tts_override_replacements_applied = spoken.applied_replacements;
@@ -3304,6 +3575,43 @@ function buildQwenGenerationPlan(
       qwen_generation_units: generationUnits,
     });
   }
+  if (providerContext.primary_provider === "qwen_local") {
+    const compactedUnits = compactQwenLiamNarrationUnits(unitRows, providerContext);
+    unitRows.splice(0, unitRows.length, ...compactedUnits);
+    for (const [index, unit] of unitRows.entries()) {
+      unit.order_index = index;
+      unit.segment_id = unit.source_segment_ids?.[0] ?? unit.segment_id;
+      unit.unit_index = null;
+      if (index === unitRows.length - 1) unit.boundary_after = "episode";
+    }
+    const sourceCounts = new Map(
+      segmentRows.map((segment) => [segment.segment_id, segment.source_unit_count]),
+    );
+    const segmentMetadata = new Map(
+      segments.map((segment) => [segment.segment_id, segment]),
+    );
+    segmentRows = segments.map((segment) => {
+      const generationUnits = unitRows.filter(
+        (unit) => unit.source_segment_ids?.[0] === segment.segment_id,
+      );
+      for (const [index, unit] of generationUnits.entries()) {
+        unit.unit_index = index + 1;
+      }
+      return {
+        segment_id: segment.segment_id,
+        delivery_mode: segmentMetadata.get(segment.segment_id)?.delivery_mode,
+        expected_duration_sec:
+          segmentMetadata.get(segment.segment_id)?.expected_duration_sec,
+        unit_count: generationUnits.length,
+        source_unit_count: sourceCounts.get(segment.segment_id) ?? 0,
+        speakers: [...new Set(generationUnits.map((unit) => unit.speaker))],
+        generation_units: generationUnits,
+        narration_units: generationUnits,
+        narration_generation_units: generationUnits,
+        qwen_generation_units: generationUnits,
+      };
+    });
+  }
   const loadedOverrides = (ttsOverrides.replacements ?? []).map((rule, index) => ({
     rule_index: index,
     from: rule.from ?? null,
@@ -3319,13 +3627,13 @@ function buildQwenGenerationPlan(
     unitRows[0].risk_flags = [...new Set(["episode_opening_unit", ...unitRows[0].risk_flags])];
     unitRows.at(-1).risk_flags = [...new Set([...unitRows.at(-1).risk_flags, "episode_final_unit"])];
   }
-  const kokoroBoundaryIntegrity = kokoroUnitBoundaryIntegrity(
+  const sentenceBoundaryIntegrity = sentenceCompleteUnitBoundaryIntegrity(
     unitRows,
-    providerContext.primary_provider === "kokoro_local",
+    ["kokoro_local", "qwen_local"].includes(providerContext.primary_provider),
   );
   return {
     schema: "goldflow_tts_generation_plan_v2",
-    status: kokoroBoundaryIntegrity.status === "blocked" ? "blocked" : "passed",
+    status: sentenceBoundaryIntegrity.status === "blocked" ? "blocked" : "passed",
     provider: providerContext.primary_provider,
     primary_provider: providerContext.primary_provider,
     fallback_provider: providerContext.fallback_provider,
@@ -3333,9 +3641,13 @@ function buildQwenGenerationPlan(
       narrator_voice_id: providerContext.kokoro.voice_id,
       narrator_voice_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_sha256,
       narrator_identity_policy: "single_puck_identity_with_qwen_exact_unit_clone",
-    } : {}),
+    } : {
+      narrator_voice_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+      narrator_voice_sha256: QWEN_LIAM_PRIMARY_LOCK.voice_sha256,
+      narrator_identity_policy: "single_qwen_liam_reference_clone",
+    }),
     generated_at: new Date().toISOString(),
-    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Kokoro uses its locked preset and native speed without claiming an instruction channel. The locked Qwen Base fallback inherits delivery only from its reference audio; any authored delivery note is advisory and is not submitted as an effective model instruction.",
+    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Qwen3-TTS Base uses one sentence-complete request at a time with the pinned Liam reference audio/transcript, no effective instruct channel, no continuous longform request, and no post-tempo processing.",
     provider_controls: {
       kokoro: providerContext.kokoro,
       qwen3: providerContext.qwen3,
@@ -3347,7 +3659,19 @@ function buildQwenGenerationPlan(
       hard_spoken_words_max: 54,
       policy: "Compact only adjacent same-speaker narration inside one existing segment. System/UI, dialogue, performance, speaker changes, sound design, explicit merge barriers, source-index gaps, and segment boundaries remain atomic barriers. A single source sentence longer than the hard maximum remains intact.",
     },
-    kokoro_unit_boundary_integrity: kokoroBoundaryIntegrity,
+    qwen_liam_unit_grouping: {
+      enabled: providerContext.primary_provider === "qwen_local",
+      sentence_complete: true,
+      target_spoken_words_min: 45,
+      target_spoken_words_max: 60,
+      hard_spoken_words_max: 60,
+      continuous_requests_allowed: false,
+      policy: "Group adjacent complete narration sentences across delivery-metadata segments. System/UI, dialogue, performance, speaker changes, sound design, and explicit merge barriers remain atomic. Never split a sentence or exceed 60 spoken words.",
+    },
+    sentence_unit_boundary_integrity: sentenceBoundaryIntegrity,
+    // Compatibility alias for historical validators; the report body is now
+    // provider-neutral and applies to Qwen Liam too.
+    kokoro_unit_boundary_integrity: sentenceBoundaryIntegrity,
     instruction_delivery: {
       kokoro: {
         supported: false,
@@ -3357,14 +3681,19 @@ function buildQwenGenerationPlan(
       qwen3: {
         planned: providerContext.primary_provider === "qwen_local" || providerContext.fallback_provider === "qwen_local",
         submitted_by_voice_plan: false,
-        supported: providerContext.primary_provider === "qwen_local",
+        supported: false,
+        delivery_control: "base_icl_reference_audio_only",
         fallback_delivery_control: providerContext.fallback_provider === "qwen_local"
           ? "base_icl_reference_audio_only"
           : null,
-        policy: providerContext.fallback_provider === "qwen_local"
+        policy: providerContext.primary_provider === "qwen_local"
+          ? "Qwen3 Base uses exact spoken text plus the pinned Liam reference audio and transcript. It receives no effective instruct, no continuous longform request, and no speed or post-tempo processing."
+          : providerContext.fallback_provider === "qwen_local"
           ? "The locked Qwen3 Base ICL fallback ignores instruct; it uses exact spoken text plus the pinned reference audio and reference transcript only."
           : "Per-unit instructions remain declarative controls only for an explicit Qwen route whose selected model/runtime supports them.",
-        ...(providerContext.qwen3.fallback ? puckQwenFallbackIdentityControls() : {}),
+        ...(providerContext.primary_provider === "qwen_local"
+          ? qwenLiamPrimaryIdentityControls()
+          : providerContext.qwen3.fallback ? puckQwenFallbackIdentityControls() : {}),
       },
     },
     qwen_config_policy: qwenConfig.prompting ?? null,
@@ -4069,8 +4398,10 @@ async function main() {
       provider: qwenConfig.provider ?? "qwen3-tts",
       production_default: providerRouting.audio?.production_tts_provider ?? null,
       fallback_provider: providerContext.fallback_provider,
-      spoken_text_policy: "No bracketed emotion, breath, laugh, or stage tags in Qwen spoken text. Put all performance direction in --instruct.",
-      instruct_policy: "Each Qwen unit carries voice identity, character, scene beat, emotion, intensity, pacing, exact-word preservation, accent limits, and pronunciation normalization.",
+      spoken_text_policy: "No bracketed emotion, breath, laugh, or stage tags in Qwen spoken text. Each request contains complete sentences only.",
+      instruct_policy: "Qwen3-TTS Base receives no effective instruct. Delivery comes from the exact spoken text, punctuation, 45–60-word sentence groups, and the pinned Liam reference clone.",
+      request_policy: "One request per sentence-complete unit; no continuous longform requests.",
+      post_tempo_processing: false,
       pronunciation_protocol: narrationGenerationPlan.pronunciation_protocol,
       generation_plan_path: qwenLocal ? qwenGenerationPlanPath : narrationGenerationPlanPath,
       script_speakability_status: scriptSpeakabilityReport.status ?? null,
@@ -4126,7 +4457,7 @@ async function main() {
   }
   if (narrationGenerationPlan.kokoro_unit_boundary_integrity?.status === "blocked") {
     const boundaryFailure = {
-      code: "kokoro_unit_boundary_integrity_failed",
+      code: "sentence_unit_boundary_integrity_failed",
       severity: "blocker",
       ...narrationGenerationPlan.kokoro_unit_boundary_integrity,
     };
@@ -4163,10 +4494,13 @@ async function main() {
       ]
       : qwenLocal
       ? [
-        "Qwen local is the production TTS provider.",
+        `Qwen3-TTS 1.7B Base with the pinned ${QWEN_LIAM_PRIMARY_LOCK.voice_id} reference clone is the sole production narrator.`,
         "Spoken text must be clean: no bracketed emotion, breath, laugh, or stage tags.",
-        "Use per-speaker/per-beat narration_generation_units and stitch locally.",
-        "Put voice identity, scene beat, emotion, intensity, pacing, accent limits, and exact-word preservation in --instruct.",
+        "Use sentence-complete 45–60-word narration units with a hard 60-word maximum.",
+        "Send one request per unit. Never send a continuous longform request.",
+        "Qwen Base receives exact text plus the pinned Liam reference audio/transcript only; do not claim an effective instruct channel.",
+        "Stitch every adjacent unit with 80 ms of silence.",
+        "Do not apply post-tempo processing or any unsupported native-speed control.",
         "Spell ambiguous rank/acronym tokens in spoken text when needed, e.g. SSS -> S S S.",
         "Preserve captions/story text separately from Qwen pronunciation-normalized spoken text.",
         "Apply approved tts_spoken_overrides.json only to tts_spoken_text, never to script_clean.md or captions.",

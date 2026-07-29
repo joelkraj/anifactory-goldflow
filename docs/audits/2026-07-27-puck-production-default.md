@@ -1,24 +1,29 @@
-# Puck production narration decision
+# Historical Puck production narration decision
 
 Date: 2026-07-27
 
-## Decision
+> Historical compatibility record. This policy was superseded on 2026-07-28 by
+> local Qwen3-TTS 1.7B Base with the exact Liam reference clone. Nothing below
+> defines the current default. See
+> `docs/audits/2026-07-28-qwen-liam-production-default.md`.
 
-Goldflow's standard narrator is the exact pinned Kokoro `am_puck` preset at
-native speed `1.2`.
+## Decision at the time
 
-- Puck is the sole production narrator identity. `am_fenrir` remains a
-  bakeoff-only comparison and cannot be selected by production preflight or used
-  as an automatic fallback.
-- `am_michael` is rejected for production.
-- Local Qwen3-TTS 1.7B Base 8-bit is a failed-unit fallback only. It must receive
+Goldflow's standard narrator at the time was the exact pinned Kokoro `am_puck`
+preset at native speed `1.2`.
+
+- Puck was the sole production narrator identity. `am_fenrir` remained a
+  bakeoff-only comparison and could not be selected by production preflight or
+  used as an automatic fallback.
+- `am_michael` was rejected for production.
+- Local Qwen3-TTS 1.7B Base 8-bit was a failed-unit fallback only. It had to receive
   the identical spoken-text hash and the pinned Puck-generated reference
   audio/transcript so it clones Puck rather than introducing another narrator
-  identity. It never replaces a whole episode automatically.
-- Existing legacy Qwen identities remain readable and resumable, but new
-  preflights select Puck.
+  identity. It never replaced a whole episode automatically.
+- Existing legacy Qwen identities remained readable and resumable, while
+  preflights created under this historical policy selected Puck.
 
-This decision weights the operator's actual listening preference above the
+This decision weighted the operator's actual listening preference above the
 machine-only reliability index. The operator heard Puck as fast, clean, coherent,
 and free of audible clicks in the proof.
 
@@ -49,9 +54,9 @@ The proof's 242.375 WPM is retained as a diagnostic. The operator judged the
 delivery speed correct, so it does not trigger tempo processing or automatic
 regeneration.
 
-## Puck-cloned Qwen fallback reference
+## Historical Puck-cloned Qwen fallback reference
 
-Qwen's exact-unit fallback is locked to a byte-identical copy of audited Puck
+Qwen's exact-unit fallback was locked to a byte-identical copy of audited Puck
 proof unit `stp_voice_seg_10_5_2630f1d234dd`:
 
 - audio: `/Users/joel/AniFactoryData/voice_bank/kokoro/reference_samples/am_puck/am_puck_qwen_fallback_reference_v1.wav`
@@ -66,7 +71,7 @@ generic narration fallback lock.
 
 ### Voice-continuity calibration
 
-The production speaker gate was calibrated on the same seventeen passages:
+The historical production speaker gate was calibrated on the same seventeen passages:
 
 | Candidate family | Minimum | Median | Maximum |
 | --- | ---: | ---: | ---: |
@@ -85,9 +90,9 @@ overrides waveform or exact-transcript QA.
 - calibration SHA-256:
   `f71deace6283c58cc28564e3a40772f907d8fb1040d3d6bbe3a9b1dc3f53bb55`
 
-## Production controls added after the proof
+## Historical Puck controls added after the proof
 
-The production route is stricter than the listening proof:
+That production route was stricter than the listening proof:
 
 1. Preserve exact locked-script coverage while keeping caption, source, and
    TTS-only spoken text separate.

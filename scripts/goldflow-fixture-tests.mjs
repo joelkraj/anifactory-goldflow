@@ -74,6 +74,7 @@ import {
   requiredMediumQaReasonsForTests,
   synthesisIdentityForTests,
   stitchBoundaryPaddingForTests,
+  stitchEffectiveBoundaryContractForTests,
   transcriptQaForTests,
   ttsSafeTextForTests,
   untranscribedActiveIntervalsForTests,
@@ -183,6 +184,10 @@ import {
 import {
   KOKORO_MODEL_LOCK,
   KOKORO_VOICE_LOCKS,
+  QWEN_LIAM_PRIMARY_LOCK,
+  QWEN_LIAM_RETRY_CONTRACT,
+  QWEN_LIAM_STITCH_CONTRACT,
+  QWEN_LIAM_UNIT_CONTRACT,
   QWEN_LOCAL_FALLBACK_LOCK,
   defaultNarrationVoiceProviderOptions,
   hasExplicitLegacyQwenIdentity,
@@ -208,6 +213,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "./narration-tts-episode.mjs";
 import {
+  qwenLiamBoundaryContractFindingsForTests,
   runIdentityTtsCompleteForTests,
   selectedNarratorVoiceIdForTests,
   ttsStatusIdentityFieldsForTests,
@@ -353,35 +359,51 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
     series_slug: "series",
     week: "run",
     episode: "ep_01",
-    tts_provider: "kokoro_local",
-    tts_fallback_provider: "qwen_local",
-    narrator_voice_id: "am_puck",
-    tts_native_speed: 1.2,
+    tts_provider: "qwen_local",
+    tts_fallback_provider: null,
+    narrator_voice_id: "am_liam",
+    tts_native_speed: null,
     voice_provider_options: voiceProviderOptions,
   };
   const policy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity(identity));
-  assert.equal(policy.primary.model_id, KOKORO_MODEL_LOCK.model_id);
-  assert.equal(policy.primary.model_revision, KOKORO_MODEL_LOCK.model_revision);
-  assert.equal(policy.primary.voice_id, "am_puck");
-  assert.equal(policy.primary.native_speed, 1.2);
-  assert.equal(policy.fallback.provider, "qwen_local");
-  assert.equal(policy.fallback.fallback_scope, "failed_units_only");
-  assert.equal(policy.fallback.model_id, QWEN_LOCAL_FALLBACK_LOCK.model_id);
-  assert.equal(policy.fallback.model_revision, QWEN_LOCAL_FALLBACK_LOCK.model_revision);
-  assert.equal(policy.fallback.reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
-  assert.equal(policy.fallback.reference_text, QWEN_LOCAL_FALLBACK_LOCK.reference_text);
-  assert.equal(policy.fallback.reference_text_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256);
-  assert.equal(policy.fallback.reference_metadata_path, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_path);
-  assert.equal(policy.fallback.reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
-  assert.equal(policy.fallback.reference_voice_id, "am_puck");
-  assert.equal(policy.fallback.reference_origin_unit_id, "stp_voice_seg_10_5_2630f1d234dd");
-  assert.equal(policy.fallback.voice_continuity_contract, "clone_primary_puck_identity");
-  assert.deepEqual(voiceProviderOptions.allowed_production_voice_ids, ["am_puck"]);
-  assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_puck_with_puck_cloned_qwen_repair");
+  assert.equal(policy.contract, "qwen_liam_primary_v1");
+  assert.equal(policy.primary.model_id, QWEN_LIAM_PRIMARY_LOCK.model_id);
+  assert.equal(policy.primary.model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
+  assert.equal(policy.primary.voice_id, "am_liam");
+  assert.equal(policy.primary.native_speed, null);
+  assert.equal(policy.primary.reference_audio_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(policy.primary.reference_manifest_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256);
+  assert.equal(policy.primary.voice_continuity_contract, "qwen_icl_clone_of_liam_reference");
+  assert.equal(policy.primary.repetition_penalty, 1.2);
+  assert.equal(policy.fallback, null);
+  assert.deepEqual(policy.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
+  assert.deepEqual(policy.stitch_contract, QWEN_LIAM_STITCH_CONTRACT);
+  assert.deepEqual(policy.retry_contract, QWEN_LIAM_RETRY_CONTRACT);
+  assert.deepEqual(voiceProviderOptions.allowed_production_voice_ids, ["am_liam"]);
+  assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_qwen_liam_icl");
   assert.equal("alternate_voice_ids" in voiceProviderOptions, false);
   assert.equal(validateNarrationTtsPolicyForTests(identity).status, "passed");
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /tts narrate/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
+
+  const legacyOptions = defaultNarrationVoiceProviderOptions({
+    provider: "kokoro_local",
+    fallbackProvider: "qwen_local",
+    voiceId: "am_puck",
+    nativeSpeed: 1.2,
+  });
+  const legacyPolicy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity({
+    ...identity,
+    tts_provider: "kokoro_local",
+    tts_fallback_provider: "qwen_local",
+    narrator_voice_id: "am_puck",
+    tts_native_speed: 1.2,
+    voice_provider_options: legacyOptions,
+  }));
+  assert.equal(legacyPolicy.contract, "legacy_kokoro_puck");
+  assert.equal(legacyPolicy.primary.model_id, KOKORO_MODEL_LOCK.model_id);
+  assert.equal(legacyPolicy.primary.voice_id, "am_puck");
+  assert.equal(legacyPolicy.fallback.model_id, QWEN_LOCAL_FALLBACK_LOCK.model_id);
   assert.match(buildStageCommand("qwen_tts_stitch", {
     channel: "test",
     series_slug: "series",
@@ -392,17 +414,98 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
   assert.throws(
     () => validateNarrationTtsPolicy(narrationTtsPolicyForIdentity({
       ...identity,
-      narrator_voice_id: "am_michael",
+      narrator_voice_id: "am_fenrir",
     })),
-    /single locked narrator voice am_puck/,
+    /single locked narrator voice am_liam/,
   );
   assert.throws(
     () => defaultNarrationVoiceProviderOptions({ voiceId: "am_fenrir" }),
-    /require am_puck/,
+    /require am_liam/,
   );
   assert.throws(
     () => defaultNarrationVoiceProviderOptions({ fallbackProvider: "modelslab_qwen" }),
-    /require qwen_local/,
+    /fallback must be null/,
+  );
+  assert.throws(
+    () => defaultNarrationVoiceProviderOptions({ nativeSpeed: 1.2 }),
+    /no native-speed control/,
+  );
+
+  const exactBoundary = {
+    after_unit_id: "unit_left",
+    before_unit_id: "unit_right",
+    status: "passed",
+    blocker: null,
+    target_gap_sample_count: 1920,
+    retained_left_trailing_silence_sample_count: 960,
+    retained_right_leading_silence_sample_count: 960,
+    inserted_silence_sample_count: 0,
+    gap_sample_count: 0,
+    effective_gap_sample_count: 1920,
+  };
+  const exactStitch = {
+    stitch_sample_rate: 24000,
+    segments: [
+      {
+        unit_id: "unit_left",
+        prepared_trailing_silence_sample_count: 960,
+      },
+      {
+        unit_id: "unit_right",
+        prepared_leading_silence_sample_count: 960,
+      },
+    ],
+    boundaries: [exactBoundary],
+    boundary_qa: {
+      status: "passed",
+      boundary_count: 1,
+      blockers: [],
+    },
+  };
+  const exactFullQa = {
+    join_qa: {
+      status: "passed",
+      exact_effective_gap_sample_count_required: true,
+      required_effective_gap_sample_count: 1920,
+      joins: [{ ...exactBoundary }],
+    },
+  };
+  assert.deepEqual(
+    qwenLiamBoundaryContractFindingsForTests(exactStitch, exactFullQa),
+    [],
+  );
+  const staleHundredMsBoundary = {
+    ...exactBoundary,
+    retained_left_trailing_silence_sample_count: 1200,
+    retained_right_leading_silence_sample_count: 1200,
+    effective_gap_sample_count: 2400,
+  };
+  const hundredMsFindings = qwenLiamBoundaryContractFindingsForTests({
+    ...exactStitch,
+    segments: [
+      {
+        unit_id: "unit_left",
+        prepared_trailing_silence_sample_count: 1200,
+      },
+      {
+        unit_id: "unit_right",
+        prepared_leading_silence_sample_count: 1200,
+      },
+    ],
+    boundaries: [staleHundredMsBoundary],
+  }, {
+    join_qa: {
+      ...exactFullQa.join_qa,
+      joins: [{ ...staleHundredMsBoundary }],
+    },
+  });
+  assert.equal(
+    hundredMsFindings.some(
+      (finding) => finding.code === "tts_join_effective_gap_sample_count_mismatch"
+        && finding.expected === 1920
+        && finding.actual === 2400,
+    ),
+    true,
   );
 }
 
@@ -456,7 +559,12 @@ function testPuckOnlyNarrationIdentityFailClosedGates() {
     /missing the generic narration identity/,
   );
 
-  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions({
+    provider: "kokoro_local",
+    fallbackProvider: "qwen_local",
+    voiceId: "am_puck",
+    nativeSpeed: 1.2,
+  });
   const puckIdentity = {
     schema: "goldflow_run_identity_v2",
     tts_provider: "kokoro_local",
@@ -638,7 +746,7 @@ function testNarrationTtsSelectionAndQaContracts() {
     true,
   );
   assert.equal(
-    candidateDisposition({ status: "blocked", findings: isolatedDeletion.findings }, "kokoro_local").status,
+    candidateDisposition({ status: "blocked", findings: isolatedDeletion.findings }, "qwen_local").status,
     "accepted_primary",
   );
   assert.equal(
@@ -649,7 +757,7 @@ function testNarrationTtsSelectionAndQaContracts() {
     true,
   );
   assert.equal(
-    candidateDisposition({ status: "blocked", findings: isolatedSubstitution.findings }, "kokoro_local").status,
+    candidateDisposition({ status: "blocked", findings: isolatedSubstitution.findings }, "qwen_local").status,
     "accepted_primary",
   );
   const softenedIsolatedDifference = softenPrimaryQa({
@@ -675,8 +783,8 @@ function testNarrationTtsSelectionAndQaContracts() {
     }],
   };
   assert.equal(
-    candidateDisposition(confirmedMissingPassage, "kokoro_local").status,
-    "fallback_required",
+    candidateDisposition(confirmedMissingPassage, "qwen_local").status,
+    "accepted_primary",
   );
   const shortContextualFullStreamGap = deliveryFirstFullStreamFindingsForTests({
     word_error_rate: 0.011,
@@ -715,7 +823,7 @@ function testNarrationTtsSelectionAndQaContracts() {
       maximum_sample_step_dbfs: -10.5,
     }],
   };
-  assert.deepEqual(candidateDisposition(possibleImpulseWarning, "kokoro_local"), {
+  assert.deepEqual(candidateDisposition(possibleImpulseWarning, "qwen_local"), {
     status: "accepted_primary",
     accepted: true,
     blocker_codes: [],
@@ -731,18 +839,37 @@ function testNarrationTtsSelectionAndQaContracts() {
   const softenedSevereImpulse = softenPrimaryQa(severeImpulse);
   assert.equal(softenedSevereImpulse.status, "blocked");
   assert.equal(softenedSevereImpulse.findings[0].severity, "blocker");
-  assert.deepEqual(candidateDisposition(softenedSevereImpulse, "kokoro_local"), {
-    status: "fallback_required",
+  assert.deepEqual(candidateDisposition(softenedSevereImpulse, "qwen_local"), {
+    status: "blocked_manual_review",
     accepted: false,
     blocker_codes: ["tts_audio_impulsive_discontinuity"],
   });
   const joinInputs = [
-    { unit_id: "unit_001", sample_count: 1 },
-    { unit_id: "unit_002", sample_count: 1 },
+    {
+      unit_id: "unit_001",
+      sample_count: 960,
+      prepared_qa: { metrics: { trailing_silence_sample_count: 960 } },
+    },
+    {
+      unit_id: "unit_002",
+      sample_count: 960,
+      prepared_qa: { metrics: { leading_silence_sample_count: 960 } },
+    },
   ];
-  const joinBoundaries = [{ after_unit_id: "unit_001", gap_sample_count: 0 }];
+  const joinBoundaries = [{
+    after_unit_id: "unit_001",
+    before_unit_id: "unit_002",
+    target_gap_sample_count: 1920,
+    retained_left_trailing_silence_sample_count: 960,
+    retained_right_leading_silence_sample_count: 960,
+    inserted_silence_sample_count: 0,
+    effective_gap_sample_count: 1920,
+    gap_sample_count: 0,
+  }];
+  const warningJoinSamples = new Int16Array(1920);
+  warningJoinSamples[960] = 10000;
   const warningJoinQa = joinQaFromPcmForTests(
-    Int16Array.from([0, 10000]),
+    warningJoinSamples,
     24000,
     joinInputs,
     joinBoundaries,
@@ -754,8 +881,10 @@ function testNarrationTtsSelectionAndQaContracts() {
     ),
     true,
   );
+  const blockingJoinSamples = new Int16Array(1920);
+  blockingJoinSamples[960] = 15000;
   const blockingJoinQa = joinQaFromPcmForTests(
-    Int16Array.from([0, 15000]),
+    blockingJoinSamples,
     24000,
     joinInputs,
     joinBoundaries,
@@ -764,6 +893,41 @@ function testNarrationTtsSelectionAndQaContracts() {
   assert.equal(
     blockingJoinQa.blockers.some(
       (finding) => finding.code === "tts_join_impulsive_discontinuity",
+    ),
+    true,
+  );
+  const hundredMsJoinQa = joinQaFromPcmForTests(
+    new Int16Array(2400),
+    24000,
+    [
+      {
+        unit_id: "unit_100ms_left",
+        sample_count: 1200,
+        prepared_qa: { metrics: { trailing_silence_sample_count: 1200 } },
+      },
+      {
+        unit_id: "unit_100ms_right",
+        sample_count: 1200,
+        prepared_qa: { metrics: { leading_silence_sample_count: 1200 } },
+      },
+    ],
+    [{
+      after_unit_id: "unit_100ms_left",
+      before_unit_id: "unit_100ms_right",
+      target_gap_sample_count: 1920,
+      retained_left_trailing_silence_sample_count: 1200,
+      retained_right_leading_silence_sample_count: 1200,
+      inserted_silence_sample_count: 0,
+      effective_gap_sample_count: 2400,
+      gap_sample_count: 0,
+    }],
+  );
+  assert.equal(hundredMsJoinQa.status, "blocked");
+  assert.equal(
+    hundredMsJoinQa.blockers.some(
+      (finding) => finding.code === "tts_join_effective_gap_sample_count_mismatch"
+        && finding.expected_sample_count === 1920
+        && finding.actual_sample_count === 2400,
     ),
     true,
   );
@@ -843,7 +1007,7 @@ function testNarrationTtsSelectionAndQaContracts() {
   const selectedRows = [
     {
       unit_id: "unit_001",
-      provider: "kokoro_local",
+      provider: "qwen_local",
       unit_qa: { status: "passed", findings: [] },
     },
     {
@@ -854,14 +1018,14 @@ function testNarrationTtsSelectionAndQaContracts() {
   ];
   const rejectedCandidateHistory = [{
     unit_id: "unit_002",
-    provider: "kokoro_local",
+    provider: "qwen_local",
     unit_qa: {
       status: "blocked",
       findings: [{ severity: "blocker", code: "tts_transcript_confirmed_deletion" }],
     },
   }];
   assert.equal(rejectedCandidateHistory[0].unit_qa.status, "blocked");
-  assert.equal(candidateDisposition(selectedRows[1].unit_qa, "qwen_local").status, "accepted_fallback");
+  assert.equal(candidateDisposition(selectedRows[1].unit_qa, "qwen_local").status, "accepted_primary");
   assert.equal(validateSelectedUnitOrder(plannedUnits, selectedRows).status, "passed");
   assert.equal(selectedQaDecisionForTests(selectedRows, {
     orderQa: validateSelectedUnitOrder(plannedUnits, selectedRows),
@@ -904,7 +1068,7 @@ function testNarrationTtsSelectionAndQaContracts() {
   assert.equal(fenrirLikeContinuity.status, "blocked");
   assert.equal(
     fenrirLikeContinuity.findings.some(
-      (finding) => finding.code === "tts_fallback_voice_similarity_below_minimum",
+      (finding) => finding.code === "tts_primary_voice_similarity_below_minimum",
     ),
     true,
   );
@@ -927,7 +1091,7 @@ function testNarrationTtsSelectionAndQaContracts() {
   assert.equal(lowMarginPuckContinuity.status, "passed");
   assert.equal(
     lowMarginPuckContinuity.findings.some(
-      (finding) => finding.code === "tts_fallback_voice_similarity_low_margin"
+      (finding) => finding.code === "tts_primary_voice_similarity_low_margin"
         && finding.severity === "warning"
         && finding.review_required === true,
     ),
@@ -1442,6 +1606,18 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
     reference_ids: ["ref_001"],
     tts_unit_ids: ["tts_001", "tts_002"],
     tts_speakers: ["NARRATOR", "SYSTEM"],
+    proof_start_sec: null,
+    proof_end_sec: null,
+    references_only: false,
+  });
+  assert.deepEqual(executionScopeForTests({
+    "episode-dir": "/tmp/episode",
+    "confirmed-retry-unit-ids": "tts_002,tts_001",
+  }), {
+    cut_ids: [],
+    scene_ids: [],
+    reference_ids: [],
+    tts_unit_ids: ["tts_001", "tts_002"],
     proof_start_sec: null,
     proof_end_sec: null,
     references_only: false,
@@ -2036,7 +2212,12 @@ async function testProofBaselineImportSupportsGenericAndLegacyNarrationContracts
   };
 
   await writeUpstreamGates(genericEpisodeDir);
-  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions({
+    provider: "kokoro_local",
+    fallbackProvider: "qwen_local",
+    voiceId: "am_puck",
+    nativeSpeed: 1.2,
+  });
   const genericIdentity = {
     schema: "goldflow_run_identity_v2",
     channel: "test",
@@ -2922,12 +3103,54 @@ function testQwenTtsOutputQaContracts() {
       0.025,
     ),
     {
+      sample_rate_hz: 24000,
+      target_gap_sample_count: 3840,
+      available_left_trailing_silence_sample_count: 600,
+      available_right_leading_silence_sample_count: 600,
+      retained_left_trailing_silence_sample_count: 600,
+      retained_right_leading_silence_sample_count: 600,
+      trimmed_left_trailing_silence_sample_count: 0,
+      trimmed_right_leading_silence_sample_count: 0,
+      inserted_silence_sample_count: 2640,
+      effective_gap_sample_count: 3840,
       target_gap_sec: 0.16,
       retained_left_trailing_silence_sec: 0.025,
       retained_right_leading_silence_sec: 0.025,
       inserted_silence_sec: 0.11,
       effective_gap_sec: 0.16,
     },
+  );
+  const overRetainedPlan = stitchBoundaryPaddingForTests(
+    {
+      trailing_silence_sec: 0.05,
+      trailing_silence_sample_count: 1200,
+    },
+    {
+      leading_silence_sec: 0.05,
+      leading_silence_sample_count: 1200,
+    },
+    0.08,
+    0.05,
+    24000,
+  );
+  assert.equal(overRetainedPlan.target_gap_sample_count, 1920);
+  assert.equal(overRetainedPlan.retained_left_trailing_silence_sample_count, 960);
+  assert.equal(overRetainedPlan.retained_right_leading_silence_sample_count, 960);
+  assert.equal(overRetainedPlan.trimmed_left_trailing_silence_sample_count, 240);
+  assert.equal(overRetainedPlan.trimmed_right_leading_silence_sample_count, 240);
+  assert.equal(overRetainedPlan.effective_gap_sample_count, 1920);
+  const previouslyPassingHundredMs = stitchEffectiveBoundaryContractForTests(
+    { trailing_silence_sample_count: 1200 },
+    { leading_silence_sample_count: 1200 },
+    0.08,
+    0,
+    24000,
+  );
+  assert.equal(previouslyPassingHundredMs.status, "blocked");
+  assert.equal(previouslyPassingHundredMs.effective_gap_sample_count, 2400);
+  assert.equal(
+    previouslyPassingHundredMs.blocker.code,
+    "tts_join_retained_edge_silence_exceeds_target",
   );
 
   const authoredUnit = {
@@ -3890,36 +4113,35 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     "--dirty-reason", "fixture test",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const identity = await readJson(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"));
-  assert.equal(identity.tts_provider, "kokoro_local");
-  assert.equal(identity.tts_fallback_provider, "qwen_local");
-  assert.equal(identity.narrator_voice_id, "am_puck");
-  assert.equal(identity.tts_native_speed, 1.2);
-  assert.equal(identity.voice_provider_options.primary.provider, "kokoro_local");
-  assert.equal(identity.voice_provider_options.primary.voice_id, "am_puck");
-  assert.equal(identity.voice_provider_options.primary.native_speed, 1.2);
-  assert.equal(identity.voice_provider_options.primary.model_id, "mlx-community/Kokoro-82M-bf16");
-  assert.equal(identity.voice_provider_options.primary.model_revision, "a71e4d38b236d968966a2002c4c895dbd12b1c3c");
-  assert.equal(identity.voice_provider_options.primary.model_weights_sha256, KOKORO_MODEL_LOCK.model_weights_sha256);
-  assert.equal(identity.voice_provider_options.primary.model_config_sha256, KOKORO_MODEL_LOCK.model_config_sha256);
-  assert.equal(identity.voice_provider_options.primary.voice_sha256, "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89");
-  assert.equal(identity.voice_provider_options.fallback.provider, "qwen_local");
-  assert.equal(identity.voice_provider_options.fallback.model_id, QWEN_LOCAL_FALLBACK_LOCK.model_id);
-  assert.equal(identity.voice_provider_options.fallback.model_revision, QWEN_LOCAL_FALLBACK_LOCK.model_revision);
-  assert.equal(identity.voice_provider_options.fallback.reference_audio_path, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_path);
-  assert.equal(identity.voice_provider_options.fallback.reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
-  assert.equal(identity.voice_provider_options.fallback.reference_text, QWEN_LOCAL_FALLBACK_LOCK.reference_text);
-  assert.equal(identity.voice_provider_options.fallback.reference_text_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_text_sha256);
-  assert.equal(identity.voice_provider_options.fallback.reference_metadata_path, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_path);
-  assert.equal(identity.voice_provider_options.fallback.reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
-  assert.equal(identity.voice_provider_options.fallback.reference_voice_id, "am_puck");
-  assert.equal(identity.voice_provider_options.fallback.voice_continuity_contract, "clone_primary_puck_identity");
+  assert.equal(identity.tts_provider, "qwen_local");
+  assert.equal(identity.tts_fallback_provider, null);
+  assert.equal(identity.narrator_voice_id, "am_liam");
+  assert.equal(identity.tts_native_speed, null);
+  assert.equal(identity.voice_provider_options.primary.provider, "qwen_local");
+  assert.equal(identity.voice_provider_options.primary.voice_id, "am_liam");
+  assert.equal(identity.voice_provider_options.primary.native_speed, null);
+  assert.equal(identity.voice_provider_options.primary.model_id, QWEN_LIAM_PRIMARY_LOCK.model_id);
+  assert.equal(identity.voice_provider_options.primary.model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
+  assert.equal(identity.voice_provider_options.primary.model_weights_sha256, QWEN_LIAM_PRIMARY_LOCK.model_weights_sha256);
+  assert.equal(identity.voice_provider_options.primary.model_config_sha256, QWEN_LIAM_PRIMARY_LOCK.model_config_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_audio_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_manifest_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_metadata_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256);
+  assert.equal(identity.voice_provider_options.primary.voice_continuity_contract, QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract);
+  assert.equal(identity.voice_provider_options.primary.repetition_penalty, 1.2);
+  assert.equal(identity.voice_provider_options.fallback, null);
+  assert.deepEqual(identity.voice_provider_options.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
+  assert.deepEqual(identity.voice_provider_options.stitch_contract, QWEN_LIAM_STITCH_CONTRACT);
+  assert.deepEqual(identity.voice_provider_options.retry_contract, QWEN_LIAM_RETRY_CONTRACT);
   assert.equal(identity.production_profile, "fast_premium_v1");
   assert.equal(identity.production_profile_config.target_wall_clock_minutes, 180);
   assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
   assert.equal(identity.production_profile_config.planner.editorial_concurrency, 8);
   assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 8);
   assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 8);
-  assert.equal(identity.voice_provider_options.pace_strategy, "provider_native_speed_no_post_tempo");
+  assert.equal(identity.production_profile_config.media.qwen_tts_concurrency, 1);
+  assert.equal(identity.production_profile_config.media.local_qwen_tts_concurrency, 1);
+  assert.equal(identity.voice_provider_options.pace_strategy, "qwen_reference_native_cadence_no_speed_no_post_tempo");
   assert.equal(identity.production_gates.post_tempo_normalization_default, false);
   assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
   assert.equal(identity.motion_policy, "selective_editorial_v1");
@@ -3932,30 +4154,49 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.parallax_retention_window_target, 10);
   assert.equal(identity.parallax_background_provider, "modelslab_flux_klein");
   assert.equal(identity.provider_locks.parallax_background_provider, "modelslab_flux_klein");
-  assert.equal(identity.provider_locks.tts_provider, "kokoro_local");
-  assert.equal(identity.provider_locks.tts_fallback_provider, "qwen_local");
-  assert.equal(identity.provider_locks.narrator_voice_id, "am_puck");
-  assert.equal(identity.provider_locks.narrator_voice_identity, "am_puck");
-  assert.equal(identity.provider_locks.fallback_voice_identity, "am_puck");
-  assert.equal(identity.provider_locks.fallback_reference_audio_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256);
-  assert.equal(identity.provider_locks.fallback_reference_metadata_sha256, QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256);
-  assert.equal(identity.provider_locks.fallback_similarity_model_sha256, QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_model_sha256);
-  assert.equal(identity.provider_locks.fallback_similarity_calibration_sha256, QWEN_LOCAL_FALLBACK_LOCK.speaker_similarity_calibration_sha256);
-  assert.equal(identity.provider_locks.fallback_minimum_cosine_similarity, 0.88);
-  assert.equal(identity.provider_locks.fallback_warning_below_cosine_similarity, 0.9);
-  assert.equal(identity.provider_locks.tts_native_speed, 1.2);
+  assert.equal(identity.provider_locks.tts_provider, "qwen_local");
+  assert.equal(identity.provider_locks.tts_fallback_provider, null);
+  assert.equal(identity.provider_locks.narrator_voice_id, "am_liam");
+  assert.equal(identity.provider_locks.narrator_voice_identity, "am_liam");
+  assert.equal(identity.provider_locks.tts_native_speed, null);
+  assert.equal(identity.provider_locks.tts_speed_control, "unsupported");
+  assert.equal(identity.provider_locks.primary_reference_audio_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(identity.provider_locks.primary_reference_manifest_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256);
+  assert.equal(identity.provider_locks.primary_reference_metadata_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256);
+  assert.equal(identity.provider_locks.primary_voice_continuity_contract, QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract);
+  assert.equal(identity.provider_locks.primary_similarity_model_sha256, QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_sha256);
+  assert.equal(identity.provider_locks.primary_similarity_calibration_sha256, QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_calibration_sha256);
+  assert.equal(identity.provider_locks.primary_minimum_cosine_similarity, 0.88);
+  assert.equal(identity.provider_locks.primary_warning_below_cosine_similarity, 0.9);
+  assert.equal(identity.provider_locks.tts_unit_target_words_min, 45);
+  assert.equal(identity.provider_locks.tts_unit_target_words_max, 60);
+  assert.equal(identity.provider_locks.tts_unit_hard_words_max, 60);
+  assert.equal(identity.provider_locks.tts_sentence_complete_units, true);
+  assert.equal(identity.provider_locks.tts_join_silence_ms, 80);
+  assert.equal(identity.provider_locks.tts_continuous_requests, false);
+  assert.equal(identity.provider_locks.post_tempo_processing, false);
+  assert.equal(identity.provider_locks.tts_retry_policy, QWEN_LIAM_RETRY_CONTRACT.retry_policy);
+  assert.equal(identity.provider_locks.tts_automatic_asr_retry, false);
+  assert.deepEqual(identity.provider_locks.tts_confirmed_defect_types, ["skip", "truncation", "stutter"]);
+  assert.equal(identity.provider_locks.fallback_voice_identity, null);
+  assert.equal(identity.provider_locks.fallback_reference_audio_sha256, null);
   assert.equal(identity.production_gates.single_narrator_identity_required, true);
-  assert.equal(identity.production_gates.fallback_must_clone_primary_voice_identity, true);
+  assert.equal(identity.production_gates.fallback_must_clone_primary_voice_identity, false);
+  assert.equal(identity.production_gates.tts_speed_control_supported, false);
+  assert.equal(identity.production_gates.sentence_complete_tts_units_required, true);
+  assert.equal(identity.production_gates.tts_unit_hard_words_max, 60);
+  assert.equal(identity.production_gates.tts_join_silence_ms, 80);
+  assert.equal(identity.production_gates.continuous_longform_tts_requests_forbidden, true);
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");
   assert.equal(identity.git.commit.length, 40);
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "gpt-5.6-sol");
-  assert.equal(identity.model_versions.tts_model, "mlx-community/Kokoro-82M-bf16");
-  assert.equal(identity.model_versions.tts_model_revision, KOKORO_MODEL_LOCK.model_revision);
-  assert.equal(identity.model_versions.fallback_tts_model, QWEN_LOCAL_FALLBACK_LOCK.model_id);
-  assert.equal(identity.model_versions.fallback_tts_model_revision, QWEN_LOCAL_FALLBACK_LOCK.model_revision);
+  assert.equal(identity.model_versions.tts_model, QWEN_LIAM_PRIMARY_LOCK.model_id);
+  assert.equal(identity.model_versions.tts_model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
+  assert.equal(identity.model_versions.fallback_tts_model, null);
+  assert.equal(identity.model_versions.fallback_tts_model_revision, null);
   assert.equal(identity.model_versions.image_model, "gpt-image-2-t2i");
   assert.equal(identity.model_versions.reference_model, "gpt-image-2-i2i");
   assert.deepEqual(identity.image_provider_options.fallback, {
@@ -3984,7 +4225,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
       "--run-intent", "production",
       "--narrator-voice-id", "am_fenrir",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
-    (error) => /Puck-only.*am_puck/i.test(String(error?.stderr ?? error?.message ?? error)),
+    (error) => /Liam-only.*am_liam/i.test(String(error?.stderr ?? error?.message ?? error)),
   );
   await assert.rejects(
     execFileAsync(process.execPath, [
@@ -3993,11 +4234,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
       "--series", "series",
       "--week", "qwen-primary-production",
       "--episode", "ep_01",
-      "--title", "Qwen remains fallback only",
+      "--title", "Legacy hosted Qwen is not local Liam",
       "--run-intent", "production",
       "--tts-provider", "modelslab_qwen",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
-    (error) => /Qwen is the exact-unit fallback, not a selectable primary narrator/i.test(
+    (error) => /production runs require qwen_local with am_liam/i.test(
       String(error?.stderr ?? error?.message ?? error),
     ),
   );
@@ -4013,7 +4254,22 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
       "--tts-provider", "modelslab_qwen",
       "--qwen-narrator-voice-id", "joel_owned_narrator_clone",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
-    (error) => /Qwen is the exact-unit fallback, not a selectable primary narrator/i.test(
+    (error) => /production runs require qwen_local with am_liam/i.test(
+      String(error?.stderr ?? error?.message ?? error),
+    ),
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      "scripts/run-preflight.mjs",
+      "--channel", "test",
+      "--series", "series",
+      "--week", "qwen-speed-control-rejected",
+      "--episode", "ep_01",
+      "--title", "No speed control",
+      "--run-intent", "production",
+      "--tts-native-speed", "1.2",
+    ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
+    (error) => /no native-speed control/i.test(
       String(error?.stderr ?? error?.message ?? error),
     ),
   );
@@ -5733,14 +5989,22 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
   assert.equal(groupedPlan.kokoro_unit_boundary_integrity.clean_start_count, groupedUnits.length);
   assert.equal(groupedPlan.kokoro_unit_boundary_integrity.terminal_punctuation_count, groupedUnits.length);
   assert.doesNotMatch(JSON.stringify(groupedPlan), /joel_owned_narrator_clone|am_fenrir/i);
-  const explicitLegacyQwenPlan = qwenGenerationPlanForTests([{
-    segment_id: "seg_legacy_qwen",
+  const qwenLiamPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_qwen_liam",
     performance_units: performanceUnits.slice(0, 1),
   }], { ttsProvider: "qwen_local" });
-  assert.equal(explicitLegacyQwenPlan.provider_controls.qwen3.fallback, false);
-  assert.equal("target_voice_id" in explicitLegacyQwenPlan.provider_controls.qwen3, false);
-  assert.equal("target_voice_id" in explicitLegacyQwenPlan.instruction_delivery.qwen3, false);
-  assert.equal("narrator_voice_id" in explicitLegacyQwenPlan, false);
+  assert.equal(qwenLiamPlan.provider_controls.qwen3.fallback, false);
+  assert.equal(qwenLiamPlan.provider_controls.qwen3.target_voice_id, "am_liam");
+  assert.equal(qwenLiamPlan.instruction_delivery.qwen3.target_voice_id, "am_liam");
+  assert.equal(qwenLiamPlan.narrator_voice_id, "am_liam");
+  assert.equal(
+    qwenLiamPlan.provider_controls.qwen3.reference_audio_sha256,
+    QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256,
+  );
+  assert.equal(
+    qwenLiamPlan.provider_controls.qwen3.voice_continuity_contract,
+    QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract,
+  );
   assert.equal(
     qwenTextIntegrityCoverageForTests(narrationTexts.join("\n"), groupedPlan).status,
     "passed",
@@ -5904,10 +6168,14 @@ function testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets() {
     "[Skill name: Chapter Zero.]",
   ]);
   assert.ok(units.every((unit) => unit.source_speaker === "SYSTEM"));
-  assert.ok(units.every((unit) => /precise interface cadence/i.test(unit.qwen_instruct)));
-  assert.ok(units.every((unit) => /205-215 spoken words per minute/i.test(unit.qwen_instruct)));
-  assert.ok(units.every((unit) => /express emotion through emphasis and tone/i.test(unit.qwen_instruct)));
-  assert.ok(units.every((unit) => !/\b(?:hushed|whisper|slowly|slow cadence)\b/i.test(unit.qwen_instruct)));
+  assert.ok(units.every((unit) => unit.qwen_instruct === null));
+  assert.ok(units.every((unit) => (
+    unit.provider_controls.qwen3.instruct_supported === false
+    && unit.provider_controls.qwen3.instruct_submitted === false
+    && unit.provider_controls.qwen3.instruct === null
+    && unit.provider_controls.qwen3.reference_audio_sha256
+      === QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256
+  )));
 }
 
 async function testNarrationPaceChecks() {
@@ -8197,7 +8465,12 @@ async function testRunStatusAcceptsGenericNarrationWithSelectedFallbackRepair() 
   const audioHash = sha256(audioBytes);
   const audioPath = path.join(episodeDir, "assets", "audio", "narration.wav");
   const m4aPath = path.join(episodeDir, "assets", "audio", "narration.m4a");
-  const voiceProviderOptions = defaultNarrationVoiceProviderOptions();
+  const voiceProviderOptions = defaultNarrationVoiceProviderOptions({
+    provider: "kokoro_local",
+    fallbackProvider: "qwen_local",
+    voiceId: "am_puck",
+    nativeSpeed: 1.2,
+  });
   const policy = narrationTtsPolicyForIdentity({
     episode: "ep_01",
     tts_provider: "kokoro_local",

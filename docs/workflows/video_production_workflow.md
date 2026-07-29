@@ -52,7 +52,7 @@ Planner calls use exact content-addressed cache reuse by default. Prompt hash, m
 
 Planner recovery is scoped-only. Once a planner has executed, another unscoped planner invocation is refused unless it names exact scene/cut/beat/reference IDs or uses `--resume-incomplete-chunks true`. Resume mode reuses compatible passed chunks and calls the model only for missing, failed, or stale-input chunks. Cache-disabled planner retries are blocked. `run advance` stops on blocked, failed, or stale planner state so the agent can inspect the evidence, prefer a small hand repair, or issue the narrowest scoped recovery.
 
-`fast_premium_v1` is the default for new preflights: eight semantic workers, eight editorial-beat workers, eight reference-planning workers, eight visual-prompt workers, one resident local Kokoro synthesis worker, fifteen reference/image workers, and four smooth-render workers. It also locks the semantic/voice-TTS parallel fork, scoped-only planner recovery, and ModelsLab prompt-to-image wavefront prefetch. This profile targets approximately three hours for a clean long episode, but the ledger records actual times and never hides provider throttling or creative-review holds.
+`fast_premium_v1` is the default for new preflights: eight semantic workers, eight editorial-beat workers, eight reference-planning workers, eight visual-prompt workers, one resident local Qwen3-TTS synthesis worker, fifteen reference/image workers, and four smooth-render workers. It also locks the semantic/voice-TTS parallel fork, scoped-only planner recovery, and ModelsLab prompt-to-image wavefront prefetch. This profile targets approximately three hours for a clean long episode, but the ledger records actual times and never hides provider throttling or creative-review holds.
 
 After targeted speakability, `goldflow run audio-semantic-fork` executes semantic extraction in parallel with voice planning, narration synthesis, local Whisper timing, and audio pace diagnostics. The stage registry declares the two branches independently ready and joins them at timing bind. Concurrent provenance is output-owned, so semantic execution cannot claim or double-count audio reports and audio execution cannot claim semantic artifacts.
 
@@ -129,29 +129,30 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
 
 9. Voice plan.
    - Narrator-only by default.
-   - The only production narrator identity is the exact pinned Kokoro `am_puck` preset at native speed `1.2`. Other Kokoro presets, including `am_fenrir`, are bakeoff-only and cannot be selected by production preflight or automatic fallback.
+   - The only production narrator identity is local Qwen3-TTS 1.7B Base conditioned by the exact pinned Liam reference audio and transcript. Every first take and retry uses the same model/revision/runtime/reference hashes; there is no alternate production voice or automatic provider fallback.
    - Standalone bracketed system/UI dialogue remains spoken. Classify it as a `SYSTEM` source unit, send its contents without the outer brackets, and preserve the original bracketed line for captions. Only bracketed sound design, performance tags, pauses, and production directions are excluded from speech. Audit the locked script's system/UI count against `narration_generation_plan.json`; unexplained omissions block synthesis.
    - Character voice casting requires an explicit operator request.
    - Voice plan requires current speakability artifacts unless running a diagnostic bypass.
-   - Current production writes `narration_generation_plan.json`, `audio_performance_plan.json`, `voice_direction_strategy_<episode>.json`, and `voice_reference_completeness_report.json`. The plan keeps source/caption/spoken text separate, stable source-derived unit IDs, protected-term/risk flags, Puck controls, and Qwen fallback controls.
-   - Fish and Qwen-named plans are legacy/diagnostic artifacts. Do not emit Fish files for current Puck runs unless explicitly requested for a bakeoff or migration audit.
+   - Current production writes `narration_generation_plan.json`, `audio_performance_plan.json`, `voice_direction_strategy_<episode>.json`, and `voice_reference_completeness_report.json`. The plan keeps source/caption/spoken text separate, stable source-derived unit IDs, protected-term/risk flags, exact Liam conditioning hashes, and the Qwen Base runtime identity.
+   - Units are sentence-complete and target 45-60 spoken words with a hard maximum of 60. Shorter system/UI, dialogue, performance, speaker, SFX, explicit-merge, or segment-barrier units remain atomic; never pad or cross a barrier merely to reach the target.
+   - Fish files and older provider-specific `qwen_generation_plan.json` files are legacy/diagnostic artifact shapes. Do not emit Fish files unless explicitly requested for a bake-off or migration audit.
 
 10. TTS generation and stitch.
-   - Uses local Kokoro v1.0 82M BF16 with `am_puck`, American English, and native speed `1.2`. The model is loaded once and units are synthesized sequentially; the audited throughput is already substantially faster than realtime.
-   - Completed units are content-addressed and reused only when the exact model/revision/runtime/voice/text/speed identity and WAV hash match.
-   - Every unit receives waveform QA and small-Whisper ASR. Any transcript discrepancy, protected term, or system/UI unit is adjudicated with medium Whisper. A confirmed deletion, insertion, substitution, stutter/repetition, clipping, severe impulse, unexplained noise, or bad endpoint blocks that Puck candidate.
-   - Only a blocked Puck unit may route to the locked local Qwen3-TTS 1.7B fallback. The fallback receives the identical spoken-text hash plus the pinned Puck-generated reference audio/transcript so it clones the same narrator identity; warnings alone never trigger it, and all fallback attempts remain visible. A candidate below `0.88` Puck speaker cosine similarity blocks; a score at least `0.88` but below the `0.90` warning floor remains explicitly flagged for review.
-   - Qwen3 1.7B Base ICL does not honor a per-unit `instruct`. Its fallback delivery comes only from the exact unit text and pinned reference audio/transcript, and runtime provenance reports `base_icl_reference_audio_only` instead of claiming instruction control.
+   - Uses local Qwen3-TTS 1.7B Base with the exact pinned Liam reference audio and transcript. Load the model once and synthesize the sentence-complete units sequentially. Do not submit a continuous longform request.
+   - Qwen3 1.7B Base ICL does not honor per-unit `instruct` or native-speed control. Delivery comes only from the exact unit text, punctuation, and pinned Liam reference audio/transcript; runtime provenance reports `base_icl_reference_audio_only` and records that no speed was applied.
+   - Completed units are content-addressed and reused only when the exact model/revision/runtime/text/Liam-reference identity and WAV hash match.
+   - Every unit receives waveform QA and ASR, but ASR is diagnostic evidence rather than an automatic retry trigger. Isolated deletions, substitutions, low-confidence words, global WER, and other uncertain ASR findings remain warnings for spot-listening.
+   - Retry only the exact failed unit through the exact same Qwen/Liam identity, and only for a confirmed audible skip, truncation, or stutter. A synthesis failure, empty output, or objectively too-short output counts as confirmed truncation and may receive one automatic retry. Clipping, severe impulses, unexplained bursts, unsafe endpoints, or voice-continuity failures block for review and never trigger a blind retry. Human retry evidence must bind the exact pre-retry narration-report hash, selected attempt, audio hash, and synthesis-identity hash. A confirmed pronunciation defect requires the narrowest TTS-only spoken-text correction and exact-unit regeneration; it must not change captions.
    - Generates one continuous narration track and generation metadata.
-   - Stitching uses verified retained silence, 8 ms edge fades, `0.08s` between units inside a source segment, and `0.16s` between source segments. There is no de-clicking, lexical repair, loudness pumping, or post-TTS tempo processing.
-   - Every final join and the full stream must pass integrity plus medium-Whisper transcript QA. Missing/duplicated/reordered units, boundary repetition, opening/final loss, protected-value drift, or stale hashes block the stage.
-   - Emotional direction does not lower the recap cadence. Kokoro has no instruction channel: delivery comes from approved spoken text, exact punctuation, sentence-complete source-bound groups, native speed, and intentional gaps—not invented performance tags or dramatic pauses. Safe adjacent narration targets 24-50 spoken words with a hard 60-word merge cap; system/UI, dialogue, performance, speaker, SFX, explicit-merge, and segment barriers remain atomic.
+   - Stitching uses verified retained silence, 8 ms edge fades, and exactly `0.08s` at every selected-unit boundary, including source-segment boundaries. There is no de-clicking, lexical repair, loudness pumping, native-speed manipulation, or post-TTS tempo processing.
+   - Every final join and the full stream must pass structural integrity plus medium-Whisper transcript QA. Missing/duplicated/reordered units, audible boundary repetition, opening/final loss, protected-value drift confirmed by listening, objective acoustic failures, or stale hashes block the stage; uncertain ASR findings alone do not.
+   - Emotional delivery and recap cadence come from the approved spoken text, exact punctuation, sentence-complete 45-60-word source-bound groups, the Liam reference, and intentional 80 ms joins—not invented performance tags, dramatic pauses, speed controls, or a continuous request.
    - If the stitched audio changes, rerun Whisper timing and every timing-dependent downstream artifact.
    - Do not destructively amplify cached TTS segments. Narration loudness is raised later in the longform mix.
 
 11. Whisper timing.
    - Run local Whisper word timing on the final stitched narration.
-   - For current Puck identities, the full-stream transcript integrity result must be `passed`; a nonempty transcript alone is not sufficient.
+   - The full-stream structural integrity result must be `passed`; a nonempty transcript alone is not sufficient. Preserve uncertain ASR discrepancies as review warnings instead of converting them into automatic synthesis retries.
    - Whisper timing is production timing truth for subtitles, SFX, scoring, semantic timing, visual beats, and render.
    - Provider/segment timing is fallback metadata only.
 
@@ -161,8 +162,8 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
    - Writes `narration_pace_report_<episode>.json`.
    - Actual WPM is computed from Whisper word count and audio duration against the 210-220 WPM target, but it is diagnostic rather than a production gate.
    - Actual TTS WPM is always diagnostic. Audio pace-check records `actual_wpm` and `diagnostic_pace_status`, while the ledger requires only current script/audio hashes and a valid measurement.
-   - An out-of-range WPM result does not block production or trigger automatic full-episode TTS regeneration. Test native-speed changes on a small representative sample before scaling them.
-   - Post-TTS tempo normalization is not a normal production recovery. `audio tempo-normalize` requires `--operator-approved-emergency true` and is reserved for an explicit operator-approved emergency diagnostic; rerun Whisper after any such use.
+   - An out-of-range WPM result does not block production or trigger automatic full-episode TTS regeneration. Qwen Base has no effective native-speed control; if cadence needs to change, test a revised source/unit/reference contract in a bounded listening proof before scaling it.
+   - Post-TTS tempo normalization is forbidden for the current Qwen/Liam production route. If cadence is unacceptable, stop and approve a new bounded synthesis proof or source/unit plan; do not run `audio tempo-normalize` on production narration.
 
 13. Timing bind.
    - Binds semantic scenes to Whisper timing.
@@ -419,7 +420,7 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
 
 ## Current Model And Provider Choices
 
-- Narration TTS: local Kokoro v1.0 82M BF16, exact pinned `am_puck` voice, native speed `1.2`. Puck is the sole production narrator identity. Other Kokoro presets are bakeoff-only; local Qwen3-TTS 1.7B is an exact-unit, QA-gated fallback that clones the pinned Puck reference.
+- Narration TTS: local Qwen3-TTS 1.7B Base, exact pinned Liam reference clone, and no alternate narrator or provider fallback. Sentence-complete units target 45-60 spoken words with a hard maximum of 60; every selected-unit boundary gets exactly 80 ms. Do not use continuous longform requests, native-speed control, or post-TTS tempo processing. Retry the exact unit with the same Qwen/Liam identity only for confirmed audible skips/truncations/stutters; failed, empty, or objectively too-short synthesis counts as confirmed truncation. Other acoustic or identity blockers stop for review, and uncertain ASR findings remain warning-only.
 - Voice route: narrator-only unless the operator explicitly requests character voice casting.
 - Timing: local Whisper word timing on the final stitched narration.
 - SFX assets: ModelsLab `/api/v7/voice/sound-generation` may generate or reuse locked assets after a Codex/local-Qwen/agent-authored plan.
@@ -538,10 +539,11 @@ Use this checklist before spending generation time:
    - Do not let speakability rewrite the story broadly unless explicitly requested.
 
 3. Audio spine
-   - Generate narrator-only Puck narration through `tts narrate`.
-   - Review the opening/final units, every fallback unit, every protected-term/system/UI unit, and all acoustic warnings before committing downstream.
+   - Generate narrator-only Qwen3-TTS 1.7B Base narration with the exact Liam reference clone through `tts narrate`.
+   - Confirm that the plan contains sentence-complete 45-60-word targets, never exceeds 60 words, uses no continuous longform request, and records 80 ms for every join.
+   - Review the opening/final units, every exact-unit retry, every protected-term/system/UI unit, and all acoustic or ASR warnings before committing downstream.
    - Run local Whisper timing after final stitched audio.
-   - If any TTS unit is regenerated, the stitch changes, or narration tempo-normalization is applied, rerun Whisper and all timing-dependent stages.
+   - If any TTS unit is regenerated or the stitch changes, rerun Whisper and all timing-dependent stages. Do not tempo-normalize current Qwen/Liam production narration.
 
 4. SFX and scoring
    - Run SFX/score planning only after Whisper timing.

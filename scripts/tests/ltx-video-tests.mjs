@@ -53,8 +53,8 @@ const richFallbackPrompt = ltxMotionPromptForCut({
 assert.doesNotMatch(richFallbackPrompt, /complete apartment confrontation/);
 assert.doesNotMatch(richFallbackPrompt, /both characters face each other/);
 assert.match(richFallbackPrompt, /woman looks away/);
-assert.match(richFallbackPrompt, /From 0\.0 to 1\.8 seconds/);
-assert.match(richFallbackPrompt, /Existing UI may animate naturally/);
+assert.match(richFallbackPrompt, /from 0\.0 to 1\.8 seconds/);
+assert.match(richFallbackPrompt, /exact text legibility is not required/);
 assert.doesNotMatch(ltxNegativePrompt(), /text mutation/);
 assert.equal(sanitizeAnimationIntent({ eligibility: "animate", shot_class: "ui_or_screen", subject_motion: "screen pulses", camera_motion: "locked", end_state: "settles" })?.shot_class, "ui_or_screen");
 assert.equal(ltxMotionPromptForCut({ ltx_video_prompt: "Authored motion." }), "Authored motion.");

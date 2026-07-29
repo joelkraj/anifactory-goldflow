@@ -311,6 +311,7 @@ function testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped() {
     manualReviewEvidencePath: "/episode/manual-review.json",
     repairTailUnitIds: ["unit_001"],
     skipRenderedTranscriptQa: true,
+    workflowBypass: true,
     validatedReview,
   }), {
     repair_tail_unit_ids: ["unit_001"],
@@ -319,20 +320,29 @@ function testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped() {
   assert.throws(() => validateManualStitchRecoveryForTests({
     repairTailUnitIds: ["unit_001"],
     skipRenderedTranscriptQa: true,
+    workflowBypass: true,
     validatedReview,
   }), /allowed only with --manual-review-evidence/i);
   assert.throws(() => validateManualStitchRecoveryForTests({
     manualReviewEvidencePath: "/episode/manual-review.json",
     repairTailUnitIds: [],
     skipRenderedTranscriptQa: true,
+    workflowBypass: true,
     validatedReview,
   }), /requires at least one/i);
   assert.throws(() => validateManualStitchRecoveryForTests({
     manualReviewEvidencePath: "/episode/manual-review.json",
     repairTailUnitIds: ["unit_002"],
     skipRenderedTranscriptQa: true,
+    workflowBypass: true,
     validatedReview,
   }), /not an exact manually accepted tts_audio_tail_not_settled/i);
+  assert.throws(() => validateManualStitchRecoveryForTests({
+    manualReviewEvidencePath: "/episode/manual-review.json",
+    repairTailUnitIds: ["unit_001"],
+    skipRenderedTranscriptQa: true,
+    validatedReview,
+  }), /require explicit --workflow-bypass true/i);
 }
 
 testHardFailuresAreNotSoftenedOrBlindlyRetried();

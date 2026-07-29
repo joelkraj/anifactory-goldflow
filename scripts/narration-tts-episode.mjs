@@ -394,6 +394,7 @@ export function validateManualStitchRecoveryForTests({
   manualReviewEvidencePath,
   repairTailUnitIds = [],
   skipRenderedTranscriptQa = false,
+  workflowBypass = false,
   validatedReview,
 } = {}) {
   const repairIds = repairTailUnitIds.map(String).filter(Boolean);
@@ -405,6 +406,12 @@ export function validateManualStitchRecoveryForTests({
   }
   if (new Set(repairIds).size !== repairIds.length) {
     throw new Error("--stitch-repair-tail-unit-ids contains duplicate unit IDs.");
+  }
+  if ((repairIds.length || skipRenderedTranscriptQa) && workflowBypass !== true) {
+    throw new Error(
+      "--stitch-repair-tail-unit-ids and --skip-rendered-transcript-qa "
+      + "require explicit --workflow-bypass true.",
+    );
   }
   if (skipRenderedTranscriptQa && !repairIds.length) {
     throw new Error(
@@ -1703,10 +1710,12 @@ async function main() {
   const skipRenderedTranscriptQa = boolFlag(
     flags["skip-rendered-transcript-qa"],
   );
+  const workflowBypass = boolFlag(flags["workflow-bypass"]);
   validateManualStitchRecoveryForTests({
     manualReviewEvidencePath,
     repairTailUnitIds: stitchRepairTailUnitIds,
     skipRenderedTranscriptQa,
+    workflowBypass,
     validatedReview: null,
   });
   if (manualReviewEvidencePath && requestedRecoveryScope) {
@@ -2042,6 +2051,7 @@ async function main() {
       manualReviewEvidencePath,
       repairTailUnitIds: stitchRepairTailUnitIds,
       skipRenderedTranscriptQa,
+      workflowBypass,
       validatedReview,
     });
     const preReviewArchiveDir = path.join(
@@ -2166,6 +2176,7 @@ async function main() {
       stitch_repair_tail_unit_ids: manualStitchRecovery.repair_tail_unit_ids,
       skip_rendered_transcript_qa:
         manualStitchRecovery.skip_rendered_transcript_qa,
+      workflow_bypass: workflowBypass,
       model_loaded: false,
       synthesis_invoked: false,
     };

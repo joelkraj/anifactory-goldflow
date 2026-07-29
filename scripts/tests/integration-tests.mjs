@@ -45,6 +45,19 @@ async function runProviderFreeSyntheticE2e() {
   const { stdout: statusStdout } = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], { cwd: process.cwd(), env });
   const statusAfterIngest = JSON.parse(statusStdout);
   assert.equal(statusAfterIngest.identity.production_profile, "fast_premium_v1");
+  assert.equal(
+    statusAfterIngest.identity.provider_locks.local_whisper_timing.model,
+    "small.en",
+  );
+  assert.equal(
+    statusAfterIngest.identity.provider_locks.local_whisper_timing
+      .omp_num_threads,
+    12,
+  );
+  assert.equal(
+    statusAfterIngest.identity.provider_locks.local_whisper_timing.cpu_threads,
+    0,
+  );
   const scriptPath = path.join(episodeDir, "script_clean.md");
   await execFileAsync(process.execPath, ["scripts/script-approve.mjs", ...base, "--hash", await fileSha256(scriptPath)], { cwd: process.cwd(), env });
 

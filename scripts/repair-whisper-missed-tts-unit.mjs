@@ -6,7 +6,23 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { transcriptQaForTests } from "./modelslab-qwen-episode-audio.mjs";
+import { localWhisperWordTimingQa } from "./lib/local-whisper-policy.mjs";
 import { softenPrimaryQa } from "./lib/tts-selection-policy.mjs";
+
+const MANUAL_MEDIUM_STRUCTURAL_RECOVERY_CONTRACT = Object.freeze({
+  contract_version: "local_whisper_manual_structural_recovery_v1",
+  engine: "faster_whisper",
+  model: "medium",
+  device: "cpu",
+  compute_type: "int8_float32",
+  omp_num_threads: 12,
+  cpu_threads: 0,
+  language: "en",
+  beam_size: 5,
+  word_timestamps: true,
+  vad_filter: false,
+  condition_on_previous_text: false,
+});
 
 function flags(parts) {
   const out = {};
@@ -45,13 +61,20 @@ function segmentStarts(stitchReport) {
   return starts;
 }
 
-async function transcribeUnit(audioPath, model = "medium") {
+async function transcribeUnit(audioPath) {
+  const contract = MANUAL_MEDIUM_STRUCTURAL_RECOVERY_CONTRACT;
   const outputPath = path.join(os.tmpdir(), `goldflow-unit-repair-${process.pid}-${Date.now()}.json`);
   const source = String.raw`
-import json, sys
+import json, os, sys
+os.environ["OMP_NUM_THREADS"] = sys.argv[4]
 from faster_whisper import WhisperModel
 audio_path, output_path, model_name = sys.argv[1:4]
-model = WhisperModel(model_name, device="auto", compute_type="auto")
+model = WhisperModel(
+    model_name,
+    device="cpu",
+    compute_type="int8_float32",
+    cpu_threads=0,
+)
 segments, info = model.transcribe(
     audio_path,
     language="en",
@@ -76,8 +99,19 @@ with open(output_path, "w", encoding="utf-8") as handle:
     json.dump({"text": " ".join(texts), "words": rows, "language_probability": info.language_probability}, handle)
 `;
   await new Promise((resolve, reject) => {
-    const child = spawn("python3", ["-c", source, audioPath, outputPath, model], {
+    const child = spawn("python3", [
+      "-c",
+      source,
+      audioPath,
+      outputPath,
+      contract.model,
+      String(contract.omp_num_threads),
+    ], {
       stdio: ["ignore", "ignore", "pipe"],
+      env: {
+        ...process.env,
+        OMP_NUM_THREADS: String(contract.omp_num_threads),
+      },
     });
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -89,14 +123,27 @@ with open(output_path, "w", encoding="utf-8") as handle:
   });
   const result = await readJson(outputPath);
   await fs.rm(outputPath, { force: true });
-  return result;
+  return { ...result, alignment_contract: structuredClone(contract) };
 }
 
 const args = flags(process.argv.slice(2));
 const episodeDir = path.resolve(String(args["episode-dir"] ?? ""));
 const unitId = String(args["unit-id"] ?? "");
 if (!episodeDir || !unitId) {
-  throw new Error("Usage: repair-whisper-missed-tts-unit --episode-dir <dir> --unit-id <id>");
+  throw new Error(
+    "Usage: repair-whisper-missed-tts-unit --episode-dir <dir> "
+    + "--unit-id <id> --manual-structural-recovery true "
+    + "--workflow-bypass true --evidence-note <reviewed blocker>",
+  );
+}
+if (args["manual-structural-recovery"] !== "true"
+  || args["workflow-bypass"] !== "true"
+  || !String(args["evidence-note"] ?? "").trim()) {
+  throw new Error(
+    "Medium Whisper is manual structural recovery only. Pass "
+    + "--manual-structural-recovery true --workflow-bypass true and a "
+    + "nonempty --evidence-note after reviewing the blocker.",
+  );
 }
 
 const timingPath = path.join(episodeDir, "narration_word_timing_ep_01.json");
@@ -145,6 +192,10 @@ const retainedWords = replaceWindow
 const words = [...retainedWords, ...insertedWords]
   .sort((left, right) => left.start_sec - right.start_sec || left.end_sec - right.end_sec)
   .map((word, index) => ({ ...word, index }));
+const wordTimingQa = localWhisperWordTimingQa(
+  words,
+  timing.audio_duration_sec,
+);
 const intendedText = (stitch.segments ?? [])
   .map((segment) => segment.text ?? segment.stripped_text ?? segment.tts_spoken_text ?? "")
   .filter((text) => String(text).trim())
@@ -181,10 +232,13 @@ const repairedQa = {
 };
 const repaired = {
   ...timing,
-  status: blockers.length ? "failed" : "passed",
+  status: blockers.length || wordTimingQa.status !== "passed"
+    ? "failed"
+    : "passed",
   word_count: words.length,
   words,
   full_stream_transcript_qa: repairedQa,
+  word_timing_qa: wordTimingQa,
   updated_at: new Date().toISOString(),
   manual_timing_repairs: [
     ...(timing.manual_timing_repairs ?? []),
@@ -198,10 +252,13 @@ const repaired = {
       replaced_context_word_count: existingInWindow.length,
       independently_recognized_text: local.text,
       method: "independent_exact_unit_medium_whisper",
+      alignment_contract: local.alignment_contract,
+      evidence_note: String(args["evidence-note"]).trim(),
     },
   ],
 };
 await writeJson(timingPath, repaired);
+const repairedTimingSha256 = await sha256File(timingPath);
 
 const triagePath = path.join(
   episodeDir,
@@ -216,18 +273,22 @@ await writeJson(triagePath, {
     failed_timing_path: timingPath,
     narration_audio_path: timing.narration_audio_path,
     narration_audio_sha256: timing.narration_audio_hash,
+    source_script_sha256: timing.source_script_hash,
     unit_id: unitId,
     unit_audio_path: unit.raw_audio_path,
     unit_audio_sha256: unit.raw_audio_sha256,
     prepared_audio_path: unit.prepared_audio_path,
     full_stream_missing_run_words: 15,
     independent_recognized_text: local.text,
+    operator_evidence_note: String(args["evidence-note"]).trim(),
   },
   repair: {
     inserted_word_count: insertedWords.length,
     replaced_context_word_count: existingInWindow.length,
     stitched_start_sec: Number(start.toFixed(3)),
     timing_source: "independent_exact_unit_medium_whisper",
+    alignment_contract: local.alignment_contract,
+    repaired_timing_sha256: repairedTimingSha256,
     no_audio_regenerated: true,
   },
   remaining_blockers: blockers,

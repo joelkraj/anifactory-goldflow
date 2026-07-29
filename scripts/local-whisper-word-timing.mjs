@@ -11,6 +11,16 @@ import {
   identityUsesCanonicalNarrationContract,
   resolveNarrationReportPath,
 } from "./lib/narration-artifacts.mjs";
+import {
+  identityRequiresLocalWhisperContract,
+  localWhisperContractFromReport,
+  localWhisperContractMismatches,
+  localWhisperTopLevelContractFromReport,
+  localWhisperWordTimingQa,
+  normalizeLocalWhisperContract,
+  productionLocalWhisperContract,
+  validateLocalWhisperIdentityContract,
+} from "./lib/local-whisper-policy.mjs";
 import { transcriptQaForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { softenPrimaryQa } from "./lib/tts-selection-policy.mjs";
 
@@ -31,6 +41,7 @@ const scriptPath = flags.script ?? path.join(episodeDir, "script_clean.md");
 const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, flags });
 const qwenReportPath = narrationReportPath;
 const outputPath = flags.output ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -87,16 +98,169 @@ function narrationAudioPath(qwenReport) {
   throw new Error("No clean stitched narration audio path found. Pass --audio <path>.");
 }
 
-async function runFasterWhisper(audioPath, { canonicalContract = false } = {}) {
-  const model = flags.model
-    ?? process.env.ANIFACTORY_WHISPER_MODEL
-    ?? (canonicalContract ? "medium" : "small");
-  const device = flags.device ?? process.env.ANIFACTORY_WHISPER_DEVICE ?? "auto";
-  const computeType = flags.computeType ?? flags["compute-type"] ?? process.env.ANIFACTORY_WHISPER_COMPUTE_TYPE ?? "auto";
-  const language = flags.language ?? process.env.ANIFACTORY_WHISPER_LANGUAGE ?? "en";
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function contractOverridesFromFlags(inputFlags = {}) {
+  const values = {
+    engine: inputFlags.engine,
+    model: inputFlags.model,
+    device: inputFlags.device,
+    compute_type: firstDefined(
+      inputFlags.computeType,
+      inputFlags["compute-type"],
+    ),
+    omp_num_threads: inputFlags["omp-num-threads"],
+    cpu_threads: inputFlags["cpu-threads"],
+    language: inputFlags.language,
+    beam_size: inputFlags["beam-size"],
+    word_timestamps: inputFlags["word-timestamps"],
+    vad_filter: inputFlags["vad-filter"],
+  };
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value !== undefined),
+  );
+}
+
+function contractOverridesFromEnv(env = {}) {
+  const values = {
+    engine: env.ANIFACTORY_WHISPER_ENGINE,
+    model: env.ANIFACTORY_WHISPER_MODEL,
+    device: env.ANIFACTORY_WHISPER_DEVICE,
+    compute_type: env.ANIFACTORY_WHISPER_COMPUTE_TYPE,
+    omp_num_threads:
+      env.ANIFACTORY_WHISPER_OMP_NUM_THREADS ?? env.OMP_NUM_THREADS,
+    cpu_threads: env.ANIFACTORY_WHISPER_CPU_THREADS,
+    language: env.ANIFACTORY_WHISPER_LANGUAGE,
+    beam_size: env.ANIFACTORY_WHISPER_BEAM_SIZE,
+    word_timestamps: env.ANIFACTORY_WHISPER_WORD_TIMESTAMPS,
+    vad_filter: env.ANIFACTORY_WHISPER_VAD_FILTER,
+  };
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value !== undefined),
+  );
+}
+
+function validateRuntimeContract(contract) {
+  if (contract.engine !== "faster_whisper") {
+    throw new Error(
+      `Unsupported local-Whisper engine ${contract.engine ?? "missing"}; `
+      + "production requires faster_whisper.",
+    );
+  }
+  for (const field of ["model", "device", "compute_type", "language"]) {
+    if (!contract[field]) {
+      throw new Error(`Missing local-Whisper runtime field: ${field}.`);
+    }
+  }
+  if (!Number.isInteger(contract.omp_num_threads)
+    || contract.omp_num_threads < 1) {
+    throw new Error("Local Whisper requires omp_num_threads >= 1.");
+  }
+  if (!Number.isInteger(contract.cpu_threads) || contract.cpu_threads < 0) {
+    throw new Error("Local Whisper requires cpu_threads >= 0.");
+  }
+  if (!Number.isInteger(contract.beam_size) || contract.beam_size < 1) {
+    throw new Error("Local Whisper requires beam_size >= 1.");
+  }
+  if (contract.word_timestamps !== true) {
+    throw new Error("Local Whisper production timing requires word_timestamps=true.");
+  }
+  if (contract.vad_filter !== false) {
+    throw new Error("Local Whisper production timing requires vad_filter=false.");
+  }
+  return contract;
+}
+
+export function resolveLocalWhisperRuntimeContractForTests({
+  identity = {},
+  inputFlags = {},
+  env = {},
+  revalidateExisting = false,
+  existingTiming = null,
+} = {}) {
+  const identityValidation = validateLocalWhisperIdentityContract(identity);
+  if (!identityValidation.done) {
+    throw new Error(identityValidation.evidence);
+  }
+  const locked = identityRequiresLocalWhisperContract(identity);
+  if (revalidateExisting) {
+    const existingContract = localWhisperContractFromReport(
+      existingTiming ?? {},
+    );
+    if (locked) {
+      const nestedMismatches = localWhisperContractMismatches(
+        existingContract,
+        identityValidation.contract,
+      );
+      const topLevelMismatches = localWhisperContractMismatches(
+        localWhisperTopLevelContractFromReport(existingTiming ?? {}),
+        identityValidation.contract,
+      ).map((row) => ({
+        ...row,
+        field: `top_level.${row.field}`,
+      }));
+      const mismatches = [...nestedMismatches, ...topLevelMismatches];
+      if (mismatches.length) {
+        throw new Error(
+          "Existing Whisper timing contract does not match the locked run "
+          + `identity: ${mismatches.map((row) => row.field).join(", ")}.`,
+        );
+      }
+    }
+    return existingContract;
+  }
+
+  const base = locked
+    ? identityValidation.contract
+    : productionLocalWhisperContract();
+  const flagOverrides = contractOverridesFromFlags(inputFlags);
+  if (locked) {
+    const requested = normalizeLocalWhisperContract({
+      ...base,
+      ...flagOverrides,
+    });
+    const mismatches = localWhisperContractMismatches(requested, base);
+    if (mismatches.length) {
+      throw new Error(
+        "Command flags conflict with the locked local-Whisper contract: "
+        + `${mismatches.map((row) => row.field).join(", ")}.`,
+      );
+    }
+    return validateRuntimeContract(normalizeLocalWhisperContract(base));
+  }
+
+  const contract = validateRuntimeContract(normalizeLocalWhisperContract({
+    ...base,
+    ...contractOverridesFromEnv(env),
+    ...flagOverrides,
+  }));
+  if (contract.model === "medium") {
+    throw new Error(
+      "Whisper medium is not an automatic production fallback. Use the "
+      + "manual structural-recovery path with recorded blocker evidence.",
+    );
+  }
+  return contract;
+}
+
+async function runFasterWhisper(audioPath, contract) {
+  const {
+    model,
+    device,
+    compute_type: computeType,
+    language,
+    omp_num_threads: ompNumThreads,
+    cpu_threads: cpuThreads,
+    beam_size: beamSize,
+    word_timestamps: wordTimestamps,
+    vad_filter: vadFilter,
+  } = contract;
   const tmpPath = path.join(os.tmpdir(), `goldflow-whisper-${process.pid}-${Date.now()}.json`);
   const py = String.raw`
-import json, sys
+import json, os, sys
+os.environ["OMP_NUM_THREADS"] = sys.argv[6]
 from faster_whisper import WhisperModel
 
 audio_path = sys.argv[1]
@@ -104,15 +268,25 @@ model_name = sys.argv[2]
 device = sys.argv[3]
 compute_type = sys.argv[4]
 language = sys.argv[5]
-output_path = sys.argv[6]
+omp_num_threads = int(sys.argv[6])
+cpu_threads = int(sys.argv[7])
+beam_size = int(sys.argv[8])
+word_timestamps = sys.argv[9].lower() == "true"
+vad_filter = sys.argv[10].lower() == "true"
+output_path = sys.argv[11]
 
-model = WhisperModel(model_name, device=device, compute_type=compute_type)
+model = WhisperModel(
+    model_name,
+    device=device,
+    compute_type=compute_type,
+    cpu_threads=cpu_threads,
+)
 segments, info = model.transcribe(
     audio_path,
     language=language,
-    word_timestamps=True,
-    vad_filter=False,
-    beam_size=5,
+    word_timestamps=word_timestamps,
+    vad_filter=vad_filter,
+    beam_size=beam_size,
 )
 
 rows = []
@@ -140,8 +314,26 @@ print(json.dumps({"status": "ok", "word_count": len(rows)}, ensure_ascii=False))
 `;
   await new Promise((resolve, reject) => {
     const timeoutMs = Number(process.env.ANIFACTORY_WHISPER_TIMEOUT_MS ?? 7_200_000);
-    const child = spawn("python3", ["-c", py, audioPath, model, device, computeType, language, tmpPath], {
+    const child = spawn("python3", [
+      "-c",
+      py,
+      audioPath,
+      model,
+      device,
+      computeType,
+      language,
+      String(ompNumThreads),
+      String(cpuThreads),
+      String(beamSize),
+      String(wordTimestamps),
+      String(vadFilter),
+      tmpPath,
+    ], {
       stdio: ["ignore", "ignore", "ignore"],
+      env: {
+        ...process.env,
+        OMP_NUM_THREADS: String(ompNumThreads),
+      },
     });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -159,7 +351,19 @@ print(json.dumps({"status": "ok", "word_count": len(rows)}, ensure_ascii=False))
   });
   const result = JSON.parse(await fs.readFile(tmpPath, "utf8"));
   await fs.rm(tmpPath, { force: true });
-  return { model, device, compute_type: computeType, language, ...result };
+  return {
+    contract,
+    model,
+    device,
+    compute_type: computeType,
+    omp_num_threads: ompNumThreads,
+    cpu_threads: cpuThreads,
+    language,
+    beam_size: beamSize,
+    word_timestamps: wordTimestamps,
+    vad_filter: vadFilter,
+    ...result,
+  };
 }
 
 function normalizeWord(value) {
@@ -216,27 +420,69 @@ export function deliveryFirstFullStreamFindingsForTests(transcriptQa) {
 async function main() {
   const [qwenReport, runIdentity] = await Promise.all([
     readJson(qwenReportPath, null),
-    readJson(path.join(episodeDir, "run_identity.json"), {}),
+    readJson(runIdentityPath, {}),
   ]);
   if (!qwenReport?.segments?.length) throw new Error(`Missing narration stitch report: ${qwenReportPath}`);
   const canonicalContract = identityUsesCanonicalNarrationContract(runIdentity);
   const audioPath = narrationAudioPath(qwenReport);
-  const [scriptHash, audioHash] = await Promise.all([hashFile(scriptPath), hashFile(audioPath)]);
+  const [
+    scriptHash,
+    audioHash,
+    narrationReportSha256,
+    runIdentitySha256,
+  ] = await Promise.all([
+    hashFile(scriptPath),
+    hashFile(audioPath),
+    hashFile(narrationReportPath),
+    hashFile(runIdentityPath),
+  ]);
   const revalidateExisting = flags["revalidate-existing"] === "true";
   const existingTiming = revalidateExisting ? await readJson(outputPath, null) : null;
   if (revalidateExisting && (
     !Array.isArray(existingTiming?.words)
     || !existingTiming.words.length
     || existingTiming.narration_audio_hash !== audioHash
+    || existingTiming.source_script_hash !== scriptHash
   )) {
-    throw new Error(`Existing Whisper timing cannot be revalidated because its words or current narration hash do not match: ${outputPath}`);
+    throw new Error(
+      "Existing Whisper timing cannot be revalidated because its words, "
+      + `script hash, or narration hash do not match: ${outputPath}`,
+    );
   }
+  const runtimeContract = resolveLocalWhisperRuntimeContractForTests({
+    identity: runIdentity,
+    inputFlags: flags,
+    env: process.env,
+    revalidateExisting,
+    existingTiming,
+  });
   const transcription = revalidateExisting
     ? {
+        contract: runtimeContract,
         model: existingTiming.alignment_model,
         device: existingTiming.alignment_device,
         compute_type: existingTiming.alignment_compute_type,
+        omp_num_threads:
+          existingTiming.alignment_contract?.omp_num_threads
+          ?? existingTiming.alignment_omp_num_threads
+          ?? null,
+        cpu_threads:
+          existingTiming.alignment_contract?.cpu_threads
+          ?? existingTiming.alignment_cpu_threads
+          ?? null,
         language: existingTiming.language,
+        beam_size:
+          existingTiming.alignment_contract?.beam_size
+          ?? existingTiming.alignment_beam_size
+          ?? null,
+        word_timestamps:
+          existingTiming.alignment_contract?.word_timestamps
+          ?? existingTiming.alignment_word_timestamps
+          ?? null,
+        vad_filter:
+          existingTiming.alignment_contract?.vad_filter
+          ?? existingTiming.alignment_vad_filter
+          ?? null,
         language_probability: existingTiming.language_probability,
         duration_sec: existingTiming.audio_duration_sec,
         words: existingTiming.words.map((word) => ({
@@ -246,8 +492,12 @@ async function main() {
           probability: word.probability,
         })),
       }
-    : await runFasterWhisper(audioPath, { canonicalContract });
+    : await runFasterWhisper(audioPath, runtimeContract);
   const words = attachSegments(transcription.words ?? [], qwenReport);
+  const wordTimingQa = localWhisperWordTimingQa(
+    words,
+    transcription.duration_sec,
+  );
   const intendedSpokenText = (qwenReport.segments ?? [])
     .map((segment) => segment.text ?? segment.stripped_text ?? segment.tts_spoken_text ?? "")
     .filter((text) => String(text).trim())
@@ -289,7 +539,15 @@ async function main() {
     blockers: fullStreamBlockers,
   };
   const report = {
-    status: words.length && (!canonicalContract || fullStreamTranscriptQa.status === "passed")
+    ...(!revalidateExisting || existingTiming?.schema
+      ? {
+          schema: existingTiming?.schema
+            ?? "goldflow_local_whisper_word_timing_v2",
+        }
+      : {}),
+    status: words.length
+      && wordTimingQa.status === "passed"
+      && (!canonicalContract || fullStreamTranscriptQa.status === "passed")
       ? "passed"
       : "failed",
     channel,
@@ -301,17 +559,39 @@ async function main() {
     narration_audio_path: audioPath,
     narration_audio_hash: audioHash,
     narration_report_path: narrationReportPath,
+    narration_report_sha256: narrationReportSha256,
     qwen_report_path: qwenReportPath,
+    run_identity_path: runIdentityPath,
+    run_identity_sha256: runIdentitySha256,
+    alignment_contract_version: transcription.contract?.contract_version
+      ?? null,
     alignment_engine: "faster_whisper",
     alignment_model: transcription.model,
     alignment_device: transcription.device,
     alignment_compute_type: transcription.compute_type,
+    alignment_omp_num_threads: transcription.omp_num_threads,
+    alignment_cpu_threads: transcription.cpu_threads,
+    alignment_beam_size: transcription.beam_size,
+    alignment_word_timestamps: transcription.word_timestamps,
+    alignment_vad_filter: transcription.vad_filter,
+    ...(!revalidateExisting
+      || existingTiming?.alignment_contract
+      || identityRequiresLocalWhisperContract(runIdentity)
+      ? { alignment_contract: transcription.contract }
+      : {}),
     alignment_revalidated_without_transcription: revalidateExisting,
     language: transcription.language,
     language_probability: transcription.language_probability,
     audio_duration_sec: transcription.duration_sec,
     word_count: words.length,
+    source_hashes: Object.fromEntries([
+      [scriptPath, scriptHash],
+      [audioPath, audioHash],
+      [narrationReportPath, narrationReportSha256],
+      [runIdentityPath, runIdentitySha256],
+    ].filter(([, value]) => Boolean(value))),
     full_stream_transcript_qa: fullStreamTranscriptQa,
+    word_timing_qa: wordTimingQa,
     words,
     updated_at: nowIso(),
   };
@@ -323,19 +603,33 @@ async function main() {
     source_script_hash: report.source_script_hash,
     narration_audio_hash: report.narration_audio_hash,
     alignment_model: report.alignment_model,
+    alignment_device: report.alignment_device,
+    alignment_compute_type: report.alignment_compute_type,
+    alignment_omp_num_threads: report.alignment_omp_num_threads,
+    alignment_cpu_threads: report.alignment_cpu_threads,
+    zero_duration_word_count:
+      report.word_timing_qa.zero_duration_word_count,
   }, null, 2));
   if (report.status !== "passed") process.exitCode = 1;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(outputPath, {
+    const failurePath = path.join(
+      episodeDir,
+      `local_whisper_word_timing_failure_${episode}_`
+        + `${nowIso().replace(/[^0-9A-Za-z]+/g, "-")}.json`,
+    );
+    await writeJson(failurePath, {
+      schema: "goldflow_local_whisper_word_timing_failure_v1",
       status: "failed",
+      intended_output_path: outputPath,
       narration_report_path: narrationReportPath,
       qwen_report_path: qwenReportPath,
       error: error instanceof Error ? error.message : String(error),
       updated_at: nowIso(),
     }).catch(() => {});
+    console.error(`Whisper failure report: ${failurePath}`);
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

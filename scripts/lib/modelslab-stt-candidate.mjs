@@ -1,3 +1,13 @@
+import {
+  PRODUCTION_LOCAL_WHISPER_CONTRACT,
+  identityRequiresLocalWhisperContract,
+  localWhisperContractForIdentity,
+  localWhisperContractFromReport,
+  localWhisperContractMismatches,
+  normalizeLocalWhisperContract,
+  validateLocalWhisperIdentityContract,
+} from "./local-whisper-policy.mjs";
+
 const MIN_PROVIDER_AUDIO_SEC = 5;
 const MAX_PROVIDER_AUDIO_SEC = 3600;
 const MAX_UPLOAD_CHUNK_SEC = 420;
@@ -6,6 +16,11 @@ const DEFAULT_OVERLAP_SEC = 2;
 const MAX_UPLOAD_SOURCE_BYTES = 3_500_000;
 const MAX_UPLOAD_BASE64_BYTES = 4_700_000;
 const V7_SCRIBE_RATE_USD_PER_SEC = 0.001;
+const LEGACY_LOCAL_WHISPER_MODELS = new Set([
+  "medium",
+  "small",
+  "small.en",
+]);
 
 const PROVIDER_PROFILES = Object.freeze({
   v6_standard: Object.freeze({
@@ -141,10 +156,30 @@ export function validateModelslabSttInvocationForTests({
 export function validateLocalWhisperBaselineContractForTests(
   baselineTiming,
   sourceAudioSha256,
+  {
+    runIdentity = null,
+    expectedContract = null,
+  } = {},
 ) {
+  const contractRequired = Boolean(
+    expectedContract
+    || identityRequiresLocalWhisperContract(runIdentity ?? {}),
+  );
+  const resolvedExpectedContract = contractRequired
+    ? expectedContract
+      ? normalizeLocalWhisperContract(expectedContract)
+      : localWhisperContractForIdentity(runIdentity ?? {})
+    : null;
+  const identityContractValidation = runIdentity && contractRequired
+    ? validateLocalWhisperIdentityContract(runIdentity)
+    : null;
   if (!baselineTiming) {
     return {
       status: "not_run",
+      contract_mode: contractRequired
+        ? "identity_locked"
+        : "historical_identity_adapter",
+      expected_contract: resolvedExpectedContract,
       blockers: [],
     };
   }
@@ -162,18 +197,6 @@ export function validateLocalWhisperBaselineContractForTests(
       actual: baselineTiming.status ?? null,
     });
   }
-  if (baselineTiming.alignment_engine !== "faster_whisper") {
-    blockers.push({
-      code: "modelslab_stt_baseline_engine_not_local_whisper",
-      actual: baselineTiming.alignment_engine ?? null,
-    });
-  }
-  if (baselineTiming.alignment_model !== "medium") {
-    blockers.push({
-      code: "modelslab_stt_baseline_model_not_medium",
-      actual: baselineTiming.alignment_model ?? null,
-    });
-  }
   if (baselineTiming.full_stream_transcript_qa?.status !== "passed") {
     blockers.push({
       code: "modelslab_stt_baseline_full_stream_qa_not_passed",
@@ -186,10 +209,63 @@ export function validateLocalWhisperBaselineContractForTests(
       code: "modelslab_stt_baseline_words_missing",
     });
   }
+
+  const actualContract = localWhisperContractFromReport(baselineTiming);
+
+  if (contractRequired) {
+    if (identityContractValidation && !identityContractValidation.done) {
+      for (const mismatch of identityContractValidation.mismatches ?? []) {
+        blockers.push({
+          code:
+            "modelslab_stt_identity_local_whisper_contract_field_mismatch",
+          ...mismatch,
+        });
+      }
+    }
+    for (const mismatch of localWhisperContractMismatches(
+      resolvedExpectedContract,
+      PRODUCTION_LOCAL_WHISPER_CONTRACT,
+    )) {
+      blockers.push({
+        code:
+          "modelslab_stt_identity_local_whisper_contract_field_mismatch",
+        ...mismatch,
+      });
+    }
+    for (const mismatch of localWhisperContractMismatches(
+      actualContract,
+      resolvedExpectedContract,
+    )) {
+      blockers.push({
+        code: "modelslab_stt_baseline_contract_field_mismatch",
+        ...mismatch,
+      });
+    }
+  } else {
+    if (actualContract.engine !== "faster_whisper") {
+      blockers.push({
+        code: "modelslab_stt_baseline_engine_not_local_whisper",
+        actual: actualContract.engine,
+      });
+    }
+    if (!LEGACY_LOCAL_WHISPER_MODELS.has(actualContract.model)) {
+      blockers.push({
+        code:
+          "modelslab_stt_baseline_model_not_historical_local_whisper",
+        accepted: [...LEGACY_LOCAL_WHISPER_MODELS],
+        actual: actualContract.model,
+      });
+    }
+  }
   return {
     status: blockers.length ? "blocked" : "passed",
-    alignment_engine: baselineTiming.alignment_engine ?? null,
-    alignment_model: baselineTiming.alignment_model ?? null,
+    contract_mode: contractRequired
+      ? "identity_locked"
+      : "historical_identity_adapter",
+    expected_contract: resolvedExpectedContract,
+    actual_contract: actualContract,
+    alignment_engine: actualContract.engine,
+    alignment_model: actualContract.model,
     blockers,
   };
 }

@@ -3,9 +3,19 @@
 ModelsLab speech-to-text is an opt-in diagnostic candidate in Goldflow. It does
 not replace local Whisper, does not satisfy the `local_whisper_word_timing`
 stage, and cannot write or promote
-`narration_word_timing_<episode>.json`. Local Whisper medium remains the
-canonical production timing source. The target episode must already have a
-valid `run_identity.json`; this diagnostic cannot create a new episode.
+`narration_word_timing_<episode>.json`. The run-identity-locked local Whisper
+artifact remains the canonical production timing source. The target episode
+must already have a valid `run_identity.json`; this diagnostic cannot create a
+new episode.
+
+New locked identities require the same-audio baseline to match
+`local_whisper_word_timing_v2` exactly: faster-whisper `small.en`, CPU,
+`int8_float32`, `OMP_NUM_THREADS=12`, `cpu_threads=0`, English, beam size five,
+word timestamps enabled, and VAD disabled. Medium is not an automatic fallback;
+it is available only through the production workflow's explicit manual blocker
+recovery path. Historical identities without an explicit local-Whisper lock
+remain compatible with passed same-audio faster-whisper `medium`, `small`, or
+`small.en` artifacts.
 
 Use this path only when an operator wants a same-audio transcription/timestamp
 bake-off. It requires both an explicit diagnostic flag and an explicit spend
@@ -92,7 +102,10 @@ the source duration and close agreement with the intended narration transcript.
 A candidate without a current same-audio local-Whisper baseline may be useful
 for listening, but it is not promotion-eligible evidence. Even a passing
 candidate cannot promote itself: Goldflow intentionally provides no ModelsLab
-production-timing writer.
+production-timing writer. For a locked identity, baseline validation binds the
+complete local-Whisper execution contract from `run_identity.json`; the
+historical compatibility adapter applies only when that identity has no
+explicit lock.
 
 Provider submission is single-attempt. Goldflow does not automatically resubmit
 after a timeout or ambiguous provider response because ModelsLab does not

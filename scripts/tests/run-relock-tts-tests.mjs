@@ -329,6 +329,16 @@ export async function runRelockTtsTests() {
   assert.equal(after.production_profile_config.media.qwen_tts_concurrency, 1);
   assert.equal(after.production_profile_config.media.local_qwen_tts_concurrency, 1);
   assert.equal(after.production_profile_config.media.qwen_tts_batch_size, 4);
+  assert.equal(
+    after.provider_locks.local_whisper_timing,
+    undefined,
+    "TTS relock must not retrofit a new Whisper lock onto an existing identity",
+  );
+  assert.equal(
+    after.production_gates.local_whisper_contract_required,
+    undefined,
+    "registry migration alone must not activate strict Whisper validation",
+  );
   assert.deepEqual(after.git, cleanGit);
   assert.equal(after.narration_identity_relock.invalidation_boundary, "voice_plan");
   assert.equal(after.narration_identity_relock.preserved_upstream_boundary, "semantic_scene_plan");

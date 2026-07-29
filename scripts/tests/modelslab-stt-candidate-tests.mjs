@@ -259,6 +259,62 @@ function testChunkMergeOffsetsAndDropsOverlap() {
   assert.equal(merged.chunks[1].overlap_word_count_discarded, 1);
 }
 
+function promotedLocalWhisperContract() {
+  return {
+    contract_version: "local_whisper_word_timing_v2",
+    engine: "faster_whisper",
+    model: "small.en",
+    device: "cpu",
+    compute_type: "int8_float32",
+    omp_num_threads: 12,
+    cpu_threads: 0,
+    language: "en",
+    beam_size: 5,
+    word_timestamps: true,
+    vad_filter: false,
+  };
+}
+
+function lockedLocalWhisperIdentity() {
+  const contract = promotedLocalWhisperContract();
+  return {
+    provider_locks: {
+      local_whisper_timing: structuredClone(contract),
+    },
+    production_profile_config: {
+      audio: {
+        local_whisper_timing: structuredClone(contract),
+      },
+    },
+    production_gates: {
+      local_whisper_contract_required: true,
+    },
+    model_versions: {
+      local_whisper_model: "small.en",
+    },
+  };
+}
+
+function localWhisperBaseline(words, {
+  model = "medium",
+  alignmentContract = null,
+} = {}) {
+  return {
+    status: "passed",
+    narration_audio_hash: "audio-sha",
+    alignment_engine: "faster_whisper",
+    alignment_model: model,
+    alignment_device: alignmentContract?.device ?? "auto",
+    alignment_compute_type: alignmentContract?.compute_type ?? "auto",
+    alignment_omp_num_threads:
+      alignmentContract?.omp_num_threads ?? null,
+    alignment_cpu_threads: alignmentContract?.cpu_threads ?? null,
+    alignment_contract: alignmentContract,
+    full_stream_transcript_qa: { status: "passed" },
+    words,
+  };
+}
+
 function testTranscriptTimingAndPromotionValidation() {
   const words = [
     { word: "The", start_sec: 0.1, end_sec: 0.25 },
@@ -266,15 +322,15 @@ function testTranscriptTimingAndPromotionValidation() {
     { word: "opened", start_sec: 0.57, end_sec: 0.92 },
   ];
   const baseline = words.map((row) => ({ ...row }));
-  const baselineContract = validateLocalWhisperBaselineContractForTests({
-    status: "passed",
-    narration_audio_hash: "audio-sha",
-    alignment_engine: "faster_whisper",
-    alignment_model: "medium",
-    full_stream_transcript_qa: { status: "passed" },
-    words: baseline,
-  }, "audio-sha");
+  const baselineContract = validateLocalWhisperBaselineContractForTests(
+    localWhisperBaseline(baseline),
+    "audio-sha",
+  );
   assert.equal(baselineContract.status, "passed");
+  assert.equal(
+    baselineContract.contract_mode,
+    "historical_identity_adapter",
+  );
   const passed = validateModelslabSttCandidateForTests({
     words,
     recognizedText: "The gate opened.",
@@ -313,14 +369,16 @@ function testTranscriptTimingAndPromotionValidation() {
     "not_run",
   );
 
-  const noncanonicalBaseline = validateLocalWhisperBaselineContractForTests({
-    status: "passed",
-    narration_audio_hash: "audio-sha",
-    alignment_engine: "faster_whisper",
-    alignment_model: "small",
-    full_stream_transcript_qa: { status: "passed" },
-    words: baseline,
-  }, "audio-sha");
+  const historicalSmall = validateLocalWhisperBaselineContractForTests(
+    localWhisperBaseline(baseline, { model: "small" }),
+    "audio-sha",
+  );
+  assert.equal(historicalSmall.status, "passed");
+
+  const noncanonicalBaseline = validateLocalWhisperBaselineContractForTests(
+    localWhisperBaseline(baseline, { model: "large-v3" }),
+    "audio-sha",
+  );
   const ineligibleBaseline = validateModelslabSttCandidateForTests({
     words,
     recognizedText: "The gate opened.",
@@ -336,7 +394,8 @@ function testTranscriptTimingAndPromotionValidation() {
   );
   assert.equal(
     ineligibleBaseline.production_timing_promotion.blockers.some(
-      (row) => row.code === "modelslab_stt_baseline_model_not_medium",
+      (row) => row.code
+        === "modelslab_stt_baseline_model_not_historical_local_whisper",
     ),
     true,
   );
@@ -367,6 +426,98 @@ function testTranscriptTimingAndPromotionValidation() {
   assert.equal(
     blocked.production_timing_promotion.status,
     "ineligible",
+  );
+}
+
+function testLockedLocalWhisperBaselineContract() {
+  const words = [
+    { word: "The", start_sec: 0.1, end_sec: 0.25 },
+    { word: "gate", start_sec: 0.27, end_sec: 0.55 },
+    { word: "opened", start_sec: 0.57, end_sec: 0.92 },
+  ];
+  const expectedContract = promotedLocalWhisperContract();
+  const runIdentity = lockedLocalWhisperIdentity();
+  const exact = validateLocalWhisperBaselineContractForTests(
+    localWhisperBaseline(words, {
+      model: "small.en",
+      alignmentContract: expectedContract,
+    }),
+    "audio-sha",
+    { runIdentity },
+  );
+  assert.equal(exact.status, "passed");
+  assert.equal(exact.contract_mode, "identity_locked");
+  assert.deepEqual(exact.expected_contract, expectedContract);
+  assert.deepEqual(exact.actual_contract, expectedContract);
+
+  for (const [field, value] of Object.entries({
+    contract_version: "local_whisper_word_timing_v1",
+    engine: "whisper_cpp",
+    model: "medium",
+    device: "auto",
+    compute_type: "auto",
+    omp_num_threads: 8,
+    cpu_threads: 12,
+    language: "fr",
+    beam_size: 1,
+    word_timestamps: false,
+    vad_filter: true,
+  })) {
+    const mismatchedContract = {
+      ...expectedContract,
+      [field]: value,
+    };
+    const result = validateLocalWhisperBaselineContractForTests(
+      localWhisperBaseline(words, {
+        model: mismatchedContract.model,
+        alignmentContract: mismatchedContract,
+      }),
+      "audio-sha",
+      { runIdentity },
+    );
+    assert.equal(result.status, "blocked", field);
+    assert.equal(
+      result.blockers.some((row) => (
+        row.code === "modelslab_stt_baseline_contract_field_mismatch"
+        && row.field === field
+      )),
+      true,
+      field,
+    );
+  }
+
+  const explicitExpected = validateLocalWhisperBaselineContractForTests(
+    localWhisperBaseline(words, {
+      model: "small.en",
+      alignmentContract: expectedContract,
+    }),
+    "audio-sha",
+    { expectedContract },
+  );
+  assert.equal(explicitExpected.status, "passed");
+  assert.equal(explicitExpected.contract_mode, "identity_locked");
+
+  const missingIdentityLock =
+    validateLocalWhisperBaselineContractForTests(
+      localWhisperBaseline(words, {
+        model: "small.en",
+        alignmentContract: expectedContract,
+      }),
+      "audio-sha",
+      {
+        runIdentity: {
+          production_gates: {
+            local_whisper_contract_required: true,
+          },
+        },
+      },
+    );
+  assert.equal(missingIdentityLock.status, "blocked");
+  assert.equal(
+    missingIdentityLock.blockers.some(
+      (row) => row.field === "provider_locks.local_whisper_timing",
+    ),
+    true,
   );
 }
 
@@ -413,4 +564,5 @@ await testDocumentedResponseNormalization();
 testChunkPlanningHonorsProviderLimits();
 testChunkMergeOffsetsAndDropsOverlap();
 testTranscriptTimingAndPromotionValidation();
+testLockedLocalWhisperBaselineContract();
 testTenThousandWordAlignmentIsBounded();

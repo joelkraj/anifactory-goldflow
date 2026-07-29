@@ -43,6 +43,10 @@ import {
   qwenBatchBindingByUnit,
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
+import {
+  validateLocalWhisperIdentityContract,
+  validateLockedLocalWhisperReport,
+} from "./lib/local-whisper-policy.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -330,7 +334,11 @@ function runIdentityTtsComplete(runIdentity = {}) {
         mismatches.push("provider_locks.tts_confirmed_defect_types");
       }
       const batch4Required =
-        runIdentity.stage_registry_version === PIPELINE_STAGE_REGISTRY_VERSION;
+        runIdentity.stage_registry_version === "2026-07-29.1"
+        || runIdentity.stage_registry_version
+          === PIPELINE_STAGE_REGISTRY_VERSION
+        || runIdentity.provider_locks?.tts_synthesis_contract_id
+          === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id;
       if (batch4Required) {
         const exactBatchLocks = {
           tts_synthesis_contract_id:
@@ -429,6 +437,10 @@ function runIdentityTtsComplete(runIdentity = {}) {
   } catch (error) {
     return { done: false, evidence: `run_identity.json TTS policy invalid: ${error instanceof Error ? error.message : String(error)}` };
   }
+}
+
+function runIdentityWhisperComplete(runIdentity = {}) {
+  return validateLocalWhisperIdentityContract(runIdentity);
 }
 
 function renderCommand(identity, base, episode) {
@@ -1324,15 +1336,100 @@ async function whisperTimingComplete(episodeDir, episode, currentScriptHash, ide
       evidence: `narration_word_timing_${episode}.json stale audio hash ${timing.narration_audio_hash ?? "none"}; current audio hash ${currentAudioHash}`,
     };
   }
+  const reportContract = validateLockedLocalWhisperReport(timing, identity);
+  if (!reportContract.done) {
+    return {
+      done: false,
+      evidence: `narration_word_timing_${episode}.json ${reportContract.evidence}`,
+    };
+  }
+  if (reportContract.mode === "locked") {
+    const scriptPath = path.join(episodeDir, "script_clean.md");
+    const runIdentityPath = path.join(episodeDir, "run_identity.json");
+    const [stitchHash, runIdentityHash] = await Promise.all([
+      fileSha256(stitchPath),
+      fileSha256(runIdentityPath),
+    ]);
+    const sourceHashes = timing.source_hashes
+      && typeof timing.source_hashes === "object"
+      && !Array.isArray(timing.source_hashes)
+      ? timing.source_hashes
+      : {};
+    const provenanceMismatches = [];
+    if (sourceHashes[scriptPath] !== currentScriptHash) {
+      provenanceMismatches.push("source_hashes.script_clean.md");
+    }
+    if (!currentAudioPath
+      || sourceHashes[currentAudioPath] !== currentAudioHash) {
+      provenanceMismatches.push("source_hashes.narration_audio");
+    }
+    if (!stitchHash || timing.narration_report_sha256 !== stitchHash) {
+      provenanceMismatches.push("narration_report_sha256");
+    }
+    if (!runIdentityHash || timing.run_identity_sha256 !== runIdentityHash) {
+      provenanceMismatches.push("run_identity_sha256");
+    }
+    if (provenanceMismatches.length) {
+      return {
+        done: false,
+        evidence:
+          `narration_word_timing_${episode}.json hash provenance stale: `
+          + provenanceMismatches.join(", "),
+      };
+    }
+  }
+  const manualMediumRepairs = (timing.manual_timing_repairs ?? []).filter(
+    (repair) => repair?.alignment_contract?.model === "medium"
+      || repair?.method === "independent_exact_unit_medium_whisper",
+  );
+  const modernManualMediumRecovery = reportContract.mode === "locked"
+    || manualMediumRepairs.some(
+      (repair) => repair?.alignment_contract?.contract_version
+        === "local_whisper_manual_structural_recovery_v1",
+    );
+  if (manualMediumRepairs.length && modernManualMediumRecovery) {
+    const triagePath = path.join(
+      episodeDir,
+      `manual_blocker_triage_local_whisper_word_timing_${episode}.json`,
+    );
+    const [triage, timingSha256] = await Promise.all([
+      readJson(triagePath, null),
+      fileSha256(timingPath),
+    ]);
+    const triageCurrent = triage?.stage === "local_whisper_word_timing"
+      && triage?.resolution === "hash_bound_exact_unit_timing_repair"
+      && triage?.evidence_reviewed?.source_script_sha256
+        === currentScriptHash
+      && triage?.evidence_reviewed?.narration_audio_sha256
+        === timing.narration_audio_hash
+      && triage?.repair?.repaired_timing_sha256 === timingSha256;
+    if (!triageCurrent) {
+      return {
+        done: false,
+        evidence:
+          `narration_word_timing_${episode}.json contains manual medium `
+          + "structural recovery without current hash-bound triage",
+      };
+    }
+  }
   if (!isLegacyQwenIdentity(identity) && timing.full_stream_transcript_qa?.status !== "passed") {
     return {
       done: false,
       evidence: `narration_word_timing_${episode}.json full-stream transcript QA=${timing.full_stream_transcript_qa?.status ?? "missing"}`,
     };
   }
+  const zeroDurationCount = Number(
+    timing.word_timing_qa?.zero_duration_word_count ?? 0,
+  );
   return {
     done: String(timing.status ?? "").toLowerCase() === "passed",
-    evidence: `narration_word_timing_${episode}.json -> ${currentScriptHash}; audio_hash=${timing.narration_audio_hash ?? "none"}`,
+    evidence:
+      `narration_word_timing_${episode}.json -> ${currentScriptHash}; `
+      + `audio_hash=${timing.narration_audio_hash ?? "none"}; `
+      + `${reportContract.evidence}`
+      + (zeroDurationCount > 0
+        ? `; zero_duration_word_timings=${zeroDurationCount} warning_only`
+        : ""),
   };
 }
 
@@ -3186,6 +3283,7 @@ async function main() {
     provider_locks: runIdentity.provider_locks ?? null,
     model_versions: runIdentity.model_versions ?? null,
     production_profile: runIdentity.production_profile ?? runIdentity.provider_locks?.production_profile ?? null,
+    production_profile_config: runIdentity.production_profile_config ?? null,
     run_identity_schema: runIdentity.schema ?? "missing",
     stage_registry_version: runIdentity.stage_registry_version ?? null,
   };
@@ -3269,10 +3367,15 @@ async function main() {
         evidence: `${semanticPlan.evidence}; ${storyFactLedger.evidence}`,
       };
   const runIdentityTts = runIdentityTtsComplete(runIdentity);
+  const runIdentityWhisper = runIdentityWhisperComplete(runIdentity);
   const validationByStage = {
     run_identity: {
-      done: await exists(runIdentityPath) && runIdentityTts.done,
-      evidence: `${legacyIdentity ? "run_identity.json legacy adapter" : "run_identity.json v2"}; ${runIdentityTts.evidence}`,
+      done: await exists(runIdentityPath)
+        && runIdentityTts.done
+        && runIdentityWhisper.done,
+      evidence:
+        `${legacyIdentity ? "run_identity.json legacy adapter" : "run_identity.json v2"}; `
+        + `${runIdentityTts.evidence}; ${runIdentityWhisper.evidence}`,
     },
     source_ingest: {
       done: await exists(path.join(episodeDir, "script_clean.md")) && await exists(path.join(episodeDir, "source_story_ingest_report.json")),
@@ -3389,6 +3492,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 
 export {
   runIdentityTtsComplete as runIdentityTtsCompleteForTests,
+  runIdentityWhisperComplete as runIdentityWhisperCompleteForTests,
   selectedNarratorVoiceId as selectedNarratorVoiceIdForTests,
   ttsStatusIdentityFields as ttsStatusIdentityFieldsForTests,
 };

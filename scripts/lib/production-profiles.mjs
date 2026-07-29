@@ -1,3 +1,7 @@
+import {
+  productionLocalWhisperContract,
+} from "./local-whisper-policy.mjs";
+
 const profiles = {
   fast_premium_v1: {
     id: "fast_premium_v1",
@@ -19,6 +23,9 @@ const profiles = {
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,
+    },
+    audio: {
+      local_whisper_timing: productionLocalWhisperContract(),
     },
     render: {
       render_concurrency: 4,
@@ -61,6 +68,9 @@ const profiles = {
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,
+    },
+    audio: {
+      local_whisper_timing: productionLocalWhisperContract(),
     },
     render: {
       render_concurrency: 4,
@@ -127,6 +137,7 @@ export function productionProfileSummary(value = DEFAULT_PRODUCTION_PROFILE) {
     target_wall_clock_minutes: profile.target_wall_clock_minutes,
     planner: profile.planner,
     media: profile.media,
+    audio: profile.audio,
     render: profile.render,
     orchestration: profile.orchestration,
     advance: profile.advance,

@@ -3,8 +3,12 @@ import {
   isLegacyQwenIdentity,
   narrationTtsPolicyForIdentity,
 } from "./narration-tts-policy.mjs";
+import {
+  localWhisperCommandFlags,
+  localWhisperContractForIdentity,
+} from "./local-whisper-policy.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-29.1";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-29.2";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -116,7 +120,7 @@ const stages = [
     required_input: "final stitched narration",
     output_artifact: "narration_word_timing_<episode>.json",
     approval: "automatic",
-    validator: "whisper_audio_hash",
+    validator: "whisper_contract_script_audio_hashes",
     depends_on: ["qwen_tts_stitch"],
     output_patterns: [
       /^narration_word_timing_.*\.json$/,
@@ -510,6 +514,9 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ?? media.tts_concurrency
       ?? 1
     : media.kokoro_tts_concurrency ?? media.tts_concurrency ?? 1;
+  const localWhisperFlags = localWhisperCommandFlags(
+    localWhisperContractForIdentity(identity),
+  );
   const commands = {
     run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
@@ -523,7 +530,9 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     qwen_tts_stitch: isLegacyQwenIdentity(identity)
       ? `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`
       : `node bin/goldflow.mjs tts narrate ${base} --concurrency ${narrationConcurrency} --batch-size ${ttsPolicy.synthesis_contract?.nominal_batch_size ?? 1}`,
-    local_whisper_word_timing: `node bin/goldflow.mjs audio whisper-timing ${base}`,
+    local_whisper_word_timing:
+      `node bin/goldflow.mjs audio whisper-timing ${base} `
+      + localWhisperFlags,
     audio_pace_check: `node bin/goldflow.mjs audio pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}`,
     timing_bind: `node bin/goldflow.mjs timing bind ${base}`,
     sfx_score_plan: narratorOnly(identity)

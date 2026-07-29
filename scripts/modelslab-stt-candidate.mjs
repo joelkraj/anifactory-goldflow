@@ -798,6 +798,7 @@ async function main() {
   const baselineContract = validateLocalWhisperBaselineContractForTests(
     baselineTiming,
     sourceAudioSha256,
+    { runIdentity },
   );
 
   await fs.mkdir(reviewSamplesDir, { recursive: true });
@@ -907,7 +908,9 @@ async function main() {
       diagnostic_only: true,
       canonical_timing_untouched:
         failureCanonicalHash === canonicalTimingHashBefore,
-      production_timing_default: "local_whisper_medium",
+      production_timing_default: "canonical_local_whisper_word_timing",
+      production_timing_contract_mode: baselineContract.contract_mode,
+      production_timing_contract: baselineContract.expected_contract,
       production_promotion_writer_available: false,
       provider: "modelslab",
       provider_profile: profile.id,
@@ -935,6 +938,7 @@ async function main() {
       expected_transcript_sha256: sha256Bytes(
         Buffer.from(expectedTranscript),
       ),
+      baseline_local_whisper_contract: baselineContract,
       canonical_timing_path: canonicalTimingPath,
       canonical_timing_sha256_before: canonicalTimingHashBefore,
       canonical_timing_sha256_after: failureCanonicalHash,
@@ -993,7 +997,9 @@ async function main() {
     status: validation.status,
     diagnostic_only: true,
     canonical_timing_untouched: true,
-    production_timing_default: "local_whisper_medium",
+    production_timing_default: "canonical_local_whisper_word_timing",
+    production_timing_contract_mode: baselineContract.contract_mode,
+    production_timing_contract: baselineContract.expected_contract,
     production_promotion_writer_available: false,
     provider: "modelslab",
     provider_profile: profile.id,

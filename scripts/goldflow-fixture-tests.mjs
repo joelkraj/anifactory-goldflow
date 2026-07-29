@@ -66,7 +66,16 @@ import {
   scopedQaRecoveryCommand,
 } from "./image-output-qa.mjs";
 import { focalAnalysisFromPixelsForTests } from "./image-focal-analysis.mjs";
-import { deliveryFirstFullStreamFindingsForTests } from "./local-whisper-word-timing.mjs";
+import {
+  deliveryFirstFullStreamFindingsForTests,
+  resolveLocalWhisperRuntimeContractForTests,
+} from "./local-whisper-word-timing.mjs";
+import {
+  PRODUCTION_LOCAL_WHISPER_CONTRACT,
+  localWhisperCommandFlags,
+  localWhisperWordTimingQa,
+  validateLockedLocalWhisperReport,
+} from "./lib/local-whisper-policy.mjs";
 import {
   audioQaFindingsForTests,
   collectQwenUnitsForTests,
@@ -220,6 +229,7 @@ import {
 import {
   qwenLiamBoundaryContractFindingsForTests,
   runIdentityTtsCompleteForTests,
+  runIdentityWhisperCompleteForTests,
   selectedNarratorVoiceIdForTests,
   ttsStatusIdentityFieldsForTests,
 } from "./run-status.mjs";
@@ -1388,7 +1398,169 @@ function testRunIdentityV2Policies() {
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_image_qa, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_motion_clip_prefetch, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.planner_recovery_policy, "scoped_only");
+  assert.deepEqual(
+    productionProfileForIdentity({
+      production_profile: "fast_premium_v1",
+    }).audio.local_whisper_timing,
+    PRODUCTION_LOCAL_WHISPER_CONTRACT,
+  );
   assert.equal(productionProfileForIdentity({}).planner.visual_chunk_concurrency, 6);
+}
+
+function testLocalWhisperProductionContract() {
+  const contract = structuredClone(PRODUCTION_LOCAL_WHISPER_CONTRACT);
+  assert.deepEqual(contract, {
+    contract_version: "local_whisper_word_timing_v2",
+    engine: "faster_whisper",
+    model: "small.en",
+    device: "cpu",
+    compute_type: "int8_float32",
+    omp_num_threads: 12,
+    cpu_threads: 0,
+    language: "en",
+    beam_size: 5,
+    word_timestamps: true,
+    vad_filter: false,
+  });
+  assert.equal(
+    localWhisperCommandFlags(contract),
+    "--engine faster_whisper --model small.en --device cpu "
+      + "--compute-type int8_float32 --omp-num-threads 12 "
+      + "--cpu-threads 0 --language en --beam-size 5 "
+      + "--word-timestamps true --vad-filter false",
+  );
+
+  const identity = {
+    schema: "goldflow_run_identity_v2",
+    provider_locks: {
+      local_whisper_timing: structuredClone(contract),
+    },
+    production_profile_config: {
+      audio: {
+        local_whisper_timing: structuredClone(contract),
+      },
+    },
+    production_gates: {
+      local_whisper_contract_required: true,
+    },
+    model_versions: {
+      local_whisper_model: "small.en",
+    },
+  };
+  assert.equal(runIdentityWhisperCompleteForTests(identity).done, true);
+  const forbiddenMediumIdentity = structuredClone(identity);
+  forbiddenMediumIdentity.provider_locks.local_whisper_timing.model = "medium";
+  forbiddenMediumIdentity.production_profile_config.audio
+    .local_whisper_timing.model = "medium";
+  forbiddenMediumIdentity.model_versions.local_whisper_model = "medium";
+  assert.equal(
+    runIdentityWhisperCompleteForTests(forbiddenMediumIdentity).done,
+    false,
+  );
+  assert.equal(
+    resolveLocalWhisperRuntimeContractForTests({
+      identity,
+      env: {
+        ANIFACTORY_WHISPER_MODEL: "medium",
+        OMP_NUM_THREADS: "2",
+      },
+    }).model,
+    "small.en",
+  );
+  assert.throws(
+    () => resolveLocalWhisperRuntimeContractForTests({
+      identity,
+      inputFlags: { model: "medium" },
+    }),
+    /conflict.*locked local-Whisper/i,
+  );
+
+  const command = buildStageCommand("local_whisper_word_timing", identity);
+  assert.match(command, /--model small\.en/);
+  assert.match(command, /--device cpu/);
+  assert.match(command, /--compute-type int8_float32/);
+  assert.match(command, /--omp-num-threads 12/);
+  assert.match(command, /--cpu-threads 0/);
+  assert.doesNotMatch(command, /--model medium|--cpu-threads 12/);
+
+  const exactReport = {
+    alignment_contract: structuredClone(contract),
+    alignment_contract_version: contract.contract_version,
+    alignment_engine: contract.engine,
+    alignment_model: contract.model,
+    alignment_device: contract.device,
+    alignment_compute_type: contract.compute_type,
+    alignment_omp_num_threads: contract.omp_num_threads,
+    alignment_cpu_threads: contract.cpu_threads,
+    language: contract.language,
+    alignment_beam_size: contract.beam_size,
+    alignment_word_timestamps: contract.word_timestamps,
+    alignment_vad_filter: contract.vad_filter,
+    word_timing_qa: { status: "passed" },
+  };
+  assert.equal(
+    validateLockedLocalWhisperReport(exactReport, identity).done,
+    true,
+  );
+  const wrongModel = structuredClone(exactReport);
+  wrongModel.alignment_contract.model = "medium";
+  assert.equal(
+    validateLockedLocalWhisperReport(wrongModel, identity).done,
+    false,
+  );
+
+  const warningOnly = localWhisperWordTimingQa([
+    { word: "zero", start_sec: 0.25, end_sec: 0.25 },
+  ], 1);
+  assert.equal(warningOnly.status, "passed");
+  assert.equal(warningOnly.zero_duration_word_count, 1);
+  assert.equal(warningOnly.warnings[0].severity, "warning");
+  const structurallyInvalid = localWhisperWordTimingQa([
+    { word: "broken", start_sec: 0.4, end_sec: 0.3 },
+  ], 1);
+  assert.equal(structurallyInvalid.status, "blocked");
+
+  const historicalIdentity = {
+    schema: "goldflow_run_identity_v2",
+    stage_registry_version: "2026-07-29.1",
+  };
+  assert.equal(
+    runIdentityWhisperCompleteForTests(historicalIdentity).done,
+    true,
+  );
+  assert.deepEqual(
+    validateLockedLocalWhisperReport({
+      status: "passed",
+      alignment_engine: "faster_whisper",
+      alignment_model: "medium",
+      alignment_device: "auto",
+      alignment_compute_type: "auto",
+    }, historicalIdentity),
+    {
+      done: true,
+      mode: "legacy_adapter",
+      contract: null,
+      mismatches: [],
+      evidence: "legacy identity has no explicit local-Whisper lock",
+    },
+  );
+  assert.equal(
+    resolveLocalWhisperRuntimeContractForTests({
+      identity: historicalIdentity,
+    }).model,
+    "small.en",
+  );
+  assert.throws(
+    () => resolveLocalWhisperRuntimeContractForTests({
+      identity: historicalIdentity,
+      inputFlags: { model: "medium" },
+    }),
+    /manual structural-recovery/i,
+  );
+  assert.match(
+    buildStageCommand("local_whisper_word_timing", historicalIdentity),
+    /--model small\.en/,
+  );
 }
 
 function testGuardedRunAdvancePolicies() {
@@ -4200,6 +4372,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_profile_config.media.qwen_tts_concurrency, 1);
   assert.equal(identity.production_profile_config.media.local_qwen_tts_concurrency, 1);
   assert.equal(identity.production_profile_config.media.qwen_tts_batch_size, 4);
+  assert.deepEqual(
+    identity.production_profile_config.audio.local_whisper_timing,
+    PRODUCTION_LOCAL_WHISPER_CONTRACT,
+  );
   assert.equal(identity.voice_provider_options.pace_strategy, "qwen_reference_native_cadence_no_speed_no_post_tempo");
   assert.equal(identity.production_gates.post_tempo_normalization_default, false);
   assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
@@ -4213,6 +4389,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.parallax_retention_window_target, 10);
   assert.equal(identity.parallax_background_provider, "modelslab_flux_klein");
   assert.equal(identity.provider_locks.parallax_background_provider, "modelslab_flux_klein");
+  assert.deepEqual(
+    identity.provider_locks.local_whisper_timing,
+    PRODUCTION_LOCAL_WHISPER_CONTRACT,
+  );
   assert.equal(identity.provider_locks.tts_provider, "qwen_local");
   assert.equal(identity.provider_locks.tts_fallback_provider, null);
   assert.equal(identity.provider_locks.narrator_voice_id, "am_liam");
@@ -4278,6 +4458,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_gates.tts_single_resident_model_required, true);
   assert.equal(identity.production_gates.tts_token_limit_outputs_forbidden, true);
   assert.equal(identity.production_gates.tts_objective_recovery_exact_unit_only, true);
+  assert.equal(
+    identity.production_gates.local_whisper_contract_required,
+    true,
+  );
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");
@@ -4288,6 +4472,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.model_versions.tts_model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
   assert.equal(identity.model_versions.fallback_tts_model, null);
   assert.equal(identity.model_versions.fallback_tts_model_revision, null);
+  assert.equal(identity.model_versions.local_whisper_model, "small.en");
   assert.equal(identity.model_versions.image_model, "gpt-image-2-t2i");
   assert.equal(identity.model_versions.reference_model, "gpt-image-2-i2i");
   assert.deepEqual(identity.image_provider_options.fallback, {
@@ -4298,6 +4483,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   });
   assert.equal(codexCreditFallbackEnabled(identity), true);
   assert.equal(runIdentityTtsCompleteForTests(identity).done, true);
+  assert.equal(runIdentityWhisperCompleteForTests(identity).done, true);
+  assert.match(
+    buildStageCommand("local_whisper_word_timing", identity),
+    /--engine faster_whisper --model small\.en --device cpu --compute-type int8_float32 --omp-num-threads 12 --cpu-threads 0/,
+  );
   const legacySerialQwenIdentity = structuredClone(identity);
   legacySerialQwenIdentity.stage_registry_version = "2026-07-27.1";
   delete legacySerialQwenIdentity.voice_provider_options.synthesis_contract;
@@ -8494,6 +8684,188 @@ async function testVisualHardenPreservesCrowdedCharacterRefsOverOmittedLocation(
   assert.equal(report.findings.some((finding) => finding.code === "manifest_character_ref_dropped_for_location_ref_limit"), false);
 }
 
+async function testLocalWhisperRevalidationAndStatusContract() {
+  const dataRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "goldflow-local-whisper-contract-"),
+  );
+  try {
+    const episodeDir = path.join(
+      dataRoot,
+      "channels",
+      "test",
+      "weekly_runs",
+      "run",
+      "episodes",
+      "ep_01",
+    );
+    const scriptPath = path.join(episodeDir, "script_clean.md");
+    const runIdentityPath = path.join(episodeDir, "run_identity.json");
+    const audioPath = path.join(episodeDir, "assets", "audio", "narration.wav");
+    const stitchPath = path.join(
+      episodeDir,
+      "audio_stitch_report_ep_01-narration.json",
+    );
+    const timingPath = path.join(
+      episodeDir,
+      "narration_word_timing_ep_01.json",
+    );
+    const scriptText = "zero";
+    await fs.mkdir(path.dirname(audioPath), { recursive: true });
+    await fs.writeFile(scriptPath, scriptText, "utf8");
+    await fs.writeFile(audioPath, Buffer.from("synthetic narration bytes"));
+    const scriptHash = sha256(Buffer.from(scriptText));
+    const audioHash = sha256(await fs.readFile(audioPath));
+    const contract = structuredClone(PRODUCTION_LOCAL_WHISPER_CONTRACT);
+    await writeJson(runIdentityPath, {
+      schema: "goldflow_run_identity_v2",
+      stage_registry_version: "2026-07-29.2",
+      channel: "test",
+      series_slug: "series",
+      week: "run",
+      episode: "ep_01",
+      tts_provider: "qwen_local",
+      audio_target: "narrator_only",
+      provider_locks: {
+        local_whisper_timing: structuredClone(contract),
+      },
+      production_profile_config: {
+        audio: {
+          local_whisper_timing: structuredClone(contract),
+        },
+      },
+      production_gates: {
+        local_whisper_contract_required: true,
+      },
+      model_versions: {
+        local_whisper_model: "small.en",
+      },
+    });
+    await writeJson(stitchPath, {
+      status: "passed",
+      source_script_hash: scriptHash,
+      output_path: audioPath,
+      output_sha256: audioHash,
+      segments: [{
+        unit_id: "unit_001",
+        segment_id: "seg_001",
+        text: scriptText,
+        duration_sec: 1,
+      }],
+    });
+    await writeJson(timingPath, {
+      schema: "goldflow_local_whisper_word_timing_v2",
+      status: "passed",
+      source_script_hash: scriptHash,
+      narration_audio_hash: audioHash,
+      alignment_contract_version: "local_whisper_word_timing_v2",
+      alignment_engine: "faster_whisper",
+      alignment_model: "small.en",
+      alignment_device: "cpu",
+      alignment_compute_type: "int8_float32",
+      alignment_omp_num_threads: 12,
+      alignment_cpu_threads: 0,
+      alignment_beam_size: 5,
+      alignment_word_timestamps: true,
+      alignment_vad_filter: false,
+      alignment_contract: structuredClone(contract),
+      language: "en",
+      language_probability: 1,
+      audio_duration_sec: 1,
+      word_count: 1,
+      full_stream_transcript_qa: { status: "passed" },
+      words: [{
+        index: 0,
+        word: "zero",
+        start_sec: 0.2,
+        end_sec: 0.2,
+        probability: 0.99,
+      }],
+    });
+
+    await execFileAsync(process.execPath, [
+      "scripts/local-whisper-word-timing.mjs",
+      "--episode-dir", episodeDir,
+      "--revalidate-existing", "true",
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+    });
+    const report = await readJson(timingPath);
+    assert.equal(report.status, "passed");
+    assert.equal(report.alignment_model, "small.en");
+    assert.equal(report.alignment_omp_num_threads, 12);
+    assert.equal(report.alignment_cpu_threads, 0);
+    assert.equal(report.word_timing_qa.status, "passed");
+    assert.equal(report.word_timing_qa.zero_duration_word_count, 1);
+    assert.equal(report.word_timing_qa.warnings[0].severity, "warning");
+    assert.equal(report.source_hashes[scriptPath], scriptHash);
+    assert.equal(report.source_hashes[audioPath], audioHash);
+    assert.equal(
+      report.narration_report_sha256,
+      sha256(await fs.readFile(stitchPath)),
+    );
+    assert.equal(
+      report.run_identity_sha256,
+      sha256(await fs.readFile(runIdentityPath)),
+    );
+
+    const statusFor = async () => {
+      const { stdout } = await execFileAsync(process.execPath, [
+        "scripts/run-status.mjs",
+        "--episode-dir", episodeDir,
+      ], {
+        cwd: process.cwd(),
+        env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+      });
+      return JSON.parse(stdout);
+    };
+    const status = await statusFor();
+    let timingStage = status.stage_ledger.find(
+      (row) => row.stage === "local_whisper_word_timing",
+    );
+    assert.equal(timingStage.exists, true, timingStage.evidence);
+    assert.match(timingStage.evidence, /zero_duration_word_timings=1 warning_only/);
+
+    report.alignment_contract.model = "medium";
+    await writeJson(timingPath, report);
+    const mismatchedTimingSha256 = sha256(await fs.readFile(timingPath));
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        "scripts/local-whisper-word-timing.mjs",
+        "--episode-dir", episodeDir,
+        "--revalidate-existing", "true",
+      ], {
+        cwd: process.cwd(),
+        env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+      }),
+      (error) => /does not match the locked run identity/i.test(
+        String(error?.stderr ?? error?.message ?? error),
+      ),
+    );
+    assert.equal(
+      sha256(await fs.readFile(timingPath)),
+      mismatchedTimingSha256,
+      "failed revalidation must preserve the existing timing artifact",
+    );
+    assert.equal(
+      (await fs.readdir(episodeDir)).some(
+        (name) => name.startsWith(
+          "local_whisper_word_timing_failure_ep_01_",
+        ),
+      ),
+      true,
+    );
+    const mismatchedStatus = await statusFor();
+    timingStage = mismatchedStatus.stage_ledger.find(
+      (row) => row.stage === "local_whisper_word_timing",
+    );
+    assert.equal(timingStage.exists, false);
+    assert.match(timingStage.evidence, /report contract mismatch.*model/i);
+  } finally {
+    await fs.rm(dataRoot, { recursive: true, force: true });
+  }
+}
+
 async function testNarratorOnlyStatusAndMixer() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -9171,6 +9543,10 @@ async function testRunStatusAcceptsGenericNarrationWithSelectedFallbackRepair() 
   assert.match(stage.evidence, /fallback_units=1/);
   assert.equal(repairedStatus.current_stage, "local_whisper_word_timing");
   assert.match(repairedStatus.next_command_shape, /audio whisper-timing/);
+  assert.match(repairedStatus.next_command_shape, /--model small\.en/);
+  assert.match(repairedStatus.next_command_shape, /--omp-num-threads 12/);
+  assert.match(repairedStatus.next_command_shape, /--cpu-threads 0/);
+  assert.doesNotMatch(repairedStatus.next_command_shape, /--model medium/);
 
   await writeJson(ttsReportPath, {
     ...baseTtsReport,
@@ -10325,6 +10701,7 @@ const FIXTURE_SUITES = {
     testScopedOnlyPlannerRerunPolicy,
     testVisualWavefrontBatchPolicy,
     testRunIdentityV2Policies,
+    testLocalWhisperProductionContract,
     testGuardedRunAdvancePolicies,
     testPlannerChunkIdentityValidation,
     testFinalQaSourceHashFreshness,
@@ -10348,6 +10725,7 @@ const FIXTURE_SUITES = {
     testRunStatusBlocksMissingQwenStitchedAudio,
     testRunStatusHashBindsCurrentQwenStitch,
     testRunStatusAcceptsGenericNarrationWithSelectedFallbackRepair,
+    testLocalWhisperRevalidationAndStatusContract,
     testRunStatusBlocksStaleVisualBeatSourceHashes,
     testRunStatusBlocksStaleVisualReferenceSourceHashes,
     testRunStatusSurfacesDraftReferenceApprovalCommand,

@@ -24,6 +24,9 @@ import {
   productionProfileSummary,
 } from "./lib/production-profiles.mjs";
 import {
+  validateLocalWhisperIdentityContract,
+} from "./lib/local-whisper-policy.mjs";
+import {
   DEFAULT_NARRATOR_VOICE_ID,
   DEFAULT_TTS_FALLBACK_PROVIDER,
   DEFAULT_TTS_PROVIDER,
@@ -63,6 +66,9 @@ const productionProfile = normalizeProductionProfile(
   flags["production-profile"] ?? flags.profile ?? DEFAULT_PRODUCTION_PROFILE,
 );
 const productionProfileConfig = productionProfileSummary(productionProfile);
+const localWhisperTimingContract = structuredClone(
+  productionProfileConfig.audio.local_whisper_timing,
+);
 const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
 const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
@@ -304,6 +310,7 @@ function lockedModelVersions() {
     fallback_tts_runtime: fallbackLock
       ? `${fallbackLock.runtime}@${fallbackLock.runtime_version}`
       : null,
+    local_whisper_model: localWhisperTimingContract.model,
     image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
     reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
     render_profile: renderProfile,
@@ -500,6 +507,7 @@ async function main() {
       image_fallback_condition: imageFallbackCondition,
       parallax_background_provider: parallaxBackgroundProvider,
       audio_target: audioTarget,
+      local_whisper_timing: structuredClone(localWhisperTimingContract),
       tts_provider: ttsProvider,
       tts_fallback_provider: ttsFallbackProvider,
       narrator_voice_id: ttsProvider !== "modelslab_qwen" ? narratorVoiceId : qwenNarratorVoiceId,
@@ -583,6 +591,7 @@ async function main() {
     production_gates: {
       script_hash_approval_required_before_downstream: true,
       whisper_timing_required_before_sfx_score_visual_beats_and_render: true,
+      local_whisper_contract_required: true,
       longform_mix_required_for_production_render: true,
       proof_renders_must_be_labeled_and_must_not_replace_final_render: true,
       provider_native_tts_speed_required: ttsProvider !== "qwen_local",
@@ -617,6 +626,11 @@ async function main() {
     episode_dir: episodeDir,
     updated_at: now,
   };
+  const localWhisperIdentityValidation =
+    validateLocalWhisperIdentityContract(manifest);
+  if (!localWhisperIdentityValidation.done) {
+    throw new Error(localWhisperIdentityValidation.evidence);
+  }
   const manifestPath = path.join(episodeDir, "run_identity.json");
   await writeJson(manifestPath, manifest);
   console.log(JSON.stringify({ status: "passed", run_identity_path: manifestPath, episode_dir: episodeDir, next_required_stage: "ingest source" }, null, 2));

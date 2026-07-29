@@ -338,7 +338,7 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
 21. Image generation.
    - Uses the approved prompt plan.
    - Flux Klein is the preferred image model when available.
-   - ModelsLab scene generation starts at concurrency 15. The active batch automatically backs off admission concurrency on queue, rate-limit, gateway, and timeout evidence, then ramps up after successful requests; scoped retries remain resumable.
+   - ModelsLab scene generation starts at concurrency 15 per configured account. Production defaults to the CLI's `default,secondary` profiles, providing two independent request pools with up to thirty concurrent requests. Work IDs remain deterministically sticky to one account, and each account has an independent adaptive-concurrency controller and circuit breaker. Use `--modelslab-profiles default` or `ANIFACTORY_MODELSLAB_PROFILES=default` only for an intentional single-account diagnostic. Reports retain only one-way account fingerprints and never credentials, email addresses, or CLI profile names. Scoped retries remain resumable.
    - Premium routes first run representative real-cut probes for text-only, one-ref, two-ref, and four-ref payloads. Three consecutive infrastructure failures open the provider circuit, preserve completed work, and leave unclaimed cut ids for retry.
    - `cut_execution_ledger.json` records per-cut beat/prompt/ref/provider/image hashes and later image-QA/motion hashes so invalidation stays cut scoped.
    - Donor-copy and hash-perturbation recovery are prohibited. Deliberate editorial image reuse requires explicit metadata naming the approved source cut.
@@ -480,6 +480,8 @@ node bin/goldflow.mjs visual harden --channel <channel> --series <series> --week
 node bin/goldflow.mjs visual engagement --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --max-events 7
 node bin/goldflow.mjs visual transitions --channel <channel> --series <series> --week <week> --episode ep_01 --prompts <episode-dir>/section_image_prompts_hardened.json --transition-sfx false
 node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 15 --reference-concurrency 15
+# Explicit two-account lane (15 workers per account, 30 theoretical total):
+node bin/goldflow.mjs imagegen start --channel <channel> --series <series> --week <week> --episode ep_01 --image-provider modelslab --prompts <episode-dir>/section_image_prompts_hardened.json --concurrency 15 --reference-concurrency 15 --modelslab-profiles default,secondary
 node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01
 # Inspect contact sheets; edit image_output_review_decisions_ep_01.json with one hash-bound decision per risk cut, then rerun QA.
 node bin/goldflow.mjs imagegen qa --channel <channel> --series <series> --week <week> --episode ep_01

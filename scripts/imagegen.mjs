@@ -15,6 +15,12 @@ import {
 import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage, modelslabRequestSettings } from "./modelslab-image-helper.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
+import {
+  configuredModelslabProfiles,
+  loadConfiguredModelslabAccounts,
+  modelslabProfileForWorkId,
+  publicModelslabAccount,
+} from "./lib/modelslab-account-pool.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -31,6 +37,9 @@ const referenceDir = path.join(imageDir, "references");
 const reportPath = flags.output ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? 15)));
 const referenceConcurrency = Math.max(1, Math.min(15, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 15)));
+const modelslabProfiles = configuredModelslabProfiles({
+  flagValue: flags["modelslab-profiles"] ?? flags.modelslabProfiles ?? null,
+});
 const force = flags.force === "true";
 const forceImages = force || flags["force-images"] === "true";
 const forceReferences = force || flags["force-references"] === "true";
@@ -1091,6 +1100,103 @@ export async function runPoolWithCircuitBreakerForTests(items, worker, limit) {
   return runPoolWithCircuitBreaker(items, worker, limit);
 }
 
+let configuredModelslabAccountsPromise = null;
+async function modelslabAccounts() {
+  if (!configuredModelslabAccountsPromise) {
+    configuredModelslabAccountsPromise = loadConfiguredModelslabAccounts(modelslabProfiles);
+  }
+  return configuredModelslabAccountsPromise;
+}
+
+function workItemId(item, index) {
+  return String(item?.image_id ?? item?.ref_id ?? `item_${index}`);
+}
+
+async function modelslabAccountForWorkItem(item, index = 0) {
+  const profile = modelslabProfileForWorkId(workItemId(item, index), modelslabProfiles);
+  const accounts = await modelslabAccounts();
+  return accounts.find((account) => account.profile === profile);
+}
+
+async function runModelslabAccountPools(items, worker, perAccountLimit) {
+  if (!items.length) {
+    return {
+      results: [],
+      circuit_open: false,
+      circuit_reason: null,
+      failure_threshold: providerCircuitFailureThreshold,
+      adaptive_concurrency: null,
+      account_pools: [],
+    };
+  }
+  const accounts = await modelslabAccounts();
+  const accountByProfile = new Map(accounts.map((account) => [account.profile, account]));
+  const partitions = new Map(modelslabProfiles.map((profile) => [profile, []]));
+  items.forEach((item, index) => {
+    const profile = modelslabProfileForWorkId(workItemId(item, index), modelslabProfiles);
+    partitions.get(profile).push({
+      item,
+      originalIndex: index,
+      image_id: item?.image_id,
+      ref_id: item?.ref_id,
+    });
+  });
+  const mergedResults = new Array(items.length);
+  const poolRows = await Promise.all(modelslabProfiles.map(async (profile) => {
+    const account = accountByProfile.get(profile);
+    const rows = partitions.get(profile);
+    if (!rows.length) {
+      return {
+        account: publicModelslabAccount(account),
+        assigned_count: 0,
+        circuit_open: false,
+        circuit_reason: null,
+        adaptive_concurrency: null,
+      };
+    }
+    const pool = await runPoolWithCircuitBreaker(
+      rows,
+      ({ item, originalIndex }) => worker(item, originalIndex, account),
+      perAccountLimit,
+    );
+    pool.results.forEach((result, index) => {
+      mergedResults[rows[index].originalIndex] = result;
+    });
+    return {
+      account: publicModelslabAccount(account),
+      assigned_count: rows.length,
+      circuit_open: pool.circuit_open,
+      circuit_reason: pool.circuit_reason,
+      adaptive_concurrency: pool.adaptive_concurrency,
+    };
+  }));
+  const activePools = poolRows.filter((row) => row.assigned_count > 0);
+  const circuitRows = activePools.filter((row) => row.circuit_open);
+  const singleAdaptive = activePools.length === 1 ? activePools[0].adaptive_concurrency : null;
+  return {
+    results: mergedResults,
+    circuit_open: circuitRows.length > 0,
+    circuit_reason: circuitRows.length
+      ? `${circuitRows.length} of ${activePools.length} ModelsLab account pools opened their circuit`
+      : null,
+    failure_threshold: providerCircuitFailureThreshold,
+    adaptive_concurrency: singleAdaptive ?? {
+      configured_per_account: perAccountLimit,
+      configured_total: perAccountLimit * activePools.length,
+      account_pool_count: activePools.length,
+      maximum_observed_active_total: activePools.reduce(
+        (sum, row) => sum + Number(row.adaptive_concurrency?.maximum_observed_active ?? 0),
+        0,
+      ),
+    },
+    account_pools: poolRows,
+  };
+}
+
+export async function runModelslabAccountPoolsForTests(items, worker, perAccountLimit) {
+  return runModelslabAccountPools(items, worker, perAccountLimit);
+}
+
 function promptReferenceCount(prompt) {
   return Math.min(4, Array.isArray(prompt?.reference_slots)
     ? prompt.reference_slots.length
@@ -1122,7 +1228,7 @@ async function runProviderHealthProbe(prompts) {
   const selected = representativeProviderProbePrompts(prompts);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const probe = await runPoolWithCircuitBreaker(selected, generateOne, Math.min(2, selected.length));
+  const probe = await runModelslabAccountPools(selected, generateOne, Math.min(2, selected.length));
   const passed = probe.results.every(imageResultPassed);
   const report = {
     schema: "goldflow_image_provider_health_v1",
@@ -1138,6 +1244,7 @@ async function runProviderHealthProbe(prompts) {
     results: probe.results,
     circuit_open: probe.circuit_open,
     circuit_reason: probe.circuit_reason,
+    modelslab_account_pools: probe.account_pools,
     started_at: startedAt,
     duration_sec: Number(((Date.now() - startedMs) / 1000).toFixed(3)),
     updated_at: new Date().toISOString(),
@@ -1157,6 +1264,7 @@ async function generateProviderImage({
   provider = imageProvider,
   width = undefined,
   height = undefined,
+  modelslabAccount = null,
 }) {
   const routedProvider = normalizeImageProvider(provider);
   if (isCodexImageProvider(routedProvider)) {
@@ -1175,7 +1283,15 @@ async function generateProviderImage({
       allowGlobalFallback: concurrency <= 1 && referenceConcurrency <= 1,
     });
   }
-  return generateModelslabImage({ prompt, outputPath, referenceImagePaths, model, width, height });
+  return generateModelslabImage({
+    prompt,
+    outputPath,
+    referenceImagePaths,
+    model,
+    width,
+    height,
+    account: modelslabAccount,
+  });
 }
 
 function modelslabSceneGeometry() {
@@ -1192,7 +1308,7 @@ function sceneAspectInstruction(provider) {
   return "";
 }
 
-async function generateOne(prompt) {
+async function generateOne(prompt, _index = 0, modelslabAccount = null) {
   const routedProvider = promptRoute(prompt);
   const outputPath = imagePathFor(prompt, routedProvider);
   const referenceImagePaths = await validateReferences(prompt);
@@ -1238,6 +1354,7 @@ async function generateOne(prompt) {
     referenceImagePaths,
     model: sceneModel,
     provider: routedProvider,
+    modelslabAccount,
     ...sceneGeometry,
   });
   assertGeneratedProviderContract(prompt, generated, modelPrompt, referenceImagePaths, routedProvider);
@@ -1349,7 +1466,13 @@ async function materializeEditorialReuses(prompts = [], availableRows = []) {
   return results;
 }
 
-async function generateReference(target, styleRefPath = null, referenceLookup = new Map(), characterStateRefs = []) {
+async function generateReference(
+  target,
+  styleRefPath = null,
+  referenceLookup = new Map(),
+  characterStateRefs = [],
+  modelslabAccount = null,
+) {
   const routedProvider = routedProviderForReference(imageProvider, target);
   const outputPath = referencePathFor(target, routedProvider);
   const stateRef = characterStateRefs.find((ref) => ref.source_ref_id === target.ref_id);
@@ -1394,6 +1517,7 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
     referenceImagePaths,
     model: referenceModel,
     provider: routedProvider,
+    modelslabAccount,
     ...(routedProvider === "modelslab" ? modelslabReferenceGeometry(target) : {}),
   });
   assertGeneratedProviderContract({ image_id: target.ref_id }, generated, prompt, referenceImagePaths, routedProvider);
@@ -1466,7 +1590,14 @@ async function generateReferences() {
     : null;
   const referenceById = new Map(existingReferenceEntries);
   if (styleTarget) {
-    const result = await generateReference(styleTarget, null, referenceById, characterRefs?.character_state_refs ?? []);
+    const account = await modelslabAccountForWorkItem(styleTarget);
+    const result = await generateReference(
+      styleTarget,
+      null,
+      referenceById,
+      characterRefs?.character_state_refs ?? [],
+      account,
+    );
     results.push(result);
     referenceById.set(result.ref_id, result.image_path);
     styleRefPath = result.image_path;
@@ -1510,9 +1641,15 @@ async function generateReferences() {
       throw new Error(`Reference dependency cycle or unresolved base identities: ${JSON.stringify(unresolved)}`);
     }
 
-    const wave = await runPoolWithCircuitBreaker(
+    const wave = await runModelslabAccountPools(
       ready,
-      (target) => generateReference(target, styleRefPath, referenceById, characterStateRows),
+      (target, _index, account) => generateReference(
+        target,
+        styleRefPath,
+        referenceById,
+        characterStateRows,
+        account,
+      ),
       referenceConcurrency,
     );
     referencePoolSummaries.push(wave);
@@ -1528,6 +1665,7 @@ async function generateReferences() {
     circuit_open: referencePoolSummaries.some((wave) => wave.circuit_open),
     circuit_reason: referencePoolSummaries.find((wave) => wave.circuit_open)?.circuit_reason ?? null,
     adaptive_concurrency: referencePoolSummaries.at(-1)?.adaptive_concurrency ?? referenceConcurrency,
+    account_pools: referencePoolSummaries.flatMap((wave) => wave.account_pools ?? []),
   };
   const updatedReferencePlan = {
     ...referencePlan,
@@ -1559,6 +1697,7 @@ async function generateReferences() {
     provider_circuit_open: referencePool.circuit_open,
     provider_circuit_reason: referencePool.circuit_reason,
     adaptive_concurrency: referencePool.adaptive_concurrency,
+    modelslab_account_pools: referencePool.account_pools,
   };
 }
 
@@ -1972,6 +2111,8 @@ async function main() {
       image_dir: imageDir,
       reference_only: true,
       reference_concurrency: referenceConcurrency,
+      modelslab_account_pool_count: modelslabProfiles.length,
+      reference_modelslab_account_pools: referenceRun.modelslab_account_pools ?? [],
       reference_provider_circuit_open: Boolean(referenceRun.provider_circuit_open),
       reference_provider_circuit_reason: referenceRun.provider_circuit_reason ?? null,
       codex_opening_sec: codexOpeningSec,
@@ -2037,8 +2178,8 @@ async function main() {
   const probedIds = new Set(probeResults.map((row) => String(row.image_id ?? "")).filter(Boolean));
   const remainingPrompts = generationPrompts.filter((prompt) => !probedIds.has(String(prompt.image_id ?? "")));
   const pool = remainingPrompts.length
-    ? await runPoolWithCircuitBreaker(remainingPrompts, generateOne, concurrency)
-    : { results: [], circuit_open: false, circuit_reason: null, adaptive_concurrency: null };
+    ? await runModelslabAccountPools(remainingPrompts, generateOne, concurrency)
+    : { results: [], circuit_open: false, circuit_reason: null, adaptive_concurrency: null, account_pools: [] };
   const generatedResults = [...probeResults, ...pool.results];
   const availableBeforeReuse = await mergeImagegenResults({ currentResults: generatedResults, promptIds: allPromptIds, promptPlanHash });
   const editorialReuseResults = await materializeEditorialReuses(editorialReusePrompts, availableBeforeReuse);
@@ -2072,6 +2213,8 @@ async function main() {
     requested_reference_image_geometry: { width: referenceImageWidth, height: referenceImageHeight },
     image_dir: imageDir,
     concurrency,
+    modelslab_account_pool_count: modelslabProfiles.length,
+    modelslab_account_pools: pool.account_pools,
     provider_health_probe_enabled: Boolean(providerHealthReport),
     provider_health_report_path: providerHealthReport ? providerHealthReportPath : null,
     provider_circuit_open: pool.circuit_open,
@@ -2090,6 +2233,7 @@ async function main() {
     reference_provider_circuit_open: Boolean(referenceRun.provider_circuit_open),
     reference_provider_circuit_reason: referenceRun.provider_circuit_reason ?? null,
     adaptive_reference_concurrency: referenceRun.adaptive_concurrency ?? null,
+    reference_modelslab_account_pools: referenceRun.modelslab_account_pools ?? [],
     results: mergedResults,
     cut_execution_ledger_path: cutExecutionLedgerPath,
     cut_execution_ledger_status: cutExecutionLedger.status,

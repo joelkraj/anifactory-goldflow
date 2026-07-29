@@ -1,13 +1,9 @@
-import { execFile as execFileCb } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { isModelslabCreditExhaustion } from "./lib/image-fallback-policy.mjs";
+import { loadModelslabAccount, publicModelslabAccount } from "./lib/modelslab-account-pool.mjs";
 
-const execFile = promisify(execFileCb);
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const timeoutMs = Number(process.env.ANIFACTORY_MODELSLAB_IMAGEGEN_TIMEOUT_MS ?? 600000);
 const width = Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_WIDTH ?? 1024);
 const height = Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_HEIGHT ?? 576);
@@ -29,35 +25,13 @@ async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
 }
 
-let cachedModelslabApiKey = null;
-let cachedModelslabApiKeyPromise = null;
-async function modelslabApiKey() {
-  if (cachedModelslabApiKey) return cachedModelslabApiKey;
-  if (!cachedModelslabApiKeyPromise) {
-    cachedModelslabApiKeyPromise = (async () => {
-      const fromEnv = process.env.MODELSLAB_API_KEY || process.env.API_KEY;
-      if (fromEnv) return fromEnv;
-      const { stdout: listStdout } = await execFile("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
-      const list = JSON.parse(listStdout);
-      const keys = list?.data?.items ?? [];
-      const selected = keys.find((key) => key.is_default === 1 || key.is_default === true) ?? keys[0];
-      if (!selected?.id) throw new Error("No ModelsLab API key available. Set MODELSLAB_API_KEY or login with the ModelsLab CLI.");
-      const { stdout: getStdout } = await execFile("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot, maxBuffer: 1024 * 1024 });
-      const detail = JSON.parse(getStdout);
-      if (!detail?.data?.key) throw new Error(`ModelsLab key ${selected.id} did not return a key value.`);
-      return detail.data.key;
-    })();
-  }
-  try {
-    cachedModelslabApiKey = await cachedModelslabApiKeyPromise;
-    return cachedModelslabApiKey;
-  } finally {
-    cachedModelslabApiKeyPromise = null;
-  }
+async function resolveAccount(account = null) {
+  if (account?.apiKey && account?.fingerprint) return account;
+  return loadModelslabAccount(account?.profile ?? "default");
 }
 
-async function postModelslabJson(endpoint, body, label, retries = 2) {
-  const key = await modelslabApiKey();
+async function postModelslabJson(endpoint, body, label, retries = 2, account = null) {
+  const resolvedAccount = await resolveAccount(account);
   let lastError = null;
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
     const controller = new AbortController();
@@ -66,7 +40,7 @@ async function postModelslabJson(endpoint, body, label, retries = 2) {
       const response = await fetch(`https://modelslab.com${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, ...body }),
+        body: JSON.stringify({ key: resolvedAccount.apiKey, ...body }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -102,10 +76,10 @@ function modelslabOutputs(json) {
   ].filter(Boolean);
 }
 
-async function pollModelslabImage(fetchEndpoint, id, label) {
+async function pollModelslabImage(fetchEndpoint, id, label, account = null) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const json = await postModelslabJson(`${fetchEndpoint}/${id}`, {}, `${label} fetch`, 1);
+    const json = await postModelslabJson(`${fetchEndpoint}/${id}`, {}, `${label} fetch`, 1, account);
     if (json.status === "success" && modelslabOutputs(json).length) return json;
     if (json.status === "failed" || json.status === "error") throw new Error(`${label} failed while polling: ${JSON.stringify(json).slice(0, 1000)}`);
     await sleep(7000);
@@ -113,9 +87,9 @@ async function pollModelslabImage(fetchEndpoint, id, label) {
   throw new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
 }
 
-async function resolveModelslabImage(json, fetchEndpoint, label) {
+async function resolveModelslabImage(json, fetchEndpoint, label, account = null) {
   if (json.status === "success" && modelslabOutputs(json).length) return json;
-  if (json.id) return pollModelslabImage(fetchEndpoint, json.id, label);
+  if (json.id) return pollModelslabImage(fetchEndpoint, json.id, label, account);
   throw new Error(`${label} returned no output/id: ${JSON.stringify(json).slice(0, 1000)}`);
 }
 
@@ -325,13 +299,13 @@ async function prepareReferenceForUpload(filePath, uploadDir, {
   return preparedPath;
 }
 
-async function uploadModelslabReference(filePath, uploadDir, geometry = {}) {
+async function uploadModelslabReference(filePath, uploadDir, geometry = {}, account = null) {
   const uploadPath = await prepareReferenceForUpload(filePath, uploadDir, geometry);
   const ext = path.extname(uploadPath).replace(".", "").toLowerCase() || "png";
   const mimeExt = ext === "jpg" ? "jpeg" : ext;
   await ensureDir(uploadDir);
   const base64 = (await fs.readFile(uploadPath)).toString("base64");
-  const json = await postModelslabJson("/api/v6/base64_to_url", { base64_string: `data:image/${mimeExt};base64,${base64}` }, `upload ${path.basename(uploadPath)}`, 2);
+  const json = await postModelslabJson("/api/v6/base64_to_url", { base64_string: `data:image/${mimeExt};base64,${base64}` }, `upload ${path.basename(uploadPath)}`, 2, account);
   const url = modelslabOutputs(json)[0];
   if (!url) throw new Error(`ModelsLab upload returned no URL for ${uploadPath}`);
   return url;
@@ -345,7 +319,10 @@ export async function generateModelslabImage({
   width: requestedWidth = width,
   height: requestedHeight = height,
   enhancePrompt = false,
+  account = null,
 }) {
+  const resolvedAccount = await resolveAccount(account);
+  const publicAccount = publicModelslabAccount(resolvedAccount);
   const startedAtMs = Date.now();
   const outputDir = path.join(path.dirname(outputPath), ".modelslab-downloads", path.basename(outputPath, path.extname(outputPath)));
   const uploadDir = path.join(outputDir, "uploads");
@@ -353,7 +330,7 @@ export async function generateModelslabImage({
   const referenceUrls = [];
   const maxReferences = 4;
   for (const refPath of referenceImagePaths.slice(0, maxReferences)) {
-    referenceUrls.push(await uploadModelslabReference(refPath, uploadDir, { width: requestedWidth, height: requestedHeight }));
+    referenceUrls.push(await uploadModelslabReference(refPath, uploadDir, { width: requestedWidth, height: requestedHeight }, resolvedAccount));
   }
   const requestSettings = modelslabRequestSettings({
     model,
@@ -373,8 +350,8 @@ export async function generateModelslabImage({
       track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
       ...(referenceUrls.length ? { init_image: referenceUrls } : {}),
     };
-    const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, 2);
-    const resolved = await resolveModelslabImage(initial, "/api/v7/images/fetch", `${selectedModel} image`);
+    const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, 2, resolvedAccount);
+    const resolved = await resolveModelslabImage(initial, "/api/v7/images/fetch", `${selectedModel} image`, resolvedAccount);
     const imageUrl = await download(modelslabOutputs(resolved), outputPath);
     const nativeGeometry = await imageGeometry(outputPath);
     const requestedAspect = requestedWidth / requestedHeight;
@@ -417,6 +394,7 @@ export async function generateModelslabImage({
       modelslab_submitted_prompt_length: submittedPrompt.submitted_length,
       modelslab_request_settings: requestSettings,
       modelslab_response_meta: resolved.meta ?? initial.meta ?? null,
+      modelslab_account: publicAccount,
       ...estimatedModelslabCost(selectedModel),
     };
   }
@@ -442,8 +420,8 @@ export async function generateModelslabImage({
         strength: requestSettings.strength,
       }
     : { ...commonPayload };
-  const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2);
-  const resolved = await resolveModelslabImage(initial, "/api/v6/images/fetch", `${model} image`);
+  const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2, resolvedAccount);
+  const resolved = await resolveModelslabImage(initial, "/api/v6/images/fetch", `${model} image`, resolvedAccount);
   const imageUrl = await download(modelslabOutputs(resolved), outputPath);
   const actualGeometry = await assertLandscapeOutput(outputPath, requestedWidth, requestedHeight);
   return {
@@ -464,6 +442,7 @@ export async function generateModelslabImage({
     modelslab_submitted_prompt_length: String(prompt ?? "").length,
     modelslab_request_settings: requestSettings,
     modelslab_response_meta: resolved.meta ?? initial.meta ?? null,
+    modelslab_account: publicAccount,
     ...estimatedModelslabCost(model),
   };
 }

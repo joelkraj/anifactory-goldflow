@@ -390,6 +390,49 @@ export function validateManualReviewEvidenceForTests({
   };
 }
 
+export function validateManualStitchRecoveryForTests({
+  manualReviewEvidencePath,
+  repairTailUnitIds = [],
+  skipRenderedTranscriptQa = false,
+  validatedReview,
+} = {}) {
+  const repairIds = repairTailUnitIds.map(String).filter(Boolean);
+  if ((repairIds.length || skipRenderedTranscriptQa) && !manualReviewEvidencePath) {
+    throw new Error(
+      "--stitch-repair-tail-unit-ids and --skip-rendered-transcript-qa "
+      + "are allowed only with --manual-review-evidence.",
+    );
+  }
+  if (new Set(repairIds).size !== repairIds.length) {
+    throw new Error("--stitch-repair-tail-unit-ids contains duplicate unit IDs.");
+  }
+  if (skipRenderedTranscriptQa && !repairIds.length) {
+    throw new Error(
+      "--skip-rendered-transcript-qa true requires at least one "
+      + "--stitch-repair-tail-unit-ids value.",
+    );
+  }
+  if (validatedReview) {
+    const reviewedById = new Map(
+      (validatedReview.accepted_units ?? []).map((row) => [String(row.unit_id), row]),
+    );
+    for (const unitId of repairIds) {
+      const reviewed = reviewedById.get(unitId);
+      if (!reviewed
+        || !reviewed.reviewed_blocker_codes.includes("tts_audio_tail_not_settled")) {
+        throw new Error(
+          `Tail repair unit ${unitId} is not an exact manually accepted `
+          + "tts_audio_tail_not_settled first take.",
+        );
+      }
+    }
+  }
+  return {
+    repair_tail_unit_ids: repairIds,
+    skip_rendered_transcript_qa: Boolean(skipRenderedTranscriptQa),
+  };
+}
+
 export function adjudicateManualReviewQaForTests(qa, {
   reviewer,
   reviewedAt,
@@ -1654,6 +1697,18 @@ async function main() {
   ).trim()
     ? path.resolve(flags["manual-review-evidence"])
     : null;
+  const stitchRepairTailUnitIds = String(
+    flags["stitch-repair-tail-unit-ids"] ?? "",
+  ).split(",").map((value) => value.trim()).filter(Boolean);
+  const skipRenderedTranscriptQa = boolFlag(
+    flags["skip-rendered-transcript-qa"],
+  );
+  validateManualStitchRecoveryForTests({
+    manualReviewEvidencePath,
+    repairTailUnitIds: stitchRepairTailUnitIds,
+    skipRenderedTranscriptQa,
+    validatedReview: null,
+  });
   if (manualReviewEvidencePath && requestedRecoveryScope) {
     throw new Error(
       "--manual-review-evidence and --confirmed-retry-unit-ids are mutually exclusive. "
@@ -1983,6 +2038,12 @@ async function main() {
       preReviewUnitQa: previousQa,
       preReviewUnitQaSha256: priorUnitQaSha256,
     });
+    const manualStitchRecovery = validateManualStitchRecoveryForTests({
+      manualReviewEvidencePath,
+      repairTailUnitIds: stitchRepairTailUnitIds,
+      skipRenderedTranscriptQa,
+      validatedReview,
+    });
     const preReviewArchiveDir = path.join(
       episodeDir,
       "reports",
@@ -2102,6 +2163,9 @@ async function main() {
       reviewed_at: validatedReview.reviewed_at,
       accepted_unit_ids: validatedReview.accepted_units.map((row) => row.unit_id),
       accepted_unit_count: validatedReview.accepted_units.length,
+      stitch_repair_tail_unit_ids: manualStitchRecovery.repair_tail_unit_ids,
+      skip_rendered_transcript_qa:
+        manualStitchRecovery.skip_rendered_transcript_qa,
       model_loaded: false,
       synthesis_invoked: false,
     };
@@ -2221,6 +2285,8 @@ async function main() {
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
       recovery_scope: recoveryScope,
+      stitch_repair_tail_unit_ids: stitchRepairTailUnitIds,
+      skip_rendered_transcript_qa: skipRenderedTranscriptQa,
       primary_provider: policy.primary.provider,
       narrator_voice_id: policy.primary.voice_id,
       voice_sha256: policy.primary.voice_sha256,
@@ -2270,7 +2336,14 @@ async function main() {
     outputDir,
     `.${path.basename(finalWav, ".wav")}.stitch-${invocationId}.wav`,
   );
-  const stitch = await helpers.stitchWavsForDiagnostics(selectedRows, stitchWorkingWav);
+  const stitch = await helpers.stitchWavsForDiagnostics(
+    selectedRows,
+    stitchWorkingWav,
+    {
+      repairTailUnitIds: new Set(stitchRepairTailUnitIds),
+      skipRenderedTranscriptQa,
+    },
+  );
   if (stitch?.status !== "passed") {
     const blockers = [
       ...(stitch?.prepared_qa?.blockers ?? []),
@@ -2304,6 +2377,8 @@ async function main() {
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
       recovery_scope: recoveryScope,
+      stitch_repair_tail_unit_ids: stitchRepairTailUnitIds,
+      skip_rendered_transcript_qa: skipRenderedTranscriptQa,
       primary_provider: policy.primary.provider,
       narrator_voice_id: policy.primary.voice_id,
       voice_sha256: policy.primary.voice_sha256,
@@ -2511,6 +2586,8 @@ async function main() {
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
     recovery_scope: recoveryScope,
+    stitch_repair_tail_unit_ids: stitchRepairTailUnitIds,
+    skip_rendered_transcript_qa: skipRenderedTranscriptQa,
     output_path: status === "passed" ? finalWav : null,
     output_sha256: status === "passed" ? finalWavSha256 : null,
     blocked_output_path: status === "blocked" ? finalWav : null,

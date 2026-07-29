@@ -2795,19 +2795,28 @@ async function prepareStitchInput(row, index, options = {}) {
   };
 }
 
-async function qaRenderedAudioRows(sourceRows, renderedRows, stage) {
+async function qaRenderedAudioRows(
+  sourceRows,
+  renderedRows,
+  stage,
+  { skipTranscriptQa = false } = {},
+) {
   let transcriptMap = new Map();
   let transcriptEngineError = null;
-  const transcriptRows = renderedRows.filter((_row, index) => (
-    String(sourceRows[index]?.provider ?? "") !== "kokoro_local"
-  ));
-  try {
-    transcriptMap = await runFasterWhisperUnitBatch(transcriptRows.map((row) => ({
-      unit_id: row.unit_id,
-      wav: row.wav,
-    })));
-  } catch (error) {
-    transcriptEngineError = error instanceof Error ? error.message : String(error);
+  const transcriptRows = skipTranscriptQa
+    ? []
+    : renderedRows.filter((_row, index) => (
+        String(sourceRows[index]?.provider ?? "") !== "kokoro_local"
+      ));
+  if (transcriptRows.length) {
+    try {
+      transcriptMap = await runFasterWhisperUnitBatch(transcriptRows.map((row) => ({
+        unit_id: row.unit_id,
+        wav: row.wav,
+      })));
+    } catch (error) {
+      transcriptEngineError = error instanceof Error ? error.message : String(error);
+    }
   }
   const units = [];
   for (let index = 0; index < renderedRows.length; index += 1) {
@@ -2844,8 +2853,11 @@ async function qaRenderedAudioRows(sourceRows, renderedRows, stage) {
     } else if (!recognized) {
       findings.push({
         severity: "warning",
-        code: "tts_primary_rendered_transcript_qa_deferred_to_full_stream",
+        code: skipTranscriptQa
+          ? "tts_primary_rendered_transcript_qa_deferred_to_local_whisper_timing"
+          : "tts_primary_rendered_transcript_qa_deferred_to_full_stream",
         stage,
+        explicitly_skipped: skipTranscriptQa,
       });
     }
     const blockers = findings.filter((row) => row.severity === "blocker");
@@ -2939,6 +2951,10 @@ async function qaRenderedAudioRows(sourceRows, renderedRows, stage) {
   return {
     stage,
     status: blockers.length ? "blocked" : "passed",
+    transcript_qa_skipped: skipTranscriptQa,
+    transcript_qa_deferred_to: skipTranscriptQa
+      ? "local_whisper_word_timing"
+      : null,
     unit_count: units.length,
     blockers,
     units,
@@ -3055,6 +3071,7 @@ async function stitchWavs(results, finalWav, options = {}) {
     usable,
     prepared.map((row) => ({ unit_id: row.unit_id, wav: row.prepared_wav })),
     "prepared_stitch_input",
+    { skipTranscriptQa: options.skipRenderedTranscriptQa === true },
   );
   prepared.forEach((row, index) => {
     row.prepared_qa = preparedQa.units[index] ?? null;

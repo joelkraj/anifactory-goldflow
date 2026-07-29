@@ -8,6 +8,7 @@ import {
   adjudicateManualReviewQaForTests,
   validateConfirmedRetryEvidenceForTests,
   validateManualReviewEvidenceForTests,
+  validateManualStitchRecoveryForTests,
 } from "../narration-tts-episode.mjs";
 
 function blockedQa(code) {
@@ -300,7 +301,42 @@ function testManualAcceptanceCannotWaiveAutomaticRetryCandidates() {
   }), /cannot waive failed, empty, or objectively short audio/i);
 }
 
+function testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped() {
+  const fixture = manualReviewFixture(["tts_audio_tail_not_settled"]);
+  const validatedReview = validateManualReviewEvidenceForTests({
+    evidence: fixture.evidence,
+    ...fixture.args,
+  });
+  assert.deepEqual(validateManualStitchRecoveryForTests({
+    manualReviewEvidencePath: "/episode/manual-review.json",
+    repairTailUnitIds: ["unit_001"],
+    skipRenderedTranscriptQa: true,
+    validatedReview,
+  }), {
+    repair_tail_unit_ids: ["unit_001"],
+    skip_rendered_transcript_qa: true,
+  });
+  assert.throws(() => validateManualStitchRecoveryForTests({
+    repairTailUnitIds: ["unit_001"],
+    skipRenderedTranscriptQa: true,
+    validatedReview,
+  }), /allowed only with --manual-review-evidence/i);
+  assert.throws(() => validateManualStitchRecoveryForTests({
+    manualReviewEvidencePath: "/episode/manual-review.json",
+    repairTailUnitIds: [],
+    skipRenderedTranscriptQa: true,
+    validatedReview,
+  }), /requires at least one/i);
+  assert.throws(() => validateManualStitchRecoveryForTests({
+    manualReviewEvidencePath: "/episode/manual-review.json",
+    repairTailUnitIds: ["unit_002"],
+    skipRenderedTranscriptQa: true,
+    validatedReview,
+  }), /not an exact manually accepted tts_audio_tail_not_settled/i);
+}
+
 testHardFailuresAreNotSoftenedOrBlindlyRetried();
 testConfirmedRetryEvidenceBindsExactListenedArtifact();
 testManualAcceptanceIsExactHashBoundAndPreservesFindings();
 testManualAcceptanceCannotWaiveAutomaticRetryCandidates();
+testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped();

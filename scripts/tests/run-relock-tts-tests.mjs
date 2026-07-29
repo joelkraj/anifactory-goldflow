@@ -16,6 +16,10 @@ import {
   relockedIdentityForTests,
   requireCanonicalQwenLiamOptions,
 } from "../run-relock-tts.mjs";
+import {
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+} from "../lib/qwen-liam-batch-contract.mjs";
 import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 
 function fixtureVoiceProviderOptions() {
@@ -70,6 +74,7 @@ function fixtureVoiceProviderOptions() {
       automatic_asr_retry: false,
       confirmed_defect_types: ["skip", "truncation", "stutter"],
     },
+    synthesis_contract: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   };
 }
 
@@ -207,6 +212,13 @@ export async function runRelockTtsTests() {
     }),
     /hard_words_max=61/,
   );
+  assert.throws(
+    () => requireCanonicalQwenLiamOptions({
+      ...options,
+      synthesis_contract: QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+    }),
+    /synthesis_contract=qwen_liam_serial_unit_v1/,
+  );
 
   const before = {
     schema: "goldflow_run_identity_v2",
@@ -289,12 +301,34 @@ export async function runRelockTtsTests() {
   assert.equal(after.provider_locks.tts_retry_policy, "confirmed_skips_truncations_or_stutters_only");
   assert.equal(after.provider_locks.tts_automatic_asr_retry, false);
   assert.deepEqual(after.provider_locks.tts_confirmed_defect_types, ["skip", "truncation", "stutter"]);
+  assert.equal(
+    after.provider_locks.tts_synthesis_contract_id,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id,
+  );
+  assert.equal(
+    after.provider_locks.tts_synthesis_mode,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode,
+  );
+  assert.equal(after.provider_locks.tts_synthesis_api, "Model.batch_generate");
+  assert.equal(after.provider_locks.tts_model_instance_count, 1);
+  assert.equal(after.provider_locks.tts_model_concurrency, 1);
+  assert.equal(after.provider_locks.tts_nominal_batch_size, 4);
+  assert.equal(
+    after.provider_locks.tts_batch_scheduler_version,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.scheduler_version,
+  );
+  assert.equal(after.provider_locks.tts_token_limit_acceptance_allowed, false);
+  assert.equal(
+    after.provider_locks.tts_objective_recovery_mode,
+    "serial_exact_unit_recovery_v1",
+  );
   assert.equal(after.provider_locks.primary_reference_manifest_sha256, "reference-manifest-sha");
   assert.equal(after.provider_locks.primary_voice_continuity_contract, "qwen_icl_clone_of_liam_reference");
   assert.equal(after.provider_locks.fallback_reference_audio_sha256, null);
   assert.equal(after.model_versions.fallback_tts_model, null);
   assert.equal(after.production_profile_config.media.qwen_tts_concurrency, 1);
   assert.equal(after.production_profile_config.media.local_qwen_tts_concurrency, 1);
+  assert.equal(after.production_profile_config.media.qwen_tts_batch_size, 4);
   assert.deepEqual(after.git, cleanGit);
   assert.equal(after.narration_identity_relock.invalidation_boundary, "voice_plan");
   assert.equal(after.narration_identity_relock.preserved_upstream_boundary, "semantic_scene_plan");
@@ -303,6 +337,11 @@ export async function runRelockTtsTests() {
     PUCK_TO_QWEN_RECOVERY_KIND,
   );
   assert.equal(after.narration_identity_relock.identity_changed, true);
+  assert.equal(after.narration_identity_relock.voice_identity_changed, true);
+  assert.equal(
+    after.narration_identity_relock.synthesis_contract_changed,
+    true,
+  );
   assert.equal(
     after.narration_identity_relock.recovery_scope,
     "operator_approved_narrator_identity_migration",
@@ -311,6 +350,17 @@ export async function runRelockTtsTests() {
   assert.equal(after.provider_locks.qwen_narrator_voice_id, null);
   assert.equal(after.production_gates.tts_speed_control_supported, false);
   assert.equal(after.production_gates.sentence_complete_tts_units_required, true);
+  assert.equal(
+    after.production_gates.deterministic_length_matched_tts_batching_required,
+    true,
+  );
+  assert.equal(after.production_gates.tts_nominal_batch_size, 4);
+  assert.equal(after.production_gates.tts_single_resident_model_required, true);
+  assert.equal(after.production_gates.tts_token_limit_outputs_forbidden, true);
+  assert.equal(
+    after.production_gates.tts_objective_recovery_exact_unit_only,
+    true,
+  );
 
   assert.equal(after.title, before.title);
   assert.equal(after.source_sha256, before.source_sha256);
@@ -321,6 +371,76 @@ export async function runRelockTtsTests() {
   assert.equal(after.model_versions.image_model, before.model_versions.image_model);
   assert.equal(after.production_profile_config.media.image_concurrency, 15);
   assert.equal(after.production_gates.image_output_qa_required, true);
+
+  const beforeSerialPromotion = structuredClone(after);
+  beforeSerialPromotion.stage_registry_version = "2026-07-27.1";
+  delete beforeSerialPromotion.voice_provider_options.synthesis_contract;
+  delete beforeSerialPromotion.production_profile_config.media.qwen_tts_batch_size;
+  for (const field of [
+    "tts_synthesis_contract_id",
+    "tts_synthesis_mode",
+    "tts_synthesis_api",
+    "tts_model_instance_count",
+    "tts_model_concurrency",
+    "tts_nominal_batch_size",
+    "tts_batch_scheduler_version",
+    "tts_token_limit_acceptance_allowed",
+    "tts_objective_recovery_mode",
+  ]) {
+    delete beforeSerialPromotion.provider_locks[field];
+  }
+  for (const field of [
+    "deterministic_length_matched_tts_batching_required",
+    "tts_nominal_batch_size",
+    "tts_single_resident_model_required",
+    "tts_token_limit_outputs_forbidden",
+    "tts_objective_recovery_exact_unit_only",
+  ]) {
+    delete beforeSerialPromotion.production_gates[field];
+  }
+  const afterSerialPromotion = relockedIdentityForTests(
+    beforeSerialPromotion,
+    {
+      voiceProviderOptions: options,
+      git: cleanGit,
+      timestamp: "2026-07-29T00:30:00.000Z",
+      archiveDir: "/episode/reports/recovery/batch4-promotion",
+      previousIdentitySha256: "serial-identity-sha",
+      reason: "operator approved deterministic batch-four promotion",
+    },
+  );
+  assert.equal(
+    afterSerialPromotion.narration_identity_relock.identity_changed,
+    true,
+  );
+  assert.equal(
+    afterSerialPromotion.narration_identity_relock.voice_identity_changed,
+    false,
+  );
+  assert.equal(
+    afterSerialPromotion.narration_identity_relock.synthesis_contract_changed,
+    true,
+  );
+  assert.equal(
+    afterSerialPromotion.narration_identity_relock.recovery_scope,
+    "same_voice_batch4_synthesis_contract_promotion",
+  );
+  assert.deepEqual(
+    afterSerialPromotion.narration_identity_relock.previous_synthesis_contract,
+    QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+  );
+  assert.deepEqual(
+    afterSerialPromotion.narration_identity_relock.synthesis_contract,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  );
+  assert.match(
+    recoveryEvidence(
+      QWEN_PLANNER_FIX_RECOVERY_KIND,
+      {},
+      { synthesisContractChanged: true },
+    ).join(" "),
+    /explicit relock records the synthesis-contract change/,
+  );
 
   const beforePlannerFix = structuredClone(after);
   beforePlannerFix.git = {
@@ -379,6 +499,14 @@ export async function runRelockTtsTests() {
     QWEN_PLANNER_FIX_RECOVERY_KIND,
   );
   assert.equal(afterPlannerFix.narration_identity_relock.identity_changed, false);
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.voice_identity_changed,
+    false,
+  );
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.synthesis_contract_changed,
+    false,
+  );
   assert.equal(
     afterPlannerFix.narration_identity_relock.recovery_scope,
     "same_identity_relock_after_committed_tts_planner_fix",

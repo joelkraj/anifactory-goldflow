@@ -1,3 +1,8 @@
+import {
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+} from "./qwen-liam-batch-contract.mjs";
+
 export const DEFAULT_TTS_PROVIDER = "qwen_local";
 export const DEFAULT_TTS_FALLBACK_PROVIDER = null;
 export const DEFAULT_NARRATOR_VOICE_ID = "am_liam";
@@ -65,6 +70,11 @@ export const QWEN_LIAM_RETRY_CONTRACT = Object.freeze({
   automatic_asr_retry: false,
   confirmed_defect_types: Object.freeze(["skip", "truncation", "stutter"]),
 });
+
+export {
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+};
 
 export const QWEN_LIAM_PRIMARY_LOCK = Object.freeze({
   ...QWEN_LOCAL_MODEL_LOCK,
@@ -296,6 +306,10 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
     : primaryProvider === "kokoro_local"
       ? "legacy_kokoro_puck"
       : "generic_narration_v1";
+  const qwenSynthesisContract = primaryProvider === "qwen_local"
+    ? identity.voice_provider_options?.synthesis_contract
+      ?? QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT
+    : null;
 
   return {
     contract,
@@ -325,6 +339,7 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
       ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_RETRY_CONTRACT.retry_policy : null),
     retry_contract: identity.voice_provider_options?.retry_contract
       ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_RETRY_CONTRACT : null),
+    synthesis_contract: qwenSynthesisContract,
     qa_policy: identity.voice_provider_options?.qa_policy
       ?? identity.tts_qa_policy
       ?? NARRATION_TTS_QA_POLICY_VERSION,
@@ -435,6 +450,10 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
         speed_control_supported: false,
         native_speed: null,
         continuous_requests: false,
+        ...(policy.synthesis_contract?.mode
+          === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode
+          ? { synthesis_contract: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT }
+          : {}),
       }
     : null;
   if (expectedPrimaryControls) {
@@ -773,6 +792,18 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
       || JSON.stringify(policy.primary.retry_contract) !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT)) {
       throw new Error("Qwen Liam retry contract permits retries only for confirmed skips, truncations, or stutters; uncertain ASR findings are non-blocking.");
     }
+    const supportedSynthesisContracts = [
+      QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+      QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+    ];
+    if (!supportedSynthesisContracts.some(
+      (contract) => JSON.stringify(policy.synthesis_contract) === JSON.stringify(contract),
+    )) {
+      throw new Error(
+        "Qwen Liam synthesis must use either the legacy serial-unit contract "
+        + "or the locked deterministic length-matched batch-four contract.",
+      );
+    }
   }
   if (policy.qa_policy !== NARRATION_TTS_QA_POLICY_VERSION) {
     throw new Error(`Narration QA policy must be ${NARRATION_TTS_QA_POLICY_VERSION}; got ${policy.qa_policy ?? "missing"}.`);
@@ -834,5 +865,6 @@ export function defaultNarrationVoiceProviderOptions({
     stitch_contract: QWEN_LIAM_STITCH_CONTRACT,
     retry_policy: QWEN_LIAM_RETRY_CONTRACT.retry_policy,
     retry_contract: QWEN_LIAM_RETRY_CONTRACT,
+    synthesis_contract: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   };
 }

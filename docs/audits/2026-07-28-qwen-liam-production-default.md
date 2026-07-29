@@ -1,6 +1,6 @@
 # Qwen/Liam production narration decision
 
-Date: 2026-07-28
+Date: 2026-07-28; batch-four synthesis promotion approved 2026-07-29
 
 ## Decision
 
@@ -12,6 +12,8 @@ exact pinned Liam reference audio and transcript.
 - Voice mode: Base-model reference-audio ICL
 - Narrator identity: Liam reference clone
 - Unit shape: sentence-complete, target 45-60 spoken words, hard maximum 60
+- New-run synthesis: deterministic length-matched fixed cohorts of four through
+  one resident model
 - Join: 80 ms at every selected-unit boundary
 - Continuous longform requests: forbidden
 - Native-speed control: unsupported and not applied
@@ -22,6 +24,14 @@ Every first take and retry must use the same model, revision, runtime, Liam
 reference audio, Liam reference transcript, and exact spoken-text hash. Puck,
 Fenrir, and Puck-cloned Qwen are historical bake-off or legacy-run
 compatibility routes, not current production fallbacks.
+
+Existing run identities created before the batch-four contract remain valid on
+the serial-unit adapter. New preflights explicitly lock
+`qwen_liam_fixed_batch4_length_matched_v1`; migration is never silent.
+Promoting an established serial Qwen/Liam production through
+`goldflow run relock-tts` additionally requires `--promote-batch4 true`, and
+the recovery record preserves both the prior serial contract and the new
+batch-four contract.
 
 ## Pinned Liam reference
 
@@ -78,14 +88,22 @@ Proof artifacts:
 2. Form sentence-complete source-bound units targeting 45-60 spoken words with
    a hard maximum of 60. Shorter system/UI, dialogue, performance, speaker, SFX,
    explicit-merge, and segment-barrier units stay atomic.
-3. Synthesize units sequentially with the resident Qwen model and the exact
-   Liam conditioning hashes. Never synthesize the episode as one long request.
+3. For a new identity, deterministically sort units by spoken word count,
+   UTF-8 text length, original source order, and unit ID, then synthesize fixed
+   cohorts of four through one resident Qwen model. Every non-final cohort has
+   four real units; the final cohort may contain one to three and is never
+   padded. Bind the complete cohort order/size/hash/seed into the plan,
+   synthesis identity, cache, and runner report. Restore original source order
+   before QA and stitching. Existing serial identities stay serial. Never
+   synthesize the episode as one long request.
 4. Run waveform QA and ASR for evidence on every unit.
-5. Retry an exact unit only when listening confirms a skip, truncation, or
-   stutter. A synthesis failure, empty output, or objectively too-short output
-   counts as confirmed truncation and may receive one automatic same-identity
-   retry. Other acoustic or voice-identity blockers stop for review rather
-   than triggering a blind retry.
+5. Never accept an output that reached its effective generation-token limit.
+   Retry an exact unit only in provenance-bound serial recovery when listening
+   confirms a skip, truncation, or stutter. A synthesis failure, empty output,
+   token-limit hit, or objectively too-short output counts as confirmed
+   truncation and may receive one automatic same-identity exact-unit recovery.
+   Other acoustic, cache-integrity, or voice-identity blockers stop for review
+   rather than triggering a blind retry.
 6. Treat isolated ASR deletions, substitutions, low-confidence words, aggregate
    WER, and low-margin speaker-similarity warnings as review signals only. They
    do not authorize an automatic retry.
@@ -100,6 +118,22 @@ Proof artifacts:
    and the final stitched stream before local Whisper timing.
 11. Do not apply native-speed or post-TTS tempo processing. If cadence needs to
     change, approve a new bounded listening proof and synthesis contract.
+
+## Batch-four throughput proof
+
+The approved eight-unit Human Shield bake-off kept the exact Qwen/Liam model,
+reference, text, and generation settings. Batch four completed in 20.450
+seconds versus 52.177 seconds for serial in the final run, a 2.551x wall-clock
+speedup (2.526x normalized). Across the two recorded runs, batch-four wall
+speedup ranged from 2.17x to 2.55x. All speaker, clipping, large-step,
+isolated-impulse, and token-cap checks passed. Batch outputs are intentionally
+different stochastic identities from serial because MLX exposes one global RNG
+for a batch; that is why cohort membership, order, size, and seed are part of
+the production synthesis identity.
+
+Proof report:
+
+`/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W31-human-shield-strongest-tank-v1/episodes/ep_01/review_samples/tts-throughput-bakeoff/human-shield-8unit-20260729-v2/report.md`
 
 ## Superseded decision
 

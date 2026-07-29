@@ -28,6 +28,7 @@ import {
   DEFAULT_TTS_FALLBACK_PROVIDER,
   DEFAULT_TTS_PROVIDER,
   KOKORO_MODEL_LOCK,
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LOCAL_FALLBACK_LOCK,
   defaultNarrationVoiceProviderOptions,
@@ -534,6 +535,33 @@ async function main() {
       tts_confirmed_defect_types: ttsProvider === "qwen_local"
         ? [...QWEN_LIAM_PRIMARY_LOCK.retry_contract.confirmed_defect_types]
         : null,
+      tts_synthesis_contract_id: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id
+        : null,
+      tts_synthesis_mode: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode
+        : null,
+      tts_synthesis_api: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.api
+        : null,
+      tts_model_instance_count: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.resident_model_count
+        : null,
+      tts_model_concurrency: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.model_concurrency
+        : null,
+      tts_nominal_batch_size: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.nominal_batch_size
+        : null,
+      tts_batch_scheduler_version: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.scheduler_version
+        : null,
+      tts_token_limit_acceptance_allowed: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.token_limit_acceptance_allowed
+        : null,
+      tts_objective_recovery_mode: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.objective_recovery_mode
+        : null,
       fallback_voice_identity: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id : null,
       fallback_reference_audio_sha256: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.reference_audio_sha256 : null,
       fallback_reference_metadata_sha256: ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK.reference_metadata_sha256 : null,
@@ -570,6 +598,14 @@ async function main() {
         ? QWEN_LIAM_PRIMARY_LOCK.stitch_contract.join_silence_ms
         : null,
       continuous_longform_tts_requests_forbidden: ttsProvider === "qwen_local",
+      deterministic_length_matched_tts_batching_required:
+        ttsProvider === "qwen_local",
+      tts_nominal_batch_size: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.nominal_batch_size
+        : null,
+      tts_single_resident_model_required: ttsProvider === "qwen_local",
+      tts_token_limit_outputs_forbidden: ttsProvider === "qwen_local",
+      tts_objective_recovery_exact_unit_only: ttsProvider === "qwen_local",
       image_output_qa_required_before_render: true,
       directed_motion_plan_required_before_render: true,
       inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",

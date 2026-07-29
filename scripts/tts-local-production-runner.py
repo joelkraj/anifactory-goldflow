@@ -25,6 +25,7 @@ import numpy as np
 from huggingface_hub import snapshot_download
 from mlx_audio.audio_io import write as audio_write
 from mlx_audio.tts.utils import load_model
+from mlx_audio.utils import load_audio
 
 
 KOKORO = {
@@ -158,6 +159,37 @@ QWEN_REFERENCE_CONTRACTS = {
     QWEN_PUCK_REFERENCE["voice_continuity_contract"]: QWEN_PUCK_REFERENCE,
 }
 MLX_AUDIO_VERSION = "0.4.6"
+SERIAL_SYNTHESIS_MODE = "serial_unit_v1"
+BATCH4_SYNTHESIS_MODE = "fixed_batch4_length_matched_v1"
+EXACT_UNIT_RECOVERY_MODE = "serial_exact_unit_recovery_v1"
+SERIAL_SYNTHESIS_CONTRACT = {
+    "schema": "goldflow_qwen_liam_synthesis_contract_v1",
+    "contract_id": "qwen_liam_serial_unit_v1",
+    "mode": SERIAL_SYNTHESIS_MODE,
+    "api": "Model.generate",
+    "scheduler_version": "source_order_serial_v1",
+    "resident_model_count": 1,
+    "model_concurrency": 1,
+    "nominal_batch_size": 1,
+    "final_partial_cohort_allowed": False,
+    "continuous_batching": False,
+    "token_limit_acceptance_allowed": False,
+    "objective_recovery_mode": SERIAL_SYNTHESIS_MODE,
+}
+BATCH4_SYNTHESIS_CONTRACT = {
+    "schema": "goldflow_qwen_liam_synthesis_contract_v1",
+    "contract_id": "qwen_liam_fixed_batch4_length_matched_v1",
+    "mode": BATCH4_SYNTHESIS_MODE,
+    "api": "Model.batch_generate",
+    "scheduler_version": "stable_length_word_byte_source_id_v1",
+    "resident_model_count": 1,
+    "model_concurrency": 1,
+    "nominal_batch_size": 4,
+    "final_partial_cohort_allowed": True,
+    "continuous_batching": False,
+    "token_limit_acceptance_allowed": False,
+    "objective_recovery_mode": EXACT_UNIT_RECOVERY_MODE,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,7 +302,14 @@ def resolve_snapshot(
 
 
 def validate_jobs(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, dict) or value.get("schema") != "goldflow_narration_tts_jobs_v1":
+    if (
+        not isinstance(value, dict)
+        or value.get("schema")
+        not in {
+            "goldflow_narration_tts_jobs_v1",
+            "goldflow_narration_tts_jobs_v2",
+        }
+    ):
         raise ValueError("Invalid narration TTS jobs schema")
     rows = value.get("jobs")
     if not isinstance(rows, list) or not rows:
@@ -292,9 +331,318 @@ def validate_jobs(value: Any) -> list[dict[str, Any]]:
         attempt = int(row.get("attempt"))
         if seed < 0 or attempt < 1:
             raise ValueError(f"Invalid seed/attempt for {unit_id}")
+        if value.get("schema") == "goldflow_narration_tts_jobs_v2":
+            original_order_index = int(row.get("original_order_index"))
+            spoken_word_count = int(row.get("spoken_word_count"))
+            spoken_text_utf8_bytes = int(
+                row.get("spoken_text_utf8_bytes")
+            )
+            if (
+                original_order_index < 0
+                or spoken_word_count != len(text.strip().split())
+                or spoken_text_utf8_bytes != len(text.encode("utf-8"))
+            ):
+                raise ValueError(
+                    f"Batch-bound length/order metadata is stale for {unit_id}"
+                )
         seen.add(unit_id)
         output.append(row)
     return output
+
+
+def validate_qwen_synthesis_manifest(
+    value: dict[str, Any],
+    jobs: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    if value.get("schema") == "goldflow_narration_tts_jobs_v1":
+        return SERIAL_SYNTHESIS_MODE, SERIAL_SYNTHESIS_CONTRACT, None
+    mode = str(value.get("synthesis_mode") or "").strip()
+    contract = value.get("synthesis_contract")
+    if mode == SERIAL_SYNTHESIS_MODE:
+        expected_contract = SERIAL_SYNTHESIS_CONTRACT
+    elif mode in {BATCH4_SYNTHESIS_MODE, EXACT_UNIT_RECOVERY_MODE}:
+        expected_contract = BATCH4_SYNTHESIS_CONTRACT
+    else:
+        raise ValueError(f"Unsupported Qwen synthesis mode: {mode!r}")
+    if contract != expected_contract:
+        raise ValueError(
+            f"Qwen synthesis contract mismatch for mode {mode!r}"
+        )
+    if (
+        int(contract["resident_model_count"]) != 1
+        or int(contract["model_concurrency"]) != 1
+        or contract["continuous_batching"] is not False
+        or contract["token_limit_acceptance_allowed"] is not False
+    ):
+        raise ValueError("Qwen synthesis contract violates production locks")
+
+    batch_plan = value.get("batch_plan")
+    batch_plan_sha256 = str(value.get("batch_plan_sha256") or "")
+    if not batch_plan_sha256:
+        raise ValueError("Qwen synthesis manifest lacks batch_plan_sha256")
+    if mode in {BATCH4_SYNTHESIS_MODE, EXACT_UNIT_RECOVERY_MODE}:
+        if not isinstance(batch_plan, dict):
+            raise ValueError("Batch-four synthesis requires its exact batch plan")
+        unsigned_plan = {
+            key: child
+            for key, child in batch_plan.items()
+            if key != "batch_plan_sha256"
+        }
+        if (
+            batch_plan.get("batch_plan_sha256")
+            != canonical_sha256(unsigned_plan)
+            or batch_plan_sha256 != batch_plan.get("batch_plan_sha256")
+            or batch_plan.get("synthesis_contract") != contract
+            or batch_plan.get("schema")
+            != "goldflow_qwen_liam_batch_plan_v1"
+        ):
+            raise ValueError("Batch-four plan hash or contract is stale")
+        original_ids = [
+            str(unit_id)
+            for unit_id in batch_plan.get("original_order_unit_ids") or []
+        ]
+        requested_ids = [str(job["unit_id"]) for job in jobs]
+        if (
+            mode == BATCH4_SYNTHESIS_MODE
+            and original_ids != requested_ids
+        ):
+            raise ValueError(
+                "Batch-four jobs are not in the exact original narration order"
+            )
+        if (
+            mode == EXACT_UNIT_RECOVERY_MODE
+            and (
+                len(set(requested_ids)) != len(requested_ids)
+                or any(unit_id not in original_ids for unit_id in requested_ids)
+                or requested_ids
+                != sorted(requested_ids, key=original_ids.index)
+            )
+        ):
+            raise ValueError(
+                "Exact-unit recovery jobs are not a unique source-ordered "
+                "subset of the original batch plan"
+            )
+        cohorts = batch_plan.get("cohorts")
+        if not isinstance(cohorts, list) or not cohorts:
+            raise ValueError("Batch-four plan has no cohorts")
+        if (
+            int(batch_plan.get("unit_count", -1)) != len(original_ids)
+            or int(batch_plan.get("cohort_count", -1)) != len(cohorts)
+        ):
+            raise ValueError("Batch-four plan counts are stale")
+        synthesized_ids: list[str] = []
+        synthesized_members: list[dict[str, Any]] = []
+        jobs_by_id = {str(job["unit_id"]): job for job in jobs}
+        for cohort_index, cohort in enumerate(cohorts):
+            members = cohort.get("members")
+            if not isinstance(members, list) or not members:
+                raise ValueError(f"Batch cohort {cohort_index} has no members")
+            effective_size = len(members)
+            if (
+                int(cohort.get("cohort_index", -1)) != cohort_index
+                or int(cohort.get("nominal_batch_size", 0)) != 4
+                or int(cohort.get("effective_batch_size", 0))
+                != effective_size
+                or (cohort_index < len(cohorts) - 1 and effective_size != 4)
+                or effective_size > 4
+                or cohort.get("schema")
+                != "goldflow_qwen_liam_synthesis_cohort_v1"
+                or cohort.get("synthesis_contract_id")
+                != contract["contract_id"]
+                or cohort.get("synthesis_mode") != BATCH4_SYNTHESIS_MODE
+                or cohort.get("scheduler_version")
+                != contract["scheduler_version"]
+            ):
+                raise ValueError(
+                    f"Batch cohort {cohort_index} size/order contract is stale"
+                )
+            cohort_identity = {
+                key: cohort.get(key)
+                for key in (
+                    "schema",
+                    "synthesis_contract_id",
+                    "synthesis_mode",
+                    "scheduler_version",
+                    "nominal_batch_size",
+                    "effective_batch_size",
+                    "cohort_index",
+                    "members",
+                )
+            }
+            expected_cohort_sha256 = canonical_sha256(cohort_identity)
+            if (
+                cohort.get("cohort_sha256") != expected_cohort_sha256
+                or cohort.get("cohort_id")
+                != (
+                    f"qwen-cohort-{cohort_index + 1:04d}-"
+                    f"{expected_cohort_sha256[:12]}"
+                )
+                or int(cohort.get("batch_seed", -1))
+                != int(expected_cohort_sha256[:8], 16)
+            ):
+                raise ValueError(
+                    f"Batch cohort {cohort_index} hash/seed is stale"
+                )
+            for position, member in enumerate(members):
+                if int(member.get("cohort_position", -1)) != position:
+                    raise ValueError(
+                        f"Batch cohort {cohort_index} member order is stale"
+                    )
+                member_id = str(member.get("unit_id") or "")
+                job = jobs_by_id.get(member_id)
+                if job is None and mode == BATCH4_SYNTHESIS_MODE:
+                    raise ValueError(
+                        f"Batch cohort {cohort_index} member identity is "
+                        f"stale for {member_id!r}"
+                    )
+                if job is not None and (
+                    member.get("spoken_text_sha256")
+                    != job.get("spoken_text_sha256")
+                    or int(member.get("original_order_index", -1))
+                    != int(job.get("original_order_index", -2))
+                    or int(member.get("spoken_word_count", -1))
+                    != int(job.get("spoken_word_count", -2))
+                    or int(member.get("spoken_text_utf8_bytes", -1))
+                    != int(job.get("spoken_text_utf8_bytes", -2))
+                ):
+                    raise ValueError(
+                        f"Batch cohort {cohort_index} member identity is "
+                        f"stale for {member_id!r}"
+                    )
+                if job is not None:
+                    expected_binding = {
+                        "synthesis_contract_id": contract["contract_id"],
+                        "synthesis_mode": BATCH4_SYNTHESIS_MODE,
+                        "batch_plan_sha256": batch_plan_sha256,
+                        "cohort_id": cohort["cohort_id"],
+                        "cohort_index": cohort_index,
+                        "cohort_sha256": cohort["cohort_sha256"],
+                        "cohort_position": position,
+                        "nominal_batch_size": 4,
+                        "effective_batch_size": effective_size,
+                        "batch_seed": cohort["batch_seed"],
+                    }
+                    if job.get("synthesis_cohort") != expected_binding:
+                        raise ValueError(
+                            f"Batch cohort binding is stale for {member_id!r}"
+                        )
+                synthesized_ids.append(member_id)
+                synthesized_members.append(member)
+        original_order_indexes = [
+            int(member["original_order_index"])
+            for member in synthesized_members
+        ]
+        if (
+            any(not unit_id for unit_id in synthesized_ids)
+            or len(set(synthesized_ids)) != len(synthesized_ids)
+            or len(set(original_order_indexes))
+            != len(original_order_indexes)
+        ):
+            raise ValueError(
+                "Batch-four plan contains missing/duplicate unit order identity"
+            )
+        expected_original_members = sorted(
+            synthesized_members,
+            key=lambda member: (
+                int(member["original_order_index"]),
+                str(member["unit_id"]),
+            ),
+        )
+        expected_original_ids = [
+            str(member["unit_id"]) for member in expected_original_members
+        ]
+        original_order_binding = [
+            {
+                "unit_id": str(member["unit_id"]),
+                "original_order_index": int(
+                    member["original_order_index"]
+                ),
+                "spoken_text_sha256": member["spoken_text_sha256"],
+            }
+            for member in expected_original_members
+        ]
+        expected_synthesis_ids = [
+            str(member["unit_id"])
+            for member in sorted(
+                synthesized_members,
+                key=lambda member: (
+                    int(member["spoken_word_count"]),
+                    int(member["spoken_text_utf8_bytes"]),
+                    int(member["original_order_index"]),
+                    str(member["unit_id"]),
+                ),
+            )
+        ]
+        if (
+            original_ids != expected_original_ids
+            or batch_plan.get("original_order_sha256")
+            != canonical_sha256(original_order_binding)
+            or synthesized_ids != expected_synthesis_ids
+            or synthesized_ids
+            != [
+                str(unit_id)
+                for unit_id
+                in batch_plan.get("synthesis_order_unit_ids") or []
+            ]
+            or sorted(synthesized_ids) != sorted(original_ids)
+        ):
+            raise ValueError("Batch-four plan unit coverage is stale")
+    elif batch_plan is not None:
+        raise ValueError(
+            f"Synthesis mode {mode!r} must not carry a batch execution plan"
+        )
+
+    if mode == EXACT_UNIT_RECOVERY_MODE:
+        for job in jobs:
+            provenance = job.get("recovery_provenance")
+            cohort = job.get("synthesis_cohort")
+            planned_cohort = next(
+                (
+                    row
+                    for row in (batch_plan or {}).get("cohorts") or []
+                    if row.get("cohort_sha256")
+                    == (cohort or {}).get("cohort_sha256")
+                ),
+                None,
+            )
+            planned_member = next(
+                (
+                    row
+                    for row in (planned_cohort or {}).get("members") or []
+                    if str(row.get("unit_id") or "")
+                    == str(job["unit_id"])
+                ),
+                None,
+            )
+            if (
+                not isinstance(provenance, dict)
+                or not isinstance(cohort, dict)
+                or planned_cohort is None
+                or planned_member is None
+                or int(planned_member.get("cohort_position", -1))
+                != int(cohort.get("cohort_position", -2))
+                or provenance.get("batch_plan_sha256") != batch_plan_sha256
+                or provenance.get("schema")
+                != "goldflow_qwen_exact_unit_recovery_provenance_v1"
+                or provenance.get("recovery_mode")
+                != EXACT_UNIT_RECOVERY_MODE
+                or provenance.get("unit_id") != str(job["unit_id"])
+                or provenance.get("spoken_text_sha256")
+                != job.get("spoken_text_sha256")
+                or provenance.get("origin_cohort_id")
+                != planned_cohort.get("cohort_id")
+                or provenance.get("origin_cohort_sha256")
+                != cohort.get("cohort_sha256")
+                or not provenance.get("origin_synthesis_identity_sha256")
+                or not provenance.get("origin_runner_report_sha256")
+                or not provenance.get("trigger_evidence_sha256")
+                or not provenance.get("trigger_codes")
+            ):
+                raise ValueError(
+                    f"Exact-unit recovery provenance is incomplete for "
+                    f"{job['unit_id']}"
+                )
+    return mode, contract, batch_plan
 
 
 def resolve_qwen_reference_contract(
@@ -355,6 +703,10 @@ def synthesis_identity(
     reference_text: str | None,
     kokoro_voice_id: str | None,
     qwen_reference_contract: dict[str, Any] | None,
+    jobs_manifest: dict[str, Any] | None = None,
+    synthesis_mode: str = SERIAL_SYNTHESIS_MODE,
+    synthesis_contract: dict[str, Any] | None = None,
+    batch_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     value = {
         "schema": "goldflow_local_tts_synthesis_identity_v1",
@@ -450,6 +802,82 @@ def synthesis_identity(
                 **generation_parameters,
             }
         )
+        if (
+            jobs_manifest
+            and jobs_manifest.get("schema") == "goldflow_narration_tts_jobs_v2"
+        ):
+            contract = synthesis_contract or SERIAL_SYNTHESIS_CONTRACT
+            value["schema"] = "goldflow_local_tts_synthesis_identity_v2"
+            value.update(
+                {
+                    "synthesis_contract_id": contract["contract_id"],
+                    "synthesis_mode": synthesis_mode,
+                    "synthesis_api": (
+                        "Model.batch_generate"
+                        if synthesis_mode == BATCH4_SYNTHESIS_MODE
+                        else "Model.generate"
+                    ),
+                    "batch_plan_sha256": jobs_manifest[
+                        "batch_plan_sha256"
+                    ],
+                    "model_instance_count": 1,
+                    "model_concurrency": 1,
+                    "continuous_batching": False,
+                    "token_limit_acceptance_allowed": False,
+                }
+            )
+            cohort_binding = job.get("synthesis_cohort")
+            if not isinstance(cohort_binding, dict):
+                raise ValueError(
+                    f"Missing synthesis cohort binding for {job['unit_id']}"
+                )
+            if synthesis_mode == BATCH4_SYNTHESIS_MODE:
+                cohort = next(
+                    (
+                        row
+                        for row in (batch_plan or {}).get("cohorts") or []
+                        if row.get("cohort_sha256")
+                        == cohort_binding.get("cohort_sha256")
+                    ),
+                    None,
+                )
+                if cohort is None:
+                    raise ValueError(
+                        f"Unknown batch cohort for {job['unit_id']}"
+                    )
+                value.update(
+                    {
+                        **cohort_binding,
+                        "cohort_members": cohort["members"],
+                        "per_unit_serial_seed": int(job["seed"]),
+                        "seed": int(cohort["batch_seed"]),
+                        "per_unit_seed_preserved": False,
+                    }
+                )
+            elif synthesis_mode == EXACT_UNIT_RECOVERY_MODE:
+                origin_cohort = next(
+                    (
+                        row
+                        for row in (batch_plan or {}).get("cohorts") or []
+                        if row.get("cohort_sha256")
+                        == cohort_binding.get("cohort_sha256")
+                    ),
+                    None,
+                )
+                if origin_cohort is None:
+                    raise ValueError(
+                        f"Unknown recovery origin cohort for {job['unit_id']}"
+                    )
+                value.update(
+                    {
+                        "recovery_provenance":
+                            job.get("recovery_provenance"),
+                        "origin_cohort_members":
+                            origin_cohort["members"],
+                        "per_unit_serial_seed": int(job["seed"]),
+                        "per_unit_seed_preserved": True,
+                    }
+                )
     return value
 
 
@@ -461,7 +889,7 @@ def generate_audio(
     reference_text: str | None,
     kokoro_voice_id: str | None,
     qwen_reference_contract: dict[str, Any] | None,
-) -> tuple[np.ndarray, int, list[Any]]:
+) -> tuple[np.ndarray, int, list[Any], int]:
     mx.random.seed(int(job["seed"]))
     if route == "kokoro":
         if kokoro_voice_id not in KOKORO_VOICES:
@@ -501,7 +929,41 @@ def generate_audio(
     output = np.asarray(audio, dtype=np.float32).reshape(-1)
     if output.size == 0 or not np.isfinite(output).all():
         raise RuntimeError(f"{route}/{job['unit_id']} returned invalid audio")
-    return output, sample_rates.pop(), generated
+    generated_token_count = sum(
+        int(getattr(result, "token_count", 0) or 0)
+        for result in generated
+    )
+    return output, sample_rates.pop(), generated, generated_token_count
+
+
+def collect_batch_audio(
+    generated: list[Any],
+    expected_count: int,
+) -> dict[int, tuple[np.ndarray, int, int]]:
+    output: dict[int, tuple[np.ndarray, int, int]] = {}
+    for result in generated:
+        sequence_index = int(result.sequence_idx)
+        if sequence_index in output:
+            raise RuntimeError(
+                f"Duplicate Qwen batch sequence index {sequence_index}"
+            )
+        mx.eval(result.audio)
+        audio = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+        if not audio.size or not np.isfinite(audio).all():
+            raise RuntimeError(
+                f"Qwen batch sequence {sequence_index} returned invalid audio"
+            )
+        output[sequence_index] = (
+            audio,
+            int(result.sample_rate),
+            int(result.token_count),
+        )
+    if sorted(output) != list(range(expected_count)):
+        raise RuntimeError(
+            "Qwen batch output indexes do not match request: "
+            f"{sorted(output)} vs {list(range(expected_count))}"
+        )
+    return output
 
 
 def main() -> None:
@@ -516,6 +978,15 @@ def main() -> None:
     report_path = Path(args.report).resolve()
     jobs_manifest = json.loads(jobs_path.read_text(encoding="utf-8"))
     jobs = validate_jobs(jobs_manifest)
+    synthesis_mode = SERIAL_SYNTHESIS_MODE
+    synthesis_contract = SERIAL_SYNTHESIS_CONTRACT
+    batch_plan: dict[str, Any] | None = None
+    if args.route == "qwen":
+        (
+            synthesis_mode,
+            synthesis_contract,
+            batch_plan,
+        ) = validate_qwen_synthesis_manifest(jobs_manifest, jobs)
     kokoro_voice_id = (
         str(jobs_manifest.get("kokoro_voice_id") or "").strip()
         if args.route == "kokoro"
@@ -595,103 +1066,558 @@ def main() -> None:
         local_files_only=args.local_files_only,
     )
     load_seconds = time.perf_counter() - load_started
-    results: list[dict[str, Any]] = []
-    for job in jobs:
-        started = time.perf_counter()
-        identity: dict[str, Any] | None = None
-        identity_sha256: str | None = None
+    results_by_id: dict[str, dict[str, Any]] = {}
+    cohort_executions: list[dict[str, Any]] = []
+
+    def output_spec(
+        job: dict[str, Any],
+        identity: dict[str, Any],
+    ) -> tuple[str, Path, Path]:
+        identity_sha256 = canonical_sha256(identity)
+        safe_unit_id = re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "-",
+            job["unit_id"],
+        ).strip("-")
+        if not safe_unit_id:
+            safe_unit_id = f"unit-{sha256_text(job['unit_id'])[:12]}"
+        stem = f"{safe_unit_id[:96]}-{identity_sha256}"
+        return (
+            identity_sha256,
+            output_dir / f"{stem}.wav",
+            output_dir / f"{stem}.json",
+        )
+
+    def exact_cached_row(
+        output_path: Path,
+        sidecar_path: Path,
+        identity_sha256: str,
+        *,
+        require_token_evidence: bool,
+    ) -> dict[str, Any] | None:
+        if not args.resume or not output_path.is_file() or not sidecar_path.is_file():
+            return None
         try:
-            identity = synthesis_identity(
-                args.route,
-                pin,
-                job,
-                reference_audio,
-                reference_text,
-                kokoro_voice_id,
-                qwen_reference_contract,
+            previous = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        generated_tokens = int(previous.get("generated_token_count") or 0)
+        token_limit = int(previous.get("effective_token_limit") or 0)
+        if (
+            previous.get("synthesis_identity_sha256") != identity_sha256
+            or previous.get("output_sha256") != sha256_file(output_path)
+            or (
+                require_token_evidence
+                and (
+                    previous.get("token_limit_reached") is not False
+                    or token_limit <= 0
+                    or generated_tokens >= token_limit
+                )
             )
-            identity_sha256 = canonical_sha256(identity)
-            safe_unit_id = re.sub(
-                r"[^A-Za-z0-9._-]+",
-                "-",
-                job["unit_id"],
-            ).strip("-")
-            if not safe_unit_id:
-                safe_unit_id = f"unit-{sha256_text(job['unit_id'])[:12]}"
-            stem = f"{safe_unit_id[:96]}-{identity_sha256}"
-            output_path = output_dir / f"{stem}.wav"
-            sidecar_path = output_dir / f"{stem}.json"
-            if args.resume and output_path.is_file() and sidecar_path.is_file():
-                try:
-                    previous = json.loads(
-                        sidecar_path.read_text(encoding="utf-8")
+        ):
+            return None
+        return {**previous, "status": "reused_exact_hash"}
+
+    def failed_row(
+        job: dict[str, Any],
+        identity: dict[str, Any] | None,
+        identity_sha256: str | None,
+        started: float,
+        error: Exception,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return {
+            "unit_id": job["unit_id"],
+            "provider": pin["provider"],
+            "model_id": pin["model_id"],
+            "voice_id": (
+                kokoro_voice_id
+                if args.route == "kokoro"
+                else qwen_reference_contract["voice_id"]
+            ),
+            "status": "failed",
+            "attempt": int(job["attempt"]),
+            "seed": int(
+                identity.get("seed", job["seed"])
+                if identity
+                else job["seed"]
+            ),
+            "per_unit_serial_seed": int(job["seed"]),
+            "spoken_text_sha256": job["spoken_text_sha256"],
+            "synthesis_identity": identity,
+            "synthesis_identity_sha256": identity_sha256,
+            "generation_time_sec": round(
+                time.perf_counter() - started,
+                6,
+            ),
+            "error_type": type(error).__name__,
+            "error": str(error),
+            **extra,
+        }
+
+    if args.route == "qwen" and synthesis_mode == BATCH4_SYNTHESIS_MODE:
+        if not hasattr(model, "batch_generate"):
+            raise RuntimeError("Pinned Qwen runtime has no batch_generate API")
+        if not model.supports_tts_batch(
+            ref_audio=str(reference_audio),
+            ref_text=reference_text,
+            speed=1.0,
+            pitch=1.0,
+            stream=False,
+        ):
+            raise RuntimeError("Pinned Qwen runtime rejects fixed-batch Liam ICL")
+        if model.supports_tts_continuous_batch(
+            ref_audio=str(reference_audio),
+            ref_text=reference_text,
+        ):
+            raise RuntimeError(
+                "Production contract requires continuous ICL batching to remain disabled"
+            )
+        reference_array = load_audio(
+            str(reference_audio),
+            sample_rate=int(model.sample_rate),
+        )
+        mx.eval(reference_array)
+        jobs_by_id = {str(job["unit_id"]): job for job in jobs}
+        for cohort in batch_plan["cohorts"]:
+            cohort_started = time.perf_counter()
+            cohort_jobs = [
+                jobs_by_id[str(member["unit_id"])]
+                for member in cohort["members"]
+            ]
+            specs: list[
+                tuple[
+                    dict[str, Any],
+                    dict[str, Any],
+                    str,
+                    Path,
+                    Path,
+                    dict[str, Any] | None,
+                ]
+            ] = []
+            for job in cohort_jobs:
+                identity = synthesis_identity(
+                    args.route,
+                    pin,
+                    job,
+                    reference_audio,
+                    reference_text,
+                    kokoro_voice_id,
+                    qwen_reference_contract,
+                    jobs_manifest,
+                    synthesis_mode,
+                    synthesis_contract,
+                    batch_plan,
+                )
+                identity_sha256, output_path, sidecar_path = output_spec(
+                    job,
+                    identity,
+                )
+                cached = exact_cached_row(
+                    output_path,
+                    sidecar_path,
+                    identity_sha256,
+                    require_token_evidence=True,
+                )
+                specs.append(
+                    (
+                        job,
+                        identity,
+                        identity_sha256,
+                        output_path,
+                        sidecar_path,
+                        cached,
                     )
-                except (json.JSONDecodeError, OSError):
-                    previous = None
-                if (
-                    previous
-                    and previous.get("synthesis_identity_sha256")
-                    == identity_sha256
-                    and previous.get("output_sha256")
-                    == sha256_file(output_path)
-                ):
-                    results.append(
-                        {**previous, "status": "reused_exact_hash"}
+                )
+            if all(spec[-1] is not None for spec in specs):
+                for job, _identity, _identity_hash, _output, _sidecar, cached in specs:
+                    results_by_id[str(job["unit_id"])] = cached
+                cohort_executions.append(
+                    {
+                        "cohort_id": cohort["cohort_id"],
+                        "cohort_sha256": cohort["cohort_sha256"],
+                        "cohort_index": cohort["cohort_index"],
+                        "nominal_batch_size": 4,
+                        "effective_batch_size": len(cohort_jobs),
+                        "batch_seed": cohort["batch_seed"],
+                        "unit_ids": [
+                            str(job["unit_id"]) for job in cohort_jobs
+                        ],
+                        "status": "reused_exact_cohort_hashes",
+                        "model_call_performed": False,
+                        "wall_sec": round(
+                            time.perf_counter() - cohort_started,
+                            6,
+                        ),
+                    }
+                )
+                continue
+            try:
+                mx.random.seed(int(cohort["batch_seed"]))
+                generated = list(
+                    model.batch_generate(
+                        texts=[job["spoken_text"] for job in cohort_jobs],
+                        voices=[None] * len(cohort_jobs),
+                        instructs=[None] * len(cohort_jobs),
+                        ref_audio=reference_array,
+                        ref_text=reference_text,
+                        temperature=float(
+                            qwen_reference_contract[
+                                "generation_parameters"
+                            ]["temperature"]
+                        ),
+                        top_p=float(
+                            qwen_reference_contract[
+                                "generation_parameters"
+                            ]["top_p"]
+                        ),
+                        top_k=int(
+                            qwen_reference_contract[
+                                "generation_parameters"
+                            ]["top_k"]
+                        ),
+                        repetition_penalty=float(
+                            qwen_reference_contract[
+                                "generation_parameters"
+                            ]["repetition_penalty"]
+                        ),
+                        max_tokens=int(
+                            qwen_reference_contract[
+                                "generation_parameters"
+                            ]["max_tokens"]
+                        ),
+                        verbose=False,
+                        stream=False,
                     )
+                )
+                collected = collect_batch_audio(
+                    generated,
+                    len(cohort_jobs),
+                )
+                staged: list[
+                    tuple[
+                        dict[str, Any],
+                        dict[str, Any],
+                        str,
+                        Path,
+                        Path,
+                        dict[str, Any] | None,
+                        np.ndarray,
+                        int,
+                        int,
+                        int,
+                        bool,
+                        Path | None,
+                        str | None,
+                    ]
+                ] = []
+                nondeterministic = False
+                for position, spec in enumerate(specs):
+                    (
+                        job,
+                        identity,
+                        identity_sha256,
+                        output_path,
+                        sidecar_path,
+                        cached,
+                    ) = spec
+                    audio, sample_rate, generated_tokens = collected[position]
+                    if sample_rate != 24000:
+                        raise RuntimeError(
+                            f"Refusing {job['unit_id']}: "
+                            f"expected native 24000 Hz, got {sample_rate}"
+                        )
+                    tokenizer_tokens = len(
+                        model.tokenizer.encode(job["spoken_text"])
+                    )
+                    effective_token_limit = min(
+                        int(
+                            qwen_reference_contract[
+                                "generation_parameters"
+                            ]["max_tokens"]
+                        ),
+                        max(75, tokenizer_tokens * 6),
+                    )
+                    token_limit_reached = (
+                        generated_tokens >= effective_token_limit
+                    )
+                    temporary_wav: Path | None = None
+                    temporary_sha256: str | None = None
+                    if not token_limit_reached:
+                        temporary_wav = output_path.with_name(
+                            f".{output_path.stem}.tmp-{os.getpid()}-"
+                            f"{cohort['cohort_index']}-{position}.wav"
+                        )
+                        audio_write(
+                            str(temporary_wav),
+                            audio,
+                            sample_rate,
+                            format="wav",
+                        )
+                        temporary_sha256 = sha256_file(temporary_wav)
+                        if (
+                            cached
+                            and temporary_sha256
+                            != cached.get("output_sha256")
+                        ):
+                            nondeterministic = True
+                    staged.append(
+                        (
+                            job,
+                            identity,
+                            identity_sha256,
+                            output_path,
+                            sidecar_path,
+                            cached,
+                            audio,
+                            sample_rate,
+                            generated_tokens,
+                            effective_token_limit,
+                            token_limit_reached,
+                            temporary_wav,
+                            temporary_sha256,
+                        )
+                    )
+                if nondeterministic:
+                    for staged_row in staged:
+                        temporary_wav = staged_row[-2]
+                        if temporary_wav and temporary_wav.exists():
+                            temporary_wav.unlink()
+                    raise RuntimeError(
+                        "Qwen batch rerun differed from an exact cohort-bound "
+                        "cached waveform; refusing to overwrite accepted cache"
+                    )
+                for staged_row in staged:
+                    (
+                        job,
+                        identity,
+                        identity_sha256,
+                        output_path,
+                        sidecar_path,
+                        cached,
+                        audio,
+                        sample_rate,
+                        generated_tokens,
+                        effective_token_limit,
+                        token_limit_reached,
+                        temporary_wav,
+                        temporary_sha256,
+                    ) = staged_row
+                    if token_limit_reached:
+                        results_by_id[str(job["unit_id"])] = failed_row(
+                            job,
+                            identity,
+                            identity_sha256,
+                            cohort_started,
+                            RuntimeError(
+                                "Qwen batch sequence reached its effective "
+                                "generation token limit"
+                            ),
+                            error_code="tts_batch_token_limit_reached",
+                            generated_token_count=generated_tokens,
+                            effective_token_limit=effective_token_limit,
+                            token_limit_reached=True,
+                        )
+                        continue
+                    if cached:
+                        if temporary_wav and temporary_wav.exists():
+                            temporary_wav.unlink()
+                        results_by_id[str(job["unit_id"])] = cached
+                        continue
+                    os.replace(temporary_wav, output_path)
+                    duration_sec = audio.size / sample_rate
+                    elapsed = time.perf_counter() - cohort_started
+                    row = {
+                        "unit_id": job["unit_id"],
+                        "provider": pin["provider"],
+                        "model_id": pin["model_id"],
+                        "voice_id": qwen_reference_contract["voice_id"],
+                        "status": "generated",
+                        "attempt": int(job["attempt"]),
+                        "seed": int(cohort["batch_seed"]),
+                        "per_unit_serial_seed": int(job["seed"]),
+                        "spoken_text": job["spoken_text"],
+                        "spoken_text_sha256": job["spoken_text_sha256"],
+                        "output_path": str(output_path),
+                        "output_sha256": temporary_sha256,
+                        "sample_rate_hz": sample_rate,
+                        "sample_count": int(audio.size),
+                        "duration_sec": round(duration_sec, 6),
+                        "generation_time_sec": round(elapsed, 6),
+                        "generation_rtf": round(
+                            elapsed / duration_sec,
+                            6,
+                        ),
+                        "result_chunk_count": 1,
+                        "generated_token_count": generated_tokens,
+                        "effective_token_limit": effective_token_limit,
+                        "token_limit_reached": False,
+                        "synthesis_mode": synthesis_mode,
+                        "batch_plan_sha256":
+                            jobs_manifest["batch_plan_sha256"],
+                        "cohort_id": cohort["cohort_id"],
+                        "cohort_sha256": cohort["cohort_sha256"],
+                        "synthesis_identity": identity,
+                        "synthesis_identity_sha256": identity_sha256,
+                        "sidecar_path": str(sidecar_path),
+                    }
+                    atomic_json(sidecar_path, row)
+                    results_by_id[str(job["unit_id"])] = row
+                cohort_executions.append(
+                    {
+                        "cohort_id": cohort["cohort_id"],
+                        "cohort_sha256": cohort["cohort_sha256"],
+                        "cohort_index": cohort["cohort_index"],
+                        "nominal_batch_size": 4,
+                        "effective_batch_size": len(cohort_jobs),
+                        "batch_seed": cohort["batch_seed"],
+                        "unit_ids": [
+                            str(job["unit_id"]) for job in cohort_jobs
+                        ],
+                        "status": (
+                            "completed_with_token_limit_failure"
+                            if any(row[10] for row in staged)
+                            else "generated"
+                        ),
+                        "model_call_performed": True,
+                        "wall_sec": round(
+                            time.perf_counter() - cohort_started,
+                            6,
+                        ),
+                    }
+                )
+            except Exception as error:
+                for spec in specs:
+                    (
+                        job,
+                        identity,
+                        identity_sha256,
+                        _output_path,
+                        _sidecar_path,
+                        _cached,
+                    ) = spec
+                    if str(job["unit_id"]) not in results_by_id:
+                        results_by_id[str(job["unit_id"])] = failed_row(
+                            job,
+                            identity,
+                            identity_sha256,
+                            cohort_started,
+                            error,
+                            error_code=(
+                                "tts_batch_cache_nondeterminism"
+                                if "differed from an exact" in str(error)
+                                else "tts_batch_synthesis_failed"
+                            ),
+                        )
+                cohort_executions.append(
+                    {
+                        "cohort_id": cohort["cohort_id"],
+                        "cohort_sha256": cohort["cohort_sha256"],
+                        "cohort_index": cohort["cohort_index"],
+                        "nominal_batch_size": 4,
+                        "effective_batch_size": len(cohort_jobs),
+                        "batch_seed": cohort["batch_seed"],
+                        "unit_ids": [
+                            str(job["unit_id"]) for job in cohort_jobs
+                        ],
+                        "status": "failed",
+                        "model_call_performed": True,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                        "wall_sec": round(
+                            time.perf_counter() - cohort_started,
+                            6,
+                        ),
+                    }
+                )
+    else:
+        for job in jobs:
+            started = time.perf_counter()
+            identity: dict[str, Any] | None = None
+            identity_sha256: str | None = None
+            generated_token_count: int | None = None
+            effective_token_limit: int | None = None
+            try:
+                identity = synthesis_identity(
+                    args.route,
+                    pin,
+                    job,
+                    reference_audio,
+                    reference_text,
+                    kokoro_voice_id,
+                    qwen_reference_contract,
+                    jobs_manifest,
+                    synthesis_mode,
+                    synthesis_contract,
+                    batch_plan,
+                )
+                (
+                    identity_sha256,
+                    output_path,
+                    sidecar_path,
+                ) = output_spec(job, identity)
+                require_token_evidence = (
+                    synthesis_mode == EXACT_UNIT_RECOVERY_MODE
+                )
+                cached = exact_cached_row(
+                    output_path,
+                    sidecar_path,
+                    identity_sha256,
+                    require_token_evidence=require_token_evidence,
+                )
+                if cached:
+                    results_by_id[str(job["unit_id"])] = cached
                     continue
 
-            audio, sample_rate, chunks = generate_audio(
-                model,
-                args.route,
-                job,
-                reference_audio,
-                reference_text,
-                kokoro_voice_id,
-                qwen_reference_contract,
-            )
-            if sample_rate != 24000:
-                raise RuntimeError(
-                    f"Refusing {job['unit_id']}: "
-                    f"expected native 24000 Hz, got {sample_rate}"
+                (
+                    audio,
+                    sample_rate,
+                    chunks,
+                    generated_token_count,
+                ) = generate_audio(
+                    model,
+                    args.route,
+                    job,
+                    reference_audio,
+                    reference_text,
+                    kokoro_voice_id,
+                    qwen_reference_contract,
                 )
-            temporary_wav = output_path.with_name(
-                f".{output_path.stem}.tmp-{os.getpid()}.wav"
-            )
-            audio_write(str(temporary_wav), audio, sample_rate, format="wav")
-            os.replace(temporary_wav, output_path)
-            elapsed = time.perf_counter() - started
-            duration_sec = audio.size / sample_rate
-            row = {
-                "unit_id": job["unit_id"],
-                "provider": pin["provider"],
-                "model_id": pin["model_id"],
-                "voice_id": (
-                    kokoro_voice_id
-                    if args.route == "kokoro"
-                    else qwen_reference_contract["voice_id"]
-                ),
-                "status": "generated",
-                "attempt": int(job["attempt"]),
-                "seed": int(job["seed"]),
-                "spoken_text": job["spoken_text"],
-                "spoken_text_sha256": job["spoken_text_sha256"],
-                "output_path": str(output_path),
-                "output_sha256": sha256_file(output_path),
-                "sample_rate_hz": sample_rate,
-                "sample_count": int(audio.size),
-                "duration_sec": round(duration_sec, 6),
-                "generation_time_sec": round(elapsed, 6),
-                "generation_rtf": round(elapsed / duration_sec, 6),
-                "result_chunk_count": len(chunks),
-                "synthesis_identity": identity,
-                "synthesis_identity_sha256": identity_sha256,
-                "sidecar_path": str(sidecar_path),
-            }
-            atomic_json(sidecar_path, row)
-            results.append(row)
-        except Exception as error:  # Unit-scoped synthesis failures are retryable.
-            results.append(
-                {
+                if sample_rate != 24000:
+                    raise RuntimeError(
+                        f"Refusing {job['unit_id']}: "
+                        f"expected native 24000 Hz, got {sample_rate}"
+                    )
+                effective_token_limit = (
+                    int(
+                        qwen_reference_contract[
+                            "generation_parameters"
+                        ]["max_tokens"]
+                    )
+                    if args.route == "qwen"
+                    else 0
+                )
+                token_limit_reached = bool(
+                    args.route == "qwen"
+                    and generated_token_count >= effective_token_limit
+                )
+                if token_limit_reached:
+                    raise RuntimeError(
+                        "Qwen serial sequence reached its generation token limit"
+                    )
+                temporary_wav = output_path.with_name(
+                    f".{output_path.stem}.tmp-{os.getpid()}.wav"
+                )
+                audio_write(
+                    str(temporary_wav),
+                    audio,
+                    sample_rate,
+                    format="wav",
+                )
+                os.replace(temporary_wav, output_path)
+                elapsed = time.perf_counter() - started
+                duration_sec = audio.size / sample_rate
+                row = {
                     "unit_id": job["unit_id"],
                     "provider": pin["provider"],
                     "model_id": pin["model_id"],
@@ -700,27 +1626,83 @@ def main() -> None:
                         if args.route == "kokoro"
                         else qwen_reference_contract["voice_id"]
                     ),
-                    "status": "failed",
+                    "status": "generated",
                     "attempt": int(job["attempt"]),
                     "seed": int(job["seed"]),
+                    "per_unit_serial_seed": int(job["seed"]),
+                    "spoken_text": job["spoken_text"],
                     "spoken_text_sha256": job["spoken_text_sha256"],
+                    "output_path": str(output_path),
+                    "output_sha256": sha256_file(output_path),
+                    "sample_rate_hz": sample_rate,
+                    "sample_count": int(audio.size),
+                    "duration_sec": round(duration_sec, 6),
+                    "generation_time_sec": round(elapsed, 6),
+                    "generation_rtf": round(elapsed / duration_sec, 6),
+                    "result_chunk_count": len(chunks),
+                    "generated_token_count": generated_token_count,
+                    "effective_token_limit": effective_token_limit,
+                    "token_limit_reached": False,
+                    "synthesis_mode": synthesis_mode,
+                    "batch_plan_sha256":
+                        jobs_manifest.get("batch_plan_sha256"),
+                    "recovery_provenance":
+                        job.get("recovery_provenance"),
                     "synthesis_identity": identity,
                     "synthesis_identity_sha256": identity_sha256,
-                    "generation_time_sec": round(
-                        time.perf_counter() - started,
-                        6,
-                    ),
-                    "error_type": type(error).__name__,
-                    "error": str(error),
+                    "sidecar_path": str(sidecar_path),
                 }
-            )
+                atomic_json(sidecar_path, row)
+                results_by_id[str(job["unit_id"])] = row
+            except Exception as error:
+                results_by_id[str(job["unit_id"])] = failed_row(
+                    job,
+                    identity,
+                    identity_sha256,
+                    started,
+                    error,
+                    error_code=(
+                        "tts_serial_token_limit_reached"
+                        if "token limit" in str(error)
+                        else "tts_serial_synthesis_failed"
+                    ),
+                    generated_token_count=(
+                        generated_token_count
+                    ),
+                    effective_token_limit=(
+                        effective_token_limit
+                    ),
+                    token_limit_reached="token limit" in str(error),
+                )
+
+    results = [
+        results_by_id[str(job["unit_id"])]
+        for job in jobs
+    ]
 
     failure_count = sum(row["status"] == "failed" for row in results)
     report_status = "passed" if failure_count == 0 else "completed_with_job_failures"
     report = {
-        "schema": "goldflow_local_tts_production_run_v1",
+        "schema": (
+            "goldflow_local_tts_production_run_v2"
+            if jobs_manifest.get("schema")
+            == "goldflow_narration_tts_jobs_v2"
+            else "goldflow_local_tts_production_run_v1"
+        ),
         "status": report_status,
         "route": args.route,
+        "synthesis_contract": (
+            synthesis_contract if args.route == "qwen" else None
+        ),
+        "synthesis_mode": (
+            synthesis_mode if args.route == "qwen" else SERIAL_SYNTHESIS_MODE
+        ),
+        "batch_plan_sha256": jobs_manifest.get("batch_plan_sha256"),
+        "cohort_executions": cohort_executions,
+        "results_restored_to_original_order": True,
+        "original_order_unit_ids": [
+            str(job["unit_id"]) for job in jobs
+        ],
         "provider": pin["provider"],
         "model_id": pin["model_id"],
         "model_source": pin["source"],
@@ -821,7 +1803,23 @@ def main() -> None:
         "model_load_time_sec": round(load_seconds, 6),
         "effective_concurrency": 1,
         "model_load_count": 1,
-        "model_load_policy": "once_per_serial_invocation",
+        "model_load_policy": (
+            "once_per_resident_fixed_batch_invocation"
+            if synthesis_mode == BATCH4_SYNTHESIS_MODE
+            else "once_per_serial_invocation"
+        ),
+        "resident_model_count": 1,
+        "model_instance_concurrency": 1,
+        "continuous_batching": False,
+        "reference_audio_preloaded_once": (
+            synthesis_mode == BATCH4_SYNTHESIS_MODE
+        ),
+        "token_limit_acceptance_allowed": False,
+        "accepted_token_limit_result_count": sum(
+            row.get("status") != "failed"
+            and row.get("token_limit_reached") is True
+            for row in results
+        ),
         "delivery_control": (
             "kokoro_voice_speed_and_authored_prosody"
             if args.route == "kokoro"

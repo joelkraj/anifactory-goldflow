@@ -31,12 +31,18 @@ import {
   narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
   narrationTtsPolicyForIdentity,
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_RETRY_CONTRACT,
   QWEN_LIAM_STITCH_CONTRACT,
   QWEN_LIAM_UNIT_CONTRACT,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
+import {
+  QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
+  qwenBatchBindingByUnit,
+  validateQwenLiamBatchPlan,
+} from "./lib/qwen-liam-batch-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -322,6 +328,75 @@ function runIdentityTtsComplete(runIdentity = {}) {
       if (JSON.stringify(runIdentity.provider_locks?.tts_confirmed_defect_types)
         !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT.confirmed_defect_types)) {
         mismatches.push("provider_locks.tts_confirmed_defect_types");
+      }
+      const batch4Required =
+        runIdentity.stage_registry_version === PIPELINE_STAGE_REGISTRY_VERSION;
+      if (batch4Required) {
+        const exactBatchLocks = {
+          tts_synthesis_contract_id:
+            QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id,
+          tts_synthesis_mode: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode,
+          tts_synthesis_api: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.api,
+          tts_model_instance_count:
+            QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.resident_model_count,
+          tts_model_concurrency:
+            QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.model_concurrency,
+          tts_nominal_batch_size:
+            QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.nominal_batch_size,
+          tts_batch_scheduler_version:
+            QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.scheduler_version,
+          tts_token_limit_acceptance_allowed: false,
+          tts_objective_recovery_mode:
+            QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.objective_recovery_mode,
+        };
+        for (const [field, expected] of Object.entries(exactBatchLocks)) {
+          if (runIdentity.provider_locks?.[field] !== expected) {
+            mismatches.push(`provider_locks.${field}`);
+          }
+        }
+        if (JSON.stringify(policy.synthesis_contract)
+          !== JSON.stringify(QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT)) {
+          mismatches.push("voice_provider_options.synthesis_contract");
+        }
+        if (runIdentity.production_gates
+          ?.deterministic_length_matched_tts_batching_required !== true) {
+          mismatches.push(
+            "production_gates.deterministic_length_matched_tts_batching_required",
+          );
+        }
+        if (runIdentity.production_gates?.tts_single_resident_model_required
+          !== true) {
+          mismatches.push(
+            "production_gates.tts_single_resident_model_required",
+          );
+        }
+        if (runIdentity.production_gates?.tts_token_limit_outputs_forbidden
+          !== true) {
+          mismatches.push(
+            "production_gates.tts_token_limit_outputs_forbidden",
+          );
+        }
+        if (runIdentity.production_gates
+          ?.tts_objective_recovery_exact_unit_only !== true) {
+          mismatches.push(
+            "production_gates.tts_objective_recovery_exact_unit_only",
+          );
+        }
+        if (Number(runIdentity.production_profile_config?.media
+          ?.qwen_tts_batch_size)
+          !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.nominal_batch_size) {
+          mismatches.push(
+            "production_profile_config.media.qwen_tts_batch_size",
+          );
+        }
+        if (Number(runIdentity.production_profile_config?.media
+          ?.qwen_tts_concurrency) !== 1
+          || Number(runIdentity.production_profile_config?.media
+            ?.local_qwen_tts_concurrency) !== 1) {
+          mismatches.push(
+            "production_profile_config.media.qwen_tts_concurrency",
+          );
+        }
       }
       if (runIdentity.production_gates?.tts_speed_control_supported !== false) {
         mismatches.push("production_gates.tts_speed_control_supported");
@@ -1597,6 +1672,102 @@ async function synthesizedNarrationArtifactsComplete({
   const stitchSegments = Array.isArray(stitchReport?.segments) ? stitchReport.segments : [];
   const stitchUnitIds = stitchSegments.map((row) => String(row?.unit_id ?? ""));
   if (!exactOrderedIds(plannedIds, stitchUnitIds)) add("stitch segment unit IDs are missing, reordered, duplicated, or unexpected");
+  let expectedBatchBindings = null;
+  let synthesisRuns = [];
+  if (policy.synthesis_contract?.mode
+    === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
+    const batchValidation = validateQwenLiamBatchPlan(
+      plan?.qwen_liam_batch_plan,
+      plannedUnits.map((unit, index) => ({
+        ...unit,
+        order_index: index,
+      })),
+      policy.synthesis_contract,
+    );
+    if (batchValidation.status !== "passed") {
+      add(`narration batch plan is stale: ${batchValidation.findings
+        .map((finding) => finding.code)
+        .join(", ")}`);
+    } else {
+      expectedBatchBindings = qwenBatchBindingByUnit(batchValidation.expected);
+    }
+    if (JSON.stringify(ttsReport?.synthesis_contract)
+      !== JSON.stringify(QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT)) {
+      add("TTS report deterministic batch-four synthesis contract is missing or stale");
+    }
+    if (ttsReport?.batch_plan_sha256
+      !== plan?.qwen_liam_batch_plan?.batch_plan_sha256) {
+      add("TTS report batch plan hash differs from the narration plan");
+    }
+    synthesisRuns = Array.isArray(ttsReport?.synthesis_runs)
+      ? ttsReport.synthesis_runs
+      : [];
+    const firstTakeRun = synthesisRuns.find(
+      (run) => Number(run?.attempt) === 1
+        && run?.synthesis_mode
+          === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode,
+    );
+    if (!firstTakeRun) {
+      add("TTS report lacks its batch-four first-take runner provenance");
+    } else {
+      if (firstTakeRun.batch_plan_sha256
+        !== plan?.qwen_liam_batch_plan?.batch_plan_sha256
+        || Number(firstTakeRun.model_load_count) !== 1
+        || Number(firstTakeRun.resident_model_count) !== 1
+        || Number(firstTakeRun.model_instance_concurrency) !== 1
+        || firstTakeRun.results_restored_to_original_order !== true) {
+        add("batch-four first-take runner provenance is stale");
+      }
+      const expectedCohorts = plan?.qwen_liam_batch_plan?.cohorts ?? [];
+      const actualCohorts = firstTakeRun.cohort_executions ?? [];
+      if (expectedCohorts.length !== actualCohorts.length
+        || expectedCohorts.some((cohort, index) => {
+          const actual = actualCohorts[index];
+          return actual?.cohort_id !== cohort.cohort_id
+            || actual?.cohort_sha256 !== cohort.cohort_sha256
+            || Number(actual?.nominal_batch_size)
+              !== Number(cohort.nominal_batch_size)
+            || Number(actual?.effective_batch_size)
+              !== Number(cohort.effective_batch_size)
+            || JSON.stringify(actual?.unit_ids ?? [])
+              !== JSON.stringify(
+                cohort.members.map((member) => member.unit_id),
+              );
+        })) {
+        add("batch-four cohort execution report differs from the voice plan");
+      }
+      const firstTakeRunnerReport = firstTakeRun.report_path
+        ? await readJson(firstTakeRun.report_path, null)
+        : null;
+      if (!firstTakeRun.report_path || !firstTakeRun.report_sha256
+        || await fileSha256(firstTakeRun.report_path)
+          !== firstTakeRun.report_sha256) {
+        add("batch-four first-take runner report path/hash is stale");
+      } else if (!firstTakeRunnerReport
+        || firstTakeRunnerReport.synthesis_mode
+          !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode
+        || JSON.stringify(firstTakeRunnerReport.synthesis_contract)
+          !== JSON.stringify(QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT)
+        || firstTakeRunnerReport.batch_plan_sha256
+          !== plan?.qwen_liam_batch_plan?.batch_plan_sha256
+        || Number(firstTakeRunnerReport.model_load_count) !== 1
+        || Number(firstTakeRunnerReport.resident_model_count) !== 1
+        || Number(firstTakeRunnerReport.model_instance_concurrency) !== 1
+        || firstTakeRunnerReport.continuous_batching !== false
+        || firstTakeRunnerReport.reference_audio_preloaded_once !== true
+        || firstTakeRunnerReport.token_limit_acceptance_allowed !== false
+        || Number(firstTakeRunnerReport.accepted_token_limit_result_count) !== 0
+        || firstTakeRunnerReport.results_restored_to_original_order !== true
+        || !exactOrderedIds(
+          plan?.qwen_liam_batch_plan?.original_order_unit_ids,
+          firstTakeRunnerReport.original_order_unit_ids,
+        )
+        || JSON.stringify(firstTakeRunnerReport.cohort_executions ?? [])
+          !== JSON.stringify(firstTakeRun.cohort_executions ?? [])) {
+        add("batch-four first-take runner report content is stale");
+      }
+    }
+  }
   for (const finding of narrationArtifactVoiceIdentityFindings({
     ttsReport,
     stitchReport,
@@ -1636,6 +1807,114 @@ async function synthesizedNarrationArtifactsComplete({
     }
     if (selectedTextHash !== planned.spoken_text_sha256) add(`unit ${planned.unit_id} unit-QA spoken text hash is stale`);
     if (segmentTextHash !== planned.spoken_text_sha256) add(`unit ${planned.unit_id} stitch spoken text hash is stale`);
+    if (expectedBatchBindings) {
+      const synthesisIdentityHashes = [
+        result.synthesis_identity_sha256,
+        selected.synthesis_identity_sha256,
+        segment.synthesis_identity_sha256,
+      ];
+      if (synthesisIdentityHashes.some((value) => !value)
+        || new Set(synthesisIdentityHashes).size !== 1) {
+        add(`unit ${planned.unit_id} synthesis identity differs across artifacts`);
+      }
+    }
+    const generatedTokenCount = Number(result.generated_token_count);
+    const effectiveTokenLimit = Number(result.effective_token_limit);
+    const unsafeTokenEvidence = expectedBatchBindings
+      ? result.token_limit_reached !== false
+        || !Number.isFinite(generatedTokenCount)
+        || generatedTokenCount < 0
+        || !Number.isFinite(effectiveTokenLimit)
+        || effectiveTokenLimit <= 0
+        || generatedTokenCount >= effectiveTokenLimit
+      : result.token_limit_reached === true
+        || result.synthesis_identity?.token_limit_reached === true
+        || (Number.isFinite(generatedTokenCount)
+          && Number.isFinite(effectiveTokenLimit)
+          && effectiveTokenLimit > 0
+          && generatedTokenCount >= effectiveTokenLimit);
+    if (unsafeTokenEvidence) {
+      add(`unit ${planned.unit_id} reached or lacks safe generation-token-limit evidence and may not be accepted`);
+    }
+    if (expectedBatchBindings) {
+      const expectedBinding = expectedBatchBindings.get(String(planned.unit_id));
+      const synthesisIdentity = result.synthesis_identity ?? {};
+      const mode = result.synthesis_mode ?? synthesisIdentity.synthesis_mode;
+      if (mode === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
+        const actualBinding = {
+          synthesis_contract_id: synthesisIdentity.synthesis_contract_id,
+          synthesis_mode: synthesisIdentity.synthesis_mode,
+          batch_plan_sha256: synthesisIdentity.batch_plan_sha256,
+          cohort_id: synthesisIdentity.cohort_id,
+          cohort_index: synthesisIdentity.cohort_index,
+          cohort_sha256: synthesisIdentity.cohort_sha256,
+          cohort_position: synthesisIdentity.cohort_position,
+          nominal_batch_size: synthesisIdentity.nominal_batch_size,
+          effective_batch_size: synthesisIdentity.effective_batch_size,
+          batch_seed: synthesisIdentity.batch_seed,
+        };
+        if (JSON.stringify(actualBinding) !== JSON.stringify(expectedBinding)) {
+          add(`unit ${planned.unit_id} selected batch cohort identity is stale`);
+        }
+      } else if (mode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE) {
+        const recovery = synthesisIdentity.recovery_provenance
+          ?? result.recovery_provenance;
+        if (!recovery
+          || recovery.batch_plan_sha256
+            !== plan?.qwen_liam_batch_plan?.batch_plan_sha256
+          || recovery.origin_cohort_sha256 !== expectedBinding?.cohort_sha256
+          || !recovery.origin_synthesis_identity_sha256
+          || !recovery.trigger_evidence_sha256
+          || !Array.isArray(recovery.trigger_codes)
+          || !recovery.trigger_codes.length) {
+          add(`unit ${planned.unit_id} exact-unit recovery provenance is missing or stale`);
+        }
+        const recoveryRunCandidates = synthesisRuns.filter(
+          (run) => run?.synthesis_mode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+            && Number(run?.attempt) === Number(result.attempt),
+        );
+        let matchingRecoveryRunner = false;
+        for (const run of recoveryRunCandidates) {
+          if (!run?.report_path || !run?.report_sha256
+            || await fileSha256(run.report_path) !== run.report_sha256) {
+            continue;
+          }
+          const runnerReport = await readJson(run.report_path, null);
+          const runnerResult = (runnerReport?.results ?? []).find(
+            (row) => String(row?.unit_id) === String(planned.unit_id)
+              && row?.synthesis_identity_sha256
+                === result.synthesis_identity_sha256,
+          );
+          if (runnerReport?.synthesis_mode
+              === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+            && runnerReport?.batch_plan_sha256
+              === plan?.qwen_liam_batch_plan?.batch_plan_sha256
+            && Number(runnerReport?.model_load_count) === 1
+            && Number(runnerReport?.resident_model_count) === 1
+            && Number(runnerReport?.model_instance_concurrency) === 1
+            && runnerReport?.continuous_batching === false
+            && runnerReport?.token_limit_acceptance_allowed === false
+            && Number(runnerReport?.accepted_token_limit_result_count) === 0
+            && runnerReport?.results_restored_to_original_order === true
+            && runnerResult?.status !== "failed"
+            && runnerResult?.output_sha256 === result.audio_sha256
+            && runnerResult?.token_limit_reached === false
+            && Number.isFinite(Number(runnerResult?.generated_token_count))
+            && Number.isFinite(Number(runnerResult?.effective_token_limit))
+            && Number(runnerResult?.effective_token_limit) > 0
+            && Number(runnerResult?.generated_token_count)
+              < Number(runnerResult?.effective_token_limit)) {
+            matchingRecoveryRunner = true;
+            break;
+          }
+        }
+        if (!matchingRecoveryRunner) {
+          add(`unit ${planned.unit_id} exact-unit recovery runner provenance is missing or stale`);
+        }
+      } else {
+        add(`unit ${planned.unit_id} selected synthesis mode ${mode ?? "missing"} is not allowed by the batch-four contract`);
+      }
+    }
     const selectedQaStatus = result.selected_qa?.status ?? result.qa_status;
     const unitQaStatus = selected.qa?.status ?? selected.qa_status;
     const stitchQaStatus = segment.unit_qa?.status ?? segment.qa_status;
@@ -2440,6 +2719,35 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
         done: false,
         evidence: `${label} Qwen Liam unit contract mismatch${groupingMismatches.length ? `: ${groupingMismatches.join(", ")}` : ""}${invalidUnit ? `; invalid unit=${invalidUnit.unit_id ?? "unknown"} (must stay inside one voice segment, end at a sentence, and stay at or below 60 words)` : ""}`,
       };
+    }
+    if (policy.synthesis_contract?.mode
+      === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
+      const batchValidation = validateQwenLiamBatchPlan(
+        plan?.qwen_liam_batch_plan,
+        units,
+        policy.synthesis_contract,
+      );
+      if (batchValidation.status !== "passed") {
+        return {
+          done: false,
+          evidence: `${label} deterministic batch-four plan mismatch: ${batchValidation.findings
+            .map((finding) => finding.code)
+            .join(", ")}`,
+        };
+      }
+      const expectedBindings = qwenBatchBindingByUnit(
+        batchValidation.expected,
+      );
+      const invalidBindingUnit = units.find((unit) => (
+        JSON.stringify(unit?.synthesis_cohort ?? null)
+        !== JSON.stringify(expectedBindings.get(String(unit?.unit_id)) ?? null)
+      ));
+      if (invalidBindingUnit) {
+        return {
+          done: false,
+          evidence: `${label} unit ${invalidBindingUnit.unit_id ?? "unknown"} has a stale deterministic batch-four cohort binding`,
+        };
+      }
     }
   }
   const voiceIdentityFindings = narrationPlanVoiceIdentityFindings(plan, policy);

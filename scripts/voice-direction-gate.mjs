@@ -7,9 +7,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
 import {
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
+  QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
   QWEN_LOCAL_FALLBACK_LOCK,
 } from "./lib/narration-tts-policy.mjs";
+import {
+  buildQwenLiamBatchPlan,
+  qwenBatchBindingByUnit,
+} from "./lib/qwen-liam-batch-contract.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -2823,7 +2829,9 @@ function puckQwenFallbackIdentityControls() {
   };
 }
 
-function qwenLiamPrimaryIdentityControls() {
+function qwenLiamPrimaryIdentityControls(
+  synthesisContract = QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+) {
   return {
     model_id: QWEN_LIAM_PRIMARY_LOCK.model_id,
     model_revision: QWEN_LIAM_PRIMARY_LOCK.model_revision,
@@ -2857,6 +2865,7 @@ function qwenLiamPrimaryIdentityControls() {
     speed_control_supported: false,
     native_speed: null,
     continuous_requests: false,
+    synthesis_contract: synthesisContract,
     unit_contract: QWEN_LIAM_PRIMARY_LOCK.unit_contract,
     stitch_contract: QWEN_LIAM_PRIMARY_LOCK.stitch_contract,
   };
@@ -2908,6 +2917,20 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
   if (provider === "qwen_local" && fallbackProvider) {
     throw new Error("Qwen Liam production uses one provider and one voice; fallback must be null.");
   }
+  const synthesisContract = qwenLiamPrimary
+    ? voiceOptions.synthesis_contract ?? QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT
+    : null;
+  if (qwenLiamPrimary && ![
+    QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  ].some((contract) => (
+    JSON.stringify(contract) === JSON.stringify(synthesisContract)
+  ))) {
+    throw new Error(
+      "Qwen Liam synthesis contract is neither the legacy serial lock nor "
+      + "the approved deterministic batch-four lock.",
+    );
+  }
   return {
     primary_provider: provider,
     fallback_provider: fallbackProvider,
@@ -2936,7 +2959,9 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
       top_k: QWEN_LIAM_PRIMARY_LOCK.top_k,
       repetition_penalty: QWEN_LIAM_PRIMARY_LOCK.repetition_penalty,
       max_tokens: QWEN_LIAM_PRIMARY_LOCK.max_tokens,
-      ...(qwenLiamPrimary ? qwenLiamPrimaryIdentityControls() : {}),
+      ...(qwenLiamPrimary
+        ? qwenLiamPrimaryIdentityControls(synthesisContract)
+        : {}),
       ...(puckQwenFallback ? {
         delivery_control: "base_icl_reference_audio_only",
         instruct_supported: false,
@@ -3437,6 +3462,9 @@ function buildQwenGenerationPlan(
       fallback: ttsProvider === "qwen_local"
         ? null
         : { ...QWEN_LOCAL_FALLBACK_LOCK },
+      synthesis_contract: ttsProvider === "qwen_local"
+        ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT
+        : null,
     },
   }, {}, ttsProvider),
 ) {
@@ -3659,6 +3687,18 @@ function buildQwenGenerationPlan(
     unitRows,
     ["kokoro_local", "qwen_local"].includes(providerContext.primary_provider),
   );
+  const qwenBatchPlan = providerContext.primary_provider === "qwen_local"
+    ? buildQwenLiamBatchPlan(
+        unitRows,
+        providerContext.qwen3.synthesis_contract,
+      )
+    : null;
+  if (qwenBatchPlan) {
+    const bindingByUnit = qwenBatchBindingByUnit(qwenBatchPlan);
+    for (const unit of unitRows) {
+      unit.synthesis_cohort = bindingByUnit.get(String(unit.unit_id));
+    }
+  }
   return {
     schema: "goldflow_tts_generation_plan_v2",
     status: sentenceBoundaryIntegrity.status === "blocked" ? "blocked" : "passed",
@@ -3675,7 +3715,7 @@ function buildQwenGenerationPlan(
       narrator_identity_policy: "single_qwen_liam_reference_clone",
     }),
     generated_at: new Date().toISOString(),
-    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Qwen3-TTS Base uses one sentence-complete request at a time with the pinned Liam reference audio/transcript, no effective instruct channel, no continuous longform request, and no post-tempo processing.",
+    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Qwen3-TTS Base uses deterministic fixed batch-four requests for new runs (with an explicitly bound final partial cohort), restores source order before QA/stitch, and uses exact-unit serial recovery only for confirmed defects. Existing serial identities remain serial. Every request keeps the pinned Liam reference audio/transcript, no effective instruct channel, no continuous longform request, and no post-tempo processing.",
     provider_controls: {
       kokoro: providerContext.kokoro,
       qwen3: providerContext.qwen3,
@@ -3696,6 +3736,7 @@ function buildQwenGenerationPlan(
       continuous_requests_allowed: false,
       policy: "Group adjacent complete narration sentences only within one voice-direction segment. Voice-segment boundaries, system/UI, dialogue, performance, speaker changes, sound design, and explicit merge barriers remain atomic. A hard segment boundary may yield a unit below the 45-word target. Never split a sentence or exceed 60 spoken words.",
     },
+    qwen_liam_batch_plan: qwenBatchPlan,
     sentence_unit_boundary_integrity: sentenceBoundaryIntegrity,
     // Compatibility alias for historical validators; the report body is now
     // provider-neutral and applies to Qwen Liam too.
@@ -4525,7 +4566,11 @@ async function main() {
         `Qwen3-TTS 1.7B Base with the pinned ${QWEN_LIAM_PRIMARY_LOCK.voice_id} reference clone is the sole production narrator.`,
         "Spoken text must be clean: no bracketed emotion, breath, laugh, or stage tags.",
         "Use sentence-complete 45–60-word narration units with a hard 60-word maximum.",
-        "Send one request per unit. Never send a continuous longform request.",
+        providerContext.qwen3.synthesis_contract?.mode
+          === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode
+          ? "Synthesize deterministic length-matched cohorts of four through one resident model. The final cohort may contain one to three real units; never pad with dummy text. Restore original source order before QA and stitching."
+          : "This existing run is pinned to serial one-unit requests. Never send a continuous longform request.",
+        "Recover only the exact objectively truncated or operator-confirmed unit in explicit serial recovery mode; never change provider, model, reference voice, text, or generation settings.",
         "Qwen Base receives exact text plus the pinned Liam reference audio/transcript only; do not claim an effective instruct channel.",
         "Stitch every adjacent unit with 80 ms of silence.",
         "Do not apply post-tempo processing or any unsupported native-speed control.",

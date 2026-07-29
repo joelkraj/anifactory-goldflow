@@ -184,6 +184,7 @@ import {
 import {
   KOKORO_MODEL_LOCK,
   KOKORO_VOICE_LOCKS,
+  QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_RETRY_CONTRACT,
   QWEN_LIAM_STITCH_CONTRACT,
@@ -4184,6 +4185,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.deepEqual(identity.voice_provider_options.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
   assert.deepEqual(identity.voice_provider_options.stitch_contract, QWEN_LIAM_STITCH_CONTRACT);
   assert.deepEqual(identity.voice_provider_options.retry_contract, QWEN_LIAM_RETRY_CONTRACT);
+  assert.deepEqual(
+    identity.voice_provider_options.synthesis_contract,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  );
   assert.equal(identity.production_profile, "fast_premium_v1");
   assert.equal(identity.production_profile_config.target_wall_clock_minutes, 180);
   assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
@@ -4192,6 +4197,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 8);
   assert.equal(identity.production_profile_config.media.qwen_tts_concurrency, 1);
   assert.equal(identity.production_profile_config.media.local_qwen_tts_concurrency, 1);
+  assert.equal(identity.production_profile_config.media.qwen_tts_batch_size, 4);
   assert.equal(identity.voice_provider_options.pace_strategy, "qwen_reference_native_cadence_no_speed_no_post_tempo");
   assert.equal(identity.production_gates.post_tempo_normalization_default, false);
   assert.equal(identity.render_profile, "smooth_subpixel_ken_burns");
@@ -4229,6 +4235,30 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.provider_locks.tts_retry_policy, QWEN_LIAM_RETRY_CONTRACT.retry_policy);
   assert.equal(identity.provider_locks.tts_automatic_asr_retry, false);
   assert.deepEqual(identity.provider_locks.tts_confirmed_defect_types, ["skip", "truncation", "stutter"]);
+  assert.equal(
+    identity.provider_locks.tts_synthesis_contract_id,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id,
+  );
+  assert.equal(
+    identity.provider_locks.tts_synthesis_mode,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode,
+  );
+  assert.equal(identity.provider_locks.tts_synthesis_api, "Model.batch_generate");
+  assert.equal(identity.provider_locks.tts_model_instance_count, 1);
+  assert.equal(identity.provider_locks.tts_model_concurrency, 1);
+  assert.equal(identity.provider_locks.tts_nominal_batch_size, 4);
+  assert.equal(
+    identity.provider_locks.tts_batch_scheduler_version,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.scheduler_version,
+  );
+  assert.equal(
+    identity.provider_locks.tts_objective_recovery_mode,
+    "serial_exact_unit_recovery_v1",
+  );
+  assert.equal(
+    identity.provider_locks.tts_token_limit_acceptance_allowed,
+    false,
+  );
   assert.equal(identity.provider_locks.fallback_voice_identity, null);
   assert.equal(identity.provider_locks.fallback_reference_audio_sha256, null);
   assert.equal(identity.production_gates.single_narrator_identity_required, true);
@@ -4238,6 +4268,14 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_gates.tts_unit_hard_words_max, 60);
   assert.equal(identity.production_gates.tts_join_silence_ms, 80);
   assert.equal(identity.production_gates.continuous_longform_tts_requests_forbidden, true);
+  assert.equal(
+    identity.production_gates.deterministic_length_matched_tts_batching_required,
+    true,
+  );
+  assert.equal(identity.production_gates.tts_nominal_batch_size, 4);
+  assert.equal(identity.production_gates.tts_single_resident_model_required, true);
+  assert.equal(identity.production_gates.tts_token_limit_outputs_forbidden, true);
+  assert.equal(identity.production_gates.tts_objective_recovery_exact_unit_only, true);
   assert.equal(identity.image_output_qa_required, true);
   assert.equal(identity.schema, "goldflow_run_identity_v2");
   assert.equal(typeof identity.git.commit, "string");
@@ -4257,9 +4295,41 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     approval_source: "run_preflight_flags",
   });
   assert.equal(codexCreditFallbackEnabled(identity), true);
+  assert.equal(runIdentityTtsCompleteForTests(identity).done, true);
+  const legacySerialQwenIdentity = structuredClone(identity);
+  legacySerialQwenIdentity.stage_registry_version = "2026-07-27.1";
+  delete legacySerialQwenIdentity.voice_provider_options.synthesis_contract;
+  for (const field of [
+    "tts_synthesis_contract_id",
+    "tts_synthesis_mode",
+    "tts_synthesis_api",
+    "tts_model_instance_count",
+    "tts_model_concurrency",
+    "tts_nominal_batch_size",
+    "tts_batch_scheduler_version",
+    "tts_token_limit_acceptance_allowed",
+    "tts_objective_recovery_mode",
+  ]) {
+    delete legacySerialQwenIdentity.provider_locks[field];
+  }
+  delete legacySerialQwenIdentity.production_profile_config.media.qwen_tts_batch_size;
+  delete legacySerialQwenIdentity.production_gates
+    .deterministic_length_matched_tts_batching_required;
+  delete legacySerialQwenIdentity.production_gates.tts_single_resident_model_required;
+  delete legacySerialQwenIdentity.production_gates.tts_token_limit_outputs_forbidden;
+  delete legacySerialQwenIdentity.production_gates.tts_objective_recovery_exact_unit_only;
+  assert.equal(
+    runIdentityTtsCompleteForTests(legacySerialQwenIdentity).done,
+    true,
+  );
+  assert.match(
+    buildStageCommand("qwen_tts_stitch", legacySerialQwenIdentity),
+    /--batch-size 1/,
+  );
   assert.match(buildStageCommand("reference_generation", identity), /--reference-image-model gpt-image-2-i2i/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /tts narrate/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
+  assert.match(buildStageCommand("qwen_tts_stitch", identity), /--batch-size 4/);
   assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
   assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8/);
   assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 8/);
@@ -6055,6 +6125,19 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
   assert.equal(
     qwenLiamPlan.provider_controls.qwen3.voice_continuity_contract,
     QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract,
+  );
+  assert.deepEqual(
+    qwenLiamPlan.provider_controls.qwen3.synthesis_contract,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  );
+  assert.equal(
+    qwenLiamPlan.qwen_liam_batch_plan.synthesis_contract.contract_id,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id,
+  );
+  assert.equal(qwenLiamPlan.qwen_liam_batch_plan.cohort_count, 1);
+  assert.equal(
+    qwenLiamPlan.units[0].synthesis_cohort.batch_plan_sha256,
+    qwenLiamPlan.qwen_liam_batch_plan.batch_plan_sha256,
   );
   assert.equal(
     qwenTextIntegrityCoverageForTests(narrationTexts.join("\n"), groupedPlan).status,

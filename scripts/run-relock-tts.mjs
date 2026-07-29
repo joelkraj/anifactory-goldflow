@@ -97,6 +97,7 @@ function requireCanonicalQwenLiamOptions(options) {
   const primary = options?.primary ?? {};
   const unit = options?.unit_contract ?? {};
   const stitch = options?.stitch_contract ?? {};
+  const synthesis = options?.synthesis_contract ?? {};
   const mismatches = [];
   if (primary.provider !== "qwen_local") mismatches.push(`provider=${primary.provider ?? "missing"}`);
   if (primary.voice_id !== "am_liam") mismatches.push(`voice=${primary.voice_id ?? "missing"}`);
@@ -110,6 +111,12 @@ function requireCanonicalQwenLiamOptions(options) {
   if (stitch.post_tempo_processing !== false) mismatches.push("post_tempo_processing must be false");
   if (options?.retry_policy !== "confirmed_skips_truncations_or_stutters_only") {
     mismatches.push(`retry_policy=${options?.retry_policy ?? "missing"}`);
+  }
+  if (JSON.stringify(synthesis)
+    !== JSON.stringify(narrationPolicy.QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT)) {
+    mismatches.push(
+      `synthesis_contract=${synthesis.contract_id ?? "missing"}`,
+    );
   }
   if (mismatches.length) {
     throw new Error(
@@ -178,17 +185,28 @@ function recoveryTriageFilename(recoveryKind, episode, archiveSlug) {
     : `manual_blocker_triage_qwen_liam_planner_fix_relock_${episode}_${archiveSlug}.json`;
 }
 
-function recoveryEvidence(recoveryKind, interruptedQwenTts = {}) {
+function recoveryEvidence(
+  recoveryKind,
+  interruptedQwenTts = {},
+  { synthesisContractChanged = false } = {},
+) {
   return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
     ? [
         "The operator explicitly superseded the Puck primary lock with the audited Qwen3-TTS 1.7B Base Liam-clone profile.",
+        ...(synthesisContractChanged
+          ? ["The operator-approved target profile also locks deterministic length-matched batch-four synthesis through one resident model."]
+          : []),
         "The approved script, speakability overrides, semantic scene plan, and fact ledger are script-hash-bound and do not depend on narrator identity.",
         "The existing narration plan embeds the superseded run identity hash, so voice_plan is the narrowest valid invalidation boundary.",
         "No historical artifact or audio asset is deleted; affected root artifacts are hash-snapshotted in the immutable recovery archive before replacement.",
       ]
     : [
-        "The operator approved recovery after a tested TTS planner unit-boundary defect; the audited Qwen3-TTS 1.7B Base Liam-clone identity and canonical delivery profile remain unchanged.",
-        "The planner correction is committed at a new clean Git HEAD, and the relock updates only the run Git/stage pins plus downstream voice-plan provenance.",
+        synthesisContractChanged
+          ? "The operator approved the deterministic batch-four production synthesis contract after the throughput bake-off; the audited Qwen3-TTS 1.7B Base Liam-clone voice identity and delivery controls remain unchanged."
+          : "The operator approved recovery after a tested TTS planner unit-boundary defect; the audited Qwen3-TTS 1.7B Base Liam-clone identity and canonical delivery profile remain unchanged.",
+        synthesisContractChanged
+          ? "The batch-four implementation is committed at a new clean Git HEAD, and this explicit relock records the synthesis-contract change before invalidating downstream voice-plan provenance."
+          : "The planner correction is committed at a new clean Git HEAD, and the relock updates only the run Git/stage pins plus downstream voice-plan provenance.",
         "The interrupted qwen_tts_stitch execution has no matching completion event, so the pre-fix narration plan and its partial synthesis cannot be selected as production truth.",
         `The recovery report hash-inventories ${Number(interruptedQwenTts.interrupted_partial_unit_wav_count ?? 0)} retained Qwen unit WAVs and the orphaned active job manifest without moving, deleting, or selecting them.`,
         "The approved script, speakability overrides, semantic scene plan, and fact ledger are script-hash-bound and remain preserved upstream of voice_plan.",
@@ -197,6 +215,7 @@ function recoveryEvidence(recoveryKind, interruptedQwenTts = {}) {
 }
 
 function qwenLiamProviderLocks(primary, options) {
+  const synthesis = options.synthesis_contract;
   return {
     tts_provider: primary.provider,
     tts_fallback_provider: null,
@@ -224,6 +243,16 @@ function qwenLiamProviderLocks(primary, options) {
     tts_confirmed_defect_types: structuredClone(
       options.retry_contract?.confirmed_defect_types ?? ["skip", "truncation", "stutter"],
     ),
+    tts_synthesis_contract_id: synthesis.contract_id,
+    tts_synthesis_mode: synthesis.mode,
+    tts_synthesis_api: synthesis.api,
+    tts_model_instance_count: Number(synthesis.resident_model_count),
+    tts_model_concurrency: Number(synthesis.model_concurrency),
+    tts_nominal_batch_size: Number(synthesis.nominal_batch_size),
+    tts_batch_scheduler_version: synthesis.scheduler_version,
+    tts_token_limit_acceptance_allowed:
+      synthesis.token_limit_acceptance_allowed,
+    tts_objective_recovery_mode: synthesis.objective_recovery_mode,
     narrator_voice_identity: primary.voice_id,
     primary_reference_audio_sha256: primary.reference_audio_sha256,
     primary_reference_manifest_sha256: primary.reference_manifest_sha256 ?? null,
@@ -258,6 +287,14 @@ export function relockedIdentityForTests(identity, {
 } = {}) {
   const options = requireCanonicalQwenLiamOptions(voiceProviderOptions);
   const primary = options.primary;
+  const previousSynthesisContract =
+    narrationPolicy.narrationTtsPolicyForIdentity(identity).synthesis_contract
+    ?? null;
+  const synthesisContractChanged =
+    JSON.stringify(previousSynthesisContract)
+    !== JSON.stringify(options.synthesis_contract);
+  const voiceIdentityChanged = recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND;
+  const identityChanged = voiceIdentityChanged || synthesisContractChanged;
   const migrated = structuredClone(identity);
   migrated.stage_registry_version = PIPELINE_STAGE_REGISTRY_VERSION;
   migrated.tts_profile = QWEN_LIAM_PROFILE_ID;
@@ -291,6 +328,9 @@ export function relockedIdentityForTests(identity, {
       kokoro_tts_concurrency: 1,
       qwen_tts_concurrency: 1,
       local_qwen_tts_concurrency: 1,
+      qwen_tts_batch_size: Number(
+        options.synthesis_contract.nominal_batch_size,
+      ),
     },
   };
   migrated.production_gates = {
@@ -304,6 +344,13 @@ export function relockedIdentityForTests(identity, {
     tts_unit_hard_words_max: Number(options.unit_contract.hard_words_max),
     tts_join_silence_ms: Number(options.stitch_contract.join_silence_ms),
     continuous_longform_tts_requests_forbidden: true,
+    deterministic_length_matched_tts_batching_required: true,
+    tts_nominal_batch_size: Number(
+      options.synthesis_contract.nominal_batch_size,
+    ),
+    tts_single_resident_model_required: true,
+    tts_token_limit_outputs_forbidden: true,
+    tts_objective_recovery_exact_unit_only: true,
   };
   migrated.git = structuredClone(git);
   migrated.dirty_worktree_waiver = null;
@@ -322,13 +369,21 @@ export function relockedIdentityForTests(identity, {
     schema: "goldflow_narration_identity_relock_v1",
     profile: QWEN_LIAM_PROFILE_ID,
     recovery_kind: recoveryKind,
-    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    identity_changed: identityChanged,
+    voice_identity_changed: voiceIdentityChanged,
+    synthesis_contract_changed: synthesisContractChanged,
+    operator_approved_batch4_promotion:
+      synthesisContractChanged,
     recovery_scope: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
       ? "operator_approved_narrator_identity_migration"
-      : "same_identity_relock_after_committed_tts_planner_fix",
+      : synthesisContractChanged
+        ? "same_voice_batch4_synthesis_contract_promotion"
+        : "same_identity_relock_after_committed_tts_planner_fix",
     invalidation_reason: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
       ? "operator_selected_qwen_liam_as_the_production_narrator"
-      : "committed_tts_planner_unit_boundary_fix_invalidates_the_prior_voice_plan",
+      : synthesisContractChanged
+        ? "operator_approved_batch4_synthesis_promotion_and_committed_tts_planner_fix_invalidate_the_prior_voice_plan"
+        : "committed_tts_planner_unit_boundary_fix_invalidates_the_prior_voice_plan",
     relocked_at: timestamp,
     reason,
     previous_run_identity_sha256: previousIdentitySha256,
@@ -342,6 +397,9 @@ export function relockedIdentityForTests(identity, {
     reference_audio_sha256: primary.reference_audio_sha256,
     unit_contract: structuredClone(options.unit_contract),
     stitch_contract: structuredClone(options.stitch_contract),
+    previous_synthesis_contract:
+      structuredClone(previousSynthesisContract),
+    synthesis_contract: structuredClone(options.synthesis_contract),
     retry_policy: options.retry_policy ?? "confirmed_skips_truncations_or_stutters_only",
     retry_contract: structuredClone(options.retry_contract ?? null),
     preserves_script_and_semantic_artifacts: true,
@@ -704,6 +762,19 @@ async function main() {
     throw new Error("run relock-tts refuses a bounded proof identity.");
   }
   const recoveryKind = recoveryKindForIdentityForTests(identity);
+  const existingNarrationPolicy =
+    narrationPolicy.narrationTtsPolicyForIdentity(identity);
+  const promotesExistingSerialQwen =
+    recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND
+    && existingNarrationPolicy.synthesis_contract?.mode
+      === narrationPolicy.QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT.mode;
+  if (promotesExistingSerialQwen && !isTrue(flags["promote-batch4"])) {
+    throw new Error(
+      "This existing Qwen/Liam identity is pinned to serial synthesis. "
+      + "Pass --promote-batch4 true only after explicit operator approval "
+      + "to migrate it to deterministic length-matched batch-four synthesis.",
+    );
+  }
   if (recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND) {
     if (identity.tts_profile !== QWEN_LIAM_PROFILE_ID) {
       throw new Error(
@@ -819,7 +890,14 @@ async function main() {
     .map((row) => row.execution_id)
     .filter(Boolean);
 
-  const evidenceReviewed = recoveryEvidence(recoveryKind, interruptedQwenTts);
+  const evidenceReviewed = recoveryEvidence(
+    recoveryKind,
+    interruptedQwenTts,
+    {
+      synthesisContractChanged:
+        migrated.narration_identity_relock.synthesis_contract_changed,
+    },
+  );
 
   const triage = {
     schema: "goldflow_manual_blocker_triage_v1",
@@ -830,7 +908,13 @@ async function main() {
     operator_request: reason,
     workflow_bypass_authorized: true,
     recovery_kind: recoveryKind,
-    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    operator_approved_batch4_promotion:
+      migrated.narration_identity_relock.synthesis_contract_changed,
+    identity_changed: migrated.narration_identity_relock.identity_changed,
+    voice_identity_changed:
+      migrated.narration_identity_relock.voice_identity_changed,
+    synthesis_contract_changed:
+      migrated.narration_identity_relock.synthesis_contract_changed,
     disposition: recoveryDisposition(recoveryKind),
     evidence_reviewed: evidenceReviewed,
     tts_profile: QWEN_LIAM_PROFILE_ID,
@@ -880,7 +964,13 @@ async function main() {
     episode_dir: episodeDir,
     episode: identity.episode,
     recovery_kind: recoveryKind,
-    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    operator_approved_batch4_promotion:
+      migrated.narration_identity_relock.synthesis_contract_changed,
+    identity_changed: migrated.narration_identity_relock.identity_changed,
+    voice_identity_changed:
+      migrated.narration_identity_relock.voice_identity_changed,
+    synthesis_contract_changed:
+      migrated.narration_identity_relock.synthesis_contract_changed,
     disposition: recoveryDisposition(recoveryKind),
     tts_profile: QWEN_LIAM_PROFILE_ID,
     run_identity_before_sha256: beforeHash,
@@ -913,7 +1003,13 @@ async function main() {
     episode_dir: episodeDir,
     tts_profile: QWEN_LIAM_PROFILE_ID,
     recovery_kind: recoveryKind,
-    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    operator_approved_batch4_promotion:
+      migrated.narration_identity_relock.synthesis_contract_changed,
+    identity_changed: migrated.narration_identity_relock.identity_changed,
+    voice_identity_changed:
+      migrated.narration_identity_relock.voice_identity_changed,
+    synthesis_contract_changed:
+      migrated.narration_identity_relock.synthesis_contract_changed,
     run_identity_path: identityPath,
     run_identity_before_sha256: beforeHash,
     run_identity_after_sha256: afterHash,

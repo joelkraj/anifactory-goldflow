@@ -39,6 +39,10 @@ export function qaBlockerCodes(qa) {
 
 const AUTOMATIC_CONFIRMED_RETRY_CODES = new Set([
   "tts_synthesis_job_failed",
+  "tts_batch_synthesis_failed",
+  "tts_serial_synthesis_failed",
+  "tts_batch_token_limit_reached",
+  "tts_serial_token_limit_reached",
   "tts_audio_empty",
   "tts_audio_implausibly_short",
   "tts_audio_duration_too_short_for_text",

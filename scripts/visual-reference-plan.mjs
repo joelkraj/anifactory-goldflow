@@ -331,7 +331,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
   const beats = beatRowsFromScopedSemantic(scopedSemantic);
   const assets = new Map();
 
-  function addAsset({ kind, refId, subject, sceneId, beat = null, reason = null, source = null, semanticRefId = null }) {
+  function addAsset({ kind, refId, subject, sceneId, beat = null, reason = null, source = null, semanticRefId = null, entityKind = null }) {
     const normalizedKind = normalizeKind(kind);
     if (!["character_state", "location", "prop", "ui", "action"].includes(normalizedKind)) return;
     const rawSubject = String(subject ?? refId ?? "").trim();
@@ -368,6 +368,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
         beat_ids: new Set(),
         semantic_ref_ids: new Set(),
         beat_ref_ids: new Set(),
+        entity_kinds: new Set(),
         reasons: new Set(),
         sources: new Set(),
         evidence_excerpts: [],
@@ -381,6 +382,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
     if (beat?.visual_beat_id) row.beat_ids.add(beat.visual_beat_id);
     if (semanticRefId) row.semantic_ref_ids.add(semanticRefId);
     if (refId) row.beat_ref_ids.add(refId);
+    if (entityKind) row.entity_kinds.add(String(entityKind));
     if (reason) row.reasons.add(String(reason).slice(0, 180));
     if (source) row.sources.add(source);
     const start = Number(beat?.start_sec ?? scenes.get(sceneId)?.start_sec ?? scenes.get(sceneId)?.startSec);
@@ -414,15 +416,31 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
   for (const beat of beats) {
     const sceneId = beat.parent_scene_id ?? beat.scene_id;
     const visibleCharacters = Array.isArray(beat.visible_characters) ? beat.visible_characters : [];
-    for (const character of visibleCharacters) {
+    const visibleEntityRows = Array.isArray(beat.visible_entities) ? beat.visible_entities : [];
+    const visibleEntityIds = [
+      ...(beat.physically_visible_entity_ids ?? []),
+      ...(beat.screen_visible_entity_ids ?? []),
+      ...(beat.preview_visible_entity_ids ?? []),
+    ];
+    for (const [index, character] of visibleCharacters.entries()) {
+      const entityRow = visibleEntityRows.find((row) => String(row?.display_name ?? "") === String(character))
+        ?? visibleEntityRows[index]
+        ?? null;
+      const entityId = entityRow?.entity_id ?? visibleEntityIds[index] ?? null;
+      const entityKind = entityRow?.kind ?? beat.visible_entity_kinds?.[entityId] ?? null;
       addAsset({
         kind: "character_state",
         refId: null,
         subject: character,
         sceneId,
         beat,
-        reason: "visible local beat character",
-        source: "visual_beat_visible_character",
+        reason: entityKind && String(entityKind).toLowerCase() !== "person"
+          ? "visible local beat identity-bearing nonhuman actor"
+          : "visible local beat character",
+        source: entityKind && String(entityKind).toLowerCase() !== "person"
+          ? "visual_beat_visible_nonhuman_actor"
+          : "visual_beat_visible_character",
+        entityKind,
       });
     }
     const location = beat.local_location ?? beat.location;
@@ -484,11 +502,18 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
       kind: asset.kind,
       subject: asset.subject,
       canonical_subject_key: slug(asset.subject, asset.asset_id),
-      entity_type: asset.kind === "character_state" && isGenericGroupSubject(`${asset.subject ?? ""} ${asset.asset_id ?? ""}`)
-        ? "group_or_creature_system"
-        : asset.kind === "character_state"
-          ? "named_or_distinct_character"
-          : asset.kind,
+      entity_kind: [...asset.entity_kinds][0] ?? null,
+      entity_type: asset.kind === "character_state" && [...asset.entity_kinds]
+        .some((kind) => /^(?:creature|construct|summon|spirit|undead)$/i.test(String(kind)))
+        ? "distinct_nonhuman_actor"
+        : asset.kind === "character_state" && (
+          [...asset.entity_kinds].some((kind) => /^(?:creature_group|group)$/i.test(String(kind)))
+          || isGenericGroupSubject(`${asset.subject ?? ""} ${asset.asset_id ?? ""}`)
+        )
+          ? "group_or_creature_system"
+          : asset.kind === "character_state"
+            ? "named_or_distinct_character"
+            : asset.kind,
       scene_ids: [...asset.scene_ids].filter(Boolean).sort(),
       beat_ids: [...asset.beat_ids].filter(Boolean).sort(),
       distinct_scene_count: asset.scene_ids.size,
@@ -661,6 +686,7 @@ function buildSelectedReferenceInventory(referenceTargets, {
       clean_plate_contract: target.clean_plate_contract ?? null,
       conditioning_subject_count: target.conditioning_subject_count ?? null,
       conditioning_asset_role: target.conditioning_asset_role ?? null,
+      identity_subtype: target.identity_subtype ?? null,
       clean_plate_contract: target.clean_plate_contract ?? null,
       evidence_asset_ids: target.evidence_asset_ids ?? (target.inventory_asset_id ? [target.inventory_asset_id] : []),
       prompt_anchor: target.prompt_anchor ?? null,
@@ -799,6 +825,7 @@ function compactInventoryAsset(asset, { evidenceLimit = 2, sceneIdLimit = Infini
     subject: asset.subject,
     canonical_subject_key: asset.canonical_subject_key ?? null,
     entity_type: asset.entity_type ?? null,
+    entity_kind: asset.entity_kind ?? null,
     scene_ids: sceneIds.slice(0, maxSceneIds),
     scene_ids_truncated_count: Math.max(0, sceneIds.length - maxSceneIds),
     distinct_scene_count: asset.distinct_scene_count,
@@ -815,9 +842,42 @@ function inventoryAssetHasReferenceValue(asset) {
   const kind = normalizeKind(asset?.kind);
   const scenes = Number(asset?.distinct_scene_count ?? asset?.scene_ids?.length ?? 0);
   const beats = Number(asset?.beat_count ?? asset?.beat_ids?.length ?? 0);
-  if (kind === "character_state" && asset?.entity_type === "named_or_distinct_character") return true;
+  if (kind === "character_state" && ["named_or_distinct_character", "distinct_nonhuman_actor"].includes(asset?.entity_type)) return true;
   if ((asset?.semantic_ref_ids ?? []).length > 0 && kind === "location") return true;
   return scenes >= 2 || beats >= 3;
+}
+
+export function unselectedDistinctNonhumanActorFindingsForTests(evidenceLedger, referenceTargets) {
+  const selectedEvidenceIds = new Set((referenceTargets ?? [])
+    .flatMap((target) => target?.evidence_asset_ids ?? [])
+    .map(String)
+    .filter(Boolean));
+  const selectedSubjectKeys = new Set((referenceTargets ?? [])
+    .flatMap((target) => [
+      target?.canonical_subject_id,
+      target?.subject,
+    ])
+    .map((value) => slug(value, ""))
+    .filter(Boolean));
+  return (evidenceLedger?.assets ?? [])
+    .filter((asset) => asset?.entity_type === "distinct_nonhuman_actor")
+    .filter((asset) => {
+      const assetId = String(asset.asset_id ?? "");
+      const subjectKey = slug(asset.canonical_subject_key ?? asset.subject, "");
+      return !selectedEvidenceIds.has(assetId) && (!subjectKey || !selectedSubjectKeys.has(subjectKey));
+    })
+    .map((asset) => ({
+      code: "distinct_nonhuman_actor_reference_not_selected",
+      severity: "warning",
+      review_required: true,
+      review_disposition: "manual_fix_or_accept",
+      production_blocking: false,
+      asset_id: asset.asset_id,
+      subject: asset.subject,
+      scene_ids: asset.scene_ids ?? [],
+      beat_ids: asset.beat_ids ?? [],
+      message: `Reference director did not select a standalone identity/anatomy reference for distinct nonhuman actor ${asset.subject}. Confirm text-only continuity is intentional or manually repair the reference plan before approval.`,
+    }));
 }
 
 function compactInventoryForPrompt(inventoryLedger, sceneIds = null, options = {}) {
@@ -866,7 +926,9 @@ Rules:
 - Return only candidates that might deserve a clean attachable reference. Omit text-only one-scene nouns entirely; location scope remains available separately through LOCATION CONTRACT LEDGER.
 - Every candidate must list evidence_asset_ids, planned_beat_ids, estimated_use_count, reference_value_reason, and why_text_is_insufficient.
 - Propose every plausible continuity-leverage candidate supported by this chunk, while omitting ordinary one-off nouns. This is a candidate pass, so do not artificially minimize it; the global director makes the final right-sized selection.
-- Identify recurring characters, character states, major locations, important props, UI motifs, and high-risk repeated action states.
+- Identify recurring identity-bearing actors, visible states, major locations, important props, UI motifs, and high-risk repeated action states. Identity-bearing actors include people, named or distinct creatures, bosses, guardians, constructs, summons, and recurring creature systems.
+- A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted is not a prop. Propose it as kind character_state. Use conditioning_asset_role creature_identity for one distinct creature/construct identity and faction_language only for a true recurring creature group or shared species/faction design.
+- A distinct nonhuman actor should receive a clean standalone identity reference when it recurs across two or more beats, is the decisive threat/contact target in an action sequence, or has signature anatomy that text-only scene prompting is likely to reinterpret. Its scene_prompt_anchor must repeat one concise positive anatomy contract across every covered beat, including exact silhouette, material, head/face construction, limb/body construction, and whether a signature object-like feature is integrated into the body, worn, held, or separate in the environment.
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
 - For real named public creators, streamers, celebrities, or influencers whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and anime/manhwa styling.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
@@ -885,14 +947,15 @@ Rules:
 - Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
 - Reference kind taxonomy is strict:
   - style refs define polished 2D anime/manhwa rendering language, line quality, color, lighting, and shot polish.
-  - character_state refs define face, hair, age, body type, wardrobe, and state; they are identity/wardrobe evidence, not reusable pose instructions.
+  - character_state refs define one identity/state: human face/body/wardrobe, one distinct creature/construct anatomy, or one coherent faction/species language. They are identity/anatomy evidence, not reusable pose instructions.
   - location refs define environment, architecture, materials, lighting, and scale; use open environment-only staging with enough clean space for later scene characters.
   - prop refs define object shape, surface, markings, and scale.
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Every selected conditioning asset contains exactly one conditioning concept: one identity/state, one environment, one prop, one UI motif, one faction/uniform language, one action/effect language, or one abstract style language. Set conditioning_subject_count to 1 and conditioning_asset_role accordingly. Never combine a character, populated story scene, prop lineup, and UI panel into one reference.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- Human character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; keep both hands relaxed and empty and omit detachable weapons, bows, swords, shields, and carried props unless the story makes one inseparable from that exact identity state. Final scene poses, held objects, and locations come from the visual prompt stage.
+- Creature/construct reference anchors should be 16:9 landscape, exactly one nonhuman actor in one neutral pose on a plain background, with one coherent full silhouette and explicit anatomy/material construction. An object-like anatomical feature must be described as one integrated body structure at its exact attachment point, not as a second prop or alternate head. Do not ask for multiple angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
 - For adult female character refs, keep the character story-appropriate but conventionally attractive: beautiful face, polished hair/makeup when suitable, flattering outfit, full bust, curvy hourglass adult silhouette, graceful waist-to-hip shape, and confident posture. Keep this non-explicit and avoid nudity, lingerie, childlike features, or pinup posing.
 - UI refs that represent a named person as data should use dossier identity tile, silhouette identity marker, or archival record wording so the ref stays an interface design plate instead of a character reference card.
 - Style references are optional. Prefer the visual style bible and style_summary text over a generated style image. Create a style reference only when it is a clean abstract rendering/material/lighting sample; it must not contain character faces, character sheets, expression panels, UI screens, speech bubbles, or readable text.
@@ -960,7 +1023,7 @@ Return:
       "why_text_is_insufficient": "specific model-consistency risk",
       "clean_plate_contract": "single clean subject, environment, object, UI, or effect plate without unrelated story-scene contamination"
       ,"conditioning_subject_count": 1,
-      "conditioning_asset_role": "identity_state|environment|prop|ui_motif|faction_language|action_effect|style_language"
+      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language"
     }
   ],
   "character_state_refs": [
@@ -975,6 +1038,7 @@ Return:
       "source_ref_id": "matching reference_targets ref_id",
       "base_identity_ref_id": "optional base face identity reference id for progressive same-character states",
       "identity_usage": "full_identity|face_only"
+      ,"identity_subtype": "human|creature|construct|creature_group"
     }
   ],
   "warnings": []
@@ -1014,6 +1078,8 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
       estimated_use_count: target.estimated_use_count ?? target.appearance_count ?? 0,
       reference_value_reason: target.reference_value_reason ?? null,
       why_text_is_insufficient: target.why_text_is_insufficient ?? null,
+      conditioning_asset_role: target.conditioning_asset_role ?? null,
+      identity_subtype: target.identity_subtype ?? null,
     })),
     character_state_refs: (plan.character_state_refs ?? []).map((ref) => ({
       state_ref_id: ref.state_ref_id,
@@ -1024,6 +1090,7 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
       source_ref_id: ref.source_ref_id,
       base_identity_ref_id: ref.base_identity_ref_id,
       identity_usage: ref.identity_usage,
+      identity_subtype: ref.identity_subtype ?? null,
     })),
     warnings: (plan.warnings ?? []).slice(0, 5),
   }));
@@ -1048,19 +1115,20 @@ Rules:
 - Treat each beat's active_state_constraints and depiction_mode as binding evidence. Select refs for materially recurring visible states; do not collapse incompatible wardrobe/injury states and do not create refs for transient text-only state changes.
 - When visual_beats carry ref_needs or beat_ref_requirements, treat those as advisory local transcript-timed evidence, not locked reference targets. Semantic scene ref_requirements remain broad scene coverage. The LLM decides the final episode-level reference strategy and may merge, downgrade, upgrade, rename, or replace beat suggestions when the story context supports it.
 - Do not preserve beat-authored generation_mode mechanically. Make the final decision from recurrence, story criticality, identity risk, and opening-retention value.
-- Distinguish named characters from groups, creatures, factions, crowds, and uniforms. A recurring named person gets a character_state/base identity ref when needed. A recurring group or creature system may receive a clean group/faction design plate when its shared silhouette, uniform, armor, or visual system matters; never pretend it is one person's face identity.
+- Distinguish people, distinct nonhuman actors, and true groups/factions. A recurring named person gets a character_state/base identity ref when needed. A named or distinct creature, boss, guardian, construct, or summon that moves, attacks, reacts, is fought, or is physically contacted is an identity-bearing actor, never a prop; keep it as kind character_state with conditioning_asset_role creature_identity. A recurring group or creature system may receive a clean group/faction design plate when its shared silhouette, uniform, armor, or visual system matters; never pretend it is one person's face identity.
+- Preserve a clean standalone identity ref for a distinct nonhuman actor when it recurs across two or more beats, is the decisive threat/contact target in an action sequence, or has signature anatomy that text-only prompts can reinterpret. Its scene_prompt_anchor must carry one concise positive anatomy contract unchanged across its covered beats, including exact silhouette, materials, head/face construction, limb/body construction, and whether any object-like feature is integrated, worn, held, or environmental.
 - If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
 - Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
 - Reference kind taxonomy is strict:
   - style refs define polished 2D anime/manhwa rendering language, line quality, color, lighting, and shot polish.
-  - character_state refs define face, hair, age, body type, wardrobe, and state; they are identity/wardrobe evidence, not reusable pose instructions.
+  - character_state refs define one human identity/state, one distinct creature/construct anatomy, or one coherent faction/species language; they are identity/anatomy evidence, not reusable pose instructions.
   - location refs define environment, architecture, materials, lighting, and scale; use open environment-only staging with enough clean space for later scene characters.
   - prop refs define object shape, surface, markings, and scale.
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Every selected conditioning asset contains exactly one conditioning concept: one identity/state, one environment, one prop, one UI motif, one faction/uniform language, one action/effect language, or one abstract style language. Set conditioning_subject_count to 1 and conditioning_asset_role accordingly. Never combine a character, populated story scene, prop lineup, and UI panel into one reference.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; final scene poses and locations come from the visual prompt stage. Do not ask for multiple face angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- Human character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; keep both hands relaxed and empty and omit detachable weapons, bows, swords, shields, and carried props unless one is inseparable from that exact identity state. Creature/construct anchors should show exactly one nonhuman actor in one neutral pose with one coherent silhouette and explicit anatomy/material construction. Final scene poses, held objects, and locations come from the visual prompt stage. Do not ask for multiple angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
 - For adult female character refs, keep the character story-appropriate but conventionally attractive: beautiful face, polished hair/makeup when suitable, flattering outfit, full bust, curvy hourglass adult silhouette, graceful waist-to-hip shape, and confident posture. Keep this non-explicit and avoid nudity, lingerie, childlike features, or pinup posing.
 - UI refs that represent a named person as data should use dossier identity tile, silhouette identity marker, or archival record wording so the ref stays an interface design plate instead of a character reference card.
 - Style references are optional. Prefer the visual style bible and style_summary text over a generated style image. Preserve a style reference only when it is a clean abstract rendering/material/lighting sample; it must not contain character faces, character sheets, expression panels, UI screens, speech bubbles, or readable text.
@@ -1127,7 +1195,7 @@ Return:
       "why_text_is_insufficient": "specific generation risk",
       "clean_plate_contract": "clean reusable plate with no unrelated story-scene contamination"
       ,"conditioning_subject_count": 1,
-      "conditioning_asset_role": "identity_state|environment|prop|ui_motif|faction_language|action_effect|style_language"
+      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language"
     }
   ],
   "character_state_refs": [
@@ -1142,6 +1210,7 @@ Return:
       "source_ref_id": "matching reference_targets ref_id",
       "base_identity_ref_id": "optional base face identity reference id for progressive same-character states",
       "identity_usage": "full_identity|face_only"
+      ,"identity_subtype": "human|creature|construct|creature_group"
     }
   ],
   "warnings": []
@@ -1294,6 +1363,7 @@ function normalizeTarget(target, index) {
     clean_plate_contract: target.clean_plate_contract ?? null,
     conditioning_subject_count: Number(target.conditioning_subject_count ?? 0),
     conditioning_asset_role: target.conditioning_asset_role ?? null,
+    identity_subtype: target.identity_subtype ?? target.entity_kind ?? null,
     director_role: target.director_role ?? null,
     director_recommended_generation_mode: target.director_recommended_generation_mode ?? target.recommended_generation_mode ?? null,
     director_recommended_required_before_imagegen: target.director_recommended_required_before_imagegen ?? target.recommended_required_before_imagegen ?? null,
@@ -1318,6 +1388,7 @@ function normalizeStateRef(ref, index) {
     source_ref_id: ref.source_ref_id ?? ref.ref_id ?? null,
     base_identity_ref_id: ref.base_identity_ref_id ?? ref.base_identity_ref ?? null,
     identity_usage: ref.identity_usage ?? (ref.base_identity_ref_id || ref.base_identity_ref ? "face_only" : "full_identity"),
+    identity_subtype: ref.identity_subtype ?? ref.entity_kind ?? null,
   };
 }
 
@@ -2314,7 +2385,7 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (!legacyRevalidation && mode !== "source_only") {
       const allowedRoles = {
         style: new Set(["style_language"]),
-        character_state: new Set(["identity_state", "faction_language"]),
+        character_state: new Set(["identity_state", "creature_identity", "faction_language"]),
         location: new Set(["environment"]),
         prop: new Set(["prop", "faction_language"]),
         ui: new Set(["ui_motif"]),
@@ -2631,9 +2702,10 @@ async function main() {
   });
   const openingIdentityFindings = openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
   const characterStateFindings = characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation });
+  const nonhumanSelectionFindings = unselectedDistinctNonhumanActorFindingsForTests(referenceEvidenceLedger, referenceTargets);
   const coverageFindings = locationContractLedger.findings ?? [];
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
-  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...openingIdentityFindings, ...characterStateFindings];
+  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...openingIdentityFindings, ...characterStateFindings, ...nonhumanSelectionFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const referenceInventoryLedger = buildSelectedReferenceInventory(referenceTargets, {
     sourceScriptHash: semanticPlan.source_script_hash,

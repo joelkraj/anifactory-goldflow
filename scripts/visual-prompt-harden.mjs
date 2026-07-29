@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import {
   backgroundPopulationFindings,
@@ -17,6 +18,12 @@ import {
   normalizeReferenceLimit,
   promptIdentityFindings,
 } from "./lib/visual-prompt-policy.mjs";
+import {
+  promptHasEquipmentGeometryRisk,
+  promptHasImmutableAnatomyRisk,
+  sanitizeAnatomyContracts,
+  sanitizeEquipmentContracts,
+} from "./lib/shot-manifest-risk-contracts.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -159,6 +166,9 @@ function sanitizeShotManifest(value) {
     .map((row, index) => ({
       ref_id: String(row.ref_id),
       kind: row.kind ? String(row.kind) : null,
+      conditioning_asset_role: row.conditioning_asset_role ? String(row.conditioning_asset_role) : null,
+      identity_subtype: row.identity_subtype ? String(row.identity_subtype) : null,
+      reference_priority: row.reference_priority ? String(row.reference_priority) : null,
       required: row.required !== false,
       slot_order: Number.isFinite(Number(row.slot_order)) ? Number(row.slot_order) : index + 1,
       slot_purpose: row.slot_purpose ? String(row.slot_purpose) : null,
@@ -174,6 +184,8 @@ function sanitizeShotManifest(value) {
     location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    anatomy_contracts: sanitizeAnatomyContracts(value.anatomy_contracts),
+    equipment_contracts: sanitizeEquipmentContracts(value.equipment_contracts),
     background_population: sanitizeBackgroundPopulation(value.background_population),
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
@@ -196,6 +208,72 @@ function promptText(prompt) {
     prompt.visual_beat_action,
     prompt.visual_beat_script_excerpt,
   ].filter(Boolean).join(" | ");
+}
+
+export function fluxKleinActionComplexityFindingsForTests(prompt) {
+  if (String(prompt?.image_provider_route ?? "modelslab") !== "modelslab") return [];
+  const modelRoute = String(prompt?.image_model_route ?? "flux-klein").toLowerCase();
+  if (!modelRoute.includes("klein")) return [];
+  const manifest = prompt?.shot_manifest ?? {};
+  const text = promptText(prompt);
+  const physicalAction = String(manifest.shot_job ?? "") === "physical_action"
+    || /\b(?:fight|attack|strike|stab|slash|shoot|grip|swing|block|parry|hammer|shield)\b/i.test(`${manifest.foreground_action ?? ""} ${text}`);
+  if (!physicalAction) return [];
+  const visibleCount = new Set([
+    ...(manifest.visible_characters ?? []),
+    ...(manifest.visible_entities ?? []),
+    ...(manifest.character_staging ?? []).map((row) => row?.name),
+  ].map(normalize).filter(Boolean)).size;
+  const weaponMentions = text.match(/\b(?:sword|blade|bow|arrow|spear|hammer|axe|dagger|shield|weapon)\b/gi) ?? [];
+  if (visibleCount < 4 && weaponMentions.length < 4) return [];
+  return [{
+    image_id: prompt?.image_id ?? null,
+    scene_id: prompt?.scene_id ?? null,
+    severity: "warning",
+    code: "flux_klein_action_complexity_review",
+    message: `Flux Klein physical-action cut asks for ${visibleCount} individually readable actors and ${weaponMentions.length} weapon mentions. Prefer one decisive contact, at most three foreground actors, exact weapon ownership, and subordinate background participants.`,
+    visible_actor_count: visibleCount,
+    weapon_mention_count: weaponMentions.length,
+    review_required: true,
+    review_disposition: "manual_fix_or_accept",
+    production_blocking: false,
+    resolved: false,
+  }];
+}
+
+export function fluxKleinStructuralContractFindingsForTests(prompt) {
+  if (String(prompt?.image_provider_route ?? "modelslab") !== "modelslab") return [];
+  const modelRoute = String(prompt?.image_model_route ?? "flux-klein").toLowerCase();
+  if (!modelRoute.includes("klein")) return [];
+  const manifest = prompt?.shot_manifest ?? {};
+  const findings = [];
+  if (promptHasImmutableAnatomyRisk(prompt) && !sanitizeAnatomyContracts(manifest.anatomy_contracts).length) {
+    findings.push({
+      image_id: prompt?.image_id ?? null,
+      scene_id: prompt?.scene_id ?? null,
+      severity: "warning",
+      code: "flux_klein_immutable_anatomy_contract_missing",
+      message: "Flux Klein cut contains an amputation, prosthetic rule, nonstandard limb fact, or signature integrated anatomy but no structured anatomy_contracts row. Add the immutable body fact and make it visible, or explicitly accept this risk.",
+      review_required: true,
+      review_disposition: "manual_fix_or_accept",
+      production_blocking: false,
+      resolved: false,
+    });
+  }
+  if (promptHasEquipmentGeometryRisk(prompt) && !sanitizeEquipmentContracts(manifest.equipment_contracts).length) {
+    findings.push({
+      image_id: prompt?.image_id ?? null,
+      scene_id: prompt?.scene_id ?? null,
+      severity: "warning",
+      code: "flux_klein_equipment_contract_missing",
+      message: "Flux Klein physical-action cut visibly uses a weapon or combat object but has no structured equipment_contracts row. Specify owner, visible count, hand assignment, holder state, and contact target, or explicitly accept this risk.",
+      review_required: true,
+      review_disposition: "manual_fix_or_accept",
+      production_blocking: false,
+      resolved: false,
+    });
+  }
+  return findings;
 }
 
 function characterMatchText(prompt) {
@@ -307,6 +385,8 @@ function buildIndexes(visualReferencePlan, characterStateRefs, referenceInventor
       source_ref_id: sourceId,
       scene_prompt_anchor: existing.scene_prompt_anchor ?? ref.scene_prompt_anchor ?? null,
       prompt_anchor: existing.prompt_anchor ?? ref.prompt_anchor ?? null,
+      conditioning_asset_role: existing.conditioning_asset_role ?? ref.conditioning_asset_role ?? null,
+      identity_subtype: existing.identity_subtype ?? ref.identity_subtype ?? null,
     });
   }
   const locationTargets = referenceTargets.filter((target) => String(target.kind ?? "") === "location");
@@ -520,6 +600,9 @@ function sanitizeRequirementFromRefId(refId, indexes, base = {}) {
     ...base,
     ref_id: selectedRefId,
     kind,
+    conditioning_asset_role: base.conditioning_asset_role ?? target.conditioning_asset_role ?? null,
+    identity_subtype: base.identity_subtype ?? target.identity_subtype ?? null,
+    reference_priority: base.reference_priority ?? target.reference_priority ?? null,
     required: base.required !== false,
     slot_order: Number(base.slot_order ?? 50),
     slot_purpose: base.slot_purpose ?? (
@@ -735,6 +818,16 @@ function sanitizePrompt(prompt, indexes) {
   );
   let codexPromptTextValue = activeProviderRoute === "codex_imagegen" ? promptTextValue : null;
   findings.push(...backgroundPopulationFindings({
+    ...prompt,
+    provider_prompt: promptTextValue,
+    shot_manifest: shotManifest,
+  }));
+  findings.push(...fluxKleinActionComplexityFindingsForTests({
+    ...prompt,
+    provider_prompt: promptTextValue,
+    shot_manifest: shotManifest,
+  }));
+  findings.push(...fluxKleinStructuralContractFindingsForTests({
     ...prompt,
     provider_prompt: promptTextValue,
     shot_manifest: shotManifest,
@@ -1151,6 +1244,9 @@ function sanitizePrompt(prompt, indexes) {
       slot: index + 1,
       ref_id: req.ref_id,
       kind: req.kind ?? null,
+      conditioning_asset_role: req.conditioning_asset_role ?? null,
+      identity_subtype: req.identity_subtype ?? null,
+      reference_priority: req.reference_priority ?? null,
       path: req.reference_image_path,
       purpose: req.slot_purpose ?? null,
       reason: req.reason ?? null,
@@ -1279,6 +1375,9 @@ function sanitizePrompt(prompt, indexes) {
         reference_slots: selectedRequirements.map((req, index) => ({
           ref_id: req.ref_id,
           kind: req.kind,
+          conditioning_asset_role: req.conditioning_asset_role ?? null,
+          identity_subtype: req.identity_subtype ?? null,
+          reference_priority: req.reference_priority ?? null,
           required: req.required !== false,
           slot_order: Number(req.slot_order ?? index + 1),
           slot_purpose: req.slot_purpose ?? req.reason ?? "conditioning reference",
@@ -1293,7 +1392,6 @@ function sanitizePrompt(prompt, indexes) {
         usage: "attach_existing_ref",
         reason: req.reason ?? "Sanitizer: validated LLM-authored reference selection.",
       })),
-      shot_manifest: shotManifest,
       hardening_notes: [
         ...(prompt.hardening_notes ?? []),
         "visual-prompt-harden sanitize mode: validated refs, synchronized explicit manifest identities, stripped invalid/forbidden provider payloads, and normalized the provider reference cap; no creative prompt rewrite.",
@@ -1531,9 +1629,11 @@ async function main() {
   if (status !== "passed") process.exitCode = 1;
 }
 
-main().catch(async (error) => {
-  const failed = { schema: "goldflow_visual_prompt_hardening_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() };
-  await writeJson(reportPath, failed).catch(() => {});
-  console.error(failed.error);
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  main().catch(async (error) => {
+    const failed = { schema: "goldflow_visual_prompt_hardening_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() };
+    await writeJson(reportPath, failed).catch(() => {});
+    console.error(failed.error);
+    process.exitCode = 1;
+  });
+}

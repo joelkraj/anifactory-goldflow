@@ -469,12 +469,15 @@ Hard rails:
 - Retention holds: 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s. Measure a beat from its first atom start through the next unmerged atom start, because the image remains visible during the narration pause. Merge adjacent atoms to fit when story truth allows. An indivisible atom or mandatory transition may use a concise rail_exception.
 - Current reality, screen/replay, preview/hypothetical, memory/flashback, and mentioned-only are distinct depiction modes.
 - Mentioned-only entities stay offscreen. Every visible entity needs an exact evidence excerpt from the grouped atoms.
+- Identity-bearing actors include people, creatures, bosses, guardians, constructs, summons, and recurring creature systems. A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted belongs in the appropriate visible entity list, never in props.
 - Resolve first-person I/me/my physical actions to the established narrator/protagonist entity when the fact ledger and scene context identify that person; do not make the acting protagonist disappear because their proper name is omitted locally.
 - Select only canonical entity_id and location_id values below. If the narration gives no supported visible person, an object/UI/environment beat is valid.
 - location_id is the physical camera setting of the foreground action. A destination, landmark, or room mentioned in the distance does not become the beat location until the narration places the visible subjects there.
 - Composition is beat-specific. There is no global wide or close-up bias.
 - Background population is neither a default nor forbidden. Use presence=explicit when the grouped atoms name a crowd/group. Use presence=implied only when a concrete local social situation logically needs anonymous people to read correctly—for example an active hearing, ceremony, class, market, public humiliation, audience reaction, staffed workplace, or assembled formation—even if the exact clause does not use the word crowd. A merely public location is insufficient. Use presence=none for private, lonely, abandoned, after-hours, isolated, or object/UI-only beats.
 - Anonymous background population is not a canonical character and does not belong in physically_visible_entity_ids. Give it a concrete description, exact local evidence for the social situation, and subordinate staging that preserves the focal subject.
+- Do not expand a collective phrase such as "four attackers," "the hunters," or "the crew" into every known individual identity. Keep the counted or named group in background_population unless the grouped atoms explicitly identify an individual and that identity is necessary to the decisive foreground moment.
+- For dense physical action, freeze one decisive instant with at most three individually readable foreground actors. Keep additional evidenced participants as a subordinate, spatially separate background group. Preserve the narrated count and role without asking one frame to perform every attack simultaneously.
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 
 ATOMS:
@@ -661,6 +664,12 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode) {
       screen_visible_entity_ids: unique(row.screen_visible_entity_ids ?? []),
       preview_visible_entity_ids: unique(row.preview_visible_entity_ids ?? []),
       mentioned_only_entity_ids: mentionedIds,
+      visible_entities: visibleIds.map((id) => ({
+        entity_id: id,
+        display_name: entityMap.get(id)?.display_name ?? id,
+        kind: entityMap.get(id)?.kind ?? "person",
+      })),
+      visible_entity_kinds: Object.fromEntries(visibleIds.map((id) => [id, entityMap.get(id)?.kind ?? "person"])),
       visible_characters: visibleIds.map((id) => entityMap.get(id)?.display_name).filter(Boolean),
       visible_subjects: visibleIds.map((id) => entityMap.get(id)?.display_name).filter(Boolean),
       screen_visible_characters: unique(row.screen_visible_entity_ids ?? []).map((id) => entityMap.get(id)?.display_name).filter(Boolean),

@@ -964,6 +964,7 @@ Rules:
 - Do not collapse acts, montages, flashbacks, locations, or major emotional beats into broad summaries.
 - Prefer visual-production units of roughly 120-260 spoken words each; shorter is fine for fast action, reveals, UI inserts, or emotional turns.
 - Include production facts needed by visual prompts: location, visible_subjects, primary_subject, visual_intent, ui_text_on_screen, sfx_cues, character_states, wardrobe, props, ref_requirements, action_staging.
+- visible_subjects includes every identity-bearing physical actor the camera may need to preserve: people, named or distinct creatures, bosses, guardians, constructs, summons, and recurring creature systems. An actor that moves, attacks, reacts, is fought, or is physically contacted is an entity, not a prop. Props are inert objects.
 - Keep character state layers separate. visible_state is for physical facts the camera can see: wet hair, torn sleeve, black suit, bandaged hand, posture, expression, age presentation, cleanliness, injury, body shape, grooming, and wardrobe condition. emotional_state, financial_state, and social_state are narrative/status facts; they should not be treated as costume or body damage unless the locked script explicitly says the character is dirty, ragged, injured, homeless, sick, or wearing damaged clothes.
 - When a character is socially, financially, or emotionally ruined, express that in semantic context without inventing visible grime. Use props, posture, expression, staging, witnesses, receipts, phones, screens, isolation, or power dynamics to make it visual. Do not convert abstract phrases like broke, ruined, betrayed, humiliated, indebted, or emotionally collapsed into filthy/ragged clothing, wounds, dumpster-like styling, or homelessness unless those physical details are explicitly in the script.
 - Resolve role/title aliases to canonical named characters when the script establishes that relationship. If a named person is introduced as the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions such as "the dean" or "the judge" should refer to that named person instead of creating a new generic character. In visible_subjects and character_states, use the named character and put the role in their state, for example "Kai Cenat, acting as dean and final judge." Only create a separate role character when the script clearly introduces a different person.
@@ -975,7 +976,7 @@ Rules:
 - ui_text_on_screen should be concise image/render guidance: short system labels, numbers, chat snippets, document titles, or key words. Do not dump long multi-line system messages, documents, article text, captions, or dense lists into imagegen text. Summarize dense UI as a visual motif here and leave exact long wording to narration/subtitles or render-layer overlays.
 - Location ref_requirements are the source of truth for downstream scene scoping. Use stable, specific snake_case location ref IDs that match the scene's visible physical area. A later reference planner may merge true duplicates, but deterministic code will not invent replacement locations after this stage.
 - Every scene with a concrete physical location must include at least one ref_requirements row with kind "location" and a stable location ref_id for that visible area. This is mandatory even when the location is one-scene, late, minor, or likely to become no_ref_needed later. Location ref requirements are scoped coverage, not standalone image orders.
-- Semantic ref_requirements are scoped target suggestions, not automatic standalone image-generation orders. Include refs for canonical recurring characters, major character states, distinct visible physical locations, signature recurring UI motifs, critical props, and high-risk one-scene close-contact characters. Do not create semantic refs for generic background groups, throwaway one-scene UI text, ordinary desks/doors/screens, or props that can be safely derived from the scene image.
+- Semantic ref_requirements are scoped target suggestions, not automatic standalone image-generation orders. Include refs for canonical recurring characters, named or distinct recurring nonhuman actors, signature bosses/guardians/constructs with unusual anatomy, major visible states, distinct visible physical locations, signature recurring UI motifs, critical props, and high-risk one-scene close-contact actors. Use kind "character" for identity-bearing human or nonhuman actors so downstream reference planning can preserve their identity and anatomy. Do not create semantic refs for generic background groups, throwaway one-scene UI text, ordinary desks/doors/screens, or props that can be safely derived from the scene image.
 - Avoid editorial/package words in semantic fields, such as hook, retention, thumbnail, CTR, narrator, recap, or what the viewer should feel. Describe the story fact visible in the scene.
 - script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later. Use short verbatim spans from the actual first and final sentence of the scene; do not summarize, paraphrase, remove clauses, or change quotation marks.
 
@@ -1006,7 +1007,7 @@ Return one valid JSON object:
       "sfx_cues": ["..."],
       "character_states": [{"character":"...","state":"...","visible_state":"camera-visible body, grooming, wardrobe, cleanliness, posture, expression, and injury facts only","emotional_state":"...","financial_state":"...","social_state":"...","wardrobe":"..."}],
       "props": ["..."],
-      "ref_requirements": [{"ref_id":"specific_visible_area_location_ref","kind":"location","required":true,"reason":"mandatory scoped location coverage for this concrete physical scene"}, {"ref_id":"...","kind":"character|prop|ui|style","required":true,"reason":"..."}],
+      "ref_requirements": [{"ref_id":"specific_visible_area_location_ref","kind":"location","required":true,"reason":"mandatory scoped location coverage for this concrete physical scene"}, {"ref_id":"...","kind":"character|prop|ui|style","required":true,"reason":"character covers identity-bearing people, creatures, bosses, guardians, constructs, and summons"}],
       "action_staging": "...",
       "continuity_notes": ["..."]
     }
@@ -1155,6 +1156,8 @@ Your job is evidence reconciliation, not story invention and not visual art dire
 Hard rules:
 - The locked script is the only source of story facts. Bibles may resolve established identity/style naming but may not add events.
 - Merge aliases into one canonical entity when the script proves they are the same person. Keep distinct people distinct.
+- Canonical entities are identity-bearing actors, not only people. Include named or distinct creatures, bosses, guardians, constructs, summons, and recurring creature systems when they move, attack, react, are fought, or are physically contacted. Never demote an acting entity to canonical_props merely because it is nonhuman.
+- Give every recurring or signature nonhuman actor one canonical entity with all evidence-backed aliases. Preserve unusual anatomy as entity identity/state evidence so downstream prompts can repeat one stable construction across cuts.
 - Canonicalize physical locations, props, recurring UI motifs, and character state transitions across chunk boundaries.
 - Overlapping chunks intentionally repeat evidence. Deduplicate repeated scenes and facts without deleting story coverage.
 - Preserve the useful scene granularity already present in the chunk extractions. Never collapse several adjacent extraction chunks into one catch-all scene. No reconciled scene may span more than 1,600 locked-script words; split broad arcs at the supplied exact chunk anchors.
@@ -1181,7 +1184,7 @@ ${serializedChunkPacket}
 Return one JSON object only:
 {
   "episode_summary": "factual summary",
-  "canonical_entities": [{"entity_id":"snake_case","display_name":"...","kind":"person|group|organization","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.99}]}],
+  "canonical_entities": [{"entity_id":"snake_case","display_name":"...","kind":"person|creature|construct|creature_group|group|organization","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.99}]}],
   "canonical_locations": [{"location_id":"snake_case","display_name":"...","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.95}]}],
   "canonical_props": [{"prop_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
   "canonical_ui_motifs": [{"ui_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
@@ -1204,6 +1207,96 @@ function storyFactRows(ledger) {
     ...(ledger.canonical_ui_motifs ?? []),
     ...(ledger.state_transitions ?? []),
   ];
+}
+
+function identityLabel(value) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function identityTokens(value) {
+  const stop = new Set([
+    "a", "an", "the", "final", "old", "new", "unlisted", "ancient", "greater", "lesser",
+    "fallen", "wounded", "injured", "dead", "sealed", "awakened",
+  ]);
+  return identityLabel(value).split(/\s+/).filter((token) => token && !stop.has(token));
+}
+
+function labelsDescribeSameEntity(left, right) {
+  const a = identityLabel(left);
+  const b = identityLabel(right);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const leftTokens = new Set(identityTokens(a));
+  const rightTokens = new Set(identityTokens(b));
+  const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  const smaller = Math.min(leftTokens.size, rightTokens.size);
+  return overlap >= 1 && smaller > 0 && overlap / smaller >= 0.67;
+}
+
+function isGenericVisibleCollective(value) {
+  const label = identityLabel(value);
+  if (!label) return true;
+  return /^(?:people|civilians?|crowd|audience|workers?|staff|guards?|soldiers?|students?|witnesses?|attackers?|fighters?|hunters?|raiders?|survivors?|monsters?|creatures?|teams?|crews?|members?|families|children)$/.test(label)
+    || /^(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:people|civilians?|guards?|soldiers?|students?|witnesses?|attackers?|fighters?|hunters?|raiders?|survivors?|monsters?|creatures?|teams?|crews?|members?)$/.test(label)
+    || /^(?:ordinary|generic|various|several|many|multiple|minor|lesser)\s+(?:monsters?|creatures?|beasts?|guards?|soldiers?|attackers?|fighters?|hunters?|raiders?|survivors?)$/.test(label)
+    || /\b(?:background crowd|anonymous crowd|generic crowd)\b/.test(label);
+}
+
+function hasDistinctActorCue(value) {
+  return /\b(?:boss|guardian|sentinel|golem|construct|automaton|monster|creature|beast|hound|wolf|dragon|wyrm|demon|spirit|summon|undead|ram|serpent|leviathan|titan|colossus|giant|entity)\b/i.test(String(value ?? ""));
+}
+
+function hasSignatureActorCue(value) {
+  return /\b(?:boss|guardian|sentinel|golem|construct|automaton|dragon|wyrm|demon|summon|undead|ram|leviathan|titan|colossus)\b/i.test(String(value ?? ""));
+}
+
+export function canonicalVisibleEntityCoverageFindingsForTests(ledger, scenes) {
+  const candidates = new Map();
+  for (const scene of scenes ?? []) {
+    const sceneId = String(scene?.scene_id ?? "").trim();
+    const primary = identityLabel(scene?.primary_subject);
+    for (const rawSubject of scene?.visible_subjects ?? []) {
+      const subject = normalizeText(rawSubject);
+      const key = identityLabel(subject);
+      if (!key || isGenericVisibleCollective(subject)) continue;
+      const current = candidates.get(key) ?? {
+        subject,
+        scene_ids: new Set(),
+        primary_count: 0,
+        distinct_actor_cue: false,
+        signature_actor_cue: false,
+      };
+      if (sceneId) current.scene_ids.add(sceneId);
+      if (primary && labelsDescribeSameEntity(subject, primary)) current.primary_count += 1;
+      current.distinct_actor_cue ||= hasDistinctActorCue(subject);
+      current.signature_actor_cue ||= hasSignatureActorCue(subject);
+      candidates.set(key, current);
+    }
+  }
+
+  const canonicalLabels = (ledger?.canonical_entities ?? []).flatMap((entity) => [
+    entity?.display_name,
+    ...(entity?.aliases ?? []),
+  ]).filter(Boolean);
+
+  return [...candidates.values()]
+    .filter((candidate) => (
+      candidate.signature_actor_cue
+      || candidate.scene_ids.size >= 2
+      || (candidate.distinct_actor_cue && candidate.primary_count >= 1)
+    ))
+    .filter((candidate) => !canonicalLabels.some((label) => labelsDescribeSameEntity(candidate.subject, label)))
+    .map((candidate) => ({
+      severity: "blocker",
+      code: "canonical_visible_actor_missing",
+      subject: candidate.subject,
+      scene_ids: [...candidate.scene_ids].sort(),
+      message: `Identity-bearing visible actor ${candidate.subject} is absent from canonical_entities. Add one evidence-backed person/creature/construct/group entity instead of treating the actor as a prop.`,
+    }));
 }
 
 export function storyFactEvidenceFindingsForTests(ledger, script) {
@@ -1286,9 +1379,11 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
     const evidenceFindings = storyFactEvidenceFindingsForTests(ledger, script);
     const normalizedScenes = normalizeScenes(parsed.scenes ?? []);
     const snappedScenes = snapSemanticSceneAnchors(normalizedScenes, script).scenes;
+    const visibleEntityCoverageFindings = canonicalVisibleEntityCoverageFindingsForTests(ledger, snappedScenes);
     const sceneFindings = [
       ...semanticSceneAnchorFindings(snappedScenes, script),
       ...semanticSceneCoverageFindingsForTests(snappedScenes, script),
+      ...visibleEntityCoverageFindings,
     ];
     const reconciliationFindings = [...evidenceFindings, ...sceneFindings];
     if (!reconciliationFindings.some((finding) => finding.severity === "blocker")) {

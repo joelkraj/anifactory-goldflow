@@ -12,8 +12,19 @@ function normalizedKind(kind) {
   return String(kind ?? "").trim().toLowerCase();
 }
 
-function referencePriority(kind) {
-  const value = normalizedKind(kind);
+function referencePriority(requirement) {
+  const authoredRole = String(
+    requirement?.reference_priority
+    ?? requirement?.selection_priority
+    ?? requirement?.priority_role
+    ?? "",
+  ).trim().toLowerCase();
+  if (authoredRole === "decisive_subject") return -20;
+  if (authoredRole === "contact_counterpart") return -10;
+  if (authoredRole === "readable_identity") return 0;
+  if (authoredRole === "location_geometry") return 1;
+  if (authoredRole === "supporting_reference") return 20;
+  const value = normalizedKind(requirement?.kind);
   if (value.includes("character")) return 0;
   if (value.includes("location")) return 1;
   if (value.includes("prop") || value.includes("ui")) return 2;
@@ -79,7 +90,7 @@ export function normalizeReferenceLimit(requirements = [], maxReferences = 4) {
   }
   const ranked = requirements.map((requirement, index) => ({ requirement, index }))
     .sort((left, right) => (
-      referencePriority(left.requirement?.kind) - referencePriority(right.requirement?.kind)
+      referencePriority(left.requirement) - referencePriority(right.requirement)
       || left.index - right.index
     ));
   const selectedEntries = ranked.slice(0, max);

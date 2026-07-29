@@ -6,6 +6,10 @@ import path from "node:path";
 import { backgroundPopulationIsRequired } from "./lib/background-population-utils.mjs";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
+import {
+  promptHasEquipmentGeometryRisk,
+  promptHasImmutableAnatomyRisk,
+} from "./lib/shot-manifest-risk-contracts.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -102,6 +106,8 @@ export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   const job = String(prompt?.shot_manifest?.shot_job ?? prompt?.suggested_shot_job ?? "").toLowerCase();
   const action = `${prompt?.shot_manifest?.foreground_action ?? ""} ${prompt?.visual_beat_action ?? ""}`;
   if (job === "physical_action" || /\b(?:lift|carry|catch|pin|restrain|shield|stab|strike|hit|shove|grab|rescue|fight)\b/i.test(action)) reasons.push("physical_action_geometry");
+  if (promptHasImmutableAnatomyRisk(prompt)) reasons.push("immutable_anatomy_adherence");
+  if (promptHasEquipmentGeometryRisk(prompt)) reasons.push("equipment_count_hand_and_contact_geometry");
   if (visibleCharacterCount(prompt) >= 3) reasons.push("dense_cast");
   if (backgroundPopulationIsRequired(prompt?.shot_manifest?.background_population)) reasons.push("background_population");
   const referenceCount = Math.max(prompt?.reference_slots?.length ?? 0, prompt?.reference_requirements?.length ?? 0);
@@ -120,17 +126,35 @@ function deterministicSampleSelected(imageId, rate) {
 
 export function imageManualReviewPolicy(prompt, compositionFindings = [], options = {}) {
   const reasons = imageRiskReasons(prompt, { openingSec: options.openingSec ?? 180 });
-  const mandatoryReasons = reasons.filter((reason) => reason !== "four_reference_integration");
+  const advisoryOnlyReasons = new Set([
+    "immutable_anatomy_adherence",
+    "equipment_count_hand_and_contact_geometry",
+  ]);
+  const mandatoryReasons = reasons.filter((reason) => reason !== "four_reference_integration" && !advisoryOnlyReasons.has(reason));
+  const compositionReasons = [];
   for (const finding of compositionFindings) {
-    if (String(finding?.severity ?? "").toLowerCase() === "needs_review") mandatoryReasons.push(`composition:${finding.code}`);
+    if (String(finding?.severity ?? "").toLowerCase() === "needs_review") {
+      const reason = `composition:${finding.code}`;
+      mandatoryReasons.push(reason);
+      compositionReasons.push(reason);
+    }
   }
   if (mandatoryReasons.length) {
-    return { tier: "mandatory_exception_review", requires_manual_review: true, reasons: [...new Set(mandatoryReasons)], sampled: false };
+    return { tier: "mandatory_exception_review", requires_manual_review: true, reasons: [...new Set([...reasons, ...compositionReasons])], sampled: false };
   }
   const sampleCandidate = reasons.includes("four_reference_integration");
   const sampled = sampleCandidate && deterministicSampleSelected(prompt?.image_id, Number(options.integrationSampleRate ?? 0.08));
   if (sampled) {
-    return { tier: "deterministic_integration_sample", requires_manual_review: true, reasons: ["sampled_four_reference_integration"], sampled: true };
+    return {
+      tier: "deterministic_integration_sample",
+      requires_manual_review: true,
+      reasons: [...new Set(["sampled_four_reference_integration", ...reasons.filter((reason) => advisoryOnlyReasons.has(reason))])],
+      sampled: true,
+    };
+  }
+  const advisoryReasons = reasons.filter((reason) => advisoryOnlyReasons.has(reason));
+  if (advisoryReasons.length) {
+    return { tier: "advisory_review_log", requires_manual_review: false, reasons: [...new Set(advisoryReasons)], sampled: false };
   }
   return { tier: "structural_auto_pass", requires_manual_review: false, reasons: [], sampled: false };
 }
@@ -206,7 +230,11 @@ function svgEscape(value) {
 
 async function contactTile(row, width = 400, imageHeight = 225, labelHeight = 70) {
   const input = await sharp(row.image_path).resize({ width, height: imageHeight, fit: "contain", background: "#000000" }).png().toBuffer();
-  const label = `${row.image_id}  ${Number(row.start_sec ?? 0).toFixed(1)}s\n${String(row.visual_job ?? row.shot_job ?? "").slice(0, 46)}`;
+  const detail = [
+    row.visual_job ?? row.shot_job ?? "",
+    ...(row.risk_reasons ?? []),
+  ].filter(Boolean).join(" | ");
+  const label = `${row.image_id}  ${Number(row.start_sec ?? 0).toFixed(1)}s\n${String(detail).slice(0, 74)}`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${labelHeight}">
     <rect width="100%" height="100%" fill="#111111"/>
     <text x="12" y="25" fill="#ffffff" font-family="Arial" font-size="17" font-weight="700">${svgEscape(label.split("\n")[0])}</text>
@@ -331,7 +359,9 @@ async function writeReviewPackets(rows) {
   }
   const riskRows = rows.filter((row) => row.requires_manual_risk_review);
   const riskSheets = riskRows.length ? await writeContactSheet(riskRows, path.join(reviewDir, "risk_cuts.jpg")) : [];
-  return { all_sheets: allSheets, risk_sheets: riskSheets };
+  const advisoryRows = rows.filter((row) => row.qa_tier === "advisory_review_log");
+  const advisorySheets = advisoryRows.length ? await writeContactSheet(advisoryRows, path.join(reviewDir, "advisory_risk_cuts.jpg")) : [];
+  return { all_sheets: allSheets, risk_sheets: riskSheets, advisory_risk_sheets: advisorySheets };
 }
 
 export function applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, structuralBlockerIds, note, now = new Date().toISOString()) {
@@ -464,6 +494,10 @@ async function main() {
           ...(priorDecisions?.contact_sheets?.risk_sheets ?? []),
           ...packets.risk_sheets,
         ])],
+        advisory_risk_sheets: [...new Set([
+          ...(priorDecisions?.contact_sheets?.advisory_risk_sheets ?? []),
+          ...packets.advisory_risk_sheets,
+        ])],
       }
     : packets;
   await writeJsonAtomic(reviewDecisionsPath, { ...decisionLedger, contact_sheets: contactSheets });
@@ -505,13 +539,16 @@ async function main() {
     image_count: audit.rows.length,
     structurally_valid_count: audit.rows.length - new Set(structuralBlockers.map((finding) => finding.image_id)).size,
     risk_cut_count: audit.rows.filter((row) => row.requires_manual_risk_review).length,
+    advisory_risk_cut_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,
     qa_policy: {
       mode: "exception_driven_v1",
       opening_review_sec: openingReviewSec,
       integration_sample_rate: integrationSampleRate,
       full_contact_sheets_enabled: writeFullContactSheets,
       manual_review_tiers: ["mandatory_exception_review", "deterministic_integration_sample"],
+      advisory_review_tiers: ["advisory_review_log"],
       structural_auto_pass_count: audit.rows.filter((row) => row.qa_tier === "structural_auto_pass").length,
+      advisory_review_log_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,
       mandatory_exception_review_count: audit.rows.filter((row) => row.qa_tier === "mandatory_exception_review").length,
       deterministic_sample_count: audit.rows.filter((row) => row.qa_tier === "deterministic_integration_sample").length,
       review_reason_counts: audit.rows.flatMap((row) => row.risk_reasons ?? []).reduce((counts, reason) => ({ ...counts, [reason]: (counts[reason] ?? 0) + 1 }), {}),

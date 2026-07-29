@@ -29,6 +29,10 @@ import {
   longLocationSpanFindings,
   repeatedLocationShotJobFindings,
 } from "./lib/visual-plan-quality-utils.mjs";
+import {
+  sanitizeAnatomyContracts,
+  sanitizeEquipmentContracts,
+} from "./lib/shot-manifest-risk-contracts.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -289,6 +293,7 @@ function compactSceneCharacterRef(ref) {
     source_ref_id: ref.source_ref_id ?? null,
     base_identity_ref_id: ref.base_identity_ref_id ?? null,
     identity_usage: ref.identity_usage ?? null,
+    identity_subtype: ref.identity_subtype ?? null,
     character: ref.character ?? null,
     scene_ids: localPromptPackets ? [] : (ref.scene_ids ?? []),
     scene_prompt_anchor: truncateText(scenePromptAnchorFromRef(ref), localPromptPackets ? 360 : (compactEditorialProof ? 280 : 900)),
@@ -367,6 +372,8 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     screen_visible_entity_ids: scene.screen_visible_entity_ids ?? [],
     preview_visible_entity_ids: scene.preview_visible_entity_ids ?? [],
     mentioned_only_entity_ids: scene.mentioned_only_entity_ids ?? [],
+    visible_entities: scene.visible_entities ?? [],
+    visible_entity_kinds: scene.visible_entity_kinds ?? {},
     active_state_constraints: scene.active_state_constraints ?? null,
     local_named_character_mentions: mentionedCandidateNames(scene),
     local_location_mentions: locationMentionPhrases(scene.visual_beat_script_excerpt ?? ""),
@@ -488,6 +495,7 @@ function relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex = ne
       scene_prompt_anchor: stateRef?.scene_prompt_anchor ?? target.scene_prompt_anchor,
       prompt_anchor: target.prompt_anchor ?? stateRef?.prompt_anchor,
       identity_usage: stateRef?.identity_usage ?? target.identity_usage,
+      identity_subtype: stateRef?.identity_subtype ?? target.identity_subtype,
     });
   });
 }
@@ -508,6 +516,8 @@ function compactReferenceTarget(target) {
     character: target.character ?? null,
     source_ref_id: target.source_ref_id ?? null,
     identity_usage: target.identity_usage ?? null,
+    conditioning_asset_role: target.conditioning_asset_role ?? null,
+    identity_subtype: target.identity_subtype ?? null,
     // Scene and contract coverage are already enforced before this prompt is
     // assembled. Repeating an asset's full episode-wide scope in every local
     // packet is pure transport bloat and was the main source of 100k+ prompts.
@@ -585,10 +595,12 @@ function compactAuthorRiskRules(compactTimedPlan) {
   const hasSurfaceRisk = /\b(?:table|desk|counter|island|railing|barrier|podium|bench|console|carriage|vehicle)\b/i.test(text);
   const hasScreenVisiblePerson = /\b(?:replay|livestream|broadcast|video wall|phone screen|dossier|chat avatar)\b/i.test(text);
   if (hasMultiCharacter) {
-    rules.push("For multi-character cuts, shot_manifest.character_staging lists every visible named character in visible-character order with distinct screen positions, ref ids, wardrobe sources, and poses. Give each person a separate prose clause and separate body silhouette.");
+    rules.push("For multi-identity cuts, shot_manifest.character_staging lists every individually readable person, creature, or construct in visible-entity order with distinct screen positions, ref ids, identity/anatomy sources, and poses. Give each foreground actor a separate prose clause and separate body silhouette.");
   }
   if (hasPhysicalAction) {
-    rules.push("For physical action, begin with actor, affected person/object, screen positions, exact contact plane, and the visible result proving the beat. Put identity anchors and environment after the decisive action sentence.");
+    rules.push("For physical action, freeze one decisive instant. Begin with actor, affected person/creature/object, screen positions, exact contact plane, and the visible result proving the beat. Keep at most three individually readable foreground actors; stage additional evidenced participants as a subordinate background group.");
+    rules.push("Bind each held weapon or object to one named owner and an exact hand. Default to one weapon per wielder and one visible instance of that weapon. If both hands grip it, state that both hands share the same single weapon; if a reference shows it sheathed or strapped, state that the same weapon is drawn and its sheath/holder is empty.");
+    rules.push("Construct every readable actor as one coherent body silhouette with the story-correct limb count, spatially separated hands, and one unambiguous action. Do not stack several simultaneous attacks into one body.");
   }
   if (hasSurfaceRisk) {
     rules.push("When a surface or large object can cross a body, state which side each person occupies and keep torsos, hands, feet, and body silhouettes spatially clear of the surface plane.");
@@ -611,11 +623,15 @@ Core contract:
 - Ask what the viewer needs to see now to understand, feel, and keep watching. Depict one present-tense moment, not a parent-scene summary or generic hero portrait.
 - Author shot_manifest first, then prose that obeys it. Preserve target_image_id, scene_id, visual_beat_id, start_sec, and duration_sec exactly.
 - Start provider prompt prose with the visible subject, decisive action or reaction, and current location. Use the best composition for this beat without a global wide or close-up bias.
-- Physically visible named people belong in visible_characters. Pure mentions belong in mentioned_only_characters and receive no character ref. Resolve first-person physical action to the narrator/protagonist unless the cut is explicitly POV, UI-only, document-only, or offscreen narration.
-- Use only approved in-scope refs from the current unit's reference_target_ids and matching reference target packet. Attach up to four refs in the actual desired slot order: visible identity/wardrobe first when that is the main risk, then location, critical prop/UI, and action/effect. Fewer refs are fine.
-- When a physically visible, screen-visible, or preview-visible named character has a matching attachable character_state target in the current unit packet, attach that character ref unless the four-slot cap makes it impossible. Do not leave a visible canonical identity text-only while an exact approved identity ref is available.
+- Physically visible identity-bearing actors belong in visible_characters for compatibility: people, named or distinct creatures, bosses, guardians, constructs, summons, and recurring creature systems. Pure mentions belong in mentioned_only_characters and receive no identity ref. Resolve first-person physical action to the narrator/protagonist unless the cut is explicitly POV, UI-only, document-only, or offscreen narration.
+- Use only approved in-scope refs from the current unit's reference_target_ids and matching reference target packet. Attach up to four refs in the actual desired slot order. Rank the decisive foreground subject and its affected/contact counterpart first, whether human, creature, construct, or critical interacted object; then remaining readable identities, exact location geometry, critical prop/UI, and action/effect. Fewer refs are fine.
+- Mark the defining subject ref as reference_priority decisive_subject and a physically contacted counterpart as contact_counterpart. These two roles may outrank peripheral human identity refs at the four-image cap; do not use them for merely present supporting cast.
+- When a physically visible, screen-visible, or preview-visible identity-bearing actor has a matching attachable character_state target in the current unit packet, attach that identity/anatomy ref when the actor is decisive or individually readable. Under the four-slot cap, omit peripheral participants before omitting the boss, creature, construct, or contact target that defines the shot.
 - Location contracts and image refs are separate. For a physical setting, select the exact in-scope textual location contract in shot_manifest.location_contract_id and use its prompt_anchor to describe the environment. Set shot_manifest.location_ref_id only when the current unit packet contains a matching approved attachable location image ref. A text-only location contract never belongs in reference_requirements and never consumes an image slot.
-- For every attached character state, reaffirm the supplied scene_prompt_anchor in that person's own clause, then add current screen position and action. If the anchor already begins with the character's name, do not repeat the name a second time.
+- For every attached character state, reaffirm the supplied scene_prompt_anchor in that actor's own clause, then add current screen position and action. If the anchor already begins with the actor's name, do not repeat the name a second time.
+- For an attached creature/construct identity, repeat its scene_prompt_anchor anatomy contract materially unchanged in every cut. State one coherent silhouette and the exact location of any integrated object-like body feature; distinguish integrated anatomy from something worn, held, or separate in the environment.
+- When a visible actor has an amputation, prosthetic rule, nonstandard limb count, or signature integrated anatomy, add one shot_manifest.anatomy_contracts row. State the identity ref, immutable body fact, expected visible hand count when relevant, missing limb, whether a prosthetic is allowed, and whether this frame must visibly prove the invariant. Make the provider prose obey that row.
+- For every visible weapon or combat object, add one shot_manifest.equipment_contracts row. State the named owner, item, exact visible count, hand assignment, sheath/holder state, contact target, and whether any extra instance is allowed. Make the provider prose obey that row.
 - Put ordered reference-role metadata once in shot_manifest.reference_slots. Do not duplicate it in top-level compatibility fields and do not repeat provider wrapper sentences such as "Use Image 1" inside scene prose.
 - active_state_constraints is binding. Preserve its current wardrobe, injury, possession, status, visible state, and location facts for every visible entity; never reset a character to a base/default state merely because an older ref exists.
 - Treat status as narrative/social context, not physical appearance. Wardrobe and injury may come only from the current active wardrobe/injury fields or the exact selected character-state anchor. When those physical fields are absent, use the selected base identity anchor's attire and intact physical condition; never infer old clothing or wounds from a status such as winner, boxer, victim, or defeated rival.
@@ -666,11 +682,13 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
       "location_contract_id": null,
       "location_ref_id": null,
       "foreground_action": "specific visible action",
+      "anatomy_contracts": [{"entity":"Name or creature","identity_ref_id":"state_or_creature_ref","body_invariant":"immutable visible anatomy","expected_visible_hands":1,"missing_limb":"left forearm below elbow or null","prosthetic_allowed":false,"visibility_required":true,"reason":"why this cut must preserve it"}],
+      "equipment_contracts": [{"owner":"Name","item":"sword","visible_count":1,"hand_assignment":"right hand; left hand empty","holder_state":"same sheath empty","contact_target":"target or null","extras_allowed":false,"reason":"one visible instance"}],
       "background_population": {"presence":"none|implied|explicit","description":null,"evidence":null,"staging":null},
       "visible_props": [],
       "ui_elements": [],
       "forbidden_ref_ids": [],
-      "reference_slots": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
+      "reference_slots": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","conditioning_asset_role":"identity_state|creature_identity|environment|prop|ui_motif|action_effect|style_language","identity_subtype":"human|creature|construct|creature_group","reference_priority":"decisive_subject|contact_counterpart|readable_identity|location_geometry|supporting_reference","slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
       "continuity_notes": "current-beat continuity",
       "motion_intent": {"behavior":"static_hold|slow_push_in|reveal_zoom_out|lateral_follow|diagonal_follow|focus_shift|impact_push|reaction_hold|ui_focus|aftermath_reveal","focal_subject":"visible focal subject","start_anchor":{"x":0.5,"y":0.5},"end_anchor":{"x":0.5,"y":0.5},"start_scale":1.0,"end_scale":1.05,"easing":"linear|ease_in|ease_out|ease_in_out","motion_keyframes":[{"at":0,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"linear"},{"at":0.15,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"ease_in_out"},{"at":0.7,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"},{"at":1,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"}],"reason":"what this movement reveals, tracks, or emphasizes","depth_candidate":{"eligible":false,"priority":0,"separation_confidence":"low","foreground_subject":null,"background_plane":null,"editorial_reason":"ordinary single-plane cut"}},
       "character_staging": [{"name":"Name","ref_id":"state_ref","screen_position":"frame-left","wardrobe_from":"character_state_ref:state_ref","pose":"current pose/action"}]
@@ -1324,6 +1342,9 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     manifest.reference_slots = row.reference_requirements.map((slot, slotIndex) => ({
       ref_id: String(slot?.ref_id ?? "").trim(),
       kind: String(slot?.kind ?? "").trim(),
+      conditioning_asset_role: String(slot?.conditioning_asset_role ?? "").trim() || null,
+      identity_subtype: String(slot?.identity_subtype ?? "").trim() || null,
+      reference_priority: String(slot?.reference_priority ?? "").trim() || null,
       required: slot?.required !== false,
       slot_order: Number(slot?.slot_order ?? slotIndex + 1),
       slot_purpose: String(slot?.slot_purpose ?? "").trim(),
@@ -1335,6 +1356,9 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   const referenceRequirements = (manifest?.reference_slots ?? []).map((slot) => ({
     ref_id: slot.ref_id,
     kind: slot.kind,
+    conditioning_asset_role: slot.conditioning_asset_role ?? null,
+    identity_subtype: slot.identity_subtype ?? null,
+    reference_priority: slot.reference_priority ?? null,
     required: slot.required !== false,
     slot_order: slot.slot_order,
     slot_purpose: slot.slot_purpose,
@@ -1577,6 +1601,8 @@ function sanitizeShotManifest(value) {
     location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    anatomy_contracts: sanitizeAnatomyContracts(value.anatomy_contracts),
+    equipment_contracts: sanitizeEquipmentContracts(value.equipment_contracts),
     background_population: sanitizeBackgroundPopulation(value.background_population),
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),
@@ -1584,6 +1610,9 @@ function sanitizeShotManifest(value) {
     reference_slots: (Array.isArray(value.reference_slots) ? value.reference_slots : []).map((slot, index) => ({
       ref_id: String(slot?.ref_id ?? "").trim(),
       kind: String(slot?.kind ?? "").trim(),
+      conditioning_asset_role: String(slot?.conditioning_asset_role ?? "").trim() || null,
+      identity_subtype: String(slot?.identity_subtype ?? "").trim() || null,
+      reference_priority: String(slot?.reference_priority ?? "").trim() || null,
       required: slot?.required !== false,
       slot_order: Number(slot?.slot_order ?? index + 1),
       slot_purpose: String(slot?.slot_purpose ?? "").trim(),

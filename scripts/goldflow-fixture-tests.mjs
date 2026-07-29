@@ -45,6 +45,7 @@ import {
   candidateImageIdsForDerivedTargetForTests,
   cumulativeImagegenHistoryForTests,
   episodeImageStatusForTests,
+  promptWithReferenceSlotsForTests,
   referencePromptForTests,
   referenceSlotInstructionForTests,
   runPoolWithCircuitBreakerForTests,
@@ -141,6 +142,7 @@ import {
 import { resolveTransitionSfxFamily, transitionSfxFamilyGuide } from "./lib/transition-sfx-policy.mjs";
 import {
   gptImage2OutputSizeForTests,
+  modelslabRequestSettings,
   prepareGptImage2PromptForTests,
 } from "./modelslab-image-helper.mjs";
 import {
@@ -167,8 +169,14 @@ import {
   referenceOpeningIdentityFindingsForTests,
   selectedReferenceInventoryForTests,
   shouldSplitReferenceChunkForTests,
+  unselectedDistinctNonhumanActorFindingsForTests,
   visualReferenceCodexCacheEnabledForTests,
 } from "./visual-reference-plan.mjs";
+import { normalizeReferenceLimit } from "./lib/visual-prompt-policy.mjs";
+import {
+  fluxKleinActionComplexityFindingsForTests,
+  fluxKleinStructuralContractFindingsForTests,
+} from "./visual-prompt-harden.mjs";
 import {
   qwenGenerationPlanForTests,
   qwenTextIntegrityCoverageForTests,
@@ -274,6 +282,7 @@ import {
 import {
   applyManualLocationRefRepairsForTests,
   applyManualSemanticRepairsForTests,
+  canonicalVisibleEntityCoverageFindingsForTests,
   semanticBuildPromptForTests,
   semanticReconciliationPromptForTests,
   sanitizeCanonicalIdForTests,
@@ -2278,6 +2287,8 @@ function testSemanticPlannerPromptContracts() {
   assert.match(prompt, /financially, or emotionally ruined/i);
   assert.match(prompt, /do not convert abstract phrases like broke, ruined, betrayed, humiliated, indebted, or emotionally collapsed/i);
   assert.match(prompt, /do not summarize, paraphrase, remove clauses, or change quotation marks/i);
+  assert.match(prompt, /named or distinct creatures, bosses, guardians, constructs, summons/i);
+  assert.match(prompt, /is an entity, not a prop/i);
 }
 
 function testSemanticChunkingSplitsLongSingleParagraph() {
@@ -2594,6 +2605,8 @@ function testSemanticReconciliationEvidenceContract() {
   assert.match(prompt, /evidence reconciliation, not story invention/i);
   assert.match(prompt, /exact_excerpt copied verbatim/i);
   assert.match(prompt, /Overlapping chunks intentionally repeat evidence/i);
+  assert.match(prompt, /nonhuman actor/i);
+  assert.match(prompt, /person\|creature\|construct\|creature_group\|group\|organization/i);
   assert.doesNotMatch(prompt, /OVERLAPPING EXTRACTIONS:\n\[\n  \{/);
   const oversizedPrompt = semanticReconciliationPromptForTests("A".repeat(900_001), {}, [{
     chunk: { chunk_index: 1, word_start_index: 0, word_end_index_exclusive: 1, overlap_words: 0 },
@@ -2622,6 +2635,29 @@ function testSemanticReconciliationEvidenceContract() {
   const missingBoundary = structuredClone(valid);
   delete missingBoundary.state_transitions[0].transition_evidence_excerpt;
   assert.equal(storyFactEvidenceFindingsForTests(missingBoundary, script).some((finding) => finding.code === "state_transition_evidence_not_exact"), true);
+}
+
+function testSemanticCanonicalizesDistinctVisibleActors() {
+  const scenes = [{
+    scene_id: "scene_001",
+    primary_subject: "the final guardian",
+    visible_subjects: ["the final guardian", "ordinary monsters"],
+  }, {
+    scene_id: "scene_002",
+    primary_subject: "Crown Ram",
+    visible_subjects: ["Crown Ram"],
+  }];
+  const missing = canonicalVisibleEntityCoverageFindingsForTests({ canonical_entities: [] }, scenes);
+  assert.deepEqual(new Set(missing.map((finding) => finding.subject)), new Set(["the final guardian", "Crown Ram"]));
+  assert.equal(missing.every((finding) => finding.code === "canonical_visible_actor_missing"), true);
+  assert.equal(missing.some((finding) => finding.subject === "ordinary monsters"), false);
+  const covered = canonicalVisibleEntityCoverageFindingsForTests({
+    canonical_entities: [
+      { entity_id: "bell_guardian", display_name: "Bell Guardian", aliases: ["the final guardian"] },
+      { entity_id: "crown_ram", display_name: "Crown Ram", aliases: [] },
+    ],
+  }, scenes);
+  assert.deepEqual(covered, []);
 }
 
 function testEditorialBeatDirectorContracts() {
@@ -2794,6 +2830,9 @@ function testEditorialBeatDirectorContracts() {
   const prompt = buildEditorialDirectorPrompt(atoms, ledger, timedScenes);
   assert.match(prompt, /You own visual job, depiction mode/i);
   assert.match(prompt, /Never merge across an atom with transition_barrier_before=true/i);
+  assert.match(prompt, /nonhuman actor/i);
+  assert.match(prompt, /at most three individually readable foreground actors/i);
+  assert.match(prompt, /Do not expand a collective phrase/i);
   assert.deepEqual(retentionRailForTime(0), { band: "0_30", min_sec: 2.2, max_sec: 4.5 });
   assert.deepEqual(retentionRailForTime(1300), { band: "1200_plus", min_sec: 7, max_sec: 15 });
 
@@ -3465,6 +3504,46 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(reasons.includes("physical_action_geometry"), true);
   assert.equal(reasons.includes("dense_cast"), true);
   assert.equal(reasons.includes("four_reference_integration"), true);
+  const immutableAndEquipmentReasons = imageRiskReasons({
+    start_sec: 420,
+    provider_prompt: "Oren's residual left arm ends below the elbow while Joey grips one sword in his right hand.",
+    shot_manifest: {
+      shot_job: "physical_action",
+      anatomy_contracts: [{
+        entity: "Oren",
+        body_invariant: "left forearm ends below elbow",
+        expected_visible_hands: 1,
+        prosthetic_allowed: false,
+        visibility_required: true,
+      }],
+      equipment_contracts: [{
+        owner: "Joey",
+        item: "sword",
+        visible_count: 1,
+        hand_assignment: "right hand",
+        extras_allowed: false,
+      }],
+    },
+  });
+  assert.equal(immutableAndEquipmentReasons.includes("immutable_anatomy_adherence"), true);
+  assert.equal(immutableAndEquipmentReasons.includes("equipment_count_hand_and_contact_geometry"), true);
+  const advisoryAnatomyPolicy = imageManualReviewPolicy({
+    image_id: "oren-map",
+    start_sec: 420,
+    provider_prompt: "Oren's residual left arm ends below the elbow while his intact right hand takes the map.",
+    shot_manifest: {
+      shot_job: "interaction",
+      anatomy_contracts: [{
+        entity: "Oren",
+        body_invariant: "left forearm ends below elbow",
+        expected_visible_hands: 1,
+        prosthetic_allowed: false,
+        visibility_required: true,
+      }],
+    },
+  }, [], { openingSec: 180, integrationSampleRate: 0 });
+  assert.equal(advisoryAnatomyPolicy.tier, "advisory_review_log");
+  assert.equal(advisoryAnatomyPolicy.requires_manual_review, false);
   const populationReasons = imageRiskReasons({
     start_sec: 420,
     shot_manifest: {
@@ -4735,6 +4814,52 @@ function testReferenceDirectorV2EvidenceAndLocationContracts() {
   assert.equal(openingFindings.some((finding) => finding.code === "opening_visible_identity_not_generatable"), true);
 }
 
+function testReferenceDirectorTreatsDistinctNonhumansAsIdentities() {
+  const semanticPlan = {
+    status: "passed",
+    source_script_hash: "fixture_hash",
+    scenes: [{
+      scene_id: "scene_001",
+      location: "sunken bell chamber",
+      visual_beats: [{
+        visual_beat_id: "beat_bell_guardian_reveal",
+        parent_scene_id: "scene_001",
+        start_sec: 20,
+        visible_characters: ["Bell Guardian"],
+        visible_entities: [{
+          entity_id: "bell_guardian",
+          display_name: "Bell Guardian",
+          kind: "construct",
+        }],
+        visible_entity_kinds: { bell_guardian: "construct" },
+        physically_visible_entity_ids: ["bell_guardian"],
+        visual_beat_script_excerpt: "The Bell Guardian lowered its bronze head and charged.",
+        local_location: "sunken bell chamber",
+      }],
+    }],
+  };
+  const evidence = referenceEvidenceLedgerForTests(semanticPlan);
+  const guardian = evidence.assets.find((asset) => asset.subject === "Bell Guardian");
+  assert.equal(guardian.kind, "character_state");
+  assert.equal(guardian.entity_kind, "construct");
+  assert.equal(guardian.entity_type, "distinct_nonhuman_actor");
+
+  const omitted = unselectedDistinctNonhumanActorFindingsForTests(evidence, []);
+  assert.equal(omitted.some((finding) => (
+    finding.code === "distinct_nonhuman_actor_reference_not_selected"
+    && finding.subject === "Bell Guardian"
+    && finding.production_blocking === false
+  )), true);
+  const selected = unselectedDistinctNonhumanActorFindingsForTests(evidence, [{
+    ref_id: "bell_guardian_identity",
+    kind: "character_state",
+    subject: "Bell Guardian",
+    canonical_subject_id: "bell_guardian",
+    evidence_asset_ids: [guardian.asset_id],
+  }]);
+  assert.deepEqual(selected, []);
+}
+
 function testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts() {
   const baseOptions = {
     llmTargetIds: new Set(["joey_identity_ref", "hall_ref"]),
@@ -5678,6 +5803,10 @@ function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
     slot: 1,
     ref_id: "arielle_curse_state",
     kind: "character_state",
+    subject: "arielle_curse_state",
+    conditioning_asset_role: null,
+    identity_subtype: null,
+    reference_priority: null,
     path: "/tmp/arielle-base.png",
     purpose: "character identity and wardrobe for arielle_curse_state",
     reason: null,
@@ -5709,6 +5838,165 @@ function testSingleCharacterReferencePromptIgnoresNegativeGroupWords() {
   });
   assert.match(prompt, /exactly one visible person/i);
   assert.doesNotMatch(prompt, /three to five clearly distinct visible people/i);
+}
+
+function testFluxKleinCreatureActionAndRequestContracts() {
+  const creaturePrompt = referencePromptForTests({
+    ref_id: "hollow_bell_boss_identity",
+    kind: "character_state",
+    subject: "Hollow-Bell Boss",
+    conditioning_asset_role: "creature_identity",
+    identity_subtype: "construct",
+    prompt_anchor: "One deep bronze bell is integrated into the center of its black-stone chest beneath a separate stone head.",
+  });
+  assert.match(creaturePrompt, /exactly one canonical nonhuman actor/i);
+  assert.match(creaturePrompt, /exact limb and body anatomy/i);
+  assert.match(creaturePrompt, /integrated at their exact body attachment point/i);
+  assert.doesNotMatch(creaturePrompt, /exactly one visible person/i);
+
+  const humanPrompt = referencePromptForTests({
+    ref_id: "archer_identity",
+    kind: "character_state",
+    subject: "academy archer",
+    conditioning_asset_role: "identity_state",
+    identity_subtype: "human",
+    prompt_anchor: "Adult academy scout in fitted green armor.",
+  });
+  assert.match(humanPrompt, /both hands relaxed and empty/i);
+  assert.match(humanPrompt, /detachable weapons, bows, swords, shields, and carried props omitted/i);
+
+  const capped = normalizeReferenceLimit([
+    { ref_id: "hero", kind: "character_state", reference_priority: "readable_identity" },
+    { ref_id: "archer", kind: "character_state", reference_priority: "supporting_reference" },
+    { ref_id: "knight", kind: "character_state", reference_priority: "supporting_reference" },
+    { ref_id: "bell_chamber", kind: "location", reference_priority: "location_geometry" },
+    { ref_id: "bell_guardian", kind: "character_state", reference_priority: "decisive_subject" },
+  ], 4);
+  assert.equal(capped.selected[0].ref_id, "bell_guardian");
+  assert.equal(capped.selected.some((row) => row.ref_id === "bell_chamber"), true);
+  assert.equal(capped.dropped.some((row) => ["archer", "knight"].includes(row.ref_id)), true);
+
+  const scenePrompt = "Hollow-Bell Boss lunges frame-right through the sunken chamber, one deep bronze bell integrated into the center of its black-stone chest beneath a separate stone head.";
+  const submitted = promptWithReferenceSlotsForTests({
+    modelslab_image_prompt: scenePrompt,
+    reference_slots: [{
+      slot: 1,
+      ref_id: "hollow_bell_boss_identity",
+      kind: "character_state",
+      subject: "Hollow-Bell Boss",
+      conditioning_asset_role: "creature_identity",
+      identity_subtype: "construct",
+    }],
+  }, "modelslab", { concise: true, mappingPosition: "after" });
+  assert.equal(submitted.startsWith(scenePrompt), true);
+  assert.equal(submitted.indexOf("Reference mapping:"), scenePrompt.length + 1);
+  assert.match(submitted, /exact Hollow-Bell Boss anatomy, silhouette, texture, and markings/i);
+
+  const authoritativeOrder = attachReferencePathsToPromptsForTests({
+    visual_prompt_hardening_report_path: "/tmp/visual_prompt_hardening_ep_01.json",
+    prompts: [{
+      image_id: "ep_01-bell-order",
+      modelslab_image_prompt: scenePrompt,
+      reference_requirements: [
+        { ref_id: "hollow_bell_boss_identity", kind: "character_state", reference_priority: "decisive_subject", slot_order: 1 },
+        { ref_id: "bell_chamber", kind: "location", reference_priority: "location_geometry", slot_order: 2 },
+        { ref_id: "joey_identity", kind: "character_state", reference_priority: "readable_identity", slot_order: 3 },
+      ],
+      shot_manifest: {
+        character_state_ref_ids: ["hollow_bell_boss_identity", "joey_identity", "peripheral_archer"],
+        location_ref_id: "bell_chamber",
+      },
+    }],
+  }, new Map([
+    ["hollow_bell_boss_identity", "/tmp/hollow-bell-boss.png"],
+    ["bell_chamber", "/tmp/bell-chamber.png"],
+    ["joey_identity", "/tmp/joey.png"],
+    ["peripheral_archer", "/tmp/archer.png"],
+  ]), [{
+    state_ref_id: "peripheral_archer",
+    source_ref_id: "peripheral_archer",
+    character: "Peripheral Archer",
+  }], [
+    { ref_id: "hollow_bell_boss_identity", kind: "character_state", subject: "Hollow-Bell Boss", conditioning_asset_role: "creature_identity", identity_subtype: "construct" },
+    { ref_id: "bell_chamber", kind: "location", subject: "bell chamber" },
+    { ref_id: "joey_identity", kind: "character_state", subject: "Joey" },
+  ]);
+  assert.deepEqual(
+    authoritativeOrder.prompts[0].reference_slots.map((slot) => slot.ref_id),
+    ["hollow_bell_boss_identity", "bell_chamber", "joey_identity"],
+  );
+  assert.equal(authoritativeOrder.prompts[0].reference_slots.some((slot) => slot.ref_id === "peripheral_archer"), false);
+
+  const complexity = fluxKleinActionComplexityFindingsForTests({
+    image_id: "ep_01-boss-fight",
+    image_provider_route: "modelslab",
+    image_model_route: "flux-klein",
+    provider_prompt: "Joey swings one sword while three allies attack the Bell Guardian with a spear, bow, shield, and blade.",
+    shot_manifest: {
+      shot_job: "physical_action",
+      visible_characters: ["Joey", "Arielle", "Archer", "Knight", "Bell Guardian"],
+      foreground_action: "Joey strikes the Bell Guardian.",
+    },
+  });
+  assert.equal(complexity.length, 1);
+  assert.equal(complexity[0].severity, "warning");
+  assert.equal(complexity[0].production_blocking, false);
+  assert.equal(complexity[0].review_disposition, "manual_fix_or_accept");
+
+  const missingContracts = fluxKleinStructuralContractFindingsForTests({
+    image_id: "ep_01-oren-map",
+    image_provider_route: "modelslab",
+    image_model_route: "flux-klein",
+    provider_prompt: "Oren's intact right hand takes the map while his residual left arm below the elbow stays clear; one sword hangs from Joey's empty sheath.",
+    shot_manifest: {
+      shot_job: "physical_action",
+      foreground_action: "Oren takes the map beside Joey's sword.",
+      anatomy_contracts: [],
+      equipment_contracts: [],
+    },
+  });
+  assert.equal(missingContracts.some((finding) => finding.code === "flux_klein_immutable_anatomy_contract_missing"), true);
+  assert.equal(missingContracts.some((finding) => finding.code === "flux_klein_equipment_contract_missing"), true);
+  assert.equal(missingContracts.every((finding) => finding.production_blocking === false), true);
+  const explicitContracts = fluxKleinStructuralContractFindingsForTests({
+    image_id: "ep_01-oren-map",
+    image_provider_route: "modelslab",
+    image_model_route: "flux-klein",
+    provider_prompt: "Oren's intact right hand takes the map while his residual left arm below the elbow stays clear; Joey carries one sword.",
+    shot_manifest: {
+      shot_job: "physical_action",
+      anatomy_contracts: [{
+        entity: "Oren",
+        identity_ref_id: "oren_post_amputation",
+        body_invariant: "left forearm ends below the elbow",
+        expected_visible_hands: 1,
+        missing_limb: "left forearm below elbow",
+        prosthetic_allowed: false,
+        visibility_required: true,
+      }],
+      equipment_contracts: [{
+        owner: "Joey",
+        item: "sword",
+        visible_count: 1,
+        hand_assignment: "right hand",
+        holder_state: "sheath empty",
+        extras_allowed: false,
+      }],
+    },
+  });
+  assert.deepEqual(explicitContracts, []);
+
+  const settings = modelslabRequestSettings({
+    model: "flux-klein",
+    referenceCount: 4,
+    width: 1024,
+    height: 576,
+  });
+  assert.equal(settings.endpoint, "/api/v6/images/img2img");
+  assert.equal(settings.init_image_count, 4);
+  assert.equal(settings.guidance_scale, 3.5);
+  assert.equal(settings.strength, 0.72);
+  assert.equal(settings.seed, null);
 }
 
 function testConciseReferenceRoleContract() {
@@ -8176,6 +8464,10 @@ async function testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs()
   assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["loc_apartment", "char_joey_state"]);
   assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.slot_order), [1, 2]);
   assert.deepEqual(plan.prompts[0].reference_slots.map((slot) => slot.ref_id), ["loc_apartment", "char_joey_state"]);
+  assert.deepEqual(
+    plan.prompts[0].shot_manifest.reference_slots.map((slot) => slot.ref_id),
+    plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id),
+  );
   assert.deepEqual(plan.prompts[0].required_reference_paths, plan.prompts[0].reference_slots.map((slot) => slot.path));
   assert.equal(report.findings.some((finding) => finding.code === "provider_exclusion_payload"), false);
 }
@@ -10907,6 +11199,7 @@ const FIXTURE_SUITES = {
     testSemanticChunkingSplitsLongSingleParagraph,
     testBoundedProofBaselineScoping,
     testSemanticReconciliationEvidenceContract,
+    testSemanticCanonicalizesDistinctVisibleActors,
     testEditorialBeatDirectorContracts,
     testEditorialBeatTimelineClosure,
     testSemanticAnchorSnapsToExactScriptTokens,
@@ -10914,6 +11207,7 @@ const FIXTURE_SUITES = {
     testWhisperExcerptAlignmentInterpolatesUnspokenUi,
     testLocationSceneIdsDerivation,
     testReferenceDirectorV2EvidenceAndLocationContracts,
+    testReferenceDirectorTreatsDistinctNonhumansAsIdentities,
     testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts,
     testReferencePlanHashApproval,
     testActiveStateValidationSkipsTextOnlyUiMentions,
@@ -10933,6 +11227,7 @@ const FIXTURE_SUITES = {
     testSceneImageProductionContractBlocksDroppedRefsAndStyle,
     testGroupReferencePromptDoesNotDemandOnePerson,
     testSingleCharacterReferencePromptIgnoresNegativeGroupWords,
+    testFluxKleinCreatureActionAndRequestContracts,
     testConciseReferenceRoleContract,
     testLocalBeatFidelityEditorialCases,
     testVisualPlannerDriftContracts,

@@ -139,6 +139,47 @@ function gptImage2OutputSize() {
   return supported.has(normalized) ? normalized : "2048x1152";
 }
 
+export function modelslabRequestSettings({
+  model = process.env.ANIFACTORY_REFERENCE_MODEL || process.env.ANIFACTORY_IMAGE_MODEL || "flux-klein",
+  referenceCount = 0,
+  width: requestedWidth = width,
+  height: requestedHeight = height,
+  enhancePrompt = false,
+} = {}) {
+  const normalizedReferenceCount = Math.max(0, Math.min(4, Number(referenceCount) || 0));
+  if (isGptImage2Model(model)) {
+    return {
+      endpoint: normalizedReferenceCount ? "/api/v7/images/image-to-image" : "/api/v7/images/text-to-image",
+      model_id: gptImage2ModelForRequest(model, normalizedReferenceCount),
+      size: gptImage2OutputSize(),
+      requested_width: requestedWidth,
+      requested_height: requestedHeight,
+      samples: 1,
+      enhance_prompt: false,
+      guidance_scale: null,
+      strength: null,
+      init_image_count: normalizedReferenceCount,
+      seed: null,
+    };
+  }
+  return {
+    endpoint: normalizedReferenceCount ? "/api/v6/images/img2img" : "/api/v6/images/text2img",
+    model_id: model,
+    width: requestedWidth,
+    height: requestedHeight,
+    samples: modelslabImageSamples,
+    enhance_prompt: Boolean(enhancePrompt),
+    guidance_scale: model === "flux-klein"
+      ? fluxKleinGuidanceScale
+      : Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_GUIDANCE_SCALE ?? 3.5),
+    strength: normalizedReferenceCount
+      ? (model === "flux-klein" ? fluxKleinStrength : 0.72)
+      : null,
+    init_image_count: normalizedReferenceCount,
+    seed: null,
+  };
+}
+
 function prepareGptImage2Prompt(prompt) {
   const text = String(prompt ?? "").trim();
   return {
@@ -314,14 +355,21 @@ export async function generateModelslabImage({
   for (const refPath of referenceImagePaths.slice(0, maxReferences)) {
     referenceUrls.push(await uploadModelslabReference(refPath, uploadDir, { width: requestedWidth, height: requestedHeight }));
   }
+  const requestSettings = modelslabRequestSettings({
+    model,
+    referenceCount: referenceUrls.length,
+    width: requestedWidth,
+    height: requestedHeight,
+    enhancePrompt,
+  });
   if (isGptImage2Model(model)) {
-    const selectedModel = gptImage2ModelForRequest(model, referenceUrls.length);
-    const endpoint = referenceUrls.length ? "/api/v7/images/image-to-image" : "/api/v7/images/text-to-image";
+    const selectedModel = requestSettings.model_id;
+    const endpoint = requestSettings.endpoint;
     const submittedPrompt = prepareGptImage2Prompt(prompt);
     const payload = {
       model_id: selectedModel,
       prompt: submittedPrompt.prompt,
-      size: gptImage2OutputSize(),
+      size: requestSettings.size,
       track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
       ...(referenceUrls.length ? { init_image: referenceUrls } : {}),
     };
@@ -367,29 +415,31 @@ export async function generateModelslabImage({
       modelslab_prompt_compacted: submittedPrompt.compacted,
       modelslab_original_prompt_length: submittedPrompt.original_length,
       modelslab_submitted_prompt_length: submittedPrompt.submitted_length,
+      modelslab_request_settings: requestSettings,
+      modelslab_response_meta: resolved.meta ?? initial.meta ?? null,
       ...estimatedModelslabCost(selectedModel),
     };
   }
-  const endpoint = referenceUrls.length ? "/api/v6/images/img2img" : "/api/v6/images/text2img";
+  const endpoint = requestSettings.endpoint;
   if (model === "flux-klein" && referenceUrls.length && endpoint !== "/api/v6/images/img2img") {
     throw new Error("flux-klein references require /api/v6/images/img2img; text2img would discard init_image references.");
   }
   const commonPayload = {
-    model_id: model,
+    model_id: requestSettings.model_id,
     prompt,
-    width: requestedWidth,
-    height: requestedHeight,
-    samples: modelslabImageSamples,
+    width: requestSettings.width,
+    height: requestSettings.height,
+    samples: requestSettings.samples,
     base64: false,
-    enhance_prompt: Boolean(enhancePrompt),
-    guidance_scale: model === "flux-klein" ? fluxKleinGuidanceScale : Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_GUIDANCE_SCALE ?? 3.5),
+    enhance_prompt: requestSettings.enhance_prompt,
+    guidance_scale: requestSettings.guidance_scale,
     track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
   };
   const payload = referenceUrls.length
     ? {
         ...commonPayload,
         init_image: referenceUrls,
-        strength: model === "flux-klein" ? fluxKleinStrength : 0.72,
+        strength: requestSettings.strength,
       }
     : { ...commonPayload };
   const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2);
@@ -408,6 +458,12 @@ export async function generateModelslabImage({
     modelslab_reference_count: referenceUrls.length,
     modelslab_request_id: initial.id ?? resolved.id ?? null,
     modelslab_model_id: model,
+    modelslab_submitted_prompt: String(prompt ?? ""),
+    modelslab_prompt_compacted: false,
+    modelslab_original_prompt_length: String(prompt ?? "").length,
+    modelslab_submitted_prompt_length: String(prompt ?? "").length,
+    modelslab_request_settings: requestSettings,
+    modelslab_response_meta: resolved.meta ?? initial.meta ?? null,
     ...estimatedModelslabCost(model),
   };
 }

@@ -13,7 +13,7 @@ import {
   routedProviderForReference,
 } from "./lib/image-provider-routing.mjs";
 import { generateCodexImage } from "./codex-image-helper.mjs";
-import { generateModelslabImage } from "./modelslab-image-helper.mjs";
+import { generateModelslabImage, modelslabRequestSettings } from "./modelslab-image-helper.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -205,10 +205,12 @@ function referencePrompt(target) {
   const kind = String(target.kind ?? "");
   const subjectText = String(target.subject ?? "").toLowerCase();
   const assetRole = String(target.conditioning_asset_role ?? target.director_role ?? "").toLowerCase();
+  const identitySubtype = String(target.identity_subtype ?? "").toLowerCase();
   const subjectCount = Number(target.conditioning_subject_count ?? 1);
   const creatureCharacterState = kind === "character_state"
     && (assetRole === "creature_identity"
-      || /\b(creature|monster|monsters|hound|hounds|dragon|beast|beasts|wolf|wolves)\b/.test(subjectText));
+      || /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)
+      || /\b(creature|monster|monsters|guardian|sentinel|golem|construct|automaton|hound|hounds|dragon|beast|beasts|wolf|wolves|boss|ram|giant|titan)\b/.test(subjectText));
   const groupCharacterState = kind === "character_state"
     && (assetRole === "faction_language"
       || assetRole === "group_identity"
@@ -217,10 +219,10 @@ function referencePrompt(target) {
   const kindInstruction = {
     style: "16:9 landscape anime/manhwa rendering sample with one coherent frame, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
     character_state: creatureCharacterState
-      ? "16:9 landscape creature conditioning image in polished 2D anime/manhwa style: exactly one canonical creature in one neutral pose on a plain studio background, clear full silhouette, anatomy, texture, markings, eyes, and material details"
+      ? "16:9 landscape creature conditioning image in polished 2D anime/manhwa style: exactly one canonical nonhuman actor in one neutral pose on a plain studio background, one coherent full silhouette, explicit head and face construction, exact limb and body anatomy, texture, markings, eyes, and materials; object-like anatomical features remain visibly integrated at their exact body attachment point"
       : groupCharacterState
         ? "16:9 landscape faction conditioning image in polished 2D anime/manhwa style: three to five clearly distinct visible people, separated full-body adults on a plain studio background, one shared uniform language, varied faces and silhouettes, readable insignia and equipment"
-      : "16:9 landscape character conditioning image in polished 2D anime/manhwa style: exactly one visible person in one neutral pose, full-body or three-quarter body centered with ample side breathing room, plain studio background, clear face, hair, age, body type, wardrobe, expression, and materials",
+      : "16:9 landscape character conditioning image in polished 2D anime/manhwa style: exactly one visible person in one neutral pose, full-body or three-quarter body centered with ample side breathing room, plain studio background, clear face, hair, age, body type, wardrobe, expression, and materials; both hands relaxed and empty, detachable weapons, bows, swords, shields, and carried props omitted",
     location: "16:9 landscape unoccupied environment-only conditioning image in polished 2D anime/manhwa style: one coherent view of the architecture, scale, lighting, materials, pathways, surfaces, and readable geography, with clean open space for later scene characters",
     prop: "16:9 landscape prop conditioning image in polished 2D anime/manhwa style: exactly one object on a plain neutral surface, one coherent view, clear shape, materials, markings, scale, and silhouette",
     ui: "16:9 landscape UI conditioning image in polished 2D anime/manhwa style: one coherent interface motif with clear panel geometry, color, glow, icon language, and hierarchy",
@@ -403,6 +405,18 @@ async function validateReferences(prompt) {
 function referenceSortKey(requirement, index) {
   const explicitOrder = Number(requirement.slot_order ?? requirement.order ?? requirement.image_slot ?? NaN);
   const requiredRank = requirement.required === true ? 0 : 1;
+  const authoredRole = String(
+    requirement.reference_priority
+    ?? requirement.selection_priority
+    ?? requirement.priority_role
+    ?? "",
+  ).trim().toLowerCase();
+  const priorityRank = authoredRole === "decisive_subject" ? -20
+    : authoredRole === "contact_counterpart" ? -10
+      : authoredRole === "readable_identity" ? 0
+        : authoredRole === "location_geometry" ? 1
+          : authoredRole === "supporting_reference" ? 20
+            : 0;
   const kind = String(requirement.kind ?? "").toLowerCase();
   const kindRank = kind.includes("character") ? 0
     : kind.includes("location") ? 1
@@ -412,6 +426,7 @@ function referenceSortKey(requirement, index) {
               : 6;
   return {
     requiredRank,
+    priorityRank,
     kindRank,
     explicitOrder: Number.isFinite(explicitOrder) ? explicitOrder : 999,
     index,
@@ -429,6 +444,12 @@ function isStyleReferenceTarget(target) {
 function referenceSlotPurpose(requirement) {
   const kind = String(requirement.kind ?? "").toLowerCase();
   const subject = requirement.subject ?? requirement.ref_id;
+  const assetRole = String(requirement.conditioning_asset_role ?? "").toLowerCase();
+  const identitySubtype = String(requirement.identity_subtype ?? "").toLowerCase();
+  if (kind.includes("character") && (
+    assetRole === "creature_identity"
+    || /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)
+  )) return `creature identity and anatomy for ${subject}`;
   if (kind.includes("character")) return `character identity and wardrobe for ${subject}`;
   if (kind.includes("location")) return `location environment for ${subject}`;
   if (kind.includes("style")) return "anime manhwa style language";
@@ -457,6 +478,10 @@ function stagingForSlot(prompt, slot) {
 }
 
 function characterSlotSubtype(slot, staging = null) {
+  const assetRole = String(slot?.conditioning_asset_role ?? "").toLowerCase();
+  const identitySubtype = String(slot?.identity_subtype ?? "").toLowerCase();
+  if (assetRole === "creature_identity" || /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)) return "creature";
+  if (assetRole === "faction_language" || /^(?:group|creature_group)$/.test(identitySubtype)) return "group";
   const text = `${slot?.subject ?? ""} ${slot?.ref_id ?? ""} ${slot?.purpose ?? ""} ${staging?.name ?? ""}`.toLowerCase();
   if (/\b(?:creature|monster|hound|dragon|beast|wolf|spirit|demon|construct)\b/.test(text)) return "creature";
   if (/\b(?:group|squad|team|crowd|guards|soldiers|students|witnesses|faction|workforce|guild masters)\b/.test(text)) return "group";
@@ -611,21 +636,26 @@ function referenceLimitOmitted(prompt, refId) {
   ));
 }
 
-function targetKindById(referenceTargets = []) {
-  return new Map((referenceTargets ?? []).filter((target) => target?.ref_id).map((target) => [String(target.ref_id), String(target.kind ?? "source_anchor")]));
+function targetById(referenceTargets = []) {
+  return new Map((referenceTargets ?? []).filter((target) => target?.ref_id).map((target) => [String(target.ref_id), target]));
 }
 
 function manifestReferenceRequirements(prompt, characterRefs, referenceById, referenceTargets = [], existingIds = new Set()) {
   const manifest = prompt.shot_manifest ?? {};
-  const targetKind = targetKindById(referenceTargets);
+  const targets = targetById(referenceTargets);
   const additions = [];
   function add(refId, kind, slotPurpose, reason, extra = {}) {
     const id = String(refId ?? "").trim();
     if (!id || existingIds.has(id) || !referenceById.has(id) || referenceLimitOmitted(prompt, id)) return;
+    const target = targets.get(id) ?? {};
     existingIds.add(id);
     additions.push({
       ref_id: id,
       kind,
+      subject: target.subject ?? target.character ?? id,
+      conditioning_asset_role: target.conditioning_asset_role ?? null,
+      identity_subtype: target.identity_subtype ?? null,
+      reference_priority: target.reference_priority ?? null,
       required: true,
       slot_order: 0,
       slot_purpose: slotPurpose,
@@ -637,7 +667,7 @@ function manifestReferenceRequirements(prompt, characterRefs, referenceById, ref
 
   add(
     manifest.location_ref_id,
-    targetKind.get(String(manifest.location_ref_id ?? "")) || "location",
+    targets.get(String(manifest.location_ref_id ?? ""))?.kind || "location",
     `location environment for ${manifest.location_ref_id}`,
     "Shot manifest declared this location ref; it is now attachable, usually after derived-ref promotion."
   );
@@ -674,8 +704,8 @@ function manifestReferenceRequirements(prompt, characterRefs, referenceById, ref
   return additions;
 }
 
-function isHardenedPromptPlan(plan) {
-  return Boolean(plan?.visual_prompt_hardening_report_path || String(plan?.prompt_policy ?? "").includes("deterministic hardening"));
+function hasAuthoritativeHardenedReferenceOrder(plan) {
+  return Boolean(plan?.visual_prompt_hardening_report_path);
 }
 
 function withCharacterReferenceAliases(referenceById, characterRefs = []) {
@@ -698,16 +728,29 @@ function withCharacterReferenceAliases(referenceById, characterRefs = []) {
 
 function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], referenceTargets = []) {
   const resolvedReferenceById = withCharacterReferenceAliases(referenceById, characterRefs);
-  const inferVisibleSubjectRefs = !isHardenedPromptPlan(plan);
+  const inferVisibleSubjectRefs = !hasAuthoritativeHardenedReferenceOrder(plan);
+  const targets = targetById(referenceTargets);
   const prompts = (plan.prompts ?? []).map((prompt) => {
     const stagingContext = stagedCharacterSlotContext(prompt, characterRefs);
     const authoredRequirements = Array.isArray(prompt.reference_requirements)
       ? prompt.reference_requirements.filter((requirement) => requirement.inferred_from_visible_subject !== true)
+        .map((requirement) => {
+          const target = targets.get(String(requirement.ref_id ?? "")) ?? {};
+          return {
+            ...requirement,
+            subject: requirement.subject ?? target.subject ?? target.character ?? requirement.ref_id ?? null,
+            conditioning_asset_role: requirement.conditioning_asset_role ?? target.conditioning_asset_role ?? null,
+            identity_subtype: requirement.identity_subtype ?? target.identity_subtype ?? null,
+            reference_priority: requirement.reference_priority ?? target.reference_priority ?? null,
+          };
+        })
       : [];
     const existingIds = new Set(authoredRequirements.map((requirement) => requirement.ref_id).filter(Boolean));
     const requirements = [
       ...authoredRequirements,
-      ...manifestReferenceRequirements(prompt, characterRefs, resolvedReferenceById, referenceTargets, existingIds),
+      ...(inferVisibleSubjectRefs
+        ? manifestReferenceRequirements(prompt, characterRefs, resolvedReferenceById, referenceTargets, existingIds)
+        : []),
       ...(inferVisibleSubjectRefs ? characterReferenceRequirements(prompt, characterRefs, existingIds) : []),
     ];
     const availableRows = requirements
@@ -719,11 +762,15 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
         staging: stagingContext.get(String(requirement.ref_id)) ?? stagingContext.get(String(requirement.source_state_ref_id ?? "")) ?? null,
       }))
       .filter((row) => row.path)
-      .sort((a, b) => a.sortKey.kindRank - b.sortKey.kindRank
-        || (a.staging?.order ?? 999) - (b.staging?.order ?? 999)
-        || a.sortKey.requiredRank - b.sortKey.requiredRank
-        || a.sortKey.explicitOrder - b.sortKey.explicitOrder
-        || a.sortKey.index - b.sortKey.index);
+      .sort((a, b) => inferVisibleSubjectRefs
+        ? (a.sortKey.priorityRank - b.sortKey.priorityRank
+          || a.sortKey.kindRank - b.sortKey.kindRank
+          || (a.staging?.order ?? 999) - (b.staging?.order ?? 999)
+          || a.sortKey.requiredRank - b.sortKey.requiredRank
+          || a.sortKey.explicitOrder - b.sortKey.explicitOrder
+          || a.sortKey.index - b.sortKey.index)
+        : (a.sortKey.explicitOrder - b.sortKey.explicitOrder
+          || a.sortKey.index - b.sortKey.index));
     const nonStyleRows = availableRows.filter((row) => !isStyleReferenceRequirement(row.requirement));
     const styleRows = availableRows.filter((row) => isStyleReferenceRequirement(row.requirement));
     const selected = (nonStyleRows.length ? nonStyleRows : styleRows).slice(0, maxSceneReferences);
@@ -732,6 +779,10 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
       slot: index + 1,
       ref_id: row.requirement.ref_id,
       kind: row.requirement.kind ?? null,
+      subject: row.requirement.subject ?? null,
+      conditioning_asset_role: row.requirement.conditioning_asset_role ?? null,
+      identity_subtype: row.requirement.identity_subtype ?? null,
+      reference_priority: row.requirement.reference_priority ?? null,
       path: row.path,
       purpose: row.staging?.name && String(row.requirement.kind ?? "").toLowerCase().includes("character")
         ? `character identity and wardrobe for ${row.staging.name}`
@@ -831,32 +882,48 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
 }
 
 function assertGeneratedProviderContract(prompt, generated, submittedPrompt, referenceImagePaths, routedProvider) {
-  if (routedProvider !== "modelslab" || !/^gpt[-_]?image[-_]?2/i.test(String(generated?.modelslab_model_id ?? ""))) return;
+  if (routedProvider !== "modelslab") return;
   if (String(generated.modelslab_submitted_prompt ?? "") !== String(submittedPrompt ?? "")) {
-    throw new Error(`GPT Image 2 provider prompt changed before submission for ${prompt.image_id}.`);
+    throw new Error(`ModelsLab provider prompt changed before submission for ${prompt.image_id}.`);
   }
   if (Number(generated.modelslab_submitted_prompt_length ?? -1) !== String(submittedPrompt ?? "").length
     || Number(generated.modelslab_original_prompt_length ?? -1) !== String(submittedPrompt ?? "").length
     || generated.modelslab_prompt_compacted === true) {
-    throw new Error(`GPT Image 2 prompt truncation/compaction detected for ${prompt.image_id}.`);
+    throw new Error(`ModelsLab prompt truncation/compaction detected for ${prompt.image_id}.`);
   }
   if (Number(generated.modelslab_reference_count ?? -1) !== referenceImagePaths.length) {
-    throw new Error(`GPT Image 2 reference-count mismatch for ${prompt.image_id}: expected ${referenceImagePaths.length}, provider recorded ${generated.modelslab_reference_count}.`);
+    throw new Error(`ModelsLab reference-count mismatch for ${prompt.image_id}: expected ${referenceImagePaths.length}, provider recorded ${generated.modelslab_reference_count}.`);
   }
-  if (referenceImagePaths.length && (!/image-to-image/i.test(String(generated.modelslab_endpoint ?? ""))
-    || !/i2i/i.test(String(generated.modelslab_model_id ?? "")))) {
+  if (/^gpt[-_]?image[-_]?2/i.test(String(generated?.modelslab_model_id ?? ""))
+    && referenceImagePaths.length
+    && (!/image-to-image/i.test(String(generated.modelslab_endpoint ?? ""))
+      || !/i2i/i.test(String(generated.modelslab_model_id ?? "")))) {
     throw new Error(`Referenced GPT Image 2 cut ${prompt.image_id} did not use the image-to-image route.`);
+  }
+  if (isFluxKleinRoute(generated?.modelslab_model_id)
+    && referenceImagePaths.length
+    && !/\/img2img$/i.test(String(generated.modelslab_endpoint ?? ""))) {
+    throw new Error(`Referenced Flux Klein cut ${prompt.image_id} did not use the img2img route.`);
   }
 }
 
-function promptWithReferenceSlots(prompt, provider = imageProvider, { concise = false } = {}) {
+function promptWithReferenceSlots(prompt, provider = imageProvider, { concise = false, mappingPosition = "before" } = {}) {
   const basePrompt = promptTextForImageProvider(prompt, provider);
   const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? [], prompt, { concise });
+  if (mappingPosition === "after") return [basePrompt, slotInstruction].filter(Boolean).join(" ");
   return [slotInstruction, basePrompt].filter(Boolean).join(" ");
+}
+
+export function promptWithReferenceSlotsForTests(prompt, provider = imageProvider, options = {}) {
+  return promptWithReferenceSlots(prompt, provider, options);
 }
 
 function isGptImage2Route(model) {
   return /^gpt[-_]?image[-_]?2/i.test(String(model ?? ""));
+}
+
+function isFluxKleinRoute(model) {
+  return /^flux[-_]?klein/i.test(String(model ?? ""));
 }
 
 async function promptFresh(prompt, outputPath) {
@@ -1134,14 +1201,31 @@ async function generateOne(prompt) {
   const modelPrompt = [
     sceneAspectInstruction(routedProvider),
     promptWithReferenceSlots(prompt, routedProvider, {
-      concise: routedProvider === "modelslab" && isGptImage2Route(sceneModel),
+      concise: routedProvider === "modelslab" && (isGptImage2Route(sceneModel) || isFluxKleinRoute(sceneModel)),
+      mappingPosition: routedProvider === "modelslab" && isFluxKleinRoute(sceneModel) ? "after" : "before",
     }),
   ].filter(Boolean).join(" ");
   const referenceInputs = await Promise.all(referenceImagePaths.map(async (referencePath) => ({
     path: referencePath,
     sha256: await hashFile(referencePath),
   })));
-  const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, provider: routedProvider, model: sceneModel, reference_inputs: referenceInputs, ...sceneGeometry }));
+  const providerRequestSettings = routedProvider === "modelslab"
+    ? modelslabRequestSettings({
+        model: sceneModel,
+        referenceCount: referenceImagePaths.length,
+        width: sceneGeometry.width,
+        height: sceneGeometry.height,
+        enhancePrompt: false,
+      })
+    : null;
+  const promptHash = sha256(JSON.stringify({
+    prompt: modelPrompt,
+    provider: routedProvider,
+    model: sceneModel,
+    reference_inputs: referenceInputs,
+    provider_request_settings: providerRequestSettings,
+    ...sceneGeometry,
+  }));
   if (routedProvider === "codex_imagegen" && !forceImages && await reusableImportedCodexImage(prompt, outputPath)) {
     return { image_id: prompt.image_id, status: "reused_imported_codex", image_path: outputPath, prompt_hash: promptHash, image_provider: routedProvider, image_provider_route: imageProvider };
   }
@@ -1176,6 +1260,7 @@ async function generateOne(prompt) {
     model: routedProvider === "codex_imagegen" ? generated.model : sceneModel,
     generated,
     requested_geometry: routedProvider === "modelslab" ? sceneGeometry : null,
+    provider_request_settings: providerRequestSettings,
     updated_at: new Date().toISOString(),
   });
   return { image_id: prompt.image_id, status: "generated", image_path: generated.downloaded_path ?? outputPath, prompt_hash: promptHash, image_provider: routedProvider, image_provider_route: imageProvider, generated };
@@ -1282,12 +1367,23 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
     path: referencePath,
     sha256: await hashFile(referencePath),
   })));
+  const referenceGeometry = routedProvider === "modelslab" ? modelslabReferenceGeometry(target) : null;
+  const providerRequestSettings = routedProvider === "modelslab"
+    ? modelslabRequestSettings({
+        model: referenceModel,
+        referenceCount: referenceImagePaths.length,
+        width: referenceGeometry.width,
+        height: referenceGeometry.height,
+        enhancePrompt: false,
+      })
+    : null;
   const promptHash = sha256(JSON.stringify({
     prompt,
     provider: routedProvider,
     model: referenceModel,
-    geometry: routedProvider === "modelslab" ? modelslabReferenceGeometry(target) : null,
+    geometry: referenceGeometry,
     reference_inputs: referenceInputs,
+    provider_request_settings: providerRequestSettings,
   }));
   if (!forceReferences && await referenceFresh(target, outputPath, promptHash)) {
     return { ref_id: target.ref_id, status: "reused_fresh", image_path: outputPath, prompt_hash: promptHash };
@@ -1300,6 +1396,7 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
     provider: routedProvider,
     ...(routedProvider === "modelslab" ? modelslabReferenceGeometry(target) : {}),
   });
+  assertGeneratedProviderContract({ image_id: target.ref_id }, generated, prompt, referenceImagePaths, routedProvider);
   await fs.writeFile(`${outputPath}.prompt.sha256`, promptHash, "utf8");
   await writeJson(`${outputPath}.metadata.json`, {
     ref_id: target.ref_id,
@@ -1312,6 +1409,7 @@ async function generateReference(target, styleRefPath = null, referenceLookup = 
     source_reference_plan_path: visualReferencePlanPath,
     reference_image_paths: referenceImagePaths,
     reference_inputs: referenceInputs,
+    provider_request_settings: providerRequestSettings,
     base_identity_ref_id: baseIdentityRefId,
     image_provider: routedProvider,
     image_provider_route: imageProvider,

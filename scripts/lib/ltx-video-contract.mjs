@@ -49,6 +49,13 @@ function firstNonEmpty(...values) {
   return values.map((value) => String(value ?? "").trim()).find(Boolean) ?? "";
 }
 
+function compactInstruction(value, maxLength) {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  const clipped = normalized.slice(0, maxLength + 1);
+  return `${clipped.slice(0, Math.max(0, clipped.lastIndexOf(" "))).replace(/[,:;\s]+$/g, "")}.`;
+}
+
 export function sanitizeAnimationIntent(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const shotClass = String(value.shot_class ?? "").trim();
@@ -104,17 +111,14 @@ export function ltxMotionPromptForCut(prompt = {}) {
   const motionParts = [
     intent.behavior ? `Motion behavior: ${intent.behavior}.` : "",
     intent.focal_subject ? `Keep focus on ${intent.focal_subject}.` : "",
-    intent.editorial_reason ? `Editorial purpose: ${intent.editorial_reason}.` : "",
   ].filter(Boolean).join(" ");
   const directedParts = animation ? [
     `Single continuous five-second ${animation.shot_class.replaceAll("_", " ")} anime/manhwa shot.`,
-    animation.start_state ? `Starting state: ${animation.start_state}` : "",
-    animation.subject_motion ? `From 0.0 to ${actionEnd.toFixed(1)} seconds: ${animation.subject_motion}` : "",
-    animation.camera_motion ? `Camera: ${animation.camera_motion}` : "",
-    animation.environmental_motion ? `Secondary environmental motion: ${animation.environmental_motion}` : "",
-    animation.end_state ? `By ${actionEnd.toFixed(1)} seconds: ${animation.end_state} Then settle into a readable hold.` : "",
-    animation.continuity_bridge ? `Continuity bridge: ${animation.continuity_bridge}` : "",
-    animation.locked_elements.length ? `Keep locked throughout: ${animation.locked_elements.join(", ")}.` : "",
+    animation.subject_motion ? `From 0.0 to ${actionEnd.toFixed(1)} seconds: ${compactInstruction(animation.subject_motion, 300)}` : "",
+    animation.camera_motion ? `Camera: ${compactInstruction(animation.camera_motion, 220)}` : "",
+    animation.environmental_motion ? `Secondary motion: ${compactInstruction(animation.environmental_motion, 180)}` : "",
+    animation.end_state ? `By ${actionEnd.toFixed(1)} seconds: ${compactInstruction(animation.end_state, 220)} Then hold.` : "",
+    animation.locked_elements.length ? `Keep locked: ${compactInstruction(animation.locked_elements.join(", "), 320)}` : "",
   ].filter(Boolean).join(" ")
     : "";
   return [

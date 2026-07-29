@@ -1397,6 +1397,35 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
   return dropOutOfScopePromptRefs(basePrompt, allowedRefIds);
 }
 
+function plannerRecoveryPlaceholder(sourceUnit, episodeId, scope = {}) {
+  const absoluteIndex = Number.isFinite(Number(sourceUnit?.__visual_plan_absolute_index))
+    ? Number(sourceUnit.__visual_plan_absolute_index)
+    : 0;
+  return {
+    ...normalizePrompt({
+      image_id: targetImageIdForRow(sourceUnit, episodeId, absoluteIndex),
+      scene_id: sourceUnit?.scene_id ?? null,
+      visual_beat_id: sourceUnit?.visual_beat_id ?? null,
+      provider_prompt: "",
+      image_prompt: "",
+      modelslab_image_prompt: "",
+      codex_image_prompt: "",
+      shot_manifest: null,
+    }, absoluteIndex, episodeId, sourceUnit, scope),
+    planner_recovery_required: true,
+    planner_recovery_reason: "The exact cut belongs to a failed prompt-authoring chunk; passed neighboring cuts are preserved.",
+  };
+}
+
+export function plannerRecoveryPlaceholderForTests(sourceUnit, options = {}) {
+  return plannerRecoveryPlaceholder(sourceUnit, options.episode ?? "ep_01", {
+    visualReferencePlan: options.visualReferencePlan ?? { reference_targets: [] },
+    stateRefIndex: options.stateRefIndex ?? new Map(),
+    activeImageProvider: options.activeImageProvider ?? "modelslab",
+    activeImageProviderOptions: options.activeImageProviderOptions ?? {},
+  });
+}
+
 function revalidateExistingPrompt(prompt, sourceUnit, scope = {}) {
   const scopedCharacterRefs = sceneCharacterStateRefs(sourceUnit, scope.stateRefIndex ?? new Map());
   const allowedRefIds = allowedRefIdsForScene({
@@ -2665,8 +2694,132 @@ async function main() {
           });
         }
       }
-      throw new Error(`Visual chunk ${index + 1}/${sceneChunks.length} failed after ${maxValidationAttempts} scoped attempts: ${lastError?.message}`);
+      return {
+        chunkError: new Error(`Visual chunk ${index + 1}/${sceneChunks.length} failed after ${maxValidationAttempts} scoped attempts: ${lastError?.message}`),
+        chunkIndex: index,
+        chunkId,
+        sourceRows: sceneChunk,
+        findings: lastFindings,
+      };
     });
+    const failedChunkResults = chunkResults.filter((result) => result?.chunkError);
+    if (failedChunkResults.length) {
+      const normalizationScope = {
+        visualReferencePlan: enrichedVisualReferencePlan,
+        stateRefIndex,
+        activeImageProvider,
+        activeImageProviderOptions,
+      };
+      const successfulScopedPrompts = [];
+      const partialScopedPrompts = [];
+      for (let chunkIndex = 0; chunkIndex < sceneChunks.length; chunkIndex += 1) {
+        const sceneChunk = sceneChunks[chunkIndex];
+        const result = chunkResults[chunkIndex];
+        if (result?.chunkError) {
+          partialScopedPrompts.push(...sceneChunk.map((sourceRow) => plannerRecoveryPlaceholder(
+            sourceRow,
+            episode,
+            normalizationScope,
+          )));
+          continue;
+        }
+        const normalizedChunkPrompts = result.chunkPrompts.map((row, promptIndex) => normalizePrompt(
+          row,
+          Number(sceneChunk[promptIndex]?.__visual_plan_absolute_index ?? promptIndex),
+          episode,
+          sceneChunk[promptIndex] ?? null,
+          normalizationScope,
+        ));
+        successfulScopedPrompts.push(...normalizedChunkPrompts);
+        partialScopedPrompts.push(...normalizedChunkPrompts);
+      }
+      const failedSourceRows = failedChunkResults.flatMap((result) => result.sourceRows ?? []);
+      const failedCutIds = failedSourceRows.map((row) => targetImageIdForRow(
+        row,
+        episode,
+        Number(row?.__visual_plan_absolute_index ?? 0),
+      ));
+      const failedBeatIds = failedSourceRows.map((row) => String(row?.visual_beat_id ?? "")).filter(Boolean);
+      const partialPrompts = scopedRepair
+        ? mergeScopedPromptReplacements(basePromptPlan.prompts, successfulScopedPrompts, {
+            image_ids: successfulScopedPrompts.map((prompt) => prompt.image_id),
+          })
+        : partialScopedPrompts;
+      const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
+      if (referencePlanApproval?.status === "approved") sourcePaths.push(referencePlanApprovalPath);
+      if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
+      if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
+      if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
+      const partialReport = {
+        schema: "goldflow_section_image_prompts_v1",
+        status: "blocked",
+        channel,
+        series_slug: series,
+        week,
+        episode,
+        source_script_hash: timedPlan.source_script_hash,
+        source_artifact_paths: sourcePaths,
+        source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+        image_provider: activeImageProvider,
+        image_provider_options: activeImageProviderOptions,
+        prompt_policy: "passed prompt chunks are immutable recovery inputs; only exact failed cuts may be re-authored",
+        prompts: partialPrompts,
+        planner: {
+          provider: isLocalLLMRoute(stageName) ? "local-qwen" : "codex",
+          model: isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel(),
+          chunked: true,
+          chunk_count: sceneChunks.length,
+          chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
+          chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
+          adaptive_chunks: adaptiveChunkTelemetry,
+          wavefront_output_dir: wavefrontOutputDir,
+          wavefront_chunk_count: wavefrontChunkFiles.length,
+          partial_failure: {
+            failed_chunk_count: failedChunkResults.length,
+            failed_cut_ids: [...new Set(failedCutIds)],
+            failed_beat_ids: [...new Set(failedBeatIds)],
+            preserved_passed_cut_ids: successfulScopedPrompts.map((prompt) => prompt.image_id),
+            recovery_policy: "exact_failed_cut_scope",
+          },
+        },
+        visual_plan_scope: {
+          mode: scopedRepair ? "exact_cut_recovery" : "full_episode_partial",
+          selected_visual_unit_count: visualSourceRows.length,
+          total_visual_unit_count: allVisualSourceRows.length,
+          cut_ids: visualSourceRows.map((row) => targetImageIdForRow(
+            row,
+            episode,
+            Number(row?.__visual_plan_absolute_index ?? 0),
+          )),
+          untouched_prompt_count: scopedRepair ? allVisualSourceRows.length - visualSourceRows.length : 0,
+          base_prompt_plan_path: scopedRepair ? basePromptPlanPath : null,
+        },
+        findings: failedChunkResults.flatMap((result) => (result.findings ?? []).map((finding) => ({
+          ...finding,
+          severity: "blocker",
+          code: finding.code ?? "visual_prompt_chunk_failed",
+          chunk_id: result.chunkId,
+          resolved: false,
+        }))),
+        updated_at: new Date().toISOString(),
+      };
+      await writeJson(outputPath, partialReport);
+      if (wavefrontOutputDir) {
+        await writeJsonAtomic(path.join(wavefrontOutputDir, "manifest.json"), {
+          schema: "goldflow_visual_prompt_wavefront_manifest_v1",
+          status: "blocked",
+          expected_chunk_count: sceneChunks.length,
+          emitted_chunk_count: wavefrontChunkFiles.length,
+          expected_cut_count: visualSourceRows.length,
+          failed_cut_ids: partialReport.planner.partial_failure.failed_cut_ids,
+          emitted_chunk_files: [...wavefrontChunkFiles].sort(),
+          completed_at: new Date().toISOString(),
+        });
+      }
+      throw new Error(
+        `${failedChunkResults.length} visual prompt chunk(s) failed; preserved ${successfulScopedPrompts.length} passed cuts and recorded exact recovery scope for ${failedCutIds.length} cuts.`,
+      );
+    }
     const styleSummaries = [];
     for (const result of chunkResults) {
       parsedPrompts.push(...result.chunkPrompts);
@@ -2723,6 +2876,19 @@ async function main() {
   if (scopedRepair) {
     prompts = mergeScopedPromptReplacements(basePromptPlan.prompts, scopedPrompts, { image_ids: scopedImageIds });
   }
+  const unresolvedRecoveryPrompts = prompts.filter((prompt) => (
+    prompt?.planner_recovery_required === true
+    || !String(prompt?.provider_prompt ?? prompt?.image_prompt ?? prompt?.modelslab_image_prompt ?? prompt?.codex_image_prompt ?? "").trim()
+  ));
+  const plannerRecoveryFindings = unresolvedRecoveryPrompts.map((prompt) => ({
+    severity: "blocker",
+    code: "visual_prompt_exact_cut_recovery_required",
+    image_id: prompt.image_id ?? null,
+    scene_id: prompt.scene_id ?? null,
+    visual_beat_id: prompt.visual_beat_id ?? null,
+    message: "This exact cut still has no accepted authored prompt; preserve all passed cuts and retry only this image/beat id.",
+    resolved: false,
+  }));
   const editorialReuse = enforceEditorialReusePolicy(prompts, {
     thresholdSec: Number(flags["editorial-reuse-after-sec"] ?? 1200),
     maxShare: Number(flags["editorial-reuse-max-share"] ?? 0.18),
@@ -2757,7 +2923,7 @@ async function main() {
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
-    status: activeStateBlockers.length || motionEditorialBlockers.length ? "blocked" : "passed",
+    status: activeStateBlockers.length || motionEditorialBlockers.length || plannerRecoveryFindings.length ? "blocked" : "passed",
     channel,
     series_slug: series,
     week,
@@ -2801,7 +2967,7 @@ async function main() {
     prompts,
     active_state_findings: activeStateFindings,
     motion_editorial_findings: motionEditorialFindings,
-    findings: [...activeStateFindings, ...motionEditorialFindings],
+    findings: [...activeStateFindings, ...motionEditorialFindings, ...plannerRecoveryFindings],
     warnings: [
       ...(llm.parsed.warnings ?? []),
       ...providerExclusionPayloadWarnings,
@@ -2830,8 +2996,10 @@ async function main() {
       completed_at: new Date().toISOString(),
     });
   }
-  if (activeStateBlockers.length || motionEditorialBlockers.length) {
-    throw new Error(`Visual prompt authoring failed ${activeStateBlockers.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
+  if (activeStateBlockers.length || motionEditorialBlockers.length || plannerRecoveryFindings.length) {
+    throw new Error(
+      `Visual prompt authoring failed ${activeStateBlockers.length} active-state, ${motionEditorialBlockers.length} motion-editorial, and ${plannerRecoveryFindings.length} exact-cut recovery blocker(s).`,
+    );
   }
   console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, scoped_repair_count: scopedRepair ? scopedPrompts.length : 0 }, null, 2));
 }

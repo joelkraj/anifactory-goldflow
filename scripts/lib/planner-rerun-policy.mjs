@@ -98,6 +98,22 @@ export function plannerRerunDecision({
     };
   }
   if (
+    stage === "visual_prompt_plan"
+    && scope.resumes_incomplete_chunks
+    && (latestAttemptFailed || interruptedAttempt || unresolvedIds.length > 0)
+  ) {
+    return {
+      allowed: false,
+      reason: "visual_prompt_resume_requires_exact_failed_scope",
+      prior_attempt_count: priorAttempts.length,
+      unresolved_expected_ids: unresolvedIds,
+      ...scope,
+      required_recovery: unresolvedIds.length
+        ? `Retry only the failed visual beats/cuts: ${unresolvedIds.join(", ")}. Preserve the complete blocked base plan and every passed content-addressed chunk.`
+        : "Inspect the blocked visual prompt plan and planner_chunk_ledger.json, then pass exact --cut-ids or --beat-ids. Whole-stage visual prompt retries are not automatic recovery.",
+    };
+  }
+  if (
     scope.resumes_incomplete_chunks
     && !cacheDisabled
     && (latestAttemptFailed || interruptedAttempt || unresolvedIds.length > 0)
@@ -141,11 +157,18 @@ function readJsonLines(filePath) {
 function unresolvedPlannerIds(episodeDir, stage) {
   try {
     const ledger = JSON.parse(readFileSync(path.join(episodeDir, "planner_chunk_ledger.json"), "utf8"));
-    return [...new Set(Object.values(ledger?.entries ?? {})
-      .filter((row) => row?.planner_stage === stage && row?.status === "failed")
+    const stageEntries = Object.values(ledger?.entries ?? {})
+      .filter((row) => row?.planner_stage === stage);
+    const passedIds = new Set(stageEntries
+      .filter((row) => row?.status === "passed")
       .flatMap((row) => row?.expected_ids ?? [])
       .map(String)
-      .filter(Boolean))];
+      .filter(Boolean));
+    return [...new Set(stageEntries
+      .filter((row) => row?.status === "failed")
+      .flatMap((row) => row?.expected_ids ?? [])
+      .map(String)
+      .filter((id) => id && !passedIds.has(id)))];
   } catch {
     return [];
   }

@@ -901,12 +901,12 @@ function testNarrationTtsSelectionAndQaContracts() {
     }],
   };
   const softenedSevereImpulse = softenPrimaryQa(severeImpulse);
-  assert.equal(softenedSevereImpulse.status, "blocked");
-  assert.equal(softenedSevereImpulse.findings[0].severity, "blocker");
+  assert.equal(softenedSevereImpulse.status, "passed_with_warnings");
+  assert.equal(softenedSevereImpulse.findings[0].severity, "warning");
   assert.deepEqual(candidateDisposition(softenedSevereImpulse, "qwen_local"), {
-    status: "blocked_manual_review",
-    accepted: false,
-    blocker_codes: ["tts_audio_impulsive_discontinuity"],
+    status: "accepted_primary",
+    accepted: true,
+    blocker_codes: [],
   });
   const joinInputs = [
     {
@@ -953,9 +953,9 @@ function testNarrationTtsSelectionAndQaContracts() {
     joinInputs,
     joinBoundaries,
   );
-  assert.equal(blockingJoinQa.status, "blocked");
+  assert.equal(blockingJoinQa.status, "passed_with_warnings");
   assert.equal(
-    blockingJoinQa.blockers.some(
+    blockingJoinQa.warnings.some(
       (finding) => finding.code === "tts_join_impulsive_discontinuity",
     ),
     true,
@@ -1185,9 +1185,9 @@ function testNarrationTtsSelectionAndQaContracts() {
     orderQa: { blockers: [] },
     joinQa: { blockers: [] },
   });
-  assert.equal(fullStreamWithConfirmedIsolatedSkip.status, "blocked");
+  assert.equal(fullStreamWithConfirmedIsolatedSkip.status, "passed");
   assert.equal(
-    fullStreamWithConfirmedIsolatedSkip.blockers.some(
+    fullStreamWithConfirmedIsolatedSkip.warnings.some(
       (finding) => finding.code === "tts_transcript_isolated_word_deletion",
     ),
     true,
@@ -1242,7 +1242,7 @@ function testScopedOnlyPlannerRerunPolicy() {
     stage: "visual_prompt_plan",
     flags: { "resume-incomplete-chunks": "true" },
     priorEvents,
-  }).reason, "content_addressed_incomplete_chunk_resume");
+  }).reason, "visual_prompt_resume_requires_exact_failed_scope");
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
     flags: { "resume-incomplete-chunks": "true" },
@@ -1261,7 +1261,7 @@ function testScopedOnlyPlannerRerunPolicy() {
       status: "passed",
     }],
     unresolvedExpectedIds: ["cut_002"],
-  }).reason, "content_addressed_incomplete_chunk_resume");
+  }).reason, "visual_prompt_resume_requires_exact_failed_scope");
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
     flags: {
@@ -1277,7 +1277,7 @@ function testScopedOnlyPlannerRerunPolicy() {
       event_type: "stage_started",
       stage: "visual_prompt_plan",
     }],
-  }).reason, "content_addressed_incomplete_chunk_resume");
+  }).reason, "visual_prompt_resume_requires_exact_failed_scope");
 }
 
 function testVisualWavefrontBatchPolicy() {
@@ -8198,6 +8198,64 @@ async function testVisualHardenCanonicalizesStateRefRequirements() {
   assert.equal(report.findings.some((finding) => finding.code === "unknown_reference_id"), false);
 }
 
+async function testVisualHardenBlocksOnlyUnusablePromptText() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText: "   ",
+    includeDefaultCharacterRef: false,
+    shotManifest: {
+      visible_characters: [],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+      location_ref_id: null,
+    },
+    referenceRequirements: [],
+  });
+  assert.notEqual(error, null);
+  assert.equal(plan.status, "blocked");
+  assert.equal(report.hard_stop_count, 1);
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "prompt_text_unusable"
+    && finding.severity === "blocker"
+    && finding.production_blocking === true
+  )), true);
+}
+
+async function testVisualHardenNormalizesReferenceCapWithoutBlocking() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const extraReferenceTargets = [
+    { ref_id: "prop_ref", kind: "prop", subject: "ledger", scene_ids: ["scene_001"], reference_image_path: "/tmp/prop_ref.png" },
+    { ref_id: "ui_ref", kind: "ui", subject: "status panel", scene_ids: ["scene_001"], reference_image_path: "/tmp/ui_ref.png" },
+    { ref_id: "action_ref", kind: "action", subject: "impact language", scene_ids: ["scene_001"], reference_image_path: "/tmp/action_ref.png" },
+  ];
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText: "Joey stands in the apartment kitchen holding a ledger beneath a status panel as impact light crosses the room.",
+    extraReferenceTargets,
+    referenceRequirements: [
+      { ref_id: "action_ref", kind: "action", slot_order: 1 },
+      { ref_id: "ui_ref", kind: "ui", slot_order: 2 },
+      { ref_id: "prop_ref", kind: "prop", slot_order: 3 },
+      { ref_id: "loc_apartment", kind: "location", slot_order: 4 },
+      { ref_id: "char_joey_ref", kind: "character_state", slot_order: 5 },
+    ],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.deepEqual(plan.prompts[0].reference_requirements.map((row) => row.ref_id), [
+    "char_joey_state",
+    "loc_apartment",
+    "ui_ref",
+    "prop_ref",
+  ]);
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "reference_limit_normalized"
+    && finding.dropped_ref_ids.includes("action_ref")
+    && finding.review_disposition === "manual_fix_or_accept"
+  )), true);
+}
+
 async function testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const promptText = "Joey stands at the apartment desk holding a red ledger stamp while the room watches.";
@@ -8211,12 +8269,15 @@ async function testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted() {
       protagonist_state_ref_id: null,
     },
   });
-  assert.notEqual(error, null);
-  assert.equal(plan.status, "blocked");
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
   assert.equal(report.findings.some((finding) => (
-    finding.code === "visible_character_ref_not_attached"
+    finding.code === "visible_character_ref_auto_attached"
     && finding.character === "Joey"
-    && finding.available_ref_ids.includes("char_joey_ref")
+    && finding.resolved === true
+  )), true);
+  assert.equal(plan.prompts[0].reference_requirements.some((requirement) => (
+    requirement.kind === "character_state"
   )), true);
 }
 
@@ -8366,12 +8427,14 @@ async function testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored() {
       { ref_id: "char_joey_ref", kind: "character_state", slot_order: 2 },
     ],
   });
-  assert.notEqual(error, null);
-  assert.equal(plan.status, "blocked");
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
   assert.equal(report.findings.some((finding) => (
     finding.code === "character_ref_anchor_not_reaffirmed"
     && finding.ref_id === "char_joey_state"
     && finding.prompt_field === "modelslab_image_prompt"
+    && finding.severity === "warning"
+    && finding.review_disposition === "manual_fix_or_accept"
   )), true);
   assert.equal(report.findings.some((finding) => (
     finding.code === "character_ref_anchor_not_reaffirmed"
@@ -8462,11 +8525,15 @@ async function testVisualHardenBlocksMissingManifestLocationWithoutAddingIt() {
     promptText,
     referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
   });
-  assert.notEqual(error, null);
-  assert.equal(plan.status, "blocked");
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
   assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["char_joey_state"]);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_not_attached_report_only"), true);
-  assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_missing_after_sanitize" && finding.severity === "blocker"), true);
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "manifest_location_ref_missing_after_sanitize"
+    && finding.severity === "warning"
+    && finding.review_disposition === "manual_fix_or_accept"
+  )), true);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_added"), false);
 }
 
@@ -8488,9 +8555,13 @@ async function testVisualHardenBlocksMissingPendingDerivedLocationContract() {
     }],
     referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
   });
-  assert.notEqual(error, null);
-  assert.equal(plan.status, "blocked");
-  assert.equal(report.findings.some((finding) => finding.code === "physical_location_ref_missing" && finding.severity === "blocker"), true);
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "physical_location_ref_missing"
+    && finding.severity === "warning"
+    && finding.review_required === true
+  )), true);
   assert.equal(report.findings.some((finding) => finding.code === "manifest_location_ref_added"), false);
   assert.deepEqual(plan.prompts[0].reference_requirements.map((requirement) => requirement.ref_id), ["char_joey_state"]);
 }
@@ -8580,9 +8651,13 @@ async function testVisualHardenV2StillBlocksCurrentRealityWithoutLocationContrac
     },
     referenceRequirements: [],
   });
-  assert.notEqual(error, null);
-  assert.equal(plan.status, "blocked");
-  assert.equal(report.findings.some((finding) => finding.code === "physical_location_contract_missing" && finding.severity === "blocker"), true);
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "physical_location_contract_missing"
+    && finding.severity === "warning"
+    && finding.review_required === true
+  )), true);
 }
 
 async function testVisualHardenV2BlocksUnknownLocationContract() {
@@ -8605,9 +8680,13 @@ async function testVisualHardenV2BlocksUnknownLocationContract() {
     },
     referenceRequirements: [{ ref_id: "char_joey_ref", kind: "character_state", slot_order: 1 }],
   });
-  assert.notEqual(error, null);
-  assert.equal(plan.status, "blocked");
-  assert.equal(report.findings.some((finding) => finding.code === "unknown_location_contract_id" && finding.severity === "blocker"), true);
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "unknown_location_contract_id"
+    && finding.severity === "warning"
+    && finding.review_disposition === "manual_fix_or_accept"
+  )), true);
 }
 
 async function testVisualHardenManualTriageCanDisregardSpecificBlocker() {
@@ -10132,6 +10211,89 @@ async function testRunStatusRoutesOnlyCreditFailuresToCodexFallback() {
   assert.match(imageStage.next_command_shape, /--cut-ids cut_credit/);
 }
 
+async function testRunStatusRecoversFailedAndCircuitSkippedSpanCuts() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-image-recovery-"));
+  const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
+  const imageDir = path.join(episodeDir, "assets", "images");
+  await fs.mkdir(imageDir, { recursive: true });
+  await writeJson(path.join(episodeDir, "run_identity.json"), {
+    schema: "goldflow_run_identity_v2",
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+    image_provider: "modelslab",
+    model_versions: {
+      image_model: "flux-klein",
+      reference_model: "flux-klein",
+    },
+  });
+
+  const prompts = Array.from({ length: 501 }, (_value, index) => {
+    const start = index * 20;
+    return {
+      image_id: `ep_01-w${String(start).padStart(6, "0")}-w${String(start + 19).padStart(6, "0")}`,
+      image_generation_required: true,
+    };
+  });
+  const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
+  await writeJson(promptPath, { status: "passed", prompts });
+  const generatedPrompts = prompts.slice(0, 350);
+  const failedPrompts = prompts.slice(350, 364);
+  const skippedPrompts = prompts.slice(364);
+  for (const prompt of generatedPrompts) {
+    await fs.writeFile(
+      path.join(imageDir, `${prompt.image_id}-modelslab-image.png`),
+      Buffer.from(`fixture image ${prompt.image_id}`),
+    );
+  }
+  // The latest scoped report may omit successful rows from an earlier batch;
+  // exact on-disk cut files remain valid completion evidence.
+  const generatedResults = generatedPrompts.slice(0, 340).map((prompt) => ({
+    image_id: prompt.image_id,
+    status: "generated",
+    image_path: path.join(imageDir, `${prompt.image_id}-modelslab-image.png`),
+  }));
+  await writeJson(path.join(episodeDir, "imagegen_report_ep_01.json"), {
+    schema: "goldflow_imagegen_report_v1",
+    status: "failed",
+    prompt_plan_hash: sha256(await fs.readFile(promptPath)),
+    image_count: 501,
+    expected_image_count: 501,
+    missing_image_count: 151,
+    results: [
+      ...generatedResults,
+      ...failedPrompts.map((prompt) => ({
+        image_id: prompt.image_id,
+        status: "failed",
+        error: "fixture provider rate limit",
+      })),
+      ...skippedPrompts.map((prompt) => ({
+        image_id: prompt.image_id,
+        status: "skipped_provider_circuit_open",
+        error: "fixture provider circuit open",
+      })),
+    ],
+  });
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    "scripts/run-status.mjs",
+    "--episode-dir", episodeDir,
+  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  const status = JSON.parse(stdout);
+  const imageStage = status.stage_ledger.find((row) => row.stage === "image_generation");
+  assert.match(imageStage.evidence, /image files=350\/501/);
+  assert.match(imageStage.evidence, /failed=14/);
+  assert.match(imageStage.evidence, /skipped_provider_circuit_open=137/);
+  const cutIdsMatch = imageStage.next_command_shape.match(/--cut-ids ([^ ]+)/);
+  assert.ok(cutIdsMatch, "image recovery command must contain an explicit cut scope");
+  const recoveryIds = cutIdsMatch[1].split(",");
+  const expectedRecoveryIds = [...failedPrompts, ...skippedPrompts].map((prompt) => prompt.image_id);
+  assert.deepEqual(recoveryIds, expectedRecoveryIds);
+  assert.equal(recoveryIds.some((imageId) => generatedPrompts.some((prompt) => prompt.image_id === imageId)), false);
+}
+
 async function testRunStatusIncludesManualBlockerTriagePolicy() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
@@ -10732,6 +10894,7 @@ const FIXTURE_SUITES = {
     testRunStatusBlocksQwenPlanMissingOverrideAudit,
     testRunStatusIgnoresProofImageReportWithoutCurrentHardenedPlan,
     testRunStatusRoutesOnlyCreditFailuresToCodexFallback,
+    testRunStatusRecoversFailedAndCircuitSkippedSpanCuts,
     testRunStatusIncludesManualBlockerTriagePolicy,
     testRunStatusDerivedReferenceSeedPromoteAndScopedRetry,
   ],
@@ -10794,6 +10957,8 @@ const FIXTURE_SUITES = {
     testVisualHardenAcceptsInventoryOnlyLocationContract,
     testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs,
     testVisualHardenCanonicalizesStateRefRequirements,
+    testVisualHardenBlocksOnlyUnusablePromptText,
+    testVisualHardenNormalizesReferenceCapWithoutBlocking,
     testVisualPlannerKeepsCanonicalIdentityTargetsForVisibleCharacters,
     testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
     testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists,

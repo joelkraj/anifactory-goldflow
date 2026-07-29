@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const NARRATION_TTS_SELECTION_POLICY_VERSION = "narration_tts_selection_v3_qwen_liam_confirmed_retry_only";
+export const NARRATION_TTS_SELECTION_POLICY_VERSION = "narration_tts_selection_v4_qwen_liam_review_warnings";
 export const PRIMARY_TTS_PROVIDER = "qwen_local";
 export const FALLBACK_TTS_PROVIDER = null;
 export const QWEN_LIAM_MINIMUM_COSINE_SIMILARITY = 0.88;
@@ -43,33 +43,56 @@ const AUTOMATIC_CONFIRMED_RETRY_CODES = new Set([
   "tts_serial_synthesis_failed",
   "tts_batch_token_limit_reached",
   "tts_serial_token_limit_reached",
+  "tts_audio_missing",
+  "tts_audio_unreadable",
   "tts_audio_empty",
-  "tts_audio_implausibly_short",
-  "tts_audio_duration_too_short_for_text",
+  "tts_audio_corrupt",
 ]);
 
 export function isAutomaticConfirmedRetryCode(code) {
   return AUTOMATIC_CONFIRMED_RETRY_CODES.has(String(code ?? ""));
 }
 
-function isUncertainAsrCode(code) {
-  return String(code ?? "").startsWith("tts_transcript_")
-    || String(code ?? "") === "tts_required_medium_qa_missing"
-    || String(code ?? "") === "tts_rendered_transcript_qa_missing";
+const STRUCTURAL_HARD_STOP_CODES = new Set([
+  ...AUTOMATIC_CONFIRMED_RETRY_CODES,
+  "tts_batch_cache_nondeterminism",
+  "tts_unit_qa_missing",
+  "tts_unit_qa_blocked_without_finding",
+  "tts_unit_qa_status_not_passed",
+]);
+
+export function isTtsStructuralHardStopCode(code) {
+  return STRUCTURAL_HARD_STOP_CODES.has(String(code ?? ""));
+}
+
+export function automatedQaFindingsAsReviewWarnings(findings = []) {
+  return (findings ?? []).map((finding) => {
+    if (finding?.severity !== "blocker"
+      || isTtsStructuralHardStopCode(finding.code)) {
+      return finding;
+    }
+    return {
+      ...finding,
+      severity: "warning",
+      original_severity: "blocker",
+      disposition_policy: "automated_tts_qa_review_warning",
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
+    };
+  });
 }
 
 export function primaryHardBlockerCodes(qa) {
   const findings = Array.isArray(qa?.findings) ? qa.findings : [];
   const blockerCodes = findings
     .filter((finding) => finding?.severity === "blocker")
-    .filter((finding) => !isUncertainAsrCode(finding.code))
+    .filter((finding) => isTtsStructuralHardStopCode(finding.code))
     .map((finding) => String(finding.code));
   if (!qa || typeof qa !== "object") blockerCodes.push("tts_unit_qa_missing");
   if (!blockerCodes.length
     && String(qa?.status ?? "").toLowerCase() === "blocked"
-    && !(findings.some((finding) => (
-      finding?.severity === "blocker" && isUncertainAsrCode(finding.code)
-    )))) {
+    && !findings.some((finding) => finding?.severity === "blocker")) {
     blockerCodes.push("tts_unit_qa_blocked_without_finding");
   }
   return [...new Set(blockerCodes)];
@@ -96,20 +119,17 @@ export function confirmableDeliveryFindingCodes(qa) {
 
 export function softenPrimaryQa(qa) {
   if (!qa || typeof qa !== "object") return qa;
-  const findings = (qa.findings ?? []).map((finding) => {
-    if (finding?.severity !== "blocker" || !isUncertainAsrCode(finding.code)) {
-      return finding;
-    }
-    return {
-      ...finding,
-      severity: "warning",
-      original_severity: "blocker",
-      disposition_policy: "qwen_liam_uncertain_diagnostic_warning",
-      retry_requires_confirmed_listen: CONFIRMABLE_DELIVERY_CODES.has(
-        String(finding.code ?? ""),
-      ),
-    };
-  });
+  const findings = automatedQaFindingsAsReviewWarnings(qa.findings ?? [])
+    .map((finding) => (
+      finding?.disposition_policy === "automated_tts_qa_review_warning"
+        ? {
+            ...finding,
+            retry_requires_confirmed_listen: CONFIRMABLE_DELIVERY_CODES.has(
+              String(finding.code ?? ""),
+            ),
+          }
+        : finding
+    ));
   const blockers = findings.filter((finding) => finding?.severity === "blocker");
   return {
     ...qa,
@@ -119,10 +139,10 @@ export function softenPrimaryQa(qa) {
       policy_version: NARRATION_TTS_SELECTION_POLICY_VERSION,
       hard_blocker_codes: primaryHardBlockerCodes({ ...qa, findings }),
       demoted_diagnostic_count: findings.filter(
-        (finding) => finding?.disposition_policy === "qwen_liam_uncertain_diagnostic_warning",
+        (finding) => finding?.disposition_policy === "automated_tts_qa_review_warning",
       ).length,
       retry_policy:
-        "Retry only exact units with a confirmed skip, truncation, or stutter. Empty, failed, or objectively too-short synthesis counts as confirmed truncation; ASR-only uncertainty is warning-only. Other blockers require review and are never auto-retried.",
+        "Automated acoustic, ASR, and voice-continuity findings are non-blocking review warnings and never trigger retry. Retry only an exact unit after a hash-bound confirmed audible skip, truncation, or stutter, or after a structural missing, unreadable, empty, corrupt, token-limited, or failed synthesis result.",
     },
   };
 }
@@ -291,28 +311,40 @@ export function fullStreamDecision(transcriptQa, {
     ...(joinQa?.blockers ?? []),
   ];
   const warnings = [...(joinQa?.warnings ?? [])];
-  const addBlocker = (code, details = {}) => blockers.push({ code, ...details });
-  const addWarning = (code, details = {}) => warnings.push({ code, ...details });
+  const addWarning = (code, details = {}) => warnings.push({
+    ...details,
+    severity: "warning",
+    disposition_policy: "automated_tts_qa_review_warning",
+    review_required: true,
+    automatic_retry_allowed: false,
+    blocks_stitching: false,
+    code,
+  });
   if (!transcriptQa) {
     if (transcriptDeferred) {
       addWarning("tts_full_stream_transcript_deferred_to_official_whisper_timing");
     } else {
-      addBlocker("tts_full_stream_transcript_missing");
+      addWarning("tts_full_stream_transcript_missing", {
+        original_severity: "blocker",
+      });
     }
   } else {
     if (Number(transcriptQa.leading_deletion_run ?? 0) > 0) {
-      addBlocker("tts_full_stream_opening_missing", {
+      addWarning("tts_full_stream_opening_missing", {
         missing_count: transcriptQa.leading_deletion_run,
+        original_severity: "blocker",
       });
     }
     if (Number(transcriptQa.trailing_deletion_run ?? 0) > 0) {
-      addBlocker("tts_full_stream_final_word_missing", {
+      addWarning("tts_full_stream_final_word_missing", {
         missing_count: transcriptQa.trailing_deletion_run,
+        original_severity: "blocker",
       });
     }
     if (Number(transcriptQa.longest_deletion_run ?? 0) >= 2) {
-      addBlocker("tts_full_stream_contiguous_words_missing", {
+      addWarning("tts_full_stream_contiguous_words_missing", {
         longest_deletion_run: transcriptQa.longest_deletion_run,
+        original_severity: "blocker",
       });
     } else if (Number(transcriptQa.deletions ?? 0) > 0) {
       addWarning("tts_full_stream_isolated_asr_deletion", {
@@ -320,8 +352,9 @@ export function fullStreamDecision(transcriptQa, {
       });
     }
     if (Number(transcriptQa.longest_insertion_run ?? 0) >= 2) {
-      addBlocker("tts_full_stream_repetition_or_insertion_burst", {
+      addWarning("tts_full_stream_repetition_or_insertion_burst", {
         longest_insertion_run: transcriptQa.longest_insertion_run,
+        original_severity: "blocker",
       });
     } else if (Number(transcriptQa.insertions ?? 0) > 0) {
       addWarning("tts_full_stream_isolated_asr_insertion", {
@@ -329,15 +362,19 @@ export function fullStreamDecision(transcriptQa, {
       });
     }
     if (Number(transcriptQa.word_error_rate ?? 1) > maximumWer) {
-      addBlocker("tts_full_stream_wer_exceeded", {
+      addWarning("tts_full_stream_wer_exceeded", {
         word_error_rate: transcriptQa.word_error_rate,
         maximum: maximumWer,
+        original_severity: "blocker",
       });
     }
-    for (const finding of transcriptQa.findings ?? []) {
-      if (finding?.severity !== "blocker") continue;
+    for (const finding of automatedQaFindingsAsReviewWarnings(
+      transcriptQa.findings ?? [],
+    )) {
       const code = String(finding.code ?? "tts_full_stream_transcript_blocker");
-      if (!blockers.some((row) => row.code === code)) addBlocker(code, finding);
+      if (!warnings.some((row) => row.code === code)) {
+        addWarning(code, finding);
+      }
     }
   }
   return {

@@ -442,7 +442,7 @@ export function validateManualReviewEvidenceForTests({
       );
       if (forbiddenCodes.length) {
         throw new Error(
-          `Manual TTS review cannot waive failed, empty, or objectively short audio for ${unitId}: ${forbiddenCodes.join(", ")}`,
+          `Manual TTS review cannot waive a structural missing, unreadable, empty, corrupt, token-limited, or failed synthesis result for ${unitId}: ${forbiddenCodes.join(", ")}`,
         );
       }
       return {
@@ -1183,6 +1183,18 @@ function ttsStatusContract({
       automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio: true,
       other_acoustic_or_voice_identity_blockers_require_review: true,
       uncertain_asr_findings_are_warning_only: true,
+      automated_acoustic_findings_are_review_warnings: true,
+      automated_asr_findings_are_review_warnings: true,
+      automated_voice_continuity_findings_are_review_warnings: true,
+      automated_qa_warnings_block_stitching: false,
+      automated_qa_warnings_trigger_retry: false,
+      automatic_retry_limited_to_structural_audio_or_synthesis_process_failures: true,
+      structural_audio_hard_stops: [
+        "missing",
+        "unreadable",
+        "empty",
+        "corrupt",
+      ],
     },
     results,
   };
@@ -1217,6 +1229,14 @@ function rebuildQaAggregate(rows, candidates) {
     warnings,
     candidates,
   };
+}
+
+function stitchReviewWarnings(stitch) {
+  return [
+    ...(stitch?.prepared_qa?.warnings ?? []),
+    ...(stitch?.boundary_qa?.warnings ?? []),
+    ...(stitch?.final_qa?.warnings ?? []),
+  ];
 }
 
 function applyProtectedTermQa(rows) {
@@ -1399,7 +1419,6 @@ export function joinQaFromPcmForTests(samples, sampleRate, preparedInputs, bound
       maximum_edge_step_dbfs: dbfs(maximumStep),
       inserted_gap_peak_dbfs: dbfs(silencePeak),
       status: boundaryContractFindings.length
-        || maximumStep > blockerThreshold
         || silencePeak > 10 ** (-54 / 20)
         ? "blocked"
         : maximumStep > warningThreshold
@@ -1407,13 +1426,23 @@ export function joinQaFromPcmForTests(samples, sampleRate, preparedInputs, bound
         : "passed",
     };
     rows.push(row);
-    if (maximumStep > blockerThreshold) blockers.push({
+    if (maximumStep > blockerThreshold) warnings.push({
+      severity: "warning",
       code: "tts_join_impulsive_discontinuity",
+      original_severity: "blocker",
+      disposition_policy: "automated_tts_qa_review_warning",
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
       ...row,
     });
     else if (maximumStep > warningThreshold) warnings.push({
       severity: "warning",
       code: "tts_join_possible_impulsive_discontinuity",
+      disposition_policy: "automated_tts_qa_review_warning",
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
       ...row,
     });
     if (silencePeak > 10 ** (-54 / 20)) blockers.push({
@@ -2606,10 +2635,11 @@ async function main() {
         confirmed_artifacts: validatedEvidence,
       };
     }
-    // Keep first takes unless synthesis objectively failed/returned empty or
-    // too-short audio, or a hash-bound human listen confirms a skip,
-    // truncation, or stutter. Other acoustic/identity blockers stop for review;
-    // they never trigger an automatic regeneration.
+    // Keep first takes when automated acoustic, ASR, or voice-continuity
+    // diagnostics raise review warnings. Only a structural missing,
+    // unreadable, empty, corrupt, token-limited, or failed synthesis result,
+    // or a hash-bound human listen confirming a skip, truncation, or stutter,
+    // can enter exact-unit recovery.
     const automaticRetryUnits = units.filter(
       (unit) => automaticRetryIds.has(String(unit.unit_id)),
     );
@@ -2947,6 +2977,7 @@ async function main() {
     maximumWer: 0.05,
     transcriptDeferred: true,
   });
+  streamDecision.warnings.push(...stitchReviewWarnings(stitch));
   const fullQaReport = {
     schema: "goldflow_narration_full_stream_qa_v1",
     status: streamDecision.status,
@@ -2966,6 +2997,7 @@ async function main() {
     join_qa: joinQa,
     blockers: streamDecision.blockers,
     warnings: streamDecision.warnings,
+    warning_count: streamDecision.warnings.length,
   };
   await atomicWriteJson(fullQaPath, fullQaReport);
   if (fullQaReport.status === "passed") {
@@ -3088,7 +3120,8 @@ async function main() {
     stitch_qa_status: joinQa.status,
     full_stream_qa_status: fullQaReport.status,
     join_qa: joinQa,
-    warnings: joinQa.warnings ?? [],
+    warnings: fullQaReport.warnings,
+    warning_count: fullQaReport.warnings.length,
     full_stream_qa_path: fullQaPath,
     segments,
   });
@@ -3112,7 +3145,8 @@ async function main() {
     selected_fallback_unit_count: 0,
     fallback_selected_unit_ids: [],
     fallback_scope_policy: "no_alternate_provider_or_voice",
-    retry_scope_policy: "same_qwen_liam_exact_unit_only_after_confirmed_delivery_defect",
+    retry_scope_policy:
+      "same_qwen_liam_exact_unit_only_after_confirmed_delivery_defect_or_structural_failure",
     attempt_events_path: eventsPath,
     attempt_count: attemptEvents.length,
     unit_qa_path: unitQaPath,
@@ -3125,8 +3159,13 @@ async function main() {
     final_m4a: status === "passed" ? finalM4a : null,
     final_m4a_sha256: finalM4aSha256,
     blockers: fullQaReport.blockers,
-    warnings: fullQaReport.warnings,
-    warning_count: fullQaReport.warnings.length,
+    warnings: [
+      ...(unitQaReport.warnings ?? []),
+      ...fullQaReport.warnings,
+    ],
+    warning_count:
+      (unitQaReport.warnings?.length ?? 0)
+      + fullQaReport.warnings.length,
   });
   console.log(JSON.stringify({
     status,

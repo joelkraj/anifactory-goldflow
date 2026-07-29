@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import {
   candidateDisposition,
+  fullStreamDecision,
+  isTtsStructuralHardStopCode,
   softenPrimaryQa,
   voiceContinuityDecision,
 } from "../lib/tts-selection-policy.mjs";
 import {
+  audioQaFindingsForTests,
   stitchBoundaryPaddingForTests,
   stitchEffectiveBoundaryContractForTests,
   stitchTargetGapSecForTests,
 } from "../modelslab-qwen-episode-audio.mjs";
 import {
   adjudicateManualReviewQaForTests,
+  joinQaFromPcmForTests,
   validateConfirmedRetryEvidenceForTests,
   validateManualReviewEvidenceForTests,
   validateManualStitchRecoveryForTests,
@@ -23,7 +27,7 @@ function blockedQa(code) {
   };
 }
 
-function testHardFailuresAreNotSoftenedOrBlindlyRetried() {
+function testAutomatedQaWarnsWhileStructuralFailuresRemainHard() {
   const continuity = voiceContinuityDecision({
     status: "passed",
     audio_sha256: "audio-a",
@@ -39,10 +43,19 @@ function testHardFailuresAreNotSoftenedOrBlindlyRetried() {
     similarityModelSha256: "model-a",
   });
   const softenedContinuity = softenPrimaryQa(continuity);
-  assert.equal(softenedContinuity.status, "blocked");
+  assert.equal(softenedContinuity.status, "passed_with_warnings");
+  assert.equal(
+    softenedContinuity.findings.every((finding) => (
+      finding.severity === "warning"
+      && finding.disposition_policy === "automated_tts_qa_review_warning"
+      && finding.automatic_retry_allowed === false
+      && finding.blocks_stitching === false
+    )),
+    true,
+  );
   assert.equal(
     candidateDisposition(softenedContinuity, "qwen_local").status,
-    "blocked_manual_review",
+    "accepted_primary",
   );
 
   for (const code of [
@@ -52,19 +65,19 @@ function testHardFailuresAreNotSoftenedOrBlindlyRetried() {
     "tts_audio_clipping",
     "tts_audio_impulsive_discontinuity",
     "tts_audio_duration_too_long_for_text",
+    "tts_audio_implausibly_short",
+    "tts_audio_duration_too_short_for_text",
+    "tts_transcript_final_word_missing",
   ]) {
     const qa = softenPrimaryQa(blockedQa(code));
-    assert.equal(qa.status, "blocked", code);
+    assert.equal(qa.status, "passed_with_warnings", code);
+    assert.equal(qa.findings[0].severity, "warning", code);
     assert.equal(
       candidateDisposition(qa, "qwen_local").status,
-      "blocked_manual_review",
+      "accepted_primary",
       code,
     );
   }
-
-  const asrOnly = softenPrimaryQa(blockedQa("tts_transcript_final_word_missing"));
-  assert.equal(asrOnly.status, "passed_with_warnings");
-  assert.equal(candidateDisposition(asrOnly, "qwen_local").status, "accepted_primary");
 
   for (const code of [
     "tts_synthesis_job_failed",
@@ -72,10 +85,12 @@ function testHardFailuresAreNotSoftenedOrBlindlyRetried() {
     "tts_batch_token_limit_reached",
     "tts_serial_synthesis_failed",
     "tts_serial_token_limit_reached",
+    "tts_audio_missing",
+    "tts_audio_unreadable",
     "tts_audio_empty",
-    "tts_audio_implausibly_short",
-    "tts_audio_duration_too_short_for_text",
+    "tts_audio_corrupt",
   ]) {
+    assert.equal(isTtsStructuralHardStopCode(code), true, code);
     const qa = softenPrimaryQa(blockedQa(code));
     assert.equal(qa.status, "blocked", code);
     assert.equal(
@@ -84,6 +99,71 @@ function testHardFailuresAreNotSoftenedOrBlindlyRetried() {
       code,
     );
   }
+
+  const nondeterministicCache = softenPrimaryQa(
+    blockedQa("tts_batch_cache_nondeterminism"),
+  );
+  assert.equal(nondeterministicCache.status, "blocked");
+  assert.equal(
+    candidateDisposition(nondeterministicCache, "qwen_local").status,
+    "blocked_manual_review",
+  );
+
+  const acousticFindings = audioQaFindingsForTests({
+    sample_count: 2400,
+    duration_sec: 0.1,
+    clipping_ratio: 0.01,
+    clipping_sample_count: 24,
+    peak_dbfs: 0,
+    isolated_impulse_count: 1,
+    maximum_isolated_impulse_dbfs: -2,
+    maximum_sample_step_dbfs: -2,
+    large_sample_step_count: 1,
+    last_sample_dbfs: -2,
+    trailing_silence_sec: 0,
+    tail_10ms_peak_dbfs: -2,
+    tail_50ms_rms_dbfs: -2,
+    leading_silence_sec: 0,
+    rms_dbfs: -6,
+  }, {
+    text: "one two three four five six seven eight nine ten",
+    word_count: 10,
+  });
+  assert.equal(
+    acousticFindings.some((finding) => finding.severity === "blocker"),
+    false,
+  );
+  assert.equal(
+    acousticFindings.some(
+      (finding) => finding.code === "tts_audio_duration_too_short_for_text",
+    ),
+    true,
+  );
+
+  const asrOnlyStream = fullStreamDecision({
+    leading_deletion_run: 1,
+    trailing_deletion_run: 1,
+    longest_deletion_run: 4,
+    longest_insertion_run: 3,
+    deletions: 4,
+    insertions: 3,
+    word_error_rate: 0.5,
+    findings: [{
+      severity: "blocker",
+      code: "tts_transcript_contiguous_words_missing",
+    }],
+  }, {
+    orderQa: { blockers: [] },
+    joinQa: { blockers: [], warnings: [] },
+  });
+  assert.equal(asrOnlyStream.status, "passed");
+  assert.equal(asrOnlyStream.blockers.length, 0);
+  assert.equal(
+    asrOnlyStream.warnings.every(
+      (finding) => finding.blocks_stitching === false,
+    ),
+    true,
+  );
 }
 
 function testConfirmedRetryEvidenceBindsExactListenedArtifact() {
@@ -307,7 +387,7 @@ function testManualAcceptanceCannotWaiveAutomaticRetryCandidates() {
   assert.throws(() => validateManualReviewEvidenceForTests({
     evidence: fixture.evidence,
     ...fixture.args,
-  }), /cannot waive failed, empty, or objectively short audio/i);
+  }), /cannot waive a structural .* synthesis result/i);
 }
 
 function testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped() {
@@ -385,9 +465,51 @@ function testNarrationExplicitGapsAreAlwaysExactEightyMilliseconds() {
       24000,
     ).status, "blocked");
   }
+
+  const acousticImpulse = new Int16Array(1920);
+  acousticImpulse[960] = 15000;
+  const warningOnlyJoin = joinQaFromPcmForTests(
+    acousticImpulse,
+    24000,
+    [
+      {
+        unit_id: "unit_left",
+        sample_count: 960,
+        prepared_qa: {
+          metrics: { trailing_silence_sample_count: 960 },
+        },
+      },
+      {
+        unit_id: "unit_right",
+        sample_count: 960,
+        prepared_qa: {
+          metrics: { leading_silence_sample_count: 960 },
+        },
+      },
+    ],
+    [{
+      after_unit_id: "unit_left",
+      before_unit_id: "unit_right",
+      target_gap_sample_count: 1920,
+      retained_left_trailing_silence_sample_count: 960,
+      retained_right_leading_silence_sample_count: 960,
+      inserted_silence_sample_count: 0,
+      effective_gap_sample_count: 1920,
+      gap_sample_count: 0,
+    }],
+  );
+  assert.equal(warningOnlyJoin.status, "passed_with_warnings");
+  assert.equal(
+    warningOnlyJoin.warnings.some((finding) => (
+      finding.code === "tts_join_impulsive_discontinuity"
+      && finding.automatic_retry_allowed === false
+      && finding.blocks_stitching === false
+    )),
+    true,
+  );
 }
 
-testHardFailuresAreNotSoftenedOrBlindlyRetried();
+testAutomatedQaWarnsWhileStructuralFailuresRemainHard();
 testConfirmedRetryEvidenceBindsExactListenedArtifact();
 testManualAcceptanceIsExactHashBoundAndPreservesFindings();
 testManualAcceptanceCannotWaiveAutomaticRetryCandidates();

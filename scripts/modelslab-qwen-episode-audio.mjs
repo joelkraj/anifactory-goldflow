@@ -9,6 +9,9 @@ import {
   redactModelslabErrorTextForStorageForTests,
   redactModelslabPayloadForStorageForTests,
 } from "./lib/modelslab-stt-candidate.mjs";
+import {
+  automatedQaFindingsAsReviewWarnings,
+} from "./lib/tts-selection-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -71,7 +74,7 @@ const unitQaMinTrailingSilenceSec = Math.max(0.02, Math.min(0.2, Number(flags["u
 const requestedQwenInstructionField = String(flags["qwen-instruct-field"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_INSTRUCT_FIELD ?? "").trim();
 const allowedQwenInstructionFields = new Set(["instruct", "instruction", "qwen_instruct"]);
 const qwenInstructionField = allowedQwenInstructionFields.has(requestedQwenInstructionField) ? requestedQwenInstructionField : null;
-const TTS_OUTPUT_QA_POLICY_VERSION = "tts_output_qa_v2";
+const TTS_OUTPUT_QA_POLICY_VERSION = "tts_output_qa_v3_review_warnings";
 const retryInvocationId = `${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${process.pid}`;
 const qwenFetchTimeoutMs = Math.max(30000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_TIMEOUT_MS ?? 120000));
 const refreshVoiceIds = new Set(String(process.env.ANIFACTORY_MODELSLAB_QWEN_REFRESH_VOICES ?? "")
@@ -85,20 +88,8 @@ function isDeliveryFirstLocalNarrator(provider) {
   return ["kokoro_local", "qwen_local"].includes(String(provider ?? ""));
 }
 
-function softenUncertainTranscriptFindings(findings, provider) {
-  if (!isDeliveryFirstLocalNarrator(provider)) return findings;
-  return (findings ?? []).map((finding) => (
-    finding?.severity === "blocker"
-      && String(finding?.code ?? "").startsWith("tts_transcript_")
-      ? {
-          ...finding,
-          severity: "warning",
-          original_severity: "blocker",
-          disposition_policy: "uncertain_asr_warning_confirm_by_listen",
-          automatic_retry_allowed: false,
-        }
-      : finding
-  ));
+function softenUncertainTranscriptFindings(findings, _provider) {
+  return automatedQaFindingsAsReviewWarnings(findings);
 }
 
 function parseFlags(parts) {
@@ -1627,21 +1618,35 @@ function audioQaFindings(metrics, unit, {
     return findings;
   }
   if (metrics.duration_sec < 0.18) {
-    push("blocker", "tts_audio_implausibly_short", { duration_sec: metrics.duration_sec });
+    push("warning", "tts_audio_implausibly_short", {
+      duration_sec: metrics.duration_sec,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
+    });
   }
   if (metrics.clipping_ratio >= 0.0005) {
-    push("blocker", "tts_audio_clipping", { clipping_ratio: metrics.clipping_ratio, peak_dbfs: metrics.peak_dbfs });
+    push("warning", "tts_audio_clipping", {
+      clipping_ratio: metrics.clipping_ratio,
+      peak_dbfs: metrics.peak_dbfs,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
+    });
   } else if (metrics.clipping_sample_count > 0) {
     push("warning", "tts_audio_peak_touches_full_scale", { clipping_sample_count: metrics.clipping_sample_count });
   }
   if (Number(metrics.isolated_impulse_count ?? 0) > 0
     && Number.isFinite(metrics.maximum_isolated_impulse_dbfs)
     && metrics.maximum_isolated_impulse_dbfs > -3.5) {
-    push("blocker", "tts_audio_impulsive_discontinuity", {
+    push("warning", "tts_audio_impulsive_discontinuity", {
       maximum_sample_step_dbfs: metrics.maximum_sample_step_dbfs,
       large_sample_step_count: metrics.large_sample_step_count,
       maximum_isolated_impulse_dbfs: metrics.maximum_isolated_impulse_dbfs,
       isolated_impulse_count: metrics.isolated_impulse_count,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
     });
   } else if (Number(metrics.isolated_impulse_count ?? 0) > 0
     && Number.isFinite(metrics.maximum_isolated_impulse_dbfs)
@@ -1654,16 +1659,24 @@ function audioQaFindings(metrics, unit, {
     });
   }
   if (Number.isFinite(metrics.last_sample_dbfs) && metrics.last_sample_dbfs > -36) {
-    push("blocker", "tts_audio_endpoint_discontinuity", { last_sample_dbfs: metrics.last_sample_dbfs });
+    push("warning", "tts_audio_endpoint_discontinuity", {
+      last_sample_dbfs: metrics.last_sample_dbfs,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
+    });
   }
   const energeticTail = (Number.isFinite(metrics.tail_10ms_peak_dbfs) && metrics.tail_10ms_peak_dbfs > -35)
     || (Number.isFinite(metrics.tail_50ms_rms_dbfs) && metrics.tail_50ms_rms_dbfs > -38);
   if (metrics.trailing_silence_sec < minTrailingSilence && energeticTail) {
-    push("blocker", "tts_audio_tail_not_settled", {
+    push("warning", "tts_audio_tail_not_settled", {
       trailing_silence_sec: metrics.trailing_silence_sec,
       required_sec: minTrailingSilence,
       tail_10ms_peak_dbfs: metrics.tail_10ms_peak_dbfs,
       tail_50ms_rms_dbfs: metrics.tail_50ms_rms_dbfs,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
     });
   } else if (metrics.trailing_silence_sec < 0.08) {
     push("warning", "tts_audio_tail_margin_narrow", { trailing_silence_sec: metrics.trailing_silence_sec });
@@ -1678,10 +1691,22 @@ function audioQaFindings(metrics, unit, {
   const minimumPlausible = wordTotal > 0 ? wordTotal / 330 * 60 : 0;
   const maximumPlausible = wordTotal > 0 ? wordTotal / 90 * 60 : Number.POSITIVE_INFINITY;
   if (wordTotal >= 8 && metrics.duration_sec < minimumPlausible) {
-    push("blocker", "tts_audio_duration_too_short_for_text", { duration_sec: metrics.duration_sec, word_count: wordTotal });
+    push("warning", "tts_audio_duration_too_short_for_text", {
+      duration_sec: metrics.duration_sec,
+      word_count: wordTotal,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
+    });
   }
   if (wordTotal >= 8 && metrics.duration_sec > maximumPlausible) {
-    push("blocker", "tts_audio_duration_too_long_for_text", { duration_sec: metrics.duration_sec, word_count: wordTotal });
+    push("warning", "tts_audio_duration_too_long_for_text", {
+      duration_sec: metrics.duration_sec,
+      word_count: wordTotal,
+      review_required: true,
+      automatic_retry_allowed: false,
+      blocks_stitching: false,
+    });
   }
   return findings;
 }
@@ -2340,14 +2365,20 @@ async function runUnitOutputQa(results) {
     ];
     if (transcriptQaRequired && transcriptEngineError && !recognized) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "tts_transcript_qa_engine_failed",
         error: transcriptEngineError,
+        review_required: true,
+        automatic_retry_allowed: false,
+        blocks_stitching: false,
       });
     } else if (transcriptQaRequired && !recognized) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "tts_transcript_qa_missing_result",
+        review_required: true,
+        automatic_retry_allowed: false,
+        blocks_stitching: false,
       });
     }
     if (!transcriptQaRequired) {
@@ -2369,21 +2400,38 @@ async function runUnitOutputQa(results) {
       const internalBursts = untranscribedActiveIntervals(metrics, recognized.words);
       const longestInternalBurst = internalBursts.reduce((maximum, interval) => Math.max(maximum, interval.duration_sec), 0);
       if (unexplainedLead > 0.6) {
-        findings.push({ severity: "blocker", code: "tts_audio_unexplained_active_lead", unexplained_active_sec: Number(unexplainedLead.toFixed(3)) });
+        findings.push({
+          severity: "warning",
+          code: "tts_audio_unexplained_active_lead",
+          unexplained_active_sec: Number(unexplainedLead.toFixed(3)),
+          review_required: true,
+          automatic_retry_allowed: false,
+          blocks_stitching: false,
+        });
       } else if (unexplainedLead > 0.35) {
         findings.push({ severity: "warning", code: "tts_audio_possible_non_speech_lead", unexplained_active_sec: Number(unexplainedLead.toFixed(3)) });
       }
       if (unexplainedTail > 0.6) {
-        findings.push({ severity: "blocker", code: "tts_audio_unexplained_active_tail", unexplained_active_sec: Number(unexplainedTail.toFixed(3)) });
+        findings.push({
+          severity: "warning",
+          code: "tts_audio_unexplained_active_tail",
+          unexplained_active_sec: Number(unexplainedTail.toFixed(3)),
+          review_required: true,
+          automatic_retry_allowed: false,
+          blocks_stitching: false,
+        });
       } else if (unexplainedTail > 0.35) {
         findings.push({ severity: "warning", code: "tts_audio_possible_non_speech_tail", unexplained_active_sec: Number(unexplainedTail.toFixed(3)) });
       }
       if (longestInternalBurst > 0.45) {
         findings.push({
-          severity: "blocker",
+          severity: "warning",
           code: "tts_audio_untranscribed_internal_burst",
           longest_untranscribed_active_sec: Number(longestInternalBurst.toFixed(3)),
           intervals: internalBursts,
+          review_required: true,
+          automatic_retry_allowed: false,
+          blocks_stitching: false,
         });
       } else if (internalBursts.length) {
         findings.push({
@@ -2464,13 +2512,16 @@ async function runUnitOutputQa(results) {
           rows[index].findings = [
             ...(rows[index].findings ?? []),
             {
-              severity: "blocker",
+              severity: "warning",
               code: "tts_required_medium_qa_missing",
               required_reasons: forcedReasons,
               error: mediumError ?? "missing medium transcript",
+              review_required: true,
+              automatic_retry_allowed: false,
+              blocks_stitching: false,
             },
           ];
-          rows[index].status = "blocked";
+          rows[index].status = "passed_with_warnings";
         }
         continue;
       }
@@ -2482,7 +2533,10 @@ async function runUnitOutputQa(results) {
       });
       const mediumFindings = [
         ...audioQaFindings(measurements[index].metrics, source),
-        ...mediumTranscript.findings,
+        ...softenUncertainTranscriptFindings(
+          mediumTranscript.findings,
+          source.provider,
+        ),
       ];
       const mediumBlockers = mediumFindings.filter((finding) => finding.severity === "blocker");
       rows[index].transcript_cross_validation = {
@@ -2804,7 +2858,11 @@ async function prepareStitchInput(row, index, options = {}) {
   );
   const contentSampleCount = trimEndSamples - trimStartSamples;
   const contentDuration = contentSampleCount / stitchSampleRate;
-  if (contentDuration < 0.2) throw new Error(`Refusing to stitch ${row.unit_id}: padding-aware trim would leave ${contentDuration.toFixed(3)}s.`);
+  if (contentSampleCount <= 0) {
+    throw new Error(
+      `Refusing to stitch ${row.unit_id}: padding-aware trim produced empty audio.`,
+    );
+  }
   const repairTailSilenceSec = options?.repairTailUnitIds?.has(String(row.unit_id))
     ? Math.max(0.06, Number(options.repairTailSilenceSec ?? 0.06))
     : 0;
@@ -2934,10 +2992,13 @@ async function qaRenderedAudioRows(
     ];
     if (!recognized && !deliveryFirstPrimary) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "tts_rendered_transcript_qa_missing",
         stage,
         error: transcriptEngineError,
+        review_required: true,
+        automatic_retry_allowed: false,
+        blocks_stitching: false,
       });
     } else if (!recognized) {
       findings.push({
@@ -3008,7 +3069,10 @@ async function qaRenderedAudioRows(
         : unitQaMinTrailingSilenceSec;
       const mediumFindings = [
         ...audioQaFindings(unit.metrics, source, { minTrailingSilence: renderedEdgeMinimum }),
-        ...mediumTranscript.findings,
+        ...softenUncertainTranscriptFindings(
+          mediumTranscript.findings,
+          source.provider,
+        ),
       ];
       const mediumBlockers = mediumFindings.filter((finding) => finding.severity === "blocker");
       unit.transcript_cross_validation = {
@@ -3037,6 +3101,9 @@ async function qaRenderedAudioRows(
   const blockers = units.flatMap((row) => row.findings
     .filter((finding) => finding.severity === "blocker")
     .map((finding) => ({ unit_id: row.unit_id, ...finding })));
+  const warnings = units.flatMap((row) => row.findings
+    .filter((finding) => finding.severity === "warning")
+    .map((finding) => ({ unit_id: row.unit_id, ...finding })));
   return {
     stage,
     status: blockers.length ? "blocked" : "passed",
@@ -3046,6 +3113,8 @@ async function qaRenderedAudioRows(
       : null,
     unit_count: units.length,
     blockers,
+    warnings,
+    warning_count: warnings.length,
     units,
   };
 }
@@ -3107,6 +3176,10 @@ async function finalStitchQa(finalWav, usable, prepared) {
       ...boundaryQa.blockers,
       ...acousticFindings.filter((row) => row.severity === "blocker"),
     ];
+    const warnings = [
+      ...(boundaryQa.warnings ?? []),
+      ...acousticFindings.filter((row) => row.severity === "warning"),
+    ];
     return {
       status: blockers.length ? "blocked" : "passed",
       audio_path: finalWav,
@@ -3115,6 +3188,8 @@ async function finalStitchQa(finalWav, usable, prepared) {
       acoustic_findings: acousticFindings,
       boundary_asr_qa: boundaryQa,
       blockers,
+      warnings,
+      warning_count: warnings.length,
     };
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });

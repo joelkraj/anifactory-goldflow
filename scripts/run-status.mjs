@@ -569,6 +569,13 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const planCommand = commandFor("visual_prompt_plan", identity);
   const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
+  const failedPromptCutIds = Array.isArray(promptPlan?.planner?.partial_failure?.failed_cut_ids)
+    ? [...new Set(promptPlan.planner.partial_failure.failed_cut_ids.map(String).filter(Boolean))]
+    : [];
+  if (promptPlan?.status === "blocked" && Array.isArray(promptPlan.prompts) && failedPromptCutIds.length) {
+    const scopedBase = planCommand.replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+    return `${scopedBase} --cut-ids ${failedPromptCutIds.join(",")}`;
+  }
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return planCommand;
   const reviewedPlanPath = path.join(episodeDir, "section_image_prompts_reviewed.json");
   const hardenedPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
@@ -868,10 +875,37 @@ async function imageReportComplete(episodeDir, episode, identity) {
   }
   const imageDir = path.join(episodeDir, "assets", "images");
   const imageNames = await listFiles(imageDir);
-  const generated = imageNames.filter((name) => new RegExp(`^${episode}-cut-.*\\.(png|jpe?g|webp)$`, "i").test(name)).length;
+  const requiredPromptIds = (promptPlan.prompts ?? [])
+    .filter((prompt) => prompt?.image_generation_required !== false)
+    .map((prompt) => String(prompt.image_id ?? "").trim())
+    .filter(Boolean);
+  const generatedIdSet = new Set(requiredPromptIds.filter((imageId) =>
+    imageNames.some((name) => name.startsWith(`${imageId}-`) && /\.(png|jpe?g|webp)$/i.test(name))
+  ));
+  const generated = generatedIdSet.size;
   const failedProbe = reports.find(({ report }) => String(report.status ?? "").toLowerCase() === "failed");
   const duplicates = latestReport ? await duplicateSummary(latestReport) : [];
   const failedIds = failedImageIdsFromReport(latestReport);
+  const successIds = successfulImageIdsFromReport(latestReport);
+  for (const imageId of generatedIdSet) successIds.add(imageId);
+  const missingIds = requiredPromptIds.filter((id) => !successIds.has(id));
+  if (missingIds.length && latestReport?.prompt_plan_hash === promptPlanHash) {
+    const creditIds = codexCreditFallbackEnabled(identity) ? creditExhaustedIdsFromReport(latestReport) : [];
+    const creditIdSet = new Set(creditIds);
+    const modelslabRecoveryIds = missingIds.filter((id) => !creditIdSet.has(id));
+    const skippedCount = (latestReport?.results ?? []).filter((row) =>
+      row?.image_id && String(row.status ?? "").toLowerCase() === "skipped_provider_circuit_open"
+    ).length;
+    const recoveryCommands = [
+      creditIds.length ? codexCreditFallbackCommand(identity, creditIds) : null,
+      modelslabRecoveryIds.length ? scopedImagegenRecoveryCommand(identity, modelslabRecoveryIds, promptPlan) : null,
+    ].filter(Boolean);
+    return {
+      done: false,
+      evidence: `image files=${generated}/${promptCount || "unknown"}; recovery cuts=${missingIds.slice(0, 8).join(", ")}${missingIds.length > 8 ? ` +${missingIds.length - 8} more` : ""}${failedIds.length ? `; failed=${failedIds.length}` : ""}${skippedCount ? `; skipped_provider_circuit_open=${skippedCount}` : ""}${creditIds.length ? `; modelslab_credit_exhausted=${creditIds.length}; codex_fallback=approved` : ""}`,
+      next_command_shape: recoveryCommands.join("; then "),
+    };
+  }
   if (failedIds.length) {
     const creditIds = codexCreditFallbackEnabled(identity) ? creditExhaustedIdsFromReport(latestReport) : [];
     return {
@@ -880,18 +914,6 @@ async function imageReportComplete(episodeDir, episode, identity) {
       next_command_shape: creditIds.length
         ? codexCreditFallbackCommand(identity, creditIds)
         : scopedImagegenRecoveryCommand(identity, failedIds, promptPlan),
-    };
-  }
-  const successIds = successfulImageIdsFromReport(latestReport);
-  const missingIds = (promptPlan.prompts ?? [])
-    .filter((prompt) => prompt?.image_generation_required !== false)
-    .map((prompt) => String(prompt.image_id ?? "").trim())
-    .filter((id) => id && !successIds.has(id));
-  if (missingIds.length && latestReport?.prompt_plan_hash === promptPlanHash) {
-    return {
-      done: false,
-      evidence: `image files=${generated}/${promptCount || "unknown"}; missing cuts=${missingIds.slice(0, 8).join(", ")}${missingIds.length > 8 ? ` +${missingIds.length - 8} more` : ""}`,
-      next_command_shape: scopedImagegenRecoveryCommand(identity, missingIds, promptPlan),
     };
   }
   return {
@@ -2457,11 +2479,23 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       || ttsReport.fallback_usage != null) {
       return { done: false, evidence: "Qwen Liam narration must not select a fallback provider or voice" };
     }
+    const warningOnlyAutomatedQaRequired = String(
+      ttsReport.selection_policy_version ?? "",
+    ).startsWith("narration_tts_selection_v4_");
+    const warningOnlyAutomatedQaPassed = !warningOnlyAutomatedQaRequired || (
+      ttsReport.retry_policy?.automated_acoustic_findings_are_review_warnings === true
+      && ttsReport.retry_policy?.automated_asr_findings_are_review_warnings === true
+      && ttsReport.retry_policy?.automated_voice_continuity_findings_are_review_warnings === true
+      && ttsReport.retry_policy?.automated_qa_warnings_block_stitching === false
+      && ttsReport.retry_policy?.automated_qa_warnings_trigger_retry === false
+      && ttsReport.retry_policy?.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures === true
+    );
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
       || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== true
       || ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true
-      || ttsReport.retry_policy?.other_acoustic_or_voice_identity_blockers_require_review !== true) {
-      return { done: false, evidence: "Qwen Liam retry policy must keep uncertain ASR non-blocking, stop unconfirmed acoustic/voice blockers for review, and retry only confirmed skips, truncations, or stutters (including objectively failed/empty/truncated synthesis)" };
+      || ttsReport.retry_policy?.other_acoustic_or_voice_identity_blockers_require_review !== true
+      || !warningOnlyAutomatedQaPassed) {
+      return { done: false, evidence: "Qwen Liam retry policy must keep every automated acoustic, ASR, and voice-continuity finding non-blocking and non-retrying, while reserving hard stops and automatic recovery for structural audio or synthesis/process failures" };
     }
     const fullQaForBoundaryContract = await readJson(
       path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
@@ -3403,7 +3437,9 @@ async function main() {
     reference_image_approval: legacyIdentity && legacyCharacterRefStatus !== "draft_needs_manual_review" && !referenceImageApproval.done
       ? { state: "skipped_with_waiver", evidence: "legacy run predates separate generated-reference approval report" }
       : referenceImageApproval,
-    visual_prompt_plan: visualPromptPlan,
+    visual_prompt_plan: visualPromptPlan.done
+      ? visualPromptPlan
+      : { ...visualPromptPlan, next_command_shape: visualPromptNextCommand },
     visual_prompt_harden: hardenStatus === "blocked" || /visual review|manual agent review/i.test(String(visualPromptNextCommand ?? ""))
       ? { state: "blocked", evidence: `${hardenedPromptPlan.evidence ?? "hardened prompts"}; harden blockers present`, next_command_shape: visualPromptNextCommand }
       : hardenedPromptPlan,

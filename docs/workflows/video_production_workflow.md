@@ -155,6 +155,7 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
    - The full-stream structural integrity result must be `passed`; a nonempty transcript alone is not sufficient. Preserve uncertain ASR discrepancies as review warnings instead of converting them into automatic synthesis retries.
    - Whisper timing is production timing truth for subtitles, SFX, scoring, semantic timing, visual beats, and render.
    - Provider/segment timing is fallback metadata only.
+   - An operator may run the spend-confirmed [ModelsLab STT diagnostic bake-off](modelslab_stt_diagnostic_workflow.md) against the same audio. It writes review-only candidates and never replaces or satisfies the local-Whisper timing stage.
 
 12. Audio pace check.
    - Run after local Whisper timing and before timing bind:

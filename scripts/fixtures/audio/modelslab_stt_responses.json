@@ -1,0 +1,112 @@
+{
+  "schema": "goldflow_modelslab_stt_response_fixtures_v1",
+  "v6_output_object": {
+    "status": "success",
+    "id": 42001,
+    "generationTime": 1.25,
+    "output": [
+      {
+        "text": "The deedholder crossed the gate.",
+        "words": [
+          {
+            "word": "The",
+            "start": 0.1,
+            "end": 0.28,
+            "confidence": 0.99
+          },
+          {
+            "word": "deedholder",
+            "start": 0.29,
+            "end": 0.78,
+            "confidence": 0.98
+          },
+          {
+            "word": "crossed",
+            "start": 0.8,
+            "end": 1.1,
+            "confidence": 0.97
+          },
+          {
+            "word": "the",
+            "start": 1.12,
+            "end": 1.25,
+            "confidence": 0.99
+          },
+          {
+            "word": "gate.",
+            "start": 1.27,
+            "end": 1.58,
+            "confidence": 0.99
+          }
+        ]
+      }
+    ]
+  },
+  "v7_nested_transcription": {
+    "status": "success",
+    "id": 72001,
+    "meta": {
+      "transcription": {
+        "text": "System warning confirmed.",
+        "word_timestamps": [
+          {
+            "text": "System",
+            "start_sec": 0.2,
+            "end_sec": 0.55,
+            "probability": 0.98
+          },
+          {
+            "text": "warning",
+            "start_sec": 0.57,
+            "end_sec": 0.91,
+            "probability": 0.97
+          },
+          {
+            "text": "confirmed.",
+            "start_sec": 0.93,
+            "end_sec": 1.31,
+            "probability": 0.99
+          }
+        ]
+      }
+    }
+  },
+  "v7_scribe_spacing_tokens": {
+    "status": "success",
+    "id": 72002,
+    "output": [
+      {
+        "text": "The gate opened.",
+        "words": [
+          {
+            "type": "word",
+            "text": "The",
+            "start": 0.1,
+            "end": 0.24
+          },
+          {
+            "type": "spacing",
+            "text": " "
+          },
+          {
+            "type": "word",
+            "text": "gate",
+            "start": 0.26,
+            "end": 0.48
+          },
+          {
+            "type": "spacing",
+            "text": " "
+          },
+          {
+            "type": "word",
+            "text": "opened.",
+            "start": 0.5,
+            "end": 0.83
+          }
+        ]
+      }
+    ]
+  },
+  "downloaded_plain_text": "The final gate opened."
+}

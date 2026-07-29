@@ -187,6 +187,7 @@ ${registryCommands}
   goldflow analytics aggregate     Aggregate multiple episode feedback reports
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
+  goldflow audio modelslab-stt-candidate Run an opt-in, spend-confirmed ModelsLab STT timing candidate without replacing local Whisper
   goldflow tts throughput-bakeoff  Run an isolated serial/batch-2/batch-4 Qwen/Liam diagnostic
 
 Common flags:
@@ -275,6 +276,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("modelslab-qwen-episode-audio.mjs", flags);
 } else if (command === "audio" && subcommand === "whisper-timing") {
   run("local-whisper-word-timing.mjs", flags);
+} else if (command === "audio" && subcommand === "modelslab-stt-candidate") {
+  run("modelslab-stt-candidate.mjs", flags);
 } else if (command === "audio" && subcommand === "pace-check") {
   run("narration-pace-check.mjs", ["--mode", "audio", ...flags]);
 } else if (command === "audio" && subcommand === "tempo-normalize") {

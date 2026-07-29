@@ -5,6 +5,10 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  redactModelslabErrorTextForStorageForTests,
+  redactModelslabPayloadForStorageForTests,
+} from "./lib/modelslab-stt-candidate.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -239,6 +243,7 @@ function audioLinks(response) {
     ...normalize(response.output),
     ...normalize(response.proxy_links),
     ...normalize(response.future_links),
+    ...normalize(response.links),
   ].filter(Boolean);
 }
 
@@ -267,8 +272,15 @@ function isAbortError(error) {
   return error?.name === "AbortError" || /aborted|timeout/i.test(String(error?.message ?? ""));
 }
 
-async function post(endpoint, body) {
-  const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_POST_ATTEMPTS ?? 6));
+export async function post(endpoint, body, {
+  maxAttempts = null,
+} = {}) {
+  const configuredAttempts = maxAttempts === null
+    ? Number(process.env.ANIFACTORY_MODELSLAB_QWEN_POST_ATTEMPTS ?? 6)
+    : Number(maxAttempts);
+  const attempts = Number.isFinite(configuredAttempts)
+    ? Math.max(1, Math.floor(configuredAttempts))
+    : (maxAttempts === null ? 6 : 1);
   const baseDelayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_RATE_LIMIT_BACKOFF_MS ?? 15000));
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     let response;
@@ -298,7 +310,7 @@ async function post(endpoint, body) {
         await sleep(delayMs);
         continue;
       }
-      throw new Error(`${endpoint} returned non-json ${response.status}: ${text.slice(0, 500)}`);
+      throw new Error(`${endpoint} returned non-json ${response.status}: ${redactModelslabErrorTextForStorageForTests(text).slice(0, 500)}`);
     }
     if (!response.ok || json.status === "error" || json.status === "failed") {
       if (attempt < attempts && isRateLimitResponse(response, json)) {
@@ -307,7 +319,7 @@ async function post(endpoint, body) {
         await sleep(delayMs);
         continue;
       }
-      throw new Error(`${endpoint} failed ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+      throw new Error(`${endpoint} failed ${response.status}: ${JSON.stringify(redactModelslabPayloadForStorageForTests(json)).slice(0, 1200)}`);
     }
     return json;
   }
@@ -320,14 +332,18 @@ function isRetryableNonJsonResponse(response, text) {
     || /rate limit|current_queue|queue is full|too many|service .*not available|try again/i.test(String(text ?? ""));
 }
 
-async function fetchVoiceRequest(id) {
+async function fetchVoiceRequest(
+  id,
+  fetchEndpoint = "/api/v6/voice/fetch",
+) {
+  const normalizedFetchEndpoint = String(fetchEndpoint).replace(/\/+$/u, "");
   const attempts = Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_ATTEMPTS ?? 8));
   const baseDelayMs = Math.max(1000, Number(process.env.ANIFACTORY_MODELSLAB_QWEN_FETCH_BACKOFF_MS ?? 5000));
   const requestJitterMs = Math.abs(Number(id) || 0) % 7 * 250;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     let response;
     try {
-      response = await fetchWithTimeout(`https://modelslab.com/api/v6/voice/fetch/${id}`, {
+      response = await fetchWithTimeout(`https://modelslab.com${normalizedFetchEndpoint}/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key: apiKey() }),
@@ -335,7 +351,7 @@ async function fetchVoiceRequest(id) {
     } catch (error) {
       if (attempt < attempts && isAbortError(error)) {
         const delayMs = baseDelayMs * attempt + requestJitterMs;
-        console.warn(`/api/v6/voice/fetch/${id} timed out (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        console.warn(`${normalizedFetchEndpoint}/${id} timed out (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
         await sleep(delayMs);
         continue;
       }
@@ -348,55 +364,74 @@ async function fetchVoiceRequest(id) {
     } catch {
       if (attempt < attempts && isRetryableNonJsonResponse(response, text)) {
         const delayMs = baseDelayMs * attempt + requestJitterMs;
-        console.warn(`/api/v6/voice/fetch/${id} returned retryable non-json ${response.status} (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        console.warn(`${normalizedFetchEndpoint}/${id} returned retryable non-json ${response.status} (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
         await sleep(delayMs);
         continue;
       }
-      throw new Error(`/api/v6/voice/fetch/${id} returned non-json ${response.status}: ${text.slice(0, 500)}`);
+      throw new Error(`${normalizedFetchEndpoint}/${id} returned non-json ${response.status}: ${redactModelslabErrorTextForStorageForTests(text).slice(0, 500)}`);
     }
     if (!response.ok || json.status === "error" || json.status === "failed") {
       if (attempt < attempts && isRateLimitResponse(response, json)) {
         const delayMs = baseDelayMs * attempt + requestJitterMs;
-        console.warn(`/api/v6/voice/fetch/${id} rate limited (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
+        console.warn(`${normalizedFetchEndpoint}/${id} rate limited (attempt ${attempt}/${attempts}); retrying in ${Math.round(delayMs / 1000)}s`);
         await sleep(delayMs);
         continue;
       }
-      throw new Error(`/api/v6/voice/fetch/${id} failed ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+      throw new Error(`${normalizedFetchEndpoint}/${id} failed ${response.status}: ${JSON.stringify(redactModelslabPayloadForStorageForTests(json)).slice(0, 1200)}`);
     }
     return json;
   }
-  throw new Error(`/api/v6/voice/fetch/${id} failed after ${attempts} attempts`);
+  throw new Error(`${normalizedFetchEndpoint}/${id} failed after ${attempts} attempts`);
 }
 
-async function resolveAudioResponse(initial) {
+export async function resolveAudioResponse(initial, {
+  fetchEndpoint = "/api/v6/voice/fetch",
+  operationLabel = "ModelsLab Qwen",
+  includeFetchResult = false,
+  completionPredicate = null,
+  requestFetcher = fetchVoiceRequest,
+  pollIntervalMs = 5000,
+} = {}) {
+  const pollDelayMs = Math.max(0, Number(pollIntervalMs) || 0);
+  const responseLinks = (response) => [
+    ...audioLinks(response),
+    ...(includeFetchResult && typeof response?.fetch_result === "string"
+      && response.fetch_result.trim()
+      ? [response.fetch_result.trim()]
+      : []),
+  ];
   let current = initial;
   let requestId = initial?.id ?? null;
-  let lastWithLinks = audioLinks(initial).length ? initial : null;
+  let lastWithLinks = responseLinks(initial).length ? initial : null;
   for (let attempt = 0; attempt < 96; attempt += 1) {
-    const links = audioLinks(current);
+    if (typeof completionPredicate === "function"
+      && completionPredicate(current)) {
+      return current;
+    }
+    const links = responseLinks(current);
     if (current?.status === "success" && links.length) return current;
     if (links.length) lastWithLinks = current;
     const message = String(current?.message ?? "");
     if (current?.status === "failed" && /try again/i.test(message) && requestId) {
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      current = await fetchVoiceRequest(requestId);
+      await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
+      current = await requestFetcher(requestId, fetchEndpoint);
       continue;
     }
     if (current?.status === "failed" && /request not found/i.test(message) && lastWithLinks) {
       return lastWithLinks;
     }
     if (current?.status === "failed" || current?.status === "error") {
-      throw new Error(`ModelsLab Qwen request failed while polling: ${JSON.stringify(current).slice(0, 1200)}`);
+      throw new Error(`${operationLabel} request failed while polling: ${JSON.stringify(redactModelslabPayloadForStorageForTests(current)).slice(0, 1200)}`);
     }
     if (current?.id) requestId = current.id;
     if (!requestId) {
       if (links.length) return current;
-      throw new Error(`ModelsLab Qwen returned no request id or audio URL: ${JSON.stringify(current).slice(0, 1200)}`);
+      throw new Error(`${operationLabel} returned no request id or output URL: ${JSON.stringify(redactModelslabPayloadForStorageForTests(current)).slice(0, 1200)}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    current = await fetchVoiceRequest(requestId);
+    await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
+    current = await requestFetcher(requestId, fetchEndpoint);
   }
-  throw new Error(`Timed out polling ModelsLab Qwen request ${initial?.id ?? "unknown"}`);
+  throw new Error(`Timed out polling ${operationLabel} request ${initial?.id ?? "unknown"}`);
 }
 
 async function downloadWhenReady(url, filePath) {
@@ -432,17 +467,53 @@ function audioMime(filePath) {
   return "audio/wav";
 }
 
-async function uploadAudioReference(filePath, voiceId) {
+export async function uploadAudioReference(filePath, voiceId, {
+  returnProvenance = false,
+  maxSourceBytes = null,
+  maxBase64Bytes = null,
+} = {}) {
   if (!filePath || !(await exists(filePath))) throw new Error(`Cannot refresh init_audio for ${voiceId}: missing local source ${filePath}`);
   await fs.mkdir(uploadDir, { recursive: true });
-  const base64 = (await fs.readFile(filePath)).toString("base64");
+  const sourceBytes = await fs.readFile(filePath);
+  if (maxSourceBytes !== null
+    && sourceBytes.byteLength > Number(maxSourceBytes)) {
+    throw new Error(
+      `ModelsLab upload source exceeds ${maxSourceBytes} bytes for `
+      + `${voiceId}: ${sourceBytes.byteLength}`,
+    );
+  }
+  const encodedByteCount = 4 * Math.ceil(sourceBytes.byteLength / 3);
+  if (maxBase64Bytes !== null
+    && encodedByteCount > Number(maxBase64Bytes)) {
+    throw new Error(
+      `ModelsLab base64 payload exceeds ${maxBase64Bytes} bytes for `
+      + `${voiceId}: ${encodedByteCount}`,
+    );
+  }
+  const base64 = sourceBytes.toString("base64");
   const response = await post("/api/v6/base64_to_url", {
     base64_string: `data:${audioMime(filePath)};base64,${base64}`,
   });
   const uploadedUrl = audioLinks(response)[0];
   if (!uploadedUrl) throw new Error(`ModelsLab upload returned no URL for ${voiceId}`);
-  await fs.writeFile(path.join(uploadDir, `${slug(voiceId)}.upload.json`), JSON.stringify({ response, source_audio_path: filePath, uploaded_url: uploadedUrl }, null, 2));
-  return uploadedUrl;
+  const sourceAudioSha256 = await sha256File(filePath);
+  const provenancePath = path.join(uploadDir, `${slug(voiceId)}.upload.json`);
+  const storedResponse = redactModelslabPayloadForStorageForTests(response);
+  await fs.writeFile(provenancePath, JSON.stringify({
+    response: storedResponse,
+    source_audio_path: filePath,
+    source_audio_sha256: sourceAudioSha256,
+    uploaded_url: uploadedUrl,
+  }, null, 2));
+  return returnProvenance
+    ? {
+        uploaded_url: uploadedUrl,
+        response: storedResponse,
+        provenance_path: provenancePath,
+        source_audio_path: filePath,
+        source_audio_sha256: sourceAudioSha256,
+      }
+    : uploadedUrl;
 }
 
 async function reusableUploadedAudioReference(filePath, voiceId) {

@@ -8,7 +8,7 @@ import {
   localWhisperContractForIdentity,
 } from "./local-whisper-policy.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-29.2";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-07-29.3";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -341,10 +341,37 @@ const stages = [
     id: "upload_packaging",
     title: "Upload packaging",
     required_input: "passed final QA + story truth",
-    output_artifact: "upload_packaging_<episode>.md",
+    output_artifact: "upload_packaging_<episode>.md + youtube_packaging_spec_<episode>.json + final thumbnail",
     approval: "operator",
-    validator: "upload_packaging_source_hash",
-    commands: [],
+    validator: "approved_ctr_packaging_and_thumbnail_contract",
+    commands: ["youtube approve-packaging"],
+  },
+  {
+    id: "youtube_publish_readiness",
+    title: "YouTube publish readiness",
+    required_input: "approved upload package + final QA + final video",
+    output_artifact: "youtube_publish_manifest_<episode>.json",
+    approval: "automatic",
+    validator: "youtube_publish_manifest_source_hashes",
+    commands: ["youtube prepare"],
+  },
+  {
+    id: "youtube_studio_upload",
+    title: "YouTube Studio upload",
+    required_input: "current YouTube publish manifest + authenticated Studio session",
+    output_artifact: "youtube_upload_receipt_<episode>.json",
+    approval: "operator",
+    validator: "youtube_upload_receipt_and_field_verification",
+    commands: ["youtube record-upload"],
+  },
+  {
+    id: "youtube_pinned_comment",
+    title: "YouTube pinned comment",
+    required_input: "passed upload receipt + explicit comment approval",
+    output_artifact: "youtube_pinned_comment_receipt_<episode>.json",
+    approval: "operator",
+    validator: "youtube_pinned_comment_receipt_hash",
+    commands: ["youtube record-comment"],
   },
 ];
 
@@ -445,7 +472,6 @@ export function productionOrderSummary() {
     .map((entry) => {
       const command = entry.commands.find((value) => !value.includes(":"));
       if (command) return command;
-      if (entry.id === "upload_packaging") return "upload packaging";
       return `[${entry.id}]`;
     })
     .join(" -> ");
@@ -562,7 +588,10 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,
-    upload_packaging: "Generate upload packaging only after final QA passes.",
+    upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
+    youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,
+    youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --comments-verified true --checks-complete true --recorded-by <name>`,
+    youtube_pinned_comment: `After explicit comment approval, use the youtube-studio-publish browser skill, pin the exact manifest comment, then run node bin/goldflow.mjs youtube record-comment ${base} --comment-id <id> --text-verified true --post-approved true --post-approved-by <name> --pinned-verified true --recorded-by <name>`,
   };
   return options.override ?? commands[stageId] ?? null;
 }

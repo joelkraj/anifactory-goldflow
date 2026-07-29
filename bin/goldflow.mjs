@@ -336,6 +336,14 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("render-report-finalize.mjs", flags);
 } else if (command === "final" && subcommand === "qa") {
   run("final-qa.mjs", flags);
+} else if (command === "youtube" && subcommand === "approve-packaging") {
+  run("youtube-publish.mjs", ["approve-packaging", ...flags]);
+} else if (command === "youtube" && subcommand === "prepare") {
+  run("youtube-publish.mjs", ["prepare", ...flags]);
+} else if (command === "youtube" && subcommand === "record-upload") {
+  run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "record-comment") {
+  run("youtube-publish.mjs", ["record-comment", ...flags]);
 } else if (command === "analytics" && subcommand === "ingest") {
   run("youtube-analytics-feedback.mjs", ["ingest", ...flags]);
 } else if (command === "analytics" && subcommand === "aggregate") {

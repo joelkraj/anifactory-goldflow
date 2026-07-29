@@ -318,7 +318,7 @@ function sha256(value) {
 function testAuthoritativeStageRegistry() {
   const ids = PIPELINE_STAGE_REGISTRY.map((stage) => stage.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual(ids.slice(-8), [
+  assert.deepEqual(ids.slice(-11), [
     "image_focal_analysis",
     "image_output_qa",
     "parallax_asset_generation",
@@ -327,6 +327,9 @@ function testAuthoritativeStageRegistry() {
     "premium_render",
     "final_qa",
     "upload_packaging",
+    "youtube_publish_readiness",
+    "youtube_studio_upload",
+    "youtube_pinned_comment",
   ]);
   assert.equal(ids.includes("visual_prompt_plan_review_harden"), false);
   assert.equal(ids.includes("reference_plan_approval"), true);
@@ -341,6 +344,10 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
   assert.equal(commandStageFor("tts", "narrate"), "qwen_tts_stitch");
   assert.equal(commandStageFor("tts", "qwen"), "qwen_tts_stitch");
+  assert.equal(commandStageFor("youtube", "approve-packaging"), "upload_packaging");
+  assert.equal(commandStageFor("youtube", "prepare"), "youtube_publish_readiness");
+  assert.equal(commandStageFor("youtube", "record-upload"), "youtube_studio_upload");
+  assert.equal(commandStageFor("youtube", "record-comment"), "youtube_pinned_comment");
   assert.equal(narratorOnly.every((row) => row.validator), true);
 }
 

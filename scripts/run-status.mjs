@@ -47,6 +47,13 @@ import {
   validateLocalWhisperIdentityContract,
   validateLockedLocalWhisperReport,
 } from "./lib/local-whisper-policy.mjs";
+import {
+  youtubePinnedCommentReceiptComplete,
+  youtubePublishManifestComplete,
+  youtubePublishingRequired,
+  youtubeUploadPackagingComplete,
+  youtubeUploadReceiptComplete,
+} from "./lib/youtube-publish-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -3372,6 +3379,19 @@ async function main() {
   const render = await renderComplete(episodeDir, episode, identity);
   const finalQa = await finalQaComplete(episodeDir, episode, identity);
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
+  const youtubeContractCurrent = youtubePublishingRequired(identity);
+  const youtubeUploadPackaging = youtubeContractCurrent
+    ? await youtubeUploadPackagingComplete(episodeDir, episode)
+    : { done: Boolean(latestPackaging), evidence: latestPackaging?.name ?? "upload packaging missing" };
+  const youtubePublishManifest = youtubeContractCurrent
+    ? await youtubePublishManifestComplete(episodeDir, episode)
+    : null;
+  const youtubeUploadReceipt = youtubeContractCurrent
+    ? await youtubeUploadReceiptComplete(episodeDir, episode)
+    : null;
+  const youtubePinnedCommentReceipt = youtubeContractCurrent
+    ? await youtubePinnedCommentReceiptComplete(episodeDir, episode)
+    : null;
   const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity);
   const narratorOnly = isNarratorOnlyAudio(identity);
   const sfxScoreDone = narratorOnly
@@ -3467,7 +3487,16 @@ async function main() {
       : motionPlan,
     premium_render: render,
     final_qa: finalQa,
-    upload_packaging: { done: Boolean(latestPackaging), evidence: latestPackaging?.name ?? "upload packaging missing" },
+    upload_packaging: youtubeUploadPackaging,
+    youtube_publish_readiness: youtubeContractCurrent
+      ? youtubePublishManifest
+      : { state: "skipped_with_waiver", evidence: "run predates hash-bound YouTube publish manifest" },
+    youtube_studio_upload: youtubeContractCurrent
+      ? youtubeUploadReceipt
+      : { state: "skipped_with_waiver", evidence: "run predates browser-assisted YouTube upload receipt" },
+    youtube_pinned_comment: youtubeContractCurrent
+      ? youtubePinnedCommentReceipt
+      : { state: "skipped_with_waiver", evidence: "run predates pinned-comment receipt contract" },
   };
 
   const rows = PIPELINE_STAGE_REGISTRY.map((definition) => {

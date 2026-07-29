@@ -20,6 +20,7 @@ import {
 } from "./lib/visual-scope-utils.mjs";
 import { multiCharacterBleedFindings, sanitizeCharacterStaging } from "./lib/character-staging-utils.mjs";
 import {
+  backgroundPopulationCuePresent,
   backgroundPopulationFindings,
   sanitizeBackgroundPopulation,
 } from "./lib/background-population-utils.mjs";
@@ -6023,6 +6024,14 @@ function testConciseReferenceRoleContract() {
 }
 
 function testLocalBeatFidelityEditorialCases() {
+  for (const promptText of [
+    "Civilians wait behind the safety line.",
+    "Local crews work at separate consoles.",
+    "Operators monitor the gate from the rear row.",
+    "Engineers and stewards remain in the background.",
+  ]) {
+    assert.equal(backgroundPopulationCuePresent(promptText), true);
+  }
   const impliedPopulation = {
     presence: "implied",
     description: "silent hearing attendees",

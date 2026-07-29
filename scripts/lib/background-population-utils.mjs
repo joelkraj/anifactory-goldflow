@@ -1,5 +1,5 @@
 const PRESENCE_VALUES = new Set(["none", "implied", "explicit"]);
-const POPULATION_CUE = /\b(?:audience|attendees?|bystanders?|cadets?|citizens?|classmates?|clerks?|commuters?|creators?|crowd|customers?|delegates?|employees?|extras?|families|fans|figures?|goblins?|guards?|guests?|guild members?|hunters?|jurors?|listeners?|members?|monsters?|nobles?|observers?|officials?|onlookers?|participants?|passengers?|patrons?|people|prisoners?|reporters?|residents?|shoppers?|silhouettes?|soldiers?|spectators?|staff|students?|supporters?|trainees?|viewers?|villagers?|warriors?|witnesses?|workers?)\b/i;
+const POPULATION_CUE = /\b(?:audience|attendees?|bystanders?|cadets?|citizens?|civilians?|classmates?|clerks?|commuters?|creators?|crew|crews|crowd|customers?|delegates?|divers?|employees?|engineers?|extras?|families|fans|figures?|goblins?|guards?|guests?|guild members?|hunters?|investigators?|jurors?|listeners?|members?|monsters?|nobles?|observers?|occupants?|officials?|onlookers?|operators?|participants?|passengers?|patrons?|people|prisoners?|reporters?|residents?|shoppers?|silhouettes?|soldiers?|spectators?|staff|stewards?|students?|supporters?|teams?|trainees?|viewers?|villagers?|warriors?|witnesses?|workers?)\b/i;
 
 function clean(value) {
   return String(value ?? "").trim();

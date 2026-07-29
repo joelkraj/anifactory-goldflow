@@ -2615,9 +2615,68 @@ async function main() {
   let parsedPrompts = [];
   let styleSummary = "";
   let adaptiveChunkTelemetry = [];
+  const manualRecoveryOutputFiles = parseListFlag(flags["manual-recovery-output-files"]);
   const useChunking = flags["visual-chunking"] !== "false"
     && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
-  if (useChunking) {
+  if (manualRecoveryOutputFiles.length) {
+    if (!scopedRepair) {
+      throw new Error("--manual-recovery-output-files is allowed only with exact --cut-ids or --beat-ids recovery scope.");
+    }
+    const sourceRowsByBeatId = new Map(visualSourceRows.map((row) => [String(row.visual_beat_id ?? ""), row]));
+    const recoveredPromptsByBeatId = new Map();
+    const manualWarnings = [];
+    for (const recoveryPath of manualRecoveryOutputFiles) {
+      const parsed = extractJson(await fs.readFile(recoveryPath, "utf8"));
+      const rawPrompts = Array.isArray(parsed?.prompts) ? parsed.prompts : [];
+      if (!rawPrompts.length) throw new Error(`Manual visual recovery output contains no prompts: ${recoveryPath}`);
+      const recoverySourceRows = rawPrompts.map((prompt) => {
+        const beatId = String(prompt?.visual_beat_id ?? "");
+        const sourceRow = sourceRowsByBeatId.get(beatId);
+        if (!sourceRow) throw new Error(`Manual visual recovery output contains an out-of-scope beat ${beatId || "(missing)"}: ${recoveryPath}`);
+        return sourceRow;
+      });
+      const checked = visualPromptChunkValidation(parsed, recoverySourceRows, {
+        label: `manual visual recovery ${path.basename(recoveryPath)}`,
+        visualReferencePlan: enrichedVisualReferencePlan,
+        stateRefIndex,
+        activeImageProvider,
+        activeImageProviderOptions,
+        storyFactLedger,
+      });
+      if (checked.findings.length) {
+        throw new Error(
+          `Manual visual recovery output failed deterministic validation for ${recoveryPath}: ${checked.findings.slice(0, 12).map((finding) => `${finding.code}:${finding.image_id ?? finding.visual_beat_id ?? "unknown"}:${finding.message ?? ""}`).join(" | ")}`,
+        );
+      }
+      for (const rawPrompt of checked.rawPrompts) {
+        const beatId = String(rawPrompt.visual_beat_id ?? "");
+        if (recoveredPromptsByBeatId.has(beatId)) throw new Error(`Manual visual recovery contains duplicate beat ${beatId}.`);
+        recoveredPromptsByBeatId.set(beatId, rawPrompt);
+      }
+      if (Array.isArray(parsed.warnings)) manualWarnings.push(...parsed.warnings);
+      if (!styleSummary && parsed.style_summary) styleSummary = parsed.style_summary;
+    }
+    const missingRecoveryBeatIds = [...sourceRowsByBeatId.keys()].filter((beatId) => !recoveredPromptsByBeatId.has(beatId));
+    if (missingRecoveryBeatIds.length) {
+      throw new Error(`Manual visual recovery is missing ${missingRecoveryBeatIds.length} selected beats: ${missingRecoveryBeatIds.slice(0, 20).join(", ")}`);
+    }
+    parsedPrompts = visualSourceRows.map((row) => recoveredPromptsByBeatId.get(String(row.visual_beat_id ?? "")));
+    llm = {
+      provider: "manual-structured-recovery",
+      model: null,
+      reasoning_effort: null,
+      codex_cli_path: null,
+      codex_cli_version: null,
+      output_path: null,
+      chunked: true,
+      chunk_count: manualRecoveryOutputFiles.length,
+      chunk_concurrency: 0,
+      reused_chunk_count: manualRecoveryOutputFiles.length,
+      repaired_chunk_count: manualRecoveryOutputFiles.length,
+      max_chunk_validation_attempt: 1,
+      parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: manualWarnings },
+    };
+  } else if (useChunking) {
     const sceneChunks = adaptivePromptChunks(visualSourceRows, enrichedVisualReferencePlan, stateRefIndex);
     if (wavefrontOutputDir) {
       await writeJsonAtomic(path.join(wavefrontOutputDir, "manifest.json"), {
@@ -2950,6 +3009,7 @@ async function main() {
   if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
   if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
+  sourcePaths.push(...manualRecoveryOutputFiles);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
     status: activeStateBlockers.length || motionEditorialBlockers.length || plannerRecoveryFindings.length ? "blocked" : "passed",
@@ -2977,6 +3037,7 @@ async function main() {
       adaptive_chunks: adaptiveChunkTelemetry,
       wavefront_output_dir: wavefrontOutputDir,
       wavefront_chunk_count: wavefrontChunkFiles.length,
+      manual_recovery_output_files: manualRecoveryOutputFiles,
     },
     editorial_reuse_policy: editorialReuse.policy,
     style_summary: styleSummary,

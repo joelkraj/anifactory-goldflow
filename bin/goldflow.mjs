@@ -187,6 +187,7 @@ ${registryCommands}
   goldflow analytics aggregate     Aggregate multiple episode feedback reports
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
+  goldflow tts throughput-bakeoff  Run an isolated serial/batch-2/batch-4 Qwen/Liam diagnostic
 
 Common flags:
   --channel <channel>
@@ -268,6 +269,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("voice-direction-gate.mjs", flags);
 } else if (command === "tts" && subcommand === "narrate") {
   run("narration-tts-episode.mjs", flags);
+} else if (command === "tts" && subcommand === "throughput-bakeoff") {
+  run("tts-qwen-throughput-bakeoff.mjs", flags);
 } else if (command === "tts" && subcommand === "qwen") {
   run("modelslab-qwen-episode-audio.mjs", flags);
 } else if (command === "audio" && subcommand === "whisper-timing") {

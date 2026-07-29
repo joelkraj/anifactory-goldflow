@@ -110,23 +110,25 @@ export function ltxMotionPromptForCut(prompt = {}) {
   const actionEnd = Math.min(4.5, Math.max(1.2, cutDuration - 0.25));
   const motionParts = [
     intent.behavior ? `Motion behavior: ${intent.behavior}.` : "",
-    intent.focal_subject ? `Keep focus on ${intent.focal_subject}.` : "",
+    intent.focal_subject ? `Focus: ${compactInstruction(intent.focal_subject, 80)}` : "",
   ].filter(Boolean).join(" ");
   const directedParts = animation ? [
-    `Single continuous five-second ${animation.shot_class.replaceAll("_", " ")} anime/manhwa shot.`,
-    animation.subject_motion ? `From 0.0 to ${actionEnd.toFixed(1)} seconds: ${compactInstruction(animation.subject_motion, 300)}` : "",
-    animation.camera_motion ? `Camera: ${compactInstruction(animation.camera_motion, 220)}` : "",
-    animation.environmental_motion ? `Secondary motion: ${compactInstruction(animation.environmental_motion, 180)}` : "",
-    animation.end_state ? `By ${actionEnd.toFixed(1)} seconds: ${compactInstruction(animation.end_state, 220)} Then hold.` : "",
-    animation.locked_elements.length ? `Keep locked: ${compactInstruction(animation.locked_elements.join(", "), 320)}` : "",
+    animation.subject_motion ? `One action from 0.0 to ${actionEnd.toFixed(1)} seconds: ${compactInstruction(animation.subject_motion, 140)}` : "",
+    animation.camera_motion ? `Camera: ${compactInstruction(animation.camera_motion, 80)}` : "",
+    animation.environmental_motion ? `Secondary: ${compactInstruction(animation.environmental_motion, 40)}` : "",
+    "Then settle into a readable hold.",
   ].filter(Boolean).join(" ")
     : "";
   return [
-    "Use the accepted image as the exact first frame. Preserve its character identities, wardrobe, anatomy, objects, environment, lighting, and spatial layout.",
+    animation
+      ? "Preserve the exact accepted anime/manhwa frame, identities, wardrobe, anatomy, objects, environment, and composition."
+      : "Use the accepted image as the exact first frame. Preserve its character identities, wardrobe, anatomy, objects, environment, lighting, and spatial layout.",
     animation ? "" : authoredPrompt,
     directedParts,
     motionParts,
-    "Use one coherent action and one continuous stable camera move. No new people, duplicate subjects, unrelated objects, panels, cuts, or scene changes. Existing UI may animate naturally; exact text legibility is not required.",
+    animation
+      ? "Use one continuous stable camera move. No new people, duplicate subjects, objects, panels, cuts, or scene changes. Existing UI may move; exact text legibility is not required."
+      : "Use one coherent action and one continuous stable camera move. No new people, duplicate subjects, unrelated objects, panels, cuts, or scene changes. Existing UI may animate naturally; exact text legibility is not required.",
   ].filter(Boolean).join(" ");
 }
 

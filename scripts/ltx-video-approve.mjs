@@ -61,7 +61,8 @@ async function main() {
   }
   const approveIds = ids(flags["approve-ids"]);
   const rejectIds = ids(flags["reject-ids"] ?? flags["decline-ids"]);
-  const known = new Set((report.clips ?? []).map((row) => String(row.image_id ?? "")));
+  const decisionId = (row) => String(row.candidate_id ?? row.image_id ?? "");
+  const known = new Set((report.clips ?? []).map(decisionId));
   for (const id of [...approveIds, ...rejectIds]) {
     if (!known.has(id)) throw new Error(`Unknown LTX clip id in approval flags: ${id}`);
   }
@@ -74,6 +75,7 @@ async function main() {
   const note = String(flags.note ?? "").trim();
   if (!reviewer || !note) throw new Error("--reviewer and --note are required.");
   const decisions = [];
+  const acceptedImages = new Set();
   for (const clip of report.clips ?? []) {
     if (await hashFile(clip.source_image_path) !== clip.source_image_sha256) {
       throw new Error(`Source image is stale for ${clip.image_id}.`);
@@ -81,9 +83,16 @@ async function main() {
     if (await hashFile(clip.normalized_video_path) !== clip.normalized_video_sha256) {
       throw new Error(`Normalized video is stale for ${clip.image_id}.`);
     }
+    const id = decisionId(clip);
+    const accepted = approveIds.has(id);
+    if (accepted && acceptedImages.has(String(clip.image_id))) {
+      throw new Error(`Only one LTX candidate may be accepted for ${clip.image_id}.`);
+    }
+    if (accepted) acceptedImages.add(String(clip.image_id));
     decisions.push({
       image_id: clip.image_id,
-      decision: approveIds.has(String(clip.image_id)) ? "accepted" : "rejected",
+      candidate_id: clip.candidate_id ?? clip.image_id,
+      decision: accepted ? "accepted" : "rejected",
       source_image_sha256: clip.source_image_sha256,
       video_sha256: clip.normalized_video_sha256,
       reviewer,

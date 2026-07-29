@@ -82,7 +82,9 @@ const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] 
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 195);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
-const ltxVideoPolicy = normalizeLtxVideoPolicy(flags["ltx-video-policy"] ?? "disabled");
+const ltxVideoPolicy = normalizeLtxVideoPolicy(
+  flags["animation-policy"] ?? flags["ltx-video-policy"] ?? "disabled",
+);
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
 const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 15, 0, 20);
 const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 3, 0, 120);
@@ -486,6 +488,7 @@ async function main() {
     },
     render_profile: renderProfile,
     motion_policy: motionPolicy,
+    animation_policy: ltxVideoPolicy,
     ltx_video_policy: ltxVideoPolicy,
     ltx_video_provider: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_PROVIDER,
     ltx_video_model: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_MODEL_ID,
@@ -629,6 +632,7 @@ async function main() {
       image_output_qa_required_before_render: true,
       directed_motion_plan_required_before_render: true,
       inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",
+      animation_direction_required_after_image_qa: ltxVideoPolicy !== "disabled",
       generated_video_approval_required_before_motion: ltxVideoPolicy !== "disabled",
       automatic_stage_spend_authorized_by_profile: productionProfileConfig.advance.authorize_planner_spend
         && productionProfileConfig.advance.authorize_media_spend

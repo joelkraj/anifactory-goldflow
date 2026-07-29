@@ -386,14 +386,15 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
    - Low-risk cuts may pass structural QA automatically. Reject only failed cut ids; regenerate that scoped set and invalidate only their motion clips.
    - Generated-image spelling and incidental text accuracy are explicitly outside this QA contract and do not block production.
 
-23. Optional hash-bound LTX 2.3 generated motion.
-   - New run identities must explicitly lock `--ltx-video-policy selective_ltx23|full_ltx23`; default and existing runs use `disabled` and skip both generated-video stages.
-   - Run `goldflow visual ltx-video` only after image QA passes. Each request binds the exact accepted source-image hash, hardened prompt hash, motion-prompt hash, provider/model id, request id, raw video hash, normalized video hash, duration, and probe results.
+23. Optional animation direction and hash-bound LTX 2.3 generated motion.
+   - New run identities must explicitly lock `--animation-policy selective_ltx23|full_ltx23`; default and existing runs use `disabled`. Disabled runs do not ask beat planning to author animation fields and skip every animation stage.
+   - Enabled runs author evidence-constrained pre-image `animation_intent` during beat planning. Visual prompting uses it to compose an animation-ready first keyframe. After image QA, `goldflow visual animation-plan` binds that intent to the accepted image and writes timed image-aware direction. UI remains eligible and exact generated text legibility is not required.
+   - Run `goldflow visual ltx-video` only after the animation direction plan passes. Each request binds the exact accepted source-image hash, hardened prompt hash, motion-prompt hash, provider/model id, request id, raw video hash, normalized video hash, duration, and probe results.
    - Provider audio is discarded. Normalized clips are silent 1920×1080 H.264/yuv420p assets; render remains responsible for the canonical narration/mix.
    - Proofs require explicit cut scope, proof-specific output paths, `--diagnostic-proof true`, and an explicitly justified workflow bypass. A proof report is never production truth.
 
 24. Generated LTX motion review.
-   - Inspect the moving clips for identity drift, anatomy deformation, missing or invented objects, crop loss, text mutation, flicker, unintended scene changes, and camera behavior.
+   - Inspect the moving clips for identity drift, anatomy deformation, missing or invented story-critical objects, crop loss, flicker, unintended scene changes, and camera behavior. Garbled UI text alone does not fail the clip.
    - Run `goldflow visual approve-ltx-video` with one accepted or rejected decision for every generated clip. Motion planning accepts only exact-hash approved clips; rejected clips fall back to the accepted still-image motion lane.
    - A midpoint contact sheet accelerates triage but does not replace playback review. Proof approvals record `production_eligible: false`.
 

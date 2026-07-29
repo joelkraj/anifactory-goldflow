@@ -39,6 +39,7 @@ const promptPath = path.resolve(flags.prompts ?? path.join(episodeDir, "section_
 const imagegenReportPath = path.resolve(flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`));
 const imageQaPath = path.resolve(flags["image-output-qa"] ?? path.join(episodeDir, `image_output_qa_${episode}.json`));
 const identityPath = path.resolve(flags["run-identity"] ?? path.join(episodeDir, "run_identity.json"));
+const animationDirectionPath = path.resolve(flags["animation-direction-plan"] ?? path.join(episodeDir, `animation_direction_plan_${episode}.json`));
 const concurrency = boundedInteger(flags.concurrency, 15, 1, 30);
 const requestedDuration = flags.duration == null ? null : clampLtxDuration(flags.duration);
 const pollIntervalMs = boundedInteger(flags["poll-interval-ms"], 7000, 2000, 60000);
@@ -332,17 +333,71 @@ async function contactSheet(clips, sheetPath) {
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, identity] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, identity, animationDirection] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
     readJson(identityPath, {}),
+    readJson(animationDirectionPath, null),
   ]);
-  const plan = await buildPlan({ promptPlan, imagegenReport, imageQa, identity });
+  let plan;
+  if (!proof && ltxVideoEnabled(identity)) {
+    if (animationDirection?.schema !== "goldflow_animation_direction_plan_v1" || animationDirection?.status !== "passed") {
+      throw new Error(`Production LTX generation requires a passed animation direction plan: ${animationDirectionPath}`);
+    }
+    const explicit = new Set(requestedCutIds());
+    const selected = (animationDirection.directions ?? []).filter((row) => !explicit.size || explicit.has(String(row.image_id)));
+    if (explicit.size && selected.length !== explicit.size) throw new Error("One or more requested --cut-ids are absent from the animation direction plan.");
+    const clips = selected.map((row) => ({
+      image_id: row.image_id,
+      scene_id: row.scene_id,
+      visual_beat_id: row.visual_beat_id,
+      start_sec: row.start_sec,
+      cut_duration_sec: row.cut_duration_sec,
+      duration_sec: row.requested_generation_duration_sec,
+      source_image_path: row.source_image_path,
+      source_image_sha256: row.source_image_sha256,
+      source_prompt_sha256: row.source_prompt_sha256,
+      motion_prompt: row.motion_prompt,
+      motion_prompt_sha256: sha256(row.motion_prompt),
+      negative_prompt: row.negative_prompt,
+      candidate_count: row.candidate_count ?? 1,
+    }));
+    plan = {
+      schema: "goldflow_ltx23_video_plan_v1",
+      status: "passed",
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      proof: false,
+      proof_label: null,
+      provider: LTX_VIDEO_PROVIDER,
+      model_id: LTX_VIDEO_MODEL_ID,
+      resolution: "16:9",
+      requested_concurrency: concurrency,
+      animation_direction_plan_path: animationDirectionPath,
+      source_hashes: { ...animationDirection.source_hashes, [animationDirectionPath]: await hashFile(animationDirectionPath) },
+      clip_count: clips.length,
+      clips,
+      updated_at: new Date().toISOString(),
+    };
+    plan.plan_sha256 = ltxPlanHash(plan);
+  } else {
+    plan = await buildPlan({ promptPlan, imagegenReport, imageQa, identity });
+  }
   await writeJson(planPath, plan);
   await fs.mkdir(path.join(outputDir, "raw"), { recursive: true });
   await fs.mkdir(path.join(outputDir, "normalized"), { recursive: true });
-  const rows = plan.clips.map((clip) => ({ ...clip, status: "planned" }));
+  const rows = plan.clips.flatMap((clip) => Array.from(
+    { length: Math.max(1, Number(clip.candidate_count ?? 1)) },
+    (_, index) => ({
+      ...clip,
+      candidate_index: index + 1,
+      candidate_id: `${clip.image_id}-candidate-${String(index + 1).padStart(2, "0")}`,
+      status: "planned",
+    }),
+  ));
   const batchStartedMs = Date.now();
   await runLimited(rows, concurrency, async (row) => {
     row.upload_started_at = new Date().toISOString();
@@ -362,7 +417,7 @@ async function main() {
       duration: String(row.duration_sec),
       base64: false,
       temp: false,
-      track_id: `goldflow-${episode}-${proofLabel}-${row.image_id}`,
+      track_id: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
     });
     row.request_id = initial.id ?? null;
     row.initial_eta_sec = initial.eta ?? null;
@@ -382,12 +437,12 @@ async function main() {
         ? row.initial_response
         : await pollResult(row.request_id, startedAtMs);
       row.provider_generation_time_sec = result.generationTime ?? null;
-      const rawPath = path.join(outputDir, "raw", `${row.image_id}-ltx23.mp4`);
+      const rawPath = path.join(outputDir, "raw", `${row.candidate_id}-ltx23.mp4`);
       row.download_url = await downloadResult(result, rawPath);
       row.raw_video_path = rawPath;
       row.raw_video_sha256 = await hashFile(rawPath);
       row.raw_probe = await probeVideo(rawPath);
-      const normalizedPath = path.join(outputDir, "normalized", `${row.image_id}-ltx23-1920x1080.mp4`);
+      const normalizedPath = path.join(outputDir, "normalized", `${row.candidate_id}-ltx23-1920x1080.mp4`);
       row.normalized_probe = await normalizeVideo(rawPath, normalizedPath, row.duration_sec);
       row.normalized_video_path = normalizedPath;
       row.normalized_video_sha256 = await hashFile(normalizedPath);
@@ -427,6 +482,8 @@ async function main() {
     contact_sheet_path: completed.length ? sheetPath : null,
     clips: rows.map((row) => ({
       image_id: row.image_id,
+      candidate_id: row.candidate_id,
+      candidate_index: row.candidate_index,
       scene_id: row.scene_id,
       visual_beat_id: row.visual_beat_id,
       start_sec: row.start_sec,

@@ -413,7 +413,12 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
   assert.deepEqual(voiceProviderOptions.allowed_production_voice_ids, ["am_liam"]);
   assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_qwen_liam_icl");
   assert.equal("alternate_voice_ids" in voiceProviderOptions, false);
-  assert.equal(validateNarrationTtsPolicyForTests(identity).status, "passed");
+  const runtimePolicy = validateNarrationTtsPolicyForTests(identity);
+  assert.equal(runtimePolicy.status, "passed");
+  assert.deepEqual(
+    runtimePolicy.synthesis_contract,
+    QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  );
   const boundIdentity = {
     ...identity,
     schema: "goldflow_run_identity_v2",

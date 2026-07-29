@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
@@ -383,7 +384,7 @@ function exactControlFindings(control, expected, pathLabel) {
     }];
   }
   return Object.entries(expected).flatMap(([field, value]) => (
-    control[field] === value
+    isDeepStrictEqual(control[field], value)
       ? []
       : [{
           code: "narration_voice_identity_control_mismatch",

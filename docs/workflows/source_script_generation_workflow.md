@@ -62,7 +62,9 @@ When a better tactic is discovered:
 
 ## Current Recommended Template
 
-Use `docs/prompts/manhwa_recap_chatbot_prompt_v4.md` for original long-form Joey Manhwa revenge power-fantasy stories across weak-to-strong, hunter/rank, system, regression, tower, academy, dungeon, noble revenge, and similar premises.
+Use `docs/prompts/manhwa_recap_chatbot_prompt_v4.md` by default for original long-form Joey Manhwa revenge power-fantasy stories across weak-to-strong, hunter/rank, system, regression, tower, academy, dungeon, noble revenge, and similar premises.
+
+Use `docs/prompts/manhwa_recap_chatbot_prompt_v5.md` only when the operator explicitly requests the conversational-winner profile. V5 preserves the V4 safeguards while permitting a few controlled audience asides and binding the script to an additive thumbnail promise.
 
 Every generated candidate must pass `docs/prompts/manhwa_recap_comment_criticism_release_gate_v1.md` before ingest.
 

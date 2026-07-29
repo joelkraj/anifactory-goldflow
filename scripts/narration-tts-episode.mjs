@@ -416,6 +416,16 @@ export function normalizeNarrationUnitsForTests(plan, {
     if (!Array.isArray(row.source_unit_refs) || !row.source_unit_refs.length) {
       throw new Error(`Unit ${unitId} lacks stable source_unit_refs`);
     }
+    const sourceSegmentIds = [...new Set([
+      ...(row.source_segment_ids ?? []),
+      ...row.source_unit_refs.map((ref) => ref?.segment_id),
+      row.inherited_segment_id,
+    ].map((value) => String(value ?? "").trim()).filter(Boolean))];
+    if (sourceSegmentIds.length > 1) {
+      throw new Error(
+        `Unit ${unitId} crosses a hard voice-segment boundary: ${sourceSegmentIds.join(", ")}`,
+      );
+    }
     const controls = row.provider_controls ?? {};
     const qwen = controls.qwen3 ?? controls.qwen_local ?? {};
     const unitVoiceId = String(
@@ -459,9 +469,7 @@ export function normalizeNarrationUnitsForTests(plan, {
       qwen_spoken_text: spokenText,
       spoken_text_sha256: spokenTextSha256,
       word_count: unitWords,
-      source_segment_ids: row.source_segment_ids?.length
-        ? row.source_segment_ids.map(String)
-        : [row.inherited_segment_id].filter(Boolean).map(String),
+      source_segment_ids: sourceSegmentIds,
       qwen_instruct: String(
         controls.qwen3?.instruct
           ?? controls.qwen_local?.instruct

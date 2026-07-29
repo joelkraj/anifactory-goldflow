@@ -3255,9 +3255,9 @@ function mergeQwenLiamNarrationRows(rows, providerContext) {
     risk_flags: [...new Set(["grouped_narration_unit", ...riskFlags])],
     protected_tokens: protectedTerms,
     protected_terms: protectedTerms,
-    merge_barrier: false,
-    boundary_before: null,
-    boundary_after: null,
+    merge_barrier: rows.some((row) => row.merge_barrier === true),
+    boundary_before: first.boundary_before ?? null,
+    boundary_after: rows.at(-1)?.boundary_after ?? null,
     qwen_instruct: null,
     provider_controls: {
       ...first.provider_controls,
@@ -3285,20 +3285,6 @@ function mergeQwenLiamNarrationRows(rows, providerContext) {
 }
 
 function compactQwenLiamNarrationUnits(rows, providerContext) {
-  const normalizedRows = rows.map((row) => {
-    const explicitOrAtomicBarrier = row.source_merge_barrier === true
-      || row.risk_flags?.includes("system_ui_atomic")
-      || row.risk_flags?.includes("speaker_or_performance_turn");
-    return {
-      ...row,
-      // Voice-direction segments are delivery metadata, not request
-      // boundaries. Qwen groups may cross them when the source sentences stay
-      // adjacent and no real performance barrier intervenes.
-      boundary_before: row.boundary_before === "segment" ? null : row.boundary_before,
-      boundary_after: row.boundary_after === "segment" ? null : row.boundary_after,
-      merge_barrier: explicitOrAtomicBarrier,
-    };
-  });
   const compacted = [];
   let pending = [];
   const flush = () => {
@@ -3308,16 +3294,44 @@ function compactQwenLiamNarrationUnits(rows, providerContext) {
     }
     pending = [];
   };
-  for (const row of normalizedRows) {
+  for (const row of rows) {
+    const rowSegmentId = String(
+      row.source_segment_ids?.[0]
+        ?? row.source_unit_refs?.[0]?.segment_id
+        ?? row.segment_id
+        ?? "",
+    );
+    const pendingSegmentId = String(
+      pending[0]?.source_segment_ids?.[0]
+        ?? pending[0]?.source_unit_refs?.[0]?.segment_id
+        ?? pending[0]?.segment_id
+        ?? "",
+    );
+    if (pending.length && (
+      row.boundary_before === "segment"
+      || rowSegmentId !== pendingSegmentId
+    )) {
+      flush();
+    }
     const previous = pending.at(-1);
     const sameSpeaker = !previous
       || (row.source_speaker === previous.source_speaker
         && row.speaker === previous.speaker);
+    const sourceOrPerformanceBarrier = row.source_merge_barrier === true
+      || row.risk_flags?.includes("system_ui_atomic")
+      || row.risk_flags?.includes("speaker_or_performance_turn")
+      || row.risk_flags?.includes("tts_override_applied");
+    const segmentBoundaryOnly = row.merge_barrier === true
+      && row.boundary_after === "segment"
+      && !sourceOrPerformanceBarrier
+      && !row.boundary_before
+      && !(
+        row.boundary_after
+        && row.boundary_after !== "segment"
+      );
     const mergeableNarration = row.kind === "narration"
-      && row.merge_barrier !== true
-      && row.source_merge_barrier !== true
-      && !row.risk_flags?.includes("system_ui_atomic")
-      && !row.risk_flags?.includes("speaker_or_performance_turn");
+      && (row.merge_barrier !== true || segmentBoundaryOnly)
+      && !sourceOrPerformanceBarrier;
     if (!mergeableNarration || !sameSpeaker) {
       flush();
       if (mergeableNarration) pending.push(row);
@@ -3325,6 +3339,7 @@ function compactQwenLiamNarrationUnits(rows, providerContext) {
       continue;
     }
     pending.push(row);
+    if (row.boundary_after === "segment") flush();
   }
   flush();
   return compacted;
@@ -3349,6 +3364,17 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
         code: "tts_unit_not_exact_whole_source_unit_join",
         unit_id: unit?.unit_id ?? null,
         source_text: sourceText,
+      });
+    }
+    const sourceSegmentIds = [...new Set([
+      ...(unit?.source_segment_ids ?? []),
+      ...refs.map((ref) => ref?.segment_id),
+    ].map((value) => String(value ?? "").trim()).filter(Boolean))];
+    if (sourceSegmentIds.length > 1) {
+      blockers.push({
+        code: "tts_unit_crosses_voice_segment_boundary",
+        unit_id: unit?.unit_id ?? null,
+        source_segment_ids: sourceSegmentIds,
       });
     }
     if (!/^[\p{L}\p{N}"“‘(\[]/u.test(sourceText)) {
@@ -3384,9 +3410,11 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
     terminal_punctuation_count: units.length - blockers.filter((row) => row.code === "tts_unit_missing_terminal_punctuation").length,
     within_hard_word_maximum_count: units.length
       - blockers.filter((row) => row.code === "tts_unit_exceeds_hard_word_maximum").length,
+    within_voice_segment_boundary_count: units.length
+      - blockers.filter((row) => row.code === "tts_unit_crosses_voice_segment_boundary").length,
     blocker_count: blockers.length,
     blockers: blockers.slice(0, 50),
-    policy: "Every request is assembled only from complete source sentences or atomic system/dialogue units, starts on a clean sentence or paragraph boundary, ends on terminal punctuation, and contains no more than 60 spoken words. Mid-sentence slicing is forbidden.",
+    policy: "Every request is assembled only from complete source sentences or atomic system/dialogue units, stays inside one voice-direction segment, starts on a clean sentence or paragraph boundary, ends on terminal punctuation, and contains no more than 60 spoken words. Voice-segment crossing and mid-sentence slicing are forbidden.",
   };
 }
 
@@ -3666,7 +3694,7 @@ function buildQwenGenerationPlan(
       target_spoken_words_max: 60,
       hard_spoken_words_max: 60,
       continuous_requests_allowed: false,
-      policy: "Group adjacent complete narration sentences across delivery-metadata segments. System/UI, dialogue, performance, speaker changes, sound design, and explicit merge barriers remain atomic. Never split a sentence or exceed 60 spoken words.",
+      policy: "Group adjacent complete narration sentences only within one voice-direction segment. Voice-segment boundaries, system/UI, dialogue, performance, speaker changes, sound design, and explicit merge barriers remain atomic. A hard segment boundary may yield a unit below the 45-word target. Never split a sentence or exceed 60 spoken words.",
     },
     sentence_unit_boundary_integrity: sentenceBoundaryIntegrity,
     // Compatibility alias for historical validators; the report body is now

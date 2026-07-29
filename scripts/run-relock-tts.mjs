@@ -10,6 +10,10 @@ import { PIPELINE_STAGE_REGISTRY_VERSION } from "./lib/pipeline-stage-registry.m
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const QWEN_LIAM_PROFILE_ID = "qwen3_1_7b_base_liam_sentence_v1";
+const PUCK_TO_QWEN_RECOVERY_KIND = "puck_to_qwen_liam_identity_migration";
+const QWEN_PLANNER_FIX_RECOVERY_KIND = "qwen_liam_planner_fix_relock";
+const INTERRUPTED_QWEN_REUSE_POLICY =
+  "reuse_allowed_only_for_exact_unchanged_single_segment_content_addressed_units";
 
 function parseFlags(parts) {
   const flags = {};
@@ -139,6 +143,59 @@ function requireCanonicalQwenLiamOptions(options) {
   return options;
 }
 
+export function recoveryKindForIdentityForTests(identity = {}) {
+  const provider = cleanValue(identity.tts_provider);
+  const voiceId = cleanValue(identity.narrator_voice_id ?? identity.tts_voice_id);
+  const fallback = identity.tts_fallback_provider
+    ?? identity.voice_provider_options?.fallback?.provider
+    ?? null;
+  if (provider === "kokoro_local" && voiceId === "am_puck") {
+    return PUCK_TO_QWEN_RECOVERY_KIND;
+  }
+  if (provider === "qwen_local" && voiceId === "am_liam" && fallback == null) {
+    return QWEN_PLANNER_FIX_RECOVERY_KIND;
+  }
+  throw new Error(
+    `run relock-tts supports only Kokoro/Puck migration or canonical Qwen/Liam planner-fix recovery; found ${provider ?? "missing"}/${voiceId ?? "missing"} with fallback ${fallback ?? "none"}.`,
+  );
+}
+
+function recoveryArchiveLabel(recoveryKind) {
+  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+    ? "puck-to-qwen-liam"
+    : "qwen-liam-planner-fix-relock";
+}
+
+function recoveryDisposition(recoveryKind) {
+  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+    ? "full_official_qwen_liam_voice_plan_and_narration_rebuild"
+    : "full_official_qwen_liam_voice_plan_and_narration_rebuild_after_committed_planner_fix";
+}
+
+function recoveryTriageFilename(recoveryKind, episode, archiveSlug) {
+  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+    ? `manual_blocker_triage_qwen_liam_relock_${episode}.json`
+    : `manual_blocker_triage_qwen_liam_planner_fix_relock_${episode}_${archiveSlug}.json`;
+}
+
+function recoveryEvidence(recoveryKind, interruptedQwenTts = {}) {
+  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+    ? [
+        "The operator explicitly superseded the Puck primary lock with the audited Qwen3-TTS 1.7B Base Liam-clone profile.",
+        "The approved script, speakability overrides, semantic scene plan, and fact ledger are script-hash-bound and do not depend on narrator identity.",
+        "The existing narration plan embeds the superseded run identity hash, so voice_plan is the narrowest valid invalidation boundary.",
+        "No historical artifact or audio asset is deleted; affected root artifacts are hash-snapshotted in the immutable recovery archive before replacement.",
+      ]
+    : [
+        "The operator approved recovery after a tested TTS planner unit-boundary defect; the audited Qwen3-TTS 1.7B Base Liam-clone identity and canonical delivery profile remain unchanged.",
+        "The planner correction is committed at a new clean Git HEAD, and the relock updates only the run Git/stage pins plus downstream voice-plan provenance.",
+        "The interrupted qwen_tts_stitch execution has no matching completion event, so the pre-fix narration plan and its partial synthesis cannot be selected as production truth.",
+        `The recovery report hash-inventories ${Number(interruptedQwenTts.interrupted_partial_unit_wav_count ?? 0)} retained Qwen unit WAVs and the orphaned active job manifest without moving, deleting, or selecting them.`,
+        "The approved script, speakability overrides, semantic scene plan, and fact ledger are script-hash-bound and remain preserved upstream of voice_plan.",
+        "voice_plan is the narrowest valid invalidation boundary because it authored the defective cross-segment request grouping.",
+      ];
+}
+
 function qwenLiamProviderLocks(primary, options) {
   return {
     tts_provider: primary.provider,
@@ -197,6 +254,7 @@ export function relockedIdentityForTests(identity, {
   archiveDir,
   previousIdentitySha256,
   reason,
+  recoveryKind = recoveryKindForIdentityForTests(identity),
 } = {}) {
   const options = requireCanonicalQwenLiamOptions(voiceProviderOptions);
   const primary = options.primary;
@@ -250,12 +308,32 @@ export function relockedIdentityForTests(identity, {
   migrated.git = structuredClone(git);
   migrated.dirty_worktree_waiver = null;
   migrated.updated_at = timestamp;
+  const previousRelock = migrated.narration_identity_relock
+    ? structuredClone(migrated.narration_identity_relock)
+    : null;
+  const previousHistory = Array.isArray(migrated.narration_identity_relock_history)
+    ? structuredClone(migrated.narration_identity_relock_history)
+    : [];
+  migrated.narration_identity_relock_history = [
+    ...previousHistory,
+    ...(previousRelock ? [previousRelock] : []),
+  ];
   migrated.narration_identity_relock = {
     schema: "goldflow_narration_identity_relock_v1",
     profile: QWEN_LIAM_PROFILE_ID,
+    recovery_kind: recoveryKind,
+    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    recovery_scope: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+      ? "operator_approved_narrator_identity_migration"
+      : "same_identity_relock_after_committed_tts_planner_fix",
+    invalidation_reason: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+      ? "operator_selected_qwen_liam_as_the_production_narrator"
+      : "committed_tts_planner_unit_boundary_fix_invalidates_the_prior_voice_plan",
     relocked_at: timestamp,
     reason,
     previous_run_identity_sha256: previousIdentitySha256,
+    previous_git_commit: identity.git?.commit ?? null,
+    relock_git_commit: git?.commit ?? null,
     archive_dir: archiveDir,
     invalidation_boundary: "voice_plan",
     preserved_upstream_boundary: "semantic_scene_plan",
@@ -313,11 +391,19 @@ function timingDerivedName(name, episode) {
     || /^score_drop_plan_.*\.json$/.test(name);
 }
 
-async function snapshotRecoveryArtifacts(episodeDir, archiveDir, episode) {
+async function snapshotRecoveryArtifacts(
+  episodeDir,
+  archiveDir,
+  episode,
+  recoveryKind,
+) {
   const names = await fs.readdir(episodeDir).catch(() => []);
   const selected = archiveCandidateNames(episode);
   for (const name of names) {
     if (timingDerivedName(name, episode)) selected.add(name);
+    if (/^manual_blocker_triage_qwen_liam.*relock.*\.json$/.test(name)) {
+      selected.add(name);
+    }
   }
   const snapshots = [];
   for (const name of [...selected].sort()) {
@@ -326,16 +412,28 @@ async function snapshotRecoveryArtifacts(episodeDir, archiveDir, episode) {
     const destination = path.join(archiveDir, "artifacts", name);
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.copyFile(source, destination);
+    const priorRecoveryRecord =
+      /^manual_blocker_triage_qwen_liam.*relock.*\.json$/.test(name);
+    const invalidatedByRelock = ![
+      "production_manifest.json",
+      "run_advance_state.json",
+      "run_identity.json",
+    ].includes(name) && !priorRecoveryRecord;
     snapshots.push({
       path: source,
       archived_path: destination,
       sha256: await sha256File(source),
-      invalidated_by_relock: name !== "production_manifest.json"
-        && name !== "run_advance_state.json"
-        && name !== "run_identity.json",
-      invalidation_reason: timingDerivedName(name, episode)
-        ? "depends_on_superseded_narration_audio_or_timing"
-        : "depends_on_superseded_tts_identity_or_voice_plan",
+      invalidated_by_relock: invalidatedByRelock,
+      archive_classification: priorRecoveryRecord
+        ? "prior_recovery_record"
+        : invalidatedByRelock ? "invalidated_stage_artifact" : "historical_context",
+      invalidation_reason: !invalidatedByRelock
+        ? null
+        : timingDerivedName(name, episode)
+          ? "depends_on_invalidated_narration_audio_or_timing"
+          : recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+            ? "depends_on_superseded_puck_identity_or_voice_plan"
+            : "depends_on_pre_fix_voice_plan_or_interrupted_qwen_tts_attempt",
     });
   }
   return snapshots;
@@ -371,7 +469,9 @@ async function retainedNarrationAudioAssets(episodeDir, episode) {
   }
   const assets = [];
   for (const filePath of [...new Set(candidates.map(cleanValue).filter(Boolean))]) {
-    const resolved = path.resolve(filePath);
+    const resolved = path.isAbsolute(filePath)
+      ? path.resolve(filePath)
+      : path.resolve(episodeDir, filePath);
     const stat = await fs.stat(resolved).catch(() => null);
     if (!stat?.isFile()) continue;
     assets.push({
@@ -383,6 +483,171 @@ async function retainedNarrationAudioAssets(episodeDir, episode) {
     });
   }
   return assets;
+}
+
+async function readJsonOptional(filePath) {
+  return fs.readFile(filePath, "utf8").then(JSON.parse).catch(() => null);
+}
+
+function sourceSegmentIdsForPlanUnit(unit) {
+  return [...new Set([
+    ...(Array.isArray(unit?.source_segment_ids) ? unit.source_segment_ids : []),
+    ...(!unit?.source_segment_ids?.length && unit?.segment_id ? [unit.segment_id] : []),
+  ].map(cleanValue).filter(Boolean))];
+}
+
+export async function interruptedQwenTtsInventoryForTests(episodeDir) {
+  const mediaRoot = path.join(episodeDir, "assets", "audio", "narration_tts");
+  const jobsDir = path.join(mediaRoot, "jobs");
+  const runsDir = path.join(mediaRoot, "runs");
+  const unitsDir = path.join(mediaRoot, "units", "qwen_local");
+  const jobNames = (await fs.readdir(jobsDir, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => entry.name)
+    .sort();
+  const orphanedQwenJobManifests = [];
+  for (const name of jobNames) {
+    const manifestPath = path.join(jobsDir, name);
+    const manifest = await readJsonOptional(manifestPath);
+    if (manifest?.schema !== "goldflow_narration_tts_jobs_v1"
+      || manifest.provider !== "qwen_local") {
+      continue;
+    }
+    const matchingRunReportPath = path.join(runsDir, name);
+    if (await exists(matchingRunReportPath)) continue;
+    const stat = await fs.stat(manifestPath);
+    orphanedQwenJobManifests.push({
+      path: manifestPath,
+      sha256: await sha256File(manifestPath),
+      size_bytes: stat.size,
+      job_count: Array.isArray(manifest.jobs) ? manifest.jobs.length : 0,
+      provider: manifest.provider,
+      attempt: manifest.attempt ?? null,
+      matching_run_report_path: matchingRunReportPath,
+      matching_run_report_exists: false,
+      retained_in_place: true,
+      selected_for_new_production: false,
+      manifest,
+    });
+  }
+  orphanedQwenJobManifests.sort((left, right) => (
+    path.basename(right.path).localeCompare(path.basename(left.path))
+  ));
+  const activeManifestInternal = orphanedQwenJobManifests[0] ?? null;
+  const activeJobs = new Map(
+    (activeManifestInternal?.manifest?.jobs ?? []).map((row) => [
+      cleanValue(row?.unit_id),
+      row,
+    ]).filter(([unitId]) => unitId),
+  );
+  const currentPlan = await readJsonOptional(
+    path.join(episodeDir, "narration_generation_plan.json"),
+  );
+  const currentPlanUnits = new Map(
+    (Array.isArray(currentPlan?.units) ? currentPlan.units : []).map((row) => [
+      cleanValue(row?.unit_id),
+      row,
+    ]).filter(([unitId]) => unitId),
+  );
+  const wavNames = (await fs.readdir(unitsDir, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".wav"))
+    .map((entry) => entry.name)
+    .sort();
+  const partialUnitWavs = [];
+  for (const name of wavNames) {
+    const wavPath = path.join(unitsDir, name);
+    const sidecarPath = path.join(unitsDir, `${path.basename(name, path.extname(name))}.json`);
+    const sidecar = await readJsonOptional(sidecarPath);
+    const wavStat = await fs.stat(wavPath);
+    const wavSha256 = await sha256File(wavPath);
+    const sidecarExists = Boolean(sidecar);
+    const sidecarSha256 = sidecarExists ? await sha256File(sidecarPath) : null;
+    const unitId = cleanValue(sidecar?.unit_id);
+    const spokenTextSha256 = cleanValue(sidecar?.spoken_text_sha256);
+    const activeJob = unitId ? activeJobs.get(unitId) : null;
+    const activeManifestExactMatch = Boolean(
+      activeJob
+      && cleanValue(activeJob.spoken_text_sha256) === spokenTextSha256,
+    );
+    const currentPlanUnit = unitId ? currentPlanUnits.get(unitId) : null;
+    const currentPlanExactMatch = Boolean(
+      currentPlanUnit
+      && cleanValue(currentPlanUnit.spoken_text_sha256) === spokenTextSha256,
+    );
+    const sourceSegmentIds = currentPlanExactMatch
+      ? sourceSegmentIdsForPlanUnit(currentPlanUnit)
+      : [];
+    partialUnitWavs.push({
+      path: wavPath,
+      sha256: wavSha256,
+      size_bytes: wavStat.size,
+      unit_id: unitId,
+      spoken_text_sha256: spokenTextSha256,
+      synthesis_identity_sha256: cleanValue(sidecar?.synthesis_identity_sha256),
+      sidecar_path: sidecarExists ? sidecarPath : null,
+      sidecar_sha256: sidecarSha256,
+      sidecar_output_sha256_matches: sidecarExists
+        ? cleanValue(sidecar.output_sha256) === wavSha256
+        : null,
+      exact_match_in_active_job_manifest: activeManifestExactMatch,
+      exact_match_in_interrupted_plan: currentPlanExactMatch,
+      interrupted_plan_source_segment_ids: sourceSegmentIds,
+      interrupted_plan_source_segment_count: currentPlanExactMatch
+        ? sourceSegmentIds.length
+        : null,
+      cross_segment_under_interrupted_plan: currentPlanExactMatch
+        ? sourceSegmentIds.length > 1
+        : null,
+      retained_in_place: true,
+      selected_for_new_production: false,
+      future_reuse_status: "not_selected_pending_corrected_plan_exact_match",
+      future_reuse_policy: INTERRUPTED_QWEN_REUSE_POLICY,
+    });
+  }
+  const activeJobPartialWavs = partialUnitWavs.filter(
+    (row) => row.exact_match_in_active_job_manifest,
+  );
+  const activeJobCrossSegmentWavs = activeJobPartialWavs.filter(
+    (row) => row.cross_segment_under_interrupted_plan === true,
+  );
+  const activeJobSingleSegmentWavs = activeJobPartialWavs.filter(
+    (row) => row.interrupted_plan_source_segment_count === 1,
+  );
+  const publicManifest = activeManifestInternal
+    ? Object.fromEntries(
+        Object.entries(activeManifestInternal).filter(([key]) => key !== "manifest"),
+      )
+    : null;
+  return {
+    schema: "goldflow_interrupted_qwen_tts_inventory_v1",
+    status: "retained_unselected_history",
+    unit_directory: unitsDir,
+    active_job_manifest_selection:
+      "latest_qwen_jobs_manifest_without_a_matching_run_report",
+    active_job_manifest: publicManifest,
+    orphaned_qwen_job_manifest_count: orphanedQwenJobManifests.length,
+    orphaned_qwen_job_manifests: orphanedQwenJobManifests.map((row) => (
+      Object.fromEntries(Object.entries(row).filter(([key]) => key !== "manifest"))
+    )),
+    interrupted_partial_unit_wav_count: partialUnitWavs.length,
+    active_job_partial_unit_wav_count: activeJobPartialWavs.length,
+    active_job_cross_segment_partial_unit_wav_count:
+      activeJobCrossSegmentWavs.length,
+    active_job_single_segment_partial_unit_wav_count:
+      activeJobSingleSegmentWavs.length,
+    historical_partial_unit_wav_count_outside_active_job:
+      partialUnitWavs.length - activeJobPartialWavs.length,
+    selected_for_new_production_count: 0,
+    reuse_policy: INTERRUPTED_QWEN_REUSE_POLICY,
+    reuse_requires: [
+      "the corrected narration plan contains the exact same content-addressed unit",
+      "the unit is bound to exactly one source segment",
+      "spoken text and spoken-text hash are unchanged",
+      "the pinned Qwen/Liam synthesis identity is unchanged",
+      "the retained WAV hash matches its synthesis sidecar",
+    ],
+    partial_unit_wavs: partialUnitWavs,
+  };
 }
 
 async function verifyCanonicalAssets(primary) {
@@ -437,14 +702,33 @@ async function main() {
   if (identity.proof_scope?.mode !== "full_episode") {
     throw new Error("run relock-tts refuses a bounded proof identity.");
   }
-  if (identity.tts_provider !== "kokoro_local"
-    || identity.narrator_voice_id !== "am_puck") {
-    throw new Error(
-      `run relock-tts currently supports only the explicit Kokoro/Puck to Qwen/Liam recovery; found ${identity.tts_provider ?? "missing"}/${identity.narrator_voice_id ?? "missing"}.`,
+  const recoveryKind = recoveryKindForIdentityForTests(identity);
+  if (recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND) {
+    if (identity.tts_profile !== QWEN_LIAM_PROFILE_ID) {
+      throw new Error(
+        `Qwen/Liam planner-fix relock requires the existing canonical profile ${QWEN_LIAM_PROFILE_ID}; found ${identity.tts_profile ?? "missing"}.`,
+      );
+    }
+    narrationPolicy.validateNarrationTtsPolicy(
+      narrationPolicy.narrationTtsPolicyForIdentity(identity),
+      { production: true },
     );
   }
 
   const git = cleanGitSnapshot();
+  if (recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND) {
+    const previousCommit = cleanValue(identity.git?.commit);
+    if (!previousCommit) {
+      throw new Error(
+        "Qwen/Liam planner-fix relock requires the prior committed Git pin in run_identity.json.",
+      );
+    }
+    if (previousCommit === git.commit) {
+      throw new Error(
+        "Qwen/Liam planner-fix relock requires a new clean committed implementation; current HEAD still matches run_identity.git.commit.",
+      );
+    }
+  }
   const voiceProviderOptions = requireCanonicalQwenLiamOptions(
     narrationPolicy.defaultNarrationVoiceProviderOptions(),
   );
@@ -456,7 +740,7 @@ async function main() {
     episodeDir,
     "reports",
     "recovery",
-    `${archiveSlug}-puck-to-qwen-liam`,
+    `${archiveSlug}-${recoveryArchiveLabel(recoveryKind)}`,
   );
   await fs.mkdir(path.dirname(archiveDir), { recursive: true });
   await fs.mkdir(archiveDir, { recursive: false });
@@ -464,10 +748,14 @@ async function main() {
     episodeDir,
     archiveDir,
     identity.episode,
+    recoveryKind,
   );
   const retainedAudioAssets = await retainedNarrationAudioAssets(
     episodeDir,
     identity.episode,
+  );
+  const interruptedQwenTts = await interruptedQwenTtsInventoryForTests(
+    episodeDir,
   );
   const beforeHash = sha256(identityRaw);
   const preservedArtifacts = await currentHashes(episodeDir, [
@@ -488,6 +776,7 @@ async function main() {
     archiveDir,
     previousIdentitySha256: beforeHash,
     reason,
+    recoveryKind,
   });
   narrationPolicy.validateNarrationTtsPolicy(
     narrationPolicy.narrationTtsPolicyForIdentity(migrated),
@@ -520,6 +809,16 @@ async function main() {
     .filter((row) => !completedExecutionIds.has(row.execution_id))
     .map((row) => row.execution_id)
     .filter(Boolean);
+  const abandonedQwenTtsStarts = executionEvents
+    .filter((row) => (
+      row.event_type === "stage_started"
+      && row.stage === "qwen_tts_stitch"
+    ))
+    .filter((row) => !completedExecutionIds.has(row.execution_id))
+    .map((row) => row.execution_id)
+    .filter(Boolean);
+
+  const evidenceReviewed = recoveryEvidence(recoveryKind, interruptedQwenTts);
 
   const triage = {
     schema: "goldflow_manual_blocker_triage_v1",
@@ -529,21 +828,40 @@ async function main() {
     recorded_at: timestamp,
     operator_request: reason,
     workflow_bypass_authorized: true,
-    disposition: "full_official_qwen_liam_voice_plan_and_narration_rebuild",
-    evidence_reviewed: [
-      "The operator explicitly superseded the Puck primary lock with the audited Qwen3-TTS 1.7B Base Liam-clone profile.",
-      "The approved script, speakability overrides, semantic scene plan, and fact ledger are script-hash-bound and do not depend on narrator identity.",
-      "The existing narration plan embeds the superseded run identity hash, so voice_plan is the narrowest valid invalidation boundary.",
-      "No historical artifact or audio asset is deleted; affected root artifacts are hash-snapshotted in the immutable recovery archive before replacement.",
-    ],
+    recovery_kind: recoveryKind,
+    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    disposition: recoveryDisposition(recoveryKind),
+    evidence_reviewed: evidenceReviewed,
     tts_profile: QWEN_LIAM_PROFILE_ID,
     run_identity_before_sha256: beforeHash,
     run_identity_after_sha256: afterHash,
+    previous_git_commit: identity.git?.commit ?? null,
+    relock_git_commit: git.commit,
     recovery_archive_dir: archiveDir,
     preserved_artifacts: preservedArtifacts,
     invalidated_artifacts: snapshots.filter((row) => row.invalidated_by_relock),
     retained_historical_audio_assets: retainedAudioAssets,
+    retained_interrupted_qwen_tts_summary: {
+      status: interruptedQwenTts.status,
+      active_job_manifest: interruptedQwenTts.active_job_manifest,
+      interrupted_partial_unit_wav_count:
+        interruptedQwenTts.interrupted_partial_unit_wav_count,
+      active_job_partial_unit_wav_count:
+        interruptedQwenTts.active_job_partial_unit_wav_count,
+      active_job_cross_segment_partial_unit_wav_count:
+        interruptedQwenTts.active_job_cross_segment_partial_unit_wav_count,
+      active_job_single_segment_partial_unit_wav_count:
+        interruptedQwenTts.active_job_single_segment_partial_unit_wav_count,
+      selected_for_new_production_count: 0,
+      reuse_policy: interruptedQwenTts.reuse_policy,
+    },
+    abandoned_qwen_tts_stitch_stage_start_execution_ids:
+      abandonedQwenTtsStarts,
     abandoned_whisper_stage_start_execution_ids: abandonedWhisperStarts,
+    abandoned_stage_start_execution_ids: {
+      qwen_tts_stitch: abandonedQwenTtsStarts,
+      local_whisper_word_timing: abandonedWhisperStarts,
+    },
     invalidation_boundary: "voice_plan",
     preserved_upstream_boundary: "semantic_scene_plan",
     next_required_artifact: "narration_generation_plan.json",
@@ -551,7 +869,7 @@ async function main() {
   };
   const triagePath = path.join(
     episodeDir,
-    `manual_blocker_triage_qwen_liam_relock_${identity.episode}.json`,
+    recoveryTriageFilename(recoveryKind, identity.episode, archiveSlug),
   );
   const recoveryReport = {
     schema: "goldflow_tts_identity_relock_report_v1",
@@ -560,13 +878,26 @@ async function main() {
     recorded_at: timestamp,
     episode_dir: episodeDir,
     episode: identity.episode,
+    recovery_kind: recoveryKind,
+    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
+    disposition: recoveryDisposition(recoveryKind),
     tts_profile: QWEN_LIAM_PROFILE_ID,
     run_identity_before_sha256: beforeHash,
     run_identity_after_sha256: afterHash,
+    previous_git_commit: identity.git?.commit ?? null,
+    relock_git_commit: git.commit,
     git,
     preserved_artifacts: preservedArtifacts,
     archived_artifacts: snapshots,
     retained_historical_audio_assets: retainedAudioAssets,
+    retained_interrupted_qwen_tts: interruptedQwenTts,
+    abandoned_qwen_tts_stitch_stage_start_execution_ids:
+      abandonedQwenTtsStarts,
+    abandoned_whisper_stage_start_execution_ids: abandonedWhisperStarts,
+    abandoned_stage_start_execution_ids: {
+      qwen_tts_stitch: abandonedQwenTtsStarts,
+      local_whisper_word_timing: abandonedWhisperStarts,
+    },
     triage_path: triagePath,
     next_stage: "voice_plan",
   };
@@ -580,11 +911,17 @@ async function main() {
     status: "passed",
     episode_dir: episodeDir,
     tts_profile: QWEN_LIAM_PROFILE_ID,
+    recovery_kind: recoveryKind,
+    identity_changed: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND,
     run_identity_path: identityPath,
     run_identity_before_sha256: beforeHash,
     run_identity_after_sha256: afterHash,
     archive_dir: archiveDir,
     archived_artifact_count: snapshots.length,
+    retained_interrupted_qwen_partial_unit_wav_count:
+      interruptedQwenTts.interrupted_partial_unit_wav_count,
+    abandoned_qwen_tts_stitch_stage_start_execution_ids:
+      abandonedQwenTtsStarts,
     triage_path: triagePath,
     recovery_report_path: recoveryReportPath,
     next_required_stage: "voice_plan",
@@ -599,6 +936,12 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  INTERRUPTED_QWEN_REUSE_POLICY,
+  PUCK_TO_QWEN_RECOVERY_KIND,
+  QWEN_PLANNER_FIX_RECOVERY_KIND,
   QWEN_LIAM_PROFILE_ID,
+  recoveryDisposition,
+  recoveryEvidence,
+  recoveryTriageFilename,
   requireCanonicalQwenLiamOptions,
 };

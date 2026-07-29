@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
+  INTERRUPTED_QWEN_REUSE_POLICY,
+  PUCK_TO_QWEN_RECOVERY_KIND,
+  QWEN_PLANNER_FIX_RECOVERY_KIND,
   QWEN_LIAM_PROFILE_ID,
+  interruptedQwenTtsInventoryForTests,
+  recoveryDisposition,
+  recoveryEvidence,
+  recoveryKindForIdentityForTests,
+  recoveryTriageFilename,
   relockedIdentityForTests,
   requireCanonicalQwenLiamOptions,
 } from "../run-relock-tts.mjs";
@@ -59,6 +71,124 @@ function fixtureVoiceProviderOptions() {
       confirmed_defect_types: ["skip", "truncation", "stutter"],
     },
   };
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function writeJson(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function runInterruptedQwenInventoryFixture() {
+  const episodeDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "goldflow-relock-tts-inventory-"),
+  );
+  try {
+    const mediaRoot = path.join(episodeDir, "assets", "audio", "narration_tts");
+    const jobsDir = path.join(mediaRoot, "jobs");
+    const runsDir = path.join(mediaRoot, "runs");
+    const unitsDir = path.join(mediaRoot, "units", "qwen_local");
+    await fs.mkdir(jobsDir, { recursive: true });
+    await fs.mkdir(runsDir, { recursive: true });
+    await fs.mkdir(unitsDir, { recursive: true });
+
+    const activeManifestName = "20260729002735577-59463-qwen-attempt-1.json";
+    await writeJson(path.join(jobsDir, activeManifestName), {
+      schema: "goldflow_narration_tts_jobs_v1",
+      provider: "qwen_local",
+      attempt: 1,
+      jobs: [
+        {
+          unit_id: "unit_single",
+          spoken_text_sha256: "single-text-sha",
+        },
+        {
+          unit_id: "unit_cross",
+          spoken_text_sha256: "cross-text-sha",
+        },
+      ],
+    });
+    const completedManifestName = "20260728000000000-11111-qwen-attempt-1.json";
+    await writeJson(path.join(jobsDir, completedManifestName), {
+      schema: "goldflow_narration_tts_jobs_v1",
+      provider: "qwen_local",
+      attempt: 1,
+      jobs: [{ unit_id: "completed_unit", spoken_text_sha256: "completed" }],
+    });
+    await writeJson(path.join(runsDir, completedManifestName), {
+      schema: "goldflow_local_tts_production_run_v1",
+      status: "passed",
+    });
+    await writeJson(path.join(episodeDir, "narration_generation_plan.json"), {
+      schema: "goldflow_narration_generation_plan_v1",
+      units: [
+        {
+          unit_id: "unit_single",
+          spoken_text_sha256: "single-text-sha",
+          source_segment_ids: ["seg_01"],
+        },
+        {
+          unit_id: "unit_cross",
+          spoken_text_sha256: "cross-text-sha",
+          source_segment_ids: ["seg_02", "seg_03"],
+        },
+      ],
+    });
+
+    for (const row of [
+      {
+        file: "unit_single-synthesis.wav",
+        unit_id: "unit_single",
+        spoken_text_sha256: "single-text-sha",
+        contents: "single wav bytes",
+      },
+      {
+        file: "unit_cross-synthesis.wav",
+        unit_id: "unit_cross",
+        spoken_text_sha256: "cross-text-sha",
+        contents: "cross wav bytes",
+      },
+      {
+        file: "historical_unit-synthesis.wav",
+        unit_id: "historical_unit",
+        spoken_text_sha256: "historical-text-sha",
+        contents: "historical wav bytes",
+      },
+    ]) {
+      const wavPath = path.join(unitsDir, row.file);
+      await fs.writeFile(wavPath, row.contents);
+      await writeJson(wavPath.replace(/\.wav$/, ".json"), {
+        unit_id: row.unit_id,
+        spoken_text_sha256: row.spoken_text_sha256,
+        output_sha256: sha256(row.contents),
+        synthesis_identity_sha256: "qwen-liam-identity-sha",
+      });
+    }
+
+    const inventory = await interruptedQwenTtsInventoryForTests(episodeDir);
+    assert.equal(inventory.status, "retained_unselected_history");
+    assert.equal(inventory.active_job_manifest.path, path.join(jobsDir, activeManifestName));
+    assert.equal(inventory.active_job_manifest.job_count, 2);
+    assert.equal(inventory.orphaned_qwen_job_manifest_count, 1);
+    assert.equal(inventory.interrupted_partial_unit_wav_count, 3);
+    assert.equal(inventory.active_job_partial_unit_wav_count, 2);
+    assert.equal(inventory.active_job_cross_segment_partial_unit_wav_count, 1);
+    assert.equal(inventory.active_job_single_segment_partial_unit_wav_count, 1);
+    assert.equal(inventory.historical_partial_unit_wav_count_outside_active_job, 1);
+    assert.equal(inventory.selected_for_new_production_count, 0);
+    assert.equal(inventory.reuse_policy, INTERRUPTED_QWEN_REUSE_POLICY);
+    assert.ok(inventory.partial_unit_wavs.every(
+      (row) => row.retained_in_place && !row.selected_for_new_production,
+    ));
+    assert.ok(inventory.partial_unit_wavs.every(
+      (row) => row.sidecar_output_sha256_matches === true,
+    ));
+  } finally {
+    await fs.rm(episodeDir, { recursive: true, force: true });
+  }
 }
 
 export async function runRelockTtsTests() {
@@ -129,6 +259,10 @@ export async function runRelockTtsTests() {
     dirty_diff_sha256: null,
     dirty_status: [],
   };
+  assert.equal(
+    recoveryKindForIdentityForTests(before),
+    PUCK_TO_QWEN_RECOVERY_KIND,
+  );
   const after = relockedIdentityForTests(before, {
     voiceProviderOptions: options,
     git: cleanGit,
@@ -164,6 +298,15 @@ export async function runRelockTtsTests() {
   assert.deepEqual(after.git, cleanGit);
   assert.equal(after.narration_identity_relock.invalidation_boundary, "voice_plan");
   assert.equal(after.narration_identity_relock.preserved_upstream_boundary, "semantic_scene_plan");
+  assert.equal(
+    after.narration_identity_relock.recovery_kind,
+    PUCK_TO_QWEN_RECOVERY_KIND,
+  );
+  assert.equal(after.narration_identity_relock.identity_changed, true);
+  assert.equal(
+    after.narration_identity_relock.recovery_scope,
+    "operator_approved_narrator_identity_migration",
+  );
   assert.equal("qwen_narrator_voice_id" in after, false);
   assert.equal(after.provider_locks.qwen_narrator_voice_id, null);
   assert.equal(after.production_gates.tts_speed_control_supported, false);
@@ -178,4 +321,103 @@ export async function runRelockTtsTests() {
   assert.equal(after.model_versions.image_model, before.model_versions.image_model);
   assert.equal(after.production_profile_config.media.image_concurrency, 15);
   assert.equal(after.production_gates.image_output_qa_required, true);
+
+  const beforePlannerFix = structuredClone(after);
+  beforePlannerFix.git = {
+    commit: "qwen-before-planner-fix",
+    branch: "main",
+    dirty: false,
+    dirty_diff_sha256: null,
+    dirty_status: [],
+  };
+  assert.equal(
+    recoveryKindForIdentityForTests(beforePlannerFix),
+    QWEN_PLANNER_FIX_RECOVERY_KIND,
+  );
+  assert.equal(
+    recoveryDisposition(QWEN_PLANNER_FIX_RECOVERY_KIND),
+    "full_official_qwen_liam_voice_plan_and_narration_rebuild_after_committed_planner_fix",
+  );
+  const plannerFixEvidence = recoveryEvidence(
+    QWEN_PLANNER_FIX_RECOVERY_KIND,
+    { interrupted_partial_unit_wav_count: 82 },
+  );
+  assert.match(plannerFixEvidence.join(" "), /identity and canonical delivery profile remain unchanged/);
+  assert.match(plannerFixEvidence.join(" "), /82 retained Qwen unit WAVs/);
+  assert.doesNotMatch(plannerFixEvidence.join(" "), /Puck|identity migration/i);
+  assert.equal(
+    recoveryTriageFilename(
+      QWEN_PLANNER_FIX_RECOVERY_KIND,
+      "ep_01",
+      "2026-07-29T01-00-00-000Z",
+    ),
+    "manual_blocker_triage_qwen_liam_planner_fix_relock_ep_01_2026-07-29T01-00-00-000Z.json",
+  );
+  assert.match(
+    recoveryEvidence(PUCK_TO_QWEN_RECOVERY_KIND).join(" "),
+    /superseded the Puck primary lock/,
+  );
+  const afterPlannerFix = relockedIdentityForTests(beforePlannerFix, {
+    voiceProviderOptions: options,
+    git: {
+      ...cleanGit,
+      commit: "qwen-after-planner-fix",
+    },
+    timestamp: "2026-07-29T01:00:00.000Z",
+    archiveDir: "/episode/reports/recovery/qwen-planner-fix",
+    previousIdentitySha256: "qwen-before-planner-fix-identity-sha",
+    reason: "operator approved recovery after tested planner fix",
+  });
+  assert.equal(afterPlannerFix.tts_profile, QWEN_LIAM_PROFILE_ID);
+  assert.equal(afterPlannerFix.tts_provider, "qwen_local");
+  assert.equal(afterPlannerFix.narrator_voice_id, "am_liam");
+  assert.equal(afterPlannerFix.tts_fallback_provider, null);
+  assert.deepEqual(afterPlannerFix.voice_provider_options, options);
+  assert.equal(afterPlannerFix.git.commit, "qwen-after-planner-fix");
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.recovery_kind,
+    QWEN_PLANNER_FIX_RECOVERY_KIND,
+  );
+  assert.equal(afterPlannerFix.narration_identity_relock.identity_changed, false);
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.recovery_scope,
+    "same_identity_relock_after_committed_tts_planner_fix",
+  );
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.invalidation_reason,
+    "committed_tts_planner_unit_boundary_fix_invalidates_the_prior_voice_plan",
+  );
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.previous_git_commit,
+    "qwen-before-planner-fix",
+  );
+  assert.equal(
+    afterPlannerFix.narration_identity_relock.relock_git_commit,
+    "qwen-after-planner-fix",
+  );
+  assert.equal(afterPlannerFix.narration_identity_relock_history.length, 1);
+  assert.deepEqual(
+    afterPlannerFix.narration_identity_relock_history[0],
+    beforePlannerFix.narration_identity_relock,
+  );
+  assert.equal(
+    JSON.stringify(afterPlannerFix.narration_identity_relock).includes("Puck"),
+    false,
+  );
+  assert.equal(afterPlannerFix.title, beforePlannerFix.title);
+  assert.equal(afterPlannerFix.source_sha256, beforePlannerFix.source_sha256);
+  assert.equal(afterPlannerFix.image_provider, beforePlannerFix.image_provider);
+  assert.deepEqual(
+    afterPlannerFix.image_provider_options,
+    beforePlannerFix.image_provider_options,
+  );
+  assert.throws(
+    () => recoveryKindForIdentityForTests({
+      tts_provider: "kokoro_local",
+      narrator_voice_id: "am_michael",
+    }),
+    /supports only Kokoro\/Puck migration or canonical Qwen\/Liam planner-fix recovery/,
+  );
+
+  await runInterruptedQwenInventoryFixture();
 }

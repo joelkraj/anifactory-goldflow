@@ -209,6 +209,7 @@ import {
 import {
   equivalentPhrasesForTests,
   joinQaFromPcmForTests,
+  normalizeNarrationUnitsForTests,
   selectedQaDecisionForTests,
   validateNarrationTtsPolicyForTests,
 } from "./narration-tts-episode.mjs";
@@ -6089,6 +6090,81 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
   assert.equal(uppercaseDialogue.paragraph_units[0].kind, "narration");
 }
 
+function testQwenHumanShieldPatternKeepsVoiceSegmentsAtomic() {
+  const narration = (text) => ({
+    kind: "narration",
+    speaker: "NARRATOR",
+    text,
+    performed_text: text,
+    caption_text: text,
+  });
+  const firstSegmentTexts = [
+    "It did not choose a target.",
+    "It did not heal the damage already done.",
+    "It named what Joey had earned.",
+  ];
+  const secondSegmentTexts = [
+    "Burden Reclaimed had awakened.",
+    "Twelve thousand Guard Experience became available.",
+    "None came from Serena forcing monsters to target him.",
+    "Forced danger had earned nothing.",
+    "The inheritance came from what Joey had done afterward.",
+  ];
+  const plan = qwenGenerationPlanForTests([
+    {
+      segment_id: "voice_seg_32",
+      delivery_mode: "aftermath narration",
+      performance_units: firstSegmentTexts.map(narration),
+    },
+    {
+      segment_id: "voice_seg_33",
+      delivery_mode: "system reveal narration",
+      performance_units: secondSegmentTexts.map(narration),
+    },
+  ], { ttsProvider: "qwen_local" });
+
+  assert.equal(plan.status, "passed");
+  assert.equal(plan.units.length, 2);
+  assert.deepEqual(
+    plan.units.map((unit) => unit.source_segment_ids),
+    [["voice_seg_32"], ["voice_seg_33"]],
+  );
+  assert.deepEqual(plan.units.map((unit) => unit.word_count), [20, 33]);
+  assert.ok(plan.units.every((unit) => unit.word_count < 45));
+  assert.ok(plan.units.every((unit) => unit.word_count <= 60));
+  assert.deepEqual(
+    plan.units.map((unit) => unit.boundary_after),
+    ["segment", "episode"],
+  );
+  assert.ok(plan.units.every((unit) => unit.merge_barrier === true));
+  assert.deepEqual(
+    plan.units.flatMap((unit) => unit.source_unit_refs.map((ref) => ref.source_text)),
+    [...firstSegmentTexts, ...secondSegmentTexts],
+  );
+  assert.equal(
+    plan.sentence_unit_boundary_integrity.within_voice_segment_boundary_count,
+    2,
+  );
+  assert.equal(
+    plan.sentence_unit_boundary_integrity.blockers.some(
+      (finding) => finding.code === "tts_unit_crosses_voice_segment_boundary",
+    ),
+    false,
+  );
+
+  const staleCrossSegmentPlan = structuredClone(plan);
+  staleCrossSegmentPlan.units[0].source_segment_ids = [
+    "voice_seg_32",
+    "voice_seg_33",
+  ];
+  assert.throws(
+    () => normalizeNarrationUnitsForTests(staleCrossSegmentPlan, {
+      voiceId: QWEN_LIAM_PRIMARY_LOCK.voice_id,
+    }),
+    /crosses a hard voice-segment boundary/i,
+  );
+}
+
 function testVoiceDirectionPreservesFastRecapCadence() {
   const ordinarySegments = Array.from({ length: 30 }, (_, index) => `Joey reviewed sponsor footage and prepared release number ${index + 1}.`);
   const metadata = voiceDirectionMetadataForTests(ordinarySegments);
@@ -10135,6 +10211,7 @@ const FIXTURE_SUITES = {
     testVoiceDirectionCharacterization,
     testQwenTextIntegrityCoverageGate,
     testKokoroNarrationUnitGroupingAndAtomicBarriers,
+    testQwenHumanShieldPatternKeepsVoiceSegmentsAtomic,
     testVoiceDirectionPreservesFastRecapCadence,
     testScriptMetaScanAllowsInStoryAnalyticsObjects,
     testQwenPlanAuditsAppliedTtsOverrides,

@@ -28,6 +28,7 @@ import {
   hasGenericTtsIdentity,
   isLegacyQwenIdentity,
   narrationArtifactVoiceIdentityFindings,
+  narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
   narrationTtsPolicyForIdentity,
   QWEN_LIAM_PRIMARY_LOCK,
@@ -2320,6 +2321,46 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
     label,
   });
   if (proofImport.applicable) return { done: proofImport.done, evidence: proofImport.evidence };
+  const runIdentityBindingFinding = narrationPlanRunIdentityBindingFinding(
+    plan,
+    identity,
+    await fileSha256(path.join(episodeDir, "run_identity.json")),
+  );
+  if (runIdentityBindingFinding) {
+    return {
+      done: false,
+      state: "stale",
+      evidence: `${label} ${runIdentityBindingFinding.message} `
+        + `Recorded ${runIdentityBindingFinding.actual ?? "missing"}; `
+        + `current ${runIdentityBindingFinding.expected ?? "missing"}.`,
+    };
+  }
+  if (plan?.schema === "goldflow_tts_generation_plan_v2") {
+    const planSourceHashes = plan?.source_hashes ?? {};
+    const sourceBindings = [
+      ["script_clean_sha256", path.join(episodeDir, "script_clean.md")],
+      [
+        "script_speakability_report_sha256",
+        path.join(episodeDir, "script_speakability_report.json"),
+      ],
+      [
+        "tts_spoken_overrides_sha256",
+        path.join(episodeDir, "tts_spoken_overrides.json"),
+      ],
+    ];
+    for (const [field, sourcePath] of sourceBindings) {
+      const expectedHash = String(planSourceHashes[field] ?? "").trim();
+      const actualHash = await fileSha256(sourcePath);
+      if (!expectedHash || expectedHash !== actualHash) {
+        return {
+          done: false,
+          state: "stale",
+          evidence: `${label} source_hashes.${field} is missing or stale; `
+            + `recorded ${expectedHash || "missing"}; current ${actualHash ?? "missing"}.`,
+        };
+      }
+    }
+  }
   let policy;
   try {
     policy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity(identity), {
@@ -2384,13 +2425,20 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
     const invalidUnit = units.find((unit) => {
       const text = String(unit?.spoken_text ?? unit?.tts_spoken_text ?? "").trim();
       const wordCount = text.split(/\s+/).filter(Boolean).length;
+      const sourceSegmentIds = [...new Set([
+        ...(Array.isArray(unit?.source_segment_ids) ? unit.source_segment_ids : []),
+        ...(Array.isArray(unit?.source_unit_refs)
+          ? unit.source_unit_refs.map((ref) => ref?.segment_id)
+          : []),
+      ].map((value) => String(value ?? "").trim()).filter(Boolean))];
       return wordCount > QWEN_LIAM_UNIT_CONTRACT.hard_words_max
-        || !/[.!?…]["”’\])]*$/u.test(text);
+        || !/[.!?…]["”’\])]*$/u.test(text)
+        || sourceSegmentIds.length > 1;
     });
     if (groupingMismatches.length || invalidUnit) {
       return {
         done: false,
-        evidence: `${label} Qwen Liam unit contract mismatch${groupingMismatches.length ? `: ${groupingMismatches.join(", ")}` : ""}${invalidUnit ? `; invalid unit=${invalidUnit.unit_id ?? "unknown"} (must end at a sentence and stay at or below 60 words)` : ""}`,
+        evidence: `${label} Qwen Liam unit contract mismatch${groupingMismatches.length ? `: ${groupingMismatches.join(", ")}` : ""}${invalidUnit ? `; invalid unit=${invalidUnit.unit_id ?? "unknown"} (must stay inside one voice segment, end at a sentence, and stay at or below 60 words)` : ""}`,
       };
     }
   }
@@ -2803,6 +2851,7 @@ async function main() {
   const productionManifest = await readJson(path.join(episodeDir, "production_manifest.json"), null);
   const ttsIdentityFields = ttsStatusIdentityFields(runIdentity, flags);
   const identity = {
+    schema: runIdentity.schema ?? "missing",
     channel: flags.channel ?? runIdentity.channel,
     series_slug: flags.series ?? flags.seriesSlug ?? runIdentity.series_slug,
     week: flags.week ?? runIdentity.week,

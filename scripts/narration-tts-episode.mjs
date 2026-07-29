@@ -21,6 +21,7 @@ import {
 import {
   NARRATION_TTS_QA_POLICY_VERSION,
   QWEN_LIAM_PRIMARY_LOCK,
+  narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
@@ -1280,6 +1281,41 @@ async function main() {
   const scriptHash = createHash("sha256").update(scriptBuffer).digest("hex");
   if (plan.source_script_hash !== scriptHash) {
     throw new Error(`Narration plan script hash ${plan.source_script_hash ?? "missing"} does not match ${scriptHash}`);
+  }
+  const runIdentityBindingFinding = narrationPlanRunIdentityBindingFinding(
+    plan,
+    identity,
+    await sha256File(identityPath),
+  );
+  if (runIdentityBindingFinding) {
+    throw new Error(
+      `${runIdentityBindingFinding.message} `
+      + `Recorded ${runIdentityBindingFinding.actual ?? "missing"}; `
+      + `current ${runIdentityBindingFinding.expected ?? "missing"}.`,
+    );
+  }
+  if (plan.schema === "goldflow_tts_generation_plan_v2") {
+    const planSourceHashes = plan.source_hashes ?? {};
+    for (const [field, sourcePath] of [
+      ["script_clean_sha256", scriptPath],
+      [
+        "script_speakability_report_sha256",
+        path.join(episodeDir, "script_speakability_report.json"),
+      ],
+      [
+        "tts_spoken_overrides_sha256",
+        path.join(episodeDir, "tts_spoken_overrides.json"),
+      ],
+    ]) {
+      const expectedHash = String(planSourceHashes[field] ?? "").trim();
+      const actualHash = await sha256File(sourcePath).catch(() => null);
+      if (!expectedHash || expectedHash !== actualHash) {
+        throw new Error(
+          `Narration plan source_hashes.${field} is missing or stale. `
+          + `Recorded ${expectedHash || "missing"}; current ${actualHash ?? "missing"}.`,
+        );
+      }
+    }
   }
   if (plan.status !== "passed") throw new Error(`Narration plan status is ${plan.status ?? "missing"}`);
   if (plan.text_integrity_coverage?.status !== "passed") {

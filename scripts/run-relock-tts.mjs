@@ -357,6 +357,7 @@ function archiveCandidateNames(episode) {
     "qwen_generation_plan.json",
     "audio_performance_plan.json",
     "narration_text_integrity_coverage_report.json",
+    "qwen_text_integrity_coverage_report.json",
     "system_ui_speech_coverage_report.json",
     "voice_reference_completeness_report.json",
     "dialogue_map.json",

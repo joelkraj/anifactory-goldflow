@@ -153,6 +153,32 @@ function cleanId(value) {
   return text || null;
 }
 
+export function narrationPlanRunIdentityBindingFinding(
+  plan = {},
+  identity = {},
+  currentRunIdentitySha256 = null,
+) {
+  const bindingRequired = identity?.schema === "goldflow_run_identity_v2"
+    && plan?.schema === "goldflow_tts_generation_plan_v2";
+  if (!bindingRequired) return null;
+  const expected = cleanId(currentRunIdentitySha256);
+  const actual = cleanId(plan?.source_hashes?.run_identity_sha256);
+  if (!expected || actual !== expected) {
+    return {
+      code: actual
+        ? "narration_plan_run_identity_hash_stale"
+        : "narration_plan_run_identity_hash_missing",
+      path: "source_hashes.run_identity_sha256",
+      expected,
+      actual,
+      message: actual
+        ? "Narration plan is bound to a superseded run_identity.json hash."
+        : "Narration plan is not bound to the current run_identity.json hash.",
+    };
+  }
+  return null;
+}
+
 function positiveNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;

@@ -193,6 +193,7 @@ import {
   hasExplicitLegacyQwenIdentity,
   isLegacyQwenIdentity,
   narrationArtifactVoiceIdentityFindings,
+  narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
@@ -384,6 +385,55 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
   assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_qwen_liam_icl");
   assert.equal("alternate_voice_ids" in voiceProviderOptions, false);
   assert.equal(validateNarrationTtsPolicyForTests(identity).status, "passed");
+  const boundIdentity = {
+    ...identity,
+    schema: "goldflow_run_identity_v2",
+  };
+  const boundPlan = {
+    schema: "goldflow_tts_generation_plan_v2",
+    source_hashes: {
+      run_identity_sha256: "current-identity-hash",
+    },
+  };
+  assert.equal(
+    narrationPlanRunIdentityBindingFinding(
+      boundPlan,
+      boundIdentity,
+      "current-identity-hash",
+    ),
+    null,
+  );
+  assert.equal(
+    narrationPlanRunIdentityBindingFinding(
+      boundPlan,
+      boundIdentity,
+      "new-identity-hash",
+    )?.code,
+    "narration_plan_run_identity_hash_stale",
+  );
+  assert.equal(
+    narrationPlanRunIdentityBindingFinding(
+      {
+        ...boundPlan,
+        source_hashes: {},
+      },
+      boundIdentity,
+      "new-identity-hash",
+    )?.code,
+    "narration_plan_run_identity_hash_missing",
+  );
+  assert.equal(
+    narrationPlanRunIdentityBindingFinding(
+      {
+        ...boundPlan,
+        schema: "goldflow_tts_generation_plan_proof_import_v2",
+        source_hashes: {},
+      },
+      boundIdentity,
+      "new-identity-hash",
+    ),
+    null,
+  );
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /tts narrate/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
 

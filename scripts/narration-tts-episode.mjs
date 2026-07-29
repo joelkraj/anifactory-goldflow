@@ -2353,6 +2353,8 @@ async function main() {
     {
       repairTailUnitIds: new Set(stitchRepairTailUnitIds),
       skipRenderedTranscriptQa,
+      unitGapSec: UNIT_GAP_SEC,
+      segmentGapSec: SEGMENT_GAP_SEC,
     },
   );
   if (stitch?.status !== "passed") {

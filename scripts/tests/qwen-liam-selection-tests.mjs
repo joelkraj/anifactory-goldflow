@@ -5,6 +5,11 @@ import {
   voiceContinuityDecision,
 } from "../lib/tts-selection-policy.mjs";
 import {
+  stitchBoundaryPaddingForTests,
+  stitchEffectiveBoundaryContractForTests,
+  stitchTargetGapSecForTests,
+} from "../modelslab-qwen-episode-audio.mjs";
+import {
   adjudicateManualReviewQaForTests,
   validateConfirmedRetryEvidenceForTests,
   validateManualReviewEvidenceForTests,
@@ -345,8 +350,42 @@ function testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped() {
   }), /require explicit --workflow-bypass true/i);
 }
 
+function testNarrationExplicitGapsAreAlwaysExactEightyMilliseconds() {
+  const explicit = { unitGapSec: 0.08, segmentGapSec: 0.08 };
+  for (const crossesSegment of [false, true]) {
+    const targetGapSec = stitchTargetGapSecForTests(explicit, crossesSegment);
+    assert.equal(targetGapSec, 0.08);
+    const planned = stitchBoundaryPaddingForTests(
+      { trailing_silence_sample_count: 0 },
+      { leading_silence_sample_count: 0 },
+      targetGapSec,
+      0.05,
+      24000,
+    );
+    assert.equal(planned.target_gap_sample_count, 1920);
+    assert.equal(planned.effective_gap_sample_count, 1920);
+    const passed = stitchEffectiveBoundaryContractForTests(
+      { trailing_silence_sample_count: 0 },
+      { leading_silence_sample_count: 0 },
+      targetGapSec,
+      1920,
+      24000,
+    );
+    assert.equal(passed.status, "passed");
+    assert.equal(passed.effective_gap_sample_count, 1920);
+    assert.equal(stitchEffectiveBoundaryContractForTests(
+      { trailing_silence_sample_count: 0 },
+      { leading_silence_sample_count: 0 },
+      targetGapSec,
+      3840,
+      24000,
+    ).status, "blocked");
+  }
+}
+
 testHardFailuresAreNotSoftenedOrBlindlyRetried();
 testConfirmedRetryEvidenceBindsExactListenedArtifact();
 testManualAcceptanceIsExactHashBoundAndPreservesFindings();
 testManualAcceptanceCannotWaiveAutomaticRetryCandidates();
 testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped();
+testNarrationExplicitGapsAreAlwaysExactEightyMilliseconds();

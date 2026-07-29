@@ -2595,6 +2595,24 @@ export function stitchBoundaryPaddingForTests(
   );
 }
 
+function stitchTargetGapSec(options = {}, crossesSegment = false) {
+  const explicit = crossesSegment
+    ? options.segmentGapSec
+    : options.unitGapSec;
+  const fallback = crossesSegment ? segmentGapSec : unitGapSec;
+  const selected = explicit == null ? fallback : Number(explicit);
+  if (!Number.isFinite(selected) || selected < 0 || selected > 1.5) {
+    throw new Error(
+      `Invalid explicit ${crossesSegment ? "segment" : "unit"} stitch gap: ${explicit}`,
+    );
+  }
+  return selected;
+}
+
+export function stitchTargetGapSecForTests(options = {}, crossesSegment = false) {
+  return stitchTargetGapSec(options, crossesSegment);
+}
+
 function stitchEffectiveBoundaryContract(
   leftMetrics,
   rightMetrics,
@@ -3041,7 +3059,7 @@ async function stitchWavs(results, finalWav, options = {}) {
   for (let index = 0; index < usable.length - 1; index += 1) {
     const crossesSegment = lastSourceSegmentId(usable[index])
       !== firstSourceSegmentId(usable[index + 1]);
-    const targetGapSec = crossesSegment ? segmentGapSec : unitGapSec;
+    const targetGapSec = stitchTargetGapSec(options, crossesSegment);
     const plan = stitchBoundaryPadding(
       usable[index].unit_qa?.metrics,
       usable[index + 1].unit_qa?.metrics,

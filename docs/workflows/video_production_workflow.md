@@ -386,13 +386,24 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
    - Low-risk cuts may pass structural QA automatically. Reject only failed cut ids; regenerate that scoped set and invalidate only their motion clips.
    - Generated-image spelling and incidental text accuracy are explicitly outside this QA contract and do not block production.
 
-23. Selective inspected parallax.
+23. Optional hash-bound LTX 2.3 generated motion.
+   - New run identities must explicitly lock `--ltx-video-policy selective_ltx23|full_ltx23`; default and existing runs use `disabled` and skip both generated-video stages.
+   - Run `goldflow visual ltx-video` only after image QA passes. Each request binds the exact accepted source-image hash, hardened prompt hash, motion-prompt hash, provider/model id, request id, raw video hash, normalized video hash, duration, and probe results.
+   - Provider audio is discarded. Normalized clips are silent 1920×1080 H.264/yuv420p assets; render remains responsible for the canonical narration/mix.
+   - Proofs require explicit cut scope, proof-specific output paths, `--diagnostic-proof true`, and an explicitly justified workflow bypass. A proof report is never production truth.
+
+24. Generated LTX motion review.
+   - Inspect the moving clips for identity drift, anatomy deformation, missing or invented objects, crop loss, text mutation, flicker, unintended scene changes, and camera behavior.
+   - Run `goldflow visual approve-ltx-video` with one accepted or rejected decision for every generated clip. Motion planning accepts only exact-hash approved clips; rejected clips fall back to the accepted still-image motion lane.
+   - A midpoint contact sheet accelerates triage but does not replace playback review. Proof approvals record `production_eligible: false`.
+
+25. Selective inspected parallax.
    - Visual prompt authoring writes a conservative `motion_intent.depth_candidate` on every cut. It may mark only exceptional moving hero reveal, impact, transformation, UI, or critical-object frames eligible when the requested composition has one clean foreground subject and a coherent background plane. A true `static_hold` is never eligible because layered depth is movement.
    - Run `goldflow visual parallax-assets` after image QA. New runs aim for up to fifteen reviewed candidates in the first 180 seconds when safe compositions exist: up to five during 0-30 seconds and ten during 30-180 seconds. Deterministic selection ranks LLM-authored candidates within those windows and binds every layer to the accepted source-image hash. ModelsLab preflight locks `parallax_background_provider: modelslab_flux_klein`; Flux Klein reconstructs a clean unoccupied rear plate from the accepted scene image, and the reviewed local alpha mask supplies the foreground. Blurred subject-removal plates are legacy-only because motion can expose duplicate silhouettes. After inspecting actual generated frames, an agent may supply an approved `--candidate-overrides <json>` artifact to nominate additional safe moving cuts without rerunning visual prompt planning or image generation; the override must name foreground/background planes and remains subject to mask and rear-plate review.
    - Inspect the generated source/mask/foreground/background review sheet. Run `goldflow visual approve-parallax` with an explicit approved or declined decision for every candidate. Weak masks, translucent/overlapping subjects, edge-clipped figures, unsafe plates, or duplicate silhouettes must be declined.
    - If no authored frame is suitable, record the explicit `--no-suitable-parallax true --reviewer <name> --note <reason>` waiver. A no-suitable decision is a valid production outcome; manufacturing weak parallax is not.
 
-24. Directed motion and render.
+26. Directed motion and render.
    - Visual prompt authoring writes one beat-level `shot_manifest.motion_intent`: focal subject, normalized anchors, restrained scale, easing, behavior, and the editorial reason the movement serves the cut. Strong reveal, focus-shift, action, and UI cuts may also use 2-5 normalized `motion_keyframes`. Default to hold, one acceleration-smooth ease-in-out move, and final hold; let transitions and SFX provide impact instead of a quick camera-scale bounce. Keyframes are selective; calm readable compositions should remain static or use one restrained move. Run `goldflow visual motion-plan` after image QA. The plan is bound to exact accepted image hashes, uses authored intent as its baseline, lets explicit per-cut image-QA focal overrides supersede it, and otherwise may translate anchors toward a confident hash-bound automatic focal region without changing behavior. Missing focal intent becomes a smooth static hold; production does not use hash-random motion directions.
    - Render writes a per-frame motion trace and blocks unplanned within-segment direction reversals, excessive keyframe velocity, discontinuities, malformed durations, and stale motion-plan inputs. Reviewed reversals remain structurally possible, but generic overshoot-and-settle scale bounce is not the default.
    - Uses the final mixed audio track, Whisper-timed subtitles, and generated image beats.

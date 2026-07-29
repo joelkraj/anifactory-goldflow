@@ -12,6 +12,11 @@ import {
 } from "./lib/motion-plan-utils.mjs";
 import { parallaxApprovalMatches } from "./lib/parallax-contract.mjs";
 import { noticeableParallaxTreatment } from "./lib/parallax-policy.mjs";
+import {
+  approvedLtxClips,
+  ltxTreatmentForClip,
+  ltxVideoEnabled,
+} from "./lib/ltx-video-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -30,6 +35,8 @@ const audioBedReportPath = flags["audio-bed-report"] ?? path.join(episodeDir, `l
 const identityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
 const parallaxReportPath = flags["parallax-report"] ?? path.join(episodeDir, `parallax_asset_report_${episode}.json`);
 const parallaxApprovalPath = flags["parallax-approval"] ?? path.join(episodeDir, `parallax_asset_approval_${episode}.json`);
+const ltxVideoReportPath = flags["ltx-video-report"] ?? path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_report_${episode}.json`);
+const ltxVideoApprovalPath = flags["ltx-video-approval"] ?? path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_approval_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`);
 
 function parseFlags(parts) {
@@ -114,7 +121,7 @@ export function applyAutomaticFocalAnchorForTests(intent, analysis, decision = n
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, focalAnalysis, decisions, ledger, audioBedReport, identity, parallaxReport, parallaxApproval] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, focalAnalysis, decisions, ledger, audioBedReport, identity, parallaxReport, parallaxApproval, ltxVideoReport, ltxVideoApproval] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
@@ -125,6 +132,8 @@ async function main() {
     readJson(identityPath, {}),
     readJson(parallaxReportPath, null),
     readJson(parallaxApprovalPath, null),
+    readJson(ltxVideoReportPath, null),
+    readJson(ltxVideoApprovalPath, null),
   ]);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed") throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
@@ -202,6 +211,27 @@ async function main() {
   if (identity?.motion_policy === "selective_editorial_v1") {
     intents = rebalanceEditorialMotionStreaks(intents, { maximumMovingCuts: 7 });
   }
+  let approvedLtxById = new Map();
+  const ltxSourcePaths = [];
+  if (ltxVideoEnabled(identity)) {
+    approvedLtxById = await approvedLtxClips(ltxVideoReport, ltxVideoApproval, { reportPath: ltxVideoReportPath });
+    if (!approvedLtxById.size) {
+      throw new Error(`LTX video policy is enabled but no current approved clips were found in ${ltxVideoApprovalPath}.`);
+    }
+    ltxSourcePaths.push(ltxVideoReportPath, ltxVideoApprovalPath);
+    intents = intents.map((intent) => {
+      const clip = approvedLtxById.get(String(intent.image_id ?? ""));
+      if (!clip) return intent;
+      if (clip.source_image_sha256 !== intent.image_sha256) {
+        throw new Error(`Approved LTX source image is stale for ${intent.image_id}.`);
+      }
+      return {
+        ...intent,
+        depth_treatment: null,
+        generated_video_treatment: ltxTreatmentForClip(clip),
+      };
+    });
+  }
   const findings = [
     ...motionIntentFindings(intents, acceptedHashes),
     ...(identity?.motion_policy === "selective_editorial_v1" ? editorialMotionDistributionFindings(intents) : []),
@@ -216,6 +246,7 @@ async function main() {
     audioBedReportPath,
     identityPath,
     ...parallaxSourcePaths,
+    ...ltxSourcePaths,
   ];
   const report = {
     schema: "goldflow_motion_edit_plan_v1",
@@ -236,6 +267,10 @@ async function main() {
     static_hold_count: intents.filter((row) => row.behavior === "static_hold").length,
     layered_parallax_count: intents.filter((row) => row.depth_treatment?.mode === "layered_parallax").length,
     approved_parallax_candidate_count: approvedParallaxById.size,
+    ltx_video_policy: identity?.ltx_video_policy ?? "disabled",
+    approved_ltx_video_count: approvedLtxById.size,
+    ltx_video_report_path: ltxVideoEnabled(identity) ? ltxVideoReportPath : null,
+    ltx_video_approval_path: ltxVideoEnabled(identity) ? ltxVideoApprovalPath : null,
     qa_override_count: intents.filter((row) => row.qa_override).length,
     auto_focal_override_count: intents.filter((row) => row.auto_focal_override).length,
     llm_authored_intent_count: intents.filter((row) => row.focal_source === "llm_authored_shot_manifest_motion_intent").length,

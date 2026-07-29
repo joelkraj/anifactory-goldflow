@@ -36,7 +36,6 @@ const imageOutputQaPath = flags["image-output-qa"] ?? path.join(episodeDir, `ima
 const cutExecutionLedgerPath = flags["cut-execution-ledger"] ?? path.join(episodeDir, "cut_execution_ledger.json");
 const transitionEditPlanPath = flags.transitionPlan ?? flags["transition-plan"] ?? path.join(episodeDir, `transition_edit_plan_${episode}.json`);
 const motionEditPlanPath = flags.motionPlan ?? flags["motion-plan"] ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`);
-const externalMotionManifestPath = flags.externalMotionManifest ?? flags["external-motion-manifest"] ?? null;
 const motionTracePath = flags["motion-trace-output"] ?? path.join(episodeDir, `motion_trace_${episode}.jsonl`);
 const engagementOverlayPlanPath = flags.engagementPlan ?? flags["engagement-plan"] ?? path.join(episodeDir, `engagement_overlay_plan_${episode}.json`);
 const outputPath = flags.output ?? path.join(renderDir, `${episode}-${channel}-goldflow.mp4`);
@@ -1663,11 +1662,6 @@ async function buildMotionClips(
   const imageById = new Map((imagegenReport.results ?? []).map((row) => [row.image_id, row.image_path]));
   const plannedTransitionByToImage = transitionPlanByToImage(transitionEditPlan);
   const motionIntentByImage = new Map((motionEditPlan?.motion_intents ?? []).map((row) => [String(row.image_id ?? ""), row]));
-  const externalMotionByImage = new Map(
-    (options.externalMotionManifest?.clips ?? [])
-      .filter((row) => row?.status === "approved")
-      .map((row) => [String(row.image_id ?? ""), row]),
-  );
   const directedMotionRequired = motionEditPlan?.status === "passed";
   const onlyImageIds = options.onlyImageIds instanceof Set ? options.onlyImageIds : null;
   const allPrompts = (promptPlan.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false);
@@ -1715,6 +1709,9 @@ async function buildMotionClips(
     }
     const depthTreatment = motionIntent?.depth_treatment ? sanitizeLayeredParallaxTreatment(motionIntent.depth_treatment) : null;
     if (motionIntent?.depth_treatment && !depthTreatment) throw new Error(`Invalid layered parallax contract for ${prompt.image_id}.`);
+    const generatedVideoTreatment = motionIntent?.generated_video_treatment?.mode === "generated_video_ltx23"
+      ? motionIntent.generated_video_treatment
+      : null;
     if (depthTreatment) layeredParallaxClipCount += 1;
     const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
     const transition = transitionProfile(duration, profile, prompt, startSec, previousPrompt, index);
@@ -1724,8 +1721,7 @@ async function buildMotionClips(
     if (profile.hook) hookClipIds.push(prompt.image_id);
     if (transition.name !== "polished_motion") transitionClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
-    const externalMotion = externalMotionByImage.get(String(prompt.image_id ?? "")) ?? null;
-    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent, depthTreatment, externalMotion });
+    clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent, depthTreatment, generatedVideoTreatment });
   }
   const selectedXfadeDurations = new Map();
   const selectedBoundaryRows = [];
@@ -1769,22 +1765,6 @@ async function buildMotionClips(
       throw new Error(`Directed motion image hash stale for ${row.prompt.image_id}.`);
     }
     let depthSourceHashes = null;
-    let externalMotionSha256 = null;
-    if (row.externalMotion) {
-      const sourceImageSha256 = String(row.externalMotion.source_image_sha256 ?? "");
-      if (sourceImageSha256 !== imageSha256) {
-        throw new Error(`External motion source image hash is stale for ${row.prompt.image_id}.`);
-      }
-      const externalPath = path.resolve(String(row.externalMotion.video_path ?? ""));
-      if (!(await exists(externalPath))) {
-        throw new Error(`Approved external motion clip is missing for ${row.prompt.image_id}: ${externalPath}`);
-      }
-      externalMotionSha256 = await hashFile(externalPath);
-      if (externalMotionSha256 !== String(row.externalMotion.video_sha256 ?? "")) {
-        throw new Error(`Approved external motion clip hash is stale for ${row.prompt.image_id}.`);
-      }
-      row.externalMotionPath = externalPath;
-    }
     if (row.depthTreatment) {
       if (row.depthTreatment.source_image_sha256 !== imageSha256) throw new Error(`Layered parallax source image hash is stale for ${row.prompt.image_id}.`);
       for (const layerPath of [row.depthTreatment.background_path, row.depthTreatment.foreground_path]) {
@@ -1797,6 +1777,19 @@ async function buildMotionClips(
       }
       depthSourceHashes = { background_sha256: backgroundSha256, foreground_sha256: foregroundSha256 };
     }
+    let generatedVideoSha256 = null;
+    if (row.generatedVideoTreatment) {
+      if (row.generatedVideoTreatment.source_image_sha256 !== imageSha256) {
+        throw new Error(`Generated LTX video source image is stale for ${row.prompt.image_id}.`);
+      }
+      if (!(await exists(row.generatedVideoTreatment.video_path))) {
+        throw new Error(`Generated LTX video is missing for ${row.prompt.image_id}: ${row.generatedVideoTreatment.video_path}`);
+      }
+      generatedVideoSha256 = await hashFile(row.generatedVideoTreatment.video_path);
+      if (generatedVideoSha256 !== row.generatedVideoTreatment.video_sha256) {
+        throw new Error(`Generated LTX video hash is stale for ${row.prompt.image_id}.`);
+      }
+    }
     const motionProfileHash = sha256(JSON.stringify({
       profile: row.profile,
       filter,
@@ -1807,12 +1800,12 @@ async function buildMotionClips(
       motion_strength: motionStrength,
       foreground_scale: foregroundScale,
       depth_treatment: row.depthTreatment,
-      external_motion_sha256: externalMotionSha256,
+      generated_video_treatment: row.generatedVideoTreatment,
     }));
     const cacheKey = sha256(JSON.stringify({
       image_sha256: imageSha256,
       depth_source_hashes: depthSourceHashes,
-      external_motion_sha256: externalMotionSha256,
+      generated_video_sha256: generatedVideoSha256,
       motion_profile_hash: motionProfileHash,
       start_sec: Number(row.startSec.toFixed(6)),
       duration_sec: Number(renderDuration.toFixed(6)),
@@ -1834,20 +1827,22 @@ async function buildMotionClips(
           return;
         }
       }
-      if (row.externalMotionPath) {
-        const externalFilter = [
+      if (row.generatedVideoTreatment) {
+        const generatedFilter = [
           `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase`,
           `crop=${width}:${height}`,
           `fps=${fps}`,
+          "setsar=1",
+          `trim=duration=${Math.min(renderDuration, Number(row.generatedVideoTreatment.native_duration_sec ?? renderDuration)).toFixed(6)}`,
           "setpts=PTS-STARTPTS",
-          `tpad=stop_mode=clone:stop_duration=${renderDuration.toFixed(3)}`,
-          `trim=duration=${renderDuration.toFixed(3)}`,
-          "format=yuv420p",
+          `tpad=stop_mode=clone:stop_duration=${renderDuration.toFixed(6)}`,
+          "format=yuv420p[v]",
         ].join(",");
         await execFile(ffmpegBin, [
           "-y",
-          "-i", row.externalMotionPath,
-          "-filter_complex", externalFilter,
+          "-i", row.generatedVideoTreatment.video_path,
+          "-filter_complex", generatedFilter,
+          "-map", "[v]",
           "-an",
           "-c:v", "libx264",
           "-preset", clipPreset,
@@ -1892,8 +1887,7 @@ async function buildMotionClips(
         image_path: row.imagePath,
         image_sha256: imageSha256,
         depth_source_hashes: depthSourceHashes,
-        external_motion_path: row.externalMotionPath ?? null,
-        external_motion_sha256: externalMotionSha256,
+        generated_video_sha256: generatedVideoSha256,
         motion_profile_hash: motionProfileHash,
         motion_clip_path: row.clipPath,
         motion_clip_sha256: row.motionClipSha256,
@@ -2053,8 +2047,6 @@ async function buildMotionClips(
     motion_trace_frame_count: motionTraceRows.length,
     motion_trace_blocker_count: motionTraceBlockers.length,
     layered_parallax_clip_count: layeredParallaxClipCount,
-    external_motion_clip_count: clipRows.filter((row) => row.externalMotionPath).length,
-    external_motion_image_ids: clipRows.filter((row) => row.externalMotionPath).map((row) => row.prompt.image_id),
     hook_transition_sec: hookTransitionSec,
     retention_xfade_sec: retentionXfadeSec,
     transition_tail_sec: transitionTailSec,
@@ -2290,7 +2282,7 @@ async function runLimited(jobs, limit) {
 async function main() {
   await configureMediaTools();
   validateDiagnosticProofScope();
-  const [promptPlan, visualBeatPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, externalMotionManifest, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
+  const [promptPlan, visualBeatPlan, imagegenReport, wordTiming, audioBedReport, audioStitchReport, transitionEditPlan, motionEditPlan, engagementOverlayPlan, runIdentity, imageOutputQa, cutExecutionLedger] = await Promise.all([
     readJson(promptPlanPath, null),
     readJson(visualBeatPlanPath, null),
     readJson(imagegenReportPath, null),
@@ -2299,7 +2291,6 @@ async function main() {
     readJson(audioStitchReportPath, null),
     readJson(transitionEditPlanPath, null),
     readJson(motionEditPlanPath, null),
-    externalMotionManifestPath ? readJson(externalMotionManifestPath, null) : null,
     readJson(engagementOverlayPlanPath, null),
     readJson(runIdentityPath, {}),
     readJson(imageOutputQaPath, null),
@@ -2385,16 +2376,12 @@ async function main() {
     : 0;
   const usableTransitionPlan = transitionSfxDisabledForRender ? withoutTransitionSfx(rawTransitionPlan) : rawTransitionPlan;
   const renderAudio = await audioWithRenderTransitionSfx(proofAudioPath, usableTransitionPlan, audioDuration);
-  if (externalMotionManifestPath && externalMotionManifest?.status !== "passed") {
-    throw new Error(`External motion manifest must be passed before render: ${externalMotionManifestPath}`);
-  }
   const concat = await buildMotionClips(
     proofPromptPlan,
     imagegenReport,
     audioDuration,
     usableTransitionPlan,
     proofMotionPlan,
-    { externalMotionManifest },
   );
   const subtitleRows = scopedSubtitleRows(buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan), Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   if (v2Run && subtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
@@ -2526,7 +2513,6 @@ async function main() {
     audioStitchReportPath,
     usableTransitionPlan ? transitionEditPlanPath : null,
     motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
-    externalMotionManifest?.status === "passed" ? externalMotionManifestPath : null,
     engagementOverlay.events.length ? engagementOverlayPlanPath : null,
   ].filter(Boolean)) {
     if (await exists(sourcePath)) sourceHashes[path.resolve(sourcePath)] = await hashFile(sourcePath);
@@ -2556,7 +2542,6 @@ async function main() {
     silent_concat_reused_without_normalization_encode: concatStreamReusable,
     transition_edit_plan_path: usableTransitionPlan ? transitionEditPlanPath : null,
     motion_edit_plan_path: motionEditPlan?.status === "passed" ? motionEditPlanPath : null,
-    external_motion_manifest_path: externalMotionManifest?.status === "passed" ? externalMotionManifestPath : null,
     transition_sfx_disabled_by_audio_report: transitionSfxDisabledByAudioReport,
     transition_sfx_disabled_for_render: transitionSfxDisabledForRender,
     transition_sfx_narrator_only_override: allowTransitionSfxOnNarratorOnly,
@@ -2622,8 +2607,6 @@ async function main() {
       motion_trace_frame_count: concat.motion_trace_frame_count,
       motion_trace_blocker_count: concat.motion_trace_blocker_count,
       layered_parallax_clip_count: concat.layered_parallax_clip_count,
-      external_motion_clip_count: concat.external_motion_clip_count,
-      external_motion_image_ids: concat.external_motion_image_ids,
       motion_clip_cache_reused_count: concat.motion_clip_cache_reused_count,
       motion_clip_cache_generated_count: concat.motion_clip_cache_generated_count,
     },

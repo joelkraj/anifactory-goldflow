@@ -14,7 +14,7 @@ Release-gate status: all six gates passed on the bound narration hash
 
 Title:
 
-`She Fired Her Fiancé for an S-Rank Genius—Then Begged Him to Save All 99 Gates | Manhwa Recap`
+`She Dumped Her F-Rank Fiancé for an S-Rank Genius—Then Her Ex Saved 99 Gates | Manhwa Recap`
 
 Primary thumbnail text:
 
@@ -53,7 +53,7 @@ Emily chose Jace's rank over Joey's warning, then begged Joey to save all ninety
 
 ## CTR Rationale
 
-Current local findings still make Simp World the channel's supreme winner, but its close sequels decayed, so this package keeps the proven relationship-and-power contrast without copying sequel wording. Strict recent niche winners commonly use simple rank labels, yellow arrows, and an instantly readable choice between two men. The clean Joey-versus-Emily-and-Jace split applies that pattern to this story, while `SHE CHOSE WRONG` adds the emotional verdict instead of repeating the gate-rescue title.
+Current local findings still make Simp World the channel's supreme winner, but its close sequels decayed, so this package keeps the proven relationship-and-power contrast without copying sequel wording. Strict recent niche winners commonly use simple rank labels, yellow arrows, and an instantly readable choice between two men. The title now completes the betrayal-to-payoff arc instead of stopping at Emily's plea. The clean Joey-versus-Emily-and-Jace split applies the proven visual pattern, while `SHE CHOSE WRONG` adds the emotional verdict without repeating the gate-rescue premise.
 
 ## Click Promise
 

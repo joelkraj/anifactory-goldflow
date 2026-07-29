@@ -21,6 +21,7 @@ import mlx.core as mx
 import numpy as np
 
 from mlx_audio.audio_io import write as audio_write
+from mlx_audio.utils import load_audio
 from mlx_audio.tts.utils import load_model
 
 
@@ -144,7 +145,7 @@ def generation_kwargs(
     model: Any,
     model_kind: str,
     text: str,
-    ref_audio: str | None,
+    ref_audio: Any,
     ref_text: str | None,
     voice: str | None,
     instruct: str | None,
@@ -294,6 +295,13 @@ def main() -> None:
     else:
         model = load_model(args.model)
     load_seconds = time.perf_counter() - load_started
+    prepared_ref_audio = (
+        load_audio(str(ref_audio_path), sample_rate=model.sample_rate)
+        if args.model_kind == "fish_s2" and ref_audio_path is not None
+        else str(ref_audio_path)
+        if ref_audio_path is not None
+        else None
+    )
     native_speed_supported = supports_native_speed(model, args.model_kind)
     if args.native_speed != 1.0 and not native_speed_supported:
         raise ValueError(
@@ -323,7 +331,7 @@ def main() -> None:
                 model,
                 args.model_kind,
                 text,
-                str(ref_audio_path) if ref_audio_path is not None else None,
+                prepared_ref_audio,
                 args.ref_text,
                 args.voice,
                 args.instruct,

@@ -119,7 +119,7 @@ export function ltxMotionPromptForCut(prompt = {}) {
     : "";
   return [
     "Use the accepted image as the exact first frame. Preserve its character identities, wardrobe, anatomy, objects, environment, lighting, and spatial layout.",
-    authoredPrompt,
+    animation ? "" : authoredPrompt,
     directedParts,
     motionParts,
     "Use one coherent action and one continuous stable camera move. No new people, duplicate subjects, unrelated objects, panels, cuts, or scene changes. Existing UI may animate naturally; exact text legibility is not required.",

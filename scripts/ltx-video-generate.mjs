@@ -341,7 +341,8 @@ async function main() {
     readJson(animationDirectionPath, null),
   ]);
   let plan;
-  if (!proof && ltxVideoEnabled(identity)) {
+  const explicitProofDirection = proof && workflowBypass && Boolean(flags["animation-direction-plan"]);
+  if ((!proof && ltxVideoEnabled(identity)) || explicitProofDirection) {
     if (animationDirection?.schema !== "goldflow_animation_direction_plan_v1" || animationDirection?.status !== "passed") {
       throw new Error(`Production LTX generation requires a passed animation direction plan: ${animationDirectionPath}`);
     }
@@ -370,8 +371,8 @@ async function main() {
       series_slug: series,
       week,
       episode,
-      proof: false,
-      proof_label: null,
+      proof,
+      proof_label: proof ? proofLabel : null,
       provider: LTX_VIDEO_PROVIDER,
       model_id: LTX_VIDEO_MODEL_ID,
       resolution: "16:9",
@@ -405,32 +406,38 @@ async function main() {
     row.upload_elapsed_ms = Date.now() - Date.parse(row.upload_started_at);
     row.status = "uploaded";
   });
-  await Promise.all(rows.map(async (row) => {
+  await runLimited(rows, concurrency, async (row) => {
     const startedAtMs = Date.now();
     row.request_started_at = new Date(startedAtMs).toISOString();
-    const initial = await postJson("https://modelslab.com/api/v6/video/img2video_ultra", {
-      model_id: LTX_VIDEO_MODEL_ID,
-      init_image: row.init_image_url,
-      prompt: row.motion_prompt,
-      negative_prompt: row.negative_prompt,
-      resolution: "16:9",
-      duration: String(row.duration_sec),
-      base64: false,
-      temp: false,
-      track_id: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
-    });
-    row.request_id = initial.id ?? null;
-    row.initial_eta_sec = initial.eta ?? null;
-    row.submit_latency_ms = Date.now() - startedAtMs;
-    row.status = String(initial.status ?? "processing");
-    row.initial_response = {
-      status: initial.status ?? null,
-      id: initial.id ?? null,
-      eta: initial.eta ?? null,
-      message: initial.message ?? null,
-    };
-  }));
-  await runLimited(rows, concurrency, async (row) => {
+    try {
+      const initial = await postJson("https://modelslab.com/api/v6/video/img2video_ultra", {
+        model_id: LTX_VIDEO_MODEL_ID,
+        init_image: row.init_image_url,
+        prompt: row.motion_prompt,
+        negative_prompt: row.negative_prompt,
+        resolution: "16:9",
+        duration: String(row.duration_sec),
+        base64: false,
+        temp: false,
+        track_id: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
+      });
+      row.request_id = initial.id ?? null;
+      row.initial_eta_sec = initial.eta ?? null;
+      row.submit_latency_ms = Date.now() - startedAtMs;
+      row.status = String(initial.status ?? "processing");
+      row.initial_response = {
+        status: initial.status ?? null,
+        id: initial.id ?? null,
+        eta: initial.eta ?? null,
+        message: initial.message ?? null,
+      };
+    } catch (error) {
+      row.status = "failed";
+      row.error = error instanceof Error ? error.message : String(error);
+    }
+  });
+  const submittedRows = rows.filter((row) => row.request_id || row.status === "success");
+  await runLimited(submittedRows, concurrency, async (row) => {
     const startedAtMs = Date.parse(row.request_started_at);
     try {
       const result = row.status === "success" && responseUrls(row.initial_response).length

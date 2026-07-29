@@ -50,7 +50,8 @@ const richFallbackPrompt = ltxMotionPromptForCut({
     locked_elements: ["faces", "wardrobe", "desk"],
   },
 });
-assert.match(richFallbackPrompt, /complete apartment confrontation/);
+assert.doesNotMatch(richFallbackPrompt, /complete apartment confrontation/);
+assert.match(richFallbackPrompt, /both characters face each other/);
 assert.match(richFallbackPrompt, /From 0\.0 to 1\.8 seconds/);
 assert.match(richFallbackPrompt, /Existing UI may animate naturally/);
 assert.doesNotMatch(ltxNegativePrompt(), /text mutation/);

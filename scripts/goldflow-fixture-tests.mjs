@@ -6727,6 +6727,26 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
     QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id,
   );
   assert.equal(qwenLiamPlan.qwen_liam_batch_plan.cohort_count, 1);
+  const qwenLiamIdentity = {
+    channel: "test",
+    series_slug: "series",
+    week: "run",
+    episode: "ep_01",
+    tts_provider: "qwen_local",
+    tts_fallback_provider: null,
+    narrator_voice_id: "am_liam",
+    tts_native_speed: null,
+    voice_provider_options: defaultNarrationVoiceProviderOptions(),
+  };
+  assert.deepEqual(
+    narrationPlanVoiceIdentityFindings(
+      qwenLiamPlan,
+      validateNarrationTtsPolicy(
+        narrationTtsPolicyForIdentity(qwenLiamIdentity),
+      ),
+    ),
+    [],
+  );
   assert.equal(
     qwenLiamPlan.units[0].synthesis_cohort.batch_plan_sha256,
     qwenLiamPlan.qwen_liam_batch_plan.batch_plan_sha256,

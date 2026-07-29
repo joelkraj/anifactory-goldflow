@@ -148,6 +148,8 @@ import {
 } from "./visual-plan.mjs";
 import {
   dropUnknownReferenceSceneScopesForTests,
+  identityMergeKeyForTests,
+  reconcileReferenceIdentityTargetsForTests,
   referenceCharacterStateFindingsForTests,
   referenceDirectorSelectionFindingsForTests,
   referenceEvidenceLedgerForTests,
@@ -4817,6 +4819,111 @@ function testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates() {
   assert.equal(findings.some((finding) => finding.code === "character_state_ref_missing_selected_source" && finding.state_ref_id === "dangling_state"), true);
   assert.equal(findings.some((finding) => finding.code === "generic_group_character_state_ref" && finding.state_ref_id === "guild_masters_state"), true);
   assert.equal(findings.some((finding) => finding.state_ref_id === "joey_state"), false);
+}
+
+function testReferenceIdentityMergePreservesChronologyAndDistinctApexAttackers() {
+  const selectedTargets = [
+    {
+      ref_id: "oren_pike_pre_amputation",
+      kind: "character_state",
+      subject: "Oren Pike before the forearm amputation",
+      canonical_subject_id: "oren_pike",
+      base_asset_id: "oren_pike_pre_amputation",
+      state_delta: "Pre-amputation operational state with both forearms intact.",
+      scene_ids: ["scene_oren_pre"],
+      risk_notes: ["preserve both forearms"],
+      generation_mode: "standalone_ref",
+      required_before_imagegen: true,
+      manual_review_required: true,
+    },
+    {
+      ref_id: "oren_pike_post_amputation",
+      kind: "character_state",
+      subject: "Oren Pike after the permanent forearm amputation",
+      canonical_subject_id: "oren_pike",
+      base_asset_id: "oren_pike_pre_amputation",
+      state_delta: "Post-amputation chronology with both forearms permanently absent.",
+      scene_ids: ["scene_oren_post"],
+      risk_notes: ["preserve permanent bilateral forearm loss"],
+      generation_mode: "standalone_ref",
+      required_before_imagegen: true,
+      manual_review_required: true,
+    },
+    ...[
+      ["blade_attacker_apex", "Recurring Apex blade attacker", "blade_attacker", "scene_blade"],
+      ["fire_caster_apex", "Recurring Apex fire caster", "fire_caster", "scene_fire"],
+      ["archer_apex", "Recurring Apex archer", "archer", "scene_archer"],
+      ["spear_attacker_apex", "Recurring Apex spear attacker", "spear_attacker", "scene_spear"],
+    ].map(([refId, subject, canonicalSubjectId, sceneId]) => ({
+      ref_id: refId,
+      kind: "character_state",
+      subject,
+      canonical_subject_id: canonicalSubjectId,
+      base_asset_id: null,
+      state_delta: null,
+      scene_ids: [sceneId],
+      risk_notes: [`preserve ${canonicalSubjectId}`],
+      generation_mode: "standalone_ref",
+      required_before_imagegen: true,
+      manual_review_required: true,
+    })),
+  ];
+  const selectedStateRefs = [
+    {
+      state_ref_id: "oren_pike_pre_amputation",
+      character: "Oren Pike",
+      source_ref_id: "oren_pike_pre_amputation",
+      base_identity_ref_id: null,
+      identity_usage: "full_identity",
+    },
+    {
+      state_ref_id: "oren_pike_post_amputation",
+      character: "Oren Pike",
+      source_ref_id: "oren_pike_post_amputation",
+      base_identity_ref_id: "oren_pike_pre_amputation",
+      identity_usage: "face_only",
+    },
+    ...[
+      ["blade_attacker_apex", "Blade Attacker"],
+      ["fire_caster_apex", "Fire Caster"],
+      ["archer_apex", "Archer"],
+      ["spear_attacker_apex", "Spear Attacker"],
+    ].map(([refId, character]) => ({
+      state_ref_id: refId,
+      character,
+      source_ref_id: refId,
+      base_identity_ref_id: null,
+      identity_usage: "full_identity",
+    })),
+  ];
+
+  assert.equal(identityMergeKeyForTests(selectedTargets[0]), "oren_pike");
+  assert.equal(identityMergeKeyForTests(selectedTargets[1]), "oren_pike");
+  assert.deepEqual(
+    selectedTargets.slice(2).map(identityMergeKeyForTests),
+    ["blade_attacker", "fire_caster", "archer", "spear_attacker"],
+  );
+
+  const reconciled = reconcileReferenceIdentityTargetsForTests(selectedTargets, selectedStateRefs);
+  const targetById = new Map(reconciled.referenceTargets.map((target) => [target.ref_id, target]));
+  assert.equal(targetById.size, selectedTargets.length);
+  for (const selected of selectedTargets) {
+    const actual = targetById.get(selected.ref_id);
+    assert.ok(actual, `expected ${selected.ref_id} to survive identity reconciliation`);
+    assert.equal(actual.generation_mode, "standalone_ref");
+    assert.equal(actual.required_before_imagegen, true);
+    assert.deepEqual(actual.scene_ids, selected.scene_ids);
+    assert.deepEqual(actual.risk_notes, selected.risk_notes);
+    assert.equal(actual.canonical_identity_ref_id, undefined);
+  }
+  assert.deepEqual(reconciled.characterStateRefs, selectedStateRefs);
+  assert.equal(
+    reconciled.warnings.some((finding) =>
+      finding.code === "canonical_identity_ref_merged"
+      || finding.code === "character_identity_alias_merged"
+    ),
+    false,
+  );
 }
 
 function testLocationCandidateExclusion() {
@@ -10273,6 +10380,7 @@ const FIXTURE_SUITES = {
     testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse,
     testSelectedReferenceInventoryContainsOnlyDirectorSelections,
     testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates,
+    testReferenceIdentityMergePreservesChronologyAndDistinctApexAttackers,
     testLocationCandidateExclusion,
     testStarvationGate,
     testBroadLocationTargetDoesNotSatisfySemanticLocationRequirement,

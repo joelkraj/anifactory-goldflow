@@ -1468,6 +1468,8 @@ function applySourceFaceAnchors({ referenceTargets, characterStateRefs, characte
 
 function identityMergeKey(target) {
   if (String(target.kind ?? "").toLowerCase() !== "character_state") return null;
+  const canonicalSubjectId = slug(target.canonical_subject_id ?? "", "");
+  if (canonicalSubjectId) return canonicalSubjectId;
   const subjectText = String(target.subject ?? "").trim();
   const refText = String(target.ref_id ?? "").replace(/^char_/, "").replace(/_ref$/, "");
   const text = `${subjectText || refText} ${refText}`.toLowerCase();
@@ -1492,6 +1494,14 @@ function identityMergeKey(target) {
     return `${tokens[0]}_${tokens[1]}`;
   }
   return tokens[0] ?? null;
+}
+
+function identityMergeGroupKey(target) {
+  const identityKey = identityMergeKey(target);
+  if (!identityKey) return null;
+  const stateDelta = String(target.state_delta ?? "").normalize("NFKC").trim();
+  if (!stateDelta) return identityKey;
+  return `${identityKey}::state_delta::${slug(stateDelta, "state")}`;
 }
 
 function isExplicitBaseIdentityTarget(target) {
@@ -1582,7 +1592,7 @@ function mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs) {
   const candidateGroups = new Map();
   for (const target of referenceTargets) {
     if (String(target.kind ?? "").toLowerCase() !== "character_state") continue;
-    const key = identityMergeKey(target);
+    const key = identityMergeGroupKey(target);
     if (!key) continue;
     if (!allGroups.has(key)) allGroups.set(key, []);
     allGroups.get(key).push(target);
@@ -1719,7 +1729,7 @@ function collapseCharacterIdentityAliasTargets(referenceTargets, characterStateR
   const groups = new Map();
   for (const target of targetById.values()) {
     if (!isMergeableIdentityAliasTarget(target)) continue;
-    const key = identityMergeKey(target);
+    const key = identityMergeGroupKey(target);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(target);
@@ -2484,6 +2494,31 @@ export function referenceCharacterStateFindingsForTests(characterStateRefs, refe
 
 export function referenceOpeningIdentityFindingsForTests(referenceTargets, visualBeatPlan) {
   return openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
+}
+
+export function identityMergeKeyForTests(target) {
+  return identityMergeKey(target);
+}
+
+export function reconcileReferenceIdentityTargetsForTests(referenceTargets, characterStateRefs) {
+  const firstCanonicalMerge = mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs);
+  const secondCanonicalMerge = mergeCanonicalBaseIdentityRefs(
+    firstCanonicalMerge.referenceTargets,
+    firstCanonicalMerge.characterStateRefs,
+  );
+  const aliasCollapse = collapseCharacterIdentityAliasTargets(
+    secondCanonicalMerge.referenceTargets,
+    secondCanonicalMerge.characterStateRefs,
+  );
+  return {
+    referenceTargets: aliasCollapse.referenceTargets,
+    characterStateRefs: aliasCollapse.characterStateRefs,
+    warnings: [
+      ...firstCanonicalMerge.warnings,
+      ...secondCanonicalMerge.warnings,
+      ...aliasCollapse.warnings,
+    ],
+  };
 }
 
 async function main() {

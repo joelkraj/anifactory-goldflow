@@ -1578,7 +1578,7 @@ async function runSynthesis({
     || report.voice_id !== policy.primary.voice_id
     || report.voice_sha256 !== policy.primary.voice_sha256
     || report.voice_clone_contract
-      !== "qwen_icl_clone_of_selected_liam_reference") {
+      !== policy.primary.voice_clone_contract) {
     throw new Error(`Pinned ${route} worker identity mismatch: ${reportPath}`);
   }
   const reportedOrder = (report.results ?? []).map((row) => String(row.unit_id));
@@ -1634,7 +1634,7 @@ async function runSynthesis({
       || synthesisIdentity.voice_continuity_contract
         !== policy.primary.voice_continuity_contract
       || synthesisIdentity.voice_clone_contract
-        !== "qwen_icl_clone_of_selected_liam_reference"
+        !== policy.primary.voice_clone_contract
       || synthesisIdentity.native_speed_applied != null
       || synthesisIdentity.post_tts_tempo_processing !== false) {
       throw new Error(`${route} result pin identity mismatch for ${unit.unit_id}`);

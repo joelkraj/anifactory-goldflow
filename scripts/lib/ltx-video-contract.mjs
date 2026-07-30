@@ -77,6 +77,12 @@ export function sanitizeAnimationIntent(value) {
       : "settle_hold",
     animation_ready_composition: firstNonEmpty(value.animation_ready_composition),
     continuity_bridge: firstNonEmpty(value.continuity_bridge),
+    sequence_eligible_with_next: value.sequence_eligible_with_next === true,
+    preferred_generation_duration_sec: clampLtxDuration(
+      value.preferred_generation_duration_sec ?? 5,
+    ),
+    camera_end_state: firstNonEmpty(value.camera_end_state),
+    end_frame_composition: firstNonEmpty(value.end_frame_composition),
     locked_elements: strings("locked_elements"),
   };
 }
@@ -132,6 +138,44 @@ export function ltxMotionPromptForCut(prompt = {}) {
   ].filter(Boolean).join(" ");
 }
 
+export function ltxMotionPromptForSequence(direction = {}) {
+  const coverage = Array.isArray(direction.coverage) ? direction.coverage : [];
+  if (coverage.length <= 1) return ltxMotionPromptForCut(direction.directed_prompt ?? direction);
+  const phases = coverage.map((row, index) => {
+    const intent = sanitizeAnimationIntent(row.animation_intent) ?? {};
+    const start = Number(row.source_offset_sec ?? 0);
+    const end = Number(row.source_end_offset_sec ?? start + Number(row.timeline_duration_sec ?? 0));
+    return [
+      `Phase ${index + 1}, ${start.toFixed(1)}-${end.toFixed(1)} seconds:`,
+      compactInstruction(intent.subject_motion || row.foreground_action, 130),
+      intent.camera_motion ? `Camera ${compactInstruction(intent.camera_motion, 70)}` : "",
+      intent.end_state ? `Land on ${compactInstruction(intent.end_state, 90)}` : "",
+    ].filter(Boolean).join(" ");
+  });
+  const first = coverage[0];
+  const last = coverage.at(-1);
+  const firstIntent = sanitizeAnimationIntent(first.animation_intent) ?? {};
+  const lastIntent = sanitizeAnimationIntent(last.animation_intent) ?? {};
+  return [
+    "Use the accepted source image as the exact first frame of one continuous anime/manhwa shot.",
+    "Preserve every identity, face, hairstyle, wardrobe item, body count, prop, environment feature, and screen direction throughout.",
+    ...phases,
+    lastIntent.end_state
+      ? `Final frame: ${compactInstruction(lastIntent.end_state, 140)}`
+      : "",
+    lastIntent.camera_end_state
+      ? `Final camera state: ${compactInstruction(lastIntent.camera_end_state, 100)}`
+      : "",
+    lastIntent.end_frame_composition
+      ? `Final composition: ${compactInstruction(lastIntent.end_frame_composition, 120)}`
+      : "",
+    firstIntent.continuity_bridge || lastIntent.continuity_bridge
+      ? `Continuity bridge: ${compactInstruction(lastIntent.continuity_bridge || firstIntent.continuity_bridge, 120)}`
+      : "",
+    "Motion must progress forward without a cut, reset, duplicated action, identity swap, new subject, or scene change. Settle cleanly on the authored final state.",
+  ].filter(Boolean).join(" ");
+}
+
 export function ltxNegativePrompt() {
   return [
     "photorealistic",
@@ -164,6 +208,12 @@ export function ltxPlanHash(plan = {}) {
       motion_prompt_sha256: clip.motion_prompt_sha256,
       duration_sec: clip.duration_sec,
       candidate_count: Number(clip.candidate_count ?? 1),
+      coverage: (clip.coverage ?? []).map((row) => ({
+        image_id: row.image_id,
+        image_sha256: row.image_sha256,
+        source_offset_sec: row.source_offset_sec,
+        source_end_offset_sec: row.source_end_offset_sec,
+      })),
     })),
   }));
 }
@@ -197,12 +247,47 @@ export async function approvedLtxClips(report, approval, { reportPath = null } =
   return rows;
 }
 
-export function ltxTreatmentForClip(clip) {
+export async function approvedLtxCoverageByImage(report, approval, { reportPath = null } = {}) {
+  const clips = await approvedLtxClips(report, approval, { reportPath });
+  const rows = new Map();
+  for (const clip of clips.values()) {
+    const coverage = Array.isArray(clip.coverage) && clip.coverage.length
+      ? clip.coverage
+      : [{
+          image_id: clip.image_id,
+          image_sha256: clip.source_image_sha256,
+          source_offset_sec: 0,
+          source_end_offset_sec: Number(clip.cut_duration_sec ?? clip.requested_duration_sec),
+        }];
+    for (const covered of coverage) {
+      const imageId = String(covered.image_id ?? "");
+      if (!imageId || rows.has(imageId)) continue;
+      rows.set(imageId, { clip, covered });
+    }
+  }
+  return rows;
+}
+
+export function ltxTreatmentForClip(clip, covered = null) {
+  const coverage = covered ?? {
+    image_id: clip.image_id,
+    image_sha256: clip.source_image_sha256,
+    source_offset_sec: 0,
+    source_end_offset_sec: Number(clip.cut_duration_sec ?? clip.requested_duration_sec),
+  };
   return {
     mode: "generated_video_ltx23",
     provider: LTX_VIDEO_PROVIDER,
     model_id: LTX_VIDEO_MODEL_ID,
     source_image_sha256: clip.source_image_sha256,
+    covered_image_id: coverage.image_id,
+    covered_image_sha256: coverage.image_sha256 ?? clip.source_image_sha256,
+    source_offset_sec: Number(coverage.source_offset_sec ?? 0),
+    source_end_offset_sec: Number(
+      coverage.source_end_offset_sec
+        ?? Number(coverage.source_offset_sec ?? 0) + Number(clip.cut_duration_sec ?? 0),
+    ),
+    animation_sequence_id: clip.animation_sequence_id ?? null,
     video_path: path.resolve(clip.normalized_video_path),
     video_sha256: clip.normalized_video_sha256,
     native_duration_sec: Number(clip.normalized_probe?.duration_sec ?? clip.requested_duration_sec),

@@ -1725,6 +1725,7 @@ async function buildMotionClips(
   }
   const selectedXfadeDurations = new Map();
   const selectedBoundaryRows = [];
+  const suppressedContinuousLtxTransitions = [];
   const clipRowByIndex = new Map(clipRows.map((row) => [row.index, row]));
   for (const current of clipRows) {
     const nextPrompt = allPrompts[current.index + 1] ?? null;
@@ -1745,6 +1746,17 @@ async function buildMotionClips(
     const planned = plannedTransitionByToImage.get(nextPrompt.image_id);
     const legacySelected = !transitionEditPlan && hookXfadeEnabled && next.startSec < retentionXfadeSec;
     if (!planned && !legacySelected) continue;
+    const currentSequence = current.generatedVideoTreatment?.animation_sequence_id;
+    const nextSequence = next.generatedVideoTreatment?.animation_sequence_id;
+    if (currentSequence && currentSequence === nextSequence) {
+      suppressedContinuousLtxTransitions.push({
+        from_image_id: current.prompt.image_id,
+        to_image_id: next.prompt.image_id,
+        animation_sequence_id: currentSequence,
+        reason: "continuous LTX source must remain frame-contiguous",
+      });
+      continue;
+    }
     const duration = planned?.xfade_duration_sec
       ? clampXfadeDuration(planned.xfade_duration_sec, current, next)
       : xfadeDurationForBoundary(current, next);
@@ -1752,8 +1764,9 @@ async function buildMotionClips(
     selectedBoundaryRows.push({ current, next, planned, duration });
   }
   const plannedTransitionCount = Array.isArray(transitionEditPlan?.transition_events) ? transitionEditPlan.transition_events.length : selectedBoundaryRows.length;
-  if (!options.prebuildOnly && transitionEditPlan && selectedBoundaryRows.length !== plannedTransitionCount) {
-    throw new Error(`Transition plan contains ${plannedTransitionCount} events but ${selectedBoundaryRows.length} map to adjacent timeline boundaries.`);
+  if (!options.prebuildOnly && transitionEditPlan
+    && selectedBoundaryRows.length + suppressedContinuousLtxTransitions.length !== plannedTransitionCount) {
+    throw new Error(`Transition plan contains ${plannedTransitionCount} events but ${selectedBoundaryRows.length} map to adjacent timeline boundaries and ${suppressedContinuousLtxTransitions.length} were suppressed for continuous LTX sequences.`);
   }
   for (const row of clipRows) {
     const tailSec = selectedXfadeDurations.get(row.index) ?? 0;
@@ -1779,8 +1792,9 @@ async function buildMotionClips(
     }
     let generatedVideoSha256 = null;
     if (row.generatedVideoTreatment) {
-      if (row.generatedVideoTreatment.source_image_sha256 !== imageSha256) {
-        throw new Error(`Generated LTX video source image is stale for ${row.prompt.image_id}.`);
+      if ((row.generatedVideoTreatment.covered_image_sha256
+        ?? row.generatedVideoTreatment.source_image_sha256) !== imageSha256) {
+        throw new Error(`Generated LTX video coverage image is stale for ${row.prompt.image_id}.`);
       }
       if (!(await exists(row.generatedVideoTreatment.video_path))) {
         throw new Error(`Generated LTX video is missing for ${row.prompt.image_id}: ${row.generatedVideoTreatment.video_path}`);
@@ -1828,12 +1842,18 @@ async function buildMotionClips(
         }
       }
       if (row.generatedVideoTreatment) {
+        const nativeDuration = Number(row.generatedVideoTreatment.native_duration_sec ?? renderDuration);
+        const sourceOffset = Math.max(0, Number(row.generatedVideoTreatment.source_offset_sec ?? 0));
+        if (!(nativeDuration > sourceOffset)) {
+          throw new Error(`Generated LTX sequence offset exceeds native duration for ${row.prompt.image_id}.`);
+        }
+        const sourceDuration = Math.min(renderDuration, nativeDuration - sourceOffset);
         const generatedFilter = [
           `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase`,
           `crop=${width}:${height}`,
           `fps=${fps}`,
           "setsar=1",
-          `trim=duration=${Math.min(renderDuration, Number(row.generatedVideoTreatment.native_duration_sec ?? renderDuration)).toFixed(6)}`,
+          `trim=start=${sourceOffset.toFixed(6)}:duration=${sourceDuration.toFixed(6)}`,
           "setpts=PTS-STARTPTS",
           `tpad=stop_mode=clone:stop_duration=${renderDuration.toFixed(6)}`,
           "format=yuv420p[v]",
@@ -2043,6 +2063,8 @@ async function buildMotionClips(
     planned_transition_count: plannedTransitionCount,
     applied_transition_count: appliedXfadeTransitions.length,
     applied_transitions: appliedXfadeTransitions,
+    suppressed_continuous_ltx_transition_count: suppressedContinuousLtxTransitions.length,
+    suppressed_continuous_ltx_transitions: suppressedContinuousLtxTransitions,
     motion_trace_path: directedMotionRequired ? motionTracePath : null,
     motion_trace_frame_count: motionTraceRows.length,
     motion_trace_blocker_count: motionTraceBlockers.length,

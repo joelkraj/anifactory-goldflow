@@ -482,6 +482,8 @@ Hard rails:
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED FOR THIS PRODUCTION. Author animation_intent for every beat. This is pre-image direction: choose an animation-ready starting composition, one coherent subject action, one camera move, restrained environmental motion, a readable end state, continuity into the next shot, and immutable elements. UI/screen shots remain eligible; exact generated text legibility is not required.
 - Set eligibility=animate when generated motion adds story value. Use still_preferred only when motion would undermine a decisive frozen tableau. Never invent an action beyond local evidence.
+- Choose preferred_generation_duration_sec from 5 through 12 based on the complete action, not the still-cut length. Set sequence_eligible_with_next=true only when this beat and the immediately following beat can play as one uninterrupted shot in the same physical scene, depiction mode, identities, wardrobe, and screen direction.
+- Author the end frame deliberately. camera_end_state and end_frame_composition must describe a stable terminal frame that can hand cleanly into the next beat; continuity_bridge must say what remains spatially unchanged across that handoff.
 - Favor animation-ready staging: clear silhouettes, visible limbs, unambiguous contact, movement room, and separated depth planes. For physical contact, lock the contact point and keep the action small. For locomotion, state direction and destination. For reactions, prefer eyes, posture, breathing, hair, and one restrained gesture.` : "- ANIMATION MODE IS DISABLED. Do not return animation_intent or animation-specific direction."}
 
 ATOMS:
@@ -543,6 +545,10 @@ Return JSON only:
       "timing_priority": "early_action|even_action|settle_hold",
       "animation_ready_composition": "how the source still should leave room for this motion",
       "continuity_bridge": "how the ending supports the following beat",
+      "sequence_eligible_with_next": false,
+      "preferred_generation_duration_sec": 5,
+      "camera_end_state": "framing and camera position at the terminal frame",
+      "end_frame_composition": "subject positions, gaze, props, and negative space at the terminal frame",
       "locked_elements": ["identity, wardrobe, anatomy, props, spatial facts"]
     },` : ""}
     "editorial_cues": [],

@@ -13,7 +13,7 @@ import {
 import { parallaxApprovalMatches } from "./lib/parallax-contract.mjs";
 import { noticeableParallaxTreatment } from "./lib/parallax-policy.mjs";
 import {
-  approvedLtxClips,
+  approvedLtxCoverageByImage,
   ltxTreatmentForClip,
   ltxVideoEnabled,
 } from "./lib/ltx-video-contract.mjs";
@@ -221,21 +221,22 @@ async function main() {
     if (allowLtxRescue && ltxVideoApproval?.production_eligible !== true) {
       throw new Error(`LTX rescue requires a production-eligible approval: ${ltxVideoApprovalPath}`);
     }
-    approvedLtxById = await approvedLtxClips(ltxVideoReport, ltxVideoApproval, { reportPath: ltxVideoReportPath });
+    approvedLtxById = await approvedLtxCoverageByImage(ltxVideoReport, ltxVideoApproval, { reportPath: ltxVideoReportPath });
     if (!approvedLtxById.size) {
       throw new Error(`LTX video policy is enabled but no current approved clips were found in ${ltxVideoApprovalPath}.`);
     }
     ltxSourcePaths.push(ltxVideoReportPath, ltxVideoApprovalPath);
     intents = intents.map((intent) => {
-      const clip = approvedLtxById.get(String(intent.image_id ?? ""));
-      if (!clip) return intent;
-      if (clip.source_image_sha256 !== intent.image_sha256) {
-        throw new Error(`Approved LTX source image is stale for ${intent.image_id}.`);
+      const coverage = approvedLtxById.get(String(intent.image_id ?? ""));
+      if (!coverage) return intent;
+      const { clip, covered } = coverage;
+      if ((covered.image_sha256 ?? clip.source_image_sha256) !== intent.image_sha256) {
+        throw new Error(`Approved LTX coverage image is stale for ${intent.image_id}.`);
       }
       return {
         ...intent,
         depth_treatment: null,
-        generated_video_treatment: ltxTreatmentForClip(clip),
+        generated_video_treatment: ltxTreatmentForClip(clip, covered),
       };
     });
   }

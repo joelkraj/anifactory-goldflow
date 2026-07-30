@@ -8,7 +8,7 @@ import {
   animationPolicyForIdentity,
   clampLtxDuration,
   hashFile,
-  ltxMotionPromptForCut,
+  ltxMotionPromptForSequence,
   ltxNegativePrompt,
   ltxVideoEnabled,
   sanitizeAnimationIntent,
@@ -62,6 +62,18 @@ function riskAndCandidateCount(intent, prompt) {
   };
 }
 
+function sequenceCompatible(left, right, currentDurationSec) {
+  if (!left?.intent?.sequence_eligible_with_next || !right) return false;
+  if (Number(right.index) !== Number(left.index) + 1) return false;
+  if (left.prompt.scene_id !== right.prompt.scene_id) return false;
+  if ((left.prompt.depiction_mode ?? null) !== (right.prompt.depiction_mode ?? null)) return false;
+  const leftLocation = left.prompt.shot_manifest?.location_id ?? left.beat?.location_id ?? null;
+  const rightLocation = right.prompt.shot_manifest?.location_id ?? right.beat?.location_id ?? null;
+  if (leftLocation !== rightLocation) return false;
+  const nextDuration = Number(right.prompt.duration_sec ?? 0);
+  return currentDurationSec + Math.max(0, nextDuration) <= 12;
+}
+
 async function main() {
   const [identity, beatPlan, promptPlan, imagegen, imageQa] = await Promise.all([
     readJson(identityPath),
@@ -80,7 +92,7 @@ async function main() {
   const imageById = new Map(imagegen.results.map((row) => [String(row.image_id ?? ""), row]));
   const accepted = imageQa.accepted_image_hashes ?? {};
   const eligiblePrompts = promptPlan.prompts.filter((row) => row.image_generation_required !== false);
-  const directions = [];
+  const candidates = [];
   for (const [index, prompt] of eligiblePrompts.entries()) {
     const beat = beatById.get(String(prompt.visual_beat_id ?? ""));
     const intent = sanitizeAnimationIntent(prompt.shot_manifest?.animation_intent ?? beat?.animation_intent);
@@ -92,38 +104,108 @@ async function main() {
     if (!imagePath || !imageHash || accepted[prompt.image_id] !== imageHash) {
       throw new Error(`Animation direction requires the current accepted image hash for ${prompt.image_id}.`);
     }
-    const prior = eligiblePrompts[index - 1];
-    const next = eligiblePrompts[index + 1];
     const risk = riskAndCandidateCount(intent, prompt);
-    const directedPrompt = {
-      ...prompt,
-      duration_sec: Number(prompt.duration_sec ?? 5),
-      animation_intent: intent,
-      shot_manifest: { ...(prompt.shot_manifest ?? {}), animation_intent: intent },
-    };
-    directions.push({
-      image_id: prompt.image_id,
-      scene_id: prompt.scene_id ?? null,
-      visual_beat_id: prompt.visual_beat_id ?? null,
-      start_sec: Number(prompt.start_sec ?? 0),
-      cut_duration_sec: Number(prompt.duration_sec ?? 5),
-      requested_generation_duration_sec: clampLtxDuration(prompt.duration_sec ?? 5),
-      source_image_path: imagePath,
-      source_image_sha256: imageHash,
-      source_prompt_sha256: sha256(JSON.stringify(prompt)),
-      animation_intent: intent,
-      risk_class: risk.risk,
-      candidate_count: risk.candidate_count,
-      scene_continuity: {
-        previous_image_id: prior?.scene_id === prompt.scene_id ? prior.image_id : null,
-        previous_action: prior?.scene_id === prompt.scene_id ? prior.visual_beat_action ?? null : null,
-        next_image_id: next?.scene_id === prompt.scene_id ? next.image_id : null,
-        next_action: next?.scene_id === prompt.scene_id ? next.visual_beat_action ?? null : null,
-      },
-      motion_prompt: ltxMotionPromptForCut(directedPrompt),
-      negative_prompt: ltxNegativePrompt(),
-    });
+    candidates.push({ index, prompt, beat, intent, imagePath, imageHash, risk });
   }
+  const groups = [];
+  for (let index = 0; index < candidates.length;) {
+    const group = [candidates[index]];
+    let durationSec = Math.max(0, Number(candidates[index].prompt.duration_sec ?? 0));
+    while (index + group.length < candidates.length) {
+      const left = group.at(-1);
+      const right = candidates[index + group.length];
+      if (!sequenceCompatible(left, right, durationSec)) break;
+      group.push(right);
+      durationSec += Math.max(0, Number(right.prompt.duration_sec ?? 0));
+    }
+    groups.push(group);
+    index += group.length;
+  }
+  const directions = groups.map((group, groupIndex) => {
+    const first = group[0];
+    const last = group.at(-1);
+    let offsetSec = 0;
+    const coverage = group.map((row) => {
+      const durationSec = Math.max(0.001, Number(row.prompt.duration_sec ?? 0));
+      const covered = {
+        image_id: row.prompt.image_id,
+        image_sha256: row.imageHash,
+        visual_beat_id: row.prompt.visual_beat_id ?? null,
+        timeline_duration_sec: durationSec,
+        source_offset_sec: Number(offsetSec.toFixed(3)),
+        source_end_offset_sec: Number((offsetSec + durationSec).toFixed(3)),
+        foreground_action: row.prompt.visual_beat_action ?? row.beat?.foreground_action ?? null,
+        animation_intent: row.intent,
+      };
+      offsetSec += durationSec;
+      return covered;
+    });
+    const preferredDuration = Math.max(
+      offsetSec,
+      ...group.map((row) => Number(row.intent.preferred_generation_duration_sec ?? 5)),
+    );
+    const sequenceIdentity = {
+      scene_id: first.prompt.scene_id ?? null,
+      coverage: coverage.map((row) => ({
+        image_id: row.image_id,
+        image_sha256: row.image_sha256,
+        source_offset_sec: row.source_offset_sec,
+        source_end_offset_sec: row.source_end_offset_sec,
+      })),
+    };
+    const animationSequenceId = `ltx-seq-${String(groupIndex + 1).padStart(4, "0")}-${sha256(JSON.stringify(sequenceIdentity)).slice(0, 12)}`;
+    const prior = eligiblePrompts[first.index - 1];
+    const next = eligiblePrompts[last.index + 1];
+    const directedPrompt = {
+      ...first.prompt,
+      duration_sec: offsetSec,
+      animation_intent: first.intent,
+      shot_manifest: { ...(first.prompt.shot_manifest ?? {}), animation_intent: first.intent },
+    };
+    const direction = {
+      image_id: first.prompt.image_id,
+      scene_id: first.prompt.scene_id ?? null,
+      visual_beat_id: first.prompt.visual_beat_id ?? null,
+      animation_sequence_id: animationSequenceId,
+      sequence_mode: group.length > 1 ? "continuous_scene_sequence" : "standalone_shot",
+      start_sec: Number(first.prompt.start_sec ?? 0),
+      cut_duration_sec: Number(first.prompt.duration_sec ?? 5),
+      sequence_timeline_duration_sec: Number(offsetSec.toFixed(3)),
+      requested_generation_duration_sec: clampLtxDuration(preferredDuration),
+      source_image_path: first.imagePath,
+      source_image_sha256: first.imageHash,
+      source_prompt_sha256: sha256(JSON.stringify(first.prompt)),
+      animation_intent: first.intent,
+      coverage,
+      start_frame_contract: {
+        image_id: first.prompt.image_id,
+        image_sha256: first.imageHash,
+        state: first.intent.start_state,
+        composition: first.intent.animation_ready_composition,
+      },
+      end_frame_contract: {
+        state: last.intent.end_state,
+        camera_state: last.intent.camera_end_state,
+        composition: last.intent.end_frame_composition,
+        continuity_bridge: last.intent.continuity_bridge,
+        next_start_image_id: next?.scene_id === last.prompt.scene_id ? next.image_id : null,
+      },
+      risk_class: group.some((row) => row.risk.risk === "high")
+        ? "high"
+        : group.some((row) => row.risk.risk === "medium") ? "medium" : "low",
+      candidate_count: Math.max(...group.map((row) => row.risk.candidate_count)),
+      scene_continuity: {
+        previous_image_id: prior?.scene_id === first.prompt.scene_id ? prior.image_id : null,
+        previous_action: prior?.scene_id === first.prompt.scene_id ? prior.visual_beat_action ?? null : null,
+        next_image_id: next?.scene_id === last.prompt.scene_id ? next.image_id : null,
+        next_action: next?.scene_id === last.prompt.scene_id ? next.visual_beat_action ?? null : null,
+      },
+      directed_prompt: directedPrompt,
+      negative_prompt: ltxNegativePrompt(),
+    };
+    direction.motion_prompt = ltxMotionPromptForSequence(direction);
+    return direction;
+  });
   if (!directions.length) throw new Error("Animation policy selected no cuts.");
   const sourcePaths = [identityPath, beatPath, promptPath, imagegenPath, imageQaPath];
   const report = {

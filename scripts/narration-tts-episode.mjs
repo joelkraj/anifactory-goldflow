@@ -774,6 +774,7 @@ function wordCount(value) {
 export function normalizeNarrationUnitsForTests(plan, {
   voiceId = null,
 } = {}) {
+  const expectedVoiceLock = qwenPinForVoiceId(voiceId);
   const topLevel = Array.isArray(plan?.units) ? plan.units : null;
   const raw = topLevel ?? (plan?.segments ?? []).flatMap((segment) => {
     const rows = segment?.narration_units
@@ -833,21 +834,21 @@ export function normalizeNarrationUnitsForTests(plan, {
         ?? "",
     );
     if ((voiceId && unitVoiceId !== voiceId)
-      || unitVoiceId !== QWEN_LIAM_PRIMARY_LOCK.voice_id
+      || unitVoiceId !== expectedVoiceLock.voice_id
       || qwen.provider !== "qwen_local"
-      || qwen.model_id !== QWEN_LIAM_PRIMARY_LOCK.model_id
-      || qwen.model_revision !== QWEN_LIAM_PRIMARY_LOCK.model_revision
+      || qwen.model_id !== expectedVoiceLock.model_id
+      || qwen.model_revision !== expectedVoiceLock.model_revision
       || qwen.reference_audio_sha256
-        !== QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256
+        !== expectedVoiceLock.reference_audio_sha256
       || qwen.reference_manifest_sha256
-        !== QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256
+        !== expectedVoiceLock.reference_manifest_sha256
       || qwen.voice_continuity_contract
-        !== QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract
+        !== expectedVoiceLock.voice_continuity_contract
       || qwen.instruct_supported !== false
       || qwen.instruct_submitted !== false
       || qwen.speed_control_supported !== false
       || qwen.native_speed != null) {
-      throw new Error(`Unit ${unitId} Qwen controls drift from the locked Liam Base reference-clone policy`);
+      throw new Error(`Unit ${unitId} Qwen controls drift from the locked Base reference-clone policy`);
     }
     const unitWords = Number(row.word_count ?? wordCount(spokenText));
     if (unitWords > 60) {
@@ -1060,7 +1061,7 @@ function selectedResultsForReport(units, selectedRows, candidates) {
       selected_spoken_text_sha256: unit.spoken_text_sha256,
       fallback_spoken_text_sha256: null,
       voice_continuity_contract:
-        QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract,
+        qwenPinForVoiceId(selected.voice_id).voice_continuity_contract,
       voice_continuity: selected.unit_qa?.voice_continuity ?? null,
       audio_path: selected.wav,
       audio_sha256: selected.unit_qa?.audio_sha256 ?? null,
@@ -1935,11 +1936,12 @@ async function main() {
   if (planPolicy.status !== "passed") {
     throw new Error(`Narration plan provider policy failed: ${JSON.stringify(planPolicy.findings)}`);
   }
+  const selectedVoiceLock = qwenPinForVoiceId(policy.primary.voice_id);
   if (await sha256File(policy.primary.reference_audio_path) !== policy.primary.reference_audio_sha256) {
-    throw new Error("Locked local Qwen Liam reference audio hash does not match");
+    throw new Error("Locked local Qwen reference audio hash does not match");
   }
   if (sha256Text(policy.primary.reference_text) !== policy.primary.reference_text_sha256) {
-    throw new Error("Locked local Qwen Liam reference text hash does not match");
+    throw new Error("Locked local Qwen reference text hash does not match");
   }
   for (const [assetPath, expectedSha256, label] of [
     [
@@ -1964,20 +1966,20 @@ async function main() {
     ],
   ]) {
     if (await sha256File(assetPath) !== expectedSha256) {
-      throw new Error(`Locked local Qwen Liam ${label} hash does not match`);
+      throw new Error(`Locked local Qwen ${label} hash does not match`);
     }
   }
   if (policy.primary.reference_voice_id !== policy.primary.voice_id
     || policy.primary.reference_voice_sha256 !== policy.primary.voice_sha256
     || policy.primary.voice_continuity_contract
-      !== "qwen_icl_clone_of_liam_reference"
+      !== selectedVoiceLock.voice_continuity_contract
     || Number(policy.primary.minimum_cosine_similarity)
       !== QWEN_LIAM_MINIMUM_COSINE_SIMILARITY
     || Number(policy.primary.warning_below_cosine_similarity)
       !== QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY
     || Number(policy.primary.warning_floor_cosine_similarity)
       !== QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY) {
-    throw new Error("Qwen production is not locked to the selected Liam voice-continuity contract");
+    throw new Error("Qwen production is not locked to the selected voice-continuity contract");
   }
   const units = normalizeNarrationUnitsForTests(plan, {
     voiceId: policy.primary.voice_id,

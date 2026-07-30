@@ -723,7 +723,7 @@ function requirementRefIdForPrompt(rawRefId, req, prompt, indexes) {
 function genericVisibleGroupName(value) {
   const text = normalize(value);
   if (!text) return true;
-  if (/\b(?:men|women|clerks|priests|guards|students|citizens|crowd|crowds|witnesses|workers|staff|audience|spectators|officials|soldiers|nobles|reporters|followers|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?)\b/.test(text)) return true;
+  if (/\b(?:men|women|clerks?|priests?|guards?|students?|citizens?|crowds?|witnesses?|workers?|staff|audience|spectators?|officials?|deans?|councils?|soldiers?|nobles?|reporters?|followers?|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?)\b/.test(text)) return true;
   if (/\b[a-z]+\s+s\b/.test(text)) return true;
   return false;
 }
@@ -1009,7 +1009,7 @@ function sanitizePrompt(prompt, indexes) {
       const outOfScopeRefs = attachableCharacterRefsForVisibleNameAnyScope(indexes, visibleName);
       if (outOfScopeRefs.length) {
         const staging = (shotManifest?.character_staging ?? []).find((row) => normalize(row?.name) === normalize(visibleName));
-        const previewOnly = /\b(?:hypothetical|preview|inset|shadowed)\b/i.test(`${staging?.screen_position ?? ""} ${staging?.pose ?? ""} ${staging?.wardrobe_from ?? ""}`);
+        const previewOnly = /\b(?:hypothetical|preview|inset|shadowed|screen|broadcast|portrait|token|projected|projection|replay)\b/i.test(`${staging?.screen_position ?? ""} ${staging?.pose ?? ""} ${staging?.wardrobe_from ?? ""}`);
         findings.push({
           image_id: prompt.image_id,
           scene_id: prompt.scene_id,

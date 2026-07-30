@@ -8775,21 +8775,30 @@ async function testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists
 
 async function testVisualHardenTreatsCollectiveSubjectsAsGeneric() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
-  const promptText = "Early Tenfold merchants gather around the apartment desk to review a clean launch dashboard.";
+  const promptText = "A Crown Academy dean, an academy official, and the Goddess Council occupy the institutional chamber.";
   const { plan, report, error } = await runVisualHardenFixture({
     dataRoot,
     promptText,
     includeDefaultCharacterRef: false,
-    extraReferenceTargets: [{
-      ref_id: "char_tenfold_accountant_ref",
-      kind: "character_state",
-      subject: "Tenfold Accountant",
-      scene_ids: ["scene_001"],
-      reference_image_path: "/tmp/char_tenfold_accountant_ref.png",
-    }],
+    extraReferenceTargets: [
+      {
+        ref_id: "emily_world_goddess_crown_state",
+        kind: "character_state",
+        subject: "Emily World Goddess Crown",
+        scene_ids: ["scene_002"],
+        reference_image_path: "/tmp/emily_world_goddess_crown_state.png",
+      },
+      {
+        ref_id: "stoneback_ram_creature_identity",
+        kind: "character_state",
+        subject: "Stoneback Ram Creature",
+        scene_ids: ["scene_002"],
+        reference_image_path: "/tmp/stoneback_ram_creature_identity.png",
+      },
+    ],
     referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
     shotManifest: {
-      visible_characters: ["Early Tenfold Merchants"],
+      visible_characters: ["Crown Academy dean", "academy official frame-left", "Goddess Council"],
       character_state_ref_ids: [],
       protagonist_state_ref_id: null,
     },
@@ -8800,6 +8809,42 @@ async function testVisualHardenTreatsCollectiveSubjectsAsGeneric() {
     finding.code === "visible_character_ref_not_attached"
     || finding.code === "visible_character_ref_scope_missing"
   )), false);
+}
+
+async function testVisualHardenWaivesNonphysicalScreenAndReplayDepictions() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const promptText = "A projected replay screen shows Jace on a birthday stage while the physical room stays empty.";
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText,
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [{
+      ref_id: "jace_civilian_identity",
+      kind: "character_state",
+      subject: "Jace",
+      scene_ids: ["scene_002"],
+      reference_image_path: "/tmp/jace_civilian_identity.png",
+    }],
+    referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
+    shotManifest: {
+      visible_characters: ["Jace"],
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+      character_staging: [{
+        name: "Jace",
+        screen_position: "center of a projected replay screen",
+        wardrobe_from: "recorded birthday broadcast",
+        pose: "nonphysical portrait inside the replay",
+      }],
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(report.findings.some((finding) => (
+    finding.code === "preview_character_ref_scope_waived"
+    && finding.character === "Jace"
+    && finding.resolved === true
+  )), true);
 }
 
 async function testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored() {
@@ -11361,6 +11406,7 @@ const FIXTURE_SUITES = {
     testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
     testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists,
     testVisualHardenTreatsCollectiveSubjectsAsGeneric,
+    testVisualHardenWaivesNonphysicalScreenAndReplayDepictions,
     testVisualHardenBlocksAttachedCharacterRefWhenAnchorIgnored,
     testVisualHardenAllowsAttachedCharacterRefWhenAnchorReaffirmed,
     testVisualHardenPreservesAttachableFaceOnlyStateRef,

@@ -213,6 +213,21 @@ export async function runYoutubePublishContractTests() {
   });
   assert.deepEqual(valid.blockers, []);
 
+  const operatorAuthoredPackage = structuredClone(spec);
+  operatorAuthoredPackage.title_candidates = operatorAuthoredPackage.title_candidates.map((candidate) => ({
+    ...candidate,
+    title: candidate.title.replace(/\s*\|\s*Manhwa Recap$/i, ""),
+  }));
+  operatorAuthoredPackage.selected_title = operatorAuthoredPackage.selected_title.replace(/\s*\|\s*Manhwa Recap$/i, "");
+  operatorAuthoredPackage.thumbnail_candidates[0].arrows = [];
+  const operatorAuthoredValidation = validateYoutubePackagingSpec(operatorAuthoredPackage, {
+    markdown: packagingMarkdown(operatorAuthoredPackage),
+    thumbnailMetadata: { width: 1280, height: 720, format: "png" },
+    thumbnailBytes: 1000,
+    now,
+  });
+  assert.deepEqual(operatorAuthoredValidation.blockers, []);
+
   const bad = structuredClone(spec);
   bad.thumbnail_candidates[0].subjects.push(
     { role: "father", emotion: "anger" },

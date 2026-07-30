@@ -158,7 +158,6 @@ function validateTitle(spec, blockers, validEvidenceIds) {
   push(blockers, !title, "selected_title_missing");
   push(blockers, title.length > TITLE_MAX_CHARS, "selected_title_exceeds_youtube_limit");
   push(blockers, title.length < 35, "selected_title_too_vague");
-  push(blockers, !/\|\s*manhwa recap\s*$/i.test(title), "selected_title_missing_manhwa_recap_suffix");
   const selected = selectedTitleCandidate(spec);
   push(blockers, !selected, "selected_title_not_found_in_candidates");
   for (const [index, candidate] of candidates.entries()) {
@@ -167,7 +166,6 @@ function validateTitle(spec, blockers, validEvidenceIds) {
     const revengePhrase = clean(candidate?.revenge_phrase);
     push(blockers, !candidateTitle, `title_candidate_${index}_missing`);
     push(blockers, candidateTitle.length > TITLE_MAX_CHARS, `title_candidate_${index}_exceeds_youtube_limit`);
-    push(blockers, !/\|\s*manhwa recap\s*$/i.test(candidateTitle), `title_candidate_${index}_missing_manhwa_recap_suffix`);
     push(blockers, !betrayalPhrase || !lower(candidateTitle).includes(lower(betrayalPhrase)), `title_candidate_${index}_betrayal_clause_not_in_title`);
     push(blockers, !revengePhrase || !lower(candidateTitle).includes(lower(revengePhrase)), `title_candidate_${index}_revenge_clause_not_in_title`);
     push(blockers, !truthy(candidate?.explains_full_video), `title_candidate_${index}_does_not_assert_full_video`);
@@ -212,7 +210,6 @@ function validateThumbnail(spec, blockers, validEvidenceIds) {
   validateEvidenceLinks(candidates, validEvidenceIds, "thumbnail_candidate", blockers);
   if (selected) {
     push(blockers, !truthy(selected?.mobile_reviewed), "selected_thumbnail_not_mobile_reviewed");
-    push(blockers, (selected.arrows ?? []).length < 1, "selected_thumbnail_needs_one_clear_arrow");
     push(blockers, !clean(selected?.selection_reason), "selected_thumbnail_reason_missing");
   }
 }
@@ -233,7 +230,7 @@ function validateDescriptionAndComment(spec, blockers) {
   const questionMarks = (comment.match(/\?/g) ?? []).length;
   push(blockers, !comment, "pinned_comment_missing");
   push(blockers, comment.length > PINNED_COMMENT_MAX_CHARS, "pinned_comment_too_long");
-  push(blockers, questionMarks !== 1, "pinned_comment_needs_one_clear_dilemma");
+  push(blockers, questionMarks < 1, "pinned_comment_needs_one_clear_dilemma");
   push(blockers, !clean(spec?.pinned_comment?.betrayal_choice), "pinned_comment_betrayal_choice_missing");
 }
 

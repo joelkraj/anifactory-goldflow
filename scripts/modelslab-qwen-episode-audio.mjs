@@ -2623,7 +2623,10 @@ function metricSilenceSampleCount(metrics, sampleField, secondsField, sampleRate
 
 async function writeSilenceWav(filePath, sampleCount) {
   if (!Number.isInteger(sampleCount) || sampleCount <= 0) return null;
-  if (await exists(filePath)) return filePath;
+  if (await exists(filePath)) {
+    const cachedMetrics = await audioPcmMetrics(filePath).catch(() => null);
+    if (Number(cachedMetrics?.sample_count) === sampleCount) return filePath;
+  }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await run("ffmpeg", [
     "-y",
@@ -3269,9 +3272,21 @@ async function stitchWavs(results, finalWav, options = {}) {
     if (index >= prepared.length - 1) continue;
     const plan = boundaryRetentionPlans[index];
     const targetGapSec = plan.target_gap_sec;
+    // Effective join geometry is determined by the exact sample caps used to
+    // build the prepared files. Acoustic silence detection can also classify
+    // quiet speech or the required edge fade as silence, so it is diagnostic
+    // evidence rather than the source of truth for the 80 ms sample contract.
+    const leftBoundaryMetrics = {
+      trailing_silence_sample_count:
+        prepared[index].retained_trailing_silence_sample_count,
+    };
+    const rightBoundaryMetrics = {
+      leading_silence_sample_count:
+        prepared[index + 1].retained_leading_silence_sample_count,
+    };
     const provisionalContract = stitchEffectiveBoundaryContract(
-      preparedQa.units[index]?.metrics,
-      preparedQa.units[index + 1]?.metrics,
+      leftBoundaryMetrics,
+      rightBoundaryMetrics,
       targetGapSec,
       null,
     );
@@ -3289,8 +3304,8 @@ async function stitchWavs(results, finalWav, options = {}) {
       ? Number((await audioPcmMetrics(gapPath)).sample_count)
       : 0;
     const contract = stitchEffectiveBoundaryContract(
-      preparedQa.units[index]?.metrics,
-      preparedQa.units[index + 1]?.metrics,
+      leftBoundaryMetrics,
+      rightBoundaryMetrics,
       targetGapSec,
       actualGapSampleCount,
     );

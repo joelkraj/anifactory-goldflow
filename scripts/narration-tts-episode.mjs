@@ -1305,12 +1305,12 @@ export function joinQaFromPcmForTests(samples, sampleRate, preparedInputs, bound
     const gapSamples = Number(boundary.gap_sample_count ?? 0);
     const nextPrepared = preparedInputs[index + 1];
     const actualRetainedLeft = Number(
-      prepared?.prepared_qa?.metrics?.trailing_silence_sample_count
-      ?? prepared?.retained_trailing_silence_sample_count,
+      prepared?.retained_trailing_silence_sample_count
+      ?? prepared?.prepared_qa?.metrics?.trailing_silence_sample_count,
     );
     const actualRetainedRight = Number(
-      nextPrepared?.prepared_qa?.metrics?.leading_silence_sample_count
-      ?? nextPrepared?.retained_leading_silence_sample_count,
+      nextPrepared?.retained_leading_silence_sample_count
+      ?? nextPrepared?.prepared_qa?.metrics?.leading_silence_sample_count,
     );
     const actualEffectiveGapSamples =
       actualRetainedLeft + gapSamples + actualRetainedRight;

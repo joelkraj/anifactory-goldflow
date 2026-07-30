@@ -214,7 +214,7 @@ Render profiles:
 Validation-batch flags:
   --image-provider modelslab --image-model gpt-image-2-t2i --reference-model gpt-image-2-i2i --image-fallback-provider codex_imagegen --image-fallback-condition modelslab_credit_exhausted
   Locks GPT Image 2 end to end and permits built-in Codex Imagen fallback only after an explicit ModelsLab insufficient-credit response.
-  Default narration is local Qwen3-TTS 1.7B Base with the pinned Liam reference clone: sentence-complete 45-60-word units (hard max 60), 80 ms joins, sequential synthesis, no fallback, no continuous request, and no speed or post-tempo control.
+  Default narration is local Qwen3-TTS 1.7B Base with the pinned owned Joel reference clone: sentence-complete 45-60-word units (hard max 60), 80 ms joins, deterministic batch-four synthesis, no fallback, no continuous request, and no speed or post-tempo control.
   --image-provider hybrid_modelslab_refs_codex_opening_modelslab_rest --codex-opening-sec 300
   Routes references through ModelsLab, scene cuts before the locked opening timestamp through staged Codex imagegen import, and later cuts through ModelsLab.
   --image-provider hybrid_codex_refs_opening_risky_modelslab_rest --codex-opening-sec 600

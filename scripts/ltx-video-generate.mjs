@@ -17,6 +17,12 @@ import {
   ltxVideoEnabled,
   sha256,
 } from "./lib/ltx-video-contract.mjs";
+import {
+  configuredModelslabProfiles,
+  loadConfiguredModelslabAccounts,
+  modelslabProfileForWorkId,
+  publicModelslabAccount,
+} from "./lib/modelslab-account-pool.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -44,6 +50,9 @@ const concurrency = boundedInteger(flags.concurrency, 15, 1, 30);
 const requestedDuration = flags.duration == null ? null : clampLtxDuration(flags.duration);
 const pollIntervalMs = boundedInteger(flags["poll-interval-ms"], 7000, 2000, 60000);
 const timeoutMs = boundedInteger(flags["timeout-ms"], 900000, 30000, 3600000);
+const modelslabProfiles = configuredModelslabProfiles({
+  flagValue: flags["modelslab-profiles"],
+});
 
 function parseFlags(parts) {
   const parsed = {};
@@ -90,40 +99,40 @@ function responseUrls(json = {}) {
   return [...values(json.output), ...values(json.proxy_links), ...values(json.future_links)];
 }
 
-let cachedApiKey = null;
-async function modelslabApiKey() {
-  if (cachedApiKey) return cachedApiKey;
-  const fromEnv = process.env.MODELSLAB_API_KEY || process.env.API_KEY;
-  if (fromEnv) {
-    cachedApiKey = fromEnv;
-    return cachedApiKey;
-  }
-  const { stdout: listText } = await execFile("modelslab", ["keys", "list", "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot });
-  const list = JSON.parse(listText);
-  const keys = list?.data?.items ?? [];
-  const selected = keys.find((row) => row.is_default === 1 || row.is_default === true) ?? keys[0];
-  if (!selected?.id) throw new Error("No ModelsLab API key available. Set MODELSLAB_API_KEY or log in with the ModelsLab CLI.");
-  const { stdout: detailText } = await execFile("modelslab", ["keys", "get", "--id", String(selected.id), "-o", "json", "--no-color", "--no-update-check"], { cwd: repoRoot });
-  cachedApiKey = JSON.parse(detailText)?.data?.key;
-  if (!cachedApiKey) throw new Error(`ModelsLab key ${selected.id} did not return a key value.`);
-  return cachedApiKey;
+function providerRateLimitDelayMs(message) {
+  const match = String(message ?? "").match(/try again in\s+(\d+)\s+minute/i);
+  if (!match) return null;
+  return (Number(match[1]) * 60 + 5) * 1000;
 }
 
-async function postJson(url, body, retries = 2) {
-  const key = await modelslabApiKey();
+async function postJson(url, body, {
+  account,
+  retries = 2,
+  rateLimitRetries = 0,
+} = {}) {
+  if (!account?.apiKey) throw new Error("ModelsLab request is missing its assigned account.");
   let lastError = null;
+  let remainingRateLimitRetries = rateLimitRetries;
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
     try {
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, ...body }),
+        body: JSON.stringify({ key: account.apiKey, ...body }),
       });
       const text = await response.text();
       let json = null;
       try { json = JSON.parse(text); } catch { throw new Error(`Non-JSON ${response.status}: ${text.slice(0, 500)}`); }
       if (!response.ok || ["error", "failed"].includes(String(json.status ?? ""))) {
-        throw new Error(`ModelsLab ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+        const message = `ModelsLab ${response.status}: ${JSON.stringify(json).slice(0, 1200)}`;
+        const waitMs = providerRateLimitDelayMs(message);
+        if (waitMs != null && remainingRateLimitRetries > 0) {
+          remainingRateLimitRetries -= 1;
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          attempt -= 1;
+          continue;
+        }
+        throw new Error(message);
       }
       return json;
     } catch (error) {
@@ -134,22 +143,26 @@ async function postJson(url, body, retries = 2) {
   throw lastError;
 }
 
-async function uploadImage(filePath) {
+async function uploadImage(filePath, account) {
   const extension = path.extname(filePath).toLowerCase();
   const mime = extension === ".jpg" || extension === ".jpeg" ? "image/jpeg" : "image/png";
   const base64 = (await fs.readFile(filePath)).toString("base64");
   const json = await postJson("https://modelslab.com/api/v6/base64_to_url", {
     base64_string: `data:${mime};base64,${base64}`,
-  });
+  }, { account });
   const url = responseUrls(json)[0];
   if (!url) throw new Error(`ModelsLab upload returned no URL for ${filePath}`);
   return url;
 }
 
-async function pollResult(requestId, startedAtMs) {
+async function pollResult(requestId, startedAtMs, account) {
   while (Date.now() - startedAtMs < timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    const json = await postJson(`https://modelslab.com/api/v6/video/fetch/${requestId}`, {}, 1);
+    const json = await postJson(
+      `https://modelslab.com/api/v6/video/fetch/${requestId}`,
+      {},
+      { account, retries: 1 },
+    );
     if (json.status === "success" && responseUrls(json).length) return json;
     if (["error", "failed"].includes(String(json.status ?? ""))) throw new Error(json.message ?? `LTX request ${requestId} failed.`);
   }
@@ -333,13 +346,15 @@ async function contactSheet(clips, sheetPath) {
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, identity, animationDirection] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, identity, animationDirection, modelslabAccounts] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
     readJson(identityPath, {}),
     readJson(animationDirectionPath, null),
+    loadConfiguredModelslabAccounts(modelslabProfiles, { cwd: repoRoot }),
   ]);
+  const accountByProfile = new Map(modelslabAccounts.map((account) => [account.profile, account]));
   let plan;
   const explicitProofDirection = proof && workflowBypass && Boolean(flags["animation-direction-plan"]);
   if ((!proof && ltxVideoEnabled(identity)) || explicitProofDirection) {
@@ -399,10 +414,15 @@ async function main() {
       status: "planned",
     }),
   ));
+  for (const row of rows) {
+    const profile = modelslabProfileForWorkId(row.candidate_id, modelslabProfiles);
+    row.modelslab_account = accountByProfile.get(profile);
+    if (!row.modelslab_account) throw new Error(`ModelsLab account profile ${profile} was not loaded.`);
+  }
   const batchStartedMs = Date.now();
   await runLimited(rows, concurrency, async (row) => {
     row.upload_started_at = new Date().toISOString();
-    row.init_image_url = await uploadImage(row.source_image_path);
+    row.init_image_url = await uploadImage(row.source_image_path, row.modelslab_account);
     row.upload_elapsed_ms = Date.now() - Date.parse(row.upload_started_at);
     row.status = "uploaded";
   });
@@ -420,6 +440,9 @@ async function main() {
         base64: false,
         temp: false,
         track_id: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
+      }, {
+        account: row.modelslab_account,
+        rateLimitRetries: 1,
       });
       row.request_id = initial.id ?? null;
       row.initial_eta_sec = initial.eta ?? null;
@@ -442,7 +465,7 @@ async function main() {
     try {
       const result = row.status === "success" && responseUrls(row.initial_response).length
         ? row.initial_response
-        : await pollResult(row.request_id, startedAtMs);
+        : await pollResult(row.request_id, startedAtMs, row.modelslab_account);
       row.provider_generation_time_sec = result.generationTime ?? null;
       const rawPath = path.join(outputDir, "raw", `${row.candidate_id}-ltx23.mp4`);
       row.download_url = await downloadResult(result, rawPath);
@@ -482,6 +505,10 @@ async function main() {
     plan_contract_sha256: plan.plan_sha256,
     source_hashes: plan.source_hashes,
     requested_concurrency: concurrency,
+    modelslab_account_pool: modelslabAccounts.map((account) => ({
+      profile: account.profile,
+      ...publicModelslabAccount(account),
+    })),
     clip_count: rows.length,
     generated_count: completed.length,
     failed_count: failures.length,
@@ -500,6 +527,8 @@ async function main() {
       source_image_sha256: row.source_image_sha256,
       source_prompt_sha256: row.source_prompt_sha256,
       motion_prompt_sha256: row.motion_prompt_sha256,
+      modelslab_account_profile: row.modelslab_account?.profile ?? null,
+      modelslab_account_fingerprint: row.modelslab_account?.fingerprint ?? null,
       request_id: row.request_id ?? null,
       initial_eta_sec: row.initial_eta_sec ?? null,
       submit_latency_ms: row.submit_latency_ms ?? null,

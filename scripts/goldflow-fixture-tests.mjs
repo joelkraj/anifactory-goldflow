@@ -6750,16 +6750,16 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
     performance_units: performanceUnits.slice(0, 1),
   }], { ttsProvider: "qwen_local" });
   assert.equal(qwenLiamPlan.provider_controls.qwen3.fallback, false);
-  assert.equal(qwenLiamPlan.provider_controls.qwen3.target_voice_id, "am_liam");
-  assert.equal(qwenLiamPlan.instruction_delivery.qwen3.target_voice_id, "am_liam");
-  assert.equal(qwenLiamPlan.narrator_voice_id, "am_liam");
+  assert.equal(qwenLiamPlan.provider_controls.qwen3.target_voice_id, "joel_owned_narrator_clone");
+  assert.equal(qwenLiamPlan.instruction_delivery.qwen3.target_voice_id, "joel_owned_narrator_clone");
+  assert.equal(qwenLiamPlan.narrator_voice_id, "joel_owned_narrator_clone");
   assert.equal(
     qwenLiamPlan.provider_controls.qwen3.reference_audio_sha256,
-    QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256,
+    QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256,
   );
   assert.equal(
     qwenLiamPlan.provider_controls.qwen3.voice_continuity_contract,
-    QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract,
+    QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract,
   );
   assert.deepEqual(
     qwenLiamPlan.provider_controls.qwen3.synthesis_contract,
@@ -6777,7 +6777,7 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
     episode: "ep_01",
     tts_provider: "qwen_local",
     tts_fallback_provider: null,
-    narrator_voice_id: "am_liam",
+    narrator_voice_id: "joel_owned_narrator_clone",
     tts_native_speed: null,
     voice_provider_options: defaultNarrationVoiceProviderOptions(),
   };
@@ -7071,7 +7071,7 @@ function testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets() {
     && unit.provider_controls.qwen3.instruct_submitted === false
     && unit.provider_controls.qwen3.instruct === null
     && unit.provider_controls.qwen3.reference_audio_sha256
-      === QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256
+      === QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256
   )));
 }
 

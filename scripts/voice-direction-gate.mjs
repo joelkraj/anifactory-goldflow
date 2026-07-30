@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
 import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_JOEL_PRIMARY_LOCK,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
   QWEN_LOCAL_FALLBACK_LOCK,
@@ -32,6 +33,12 @@ const episodeDir = path.join(DATA_ROOT, "channels", channel, "weekly_runs", week
 const maxDurationSec = flags["max-duration-sec"] ? Number(flags["max-duration-sec"]) : null;
 const emitLegacyFishArtifacts = flags["emit-legacy-fish-artifacts"] === "true";
 const repoRoot = process.cwd();
+
+function qwenPrimaryLockForVoiceId(voiceId) {
+  return voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
+    ? QWEN_LIAM_PRIMARY_LOCK
+    : QWEN_JOEL_PRIMARY_LOCK;
+}
 
 function characterVoiceCastingEnabled() {
   const value = flags["character-voice-casting"] ?? process.env.ANIFACTORY_CHARACTER_VOICE_CASTING ?? "false";
@@ -88,9 +95,7 @@ function selectedQwenNarratorVoiceId(identity = {}) {
     ?? cleanVoiceId(identity?.voice_provider_options?.qwen_narrator_voice_id)
     ?? cleanVoiceId(identity?.qwen_narrator_voice_id)
     ?? cleanVoiceId(legacyGenericNarratorVoiceId)
-    ?? (lockedProvider === "qwen_local"
-      ? QWEN_LIAM_PRIMARY_LOCK.voice_id
-      : DEFAULT_QWEN_NARRATOR_VOICE_ID);
+    ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 }
 
 function parseFlags(parts) {
@@ -369,21 +374,22 @@ async function loadDialogueContext() {
   const seriesPackage = await readJsonIfExists(path.join(seriesDir, "series_package.json"), await readJsonIfExists(path.join(weekDir, "series_package.json"), {}));
   const runIdentity = await readJsonIfExists(path.join(episodeDir, "run_identity.json"), {});
   const puckPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "kokoro_local";
-  const liamPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "qwen_local"
-    && selectedQwenNarratorVoiceId(runIdentity) === QWEN_LIAM_PRIMARY_LOCK.voice_id;
   const narratorVoiceId = selectedQwenNarratorVoiceId(runIdentity);
+  const qwenPrimaryIdentity = identityLockedTtsProvider(runIdentity) === "qwen_local"
+    && [QWEN_JOEL_PRIMARY_LOCK.voice_id, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(narratorVoiceId);
+  const qwenPrimaryLock = qwenPrimaryLockForVoiceId(narratorVoiceId);
   const narratorVoice = await readGlobalQwenVoice(narratorVoiceId);
   const rawVoiceCastingLock = await readJsonIfExists(path.join(episodeDir, `voice_casting_lock_${episode}.json`), await readJsonIfExists(path.join(episodeDir, "voice_casting_lock_ep_01.json"), {}));
   const rawNarratorCast = rawVoiceCastingLock?.speaker_casting?.NARRATOR ?? rawVoiceCastingLock?.speaker_casting?.narrator ?? null;
   const rawNarratorVoiceId = cleanVoiceId(rawNarratorCast?.reference_id) ?? cleanVoiceId(rawNarratorCast?.id);
-  const narratorCast = liamPrimaryIdentity
+  const narratorCast = qwenPrimaryIdentity
     ? {
-        id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
-        reference_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
-        source_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
-        source_transcript: QWEN_LIAM_PRIMARY_LOCK.reference_text,
-        source_transcript_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_text_sha256,
-        voice_source_policy: "qwen_liam_primary_reference_clone",
+        id: qwenPrimaryLock.voice_id,
+        reference_id: qwenPrimaryLock.voice_id,
+        source_audio_path: qwenPrimaryLock.reference_audio_path,
+        source_transcript: qwenPrimaryLock.reference_text,
+        source_transcript_sha256: qwenPrimaryLock.reference_text_sha256,
+        voice_source_policy: qwenPrimaryLock.voice_continuity_contract,
       }
     : puckPrimaryIdentity
     ? {
@@ -2831,33 +2837,34 @@ function puckQwenFallbackIdentityControls() {
 
 function qwenLiamPrimaryIdentityControls(
   synthesisContract = QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
+  voiceLock = QWEN_JOEL_PRIMARY_LOCK,
 ) {
   return {
-    model_id: QWEN_LIAM_PRIMARY_LOCK.model_id,
-    model_revision: QWEN_LIAM_PRIMARY_LOCK.model_revision,
-    target_voice_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
-    target_voice_sha256: QWEN_LIAM_PRIMARY_LOCK.voice_sha256,
-    reference_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
-    reference_audio_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256,
-    reference_text: QWEN_LIAM_PRIMARY_LOCK.reference_text,
-    reference_text_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_text_sha256,
-    reference_transcript: QWEN_LIAM_PRIMARY_LOCK.reference_text,
-    reference_transcript_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_text_sha256,
-    reference_manifest_path: QWEN_LIAM_PRIMARY_LOCK.reference_manifest_path,
-    reference_manifest_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256,
-    reference_metadata_path: QWEN_LIAM_PRIMARY_LOCK.reference_metadata_path,
-    reference_metadata_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256,
-    reference_voice_id: QWEN_LIAM_PRIMARY_LOCK.reference_voice_id,
-    reference_voice_sha256: QWEN_LIAM_PRIMARY_LOCK.reference_voice_sha256,
-    voice_continuity_contract: QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract,
-    speaker_similarity_method: QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_method,
-    speaker_similarity_model_path: QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_path,
+    model_id: voiceLock.model_id,
+    model_revision: voiceLock.model_revision,
+    target_voice_id: voiceLock.voice_id,
+    target_voice_sha256: voiceLock.voice_sha256,
+    reference_audio_path: voiceLock.reference_audio_path,
+    reference_audio_sha256: voiceLock.reference_audio_sha256,
+    reference_text: voiceLock.reference_text,
+    reference_text_sha256: voiceLock.reference_text_sha256,
+    reference_transcript: voiceLock.reference_text,
+    reference_transcript_sha256: voiceLock.reference_text_sha256,
+    reference_manifest_path: voiceLock.reference_manifest_path,
+    reference_manifest_sha256: voiceLock.reference_manifest_sha256,
+    reference_metadata_path: voiceLock.reference_metadata_path,
+    reference_metadata_sha256: voiceLock.reference_metadata_sha256,
+    reference_voice_id: voiceLock.reference_voice_id,
+    reference_voice_sha256: voiceLock.reference_voice_sha256,
+    voice_continuity_contract: voiceLock.voice_continuity_contract,
+    speaker_similarity_method: voiceLock.speaker_similarity_method,
+    speaker_similarity_model_path: voiceLock.speaker_similarity_model_path,
     speaker_similarity_model_sha256:
-      QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_sha256,
+      voiceLock.speaker_similarity_model_sha256,
     hard_minimum_cosine_similarity:
-      QWEN_LIAM_PRIMARY_LOCK.minimum_cosine_similarity,
+      voiceLock.minimum_cosine_similarity,
     warning_floor_cosine_similarity:
-      QWEN_LIAM_PRIMARY_LOCK.warning_floor_cosine_similarity,
+      voiceLock.warning_floor_cosine_similarity,
     delivery_control: "base_icl_reference_audio_only",
     instruct_supported: false,
     instruct_submitted: false,
@@ -2866,8 +2873,8 @@ function qwenLiamPrimaryIdentityControls(
     native_speed: null,
     continuous_requests: false,
     synthesis_contract: synthesisContract,
-    unit_contract: QWEN_LIAM_PRIMARY_LOCK.unit_contract,
-    stitch_contract: QWEN_LIAM_PRIMARY_LOCK.stitch_contract,
+    unit_contract: voiceLock.unit_contract,
+    stitch_contract: voiceLock.stitch_contract,
   };
 }
 
@@ -2903,24 +2910,26 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
     throw new Error(`New Kokoro narration plans are Puck-only: expected ${QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id}, got ${kokoroVoice}. Other presets are bakeoff-only.`);
   }
   const puckQwenFallback = provider === "kokoro_local" && fallbackProvider === "qwen_local";
-  const qwenLiamPrimary = provider === "qwen_local"
-    && cleanVoiceId(
+  const requestedQwenVoiceId = cleanVoiceId(
       primary?.voice_id
         ?? runIdentity?.narrator_voice_id
         ?? runIdentity?.tts_voice_id,
-    ) === QWEN_LIAM_PRIMARY_LOCK.voice_id;
-  if (provider === "qwen_local" && !qwenLiamPrimary) {
+    ) ?? QWEN_JOEL_PRIMARY_LOCK.voice_id;
+  const qwenPrimary = provider === "qwen_local"
+    && [QWEN_JOEL_PRIMARY_LOCK.voice_id, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(requestedQwenVoiceId);
+  const qwenPrimaryLock = qwenPrimaryLockForVoiceId(requestedQwenVoiceId);
+  if (provider === "qwen_local" && !qwenPrimary) {
     throw new Error(
-      `New local Qwen narration plans are Liam-only: expected ${QWEN_LIAM_PRIMARY_LOCK.voice_id}.`,
+      `Local Qwen narration plans require an approved narrator voice; got ${requestedQwenVoiceId}.`,
     );
   }
   if (provider === "qwen_local" && fallbackProvider) {
-    throw new Error("Qwen Liam production uses one provider and one voice; fallback must be null.");
+    throw new Error("Qwen production uses one provider and one voice; fallback must be null.");
   }
-  const synthesisContract = qwenLiamPrimary
+  const synthesisContract = qwenPrimary
     ? voiceOptions.synthesis_contract ?? QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT
     : null;
-  if (qwenLiamPrimary && ![
+  if (qwenPrimary && ![
     QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
     QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   ].some((contract) => (
@@ -2954,13 +2963,13 @@ function providerPlanContext(runIdentity = {}, providerRouting = {}, ttsProvider
       enabled: provider === "qwen_local",
       fallback: puckQwenFallback,
       language: "English",
-      temperature: QWEN_LIAM_PRIMARY_LOCK.temperature,
-      top_p: QWEN_LIAM_PRIMARY_LOCK.top_p,
-      top_k: QWEN_LIAM_PRIMARY_LOCK.top_k,
-      repetition_penalty: QWEN_LIAM_PRIMARY_LOCK.repetition_penalty,
-      max_tokens: QWEN_LIAM_PRIMARY_LOCK.max_tokens,
-      ...(qwenLiamPrimary
-        ? qwenLiamPrimaryIdentityControls(synthesisContract)
+      temperature: qwenPrimaryLock.temperature,
+      top_p: qwenPrimaryLock.top_p,
+      top_k: qwenPrimaryLock.top_k,
+      repetition_penalty: qwenPrimaryLock.repetition_penalty,
+      max_tokens: qwenPrimaryLock.max_tokens,
+      ...(qwenPrimary
+        ? qwenLiamPrimaryIdentityControls(synthesisContract, qwenPrimaryLock)
         : {}),
       ...(puckQwenFallback ? {
         delivery_control: "base_icl_reference_audio_only",
@@ -3235,10 +3244,10 @@ function mergeQwenLiamNarrationRows(rows, providerContext) {
       grouped_source_unit_count: 1,
       grouping_policy: "qwen_liam_sentence_complete_45_60_v1",
       qwen_instruct: null,
-      reference_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
-      reference_text: QWEN_LIAM_PRIMARY_LOCK.reference_text,
-      reference_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
-      voice_source_policy: "qwen_liam_primary_reference_clone",
+      reference_audio_path: providerContext.qwen3.reference_audio_path,
+      reference_text: providerContext.qwen3.reference_text,
+      reference_id: providerContext.qwen3.target_voice_id,
+      voice_source_policy: providerContext.qwen3.voice_continuity_contract,
     };
   }
   const first = rows[0];
@@ -3294,10 +3303,10 @@ function mergeQwenLiamNarrationRows(rows, providerContext) {
         instruct: null,
       },
     },
-    reference_audio_path: QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
-    reference_text: QWEN_LIAM_PRIMARY_LOCK.reference_text,
-    reference_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
-    voice_source_policy: "qwen_liam_primary_reference_clone",
+    reference_audio_path: providerContext.qwen3.reference_audio_path,
+    reference_text: providerContext.qwen3.reference_text,
+    reference_id: providerContext.qwen3.target_voice_id,
+    voice_source_policy: providerContext.qwen3.voice_continuity_contract,
     grouped_source_unit_count: sourceUnitRefs.length,
     grouping_policy: "qwen_liam_sentence_complete_45_60_v1",
   };
@@ -3460,11 +3469,11 @@ function buildQwenGenerationPlan(
     tts_provider: ttsProvider,
     tts_fallback_provider: ttsProvider === "qwen_local" ? null : "qwen_local",
     narrator_voice_id: ttsProvider === "qwen_local"
-      ? QWEN_LIAM_PRIMARY_LOCK.voice_id
+      ? QWEN_JOEL_PRIMARY_LOCK.voice_id
       : QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
     voice_provider_options: {
       primary: ttsProvider === "qwen_local"
-        ? { ...QWEN_LIAM_PRIMARY_LOCK }
+        ? { ...QWEN_JOEL_PRIMARY_LOCK }
         : { voice_id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id },
       fallback: ttsProvider === "qwen_local"
         ? null
@@ -3578,17 +3587,17 @@ function buildQwenGenerationPlan(
         },
         reference_audio_path: isKokoroPrimary
           ? null
-          : QWEN_LIAM_PRIMARY_LOCK.reference_audio_path,
+          : providerContext.qwen3.reference_audio_path,
         reference_text: isKokoroPrimary
           ? null
-          : QWEN_LIAM_PRIMARY_LOCK.reference_text,
+          : providerContext.qwen3.reference_text,
         voice_source_policy: isKokoroPrimary
           ? "bundled_kokoro_preset_no_reference_audio_required"
           : "qwen_liam_primary_reference_clone",
         voice_casting_mode: characterVoiceCastingEnabled() ? "explicit_character_voice_casting" : "narrator_only_default",
         reference_id: isKokoroPrimary
           ? providerContext.kokoro.voice_id
-          : QWEN_LIAM_PRIMARY_LOCK.voice_id,
+          : providerContext.qwen3.target_voice_id,
       };
       if (spoken.applied_replacements?.length) {
         row.tts_override_replacements_applied = spoken.applied_replacements;
@@ -3717,12 +3726,12 @@ function buildQwenGenerationPlan(
       narrator_voice_sha256: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_sha256,
       narrator_identity_policy: "single_puck_identity_with_qwen_exact_unit_clone",
     } : {
-      narrator_voice_id: QWEN_LIAM_PRIMARY_LOCK.voice_id,
-      narrator_voice_sha256: QWEN_LIAM_PRIMARY_LOCK.voice_sha256,
-      narrator_identity_policy: "single_qwen_liam_reference_clone",
+      narrator_voice_id: providerContext.qwen3.target_voice_id,
+      narrator_voice_sha256: providerContext.qwen3.target_voice_sha256,
+      narrator_identity_policy: "single_qwen_reference_clone",
     }),
     generated_at: new Date().toISOString(),
-    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Qwen3-TTS Base uses deterministic fixed batch-four requests for new runs (with an explicitly bound final partial cohort), restores source order before QA/stitch, and uses exact-unit serial recovery only for confirmed defects. Existing serial identities remain serial. Every request keeps the pinned Liam reference audio/transcript, no effective instruct channel, no continuous longform request, and no post-tempo processing.",
+    policy: "Provider-neutral narrator generation plan. Spoken text is clean and separate from exact captions/source. Standalone system/UI dialogue is spoken without its brackets; emotion, sound-design, and production-direction tags never enter spoken text. Qwen3-TTS Base uses deterministic fixed batch-four requests for new runs (with an explicitly bound final partial cohort), restores source order before QA/stitch, and uses exact-unit serial recovery only for confirmed defects. Existing serial identities remain serial. Every request keeps the identity-locked reference audio/transcript, no effective instruct channel, no continuous longform request, and no post-tempo processing.",
     provider_controls: {
       kokoro: providerContext.kokoro,
       qwen3: providerContext.qwen3,
@@ -4570,7 +4579,7 @@ async function main() {
       ]
       : qwenLocal
       ? [
-        `Qwen3-TTS 1.7B Base with the pinned ${QWEN_LIAM_PRIMARY_LOCK.voice_id} reference clone is the sole production narrator.`,
+        `Qwen3-TTS 1.7B Base with the pinned ${providerContext.qwen3.target_voice_id} reference clone is the sole production narrator.`,
         "Spoken text must be clean: no bracketed emotion, breath, laugh, or stage tags.",
         "Use sentence-complete 45–60-word narration units with a hard 60-word maximum.",
         providerContext.qwen3.synthesis_contract?.mode
@@ -4578,7 +4587,7 @@ async function main() {
           ? "Synthesize deterministic length-matched cohorts of four through one resident model. The final cohort may contain one to three real units; never pad with dummy text. Restore original source order before QA and stitching."
           : "This existing run is pinned to serial one-unit requests. Never send a continuous longform request.",
         "Recover only the exact objectively truncated or operator-confirmed unit in explicit serial recovery mode; never change provider, model, reference voice, text, or generation settings.",
-        "Qwen Base receives exact text plus the pinned Liam reference audio/transcript only; do not claim an effective instruct channel.",
+        "Qwen Base receives exact text plus the identity-locked reference audio/transcript only; do not claim an effective instruct channel.",
         "Stitch every adjacent unit with 80 ms of silence.",
         "Do not apply post-tempo processing or any unsupported native-speed control.",
         "Spell ambiguous rank/acronym tokens in spoken text when needed, e.g. SSS -> S S S.",

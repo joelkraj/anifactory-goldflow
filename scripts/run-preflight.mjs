@@ -83,7 +83,7 @@ const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] 
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
 const ltxVideoPolicy = normalizeLtxVideoPolicy(
-  flags["animation-policy"] ?? flags["ltx-video-policy"] ?? "disabled",
+  flags["animation-policy"] ?? flags["ltx-video-policy"] ?? "selective_ltx23",
 );
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
 const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 15, 0, 20);

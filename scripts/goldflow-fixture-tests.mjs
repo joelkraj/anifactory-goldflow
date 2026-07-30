@@ -6029,6 +6029,10 @@ function testLocalBeatFidelityEditorialCases() {
     "Local crews work at separate consoles.",
     "Operators monitor the gate from the rear row.",
     "Engineers and stewards remain in the background.",
+    "Three teachers review the paper together.",
+    "Her unnamed teammate sits at the desk ahead.",
+    "An exam proctor observes from the collection point.",
+    "Other test takers remain seated in orderly rows.",
   ]) {
     assert.equal(backgroundPopulationCuePresent(promptText), true);
   }

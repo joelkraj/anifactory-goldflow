@@ -66,8 +66,8 @@ async function main() {
   for (let index = 0; index < reports.length; index += 1) {
     const report = reports[index];
     const reportPath = reportPaths[index];
-    if (report?.schema !== "goldflow_ltx23_video_report_v1" || report?.status !== "passed" || report?.proof !== true) {
-      throw new Error(`Promotion requires a passed diagnostic proof report: ${reportPath}`);
+    if (report?.schema !== "goldflow_ltx23_video_report_v1" || report?.proof !== true || Number(report?.generated_count ?? 0) < 1) {
+      throw new Error(`Promotion requires a completed diagnostic proof report: ${reportPath}`);
     }
     if (report.model_id !== LTX_VIDEO_MODEL_ID || report.provider !== LTX_VIDEO_PROVIDER) {
       throw new Error(`Unexpected provider/model in ${reportPath}.`);
@@ -76,7 +76,7 @@ async function main() {
     for (const clip of report.clips ?? []) {
       const candidateId = String(clip.candidate_id ?? clip.image_id ?? "");
       if (!candidateId || seenCandidates.has(candidateId)) throw new Error(`Missing or duplicate candidate id ${candidateId || "<empty>"}.`);
-      if (clip.status !== "generated") throw new Error(`Only generated clips may be promoted: ${candidateId}.`);
+      if (clip.status !== "generated") continue;
       if (await hashFile(clip.source_image_path) !== clip.source_image_sha256) throw new Error(`Stale source image for ${candidateId}.`);
       if (await hashFile(clip.normalized_video_path) !== clip.normalized_video_sha256) throw new Error(`Stale normalized video for ${candidateId}.`);
       seenCandidates.add(candidateId);

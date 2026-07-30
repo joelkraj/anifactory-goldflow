@@ -36,16 +36,16 @@ function fixtureVoiceProviderOptions() {
       runtime: "mlx-audio",
       runtime_version: "0.4.6",
       sample_rate_hz: 24000,
-      voice_id: "am_liam",
-      voice_sha256: "liam-voice-sha",
-      reference_audio_path: "/voice/am_liam.wav",
+      voice_id: "joel_owned_narrator_clone",
+      voice_sha256: "joel-voice-sha",
+      reference_audio_path: "/voice/joel_owned_narrator_clone.wav",
       reference_audio_sha256: "reference-audio-sha",
-      reference_text: "Audited Liam reference transcript.",
+      reference_text: "Audited owned Joel reference transcript.",
       reference_text_sha256: "reference-text-sha",
-      reference_manifest_path: "/voice/am_liam_manifest.json",
+      reference_manifest_path: "/voice/joel_owned_narrator_clone_manifest.json",
       reference_manifest_sha256: "reference-manifest-sha",
-      reference_voice_sha256: "liam-voice-sha",
-      voice_continuity_contract: "qwen_icl_clone_of_liam_reference",
+      reference_voice_sha256: "joel-voice-sha",
+      voice_continuity_contract: "qwen_icl_clone_of_joel_owned_reference",
       reference_metadata_sha256: "reference-metadata-sha",
       speaker_similarity_model_sha256: "speaker-model-sha",
       speaker_similarity_calibration_sha256: "speaker-calibration-sha",
@@ -55,8 +55,8 @@ function fixtureVoiceProviderOptions() {
     fallback: null,
     qa_policy: "narration_tts_qa_v1",
     pace_strategy: "qwen_reference_native_cadence_no_speed_no_post_tempo",
-    narrator_identity_policy: "single_voice_qwen_liam_icl",
-    allowed_production_voice_ids: ["am_liam"],
+    narrator_identity_policy: "single_voice_qwen_joel_owned_icl",
+    allowed_production_voice_ids: ["joel_owned_narrator_clone"],
     unit_contract: {
       sentence_complete: true,
       target_words_min: 45,
@@ -281,15 +281,15 @@ export async function runRelockTtsTests() {
     timestamp: "2026-07-28T23:59:00.000Z",
     archiveDir: "/episode/reports/recovery/relock",
     previousIdentitySha256: "old-identity-sha",
-    reason: "operator approved Qwen Liam",
+    reason: "operator approved Qwen with the owned Joel reference",
   });
 
   assert.equal(after.tts_profile, QWEN_LIAM_PROFILE_ID);
   assert.equal(after.tts_provider, "qwen_local");
   assert.equal(after.tts_fallback_provider, null);
-  assert.equal(after.narrator_voice_id, "am_liam");
+  assert.equal(after.narrator_voice_id, "joel_owned_narrator_clone");
   assert.equal(after.tts_native_speed, null);
-  assert.equal(after.provider_locks.narrator_voice_sha256, "liam-voice-sha");
+  assert.equal(after.provider_locks.narrator_voice_sha256, "joel-voice-sha");
   assert.equal(after.provider_locks.tts_model_weights_sha256, "weights-sha");
   assert.equal(after.provider_locks.tts_unit_target_words_min, 45);
   assert.equal(after.provider_locks.tts_unit_target_words_max, 60);
@@ -323,7 +323,7 @@ export async function runRelockTtsTests() {
     "serial_exact_unit_recovery_v1",
   );
   assert.equal(after.provider_locks.primary_reference_manifest_sha256, "reference-manifest-sha");
-  assert.equal(after.provider_locks.primary_voice_continuity_contract, "qwen_icl_clone_of_liam_reference");
+  assert.equal(after.provider_locks.primary_voice_continuity_contract, "qwen_icl_clone_of_joel_owned_reference");
   assert.equal(after.provider_locks.fallback_reference_audio_sha256, null);
   assert.equal(after.model_versions.fallback_tts_model, null);
   assert.equal(after.production_profile_config.media.qwen_tts_concurrency, 1);
@@ -466,7 +466,7 @@ export async function runRelockTtsTests() {
   );
   assert.equal(
     recoveryDisposition(QWEN_PLANNER_FIX_RECOVERY_KIND),
-    "full_official_qwen_liam_voice_plan_and_narration_rebuild_after_committed_planner_fix",
+    "full_official_qwen_joel_voice_plan_and_narration_rebuild_after_committed_planner_fix",
   );
   const plannerFixEvidence = recoveryEvidence(
     QWEN_PLANNER_FIX_RECOVERY_KIND,
@@ -481,11 +481,11 @@ export async function runRelockTtsTests() {
       "ep_01",
       "2026-07-29T01-00-00-000Z",
     ),
-    "manual_blocker_triage_qwen_liam_planner_fix_relock_ep_01_2026-07-29T01-00-00-000Z.json",
+    "manual_blocker_triage_qwen_joel_planner_fix_relock_ep_01_2026-07-29T01-00-00-000Z.json",
   );
   assert.match(
     recoveryEvidence(PUCK_TO_QWEN_RECOVERY_KIND).join(" "),
-    /superseded the Puck primary lock/,
+    /superseded the prior narrator lock/,
   );
   const afterPlannerFix = relockedIdentityForTests(beforePlannerFix, {
     voiceProviderOptions: options,
@@ -500,7 +500,7 @@ export async function runRelockTtsTests() {
   });
   assert.equal(afterPlannerFix.tts_profile, QWEN_LIAM_PROFILE_ID);
   assert.equal(afterPlannerFix.tts_provider, "qwen_local");
-  assert.equal(afterPlannerFix.narrator_voice_id, "am_liam");
+  assert.equal(afterPlannerFix.narrator_voice_id, "joel_owned_narrator_clone");
   assert.equal(afterPlannerFix.tts_fallback_provider, null);
   assert.deepEqual(afterPlannerFix.voice_provider_options, options);
   assert.equal(afterPlannerFix.git.commit, "qwen-after-planner-fix");
@@ -554,7 +554,7 @@ export async function runRelockTtsTests() {
       tts_provider: "kokoro_local",
       narrator_voice_id: "am_michael",
     }),
-    /supports only Kokoro\/Puck migration or canonical Qwen\/Liam planner-fix recovery/,
+    /supports Kokoro\/Puck or Qwen\/Liam migration to Joel\/Qwen/,
   );
 
   await runInterruptedQwenInventoryFixture();

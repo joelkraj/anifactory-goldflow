@@ -200,7 +200,7 @@ Common flags:
   --allow-dirty-worktree true --dirty-reason <reason> is diagnostic/proof-only
 
 Production profiles:
-  fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, local Qwen Liam TTS 1, reference/images 15, render 4
+  fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, local Qwen with the owned Joel reference 1, reference/images 15, render 4
   fast-premium orchestration: semantic || voice/TTS/Whisper fork, scoped-only planner recovery, prompt-to-ModelsLab wavefront prefetch
   balanced: legacy 4/4/6/6 planner concurrency and explicit spend flags for run advance
   Selecting fast-premium at preflight authorizes planner/media/render spend for run advance. Creative review gates still hold.

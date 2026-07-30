@@ -22,6 +22,7 @@ import {
 import {
   NARRATION_TTS_QA_POLICY_VERSION,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_JOEL_PRIMARY_LOCK,
   QWEN_LIAM_PRIMARY_LOCK,
   narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
@@ -39,15 +40,19 @@ import {
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
 const DEFAULT_SIMILARITY_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-speaker-similarity/bin/python";
-const QWEN_REFERENCE_TEXT = QWEN_LIAM_PRIMARY_LOCK.reference_text;
-const QWEN_PIN = Object.freeze({
-  ...QWEN_LIAM_PRIMARY_LOCK,
-  model_source: QWEN_LIAM_PRIMARY_LOCK.model_id,
-  model_weights_sha256: "b965c581ccf6aa852a4124feeb7a8a111542ee7b213139368b4cc7ba7fd4728b",
-  speech_tokenizer_weights_sha256: "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
-  runtime: "mlx-audio",
-  runtime_version: "0.4.6",
-});
+function qwenPinForVoiceId(voiceId) {
+  const voiceLock = voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
+    ? QWEN_LIAM_PRIMARY_LOCK
+    : QWEN_JOEL_PRIMARY_LOCK;
+  return Object.freeze({
+    ...voiceLock,
+    model_source: voiceLock.model_id,
+    model_weights_sha256: "b965c581ccf6aa852a4124feeb7a8a111542ee7b213139368b4cc7ba7fd4728b",
+    speech_tokenizer_weights_sha256: "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+    runtime: "mlx-audio",
+    runtime_version: "0.4.6",
+  });
+}
 const QA_POLICY_VERSION = NARRATION_TTS_QA_POLICY_VERSION;
 const STITCH_POLICY_VERSION = "narration_tts_stitch_v1";
 const SAMPLE_RATE = 24000;
@@ -675,6 +680,8 @@ function requiredExact(actual, expected, label, findings) {
 
 export function validateNarrationTtsPolicyForTests(identity) {
   const findings = [];
+  const qwenPin = qwenPinForVoiceId(identity?.narrator_voice_id);
+  const qwenReferenceText = qwenPin.reference_text;
   let policy;
   try {
     policy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity(identity), {
@@ -701,39 +708,39 @@ export function validateNarrationTtsPolicyForTests(identity) {
     });
   }
   for (const [key, expected] of Object.entries({
-    provider: QWEN_PIN.provider,
-    model_id: QWEN_PIN.model_id,
-    model_revision: QWEN_PIN.model_revision,
-    model_weights_sha256: QWEN_PIN.model_weights_sha256,
-    model_config_sha256: QWEN_PIN.model_config_sha256,
-    generation_config_sha256: QWEN_PIN.generation_config_sha256,
-    speech_tokenizer_weights_sha256: QWEN_PIN.speech_tokenizer_weights_sha256,
-    speech_tokenizer_config_sha256: QWEN_PIN.speech_tokenizer_config_sha256,
-    runtime: QWEN_PIN.runtime,
-    runtime_version: QWEN_PIN.runtime_version,
-    sample_rate_hz: QWEN_PIN.sample_rate_hz,
-    voice_id: QWEN_PIN.voice_id,
-    voice_sha256: QWEN_PIN.voice_sha256,
-    reference_audio_path: QWEN_PIN.reference_audio_path,
-    reference_audio_sha256: QWEN_PIN.reference_audio_sha256,
-    reference_text: QWEN_REFERENCE_TEXT,
-    reference_text_sha256: QWEN_PIN.reference_text_sha256,
-    reference_manifest_path: QWEN_PIN.reference_manifest_path,
-    reference_manifest_sha256: QWEN_PIN.reference_manifest_sha256,
-    reference_metadata_path: QWEN_PIN.reference_metadata_path,
-    reference_metadata_sha256: QWEN_PIN.reference_metadata_sha256,
-    reference_voice_id: QWEN_PIN.reference_voice_id,
-    reference_voice_sha256: QWEN_PIN.reference_voice_sha256,
-    voice_continuity_contract: QWEN_PIN.voice_continuity_contract,
+    provider: qwenPin.provider,
+    model_id: qwenPin.model_id,
+    model_revision: qwenPin.model_revision,
+    model_weights_sha256: qwenPin.model_weights_sha256,
+    model_config_sha256: qwenPin.model_config_sha256,
+    generation_config_sha256: qwenPin.generation_config_sha256,
+    speech_tokenizer_weights_sha256: qwenPin.speech_tokenizer_weights_sha256,
+    speech_tokenizer_config_sha256: qwenPin.speech_tokenizer_config_sha256,
+    runtime: qwenPin.runtime,
+    runtime_version: qwenPin.runtime_version,
+    sample_rate_hz: qwenPin.sample_rate_hz,
+    voice_id: qwenPin.voice_id,
+    voice_sha256: qwenPin.voice_sha256,
+    reference_audio_path: qwenPin.reference_audio_path,
+    reference_audio_sha256: qwenPin.reference_audio_sha256,
+    reference_text: qwenReferenceText,
+    reference_text_sha256: qwenPin.reference_text_sha256,
+    reference_manifest_path: qwenPin.reference_manifest_path,
+    reference_manifest_sha256: qwenPin.reference_manifest_sha256,
+    reference_metadata_path: qwenPin.reference_metadata_path,
+    reference_metadata_sha256: qwenPin.reference_metadata_sha256,
+    reference_voice_id: qwenPin.reference_voice_id,
+    reference_voice_sha256: qwenPin.reference_voice_sha256,
+    voice_continuity_contract: qwenPin.voice_continuity_contract,
     delivery_control: "base_icl_reference_audio_only",
     instruct_supported: false,
     speed_control_supported: false,
     native_speed: null,
-    temperature: QWEN_PIN.temperature,
-    top_p: QWEN_PIN.top_p,
-    top_k: QWEN_PIN.top_k,
-    repetition_penalty: QWEN_PIN.repetition_penalty,
-    max_tokens: QWEN_PIN.max_tokens,
+    temperature: qwenPin.temperature,
+    top_p: qwenPin.top_p,
+    top_k: qwenPin.top_k,
+    repetition_penalty: qwenPin.repetition_penalty,
+    max_tokens: qwenPin.max_tokens,
   })) requiredExact(primary[key], expected, `primary.${key}`, findings);
   if (fallback !== null) {
     findings.push({
@@ -747,8 +754,8 @@ export function validateNarrationTtsPolicyForTests(identity) {
     findings,
     primary: {
       ...primary,
-      ...QWEN_PIN,
-      reference_text: primary.reference_text ?? QWEN_REFERENCE_TEXT,
+      ...qwenPin,
+      reference_text: primary.reference_text ?? qwenReferenceText,
     },
     fallback: null,
     unit_contract: policy.unit_contract,

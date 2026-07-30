@@ -59,6 +59,9 @@ const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData
 const flags = parseFlags(process.argv.slice(2));
 const CURRENT_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v3";
 const LEGACY_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
+// Legacy identities may omit pace targets. New preflights always bind the
+// current 180-195 contract explicitly, while missing historical values retain
+// their original compatibility defaults.
 const DEFAULT_TARGET_WPM_MIN = 195;
 const DEFAULT_TARGET_WPM_MAX = 220;
 const DEFAULT_TARGET_WPM_MID = 208;

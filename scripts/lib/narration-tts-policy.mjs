@@ -6,7 +6,7 @@ import {
 
 export const DEFAULT_TTS_PROVIDER = "qwen_local";
 export const DEFAULT_TTS_FALLBACK_PROVIDER = null;
-export const DEFAULT_NARRATOR_VOICE_ID = "am_liam";
+export const DEFAULT_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
 export const DEFAULT_TTS_NATIVE_SPEED = null;
 export const DEFAULT_TTS_UNIT_TARGET_WORDS_MIN = 45;
 export const DEFAULT_TTS_UNIT_TARGET_WORDS_MAX = 60;
@@ -117,6 +117,53 @@ export const QWEN_LIAM_PRIMARY_LOCK = Object.freeze({
   stitch_contract: QWEN_LIAM_STITCH_CONTRACT,
   retry_contract: QWEN_LIAM_RETRY_CONTRACT,
 });
+
+export const QWEN_JOEL_PRIMARY_LOCK = Object.freeze({
+  ...QWEN_LOCAL_MODEL_LOCK,
+  voice_id: "joel_owned_narrator_clone",
+  voice_sha256: "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf",
+  reference_audio_path: "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_02_tense_narration.wav",
+  reference_audio_sha256: "4cb13c2fb887874b77125b70c020f3cfb103954246fb391a51ce99f0341d8a17",
+  reference_text: "The register turned blue before the window cracked. Outside, something tall moved between the parked cars, stopped under the dead sign, and waited like it had already learned his name.",
+  reference_text_sha256: "0d51ab6db4afea9f0e9341b009b5b100e280279d17752a154b6b248353df2d8d",
+  reference_manifest_path: "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/manifest.json",
+  reference_manifest_sha256: "ac7a784998f614d75abd9e6c2788692094ba80825edb4bea4508f899c60ea9f7",
+  reference_metadata_path: "/Users/joel/AniFactoryData/voice_bank/qwen/voices/joel_owned_narrator_clone/voice.json",
+  reference_metadata_sha256: "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf",
+  reference_voice_id: "joel_owned_narrator_clone",
+  reference_voice_sha256: "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf",
+  reference_source_provider: "operator_owned_audio",
+  reference_source_model_id: "joel_owned_voice_recording",
+  reference_source_model_revision: "joel_ref_02_tense_narration_v1",
+  reference_origin_unit_id: "joel_ref_02_tense_narration",
+  voice_continuity_contract: "qwen_icl_clone_of_joel_owned_reference",
+  delivery_control: "base_icl_reference_audio_only",
+  instruct_supported: false,
+  speed_control_supported: false,
+  native_speed: null,
+  temperature: 0.6,
+  top_p: 0.8,
+  top_k: 50,
+  repetition_penalty: 1.2,
+  max_tokens: 1200,
+  speaker_similarity_method: "WeSpeaker VoxCeleb ResNet34 LM cosine similarity",
+  speaker_similarity_model_path: "/Users/joel/AniFactoryData/voice_bank/bakeoff/model-downloads/wespeaker/wespeaker_en_voxceleb_resnet34.onnx",
+  speaker_similarity_model_sha256: "5ef208a9da1453335308a6b6f4e6dfbd7e183a38b604de0a57664f45d257fe94",
+  speaker_similarity_calibration_path: "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/manifest.json",
+  speaker_similarity_calibration_sha256: "ac7a784998f614d75abd9e6c2788692094ba80825edb4bea4508f899c60ea9f7",
+  minimum_cosine_similarity: 0.88,
+  warning_below_cosine_similarity: 0.90,
+  warning_floor_cosine_similarity: 0.90,
+  unit_contract: QWEN_LIAM_UNIT_CONTRACT,
+  stitch_contract: QWEN_LIAM_STITCH_CONTRACT,
+  retry_contract: QWEN_LIAM_RETRY_CONTRACT,
+});
+
+function qwenPrimaryLockForVoice(voiceId) {
+  return voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
+    ? QWEN_LIAM_PRIMARY_LOCK
+    : QWEN_JOEL_PRIMARY_LOCK;
+}
 
 // Retained only so already-created Kokoro/Puck identities remain readable
 // through their explicit compatibility contract.
@@ -303,7 +350,9 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
     ? null
     : positiveNumber(rawNativeSpeed, null);
   const contract = primaryProvider === "qwen_local"
-    ? "qwen_liam_primary_v1"
+    ? voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
+      ? "qwen_liam_primary_v1"
+      : "qwen_joel_primary_v1"
     : primaryProvider === "kokoro_local"
       ? "legacy_kokoro_puck"
       : "generic_narration_v1";
@@ -316,7 +365,7 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
     contract,
     primary: {
       ...(primaryProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : {}),
-      ...(primaryProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK : {}),
+      ...(primaryProvider === "qwen_local" ? qwenPrimaryLockForVoice(voiceId) : {}),
       ...(identity.voice_provider_options?.primary ?? {}),
       provider: primaryProvider,
       voice_id: voiceId,
@@ -713,13 +762,14 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
       throw new Error(`Qwen fallback lock differs from the audited model/reference assets: ${fallbackMismatches.join(", ")}.`);
     }
   } else {
-    if (policy.contract !== "qwen_liam_primary_v1"
+    if (!["qwen_joel_primary_v1", "qwen_liam_primary_v1"].includes(policy.contract)
       || policy.primary?.provider !== "qwen_local") {
-      throw new Error(`The production narration lane requires qwen_local Liam primary; got ${policy.primary?.provider ?? "missing"}.`);
+      throw new Error(`The production narration lane requires a locked qwen_local narrator; got ${policy.primary?.provider ?? "missing"}.`);
     }
-    if (policy.primary.voice_id !== DEFAULT_NARRATOR_VOICE_ID) {
-      throw new Error(`New narration identities require the single locked narrator voice ${DEFAULT_NARRATOR_VOICE_ID}; got ${policy.primary.voice_id ?? "missing"}.`);
+    if (![DEFAULT_NARRATOR_VOICE_ID, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(policy.primary.voice_id)) {
+      throw new Error(`Narration identities require an approved locked narrator voice; got ${policy.primary.voice_id ?? "missing"}.`);
     }
+    const expectedPrimaryLock = qwenPrimaryLockForVoice(policy.primary.voice_id);
     const primaryLockFields = [
       "provider",
       "model_id",
@@ -768,10 +818,10 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
       "warning_floor_cosine_similarity",
     ];
     const primaryMismatches = primaryLockFields.filter(
-      (field) => policy.primary?.[field] !== QWEN_LIAM_PRIMARY_LOCK[field],
+      (field) => policy.primary?.[field] !== expectedPrimaryLock[field],
     );
     if (primaryMismatches.length) {
-      throw new Error(`Qwen Liam production lock differs from the audited model/reference assets: ${primaryMismatches.join(", ")}.`);
+      throw new Error(`Qwen narrator production lock differs from the audited model/reference assets: ${primaryMismatches.join(", ")}.`);
     }
     if (policy.fallback != null) {
       throw new Error("Qwen Liam is the sole production voice; fallback must be null.");
@@ -856,11 +906,11 @@ export function defaultNarrationVoiceProviderOptions({
     throw new Error("Qwen Liam has no native-speed control; omit nativeSpeed.");
   }
   return {
-    primary: QWEN_LIAM_PRIMARY_LOCK,
+    primary: QWEN_JOEL_PRIMARY_LOCK,
     fallback: null,
     qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
     pace_strategy: "qwen_reference_native_cadence_no_speed_no_post_tempo",
-    narrator_identity_policy: "single_voice_qwen_liam_icl",
+    narrator_identity_policy: "single_voice_qwen_joel_owned_icl",
     allowed_production_voice_ids: [DEFAULT_NARRATOR_VOICE_ID],
     unit_contract: QWEN_LIAM_UNIT_CONTRACT,
     stitch_contract: QWEN_LIAM_STITCH_CONTRACT,

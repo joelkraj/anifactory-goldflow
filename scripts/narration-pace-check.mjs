@@ -5,8 +5,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
-const DEFAULT_TARGET_WPM_MIN = 195;
-const DEFAULT_TARGET_WPM_MAX = 220;
+const DEFAULT_TARGET_WPM_MIN = 180;
+const DEFAULT_TARGET_WPM_MAX = 195;
 const flags = parseFlags(process.argv.slice(2));
 const mode = String(flags.mode ?? "script");
 const channel = flags.channel ?? "53rebirth";

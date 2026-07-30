@@ -48,6 +48,10 @@ LIAM_VOICE_ID = "am_liam"
 LIAM_VOICE_SHA256 = (
     "66b65a96e16c3d91035a6e9019d9986ed524d27ce35b487270cdf61c99e3ebad"
 )
+JOEL_VOICE_ID = "joel_owned_narrator_clone"
+JOEL_VOICE_SHA256 = (
+    "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf"
+)
 QWEN = {
     "provider": "qwen_local",
     "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
@@ -112,6 +116,54 @@ QWEN_LIAM_REFERENCE = {
         "max_tokens": 1200,
     },
 }
+QWEN_JOEL_REFERENCE = {
+    "contract_id": "qwen_joel_primary_v1",
+    "voice_continuity_contract": "qwen_icl_clone_of_joel_owned_reference",
+    "voice_clone_contract": "qwen_icl_clone_of_selected_joel_owned_reference",
+    "voice_id": JOEL_VOICE_ID,
+    "voice_sha256": JOEL_VOICE_SHA256,
+    "audio_path": (
+        "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/"
+        "joel_narrator/joel_ref_02_tense_narration.wav"
+    ),
+    "audio_sha256": (
+        "4cb13c2fb887874b77125b70c020f3cfb103954246fb391a51ce99f0341d8a17"
+    ),
+    "text": (
+        "The register turned blue before the window cracked. Outside, something "
+        "tall moved between the parked cars, stopped under the dead sign, and "
+        "waited like it had already learned his name."
+    ),
+    "text_sha256": (
+        "0d51ab6db4afea9f0e9341b009b5b100e280279d17752a154b6b248353df2d8d"
+    ),
+    "manifest_path": (
+        "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/"
+        "joel_narrator/manifest.json"
+    ),
+    "manifest_sha256": (
+        "ac7a784998f614d75abd9e6c2788692094ba80825edb4bea4508f899c60ea9f7"
+    ),
+    "metadata_path": (
+        "/Users/joel/AniFactoryData/voice_bank/qwen/voices/"
+        "joel_owned_narrator_clone/voice.json"
+    ),
+    "metadata_sha256": (
+        "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf"
+    ),
+    "source_provider": "operator_owned_audio",
+    "source_model_id": "joel_owned_voice_recording",
+    "source_model_revision": "joel_ref_02_tense_narration_v1",
+    "source_unit_id": "joel_ref_02_tense_narration",
+    "legacy_compatibility": False,
+    "generation_parameters": {
+        "temperature": 0.6,
+        "top_p": 0.8,
+        "top_k": 50,
+        "repetition_penalty": 1.2,
+        "max_tokens": 1200,
+    },
+}
 QWEN_PUCK_REFERENCE = {
     "contract_id": "qwen_puck_legacy_fallback_v1",
     "voice_continuity_contract": "clone_primary_puck_identity",
@@ -155,6 +207,7 @@ QWEN_PUCK_REFERENCE = {
     },
 }
 QWEN_REFERENCE_CONTRACTS = {
+    QWEN_JOEL_REFERENCE["voice_continuity_contract"]: QWEN_JOEL_REFERENCE,
     QWEN_LIAM_REFERENCE["voice_continuity_contract"]: QWEN_LIAM_REFERENCE,
     QWEN_PUCK_REFERENCE["voice_continuity_contract"]: QWEN_PUCK_REFERENCE,
 }

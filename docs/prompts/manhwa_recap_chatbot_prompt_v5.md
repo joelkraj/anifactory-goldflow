@@ -143,7 +143,7 @@ For a betrayal story with a hidden skill, system, or evolved power, reveal the c
 
 By approximately ten minutes, Joey must have survived or escaped the opening crisis, physically demonstrated the core advantage and its limit, and entered a new status or objective.
 
-Before drafting, silently convert those time targets into word positions using the intended spoken WPM. At two hundred fifteen WPM, the refusal belongs near word one thousand, the mechanic and its first proof belong between roughly words one thousand three hundred and one thousand six hundred, and the escape, boundary, and new objective belong by roughly word two thousand one hundred fifty. Do not spend the opening word budget on an extended solo boss exchange after the mechanic is understood.
+Before drafting, silently convert those time targets into word positions using the intended spoken WPM. At roughly one hundred eighty-eight WPM, the refusal belongs near word nine hundred, the mechanic and its first proof belong between roughly words one thousand one hundred and one thousand four hundred, and the escape, boundary, and new objective belong by roughly word one thousand eight hundred eighty. Do not spend the opening word budget on an extended solo boss exchange after the mechanic is understood.
 
 STORY ENGINE
 
@@ -437,4 +437,3 @@ The output contains only TTS-ready narration.
 
 Now write the complete script.
 ```
-

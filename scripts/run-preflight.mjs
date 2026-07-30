@@ -31,8 +31,8 @@ import {
   DEFAULT_TTS_FALLBACK_PROVIDER,
   DEFAULT_TTS_PROVIDER,
   KOKORO_MODEL_LOCK,
+  QWEN_JOEL_PRIMARY_LOCK,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
-  QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LOCAL_FALLBACK_LOCK,
   defaultNarrationVoiceProviderOptions,
   normalizeTtsProvider,
@@ -73,8 +73,8 @@ const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
 const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
 const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "diagnostic");
-const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 195);
-const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 220);
+const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 180);
+const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 195);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
@@ -95,15 +95,15 @@ if (!["qwen_local", "kokoro_local", "modelslab_qwen"].includes(ttsProvider)) {
   throw new Error(`Unsupported TTS provider: ${ttsProvider}.`);
 }
 if (explicitLegacyQwenFlags && flags["tts-provider"] == null) {
-  throw new Error("Legacy Qwen flags do not select the local production provider. Omit them for Qwen Liam, or explicitly pass --tts-provider modelslab_qwen for a legacy diagnostic.");
+  throw new Error("Legacy Qwen flags do not select the local production provider. Omit them for the Joel/Qwen default, or explicitly pass --tts-provider modelslab_qwen for a legacy diagnostic.");
 }
 if (runIntent === "production" && ttsProvider !== DEFAULT_TTS_PROVIDER) {
   throw new Error(`New production runs require ${DEFAULT_TTS_PROVIDER} with ${DEFAULT_NARRATOR_VOICE_ID}.`);
 }
 if (ttsProvider === "qwen_local"
   && flags["tts-model"] != null
-  && flags["tts-model"] !== QWEN_LIAM_PRIMARY_LOCK.model_id) {
-  throw new Error(`Qwen Liam production requires the audited model ${QWEN_LIAM_PRIMARY_LOCK.model_id}; --tts-model may not override it.`);
+  && flags["tts-model"] !== QWEN_JOEL_PRIMARY_LOCK.model_id) {
+  throw new Error(`Joel/Qwen production requires the audited model ${QWEN_JOEL_PRIMARY_LOCK.model_id}; --tts-model may not override it.`);
 }
 const fallbackDefault = ttsProvider === "kokoro_local" ? "qwen_local" : DEFAULT_TTS_FALLBACK_PROVIDER;
 const fallbackValue = flags["tts-fallback-provider"] ?? fallbackDefault;
@@ -116,10 +116,10 @@ const narratorVoiceId = cleanOptionalId(
     : ttsProvider === "kokoro_local" ? "am_puck" : null),
 );
 if (ttsProvider === "qwen_local" && narratorVoiceId !== DEFAULT_NARRATOR_VOICE_ID) {
-  throw new Error(`New narration identities are Liam-only: --narrator-voice-id must be ${DEFAULT_NARRATOR_VOICE_ID}.`);
+  throw new Error(`New narration identities use the owned Joel reference: --narrator-voice-id must be ${DEFAULT_NARRATOR_VOICE_ID}.`);
 }
 if (ttsProvider === "qwen_local" && ttsFallbackProvider !== null) {
-  throw new Error("Qwen Liam is the sole production voice; --tts-fallback-provider must be omitted.");
+  throw new Error("Joel/Qwen is the sole production voice; --tts-fallback-provider must be omitted.");
 }
 if (ttsProvider === "kokoro_local" && narratorVoiceId !== "am_puck") {
   throw new Error("Legacy Kokoro compatibility is Puck-only: --narrator-voice-id must be am_puck.");
@@ -131,7 +131,7 @@ const requestedTtsNativeSpeed = flags["tts-native-speed"]
   ?? (ttsProvider === "modelslab_qwen" ? flags["qwen-native-speed"] : null)
   ?? process.env.ANIFACTORY_TTS_NATIVE_SPEED;
 if (ttsProvider === "qwen_local" && requestedTtsNativeSpeed != null) {
-  throw new Error("Qwen Liam has no native-speed control. Omit --tts-native-speed; post-tempo processing is also disabled.");
+  throw new Error("Joel/Qwen has no native-speed control. Omit --tts-native-speed; post-tempo processing is also disabled.");
 }
 const ttsNativeSpeed = ttsProvider === "qwen_local"
   ? null
@@ -296,7 +296,7 @@ function parseProofScope(parsedFlags, intent) {
 function lockedModelVersions() {
   const genericTts = ttsProvider === "qwen_local" || ttsProvider === "kokoro_local";
   const primaryLock = ttsProvider === "qwen_local"
-    ? QWEN_LIAM_PRIMARY_LOCK
+    ? QWEN_JOEL_PRIMARY_LOCK
     : ttsProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : null;
   const fallbackLock = ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK : null;
   return {
@@ -518,30 +518,30 @@ async function main() {
       fallback_tts_model: lockedModelVersions().fallback_tts_model,
       fallback_tts_model_revision: lockedModelVersions().fallback_tts_model_revision,
       narrator_voice_identity: ttsProvider !== "modelslab_qwen" ? narratorVoiceId : qwenNarratorVoiceId,
-      primary_reference_audio_sha256: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256 : null,
-      primary_reference_manifest_sha256: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256 : null,
-      primary_reference_metadata_sha256: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256 : null,
-      primary_voice_sha256: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.voice_sha256 : null,
-      primary_similarity_model_sha256: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_sha256 : null,
-      primary_similarity_calibration_sha256: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_calibration_sha256 : null,
-      primary_minimum_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.minimum_cosine_similarity : null,
-      primary_warning_below_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.warning_below_cosine_similarity : null,
-      primary_voice_continuity_contract: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract : null,
-      tts_unit_target_words_min: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.unit_contract.target_words_min : null,
-      tts_unit_target_words_max: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.unit_contract.target_words_max : null,
-      tts_unit_hard_words_max: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.unit_contract.hard_words_max : null,
-      tts_sentence_complete_units: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.unit_contract.sentence_complete : null,
-      tts_continuous_requests: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.unit_contract.continuous_requests : null,
-      tts_join_silence_ms: ttsProvider === "qwen_local" ? QWEN_LIAM_PRIMARY_LOCK.stitch_contract.join_silence_ms : null,
+      primary_reference_audio_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256 : null,
+      primary_reference_manifest_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256 : null,
+      primary_reference_metadata_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256 : null,
+      primary_voice_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_sha256 : null,
+      primary_similarity_model_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_sha256 : null,
+      primary_similarity_calibration_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256 : null,
+      primary_minimum_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.minimum_cosine_similarity : null,
+      primary_warning_below_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.warning_below_cosine_similarity : null,
+      primary_voice_continuity_contract: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract : null,
+      tts_unit_target_words_min: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.target_words_min : null,
+      tts_unit_target_words_max: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.target_words_max : null,
+      tts_unit_hard_words_max: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.hard_words_max : null,
+      tts_sentence_complete_units: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.sentence_complete : null,
+      tts_continuous_requests: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.continuous_requests : null,
+      tts_join_silence_ms: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.stitch_contract.join_silence_ms : null,
       post_tempo_processing: false,
       tts_retry_policy: ttsProvider === "qwen_local"
-        ? QWEN_LIAM_PRIMARY_LOCK.retry_contract.retry_policy
+        ? QWEN_JOEL_PRIMARY_LOCK.retry_contract.retry_policy
         : null,
       tts_automatic_asr_retry: ttsProvider === "qwen_local"
-        ? QWEN_LIAM_PRIMARY_LOCK.retry_contract.automatic_asr_retry
+        ? QWEN_JOEL_PRIMARY_LOCK.retry_contract.automatic_asr_retry
         : null,
       tts_confirmed_defect_types: ttsProvider === "qwen_local"
-        ? [...QWEN_LIAM_PRIMARY_LOCK.retry_contract.confirmed_defect_types]
+        ? [...QWEN_JOEL_PRIMARY_LOCK.retry_contract.confirmed_defect_types]
         : null,
       tts_synthesis_contract_id: ttsProvider === "qwen_local"
         ? QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.contract_id
@@ -601,10 +601,10 @@ async function main() {
       fallback_must_clone_primary_voice_identity: ttsProvider === "kokoro_local",
       sentence_complete_tts_units_required: ttsProvider === "qwen_local",
       tts_unit_hard_words_max: ttsProvider === "qwen_local"
-        ? QWEN_LIAM_PRIMARY_LOCK.unit_contract.hard_words_max
+        ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.hard_words_max
         : null,
       tts_join_silence_ms: ttsProvider === "qwen_local"
-        ? QWEN_LIAM_PRIMARY_LOCK.stitch_contract.join_silence_ms
+        ? QWEN_JOEL_PRIMARY_LOCK.stitch_contract.join_silence_ms
         : null,
       continuous_longform_tts_requests_forbidden: ttsProvider === "qwen_local",
       deterministic_length_matched_tts_batching_required:

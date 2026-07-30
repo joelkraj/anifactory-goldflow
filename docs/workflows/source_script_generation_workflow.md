@@ -8,7 +8,7 @@ The chatbot should produce a polished narration script that is already close to 
 
 ## Default Flow
 
-1. Operator provides a premise, target length, subgenre, and title promise. Default production narration pace is 210-220 spoken words per minute, with 215 WPM used for runtime estimates.
+1. Operator provides a premise, target length, subgenre, and title promise. Default production narration pace is 180-195 spoken words per minute, with 187.5 WPM used for runtime estimates.
 2. Agent selects the best prompt template from `docs/prompts/`.
 3. Agent fills the template variables and returns one copy-paste prompt to the operator.
 4. Operator gives the prompt to the chatbot.
@@ -32,7 +32,7 @@ Reject or revise the chatbot output before ingest if it contains:
 - A cold open that spends the first 30-60 seconds on setup instead of visible wound, hidden-power spark, first counter, and the next arc.
 - Streamer/system premises where the first live/system quest, status mechanic, or next arc arrives too late for the title promise.
 - TTS-ambiguous wording such as "go live" without streaming context or "content" where the intended meaning is media/clip content.
-- Prose that is padded for length instead of written for the 210-220 WPM narration target.
+- Prose that is padded for length instead of written for the 180-195 WPM narration target.
 - Joey continuing to submit to the same betrayer after understanding the harm without a visible objective, boundary, and changed conflict.
 - Joey repeating a mistake after the story has already made the lesson explicit.
 - A system or mechanic choosing Joey's goals, morality, or decisive action for him.
@@ -62,9 +62,7 @@ When a better tactic is discovered:
 
 ## Current Recommended Template
 
-Use `docs/prompts/manhwa_recap_chatbot_prompt_v4.md` by default for original long-form Joey Manhwa revenge power-fantasy stories across weak-to-strong, hunter/rank, system, regression, tower, academy, dungeon, noble revenge, and similar premises.
-
-Use `docs/prompts/manhwa_recap_chatbot_prompt_v5.md` only when the operator explicitly requests the conversational-winner profile. V5 preserves the V4 safeguards while permitting a few controlled audience asides and binding the script to an additive thumbnail promise.
+Use `docs/prompts/manhwa_recap_chatbot_prompt_v5.md` by default for original long-form Joey Manhwa revenge power-fantasy stories across weak-to-strong, hunter/rank, system, regression, tower, academy, dungeon, noble revenge, and similar premises. Select the `CONVERSATIONAL WINNER` narration profile unless the operator asks for another profile. V5 preserves the V4 safeguards while permitting a few controlled audience asides and binding the script to an additive thumbnail promise.
 
 Every generated candidate must pass `docs/prompts/manhwa_recap_comment_criticism_release_gate_v1.md` before ingest.
 

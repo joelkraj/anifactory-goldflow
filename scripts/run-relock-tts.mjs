@@ -9,9 +9,10 @@ import * as narrationPolicy from "./lib/narration-tts-policy.mjs";
 import { PIPELINE_STAGE_REGISTRY_VERSION } from "./lib/pipeline-stage-registry.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const QWEN_LIAM_PROFILE_ID = "qwen3_1_7b_base_liam_sentence_v1";
-const PUCK_TO_QWEN_RECOVERY_KIND = "puck_to_qwen_liam_identity_migration";
-const QWEN_PLANNER_FIX_RECOVERY_KIND = "qwen_liam_planner_fix_relock";
+const QWEN_LIAM_PROFILE_ID = "qwen3_1_7b_base_joel_sentence_v1";
+const PUCK_TO_QWEN_RECOVERY_KIND = "puck_to_qwen_joel_identity_migration";
+const LIAM_TO_JOEL_RECOVERY_KIND = "qwen_liam_to_joel_identity_migration";
+const QWEN_PLANNER_FIX_RECOVERY_KIND = "qwen_joel_planner_fix_relock";
 const INTERRUPTED_QWEN_REUSE_POLICY =
   "reuse_allowed_only_for_exact_unchanged_single_segment_content_addressed_units";
 
@@ -100,7 +101,7 @@ function requireCanonicalQwenLiamOptions(options) {
   const synthesis = options?.synthesis_contract ?? {};
   const mismatches = [];
   if (primary.provider !== "qwen_local") mismatches.push(`provider=${primary.provider ?? "missing"}`);
-  if (primary.voice_id !== "am_liam") mismatches.push(`voice=${primary.voice_id ?? "missing"}`);
+  if (primary.voice_id !== "joel_owned_narrator_clone") mismatches.push(`voice=${primary.voice_id ?? "missing"}`);
   if (options?.fallback != null) mismatches.push("fallback must be null");
   if (unit.sentence_complete !== true) mismatches.push("sentence_complete must be true");
   if (Number(unit.target_words_min) !== 45) mismatches.push(`target_words_min=${unit.target_words_min ?? "missing"}`);
@@ -160,29 +161,32 @@ export function recoveryKindForIdentityForTests(identity = {}) {
     return PUCK_TO_QWEN_RECOVERY_KIND;
   }
   if (provider === "qwen_local" && voiceId === "am_liam" && fallback == null) {
+    return LIAM_TO_JOEL_RECOVERY_KIND;
+  }
+  if (provider === "qwen_local" && voiceId === "joel_owned_narrator_clone" && fallback == null) {
     return QWEN_PLANNER_FIX_RECOVERY_KIND;
   }
   throw new Error(
-    `run relock-tts supports only Kokoro/Puck migration or canonical Qwen/Liam planner-fix recovery; found ${provider ?? "missing"}/${voiceId ?? "missing"} with fallback ${fallback ?? "none"}.`,
+    `run relock-tts supports Kokoro/Puck or Qwen/Liam migration to Joel/Qwen, plus canonical Joel/Qwen planner-fix recovery; found ${provider ?? "missing"}/${voiceId ?? "missing"} with fallback ${fallback ?? "none"}.`,
   );
 }
 
 function recoveryArchiveLabel(recoveryKind) {
-  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
-    ? "puck-to-qwen-liam"
-    : "qwen-liam-planner-fix-relock";
+  if (recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND) return "puck-to-qwen-joel";
+  if (recoveryKind === LIAM_TO_JOEL_RECOVERY_KIND) return "qwen-liam-to-joel";
+  return "qwen-joel-planner-fix-relock";
 }
 
 function recoveryDisposition(recoveryKind) {
-  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
-    ? "full_official_qwen_liam_voice_plan_and_narration_rebuild"
-    : "full_official_qwen_liam_voice_plan_and_narration_rebuild_after_committed_planner_fix";
+  return recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND
+    ? "full_official_qwen_joel_voice_plan_and_narration_rebuild_after_committed_planner_fix"
+    : "full_official_qwen_joel_voice_plan_and_narration_rebuild";
 }
 
 function recoveryTriageFilename(recoveryKind, episode, archiveSlug) {
-  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
-    ? `manual_blocker_triage_qwen_liam_relock_${episode}.json`
-    : `manual_blocker_triage_qwen_liam_planner_fix_relock_${episode}_${archiveSlug}.json`;
+  return recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND
+    ? `manual_blocker_triage_qwen_joel_planner_fix_relock_${episode}_${archiveSlug}.json`
+    : `manual_blocker_triage_qwen_joel_relock_${episode}.json`;
 }
 
 function recoveryEvidence(
@@ -190,9 +194,9 @@ function recoveryEvidence(
   interruptedQwenTts = {},
   { synthesisContractChanged = false } = {},
 ) {
-  return recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+  return recoveryKind !== QWEN_PLANNER_FIX_RECOVERY_KIND
     ? [
-        "The operator explicitly superseded the Puck primary lock with the audited Qwen3-TTS 1.7B Base Liam-clone profile.",
+        "The operator explicitly superseded the prior narrator lock with Qwen3-TTS 1.7B Base conditioned by the owned Joel reference.",
         ...(synthesisContractChanged
           ? ["The operator-approved target profile also locks deterministic length-matched batch-four synthesis through one resident model."]
           : []),
@@ -293,7 +297,7 @@ export function relockedIdentityForTests(identity, {
   const synthesisContractChanged =
     JSON.stringify(previousSynthesisContract)
     !== JSON.stringify(options.synthesis_contract);
-  const voiceIdentityChanged = recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND;
+  const voiceIdentityChanged = recoveryKind !== QWEN_PLANNER_FIX_RECOVERY_KIND;
   const identityChanged = voiceIdentityChanged || synthesisContractChanged;
   const migrated = structuredClone(identity);
   migrated.stage_registry_version = PIPELINE_STAGE_REGISTRY_VERSION;
@@ -374,13 +378,13 @@ export function relockedIdentityForTests(identity, {
     synthesis_contract_changed: synthesisContractChanged,
     operator_approved_batch4_promotion:
       synthesisContractChanged,
-    recovery_scope: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
+    recovery_scope: voiceIdentityChanged
       ? "operator_approved_narrator_identity_migration"
       : synthesisContractChanged
         ? "same_voice_batch4_synthesis_contract_promotion"
         : "same_identity_relock_after_committed_tts_planner_fix",
-    invalidation_reason: recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND
-      ? "operator_selected_qwen_liam_as_the_production_narrator"
+    invalidation_reason: voiceIdentityChanged
+      ? "operator_selected_owned_joel_reference_qwen_as_the_production_narrator"
       : synthesisContractChanged
         ? "operator_approved_batch4_synthesis_promotion_and_committed_tts_planner_fix_invalidate_the_prior_voice_plan"
         : "committed_tts_planner_unit_boundary_fix_invalidates_the_prior_voice_plan",

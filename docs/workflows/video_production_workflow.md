@@ -108,10 +108,10 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
    - Writes `manual_agent_script_review.json`, `operator_script_approval.json`, and `script_lock.json`.
 
 6. Script pace check.
-   - New production narration targets 210-220 spoken words per minute.
+   - New production narration targets 180-195 spoken words per minute.
    - Run after exact-hash script approval:
      `node bin/goldflow.mjs script pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 210 --target-wpm-max 220`
-   - Writes `script_pace_report.json` for the approved script hash with word count and estimated runtime at the 215 WPM midpoint.
+   - Writes `script_pace_report.json` for the approved script hash with word count and estimated runtime at the 187.5 WPM midpoint.
    - Deterministic script pace checks must not contain built-in story-family, episode-specific, or premise-specific hook phrases. Hook milestone timing is allowed only from an explicit operator/run-supplied `--hook-milestones` config; otherwise script pace records that hook milestones are not configured and must not block on inferred story content.
    - If explicit hook milestones are supplied, late configured milestones may block. WPM/runtime estimates alone are not enough; source/chatbot hook timing must be fixed before speakability, semantic planning, TTS, or visuals.
    - Exception: explicit validation batches with reviewed/approved source scripts may lock `--pace-policy diagnostic`; in that mode script pace records `diagnostic_hook_status` and configured hook warnings without blocking or rewriting the approved script.
@@ -172,7 +172,7 @@ The wavefront may also prebuild motion clips for accepted cuts whose authored in
    - Run after local Whisper timing and before timing bind:
      `node bin/goldflow.mjs audio pace-check --channel <channel> --series <series> --week <stable-run-slug> --episode <episode> --target-wpm-min 210 --target-wpm-max 220`
    - Writes `narration_pace_report_<episode>.json`.
-   - Actual WPM is computed from Whisper word count and audio duration against the 210-220 WPM target, but it is diagnostic rather than a production gate.
+   - Actual WPM is computed from Whisper word count and audio duration against the 180-195 WPM target, but it is diagnostic rather than a production gate.
    - Actual TTS WPM is always diagnostic. Audio pace-check records `actual_wpm` and `diagnostic_pace_status`, while the ledger requires only current script/audio hashes and a valid measurement.
    - An out-of-range WPM result does not block production or trigger automatic full-episode TTS regeneration. Qwen Base has no effective native-speed control; if cadence needs to change, test a revised source/unit/reference contract in a bounded listening proof before scaling it.
    - Post-TTS tempo normalization is forbidden for the current Qwen/Liam production route. If cadence is unacceptable, stop and approve a new bounded synthesis proof or source/unit plan; do not run `audio tempo-normalize` on production narration.

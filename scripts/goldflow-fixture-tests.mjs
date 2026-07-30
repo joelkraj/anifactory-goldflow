@@ -204,6 +204,7 @@ import {
 import {
   KOKORO_MODEL_LOCK,
   KOKORO_VOICE_LOCKS,
+  QWEN_JOEL_PRIMARY_LOCK,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_RETRY_CONTRACT,
@@ -393,26 +394,26 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
     episode: "ep_01",
     tts_provider: "qwen_local",
     tts_fallback_provider: null,
-    narrator_voice_id: "am_liam",
+    narrator_voice_id: "joel_owned_narrator_clone",
     tts_native_speed: null,
     voice_provider_options: voiceProviderOptions,
   };
   const policy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity(identity));
-  assert.equal(policy.contract, "qwen_liam_primary_v1");
-  assert.equal(policy.primary.model_id, QWEN_LIAM_PRIMARY_LOCK.model_id);
-  assert.equal(policy.primary.model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
-  assert.equal(policy.primary.voice_id, "am_liam");
+  assert.equal(policy.contract, "qwen_joel_primary_v1");
+  assert.equal(policy.primary.model_id, QWEN_JOEL_PRIMARY_LOCK.model_id);
+  assert.equal(policy.primary.model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
+  assert.equal(policy.primary.voice_id, "joel_owned_narrator_clone");
   assert.equal(policy.primary.native_speed, null);
-  assert.equal(policy.primary.reference_audio_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256);
-  assert.equal(policy.primary.reference_manifest_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256);
-  assert.equal(policy.primary.voice_continuity_contract, "qwen_icl_clone_of_liam_reference");
+  assert.equal(policy.primary.reference_audio_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(policy.primary.reference_manifest_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256);
+  assert.equal(policy.primary.voice_continuity_contract, "qwen_icl_clone_of_joel_owned_reference");
   assert.equal(policy.primary.repetition_penalty, 1.2);
   assert.equal(policy.fallback, null);
   assert.deepEqual(policy.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
   assert.deepEqual(policy.stitch_contract, QWEN_LIAM_STITCH_CONTRACT);
   assert.deepEqual(policy.retry_contract, QWEN_LIAM_RETRY_CONTRACT);
-  assert.deepEqual(voiceProviderOptions.allowed_production_voice_ids, ["am_liam"]);
-  assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_qwen_liam_icl");
+  assert.deepEqual(voiceProviderOptions.allowed_production_voice_ids, ["joel_owned_narrator_clone"]);
+  assert.equal(voiceProviderOptions.narrator_identity_policy, "single_voice_qwen_joel_owned_icl");
   assert.equal("alternate_voice_ids" in voiceProviderOptions, false);
   const runtimePolicy = validateNarrationTtsPolicyForTests(identity);
   assert.equal(runtimePolicy.status, "passed");
@@ -502,11 +503,11 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
       ...identity,
       narrator_voice_id: "am_fenrir",
     })),
-    /single locked narrator voice am_liam/,
+    /approved locked narrator voice/,
   );
   assert.throws(
     () => defaultNarrationVoiceProviderOptions({ voiceId: "am_fenrir" }),
-    /require am_liam/,
+    /require joel_owned_narrator_clone/,
   );
   assert.throws(
     () => defaultNarrationVoiceProviderOptions({ fallbackProvider: "modelslab_qwen" }),
@@ -4443,19 +4444,19 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   const identity = await readJson(path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01", "run_identity.json"));
   assert.equal(identity.tts_provider, "qwen_local");
   assert.equal(identity.tts_fallback_provider, null);
-  assert.equal(identity.narrator_voice_id, "am_liam");
+  assert.equal(identity.narrator_voice_id, "joel_owned_narrator_clone");
   assert.equal(identity.tts_native_speed, null);
   assert.equal(identity.voice_provider_options.primary.provider, "qwen_local");
-  assert.equal(identity.voice_provider_options.primary.voice_id, "am_liam");
+  assert.equal(identity.voice_provider_options.primary.voice_id, "joel_owned_narrator_clone");
   assert.equal(identity.voice_provider_options.primary.native_speed, null);
-  assert.equal(identity.voice_provider_options.primary.model_id, QWEN_LIAM_PRIMARY_LOCK.model_id);
-  assert.equal(identity.voice_provider_options.primary.model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
-  assert.equal(identity.voice_provider_options.primary.model_weights_sha256, QWEN_LIAM_PRIMARY_LOCK.model_weights_sha256);
-  assert.equal(identity.voice_provider_options.primary.model_config_sha256, QWEN_LIAM_PRIMARY_LOCK.model_config_sha256);
-  assert.equal(identity.voice_provider_options.primary.reference_audio_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256);
-  assert.equal(identity.voice_provider_options.primary.reference_manifest_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256);
-  assert.equal(identity.voice_provider_options.primary.reference_metadata_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256);
-  assert.equal(identity.voice_provider_options.primary.voice_continuity_contract, QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract);
+  assert.equal(identity.voice_provider_options.primary.model_id, QWEN_JOEL_PRIMARY_LOCK.model_id);
+  assert.equal(identity.voice_provider_options.primary.model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
+  assert.equal(identity.voice_provider_options.primary.model_weights_sha256, QWEN_JOEL_PRIMARY_LOCK.model_weights_sha256);
+  assert.equal(identity.voice_provider_options.primary.model_config_sha256, QWEN_JOEL_PRIMARY_LOCK.model_config_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_audio_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_manifest_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_metadata_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256);
+  assert.equal(identity.voice_provider_options.primary.voice_continuity_contract, QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract);
   assert.equal(identity.voice_provider_options.primary.repetition_penalty, 1.2);
   assert.equal(identity.voice_provider_options.fallback, null);
   assert.deepEqual(identity.voice_provider_options.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
@@ -4497,16 +4498,16 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   );
   assert.equal(identity.provider_locks.tts_provider, "qwen_local");
   assert.equal(identity.provider_locks.tts_fallback_provider, null);
-  assert.equal(identity.provider_locks.narrator_voice_id, "am_liam");
-  assert.equal(identity.provider_locks.narrator_voice_identity, "am_liam");
+  assert.equal(identity.provider_locks.narrator_voice_id, "joel_owned_narrator_clone");
+  assert.equal(identity.provider_locks.narrator_voice_identity, "joel_owned_narrator_clone");
   assert.equal(identity.provider_locks.tts_native_speed, null);
   assert.equal(identity.provider_locks.tts_speed_control, "unsupported");
-  assert.equal(identity.provider_locks.primary_reference_audio_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_audio_sha256);
-  assert.equal(identity.provider_locks.primary_reference_manifest_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_manifest_sha256);
-  assert.equal(identity.provider_locks.primary_reference_metadata_sha256, QWEN_LIAM_PRIMARY_LOCK.reference_metadata_sha256);
-  assert.equal(identity.provider_locks.primary_voice_continuity_contract, QWEN_LIAM_PRIMARY_LOCK.voice_continuity_contract);
-  assert.equal(identity.provider_locks.primary_similarity_model_sha256, QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_model_sha256);
-  assert.equal(identity.provider_locks.primary_similarity_calibration_sha256, QWEN_LIAM_PRIMARY_LOCK.speaker_similarity_calibration_sha256);
+  assert.equal(identity.provider_locks.primary_reference_audio_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(identity.provider_locks.primary_reference_manifest_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256);
+  assert.equal(identity.provider_locks.primary_reference_metadata_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256);
+  assert.equal(identity.provider_locks.primary_voice_continuity_contract, QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract);
+  assert.equal(identity.provider_locks.primary_similarity_model_sha256, QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_sha256);
+  assert.equal(identity.provider_locks.primary_similarity_calibration_sha256, QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256);
   assert.equal(identity.provider_locks.primary_minimum_cosine_similarity, 0.88);
   assert.equal(identity.provider_locks.primary_warning_below_cosine_similarity, 0.9);
   assert.equal(identity.provider_locks.tts_unit_target_words_min, 45);
@@ -4570,8 +4571,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.git.commit.length, 40);
   assert.equal(identity.stage_registry_version.length > 0, true);
   assert.equal(identity.model_versions.planning_model, "gpt-5.6-sol");
-  assert.equal(identity.model_versions.tts_model, QWEN_LIAM_PRIMARY_LOCK.model_id);
-  assert.equal(identity.model_versions.tts_model_revision, QWEN_LIAM_PRIMARY_LOCK.model_revision);
+  assert.equal(identity.model_versions.tts_model, QWEN_JOEL_PRIMARY_LOCK.model_id);
+  assert.equal(identity.model_versions.tts_model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(identity.model_versions.fallback_tts_model, null);
   assert.equal(identity.model_versions.fallback_tts_model_revision, null);
   assert.equal(identity.model_versions.local_whisper_model, "small.en");
@@ -4640,7 +4641,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
       "--run-intent", "production",
       "--narrator-voice-id", "am_fenrir",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
-    (error) => /Liam-only.*am_liam/i.test(String(error?.stderr ?? error?.message ?? error)),
+    (error) => /owned Joel reference.*joel_owned_narrator_clone/i.test(String(error?.stderr ?? error?.message ?? error)),
   );
   await assert.rejects(
     execFileAsync(process.execPath, [
@@ -4653,7 +4654,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
       "--run-intent", "production",
       "--tts-provider", "modelslab_qwen",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
-    (error) => /production runs require qwen_local with am_liam/i.test(
+    (error) => /production runs require qwen_local with joel_owned_narrator_clone/i.test(
       String(error?.stderr ?? error?.message ?? error),
     ),
   );
@@ -4669,7 +4670,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
       "--tts-provider", "modelslab_qwen",
       "--qwen-narrator-voice-id", "joel_owned_narrator_clone",
     ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } }),
-    (error) => /production runs require qwen_local with am_liam/i.test(
+    (error) => /production runs require qwen_local with joel_owned_narrator_clone/i.test(
       String(error?.stderr ?? error?.message ?? error),
     ),
   );
@@ -7074,8 +7075,8 @@ async function testNarrationPaceChecks() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const scriptReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
   assert.equal(scriptReport.status, "passed");
-  assert.equal(scriptReport.target_wpm_min, 195);
-  assert.equal(scriptReport.target_wpm_max, 220);
+  assert.equal(scriptReport.target_wpm_min, 180);
+  assert.equal(scriptReport.target_wpm_max, 195);
   assert.equal(scriptReport.script_word_count, 7);
   assert.equal(scriptReport.source_hashes[path.join(episodeDir, "script_clean.md")], scriptReport.source_script_hash);
 

@@ -414,8 +414,8 @@ async function loadDialogueContext() {
         production_ready: rawVoiceCastingLock?.production_ready ?? true,
         narrator_voice_id: rawVoiceCastingLock?.narrator_voice_id ?? narratorVoiceId,
         requested_narrator_voice_id: rawVoiceCastingLock?.requested_narrator_voice_id ?? narratorVoiceId,
-        narrator_voice_policy: liamPrimaryIdentity
-          ? "single_qwen_liam_reference_clone"
+        narrator_voice_policy: qwenPrimaryIdentity
+          ? "single_qwen_reference_clone"
           : puckPrimaryIdentity
           ? "single_puck_identity_with_qwen_exact_unit_clone"
           : rawVoiceCastingLock?.narrator_voice_policy ?? runIdentity?.qwen_narrator_voice_policy ?? runIdentity?.voice_provider_options?.qwen_narrator_voice_policy ?? DEFAULT_QWEN_NARRATOR_VOICE_POLICY,

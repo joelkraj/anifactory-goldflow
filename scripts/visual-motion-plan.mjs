@@ -38,6 +38,7 @@ const parallaxApprovalPath = flags["parallax-approval"] ?? path.join(episodeDir,
 const ltxVideoReportPath = flags["ltx-video-report"] ?? path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_report_${episode}.json`);
 const ltxVideoApprovalPath = flags["ltx-video-approval"] ?? path.join(episodeDir, "assets", "motion", "ltx23", `ltx_video_approval_${episode}.json`);
 const outputPath = flags.output ?? path.join(episodeDir, `motion_edit_plan_${episode}.json`);
+const allowLtxRescue = /^(true|1|yes)$/i.test(String(flags["allow-ltx-rescue"] ?? "false"));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -213,7 +214,13 @@ async function main() {
   }
   let approvedLtxById = new Map();
   const ltxSourcePaths = [];
-  if (ltxVideoEnabled(identity)) {
+  if (ltxVideoEnabled(identity) || allowLtxRescue) {
+    if (allowLtxRescue && ltxVideoEnabled(identity)) {
+      throw new Error("--allow-ltx-rescue is only for an existing identity whose animation policy is disabled.");
+    }
+    if (allowLtxRescue && ltxVideoApproval?.production_eligible !== true) {
+      throw new Error(`LTX rescue requires a production-eligible approval: ${ltxVideoApprovalPath}`);
+    }
     approvedLtxById = await approvedLtxClips(ltxVideoReport, ltxVideoApproval, { reportPath: ltxVideoReportPath });
     if (!approvedLtxById.size) {
       throw new Error(`LTX video policy is enabled but no current approved clips were found in ${ltxVideoApprovalPath}.`);
@@ -258,6 +265,12 @@ async function main() {
     policy: "LLM-authored shot_manifest.motion_intent is the baseline. Explicit image-QA focal overrides supersede it; otherwise hash-bound automatic image saliency may translate authored anchors without changing behavior. Legacy prompts without authored motion use conservative shot-staging fallback; missing focal intent becomes a smooth static hold. Hash-random motion is forbidden. Only reviewed, hash-bound parallax candidates may add layered depth.",
     motion_policy: identity?.motion_policy ?? "legacy",
     parallax_policy: parallaxPolicy,
+    ltx_rescue_override: allowLtxRescue ? {
+      enabled: true,
+      reason: "Operator-approved rescue of an existing animation-disabled identity using separately reviewed, hash-bound LTX 2.3 clips.",
+      report_path: ltxVideoReportPath,
+      approval_path: ltxVideoApprovalPath,
+    } : null,
     parallax_asset_report_path: parallaxPolicy === "selective_inspected" ? parallaxReportPath : null,
     parallax_asset_approval_path: parallaxPolicy === "selective_inspected" && Number(parallaxReport?.candidate_count ?? 0) > 0 ? parallaxApprovalPath : null,
     source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [path.resolve(filePath), await hashFile(filePath)]))).filter(([, hash]) => hash)),
@@ -269,8 +282,8 @@ async function main() {
     approved_parallax_candidate_count: approvedParallaxById.size,
     ltx_video_policy: identity?.ltx_video_policy ?? "disabled",
     approved_ltx_video_count: approvedLtxById.size,
-    ltx_video_report_path: ltxVideoEnabled(identity) ? ltxVideoReportPath : null,
-    ltx_video_approval_path: ltxVideoEnabled(identity) ? ltxVideoApprovalPath : null,
+    ltx_video_report_path: ltxVideoEnabled(identity) || allowLtxRescue ? ltxVideoReportPath : null,
+    ltx_video_approval_path: ltxVideoEnabled(identity) || allowLtxRescue ? ltxVideoApprovalPath : null,
     qa_override_count: intents.filter((row) => row.qa_override).length,
     auto_focal_override_count: intents.filter((row) => row.auto_focal_override).length,
     llm_authored_intent_count: intents.filter((row) => row.focal_source === "llm_authored_shot_manifest_motion_intent").length,

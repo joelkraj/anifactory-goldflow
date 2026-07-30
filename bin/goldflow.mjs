@@ -316,6 +316,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("ltx-video-generate.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ltx-video") {
   run("ltx-video-approve.mjs", flags);
+} else if (command === "visual" && subcommand === "import-ltx-proof") {
+  run("ltx-video-import-proof.mjs", flags);
 } else if (command === "visual" && subcommand === "parallax-proof-assets") {
   run("editorial-parallax-assets.mjs", flags);
 } else if (command === "visual" && subcommand === "motion-proof-plan") {

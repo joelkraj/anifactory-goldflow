@@ -65,7 +65,7 @@ const segmentGapSec = Math.max(0, Math.min(1.5, Number(flags["segment-gap-sec"] 
 const stitchSampleRate = Math.max(8000, Math.min(96000, Number(flags["stitch-sample-rate"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_SAMPLE_RATE ?? 24000)));
 const stitchEdgePadSec = Math.max(0.01, Math.min(0.08, Number(flags["stitch-edge-pad-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_EDGE_PAD_SEC ?? 0.025)));
 const stitchFadeSec = Math.max(0.003, Math.min(0.02, Number(flags["stitch-fade-sec"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_STITCH_FADE_SEC ?? 0.008)));
-const unitTranscriptQa = !/^(?:0|false|no|off)$/i.test(String(flags["unit-transcript-qa"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_TRANSCRIPT_QA ?? "true"));
+const unitTranscriptQa = !/^(?:0|false|no|off)$/i.test(String(flags["unit-transcript-qa"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_UNIT_TRANSCRIPT_QA ?? "false"));
 const unitQaWhisperModel = String(flags["unit-qa-whisper-model"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_WHISPER_MODEL ?? "small");
 const unitQaWhisperDevice = String(flags["unit-qa-whisper-device"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_WHISPER_DEVICE ?? "auto");
 const unitQaWhisperComputeType = String(flags["unit-qa-whisper-compute-type"] ?? process.env.ANIFACTORY_MODELSLAB_QWEN_QA_WHISPER_COMPUTE_TYPE ?? "auto");
@@ -2582,6 +2582,7 @@ async function runUnitOutputQa(results) {
     status: blockers.length ? "blocked" : "passed",
     policy_version: TTS_OUTPUT_QA_POLICY_VERSION,
     transcript_qa_enabled: unitTranscriptQa,
+    transcript_qa_deferred_to_local_whisper_word_timing: !unitTranscriptQa,
     transcript_engine: unitTranscriptQa ? "faster_whisper" : null,
     transcript_model: unitTranscriptQa ? unitQaWhisperModel : null,
     transcript_engine_error: transcriptEngineError,
@@ -2950,10 +2951,10 @@ async function qaRenderedAudioRows(
 ) {
   let transcriptMap = new Map();
   let transcriptEngineError = null;
-  const transcriptRows = skipTranscriptQa
+  const transcriptRows = skipTranscriptQa || !unitTranscriptQa
     ? []
     : renderedRows.filter((_row, index) => (
-        String(sourceRows[index]?.provider ?? "") !== "kokoro_local"
+        !isDeliveryFirstLocalNarrator(sourceRows[index]?.provider)
       ));
   if (transcriptRows.length) {
     try {
@@ -3108,6 +3109,8 @@ async function qaRenderedAudioRows(
     stage,
     status: blockers.length ? "blocked" : "passed",
     transcript_qa_skipped: skipTranscriptQa,
+    transcript_qa_deferred_to_local_whisper_word_timing:
+      !unitTranscriptQa || skipTranscriptQa,
     transcript_qa_deferred_to: skipTranscriptQa
       ? "local_whisper_word_timing"
       : null,

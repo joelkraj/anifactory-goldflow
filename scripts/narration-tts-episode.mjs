@@ -1734,6 +1734,11 @@ async function applyQwenVoiceContinuityQa({
     report = await readJson(reportPath, null);
   } catch (error) {
     executionError = error instanceof Error ? error.message : String(error);
+    // The similarity helper exits non-zero when any candidate falls below its
+    // diagnostic threshold, but it still writes a complete hash-bound report.
+    // Load that report so automated continuity findings remain review warnings
+    // instead of being misclassified as a missing structural artifact.
+    report = await readJson(reportPath, null);
   }
 
   const reportReferences = report?.references ?? [];
@@ -2171,6 +2176,14 @@ async function main() {
   ensureExactNumericArg("--stitch-sample-rate", "stitch-sample-rate", SAMPLE_RATE);
   ensureExactNumericArg("--stitch-edge-pad-sec", "stitch-edge-pad-sec", EDGE_PAD_SEC);
   ensureExactNumericArg("--stitch-fade-sec", "stitch-fade-sec", FADE_SEC);
+  if (flags["unit-transcript-qa"] != null
+    && !/^(?:0|false|no|off)$/i.test(String(flags["unit-transcript-qa"]))) {
+    throw new Error(
+      "--unit-transcript-qa is production-locked off; transcript review "
+      + "comes from the required final local Whisper timing stage.",
+    );
+  }
+  ensureArg("--unit-transcript-qa", "false");
   if (flags["unit-qa-whisper-model"] != null
     && String(flags["unit-qa-whisper-model"]) !== "small") {
     throw new Error("--unit-qa-whisper-model is production-locked to small");

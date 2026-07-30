@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import sharp from "sharp";
 import { sha256File } from "./lib/file-hash.mjs";
+import { assertMuxDurationIntegrity } from "./lib/media-duration-integrity.mjs";
 import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
 import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
@@ -2524,6 +2525,14 @@ async function main() {
       ], { maxBuffer: 1024 * 1024 * 32 });
     }
   }
+  const outputDurationSec = await mediaDuration(outputPath);
+  const finalVideoInputDurationSec = await mediaDuration(normalizedVideoPath);
+  const finalAudioInputDurationSec = await mediaDuration(finalMuxAudioPath);
+  const durationIntegrity = assertMuxDurationIntegrity({
+    outputDurationSec,
+    videoDurationSec: finalVideoInputDurationSec,
+    audioDurationSec: finalAudioInputDurationSec,
+  });
   const sourceHashes = {};
   for (const sourcePath of [
     promptPlanPath,
@@ -2552,7 +2561,8 @@ async function main() {
     final_video_path: outputPath,
     final_video_sha256: finalVideoSha256,
     source_hashes: sourceHashes,
-    output_duration_sec: await mediaDuration(outputPath),
+    output_duration_sec: outputDurationSec,
+    duration_integrity: durationIntegrity,
     audio_path: audioPath,
     scoped_render_audio_source_path: proofAudioPath,
     render_audio_path: renderAudio.audio_path,

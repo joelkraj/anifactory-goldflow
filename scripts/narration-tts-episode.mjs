@@ -3078,9 +3078,13 @@ async function main() {
       prepared_audio_sha256: prepared?.prepared_audio_sha256 ?? null,
       prepared_sample_count: prepared?.sample_count ?? null,
       prepared_leading_silence_sample_count:
-        prepared?.prepared_qa?.metrics?.leading_silence_sample_count ?? null,
+        prepared?.retained_leading_silence_sample_count
+        ?? prepared?.prepared_qa?.metrics?.leading_silence_sample_count
+        ?? null,
       prepared_trailing_silence_sample_count:
-        prepared?.prepared_qa?.metrics?.trailing_silence_sample_count ?? null,
+        prepared?.retained_trailing_silence_sample_count
+        ?? prepared?.prepared_qa?.metrics?.trailing_silence_sample_count
+        ?? null,
       boundary_after_effective_gap_sample_count:
         boundary?.effective_gap_sample_count ?? null,
       duration_sec: Number((

@@ -560,6 +560,30 @@ function validateSubtitleTimeline(events) {
   }
 }
 
+function coalesceOverlappingSubtitleEvents(events) {
+  const coalesced = [];
+  for (const event of events ?? []) {
+    const current = {
+      ...event,
+      start_sec: Number(event.start_sec),
+      end_sec: Number(event.end_sec),
+      text: String(event.text ?? "").trim(),
+    };
+    const previous = coalesced.at(-1);
+    if (!previous || current.start_sec >= previous.end_sec) {
+      coalesced.push(current);
+      continue;
+    }
+    previous.end_sec = Math.max(previous.end_sec, current.end_sec);
+    previous.text = `${previous.text} ${current.text}`.replace(/\s+/g, " ").trim();
+  }
+  return coalesced;
+}
+
+export function coalesceOverlappingSubtitleEventsForTests(events) {
+  return coalesceOverlappingSubtitleEvents(events);
+}
+
 function alignExpandedZeroMultiplierCaptions(events, words) {
   const adjusted = (events ?? []).map((event) => ({ ...event }));
   const zeroTimesSpans = [];
@@ -646,7 +670,9 @@ function subtitleEventsFromScript(words, stitchReport) {
     }
     events.push(...alignedCaptionEventsForUnit(segment, segmentWords));
   }
-  const aligned = events.filter((row) => row.text && row.end_sec > row.start_sec);
+  const aligned = coalesceOverlappingSubtitleEvents(
+    events.filter((row) => row.text && row.end_sec > row.start_sec),
+  );
   validateSubtitleTimeline(aligned);
   return aligned;
 }

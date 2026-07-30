@@ -110,7 +110,7 @@ import {
   creditExhaustedIdsFromReport,
   isModelslabCreditExhaustion,
 } from "./lib/image-fallback-policy.mjs";
-import { alignExpandedZeroMultiplierCaptionsForTests, assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { alignExpandedZeroMultiplierCaptionsForTests, assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, coalesceOverlappingSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import { promoteEditorialMotionPlans } from "./editorial-motion-promote-proof.mjs";
 import { applyAutomaticFocalAnchorForTests } from "./visual-motion-plan.mjs";
 import {
@@ -2979,6 +2979,16 @@ function testWhisperExcerptAlignmentInterpolatesUnspokenUi() {
 }
 
 function testPhraseAwareSubtitleGrouping() {
+  const coalescedCollapsedTiming = coalesceOverlappingSubtitleEventsForTests([
+    { start_sec: 10, end_sec: 10.01, text: "Mm." },
+    { start_sec: 10, end_sec: 10.66, text: "A pause." },
+    { start_sec: 10.66, end_sec: 11.2, text: "Then she spoke." },
+  ]);
+  assert.deepEqual(coalescedCollapsedTiming, [
+    { start_sec: 10, end_sec: 10.66, text: "Mm. A pause." },
+    { start_sec: 10.66, end_sec: 11.2, text: "Then she spoke." },
+  ]);
+
   const merged = mergeShortSubtitleEvents([
     { start_sec: 0, end_sec: 0.45, text: "The" },
     { start_sec: 0.46, end_sec: 1.75, text: "system opened" },

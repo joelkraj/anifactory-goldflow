@@ -621,7 +621,7 @@ export function motionIntentFindings(intents, acceptedHashes = {}) {
     if (!EASINGS.has(String(row.easing ?? ""))) findings.push({ severity: "blocker", code: "motion_easing_invalid", image_id: row.image_id });
     if (row.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_keyframes_invalid", image_id: row.image_id });
     if (row.qa_override?.motion_keyframes !== undefined && !sanitizeMotionKeyframes(row.qa_override.motion_keyframes)) findings.push({ severity: "blocker", code: "motion_qa_override_keyframes_invalid", image_id: row.image_id });
-    if (row.depth_treatment !== undefined && !sanitizeLayeredParallaxTreatment(row.depth_treatment)) findings.push({ severity: "blocker", code: "motion_depth_treatment_invalid", image_id: row.image_id });
+    if (row.depth_treatment != null && !sanitizeLayeredParallaxTreatment(row.depth_treatment)) findings.push({ severity: "blocker", code: "motion_depth_treatment_invalid", image_id: row.image_id });
   }
   let streakStart = 0;
   const direction = (value, epsilon = 0.015) => value > epsilon ? "positive" : value < -epsilon ? "negative" : "still";

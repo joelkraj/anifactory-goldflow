@@ -284,6 +284,7 @@ import {
 import {
   applyManualLocationRefRepairsForTests,
   applyManualSemanticRepairsForTests,
+  applyManualSemanticRepairsToReconciliationCandidateForTests,
   canonicalVisibleEntityCoverageFindingsForTests,
   semanticBuildPromptForTests,
   semanticReconciliationPromptForTests,
@@ -2118,6 +2119,67 @@ function testSemanticSceneCoverageRejectsCollapsedTail() {
     ),
     true,
   );
+}
+
+function testManualSemanticRepairClosesMatchingReconciliationGap() {
+  const script = "Carter kept whatever personal property had never been pledged. He lost the company because he had borrowed against almost everything that made the company valuable. Joey visited Vantage on the final day of the cure period.";
+  const scenes = [
+    {
+      scene_id: "scene_042",
+      title: "The Cure Period Expires",
+      script_excerpt_start: "Carter kept whatever personal property had never been pledged",
+      script_excerpt_end: "Carter kept whatever personal property had never been pledged",
+    },
+    {
+      scene_id: "scene_043",
+      title: "Responsibility Replaces Revenge",
+      script_excerpt_start: "Joey visited Vantage on the final day of the cure period",
+      script_excerpt_end: "Joey visited Vantage on the final day of the cure period",
+    },
+  ];
+  const artifact = {
+    schema: "goldflow_semantic_manual_repair_v1",
+    status: "approved",
+    source_script_hash: "script_hash",
+    base_reconciliation_sha256: "matching_reconciliation_hash",
+    scene_updates: [{
+      scene_id: "scene_042",
+      expected: {
+        script_excerpt_end: "Carter kept whatever personal property had never been pledged",
+      },
+      set: {
+        script_excerpt_end: "He lost the company because he had borrowed against almost everything that made the company valuable",
+      },
+    }],
+  };
+  const mismatched = applyManualSemanticRepairsToReconciliationCandidateForTests(
+    scenes,
+    { canonical_locations: [], state_transitions: [] },
+    artifact,
+    {
+      sourceScriptHash: "script_hash",
+      reconciliationOutputSha256: "different_hash",
+      requestedSceneIds: ["scene_042"],
+    },
+  );
+  assert.equal(mismatched.applied, false);
+  assert.equal(
+    semanticSceneCoverageFindingsForTests(mismatched.scenes, script)
+      .some((finding) => finding.code === "semantic_scene_gap_uncovered_words"),
+    true,
+  );
+  const repaired = applyManualSemanticRepairsToReconciliationCandidateForTests(
+    scenes,
+    { canonical_locations: [], state_transitions: [] },
+    artifact,
+    {
+      sourceScriptHash: "script_hash",
+      reconciliationOutputSha256: "matching_reconciliation_hash",
+      requestedSceneIds: ["scene_042"],
+    },
+  );
+  assert.equal(repaired.applied, true);
+  assert.deepEqual(semanticSceneCoverageFindingsForTests(repaired.scenes, script), []);
 }
 
 function testSemanticSceneQualityFindings() {
@@ -11341,6 +11403,7 @@ const FIXTURE_SUITES = {
   planner: [
     testSemanticSceneAnchorValidation,
     testSemanticSceneCoverageRejectsCollapsedTail,
+    testManualSemanticRepairClosesMatchingReconciliationGap,
     testSemanticSceneQualityFindings,
     testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement,
     testSemanticPlannerPromptContracts,

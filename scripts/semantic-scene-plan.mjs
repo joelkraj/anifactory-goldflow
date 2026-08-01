@@ -569,6 +569,44 @@ export function applyManualSemanticRepairsForTests(
   };
 }
 
+export function applyManualSemanticRepairsToReconciliationCandidateForTests(
+  scenes,
+  ledger,
+  artifact,
+  {
+    sourceScriptHash = null,
+    reconciliationOutputSha256 = null,
+    requestedSceneIds = [],
+  } = {},
+) {
+  if (!artifact
+    || !reconciliationOutputSha256
+    || artifact.base_reconciliation_sha256 !== reconciliationOutputSha256) {
+    return {
+      applied: false,
+      scenes,
+      ledger,
+      applied_scene_updates: [],
+      applied_scene_insertions: [],
+      appended_state_transitions: [],
+      appended_canonical_locations: [],
+    };
+  }
+  return {
+    applied: true,
+    ...applyManualSemanticRepairsForTests(
+      scenes,
+      ledger,
+      artifact,
+      {
+        sourceScriptHash,
+        baseReconciliationSha256: reconciliationOutputSha256,
+        requestedSceneIds,
+      },
+    ),
+  };
+}
+
 function normalizeText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
@@ -1334,7 +1372,14 @@ export function storyFactEvidenceFindingsForTests(ledger, script) {
   return findings;
 }
 
-async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName) {
+async function reconcileSemanticPlan(
+  script,
+  bibles,
+  parsedChunks,
+  targets,
+  stageName,
+  { manualSemanticRepairs = null, requestedSceneIds = [] } = {},
+) {
   const reconciliationStage = `${stageName}_global_reconciliation`;
   const basePrompt = buildReconciliationPrompt(script, bibles, parsedChunks, targets);
   let lastFindings = [];
@@ -1376,18 +1421,44 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
       },
       updated_at: new Date().toISOString(),
     };
-    const evidenceFindings = storyFactEvidenceFindingsForTests(ledger, script);
     const normalizedScenes = normalizeScenes(parsed.scenes ?? []);
     const snappedScenes = snapSemanticSceneAnchors(normalizedScenes, script).scenes;
-    const visibleEntityCoverageFindings = canonicalVisibleEntityCoverageFindingsForTests(ledger, snappedScenes);
+    const reconciliationOutputSha256 = llm.output_path
+      ? sha256(await fs.readFile(llm.output_path))
+      : null;
+    const candidateRepair = applyManualSemanticRepairsToReconciliationCandidateForTests(
+      snappedScenes,
+      ledger,
+      manualSemanticRepairs,
+      {
+        sourceScriptHash: sha256(script),
+        reconciliationOutputSha256,
+        requestedSceneIds,
+      },
+    );
+    const evidenceFindings = storyFactEvidenceFindingsForTests(candidateRepair.ledger, script);
+    const visibleEntityCoverageFindings = canonicalVisibleEntityCoverageFindingsForTests(
+      candidateRepair.ledger,
+      candidateRepair.scenes,
+    );
     const sceneFindings = [
-      ...semanticSceneAnchorFindings(snappedScenes, script),
-      ...semanticSceneCoverageFindingsForTests(snappedScenes, script),
+      ...semanticSceneAnchorFindings(candidateRepair.scenes, script),
+      ...semanticSceneCoverageFindingsForTests(candidateRepair.scenes, script),
       ...visibleEntityCoverageFindings,
     ];
     const reconciliationFindings = [...evidenceFindings, ...sceneFindings];
     if (!reconciliationFindings.some((finding) => finding.severity === "blocker")) {
-      return { llm, parsed, ledger, evidenceFindings, sceneFindings };
+      return {
+        llm,
+        parsed: candidateRepair.applied
+          ? { ...parsed, scenes: candidateRepair.scenes }
+          : parsed,
+        ledger: candidateRepair.ledger,
+        evidenceFindings,
+        sceneFindings,
+        reconciliationOutputSha256,
+        manualSemanticRepairResult: candidateRepair.applied ? candidateRepair : null,
+      };
     }
     lastFindings = reconciliationFindings;
   }
@@ -1520,7 +1591,18 @@ async function main() {
       scenes: Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [],
     }];
   }
-  const reconciliation = await reconcileSemanticPlan(planningScript, bibles, parsedChunks, targets, stageName);
+  const requestedSemanticSceneIds = commaSeparatedIds(flags["scene-ids"] ?? flags["scene-id"]);
+  const reconciliation = await reconcileSemanticPlan(
+    planningScript,
+    bibles,
+    parsedChunks,
+    targets,
+    stageName,
+    {
+      manualSemanticRepairs,
+      requestedSceneIds: requestedSemanticSceneIds,
+    },
+  );
   semanticParsed = reconciliation.parsed;
   scenes = Array.isArray(reconciliation.parsed.scenes) ? reconciliation.parsed.scenes : [];
   if (!scenes.length) throw new Error("Semantic scene planner returned no scenes.");
@@ -1531,19 +1613,26 @@ async function main() {
     throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
   }
   const normalizedScenes = normalizeScenes(scenes);
-  const reconciliationOutputSha256 = reconciliation.llm.output_path
-    ? sha256(await fs.readFile(reconciliation.llm.output_path))
-    : null;
-  const manualSemanticRepairResult = applyManualSemanticRepairsForTests(
-    normalizedScenes,
-    reconciliation.ledger,
-    manualSemanticRepairs,
-    {
-      sourceScriptHash: scriptHash,
-      baseReconciliationSha256: reconciliationOutputSha256,
-      requestedSceneIds: commaSeparatedIds(flags["scene-ids"] ?? flags["scene-id"]),
-    },
-  );
+  const reconciliationOutputSha256 = reconciliation.reconciliationOutputSha256
+    ?? (reconciliation.llm.output_path
+      ? sha256(await fs.readFile(reconciliation.llm.output_path))
+      : null);
+  const manualSemanticRepairResult = reconciliation.manualSemanticRepairResult
+    ? {
+        ...reconciliation.manualSemanticRepairResult,
+        scenes: normalizedScenes,
+        ledger: reconciliation.ledger,
+      }
+    : applyManualSemanticRepairsForTests(
+        normalizedScenes,
+        reconciliation.ledger,
+        manualSemanticRepairs,
+        {
+          sourceScriptHash: scriptHash,
+          baseReconciliationSha256: reconciliationOutputSha256,
+          requestedSceneIds: requestedSemanticSceneIds,
+        },
+      );
   const manualLocationRepairResult = applyManualLocationRefRepairsForTests(
     manualSemanticRepairResult.scenes,
     manualLocationRefRepairs,

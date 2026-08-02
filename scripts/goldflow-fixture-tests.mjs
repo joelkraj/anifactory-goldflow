@@ -5277,7 +5277,7 @@ function testCharacterReferenceCleanlinessContracts() {
     ref_id: "documentary_location",
     kind: "location",
     generation_mode: "standalone_ref",
-    prompt_anchor: "16:9 unoccupied baggage hall with ample clean space for later characters and luggage, no airline logo, readable signage, people, luggage, or invented machinery.",
+    prompt_anchor: "16:9 unoccupied baggage hall with realistic human working scale and ample clean space for later characters and luggage, no airline logo, readable signage, people, luggage, or invented machinery.",
   }, {
     ref_id: "documentary_ui",
     kind: "ui",

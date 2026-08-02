@@ -2720,7 +2720,7 @@ function matchIsNonDepictedStagingOrScaleMention(text, index, matchText) {
     Math.max(0, index - 35),
     Math.min(String(text ?? "").length, index + String(matchText ?? "").length + 45),
   );
-  return /\b(?:realistic|believable)\s+(?:human|person|people)(?:\s+and\s+\w+){0,2}\s+scale\b/i.test(around);
+  return /\b(?:realistic|believable)\s+(?:human|person|people)(?:\s+and\s+\w+){0,2}(?:\s+working)?\s+scale\b/i.test(around);
 }
 
 function affirmativeHeldPropInAnchor(value) {

@@ -82,6 +82,18 @@ const MANUAL_BLOCKER_TRIAGE_POLICY = {
   ],
 };
 
+export function contentStatusIdentityFields(runIdentity = {}) {
+  return {
+    source_path: runIdentity.source_path ?? null,
+    proof_source_mode: runIdentity.proof_source_mode ?? null,
+    content_profile: runIdentity.content_profile ?? null,
+    content_profile_version: runIdentity.content_profile_version ?? null,
+    content_profile_sha256: runIdentity.content_profile_sha256 ?? null,
+    content_profile_config: runIdentity.content_profile_config ?? null,
+    factual_evidence: runIdentity.factual_evidence ?? null,
+  };
+}
+
 function parseFlags(parts) {
   const parsed = {};
   for (let index = 0; index < parts.length; index += 1) {
@@ -3384,6 +3396,7 @@ async function main() {
     parallax_min_spacing_sec: runIdentity.parallax_min_spacing_sec ?? null,
     run_intent: runIdentity.run_intent ?? "production",
     proof_scope: runIdentity.proof_scope ?? { mode: "full_episode", start_sec: 0, end_sec: null },
+    ...contentStatusIdentityFields(runIdentity),
     git: runIdentity.git ?? null,
     provider_locks: runIdentity.provider_locks ?? null,
     model_versions: runIdentity.model_versions ?? null,

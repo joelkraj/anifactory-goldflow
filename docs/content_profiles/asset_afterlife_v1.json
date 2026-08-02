@@ -1,7 +1,7 @@
 {
   "schema": "goldflow_content_profile_v1",
   "id": "asset_afterlife_v1",
-  "version": "2026-08-01.1",
+  "version": "2026-08-01.2",
   "label": "Asset Afterlife factual documentary",
   "content_family": "factual_asset_afterlife_documentary",
   "viewer_promise": "Follow a valuable object after its final public moment and reveal who controls it, what remains valuable, what decisions determine its fate, and where it ultimately goes.",
@@ -18,6 +18,10 @@
     "editorial": "an editorial beat director for timed factual documentary narration about the hidden afterlife of valuable objects",
     "reference": "a documentary visual-reference director preserving real-world asset, location, process, and custody continuity",
     "visual_prompt": "a precise factual-documentary reconstruction and technical-visualization prompt planner"
+  },
+  "voice": {
+    "longform_minimum_pause_events": 0,
+    "pause_contract": "Natural sentence and paragraph punctuation provides documentary pacing; explicit dramatic pause directives are optional."
   },
   "visual": {
     "scene_prompt_style_phrase": "16:9 landscape cinematic factual documentary reconstruction",

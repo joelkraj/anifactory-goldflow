@@ -10,6 +10,8 @@ import {
 } from "../lib/factual-evidence-contract.mjs";
 import { buildStageCommand } from "../lib/pipeline-stage-registry.mjs";
 import { scenePromptProductionContractFindingsForTests } from "../imagegen.mjs";
+import { contentStatusIdentityFields } from "../run-status.mjs";
+import { minimumPauseEventsForProfile } from "../voice-direction-gate.mjs";
 
 export async function runContentProfileTests() {
   const manhwa = contentProfileDefinition("manhwa");
@@ -29,6 +31,8 @@ export async function runContentProfileTests() {
     contentProfileSceneStyleSatisfied("A generic anime frame.", documentary.config),
     false,
   );
+  assert.equal(minimumPauseEventsForProfile(documentary.config), 0);
+  assert.equal(minimumPauseEventsForProfile(manhwa.config), 2);
 
   const ledger = {
     schema: "goldflow_factual_evidence_ledger_v1",
@@ -70,6 +74,22 @@ export async function runContentProfileTests() {
   };
   const semanticCommand = buildStageCommand("semantic_scene_plan", standaloneProofIdentity);
   assert.doesNotMatch(semanticCommand, /proof-baseline-word-timing/);
+  const statusIdentity = {
+    ...standaloneProofIdentity,
+    ...contentStatusIdentityFields({
+      ...standaloneProofIdentity,
+      source_path: "/tmp/script.md",
+      content_profile: documentary.id,
+      content_profile_version: documentary.config.version,
+      content_profile_sha256: documentary.sha256,
+      content_profile_config: documentary.config,
+      factual_evidence: { sha256: "evidence-sha" },
+    }),
+  };
+  assert.equal(statusIdentity.proof_source_mode, "standalone_bounded_source");
+  assert.equal(statusIdentity.content_profile, documentary.id);
+  assert.equal(statusIdentity.factual_evidence.sha256, "evidence-sha");
+  assert.doesNotMatch(buildStageCommand("semantic_scene_plan", statusIdentity), /proof-baseline-word-timing/);
   const renderCommand = buildStageCommand("premium_render", standaloneProofIdentity);
   assert.match(renderCommand, /--diagnostic-proof true/);
   assert.match(renderCommand, /--proof-scope-end-sec 180/);
@@ -95,4 +115,3 @@ export async function runContentProfileTests() {
   }], { contentProfile: documentary.config });
   assert.equal(wrongStyleFindings.some((finding) => finding.code === "scene_prompt_style_contract_missing"), true);
 }
-

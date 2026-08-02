@@ -17,6 +17,7 @@ import {
   buildQwenLiamBatchPlan,
   qwenBatchBindingByUnit,
 } from "./lib/qwen-liam-batch-contract.mjs";
+import { contentProfileForIdentity } from "./lib/content-profiles.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -2229,7 +2230,21 @@ function auditDialoguePerformance(script, segments, speakabilityRules = {}) {
   };
 }
 
-function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
+export function minimumPauseEventsForProfile(contentProfile = {}, {
+  isTestSlice = false,
+  maxDurationSec: durationLimitSec = null,
+} = {}) {
+  const configured = contentProfile?.voice?.longform_minimum_pause_events;
+  const longformMinimum = Number.isInteger(configured) && configured >= 0 ? configured : 2;
+  if (isTestSlice && durationLimitSec <= 45) return 0;
+  if (isTestSlice && durationLimitSec < 90) return Math.min(1, longformMinimum);
+  return longformMinimum;
+}
+
+function qualityReport(segments, {
+  ttsProvider = "qwen_local",
+  contentProfile = {},
+} = {}) {
   const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
   const voicedSegments = segments.filter((segment) => segment.fish_generation_required !== false && segment.delivery_mode !== "sound_design");
   const tags = voicedSegments.map((segment) => segment.tag);
@@ -2314,7 +2329,10 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
   if (maxRun >= 5) failures.push({ code: "same_tag_repeats_5_plus", severity: "blocker" });
   if (physicalTags < minPhysicalTags) failures.push({ code: "too_few_physical_tags", severity: "blocker", min_physical_tags: minPhysicalTags });
   if (physicalTags > Math.ceil(voicedSegments.length * 0.45)) failures.push({ code: "too_many_physical_tags", severity: "warning" });
-  const minPauseEvents = isTestSlice && maxDurationSec <= 45 ? 0 : isTestSlice && maxDurationSec < 90 ? 1 : 2;
+  const minPauseEvents = minimumPauseEventsForProfile(contentProfile, {
+    isTestSlice,
+    maxDurationSec,
+  });
   if (pauseEvents < minPauseEvents) failures.push({ code: "too_few_pause_events", severity: "blocker", min_pause_events: minPauseEvents });
   if (midSentenceTags > 0) failures.push({ code: "mid_sentence_tags", severity: "blocker", count: midSentenceTags });
   if (narrationMisclassifiedAsDialogue.length) {
@@ -2453,6 +2471,13 @@ function qualityReport(segments, { ttsProvider = "qwen_local" } = {}) {
     max_consecutive_same_tag: maxRun,
     physical_tag_count: physicalTags,
     pause_event_count: pauseEvents,
+    pause_event_policy: {
+      content_profile: contentProfile?.id ?? null,
+      longform_minimum_pause_events: Number.isInteger(contentProfile?.voice?.longform_minimum_pause_events)
+        ? contentProfile.voice.longform_minimum_pause_events
+        : 2,
+      effective_minimum_pause_events: minPauseEvents,
+    },
     mid_sentence_tag_count: midSentenceTags,
     speaker_mode_count: Object.fromEntries([...new Set(segments.map((segment) => segment.delivery_mode))].map((mode) => [mode, segments.filter((segment) => segment.delivery_mode === mode).length])),
     tempo_classification_counts: tempoCounts,
@@ -4518,7 +4543,8 @@ async function main() {
     },
     audio_performance_segments: segments,
   };
-  const report = qualityReport(segments, { ttsProvider });
+  const contentProfile = contentProfileForIdentity(runIdentity);
+  const report = qualityReport(segments, { ttsProvider, contentProfile });
   if (narrationTextIntegrityCoverage.status !== "passed") {
     const textIntegrityFailure = {
       code: "narration_text_integrity_coverage_failed",

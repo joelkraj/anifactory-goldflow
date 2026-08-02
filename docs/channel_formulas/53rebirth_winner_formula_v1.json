@@ -1,0 +1,370 @@
+{
+  "schema": "goldflow_channel_winner_formula_v1",
+  "status": "active",
+  "channel": "53rebirth",
+  "channel_name": "Manhwa Joey",
+  "version": "2026-08-01.7",
+  "observed_at": "2026-08-01T12:00:00-04:00",
+  "research_basis": {
+    "path": "/Users/joel/AniFactoryData/channels/53rebirth/source_development/research/2026-08-01-winner-concepts-v1/ranked_premise_research_pool.json",
+    "supporting_paths": [
+      "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reports/recent_top_title_formula_2026_06_28.md",
+      "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/exports/chatbot_handoff_2026_07_27/ultimate_winner_research_handoff.md"
+    ],
+    "role": "directional_hypothesis_pool",
+    "limits": "The one hundred concept scores are comparative editorial estimates, not predicted CTR. The vidIQ figures are directional snapshots, and the pasted citation tokens are not reusable source links. Operator decisions and measured upload outcomes outrank this pool.",
+    "adopted_findings": [
+      "own-channel demand and immediate emotional clarity deserve the largest package weights",
+      "betrayal or humiliation is the mandatory premise chassis for every candidate, never a competing idea lane",
+      "the healthy mix comes from changing the reversal engine after the betrayal: explicit systems, fortune, genius, supernatural partners, magical boons, or original high-scaling mechanics",
+      "recent niche winners materially support forbidden mechanics, measurable multipliers, visible rank or institution tests, and human betrayal paired with a corrective reversal engine",
+      "the reversal engine is secondary to the plain human betrayal and visible loss, but every candidate still needs one clear engine",
+      "one proof object or relationship should make the reversal phone-readable",
+      "documentary proof may enable an active reversal but must not become a procedural climax"
+    ],
+    "rejected_findings": [
+      "a rigid fifty-percent AI-generated supernatural quota",
+      "treating ranked concepts as a release queue",
+      "assuming Queen, Goddess, Empress, Spirit, or other fantasy-title substitution creates useful absurdity by itself",
+      "treating systems, ranks, regression, or measurable manhwa mechanics as inherently harmful because one lore-heavy gate story failed"
+    ]
+  },
+  "formula_name": "concrete_betrayal_explained_power_reversal",
+  "formula_statement": "Every premise begins with a personally legible betrayal or humiliation that removes Joey's status, relationship, safety, work, or future. Joey makes an early irreversible boundary, receives or discovers one clear reversal engine, and uses its potentially overpowered or hyper-scaling effect to build an understandable ascent. The engine does not need to mirror the betrayal; it must causally power the promised transformation. The story explains how Joey converts that power into results at both the scale of his whole ascent and the moment of each decisive victory, imposing a visible loss on the betrayer while building a far larger life beyond them.",
+  "audience_promise": {
+    "click_reason": "See an unfair personal betrayal reversed completely and visibly.",
+    "emotional_sequence": [
+      "understand the wound immediately",
+      "hate the unfair arrangement",
+      "respect Joey's first boundary",
+      "enjoy simple premise-native choices and escalation",
+      "see the betrayer lose the exact thing they abused",
+      "leave with a complete ending"
+    ],
+    "non_negotiable": "The title, thumbnail, opening, middle engine, climax, and final boundary must all express the same viewer fantasy."
+  },
+  "candidate_policy": {
+    "raw_idea_pool_count": 12,
+    "requested_candidate_count": 6,
+    "minimum_eligible_candidates": 3,
+    "minimum_total_score": 85,
+    "required_evidence_types": [
+      "own_channel",
+      "niche_outlier"
+    ],
+    "target_runtime_minutes": 60,
+    "target_runtime_min_minutes": 55,
+    "target_runtime_max_minutes": 65,
+    "target_spoken_wpm": 187.5,
+    "narration_profile": "CONVERSATIONAL WINNER",
+    "title_suffix": "| Manhwa Recap",
+    "title_max_characters": 100,
+    "thumbnail_main_text_words_max": 4,
+    "thumbnail_total_overlay_words_max": 8,
+    "thumbnail_subjects_max": 3,
+    "thumbnail_arrows_max": 1,
+    "thumbnail_labels_max": 2
+  },
+  "reversal_engine_policy": {
+    "operator_seed_policy": "Preserve every supplied operator seed as a real finalist unless it violates literal title truth or duplicates a recorded rejection. AI challenges and develops operator seeds; it does not silently replace them.",
+    "mandatory_betrayal_spine": "Every candidate must name who betrayed, rejected, abandoned, stole from, cursed, framed, cheated on, fired, disowned, or publicly humiliated Joey; state the literal act and concrete loss; then launch Joey into one primary reversal engine and a visible transformation.",
+    "sequence": "CONCRETE BETRAYAL OR HUMILIATION -> ONE REVERSAL ENGINE -> EARLY VISIBLE PROOF -> HYPER-SCALING BUT CAUSALLY EXPLAINED ASCENT -> VISIBLE PAYBACK",
+    "discovery_rule": "There are no fixed reversal-engine lanes, quotas, allowed-family enum, power ceiling, or mandatory nerf. Search freely for the strongest clear mechanic that can launch Joey's post-betrayal ascent. Systems, lotteries, genius, hidden identity, supernatural spouses, demons, gods, devils, ghosts, vampires, genies, wishing willows, curses, jobs, skills, objects, contracts, luck, status, and unfamiliar original mechanics are examples rather than boxes to fill.",
+    "batch_diversity_rule": "The private raw pool should explore materially different mechanics and avoid six reskins of the same system, spouse title, fantasy noun, or windfall. Diversity breaks ties; it never outranks click strength, operator judgment, or a genuinely better premise.",
+    "selection_rule": "Select finalists by package strength and story runway, not quota compliance. Preserve operator seeds. Do not reject an original mechanic because it does not fit a predefined family.",
+    "grounded_explanation_standard": {
+      "definition": "Grounded means every decisive result is explained through observable cause and effect inside the story's fictional rules. It does not mean realistic power limits.",
+      "major_proof_chain": "OBSTACLE OR TELL -> MECHANIC INPUT, OUTPUT, OR GRANTED CAPABILITY -> JOEY'S CONCRETE TACTIC OR EXECUTION -> OPPONENT OR ENVIRONMENT RESPONSE -> RESULT -> COMPARATIVE PROOF OF HOW OVERPOWERED HE IS",
+      "capability_sufficiency": "A result must be supported by capabilities the mechanic actually grants. Intelligence or analysis alone does not supply strength, reflexes, motor memory, capital, tools, credentials, or labor. Establish accelerated training, physical enhancement, perfect control, equipment, allies, capital, or another execution bridge when the result requires it.",
+      "specificity_rule": "Do not summarize a major win with vague claims such as Joey used his brain, used the system, used advanced tactics, easily won, outsmarted everyone, or built an empire. Name the relevant observation or power output, the tactic or action, why the obstacle reacted as expected, the resulting change, and one visible measure or comparison proving dominance.",
+      "detail_calibration": "Use the few concrete details needed to make the result inevitable and satisfying, normally one to three decisive tactical or technical facts. Avoid both unexplained outcomes and jargon dumps.",
+      "required_package_examples": "Before scripting, preserve at least two fully explained decisive applications: the first proof and the climax or another late-scale proof. These examples establish the engine's usable causal grammar without forcing the narration into a beat sheet.",
+      "boxing_example": "Bad: Joey used an intelligence system and outboxed a professional. Sufficient: the system identifies the professional's repeated tell, grants or accelerates the perception and motor control needed to exploit it, Joey deliberately baits the expected attack and executes a named counter, the professional commits to the trap, and the result includes a visible margin proving Joey was overwhelmingly superior rather than lucky. If the system grants analysis only, it cannot also grant professional reflexes or technique without training or another execution bridge."
+    },
+    "rule": "Every concept is betrayal first and reversal-engine second. The engine need not thematically counter or mirror the wound. It must be nameable in one short phrase, produce visible proof, support dramatic hyper-scaling, and causally power the title transformation. Unlimited, compounding, or wildly overpowered mechanics are welcome. Do not invent a limit, cost, cooldown, or weakness merely to balance them. Instead define the acquisition, effect, scaling rule, execution bridge, first proof logic, and the major causal steps that turn the mechanic into status, money, mastery, relationships, companies, kingdoms, or worlds. Joey supplies direction and concrete application; the engine may supply enormous power. Do not stack unrelated mechanics when one strong engine can carry the fantasy."
+  },
+  "score_dimensions": {
+    "own_channel_demand_fit": {
+      "weight": 20,
+      "minimum": 8,
+      "question": "Does the package transfer a measured demand pattern from the channel's strongest videos without copying their plot skin?"
+    },
+    "niche_outlier_support": {
+      "weight": 10,
+      "minimum": 7,
+      "question": "Does a current niche outlier support the click grammar, emotional contradiction, or visible outcome?"
+    },
+    "instant_emotional_clarity": {
+      "weight": 15,
+      "minimum": 8,
+      "question": "Can a cold viewer understand the relationship, betrayal, and reversal without lore?"
+    },
+    "literal_complete_title_reversal": {
+      "weight": 15,
+      "minimum": 8,
+      "question": "Does the title state the concrete wound and the complete literal transformation rather than merely setting up a mystery?"
+    },
+    "one_glance_thumbnail_proof": {
+      "weight": 10,
+      "minimum": 8,
+      "question": "Can one simple thumbnail scene prove the emotional conflict and the reversal at phone size?"
+    },
+    "thumbnail_additivity": {
+      "weight": 5,
+      "minimum": 8,
+      "question": "Does the thumbnail add proof, judgment, or status instead of repeating the title?"
+    },
+    "power_fantasy_engine_and_causal_scaling": {
+      "weight": 10,
+      "minimum": 7,
+      "question": "After the mandatory betrayal, does one clear reversal engine deliver an exciting power fantasy with visible acceleration or hyper-scaling? Does each major proof explain the obstacle, mechanic output or granted capability, Joey's concrete execution, the response, the result, and a visible comparison proving how overpowered he is? Can the premise bridge every required capability without artificially nerfing the mechanic or using vague claims such as he used his intelligence or simply outsmarted them?"
+    },
+    "fresh_from_recent_uploads": {
+      "weight": 5,
+      "minimum": 7,
+      "question": "Is the central relationship, advantage, setting, and payoff meaningfully different from recent uploads?"
+    },
+    "longform_runway": {
+      "weight": 10,
+      "minimum": 7,
+      "question": "Can one central conflict and one primary mechanic keep escalating for an hour through increasingly large goals, proofs, applications, relationships, rivals, and consequences without adding unrelated systems, repeated humiliation, or procedural filler?"
+    }
+  },
+  "retention_architecture": {
+    "mode": "diagnostic_review_only",
+    "blocks_source_release": false,
+    "minimum_total_score": 85,
+    "movement_count_min": 8,
+    "movement_count_max": 10,
+    "movement_max_script_percent": 18,
+    "climax_start_percent_min": 86,
+    "climax_start_percent_max": 92,
+    "resolution_script_percent_max": 8,
+    "score_dimensions": {
+      "opening_and_ten_minute_payoff_map": {"weight": 15, "minimum": 7},
+      "clear_advantage_rule_and_scaling_path": {"weight": 15, "minimum": 7},
+      "joey_agency_and_audience_trust": {"weight": 15, "minimum": 7},
+      "causal_movement_runway": {"weight": 20, "minimum": 7},
+      "conflict_variety_and_procedure_restraint": {"weight": 10, "minimum": 7},
+      "intelligent_opposition_and_scaling_pressure": {"weight": 10, "minimum": 7},
+      "active_title_native_climax": {"weight": 10, "minimum": 7},
+      "concise_closure": {"weight": 5, "minimum": 7}
+    },
+    "required_checkpoint_ids": [
+      "title_contradiction_30s",
+      "irreversible_boundary_minute_5",
+      "advantage_proof_minute_8",
+      "forward_objective_minute_10",
+      "scaling_pressure_and_adaptive_response",
+      "literal_title_payoff"
+    ],
+    "rule": "This is a post-generation review log, not a source-release gate. It may identify likely slow, repetitive, or overlong spans for optional human review, but it never triggers automatic rewriting, regeneration, or ingest blocking. Upload retention—not an LLM checklist—decides whether the formula works."
+  },
+  "package_contract": {
+    "title": [
+      "Use one plain causal sentence.",
+      "Name the relationship or institution that betrayed Joey.",
+      "State the concrete betrayal.",
+      "State the concrete reversal, takeback, exposure, alliance, or new status.",
+      "Use at most one impossible contradiction, and require it to materially drive the ascent, conflict, visual identity, or payoff rather than merely decorate the title.",
+      "Use no unexplained lore term as the click hinge.",
+      "Make every verb, count, rank, relationship, and payoff literally true in the eventual script."
+    ],
+    "thumbnail": [
+      "Use one scene, not a collage.",
+      "Prefer Joey and one antagonist or contrast figure.",
+      "Use one dominant prop, gesture, relationship, or status proof.",
+      "Use one to four main words and at most eight overlay words total.",
+      "Use at most one primary arrow; a second is allowed only when it clarifies the transfer or replacement.",
+      "Add information the title does not already say.",
+      "Compose for a full Codex-generated thumbnail with exact text and arrows when requested by the operator."
+    ],
+    "opening": [
+      "Show the title contradiction through a physical or social event in the first thirty seconds.",
+      "Give three to five non-redundant receipts of exploitation when the betrayal needs accumulation.",
+      "Cross the irreversible line and give Joey a meaningful refusal, escape, or boundary by minutes three to five.",
+      "Prove the core advantage and show its scaling direction by approximately minutes six to eight through an obstacle, mechanic output, execution bridge, concrete tactic, obstacle response, result, and visible dominance comparison.",
+      "Enter the larger premise-native objective by minute ten."
+    ],
+    "middle": [
+      "Move beyond replaying the opening humiliation.",
+      "Use eight to ten causal movements with changing objectives, pressure, relationships, resources, status, information, or environment.",
+      "For every major proof or decisive victory, explain the short local chain from obstacle through mechanic output, execution, response, result, and visible margin of dominance. Do not substitute a label such as intelligence, advanced tactics, or outsmarting for the action itself.",
+      "Keep the antagonist competent and evidence-bound.",
+      "Create meaningful pressure through larger goals, intelligent opposition, responsibility, speed, complexity, or scale. Do not require a defeat or nerf the mechanic merely to manufacture tension.",
+      "Let allies materially change at least one rescue, comeback, or climax."
+    ],
+    "ending": [
+      "Resolve the title promise in an active physical or social scene whose decisive mechanism, execution, response, and result are visible and causally sufficient.",
+      "Cause a concrete loss tied to the original exploitation.",
+      "Show Joey's final boundary.",
+      "End with one concise changed equilibrium and no second ending."
+    ]
+  },
+  "hard_reject_codes": {
+    "setup_only_title": "The title promises only the wound and hides the transformation.",
+    "abstract_click_hinge": "The click depends on lore, an undefined rank, a metaphor, or a vague claim.",
+    "thumbnail_repeats_title": "The thumbnail merely restates the title instead of proving or extending it.",
+    "thumbnail_collage": "The thumbnail requires a collage, crowd, or too many labels to understand.",
+    "passive_joey": "Joey continues serving the betrayer after understanding the harm without a strategic boundary.",
+    "engine_replaces_joey_agency": "The reversal engine chooses Joey's goal, morality, or decisive victory instead of supplying leverage for his choices.",
+    "unexplained_power_application": "A major victory is credited to intelligence, genius, the system, luck, advanced tactics, or raw power without showing the relevant mechanic output, required execution capability, concrete action, obstacle response, result, and visible proof of dominance.",
+    "repeated_humiliation_engine": "The middle repeats the opening humiliation with new names.",
+    "paperwork_climax": "A hearing, contract, lawsuit, report, or technicality creates the decisive victory.",
+    "unearned_antagonist_collapse": "The antagonist becomes incompetent or confesses without evidence-based pressure.",
+    "weak_symmetric_payoff": "The betrayer does not visibly lose something connected to the original harm.",
+    "recent_signature_duplicate": "The premise substantially repeats a recent relationship, mechanic, setting, and payoff combination.",
+    "production_identity_overload": "The story needs too many recurring characters, monsters, props, or location states to remain visually coherent.",
+    "random_fantasy_mad_lib": "The supernatural element is a replaceable Queen, Goddess, Empress, Spirit, creature, or magical object that does not materially change the progression, decisions, visual identity, escalation, or payoff."
+  },
+  "evidence": [
+    {
+      "id": "own_anti_simp_breakout",
+      "source_type": "own_channel",
+      "source_ref": "BbIfCKlbc-M",
+      "title": "Reincarnated as the World's Biggest Simp, He Unlocks the Anti-Simp System | Manhwa Recap",
+      "metrics": {
+        "views": 28981,
+        "breakout_score": 117.75,
+        "average_view_duration_sec": 711,
+        "average_percentage_viewed": 18.97
+      },
+      "lesson": "A familiar humiliation identity plus one instantly understandable corrective mechanic can create exceptional click demand."
+    },
+    {
+      "id": "own_death_goddess",
+      "source_type": "own_channel",
+      "source_ref": "aLRmk50_Hqg",
+      "title": "My Wife Poisoned Me, Then I Married the Goddess of Death | Manhwa Recap",
+      "metrics": {
+        "views": 22300,
+        "breakout_score": 5.24,
+        "average_view_duration_sec": 1473,
+        "average_percentage_viewed": 27.47
+      },
+      "lesson": "The cleanest package combines an intimate betrayal with a visually powerful replacement relationship."
+    },
+    {
+      "id": "own_boss_one_dollar",
+      "source_type": "own_channel",
+      "source_ref": "aPqf5EwZTsk",
+      "title": "My Boss Stole My Fiancee And Fired Me, Then My $1 System Bought His Company | Manhwa Recap",
+      "metrics": {
+        "views": 17523,
+        "breakout_score": 18.79,
+        "average_view_duration_sec": 2041,
+        "average_percentage_viewed": 24.28
+      },
+      "lesson": "A complete causal title can carry betrayal, loss, a simple numerical advantage, and a concrete takeback."
+    },
+    {
+      "id": "own_learning_system",
+      "source_type": "own_channel",
+      "source_ref": "qI46llUgLxQ",
+      "title": "He Stole My GF and Humiliated Me, Then I Unlocked The 100X Learning System | Manhwa Recap",
+      "metrics": {
+        "views": 15252,
+        "breakout_score": 6.24,
+        "average_view_duration_sec": 1324,
+        "average_percentage_viewed": 23.37
+      },
+      "lesson": "A personal rival plus a one-line numerical mechanic makes the transformation easy to understand."
+    },
+    {
+      "id": "own_spend_exposure",
+      "source_type": "own_channel",
+      "source_ref": "76HyNofMk5E",
+      "title": "I Spent $184,730 on Her, Then My 10X System Exposed Her | Manhwa Recap",
+      "metrics": {
+        "views": 12714,
+        "breakout_score": 52.96,
+        "average_view_duration_sec": 1210,
+        "average_percentage_viewed": 26.81
+      },
+      "lesson": "A precise receipt makes exploitation tangible, while a simple exposure payoff completes the promise."
+    },
+    {
+      "id": "niche_betrayal_villain_system",
+      "source_type": "niche_outlier",
+      "source_ref": "KQMPGyt6PxA",
+      "title": "She Dumped Me for the Hero—Now I Awakened VILLAIN System To Crush Them! - Manhwa Recap in Hindi",
+      "metrics": {
+        "views": 450012,
+        "age_days_at_snapshot": 4,
+        "snapshot_date": "2026-06-28"
+      },
+      "lesson": "A public romantic rejection paired with one named corrective system creates an immediate human wound, a manhwa-native click hinge, and an explicit revenge direction."
+    },
+    {
+      "id": "niche_every_death_100x",
+      "source_type": "niche_outlier",
+      "source_ref": "aJngEMb6Cvk",
+      "title": "Reincarnating With EVERY DEATH, He Evolves 100x Faster Than Anyone - Manhwa Recap",
+      "metrics": {
+        "views": 760952,
+        "age_days_at_snapshot": 22,
+        "snapshot_date": "2026-06-28"
+      },
+      "lesson": "One repeatable manhwa mechanic plus a measurable multiplier supplies both instant title clarity and a natural progression engine."
+    },
+    {
+      "id": "niche_meat_shield_tank",
+      "source_type": "niche_outlier",
+      "source_ref": "L8iwCGK7rFw",
+      "title": "Used as a Meat Shield for Years, He Left Her and Became the Strongest Tank",
+      "metrics": {
+        "views": 986502,
+        "runtime_minutes": 63.7,
+        "spoken_wpm": 226.6
+      },
+      "lesson": "Concrete abuse, early withdrawal, a premise-native adventure, and calm evidence-based revenge outperform repeated ranting."
+    },
+    {
+      "id": "niche_slave_husband",
+      "source_type": "niche_outlier",
+      "source_ref": "mcHbqYnOJQc",
+      "title": "Isekai'd as a Slave, He Was Bought by a Single Mother to Be Her Husband",
+      "metrics": {
+        "views": 887454,
+        "runtime_minutes": 42.6,
+        "spoken_wpm": 246.7
+      },
+      "lesson": "One legible status contradiction and one relationship transformation can carry the complete package."
+    },
+    {
+      "id": "niche_runaway_bride_aunt",
+      "source_type": "niche_outlier",
+      "source_ref": "research_snapshot_2026_07_31_runaway_bride_aunt",
+      "title": "My Bride Ran Away Before The Wedding, So I Married Her Billionaire Aunt | Manhwa Recap",
+      "metrics": {
+        "views": 110582,
+        "views_per_hour": 235
+      },
+      "lesson": "A simple relationship substitution creates immediate betrayal, reversal, and thumbnail clarity without lore."
+    }
+  ],
+  "negative_evidence": [
+    {
+      "id": "own_ninety_nine_gates_formal_gate_false_positive",
+      "source_type": "own_channel_negative",
+      "source_ref": "Gc9yUNVIwLc",
+      "metrics": {
+        "click_through_rate_percent": 3.2,
+        "average_view_duration_sec": 368,
+        "typical_average_view_duration_lower_sec": 1062,
+        "typical_average_view_duration_upper_sec": 1362
+      },
+      "lesson": "Rank, gates, technical lore, and formal checklist completion do not replace an emotionally simple wound, quick human choice, escalating causal movements, and a literal reversal. Presence-only gates can pass a script that viewers abandon."
+    }
+  ],
+  "recent_signature_policy": {
+    "source": "Read the current channel upload ledger during ideation when available.",
+    "avoid_repeating_all_four": [
+      "same betrayer relationship",
+      "same advantage or system",
+      "same primary setting",
+      "same final takeback"
+    ],
+    "allowed_transfer": "Reuse winning emotional grammar, not the same plot skin."
+  }
+}

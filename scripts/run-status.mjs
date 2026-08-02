@@ -481,7 +481,7 @@ function commandBase(identity) {
 }
 
 function visualRefsApproveCommand(identity) {
-  return `node bin/goldflow.mjs visual approve-refs ${commandBase(identity)} --note "<reference review notes>"`;
+  return `node bin/goldflow.mjs visual approve-refs ${commandBase(identity)} --cleanliness-reviewed true --note "<reference review notes>"`;
 }
 
 function imagegenStartCommand(identity, extra = "") {

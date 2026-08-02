@@ -16,6 +16,10 @@ import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage, modelslabRequestSettings } from "./modelslab-image-helper.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import {
+  sanitizeAnatomyContracts,
+  sanitizeEquipmentContracts,
+} from "./lib/shot-manifest-risk-contracts.mjs";
+import {
   configuredModelslabProfiles,
   loadConfiguredModelslabAccounts,
   modelslabProfileForWorkId,
@@ -211,36 +215,80 @@ function referencePathFor(target, provider = routedProviderForReference(imagePro
 }
 
 function referencePrompt(target) {
-  const kind = String(target.kind ?? "");
+  const rawKind = String(target.kind ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const kind = rawKind === "character" ? "character_state" : rawKind === "effect" ? "action" : rawKind;
   const subjectText = String(target.subject ?? "").toLowerCase();
   const assetRole = String(target.conditioning_asset_role ?? target.director_role ?? "").toLowerCase();
   const identitySubtype = String(target.identity_subtype ?? "").toLowerCase();
   const subjectCount = Number(target.conditioning_subject_count ?? 1);
+  const explicitCharacterRole = ["identity_state", "creature_identity", "faction_language", "group_identity"].includes(assetRole);
+  const explicitHumanIdentity = assetRole === "identity_state"
+    || (!explicitCharacterRole && /^(?:human|person)$/.test(identitySubtype));
   const creatureCharacterState = kind === "character_state"
+    && !explicitHumanIdentity
     && (assetRole === "creature_identity"
-      || /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)
-      || /\b(creature|monster|monsters|guardian|sentinel|golem|construct|automaton|hound|hounds|dragon|beast|beasts|wolf|wolves|boss|ram|giant|titan)\b/.test(subjectText));
+      || (!explicitCharacterRole && /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype))
+      || (!assetRole && !identitySubtype && /\b(creature|monster|monsters|golem|construct|automaton|hound|hounds|dragon|beast|beasts|wolf|wolves|ram|titan)\b/.test(subjectText)));
   const groupCharacterState = kind === "character_state"
+    && !explicitHumanIdentity
     && (assetRole === "faction_language"
       || assetRole === "group_identity"
       || (Number.isFinite(subjectCount) && subjectCount > 1)
-      || /\b(group|squad|team|crowd|guards|soldiers|students|witnesses|faction|workforce)\b/.test(subjectText));
+      || (!explicitCharacterRole && /^(?:group|creature_group|faction)$/.test(identitySubtype))
+      || (!assetRole && !identitySubtype && /\b(group|squad|team|crowd|guards|soldiers|students|witnesses|faction|workforce)\b/.test(subjectText)));
+  const expectedVisibleHandsValue = target?.expected_visible_hands;
+  const expectedVisibleHands = expectedVisibleHandsValue !== null
+    && expectedVisibleHandsValue !== undefined
+    && expectedVisibleHandsValue !== ""
+    && Number.isInteger(Number(expectedVisibleHandsValue))
+    && Number(target.expected_visible_hands) >= 0
+    ? Number(target.expected_visible_hands)
+    : null;
+  const humanHandInstruction = expectedVisibleHands === 0
+    ? "the authored anatomy has zero visible natural or prosthetic hands, so do not add a hand, arm extension, or prosthetic"
+    : expectedVisibleHands == null
+      ? "preserve the exact authored limb count and any documented limb absence; every anatomically present natural hand is visible, clearly readable, separated from the torso, relaxed, open, and empty"
+      : `show exactly ${expectedVisibleHands} total visible ${expectedVisibleHands === 1 ? "hand or documented prosthetic hand endpoint" : "hands or documented prosthetic hand endpoints"}, matching the authored integrated anatomy, clearly readable, separated from the torso, relaxed, open, and empty; do not invent another hand or prosthetic`;
+  const creatureHandInstruction = expectedVisibleHands === 0
+    ? "the authored anatomy has zero grasping or hand-like appendages; do not add any"
+    : expectedVisibleHands == null
+      ? "all grasping or hand-like appendages are relaxed, clearly readable, separated from the torso, and empty"
+      : `show exactly ${expectedVisibleHands} grasping or hand-like ${expectedVisibleHands === 1 ? "appendage" : "appendages"}, relaxed, clearly readable, separated from the torso, and empty; do not add another`;
   const kindInstruction = {
     style: "16:9 landscape anime/manhwa rendering sample with one coherent frame, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
     character_state: creatureCharacterState
-      ? "16:9 landscape creature conditioning image in polished 2D anime/manhwa style: exactly one canonical nonhuman actor in one neutral pose on a plain studio background, one coherent full silhouette, explicit head and face construction, exact limb and body anatomy, texture, markings, eyes, and materials; object-like anatomical features remain visibly integrated at their exact body attachment point"
+      ? `16:9 landscape creature conditioning image in polished 2D anime/manhwa style: exactly one canonical nonhuman actor in one neutral pose on a plain studio background, one coherent full silhouette, explicit head and face construction, exact limb and body anatomy, texture, markings, eyes, and materials; ${creatureHandInstruction}; object-like anatomical features remain visibly integrated at their exact body attachment point; detachable equipment belongs to separate prop plates`
       : groupCharacterState
-        ? "16:9 landscape faction conditioning image in polished 2D anime/manhwa style: three to five clearly distinct visible people, separated full-body adults on a plain studio background, one shared uniform language, varied faces and silhouettes, readable insignia and equipment"
-      : "16:9 landscape character conditioning image in polished 2D anime/manhwa style: exactly one visible person in one neutral pose, full-body or three-quarter body centered with ample side breathing room, plain studio background, clear face, hair, age, body type, wardrobe, expression, and materials; both hands relaxed and empty, detachable weapons, bows, swords, shields, and carried props omitted",
+        ? "16:9 landscape faction conditioning image in polished 2D anime/manhwa style: three to five clearly distinct visible people, separated full-body adults on a plain studio background, one shared uniform language, varied faces and silhouettes, readable insignia and worn armor; every visible hand is relaxed, clearly readable, separated from the body, and empty; reusable weapons and props belong to separate prop plates"
+      : `16:9 landscape character conditioning image in polished 2D anime/manhwa style: exactly one visible person in one neutral pose, full-body or three-quarter body centered with ample side breathing room, plain studio background, clear face, hair, age, body type, wardrobe, expression, and materials; ${humanHandInstruction}; the conditioning frame contains only the person's body, worn wardrobe, and plain background; reusable weapons and carried objects belong to separate prop plates`,
     location: "16:9 landscape unoccupied environment-only conditioning image in polished 2D anime/manhwa style: one coherent view of the architecture, scale, lighting, materials, pathways, surfaces, and readable geography, with clean open space for later scene characters",
     prop: "16:9 landscape prop conditioning image in polished 2D anime/manhwa style: exactly one object on a plain neutral surface, one coherent view, clear shape, materials, markings, scale, and silhouette",
     ui: "16:9 landscape UI conditioning image in polished 2D anime/manhwa style: one coherent interface motif with clear panel geometry, color, glow, icon language, and hierarchy",
     action: "16:9 landscape action/effect conditioning image in polished 2D anime/manhwa style: one readable effect shape, movement path, energy color, interaction pattern, and spatial logic on a neutral field",
   }[kind] ?? "production reference image";
+  const conditioningIsolationInstruction = kind === "character_state"
+    ? creatureCharacterState
+      ? "conditioning isolation contract: creature identity and integrated anatomy only; every grasping appendage is empty and every detachable object is supplied later by a separate scene or prop contract"
+      : groupCharacterState
+        ? "conditioning isolation contract: faction faces, silhouettes, uniforms, insignia, and worn armor only; every visible hand is empty and every detachable object is supplied later by a separate scene or prop contract"
+        : "conditioning isolation contract: identity, body, and worn wardrobe only; preserve the authored limb count, keep every anatomically present visible hand empty, and supply every detachable object later through a separate scene or prop contract"
+    : "";
+  const referenceAnatomyContract = kind === "character_state" && !groupCharacterState
+    ? `authoritative reference anatomy contract: ${JSON.stringify({
+        expected_visible_hands: expectedVisibleHands,
+        hands_policy: target?.hands_policy ?? null,
+        integrated_anatomy_features: Array.isArray(target?.integrated_anatomy_features)
+          ? target.integrated_anatomy_features
+          : [],
+        detachable_props: [],
+      })}`
+    : "";
   const parts = [
     kindInstruction,
     target.prompt_anchor,
+    referenceAnatomyContract,
     target.subject ? `subject: ${target.subject}` : "",
+    conditioningIsolationInstruction,
     "single continuous image, stable visual design, no panel grid, no turnaround, no inset faces, no labels, no multiple views, landscape canvas",
   ].filter(Boolean);
   return parts.join(", ");
@@ -256,6 +304,97 @@ function isDerivedReferenceTarget(target) {
 
 function referencePathValue(target) {
   return target?.conditioning_image_path ?? target?.reference_image_path ?? target?.required_reference_path ?? target?.path ?? null;
+}
+
+export async function assertApprovedSourceReferenceHashesForTests(approval, referencePlan, options = {}) {
+  if (String(referencePlan?.reference_cleanliness_contract_version ?? "") !== "empty_hands_no_detachable_props_v1") return true;
+  const planPath = options.visualReferencePlanPath ?? visualReferencePlanPath;
+  const approvalRows = Array.isArray(approval?.source_reference_hashes) ? approval.source_reference_hashes : [];
+  const approvalById = new Map(approvalRows.map((row) => [String(row?.ref_id ?? ""), row]));
+  const sourceTargets = (referencePlan?.reference_targets ?? [])
+    .filter((target) => String(target?.generation_mode ?? "").toLowerCase() === "source_only");
+  for (const target of sourceTargets) {
+    const refId = String(target?.ref_id ?? "").trim();
+    const approved = approvalById.get(refId);
+    if (!approved) throw new Error(`Approved source-reference receipt is missing for ${refId || "unknown source reference"}.`);
+    const rawTargetPath = referencePathValue(target);
+    const targetPath = rawTargetPath
+      ? path.isAbsolute(String(rawTargetPath))
+        ? path.resolve(String(rawTargetPath))
+        : path.resolve(path.dirname(planPath), String(rawTargetPath))
+      : null;
+    const approvedPath = approved.reference_image_path ? path.resolve(String(approved.reference_image_path)) : null;
+    if (!targetPath || !approvedPath || targetPath !== approvedPath) {
+      throw new Error(`Approved source-reference path mismatch for ${refId || "unknown source reference"}.`);
+    }
+    const currentHash = await hashFile(targetPath);
+    const approvedHash = String(approved.source_reference_sha256 ?? approved.reference_image_sha256 ?? "").trim().toLowerCase();
+    if (!currentHash || !approvedHash || currentHash.toLowerCase() !== approvedHash) {
+      throw new Error(`Approved source-reference hash is stale for ${refId || "unknown source reference"}: ${targetPath}`);
+    }
+  }
+  return true;
+}
+
+export async function assertApprovedMaterializedReferenceHashesForTests(characterRefs, referencePlan, options = {}) {
+  if (String(referencePlan?.reference_cleanliness_contract_version ?? "") !== "empty_hands_no_detachable_props_v1") return true;
+  const planPath = options.visualReferencePlanPath ?? visualReferencePlanPath;
+  if (String(characterRefs?.status ?? "").toLowerCase() !== "approved") {
+    throw new Error("Scene image generation requires approved character_state_refs under the reference cleanliness contract.");
+  }
+  const currentPlanHash = await hashFile(planPath);
+  const approvedPlanHash = String(characterRefs?.source_hashes?.[planPath] ?? "").trim().toLowerCase();
+  if (!currentPlanHash || !approvedPlanHash || currentPlanHash.toLowerCase() !== approvedPlanHash) {
+    throw new Error(`Scene image generation requires a current hash-bound clean-reference approval for ${planPath}.`);
+  }
+  const decisions = Array.isArray(characterRefs?.reference_cleanliness_decisions)
+    ? characterRefs.reference_cleanliness_decisions
+    : [];
+  const decisionById = new Map(decisions.map((row) => [String(row?.ref_id ?? ""), row]));
+  const requiredTargets = (referencePlan?.reference_targets ?? []).filter((target) => Boolean(referencePathValue(target)));
+  for (const target of requiredTargets) {
+    const refId = String(target?.ref_id ?? "").trim();
+    const decision = decisionById.get(refId);
+    if (!decision || String(decision?.decision ?? "").toLowerCase() !== "approved_clean") {
+      throw new Error(`Hash-bound clean reference approval is missing for ${refId || "unknown reference"}.`);
+    }
+    const rawTargetPath = referencePathValue(target);
+    const targetPath = rawTargetPath
+      ? path.isAbsolute(String(rawTargetPath))
+        ? path.resolve(String(rawTargetPath))
+        : path.resolve(path.dirname(planPath), String(rawTargetPath))
+      : null;
+    const approvedPath = decision.reference_image_path ? path.resolve(String(decision.reference_image_path)) : null;
+    if (!targetPath || !approvedPath || targetPath !== approvedPath) {
+      throw new Error(`Hash-bound clean reference path mismatch for ${refId || "unknown reference"}.`);
+    }
+    const currentHash = await hashFile(targetPath);
+    const approvedHash = String(decision.reference_image_sha256 ?? "").trim().toLowerCase();
+    if (!currentHash || !approvedHash || currentHash.toLowerCase() !== approvedHash) {
+      throw new Error(`Hash-bound clean reference approval is stale for ${refId || "unknown reference"}: ${targetPath}`);
+    }
+  }
+  for (const ref of characterRefs?.character_state_refs ?? []) {
+    const rawRefPath = referencePathValue(ref);
+    if (!rawRefPath) continue;
+    const sourceRefId = String(ref?.source_ref_id ?? "").trim();
+    const decision = decisionById.get(sourceRefId);
+    if (!sourceRefId || !decision || String(decision?.decision ?? "").toLowerCase() !== "approved_clean") {
+      throw new Error(`Character-state reference ${ref?.state_ref_id ?? "unknown"} does not resolve to a hash-bound clean selected target.`);
+    }
+    const refPath = path.isAbsolute(String(rawRefPath))
+      ? path.resolve(String(rawRefPath))
+      : path.resolve(path.dirname(planPath), String(rawRefPath));
+    const approvedPath = decision.reference_image_path ? path.resolve(String(decision.reference_image_path)) : null;
+    if (!approvedPath || refPath !== approvedPath) {
+      throw new Error(`Character-state reference path mismatch for ${ref?.state_ref_id ?? sourceRefId}.`);
+    }
+    const currentHash = await hashFile(refPath);
+    if (!currentHash || currentHash.toLowerCase() !== String(decision.reference_image_sha256 ?? "").toLowerCase()) {
+      throw new Error(`Character-state clean reference approval is stale for ${ref?.state_ref_id ?? sourceRefId}: ${refPath}`);
+    }
+  }
+  return true;
 }
 
 async function hasExistingReferencePath(target) {
@@ -453,12 +592,20 @@ function isStyleReferenceTarget(target) {
 function referenceSlotPurpose(requirement) {
   const kind = String(requirement.kind ?? "").toLowerCase();
   const subject = requirement.subject ?? requirement.ref_id;
+  const identityUsage = String(requirement.identity_usage ?? "").toLowerCase();
   const assetRole = String(requirement.conditioning_asset_role ?? "").toLowerCase();
   const identitySubtype = String(requirement.identity_subtype ?? "").toLowerCase();
+  const explicitCharacterRole = ["identity_state", "creature_identity", "faction_language", "group_identity"].includes(assetRole);
   if (kind.includes("character") && (
     assetRole === "creature_identity"
-    || /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)
+    || (!explicitCharacterRole && /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype))
   )) return `creature identity and anatomy for ${subject}`;
+  if (kind.includes("character") && (
+    assetRole === "faction_language"
+    || assetRole === "group_identity"
+    || (!explicitCharacterRole && /^(?:group|creature_group|faction)$/.test(identitySubtype))
+  )) return `faction or group design language for ${subject}`;
+  if (kind.includes("character") && identityUsage === "face_only") return `facial likeness only for ${subject}`;
   if (kind.includes("character")) return `character identity and wardrobe for ${subject}`;
   if (kind.includes("location")) return `location environment for ${subject}`;
   if (kind.includes("style")) return "anime manhwa style language";
@@ -489,8 +636,11 @@ function stagingForSlot(prompt, slot) {
 function characterSlotSubtype(slot, staging = null) {
   const assetRole = String(slot?.conditioning_asset_role ?? "").toLowerCase();
   const identitySubtype = String(slot?.identity_subtype ?? "").toLowerCase();
-  if (assetRole === "creature_identity" || /^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)) return "creature";
-  if (assetRole === "faction_language" || /^(?:group|creature_group)$/.test(identitySubtype)) return "group";
+  if (assetRole === "creature_identity") return "creature";
+  if (assetRole === "faction_language" || assetRole === "group_identity") return "group";
+  if (assetRole === "identity_state") return "human";
+  if (/^(?:creature|construct|summon|spirit|undead)$/.test(identitySubtype)) return "creature";
+  if (/^(?:group|creature_group|faction)$/.test(identitySubtype)) return "group";
   const text = `${slot?.subject ?? ""} ${slot?.ref_id ?? ""} ${slot?.purpose ?? ""} ${staging?.name ?? ""}`.toLowerCase();
   if (/\b(?:creature|monster|hound|dragon|beast|wolf|spirit|demon|construct)\b/.test(text)) return "creature";
   if (/\b(?:group|squad|team|crowd|guards|soldiers|students|witnesses|faction|workforce|guild masters)\b/.test(text)) return "group";
@@ -507,10 +657,14 @@ function referenceSlotRole(slot, prompt) {
     const subject = staging?.name ?? slot.subject ?? slot.ref_id ?? "the referenced subject";
     const position = staging?.screen_position ? ` Place ${subject} at ${staging.screen_position}.` : "";
     const pose = staging?.pose ? ` Current action: ${staging.pose}.` : "";
+    const identityUsage = String(slot?.identity_usage ?? "").toLowerCase();
+    if (identityUsage === "face_only") {
+      return `Use Image ${slotNo} for ${subject}'s facial likeness only. The current scene/state contract exclusively defines body, limb count, hands, wardrobe, pose, held objects, background, and composition.${position}${pose}`;
+    }
     const subtype = characterSlotSubtype(slot, staging);
-    if (subtype === "creature") return `Use Image ${slotNo} for ${subject}'s anatomy, silhouette, texture, markings, eyes, and identity.${position}${pose}`;
-    if (subtype === "group") return `Use Image ${slotNo} for ${subject}'s uniform palette, insignia, equipment, and silhouette variety.${position}${pose}`;
-    return `Use Image ${slotNo} for ${subject}'s face, hair, body type, wardrobe, and identity.${position}${pose}`;
+    if (subtype === "creature") return `Use Image ${slotNo} for ${subject}'s identity, integrated anatomy, silhouette, texture, markings, and eyes only.${position}${pose}`;
+    if (subtype === "group") return `Use Image ${slotNo} for ${subject}'s faces, silhouette variety, uniform palette, insignia, and worn armor only.${position}${pose}`;
+    return `Use Image ${slotNo} for ${subject}'s face, hair, body type, worn wardrobe, and identity only.${position}${pose}`;
   }
   if (kind.includes("location")) {
     return `Use Image ${slotNo} for the setting's architecture, materials, lighting, surfaces, and spatial layout.`;
@@ -536,10 +690,13 @@ function conciseReferenceSlotRole(slot, prompt, index) {
   const subject = staging?.name ?? slot.character ?? slot.subject ?? slot.ref_id ?? `reference ${index + 1}`;
   const source = `Image ${index + 1}`;
   if (kind.includes("character")) {
+    if (String(slot?.identity_usage ?? "").toLowerCase() === "face_only") {
+      return `${source} = ${subject} facial likeness only; scene/state contract owns body, limbs, hands, wardrobe, pose, objects, and background`;
+    }
     const subtype = characterSlotSubtype(slot, staging);
-    if (subtype === "creature") return `${source} = exact ${subject} anatomy, silhouette, texture, and markings`;
-    if (subtype === "group") return `${source} = exact ${subject} uniform, insignia, and equipment language`;
-    return `${source} = exact ${subject} identity and wardrobe`;
+    if (subtype === "creature") return `${source} = exact ${subject} identity, integrated anatomy, silhouette, texture, and markings only`;
+    if (subtype === "group") return `${source} = exact ${subject} faces, silhouettes, uniform, insignia, and worn armor only`;
+    return `${source} = exact ${subject} identity and worn wardrobe only`;
   }
   if (kind.includes("location")) return `${source} = exact setting architecture and spatial layout`;
   if (kind.includes("prop")) return `${source} = exact prop design and materials`;
@@ -559,18 +716,44 @@ function referenceSlotInstruction(slots, prompt = {}, { concise = false } = {}) 
     return [
       "Reference mapping:",
       `${roles}.`,
-      "Keep referenced subjects distinct; use the scene prompt for pose, position, action, setting, lighting, and composition.",
+      "Keep referenced subjects distinct and use only each mapping's declared aspects. The current scene staging, anatomy, and equipment contracts exclusively define arms, hands, held objects, pose, position, action, setting, lighting, and composition.",
     ].join(" ");
   }
   return [
     "Reference usage:",
     roles,
-    "Compose one unified final scene. Match the referenced subjects/settings while following the prompt's current action, position, lighting, and composition.",
+    "Compose one unified final scene and use only each mapping's declared aspects. The current scene staging, anatomy, and equipment contracts exclusively define arms, hands, held objects, action, position, lighting, and composition.",
   ].filter(Boolean).join(" ");
 }
 
 export function referenceSlotInstructionForTests(slots, prompt = {}, options = {}) {
   return referenceSlotInstruction(slots, prompt, options);
+}
+
+function compactShotContractRow(row) {
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => (
+    value !== null
+    && value !== undefined
+    && value !== ""
+  )));
+}
+
+function shotManifestProviderContract(prompt = {}) {
+  const manifest = prompt?.shot_manifest ?? {};
+  const foregroundAction = String(manifest.foreground_action ?? "").trim();
+  const anatomyContracts = sanitizeAnatomyContracts(manifest.anatomy_contracts).map(compactShotContractRow);
+  const equipmentContracts = sanitizeEquipmentContracts(manifest.equipment_contracts).map(compactShotContractRow);
+  const contract = {
+    ...(foregroundAction ? { foreground_action: foregroundAction } : {}),
+    ...(anatomyContracts.length ? { anatomy_contracts: anatomyContracts } : {}),
+    ...(equipmentContracts.length ? { equipment_contracts: equipmentContracts } : {}),
+  };
+  if (!Object.keys(contract).length) return "";
+  return `Authoritative shot contract; obey these already-authored physical facts exactly: ${JSON.stringify(contract)}`;
+}
+
+export function shotManifestProviderContractForTests(prompt = {}) {
+  return shotManifestProviderContract(prompt);
 }
 
 function normalizeName(value) {
@@ -598,7 +781,7 @@ function stagedCharacterSlotContext(prompt, characterRefs = []) {
   return context;
 }
 
-function characterReferenceRequirements(prompt, characterRefs, existingIds) {
+function characterReferenceRequirements(prompt, characterRefs, existingIds, targets = new Map()) {
   const sceneId = String(prompt.scene_id ?? "");
   const visibleText = [
     ...(Array.isArray(prompt.visible_subjects) ? prompt.visible_subjects : []),
@@ -623,12 +806,16 @@ function characterReferenceRequirements(prompt, characterRefs, existingIds) {
     if (Array.isArray(ref.scene_ids) && ref.scene_ids.length && sceneId && !ref.scene_ids.includes(sceneId)) continue;
     if (!visibleText.includes(character)) continue;
     coveredCharacters.add(character);
+    const identityUsage = targets.get(String(sourceRefId))?.identity_usage ?? null;
     inferred.push({
       ref_id: sourceRefId,
       kind: "character_state",
+      identity_usage: identityUsage,
       required: true,
       slot_order: 0,
-      slot_purpose: `character identity and wardrobe for ${ref.character ?? ref.subject ?? sourceRefId}`,
+      slot_purpose: String(identityUsage ?? "").toLowerCase() === "face_only"
+        ? `facial likeness only for ${ref.character ?? ref.subject ?? sourceRefId}`
+        : `character identity and wardrobe for ${ref.character ?? ref.subject ?? sourceRefId}`,
       reason: "Visible named character has an approved character_state_ref; attached to reduce multi-character identity bleed.",
       inferred_from_visible_subject: true,
     });
@@ -664,6 +851,7 @@ function manifestReferenceRequirements(prompt, characterRefs, referenceById, ref
       subject: target.subject ?? target.character ?? id,
       conditioning_asset_role: target.conditioning_asset_role ?? null,
       identity_subtype: target.identity_subtype ?? null,
+      identity_usage: target.identity_usage ?? null,
       reference_priority: target.reference_priority ?? null,
       required: true,
       slot_order: 0,
@@ -725,7 +913,6 @@ function withCharacterReferenceAliases(referenceById, characterRefs = []) {
     const baseIdentityRefId = String(ref?.base_identity_ref_id ?? "").trim();
     const path = resolved.get(stateRefId)
       ?? resolved.get(sourceRefId)
-      ?? resolved.get(baseIdentityRefId)
       ?? null;
     if (!path) continue;
     if (stateRefId) resolved.set(stateRefId, path);
@@ -750,6 +937,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
             subject: requirement.subject ?? target.subject ?? target.character ?? requirement.ref_id ?? null,
             conditioning_asset_role: requirement.conditioning_asset_role ?? target.conditioning_asset_role ?? null,
             identity_subtype: requirement.identity_subtype ?? target.identity_subtype ?? null,
+            identity_usage: requirement.identity_usage ?? target.identity_usage ?? null,
             reference_priority: requirement.reference_priority ?? target.reference_priority ?? null,
           };
         })
@@ -760,7 +948,7 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
       ...(inferVisibleSubjectRefs
         ? manifestReferenceRequirements(prompt, characterRefs, resolvedReferenceById, referenceTargets, existingIds)
         : []),
-      ...(inferVisibleSubjectRefs ? characterReferenceRequirements(prompt, characterRefs, existingIds) : []),
+      ...(inferVisibleSubjectRefs ? characterReferenceRequirements(prompt, characterRefs, existingIds, targets) : []),
     ];
     const availableRows = requirements
       .map((requirement, index) => ({
@@ -791,10 +979,13 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
       subject: row.requirement.subject ?? null,
       conditioning_asset_role: row.requirement.conditioning_asset_role ?? null,
       identity_subtype: row.requirement.identity_subtype ?? null,
+      identity_usage: row.requirement.identity_usage ?? null,
       reference_priority: row.requirement.reference_priority ?? null,
       path: row.path,
       purpose: row.staging?.name && String(row.requirement.kind ?? "").toLowerCase().includes("character")
-        ? `character identity and wardrobe for ${row.staging.name}`
+        ? String(row.requirement.identity_usage ?? "").toLowerCase() === "face_only"
+          ? `facial likeness only for ${row.staging.name}`
+          : `character identity and wardrobe for ${row.staging.name}`
         : row.requirement.slot_purpose ?? referenceSlotPurpose(row.requirement),
       reason: row.requirement.reason ?? null,
     }));
@@ -916,11 +1107,16 @@ function assertGeneratedProviderContract(prompt, generated, submittedPrompt, ref
   }
 }
 
-function promptWithReferenceSlots(prompt, provider = imageProvider, { concise = false, mappingPosition = "before" } = {}) {
+function promptWithReferenceSlots(prompt, provider = imageProvider, {
+  concise = false,
+  mappingPosition = "before",
+  shotContractText = "",
+} = {}) {
   const basePrompt = promptTextForImageProvider(prompt, provider);
+  const contractedPrompt = [basePrompt, shotContractText].filter(Boolean).join(" ");
   const slotInstruction = referenceSlotInstruction(prompt.reference_slots ?? [], prompt, { concise });
-  if (mappingPosition === "after") return [basePrompt, slotInstruction].filter(Boolean).join(" ");
-  return [slotInstruction, basePrompt].filter(Boolean).join(" ");
+  if (mappingPosition === "after") return [contractedPrompt, slotInstruction].filter(Boolean).join(" ");
+  return [slotInstruction, contractedPrompt].filter(Boolean).join(" ");
 }
 
 export function promptWithReferenceSlotsForTests(prompt, provider = imageProvider, options = {}) {
@@ -1314,11 +1510,15 @@ async function generateOne(prompt, _index = 0, modelslabAccount = null) {
   const referenceImagePaths = await validateReferences(prompt);
   const sceneGeometry = routedProvider === "modelslab" ? modelslabSceneGeometry() : {};
   const sceneModel = effectiveSceneImageModel(prompt);
+  const shotContractText = routedProvider === "modelslab" && isFluxKleinRoute(sceneModel)
+    ? shotManifestProviderContract(prompt)
+    : "";
   const modelPrompt = [
     sceneAspectInstruction(routedProvider),
     promptWithReferenceSlots(prompt, routedProvider, {
       concise: routedProvider === "modelslab" && (isGptImage2Route(sceneModel) || isFluxKleinRoute(sceneModel)),
       mappingPosition: routedProvider === "modelslab" && isFluxKleinRoute(sceneModel) ? "after" : "before",
+      shotContractText,
     }),
   ].filter(Boolean).join(" ");
   const referenceInputs = await Promise.all(referenceImagePaths.map(async (referencePath) => ({
@@ -1338,6 +1538,7 @@ async function generateOne(prompt, _index = 0, modelslabAccount = null) {
     prompt: modelPrompt,
     provider: routedProvider,
     model: sceneModel,
+    shot_manifest_provider_contract: shotContractText || null,
     reference_inputs: referenceInputs,
     provider_request_settings: providerRequestSettings,
     ...sceneGeometry,
@@ -1370,6 +1571,8 @@ async function generateOne(prompt, _index = 0, modelslabAccount = null) {
     source_image_prompt: prompt.image_prompt ?? null,
     source_modelslab_image_prompt: prompt.modelslab_image_prompt ?? null,
     source_codex_image_prompt: prompt.codex_image_prompt ?? null,
+    shot_manifest_provider_contract: shotContractText || null,
+    shot_manifest_provider_contract_sha256: shotContractText ? sha256(shotContractText) : null,
     modelslab_prompt: routedProvider === "modelslab" ? modelPrompt : null,
     codex_prompt: routedProvider === "codex_imagegen" ? modelPrompt : null,
     image_provider: routedProvider,
@@ -1544,6 +1747,19 @@ async function generateReference(
   return { ref_id: target.ref_id, status: "generated", image_path: generated.downloaded_path ?? outputPath, prompt_hash: promptHash, image_provider: routedProvider, image_provider_route: imageProvider, generated };
 }
 
+function referenceTargetNeedsGeneration(target, referenceScope = new Set()) {
+  const mode = String(target?.generation_mode ?? "").toLowerCase();
+  if (mode !== "standalone_ref") return false;
+  const selected = target?.required_before_imagegen === true
+    || mode === "standalone_ref"
+    || referenceScope.has(target?.ref_id);
+  return selected && (!referenceScope.size || referenceScope.has(target?.ref_id));
+}
+
+export function referenceTargetNeedsGenerationForTests(target, referenceScope = new Set()) {
+  return referenceTargetNeedsGeneration(target, referenceScope);
+}
+
 async function generateReferences() {
   const referencePlan = await readJson(visualReferencePlanPath, null);
   const characterRefs = await readJson(characterStateRefsPath, null);
@@ -1576,8 +1792,7 @@ async function generateReferences() {
     if (ref.source_ref_id && refPath && await exists(refPath)) existingReferenceEntries.push([ref.source_ref_id, refPath]);
   }
   const requestedTargets = referencePlan.reference_targets
-    .filter((target) => target.generation_mode === "standalone_ref" || target.required_before_imagegen === true || referenceScope.has(target.ref_id))
-    .filter((target) => !referenceScope.size || referenceScope.has(target.ref_id));
+    .filter((target) => referenceTargetNeedsGeneration(target, referenceScope));
   const targets = [];
   for (const target of requestedTargets) {
     targets.push(target);
@@ -2083,13 +2298,14 @@ async function main() {
     await promoteDerivedReferences();
     return;
   }
-  if (runIdentity.schema === "goldflow_run_identity_v2" && !skipReferenceGeneration) {
+  if (runIdentity.schema === "goldflow_run_identity_v2") {
     const approval = await readJson(referencePlanApprovalPath, null);
     const currentPlan = await readJson(visualReferencePlanPath, null);
     const currentPlanHash = await hashFile(visualReferencePlanPath);
     if (!currentPlan || !referencePlanApprovalMatches({ approval, plan: currentPlan, fileSha256: currentPlanHash })) {
-      throw new Error(`Reference generation refused: current reference_plan_approval.json is missing or stale for ${visualReferencePlanPath}. Run goldflow visual approve-ref-plan first.`);
+      throw new Error(`Image generation refused: current reference_plan_approval.json is missing or stale for ${visualReferencePlanPath}. Run goldflow visual approve-ref-plan first.`);
     }
+    await assertApprovedSourceReferenceHashesForTests(approval, currentPlan);
   }
   const referenceRun = await generateReferences();
   if (referencesOnly) {
@@ -2128,6 +2344,7 @@ async function main() {
     if (materialized.status !== "passed") process.exitCode = 1;
     return;
   }
+  await assertApprovedMaterializedReferenceHashesForTests(referenceRun.characterRefs, referenceRun.referencePlan);
   let plan = await readJson(promptPath, null);
   if (plan?.status !== "passed" || !Array.isArray(plan.prompts) || !plan.prompts.length) throw new Error(`Missing passed section image prompt plan: ${promptPath}`);
   if (!allowUnhardenedPrompts && !plan.visual_prompt_hardening_report_path && !String(plan.prompt_policy ?? "").includes("deterministic hardening")) {

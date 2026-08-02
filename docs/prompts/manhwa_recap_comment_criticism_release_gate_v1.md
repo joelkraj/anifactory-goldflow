@@ -57,7 +57,9 @@ Automatic failure questions:
 
 Pass only when:
 
-- Every major result follows from a visible prior fact, action, choice, cost, or setup.
+- Every major result follows from a visible prior fact, action, choice, mechanic output, resource, or setup. A cost is not required.
+- Every major proof or decisive victory shows the obstacle or tell, the exact mechanic output or granted capability, Joey's execution bridge, his concrete tactic and action, the opponent or environment response, the result, and a visible comparison proving his margin of dominance.
+- Intelligence or analysis is not treated as strength, reflexes, motor memory, tools, capital, credentials, authority, or labor unless the story establishes an execution bridge such as accelerated training, physical enhancement, equipment, specialists, funding, authority, or infrastructure.
 - The antagonist acts only on evidence they could possess.
 - Cast counts, injuries, locations, knowledge, resources, promises, and time order remain consistent.
 - The mechanic's trigger, payout timing, exclusions, costs, and limits never change for convenience.
@@ -71,6 +73,7 @@ Automatic failure questions:
 - Where did that power, object, permission, or knowledge come from?
 - Would this setback have happened even if Joey had made the correct choice?
 - Did the ending fulfill the title, or merely announce that it did?
+- What exactly did Joey notice, receive, and do, why did the obstacle respond that way, and what proves the win was dominance rather than luck?
 
 ## Gate Three: Pacing And Non-Repetition
 
@@ -92,7 +95,7 @@ Automatic failure questions:
 - Can I skip this section without losing a cause, choice, consequence, or relationship change?
 - Did the story end several minutes ago?
 
-## Gate Four: Joey Versus The System
+## Gate Four: Joey Agency With Power
 
 Pass only when:
 
@@ -100,6 +103,7 @@ Pass only when:
 - Joey decides whom to help, what risk to accept, what boundary to enforce, and what plan to execute.
 - The system does not issue repetitive quests that replace character motivation.
 - No decisive victory happens automatically when a meter fills.
+- No decisive victory is summarized only as using intelligence, using the system, using advanced tactics, easily winning, or outsmarting everyone. One to three concrete decisive facts should explain how it worked without turning the story into a technical lecture.
 - At least one ally materially changes the plan, defeat, rescue, comeback, or climax.
 - Joey sometimes accepts correction, protection, or information from others.
 

@@ -1159,6 +1159,7 @@ Hard rules:
 - Canonical entities are identity-bearing actors, not only people. Include named or distinct creatures, bosses, guardians, constructs, summons, and recurring creature systems when they move, attack, react, are fought, or are physically contacted. Never demote an acting entity to canonical_props merely because it is nonhuman.
 - Give every recurring or signature nonhuman actor one canonical entity with all evidence-backed aliases. Preserve unusual anatomy as entity identity/state evidence so downstream prompts can repeat one stable construction across cuts.
 - Canonicalize physical locations, props, recurring UI motifs, and character state transitions across chunk boundaries.
+- Merge every evidence-backed alternate name or short descriptive label for the same recurring location, prop, or UI motif into that canonical row's aliases array. Do not split one recurring object or interface into separate rows merely because the script calls it by different names.
 - Overlapping chunks intentionally repeat evidence. Deduplicate repeated scenes and facts without deleting story coverage.
 - Preserve the useful scene granularity already present in the chunk extractions. Never collapse several adjacent extraction chunks into one catch-all scene. No reconciled scene may span more than 1,600 locked-script words; split broad arcs at the supplied exact chunk anchors.
 - The first scene must begin near the beginning of the locked script and the final scene must end on the locked script's actual final narration. Short or repeated anchors such as "yes" must be resolved by ordered script position, not by the first matching occurrence.
@@ -1186,8 +1187,8 @@ Return one JSON object only:
   "episode_summary": "factual summary",
   "canonical_entities": [{"entity_id":"snake_case","display_name":"...","kind":"person|creature|construct|creature_group|group|organization","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.99}]}],
   "canonical_locations": [{"location_id":"snake_case","display_name":"...","aliases":["..."],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.95}]}],
-  "canonical_props": [{"prop_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
-  "canonical_ui_motifs": [{"ui_id":"snake_case","display_name":"...","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
+  "canonical_props": [{"prop_id":"snake_case","display_name":"...","aliases":["every evidence-backed alternate name or short descriptor"],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
+  "canonical_ui_motifs": [{"ui_id":"snake_case","display_name":"...","aliases":["every evidence-backed alternate name or short descriptor"],"evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
   "state_transitions": [{"entity_id":"snake_case","state_kind":"wardrobe|injury|possession|status|location","from_state":"...","to_state":"...","transition_evidence_excerpt":"one verbatim evidence excerpt where to_state first becomes true","evidence":[{"exact_excerpt":"verbatim script text","confidence":0.9}]}],
   "global_reference_requirements": [],
   "scenes": [/* reconciled semantic scene objects using exact script_excerpt_start/end */],

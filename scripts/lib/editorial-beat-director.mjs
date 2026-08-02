@@ -442,7 +442,32 @@ function canonicalDictionaries(factLedger) {
     display_name: row.display_name ?? row.label ?? row.location_id,
     aliases: row.aliases ?? [],
   })).filter((row) => row.location_id);
-  return { entities, locations };
+  const props = (factLedger?.canonical_props ?? factLedger?.props ?? []).map((row) => ({
+    prop_id: canonicalId(row.prop_id),
+    display_name: row.display_name ?? row.label ?? row.prop_id,
+    aliases: row.aliases ?? [],
+  })).filter((row) => row.prop_id);
+  const uiElements = (factLedger?.canonical_ui_motifs ?? factLedger?.ui_motifs ?? []).map((row) => ({
+    ui_id: canonicalId(row.ui_id),
+    display_name: row.display_name ?? row.label ?? row.ui_id,
+    aliases: row.aliases ?? [],
+  })).filter((row) => row.ui_id);
+  return { entities, locations, props, uiElements };
+}
+
+function canonicalAssetId(value, rows, idField) {
+  const explicit = value && typeof value === "object"
+    ? canonicalId(value[idField] ?? value.canonical_id)
+    : "";
+  if (explicit) return explicit;
+  const label = canonicalId(assetLabel(value));
+  if (!label) return null;
+  const matches = (rows ?? []).filter((row) => [
+    row[idField],
+    row.display_name,
+    ...(row.aliases ?? []),
+  ].some((candidate) => canonicalId(candidate) === label));
+  return matches.length === 1 ? matches[0][idField] : null;
 }
 
 export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = [], options = {}) {
@@ -472,7 +497,7 @@ Hard rails:
 - Mentioned-only entities stay offscreen. Every visible entity needs an exact evidence excerpt from the grouped atoms.
 - Identity-bearing actors include people, creatures, bosses, guardians, constructs, summons, and recurring creature systems. A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted belongs in the appropriate visible entity list, never in props.
 - Resolve first-person I/me/my physical actions to the established narrator/protagonist entity when the fact ledger and scene context identify that person; do not make the acting protagonist disappear because their proper name is omitted locally.
-- Select only canonical entity_id and location_id values below. If the narration gives no supported visible person, an object/UI/environment beat is valid.
+- Select only canonical entity_id and location_id values below. For every recurring/signature prop or UI motif represented in the canonical dictionaries, return its exact prop_id or ui_id alongside the local label; use null only for a truly one-off item absent from the dictionary. If the narration gives no supported visible person, an object/UI/environment beat is valid.
 - location_id is the physical camera setting of the foreground action. A destination, landmark, or room mentioned in the distance does not become the beat location until the narration places the visible subjects there.
 - Composition is beat-specific. There is no global wide or close-up bias.
 - Background population is neither a default nor forbidden. Use presence=explicit when the grouped atoms name a crowd/group. Use presence=implied only when a concrete local social situation logically needs anonymous people to read correctly—for example an active hearing, ceremony, class, market, public humiliation, audience reaction, staffed workplace, or assembled formation—even if the exact clause does not use the word crowd. A merely public location is insufficient. Use presence=none for private, lonely, abandoned, after-hours, isolated, or object/UI-only beats.
@@ -505,6 +530,12 @@ ${JSON.stringify(dictionaries.entities, null, 2)}
 CANONICAL LOCATIONS:
 ${JSON.stringify(dictionaries.locations, null, 2)}
 
+CANONICAL PROPS:
+${JSON.stringify(dictionaries.props, null, 2)}
+
+CANONICAL UI MOTIFS:
+${JSON.stringify(dictionaries.uiElements, null, 2)}
+
 SEMANTIC SCENE CONTEXT (broad hints, local atoms win):
 ${JSON.stringify(sceneContext, null, 2)}
 
@@ -522,8 +553,8 @@ Return JSON only:
     "mentioned_only_entity_ids": [],
     "primary_entity_id": null,
     "entity_evidence": {"entity_id":"exact excerpt from grouped atoms"},
-    "props": [],
-    "ui_elements": [],
+    "props": [{"prop_id":"canonical prop id or null for a one-off","label":"exact local prop label"}],
+    "ui_elements": [{"ui_id":"canonical UI id or null for a one-off","label":"exact local UI label"}],
     "background_population": {
       "presence": "none|implied|explicit",
       "description": "anonymous background people or null",
@@ -570,6 +601,8 @@ function groupingFindings(rows, atoms, factLedger) {
   const dictionaries = canonicalDictionaries(factLedger);
   const entityIds = new Set(dictionaries.entities.map((row) => row.entity_id));
   const locationIds = new Set(dictionaries.locations.map((row) => row.location_id));
+  const propIds = new Set(dictionaries.props.map((row) => row.prop_id));
+  const uiIds = new Set(dictionaries.uiElements.map((row) => row.ui_id));
   for (const [rowIndex, row] of rows.entries()) {
     const ids = (row.source_atom_ids ?? []).map(String);
     const atomRows = ids.map((id) => atomMap.get(id));
@@ -584,6 +617,14 @@ function groupingFindings(rows, atoms, factLedger) {
       findings.push({ severity: "blocker", code: "editorial_crossed_transition_barrier", row_index: rowIndex });
     }
     if (!locationIds.has(String(row.location_id ?? ""))) findings.push({ severity: "blocker", code: "editorial_unknown_location", row_index: rowIndex });
+    for (const prop of row.props ?? []) {
+      const propId = prop && typeof prop === "object" ? canonicalId(prop.prop_id ?? prop.canonical_id) : "";
+      if (propId && !propIds.has(propId)) findings.push({ severity: "blocker", code: "editorial_unknown_prop", row_index: rowIndex, prop_id: propId });
+    }
+    for (const ui of row.ui_elements ?? []) {
+      const uiId = ui && typeof ui === "object" ? canonicalId(ui.ui_id ?? ui.canonical_id) : "";
+      if (uiId && !uiIds.has(uiId)) findings.push({ severity: "blocker", code: "editorial_unknown_ui", row_index: rowIndex, ui_id: uiId });
+    }
     const groupedText = normalizeEvidenceText(atomRows.map(({ atom }) => atom.text).join(" "));
     const actionEvidence = normalizeEvidenceText(row.foreground_action_evidence);
     if (!actionEvidence || !groupedText.includes(actionEvidence)) {
@@ -717,6 +758,8 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
       primary_subject: entityMap.get(String(row.primary_entity_id ?? ""))?.display_name ?? null,
       local_props: assetLabels(row.props ?? []),
       local_ui_elements: assetLabels(row.ui_elements ?? []),
+      local_prop_ids: (row.props ?? []).map((value) => canonicalAssetId(value, dictionaries.props, "prop_id")),
+      local_ui_ids: (row.ui_elements ?? []).map((value) => canonicalAssetId(value, dictionaries.uiElements, "ui_id")),
       background_population: sanitizeBackgroundPopulation(row.background_population),
       editorial_cues: unique(row.editorial_cues ?? []),
       visual_novelty_directive: normalizeText(row.composition_intent),

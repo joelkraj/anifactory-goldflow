@@ -11,6 +11,10 @@ import { CHARACTER_STAGING_POSITIONS, multiCharacterBleedFindings, sanitizeChara
 import { sanitizeBackgroundPopulation } from "./lib/background-population-utils.mjs";
 import { beautyLanguageFindings, namedCharacterDuplicationFindings, providerExclusionPayloadFindings } from "./lib/prompt-prose-findings.mjs";
 import {
+  sanitizeAnatomyContracts,
+  sanitizeEquipmentContracts,
+} from "./lib/shot-manifest-risk-contracts.mjs";
+import {
   blockerImageIds,
   blockerSceneIds,
   compatibleHardenFeedbackBlockers,
@@ -358,7 +362,7 @@ Rules:
 - Character references provide face, hair, age, body type, and outfit only. Scene pose, camera angle, and action come from the current visual beat.
 - Use character_state_refs.scene_prompt_anchor for identity, wardrobe, and state wording inside scene prompts. prompt_anchor may describe a reference-generation sheet and should not be copied into scene cuts.
 - visual_beat_script_excerpt and visual_beat_action are authoritative for what this cut shows. Rewrite generic scene-summary prompts into a concrete moment from that beat excerpt.
-- Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, textual location contract, optional attachable location ref, character state refs, foreground action, shot job, props/UI, and forbidden refs.
+- Review and repair shot_manifest first, then make the prose prompt and reference_requirements obey it. The manifest is the cut contract: visible characters, mentioned-only characters, textual location contract, optional attachable location ref, character state refs, foreground action, shot job, anatomy contracts, equipment contracts, props/UI, and forbidden refs. Preserve authored anatomy_contracts and equipment_contracts unless the reviewed cut explicitly repairs them.
 - Resolve role/title aliases to canonical named characters when current scene facts establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions should stage the named person and use that named character's ref instead of a separate generic character.
 - If the beat or prompt shows a recognizable named person inside a replay clip, livestream panel, broadcast feed, video wall, chat avatar, dossier card, or phone screen, that person is visually present through media. Keep or add them in shot_manifest.visible_characters, include character_staging that says they are screen-visible or panel-visible, and attach their in-scope character_state ref when their likeness matters and reference slots allow.
 - Use mentioned_only for a named person only when the beat talks about them without showing their body, face, avatar, file portrait, or replay/broadcast image anywhere in the cut.
@@ -452,6 +456,8 @@ Return JSON only:
         "location_contract_id": "...",
         "location_ref_id": "...",
         "foreground_action": "...",
+        "anatomy_contracts": [{"entity":"...","identity_ref_id":"...","body_invariant":"...","expected_visible_hands":2,"missing_limb":null,"prosthetic_allowed":false,"visibility_required":true,"reason":"..."}],
+        "equipment_contracts": [{"owner":"...","item":"...","visible_count":1,"hand_assignment":"...","holder_state":"...","contact_target":"...","extras_allowed":false,"reason":"..."}],
         "visible_props": ["..."],
         "ui_elements": ["..."],
         "forbidden_ref_ids": ["..."],
@@ -704,7 +710,11 @@ function normalizeReviewedPrompt(row, original) {
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : (original.required_reference_paths ?? []),
     reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : (original.reference_usage ?? []),
     anchor_roles: Array.isArray(row.anchor_roles) ? row.anchor_roles : (original.anchor_roles ?? []),
-    shot_manifest: sanitizeShotManifest(row.shot_manifest ?? original.shot_manifest),
+    shot_manifest: sanitizeShotManifest(row.shot_manifest ? {
+      ...row.shot_manifest,
+      anatomy_contracts: row.shot_manifest.anatomy_contracts ?? original.shot_manifest?.anatomy_contracts,
+      equipment_contracts: row.shot_manifest.equipment_contracts ?? original.shot_manifest?.equipment_contracts,
+    } : original.shot_manifest),
     visible_subjects: Array.isArray(row.visible_subjects) ? row.visible_subjects : (original.visible_subjects ?? []),
     character_state_refs_used: Array.isArray(row.character_state_refs_used) ? row.character_state_refs_used : (original.character_state_refs_used ?? []),
     primary_subject: row.primary_subject ?? original.primary_subject ?? null,
@@ -727,6 +737,8 @@ function sanitizeShotManifest(value) {
     location_contract_id: value.location_contract_id ? String(value.location_contract_id) : null,
     location_ref_id: value.location_ref_id ? String(value.location_ref_id) : null,
     foreground_action: value.foreground_action ? String(value.foreground_action) : null,
+    anatomy_contracts: sanitizeAnatomyContracts(value.anatomy_contracts),
+    equipment_contracts: sanitizeEquipmentContracts(value.equipment_contracts),
     background_population: sanitizeBackgroundPopulation(value.background_population),
     visible_props: arrayOfStrings("visible_props"),
     ui_elements: arrayOfStrings("ui_elements"),

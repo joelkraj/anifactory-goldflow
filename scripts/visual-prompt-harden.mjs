@@ -19,12 +19,16 @@ import {
   promptIdentityFindings,
 } from "./lib/visual-prompt-policy.mjs";
 import {
+  completeAnatomyContracts,
+  completeEquipmentContracts,
+  promptHasHandGeometryRisk,
   promptHasEquipmentGeometryRisk,
   promptHasImmutableAnatomyRisk,
   sanitizeAnatomyContracts,
   sanitizeEquipmentContracts,
 } from "./lib/shot-manifest-risk-contracts.mjs";
 import { sanitizeAnimationIntent } from "./lib/ltx-video-contract.mjs";
+import { stripEmbeddedProviderExclusionPayloadSyntax } from "./lib/prompt-payload-sanitize.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -249,26 +253,38 @@ export function fluxKleinStructuralContractFindingsForTests(prompt) {
   if (!modelRoute.includes("klein")) return [];
   const manifest = prompt?.shot_manifest ?? {};
   const findings = [];
-  if (promptHasImmutableAnatomyRisk(prompt) && !sanitizeAnatomyContracts(manifest.anatomy_contracts).length) {
+  const anatomyContracts = sanitizeAnatomyContracts(manifest.anatomy_contracts);
+  const completeAnatomy = completeAnatomyContracts(manifest.anatomy_contracts);
+  const equipmentContracts = sanitizeEquipmentContracts(manifest.equipment_contracts);
+  const completeEquipment = completeEquipmentContracts(manifest.equipment_contracts);
+  if ((promptHasImmutableAnatomyRisk(prompt) || promptHasHandGeometryRisk(prompt)) && !completeAnatomy.length) {
     findings.push({
       image_id: prompt?.image_id ?? null,
       scene_id: prompt?.scene_id ?? null,
       severity: "warning",
-      code: "flux_klein_immutable_anatomy_contract_missing",
-      message: "Flux Klein cut contains an amputation, prosthetic rule, nonstandard limb fact, or signature integrated anatomy but no structured anatomy_contracts row. Add the immutable body fact and make it visible, or explicitly accept this risk.",
+      code: anatomyContracts.length
+        ? "flux_klein_anatomy_contract_incomplete"
+        : "flux_klein_immutable_anatomy_contract_missing",
+      message: anatomyContracts.length
+        ? "Flux Klein cut has an incomplete anatomy contract. State the body invariant, expected visible hand count, and whether the invariant must be visible; add a prosthetic decision when a limb is missing."
+        : "Flux Klein cut contains hand/contact geometry, an amputation, a prosthetic rule, nonstandard limbs, or signature integrated anatomy but no complete anatomy contract. State the exact visible-hand/body construction or explicitly accept this risk.",
       review_required: true,
       review_disposition: "manual_fix_or_accept",
       production_blocking: false,
       resolved: false,
     });
   }
-  if (promptHasEquipmentGeometryRisk(prompt) && !sanitizeEquipmentContracts(manifest.equipment_contracts).length) {
+  if (promptHasEquipmentGeometryRisk(prompt) && !completeEquipment.length) {
     findings.push({
       image_id: prompt?.image_id ?? null,
       scene_id: prompt?.scene_id ?? null,
       severity: "warning",
-      code: "flux_klein_equipment_contract_missing",
-      message: "Flux Klein physical-action cut visibly uses a weapon or combat object but has no structured equipment_contracts row. Specify owner, visible count, hand assignment, holder state, and contact target, or explicitly accept this risk.",
+      code: equipmentContracts.length
+        ? "flux_klein_equipment_contract_incomplete"
+        : "flux_klein_equipment_contract_missing",
+      message: equipmentContracts.length
+        ? "Flux Klein cut has an incomplete equipment contract. State owner, exact visible count, hand assignment, holder/sheath state, and whether extras are allowed."
+        : "Flux Klein cut visibly uses a weapon or handled object but has no complete equipment contract. Specify owner, visible count, hand assignment, holder/sheath state, contact target when relevant, and whether extras are allowed, or explicitly accept this risk.",
       review_required: true,
       review_disposition: "manual_fix_or_accept",
       production_blocking: false,
@@ -755,15 +771,15 @@ function isPureMediaDepiction(prompt) {
 function sanitizePrompt(prompt, indexes) {
   const findings = [];
   findings.push(...providerExclusionPayloadFindings([prompt]).map((finding) => (
-    providerExclusionField(finding.target_field)
-      ? {
-          ...finding,
-          severity: "warning",
-          code: "provider_exclusion_payload_stripped",
-          message: `${finding.target_field} was stripped; provider exclusions must not be sent as a separate payload.`,
-          resolved: true,
-        }
-      : finding
+    {
+      ...finding,
+      severity: "warning",
+      code: "provider_exclusion_payload_stripped",
+      message: providerExclusionField(finding.target_field)
+        ? `${finding.target_field} was stripped; provider exclusions must not be sent as a separate payload.`
+        : `Embedded provider-exclusion syntax and its trailing exclusion list were stripped from ${finding.target_field} before provider submission.`,
+      resolved: true,
+    }
   )));
   const rawMotionIntent = prompt?.shot_manifest?.motion_intent;
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
@@ -813,8 +829,14 @@ function sanitizePrompt(prompt, indexes) {
   }
   const activeProviderRoute = String(prompt.image_provider_route ?? "modelslab") === "codex_imagegen" ? "codex_imagegen" : "modelslab";
   let promptTextValue = trackedMutation(
-    "normalizePromptFormatting",
+    "stripEmbeddedProviderExclusionPayloadSyntax",
     prompt.provider_prompt ?? (activeProviderRoute === "codex_imagegen" ? prompt.codex_image_prompt : prompt.modelslab_image_prompt) ?? prompt.image_prompt ?? "",
+    (value) => stripEmbeddedProviderExclusionPayloadSyntax(value),
+    { prompt }
+  );
+  promptTextValue = trackedMutation(
+    "normalizePromptFormatting",
+    promptTextValue,
     (value) => normalizePromptFormatting(value),
     { prompt }
   );

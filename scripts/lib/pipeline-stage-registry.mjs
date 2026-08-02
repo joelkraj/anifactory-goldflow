@@ -607,7 +607,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     reference_generation: codexReferences(identity)
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 3 --lease-sec 900`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency ${media.reference_concurrency}`,
-    reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --note "<generated reference review notes>"`,
+    reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --cleanliness-reviewed true --note "<generated reference review notes>"`,
     visual_prompt_plan: `node bin/goldflow.mjs visual plan ${base} --visual-chunk-concurrency ${planner.visual_chunk_concurrency} --visual-chunk-validation-attempts ${planner.chunk_validation_attempts}`,
     visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
     visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 2 --visual-chunk-concurrency ${planner.visual_chunk_concurrency}`,

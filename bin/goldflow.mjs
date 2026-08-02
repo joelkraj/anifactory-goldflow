@@ -185,6 +185,11 @@ ${registryCommands}
   goldflow render finalize-report  Stream-hash and finalize an existing passed render report
   goldflow analytics ingest        Attribute a YouTube retention export to exact Goldflow cuts
   goldflow analytics aggregate     Aggregate multiple episode feedback reports
+  goldflow source ideate           Generate and independently rank package-first story candidates before run preflight
+  goldflow source approve-package  Operator-approve one exact title/thumbnail/story package
+  goldflow source script           Generate one conversational narration from the approved package
+  goldflow source audit            Write an optional non-blocking script/retention review log
+  goldflow source release          Operator-release the exact source hash for preflight and ingest
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
   goldflow audio modelslab-stt-candidate Run an opt-in, spend-confirmed ModelsLab STT timing candidate without replacing local Whisper
@@ -254,6 +259,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("proof-baseline-import.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {
   run("run-cleanup.mjs", flags);
+} else if (command === "source" && ["ideate", "approve-package", "script", "audit", "gate", "release"].includes(subcommand)) {
+  run("winner-source.mjs", [subcommand, ...flags]);
 } else if (command === "ingest" && subcommand === "source") {
   run("source-ingest.mjs", flags);
 } else if (command === "script" && subcommand === "approve") {

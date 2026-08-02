@@ -52,6 +52,7 @@ const generationModes = new Set([
   "manual_review",
   "source_only",
 ]);
+const referenceCleanlinessContractVersion = "empty_hands_no_detachable_props_v1";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -325,27 +326,114 @@ function isOpeningLocationCoverageAsset(asset, openingSec) {
   return sceneIds.length > 0;
 }
 
-function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPath: ledgerPath = referenceEvidenceLedgerOutputPath } = {}) {
+function canonicalReferenceAliasIndex(storyFactLedger = {}) {
+  const indexByKind = new Map();
+  const groups = [
+    ["character_state", storyFactLedger?.canonical_entities, ["entity_id", "canonical_entity_id"]],
+    ["location", storyFactLedger?.canonical_locations, ["location_id", "canonical_location_id"]],
+    ["prop", storyFactLedger?.canonical_props, ["prop_id", "canonical_prop_id"]],
+    ["ui", storyFactLedger?.canonical_ui_motifs, ["ui_id", "canonical_ui_id"]],
+  ];
+  for (const [kind, rows, idFields] of groups) {
+    const candidatesByAlias = new Map();
+    const evidencePhrases = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const canonicalId = idFields.map((field) => row?.[field]).find(Boolean);
+      if (!canonicalId) continue;
+      const normalizedId = slug(canonicalId, "");
+      if (!normalizedId) continue;
+      const displayName = String(row?.display_name ?? row?.name ?? row?.label ?? canonicalId).trim();
+      const record = { canonical_id: normalizedId, display_name: displayName || normalizedId };
+      const shortEvidenceAliases = (Array.isArray(row?.evidence) ? row.evidence : [])
+        .map((item) => String(item?.exact_excerpt ?? "").replace(/\s+/g, " ").trim())
+        .filter((label) => label && label.length <= 120 && label.split(/\s+/).length <= 12);
+      for (const label of shortEvidenceAliases) {
+        const phrase = slug(label, "");
+        if (phrase) evidencePhrases.push({ phrase, record });
+      }
+      for (const label of [canonicalId, displayName, ...(Array.isArray(row?.aliases) ? row.aliases : []), ...shortEvidenceAliases]) {
+        const alias = slug(label, "");
+        if (!alias) continue;
+        if (!candidatesByAlias.has(alias)) candidatesByAlias.set(alias, new Map());
+        candidatesByAlias.get(alias).set(normalizedId, record);
+      }
+    }
+    indexByKind.set(kind, {
+      exact: new Map(
+        [...candidatesByAlias.entries()]
+          .filter(([, candidates]) => candidates.size === 1)
+          .map(([alias, candidates]) => [alias, [...candidates.values()][0]]),
+      ),
+      evidence_phrases: evidencePhrases,
+    });
+  }
+  return indexByKind;
+}
+
+function canonicalFromEvidenceContainment(subject, evidencePhrases = [], kind = "") {
+  const normalizedSubject = slug(subject, "");
+  if (!normalizedSubject) return null;
+  const contentTokens = normalizedSubject.split("_").filter((token) => token && !new Set([
+    "a", "an", "the", "his", "her", "its", "their", "this", "that",
+  ]).has(token));
+  if (contentTokens.length < 2) {
+    const safeSingleTokenAliases = {
+      prop: new Set(["weapon", "sword", "blade", "spear", "bow", "shield", "gun", "rifle", "pistol", "axe", "hammer", "staff", "wand", "knife", "dagger", "key", "coin", "bell", "orb", "gem", "crystal", "crown", "mask", "amulet", "ring", "book", "phone", "tablet", "document", "letter", "contract", "ledger", "scroll", "map", "lantern", "chain"]),
+      ui: new Set(["system", "interface", "panel", "screen", "window", "menu", "ledger", "status", "ranking", "quest", "warning", "notification"]),
+      location: new Set(["hall", "room", "vault", "palace", "academy", "arena", "office", "street", "alley", "bridge", "tower", "chamber", "court", "courtyard", "rooftop", "warehouse", "dungeon", "forest", "city", "village"]),
+    };
+    if (contentTokens.length !== 1 || !safeSingleTokenAliases[kind]?.has(contentTokens[0])) return null;
+  }
+  const needle = `_${normalizedSubject}_`;
+  const matches = new Map();
+  for (const candidate of evidencePhrases) {
+    if (`_${candidate.phrase}_`.includes(needle)) {
+      matches.set(candidate.record.canonical_id, candidate.record);
+    }
+  }
+  return matches.size === 1 ? [...matches.values()][0] : null;
+}
+
+function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
+  outputPath: ledgerPath = referenceEvidenceLedgerOutputPath,
+  storyFactLedger = null,
+} = {}) {
   const semanticScenes = scopedSemantic?.scenes ?? [];
   const scenes = sceneById(semanticScenes);
   const beats = beatRowsFromScopedSemantic(scopedSemantic);
   const assets = new Map();
+  const canonicalAliases = canonicalReferenceAliasIndex(storyFactLedger ?? {});
 
-  function addAsset({ kind, refId, subject, sceneId, beat = null, reason = null, source = null, semanticRefId = null, entityKind = null }) {
+  function addAsset({ kind, refId, subject, canonicalId = null, sceneId, beat = null, reason = null, source = null, semanticRefId = null, entityKind = null }) {
     const normalizedKind = normalizeKind(kind);
     if (!["character_state", "location", "prop", "ui", "action"].includes(normalizedKind)) return;
     const rawSubject = String(subject ?? refId ?? "").trim();
-    const cleanSubject = normalizedKind === "character_state" && shouldPreferCharacterRefIdSubject(rawSubject, refId)
+    let cleanSubject = normalizedKind === "character_state" && shouldPreferCharacterRefIdSubject(rawSubject, refId)
       ? (characterSubjectFromRefId(refId) ?? rawSubject)
       : rawSubject;
     if (!cleanSubject) return;
     const assetKind = normalizedKind;
+    const canonicalIndex = canonicalAliases.get(assetKind) ?? { exact: new Map(), evidence_phrases: [] };
+    const canonical = [canonicalId, refId, cleanSubject]
+      .map((value) => slug(value, ""))
+      .filter(Boolean)
+      .map((key) => canonicalIndex.exact.get(key))
+      .find(Boolean)
+      ?? canonicalFromEvidenceContainment(cleanSubject, canonicalIndex.evidence_phrases, assetKind)
+      ?? null;
+    if (canonical?.display_name) cleanSubject = canonical.display_name;
     let resolvedRefId = refId
       ? slug(refId)
       : inventoryRefIdFor(assetKind, cleanSubject, "asset");
     let assetId = assetKind === "character_state" && !refId
       ? inventoryRefIdFor("character_state", cleanSubject, "character").replace(/_ref$/i, "_identity")
       : resolvedRefId;
+    if (canonical) {
+      resolvedRefId = canonical.canonical_id;
+      assetId = assetKind === "character_state"
+        ? `char_${canonical.canonical_id.replace(/^char_/, "")}_identity`
+        : inventoryRefIdFor(assetKind, canonical.canonical_id, canonical.canonical_id);
+    }
     if (!refId && assetKind === "location" && sceneId) {
       let bestLocation = null;
       for (const existing of assets.values()) {
@@ -364,6 +452,8 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
         ref_id: resolvedRefId,
         kind: assetKind,
         subject: cleanSubject,
+        canonical_subject_id: canonical?.canonical_id ?? null,
+        observed_aliases: new Set(),
         scene_ids: new Set(),
         beat_ids: new Set(),
         semantic_ref_ids: new Set(),
@@ -377,6 +467,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
       });
     }
     const row = assets.get(assetId);
+    if (rawSubject) row.observed_aliases.add(rawSubject);
     if (cleanSubject.length > String(row.subject ?? "").length && !refId) row.subject = cleanSubject;
     if (sceneId) row.scene_ids.add(sceneId);
     if (beat?.visual_beat_id) row.beat_ids.add(beat.visual_beat_id);
@@ -432,6 +523,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
         kind: "character_state",
         refId: null,
         subject: character,
+        canonicalId: entityId,
         sceneId,
         beat,
         reason: entityKind && String(entityKind).toLowerCase() !== "person"
@@ -449,28 +541,31 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
         kind: "location",
         refId: null,
         subject: location,
+        canonicalId: beat.location_id ?? null,
         sceneId,
         beat,
         reason: "local visual beat location",
         source: "visual_beat_location",
       });
     }
-    for (const prop of (Array.isArray(beat.local_props) ? beat.local_props : []).slice(0, 8)) {
+    for (const [index, prop] of (Array.isArray(beat.local_props) ? beat.local_props : []).entries()) {
       addAsset({
         kind: "prop",
         refId: null,
         subject: prop,
+        canonicalId: Array.isArray(beat.local_prop_ids) ? beat.local_prop_ids[index] : null,
         sceneId,
         beat,
         reason: "local visual beat prop",
         source: "visual_beat_prop",
       });
     }
-    for (const ui of (Array.isArray(beat.local_ui_elements) ? beat.local_ui_elements : []).slice(0, 5)) {
+    for (const [index, ui] of (Array.isArray(beat.local_ui_elements) ? beat.local_ui_elements : []).entries()) {
       addAsset({
         kind: "ui",
         refId: null,
         subject: ui,
+        canonicalId: Array.isArray(beat.local_ui_ids) ? beat.local_ui_ids[index] : null,
         sceneId,
         beat,
         reason: "local visual beat UI/system element",
@@ -501,7 +596,9 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, { outputPa
       ref_id: asset.ref_id,
       kind: asset.kind,
       subject: asset.subject,
-      canonical_subject_key: slug(asset.subject, asset.asset_id),
+      canonical_subject_id: asset.canonical_subject_id,
+      canonical_subject_key: asset.canonical_subject_id ?? slug(asset.subject, asset.asset_id),
+      observed_aliases: [...asset.observed_aliases].filter(Boolean).sort(),
       entity_kind: [...asset.entity_kinds][0] ?? null,
       entity_type: asset.kind === "character_state" && [...asset.entity_kinds]
         .some((kind) => /^(?:creature|construct|summon|spirit|undead)$/i.test(String(kind)))
@@ -745,8 +842,11 @@ export function referenceLocationContractLedgerForTests(semanticPlan) {
   return buildLocationContractLedger(semanticPlan, { outputPath: "location_contract_ledger.json" });
 }
 
-export function referenceEvidenceLedgerForTests(semanticPlan) {
-  return buildReferenceEvidenceLedger(semanticPlan, null, { outputPath: "reference_evidence_ledger.json" });
+export function referenceEvidenceLedgerForTests(semanticPlan, storyFactLedger = null) {
+  return buildReferenceEvidenceLedger(semanticPlan, null, {
+    outputPath: "reference_evidence_ledger.json",
+    storyFactLedger,
+  });
 }
 
 export function referenceLocationScopeForTests(referenceTargets, locationContractLedger) {
@@ -921,7 +1021,7 @@ ${chunkLabel ? `\nThis is ${chunkLabel}. Propose only assets with plausible epis
 
 Rules:
 - This chunk stage supplies evidence-backed candidates to the global reference director. It does not decide the final reference budget and it does not write final scene-image prompts.
-- Use REFERENCE EVIDENCE LEDGER as observations, not orders. Semantic scenes provide broad context and location contracts; visual beats provide local transcript evidence. Raw semantic requirements and beat hints never force image generation.
+- Use REFERENCE EVIDENCE LEDGER as observations, not direct authoring orders. Semantic scenes provide broad context and location contracts; visual beats provide local transcript evidence. You remain the sole creative selector, but deterministic validation will block a final plan that omits binding recurring coverage: character_state assets recurring in at least two beats or at least two scenes, and location/prop/ui assets recurring in at least three beats or at least two scenes.
 - Reuse stable evidence asset ids. Canonicalize aliases and state variants under canonical_subject_id and base_asset_id instead of inventing duplicate identities.
 - Return only candidates that might deserve a clean attachable reference. Omit text-only one-scene nouns entirely; location scope remains available separately through LOCATION CONTRACT LEDGER.
 - Every candidate must list evidence_asset_ids, planned_beat_ids, estimated_use_count, reference_value_reason, and why_text_is_insufficient.
@@ -934,10 +1034,10 @@ Rules:
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
 - Treat each beat's active_state_constraints and depiction_mode as binding evidence. Select refs for materially recurring visible states; do not collapse incompatible wardrobe/injury states and do not create refs for transient text-only state changes.
 - When visual_beats carry ref_needs or beat_ref_requirements, treat those as advisory local transcript-timed evidence, not locked reference targets. Semantic scene ref_requirements remain broad scene coverage. The LLM decides the final episode-level reference strategy and may merge, downgrade, upgrade, rename, or replace beat suggestions when the story context supports it.
-- Do not preserve beat-authored generation_mode mechanically. Use it as a hint only. Final generation_mode belongs to this reference-planning stage after considering recurrence, story criticality, identity risk, opening-retention value, and whether a clean scene cut can become the reference later.
+- Do not preserve beat-authored generation_mode mechanically. Use it as a hint only. Final generation_mode belongs to this reference-planning stage after considering recurrence, story criticality, identity risk, opening-retention value, and whether an already accepted, clean, review-bound source asset exists.
 - Distinguish named characters from groups, factions, crowds, and uniforms. A recurring named person gets a character_state/base identity ref when needed. A visible group such as guild masters, guards, families, students, witnesses, or crowds should not become a character identity ref unless a specific named member recurs. If the group has a recognizable uniform, faction styling, badge, armor set, or wardrobe system with real continuity value, propose one clean attachable uniform/faction design plate; otherwise omit it and let scene prompts describe the group.
 - If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
-- Candidate generation_mode is limited to standalone_ref, manual_review, or source_only. Do not derive references from ordinary story cuts; those images contain people, props, UI, and backgrounds that can contaminate later generations.
+- Candidate generation_mode is limited to standalone_ref, manual_review, or source_only. Do not derive references from ordinary story cuts. source_only is valid only when the exact clean asset already exists and the target carries reference_image_path, source_origin, source_review_status=approved_clean, source_review_receipt_path, source_image_id, and source_image_sha256. source_origin is owned_source or accepted_production_cut. An accepted production cut additionally carries source_cut_id, passed source_image_qa_status, and source_image_qa_receipt_path, and may be source_only only for location, prop, or UI refs. Human source refs must be operator-owned face-only sources, never production story cuts.
 - Use generic production logic. Do not hardcode story-specific rules.
 - Write normal descriptive prompt anchors that preserve story-faithful UI labels, status phrases, and concise absence states when they are the point of the reference.
 - Do not create separate provider-exclusion payload fields such as negative_prompt, avoid_list, or exclude_list. Keep provider-facing content in the normal prompt anchor.
@@ -953,9 +1053,10 @@ Rules:
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Every selected conditioning asset contains exactly one conditioning concept: one identity/state, one environment, one prop, one UI motif, one faction/uniform language, one action/effect language, or one abstract style language. Set conditioning_subject_count to 1 and conditioning_asset_role accordingly. Never combine a character, populated story scene, prop lineup, and UI panel into one reference.
+- Every non-source character_state target must carry the structured cleanliness fields reference_pose, visible_subject_count, expected_visible_hands, hands_policy, detachable_props, and integrated_anatomy_features. Human identity refs use reference_pose=neutral_single, visible_subject_count=1, exact expected_visible_hands for the authored anatomy (normally 2; use the evidence-backed present count after amputation or other permanent anatomy), hands_policy=relaxed_empty, and detachable_props=[]. Creature refs use reference_pose=neutral_single, visible_subject_count=1, exact expected_visible_hands for grasping/hand-like appendages, hands_policy=empty_or_unoccupied, detachable_props=[], explicitly keep every such appendage empty/unoccupied, and list integrated body structures in integrated_anatomy_features. Faction refs use reference_pose=neutral_separated_lineup, visible_subject_count from 3 through 5, expected_visible_hands=null, hands_policy=relaxed_empty, and detachable_props=[]. Weapons, handheld props, action poses, and interaction staging belong to separate prop/action targets and final scene prompts.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Human character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; keep both hands relaxed and empty and omit detachable weapons, bows, swords, shields, and carried props unless the story makes one inseparable from that exact identity state. Final scene poses, held objects, and locations come from the visual prompt stage.
-- Creature/construct reference anchors should be 16:9 landscape, exactly one nonhuman actor in one neutral pose on a plain background, with one coherent full silhouette and explicit anatomy/material construction. An object-like anatomical feature must be described as one integrated body structure at its exact attachment point, not as a second prop or alternate head. Do not ask for multiple angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- Human character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; preserve the exact authored limb count, keep every anatomically present visible hand relaxed and empty, and omit every detachable weapon and carried prop. Final scene poses, held objects, and locations come from the visual prompt stage.
+- Creature/construct reference anchors should be 16:9 landscape, exactly one nonhuman actor in one neutral pose on a plain background, with one coherent full silhouette, every grasping or hand-like appendage visibly empty/unoccupied, and explicit anatomy/material construction. An object-like anatomical feature must be described as one integrated body structure at its exact attachment point, not as a second prop or alternate head. Do not ask for multiple angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
 - For adult female character refs, keep the character story-appropriate but conventionally attractive: beautiful face, polished hair/makeup when suitable, flattering outfit, full bust, curvy hourglass adult silhouette, graceful waist-to-hip shape, and confident posture. Keep this non-explicit and avoid nudity, lingerie, childlike features, or pinup posing.
 - UI refs that represent a named person as data should use dossier identity tile, silhouette identity marker, or archival record wording so the ref stays an interface design plate instead of a character reference card.
 - Style references are optional. Prefer the visual style bible and style_summary text over a generated style image. Create a style reference only when it is a clean abstract rendering/material/lighting sample; it must not contain character faces, character sheets, expression panels, UI screens, speech bubbles, or readable text.
@@ -966,14 +1067,14 @@ Rules:
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
 - Omit lower-priority entities from candidate output. Their story facts remain available as prompt text and location contracts.
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
-- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and low-value 2-3 occurrence assets should be omitted unless the story makes them truly critical.
-- Major recurring characters and visually sensitive major wardrobe/state changes should usually use standalone_ref or manual_review.
+- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, and one-off props may be omitted when they do not meet a high-risk exception. Do not omit a character_state asset observed in at least two beats or two scenes, or a location/prop/ui asset observed in at least three beats or two scenes; deterministic coverage validation treats those recurrence thresholds as binding.
+- Recurring character_state assets that reach two beats or two scenes must use standalone_ref or an approved-clean full conditioning source_only asset. A face-only source is an identity dependency for generating the clean character-state plate; it does not satisfy recurring state coverage by itself. manual_review is a hold and does not satisfy binding recurring coverage.
 - A selected recurring character identity that is visibly depicted in the first 30 seconds must be standalone_ref with required_before_imagegen true. manual_review is a planning hold, not a generatable opening identity.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; omit it unless distinct identity continuity is mission-critical.
-- Major recurring locations should use clean environment-only standalone plates. Do not upgrade every one-scene opening sublocation merely because it is early, and do not derive location refs from populated story cuts.
+- Recurring locations that reach three beats or two scenes must use clean environment-only standalone plates or an approved-clean source_only asset. Do not upgrade every one-scene opening sublocation merely because it is early, and do not derive location refs from populated story cuts without an explicit accepted-production-cut source review.
 - Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If consecutive scenes or a long story span moves between different visible areas, create separate scene-scoped location refs for those areas, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
-- Semantic location ref_requirements are represented in LOCATION CONTRACT LEDGER and do not need matching image targets. Propose a location image ref only when a clean reusable environment plate buys meaningful consistency; list every covered location_contract_id.
+- Semantic location ref_requirements are represented in LOCATION CONTRACT LEDGER and do not alone force matching image targets. Recurring evidence still does: propose a location image ref whenever the location reaches three beats or two scenes, and list every covered location_contract_id.
 - Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
 - Rank recurring locations by continuity_value_score, which includes beat reuse, scene reuse, opening value, and reuse span. A location used across six or more cuts can be a key standalone anchor even when all of those cuts live under one broad semantic scene. Do not let several one-off props displace a high-value recurring environment.
 - Return only valid JSON.
@@ -1021,9 +1122,25 @@ Return:
       "estimated_use_count": 4,
       "reference_value_reason": "specific continuity value",
       "why_text_is_insufficient": "specific model-consistency risk",
-      "clean_plate_contract": "single clean subject, environment, object, UI, or effect plate without unrelated story-scene contamination"
-      ,"conditioning_subject_count": 1,
-      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language"
+      "clean_plate_contract": "single clean subject, environment, object, UI, or effect plate without unrelated story-scene contamination",
+      "conditioning_subject_count": 1,
+      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language",
+      "reference_pose": "neutral_single|neutral_separated_lineup|not_applicable",
+      "visible_subject_count": 1,
+      "expected_visible_hands": 2,
+      "hands_policy": "relaxed_empty|empty_or_unoccupied|not_applicable",
+      "detachable_props": [],
+      "integrated_anatomy_features": [],
+      "identity_usage": "full_identity|face_only",
+      "reference_cleanliness_contract_version": "empty_hands_no_detachable_props_v1",
+      "source_origin": "owned_source|accepted_production_cut|null",
+      "source_review_status": "approved_clean|needs_manual_review|null",
+      "source_review_receipt_path": null,
+      "source_image_id": null,
+      "source_image_sha256": null,
+      "source_image_qa_status": "passed|null",
+      "source_image_qa_receipt_path": null,
+      "source_cut_id": null
     }
   ],
   "character_state_refs": [
@@ -1080,6 +1197,22 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
       why_text_is_insufficient: target.why_text_is_insufficient ?? null,
       conditioning_asset_role: target.conditioning_asset_role ?? null,
       identity_subtype: target.identity_subtype ?? null,
+      reference_pose: target.reference_pose ?? null,
+      visible_subject_count: target.visible_subject_count ?? null,
+      expected_visible_hands: target.expected_visible_hands ?? null,
+      hands_policy: target.hands_policy ?? null,
+      detachable_props: target.detachable_props ?? null,
+      integrated_anatomy_features: target.integrated_anatomy_features ?? null,
+      identity_usage: target.identity_usage ?? null,
+      reference_cleanliness_contract_version: target.reference_cleanliness_contract_version ?? null,
+      source_origin: target.source_origin ?? null,
+      source_review_status: target.source_review_status ?? null,
+      source_review_receipt_path: target.source_review_receipt_path ?? null,
+      source_image_id: target.source_image_id ?? null,
+      source_image_sha256: target.source_image_sha256 ?? null,
+      source_image_qa_status: target.source_image_qa_status ?? null,
+      source_image_qa_receipt_path: target.source_image_qa_receipt_path ?? null,
+      source_cut_id: target.source_cut_id ?? null,
     })),
     character_state_refs: (plan.character_state_refs ?? []).map((ref) => ({
       state_ref_id: ref.state_ref_id,
@@ -1098,7 +1231,7 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
 
 Rules:
 - You are the sole episode-level reference director. Code validates your output but never restores an asset you omit and never guesses a replacement.
-- Use REFERENCE EVIDENCE LEDGER and CHUNK CANDIDATES as evidence, not shopping lists. Semantic scenes provide broad context, visual beats provide local transcript truth, and LOCATION CONTRACT LEDGER carries textual location scope without forcing image refs.
+- Use REFERENCE EVIDENCE LEDGER and CHUNK CANDIDATES as evidence, not deterministic target authoring. Semantic scenes provide broad context, visual beats provide local transcript truth, and LOCATION CONTRACT LEDGER carries textual location scope. You remain the sole creative selector, but the final plan will be blocked if it omits a character_state asset recurring in at least two beats or two scenes, or a location/prop/ui asset recurring in at least three beats or two scenes.
 - The merged output should feel like a human art director chose the cast, location, prop, UI, uniform/faction, and action references that actually buy consistency.
 - There is no fixed numeric reference budget. Right-size the selection to the episode's length and visual complexity. Do not optimize for the smallest possible count, and do not keep low-value refs merely to hit a quota; every selected ref must have concrete reuse or risk-reduction value.
 - Treat chunk plans as proposals. Keep only references that materially improve consistency and trace each selection through evidence_asset_ids. If several chunks propose aliases or state variants of the same asset, choose one canonical_subject_id and one base_asset_id, then retain only visually material state deltas.
@@ -1106,7 +1239,7 @@ Rules:
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
 - For real named public creators, streamers, celebrities, or influencers whose likeness matters, preserve or request face-only source identity anchors and use those anchors as base_identity_ref_id for the generated anime/manhwa character-state refs. Do not merge these into generic role refs or text-only lookalikes.
 - Preserve all relevant scene_ids from the chunk plans.
-- Final generation_mode is limited to standalone_ref, manual_review, or source_only. Omit text-only assets. Do not derive references from populated story cuts.
+- Final generation_mode is limited to standalone_ref, manual_review, or source_only. Omit text-only one-off assets. Do not derive references from populated story cuts. source_only is valid only when an exact clean asset already exists and the target carries reference_image_path, source_origin, source_review_status=approved_clean, source_review_receipt_path, source_image_id, and source_image_sha256. source_origin is owned_source or accepted_production_cut. accepted_production_cut additionally requires source_cut_id, passed source_image_qa_status, and source_image_qa_receipt_path, and is permitted only for location, prop, or UI refs. A human source identity must be an operator-owned face-only source.
 - Write normal descriptive prompt anchors that preserve story-faithful UI labels, status phrases, and concise absence states when they are the point of the reference.
 - Do not create separate provider-exclusion payload fields such as negative_prompt, avoid_list, or exclude_list. Keep provider-facing content in the normal prompt anchor.
 - Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
@@ -1127,8 +1260,9 @@ Rules:
   - ui refs define interface design, typography, color, layout, and exact display motif.
   - action refs define effect shape, energy color, movement path, interaction pattern, and spatial logic; keep them as effect/action studies rather than complete story scenes.
 - Every selected conditioning asset contains exactly one conditioning concept: one identity/state, one environment, one prop, one UI motif, one faction/uniform language, one action/effect language, or one abstract style language. Set conditioning_subject_count to 1 and conditioning_asset_role accordingly. Never combine a character, populated story scene, prop lineup, and UI panel into one reference.
+- Every non-source character_state target must carry reference_pose, visible_subject_count, expected_visible_hands, hands_policy, detachable_props, and integrated_anatomy_features. Human identity refs use neutral_single, one visible subject, the exact evidence-backed count of anatomically present hands (normally two), relaxed_empty hands, and no detachable props. Creature refs use neutral_single, one visible subject, the exact count of grasping/hand-like appendages, empty_or_unoccupied appendages, no detachable props, and integrated body structures in integrated_anatomy_features. Faction refs use neutral_separated_lineup, three through five separated subjects, expected_visible_hands=null, relaxed_empty hands, and no detachable props. Held weapons/objects and action poses belong to separate prop/action targets and final scene prompts.
 - Action/effect reference anchors should use neutral or abstract staging unless a specific location is inseparable from the effect.
-- Human character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; keep both hands relaxed and empty and omit detachable weapons, bows, swords, shields, and carried props unless one is inseparable from that exact identity state. Creature/construct anchors should show exactly one nonhuman actor in one neutral pose with one coherent silhouette and explicit anatomy/material construction. Final scene poses, held objects, and locations come from the visual prompt stage. Do not ask for multiple angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
+- Human character reference anchors should be 16:9 landscape, single-person, single-pose, plain-background identity reference cards with the full body or three-quarter body centered inside the canvas; preserve the exact authored limb count, keep every anatomically present visible hand relaxed and empty, and omit detachable weapons, bows, swords, shields, and carried props. Creature/construct anchors should show exactly one nonhuman actor in one neutral pose with one coherent silhouette, every grasping or hand-like appendage visibly empty/unoccupied, and explicit anatomy/material construction. Final scene poses, held objects, and locations come from the visual prompt stage. Do not ask for multiple angles, turnaround sheets, pose grids, scene backgrounds, or cinematic action.
 - For adult female character refs, keep the character story-appropriate but conventionally attractive: beautiful face, polished hair/makeup when suitable, flattering outfit, full bust, curvy hourglass adult silhouette, graceful waist-to-hip shape, and confident posture. Keep this non-explicit and avoid nudity, lingerie, childlike features, or pinup posing.
 - UI refs that represent a named person as data should use dossier identity tile, silhouette identity marker, or archival record wording so the ref stays an interface design plate instead of a character reference card.
 - Style references are optional. Prefer the visual style bible and style_summary text over a generated style image. Preserve a style reference only when it is a clean abstract rendering/material/lighting sample; it must not contain character faces, character sheets, expression panels, UI screens, speech bubbles, or readable text.
@@ -1137,16 +1271,16 @@ Rules:
   - Later character_state refs and scene_prompt_anchor values must dictate the current visible state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status expressed through visible styling, and emotional bearing expressed through expression/posture. Do not visualize abstract wealth loss, debt, betrayal, shame, or social ruin as grime or raggedness unless the script explicitly describes those physical signs.
   - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
-- Major recurring characters and visually sensitive wardrobe/state changes should usually use standalone_ref or manual_review.
+- Recurring character_state assets that reach two beats or two scenes must use standalone_ref or an approved-clean full conditioning source_only asset. A face-only source is an identity dependency for generating the clean character-state plate; it does not satisfy recurring state coverage by itself. manual_review is a hold and does not satisfy binding recurring coverage.
 - A selected recurring character identity that is visibly depicted in the first 30 seconds must be standalone_ref with required_before_imagegen true. manual_review is a planning hold, not a generatable opening identity.
 - Omit lower-priority entities entirely. Their facts remain available to scene prompting as text.
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
-- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, one-off props, and low-value 2-3 occurrence assets should be omitted unless truly critical.
+- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, and one-off props may be omitted when they do not meet a high-risk exception. Do not omit character_state evidence recurring in two beats or two scenes, or location/prop/ui evidence recurring in three beats or two scenes.
 - Do not upgrade every one-scene opening sublocation solely because it is early. Standalone opening locations must be a small curated set with real multi-beat clarity value.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not enough for a one-scene standalone ref unless distinct identity continuity is mission-critical.
 - Do not merge visually distinct sublocations into one broad location ref just because they share a building, campus, city, company, palace, arena, or venue name. If chunk plans contain separate visible areas inside one larger venue, preserve or create separate scene-scoped location refs for those areas during merge, such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Use the semantic scene location/ref_requirements as the source of scope; code will validate scene_ids and will not invent replacement locations later.
-- Location contracts do not force matching image refs. Select clean reusable location plates for recurring physical environments, list the location_contract_ids they cover, and leave one-scene location truth in the contract ledger.
+- Location contracts alone do not force matching image refs. Select clean reusable location plates for physical environments recurring in three beats or two scenes, list the location_contract_ids they cover, and leave one-scene location truth in the contract ledger.
 - Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
 - Rank recurring locations from the supplied evidence: beat reuse, scene reuse, opening value, and reuse span. A location used across many cuts can be a key standalone anchor even when those cuts live under one broad semantic scene. Do not let several one-off props displace a high-value recurring environment.
 - Return only valid JSON.
@@ -1193,9 +1327,25 @@ Return:
       "estimated_use_count": 4,
       "reference_value_reason": "specific continuity value",
       "why_text_is_insufficient": "specific generation risk",
-      "clean_plate_contract": "clean reusable plate with no unrelated story-scene contamination"
-      ,"conditioning_subject_count": 1,
-      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language"
+      "clean_plate_contract": "clean reusable plate with no unrelated story-scene contamination",
+      "conditioning_subject_count": 1,
+      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language",
+      "reference_pose": "neutral_single|neutral_separated_lineup|not_applicable",
+      "visible_subject_count": 1,
+      "expected_visible_hands": 2,
+      "hands_policy": "relaxed_empty|empty_or_unoccupied|not_applicable",
+      "detachable_props": [],
+      "integrated_anatomy_features": [],
+      "identity_usage": "full_identity|face_only",
+      "reference_cleanliness_contract_version": "empty_hands_no_detachable_props_v1",
+      "source_origin": "owned_source|accepted_production_cut|null",
+      "source_review_status": "approved_clean|needs_manual_review|null",
+      "source_review_receipt_path": null,
+      "source_image_id": null,
+      "source_image_sha256": null,
+      "source_image_qa_status": "passed|null",
+      "source_image_qa_receipt_path": null,
+      "source_cut_id": null
     }
   ],
   "character_state_refs": [
@@ -1325,10 +1475,32 @@ export function shouldSplitReferenceChunkForTests(promptLength, sceneCount, maxP
   return shouldSplitReferenceChunk(promptLength, sceneCount, maxPromptChars);
 }
 
+function normalizedOptionalStringArray(value) {
+  if (!Array.isArray(value)) return null;
+  return [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))];
+}
+
+function normalizeSourceOrigin(value) {
+  const normalized = slug(value, "");
+  if (!normalized) return null;
+  if ([
+    "owned_source",
+    "owned_source_face",
+    "owned_face_source",
+    "operator_owned_face",
+    "operator_owned_source_face",
+    "owned_clean_asset",
+    "operator_owned_clean_asset",
+    "owned_reference_asset",
+  ].includes(normalized)) return "owned_source";
+  if (["accepted_production_cut", "approved_production_cut", "production_cut"].includes(normalized)) return "accepted_production_cut";
+  return normalized;
+}
+
 function normalizeTarget(target, index) {
   const refId = slug(target.ref_id ?? `${target.kind ?? "ref"}_${index + 1}`);
   const mode = String(target.generation_mode ?? "manual_review");
-  const kind = target.kind ?? "unknown";
+  const kind = normalizeKind(target.kind);
   return {
     ref_id: refId,
     kind,
@@ -1364,6 +1536,28 @@ function normalizeTarget(target, index) {
     conditioning_subject_count: Number(target.conditioning_subject_count ?? 0),
     conditioning_asset_role: target.conditioning_asset_role ?? null,
     identity_subtype: target.identity_subtype ?? target.entity_kind ?? null,
+    reference_pose: target.reference_pose ?? null,
+    visible_subject_count: Number.isFinite(Number(target.visible_subject_count))
+      ? Number(target.visible_subject_count)
+      : null,
+    expected_visible_hands: target.expected_visible_hands === null
+      ? null
+      : Number.isInteger(Number(target.expected_visible_hands)) && Number(target.expected_visible_hands) >= 0
+        ? Number(target.expected_visible_hands)
+        : null,
+    hands_policy: target.hands_policy ?? null,
+    detachable_props: normalizedOptionalStringArray(target.detachable_props),
+    integrated_anatomy_features: normalizedOptionalStringArray(target.integrated_anatomy_features),
+    identity_usage: target.identity_usage ?? null,
+    reference_cleanliness_contract_version: target.reference_cleanliness_contract_version ?? referenceCleanlinessContractVersion,
+    source_origin: normalizeSourceOrigin(target.source_origin ?? target.source_asset_origin),
+    source_review_status: target.source_review_status ?? target.clean_source_review_status ?? null,
+    source_review_receipt_path: target.source_review_receipt_path ?? target.source_review_path ?? null,
+    source_image_id: target.source_image_id ?? target.source_asset_id ?? target.source_cut_id ?? target.production_cut_id ?? null,
+    source_image_sha256: target.source_image_sha256 ?? target.source_sha256 ?? null,
+    source_image_qa_status: target.source_image_qa_status ?? target.source_qa_status ?? null,
+    source_image_qa_receipt_path: target.source_image_qa_receipt_path ?? target.source_qa_receipt_path ?? null,
+    source_cut_id: target.source_cut_id ?? target.production_cut_id ?? null,
     director_role: target.director_role ?? null,
     director_recommended_generation_mode: target.director_recommended_generation_mode ?? target.recommended_generation_mode ?? null,
     director_recommended_required_before_imagegen: target.director_recommended_required_before_imagegen ?? target.recommended_required_before_imagegen ?? null,
@@ -1423,6 +1617,14 @@ function sourceFaceAnchorRows(characterBible) {
       prompt_anchor: anchor?.prompt_anchor ?? character.source_face_prompt_anchor ?? null,
       approved: anchor?.approved ?? character.source_face_approved ?? false,
       source: anchor?.source ?? character.source_face_source ?? null,
+      owned: anchor?.owned ?? character.source_face_owned ?? character.source_face_operator_owned ?? false,
+      source_origin: anchor?.source_origin ?? character.source_face_origin ?? null,
+      source_review_status: anchor?.source_review_status ?? character.source_face_review_status ?? null,
+      source_review_receipt_path: anchor?.source_review_receipt_path ?? character.source_face_review_receipt_path ?? null,
+      source_image_id: anchor?.source_image_id ?? character.source_face_image_id ?? null,
+      source_image_sha256: anchor?.source_image_sha256 ?? character.source_face_image_sha256 ?? null,
+      source_image_qa_status: anchor?.source_image_qa_status ?? character.source_face_image_qa_status ?? null,
+      source_image_qa_receipt_path: anchor?.source_image_qa_receipt_path ?? character.source_face_image_qa_receipt_path ?? null,
     });
   }
   return rows.filter((row) => row && (row.character || row.ref_id) && (row.reference_image_path || row.path));
@@ -1447,7 +1649,7 @@ function sceneIdsForCharacter(character, aliases, scenes, characterStateRefs, ex
   return [...sceneIds].filter(Boolean);
 }
 
-function sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterStateRefs) {
+async function sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterStateRefs) {
   const seen = new Set();
   const anchors = [];
   for (const row of sourceFaceAnchorRows(characterBible)) {
@@ -1457,6 +1659,18 @@ function sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterSt
     if (!refId || seen.has(refId)) continue;
     seen.add(refId);
     const sceneIds = sceneIdsForCharacter(character, aliases, scenes, characterStateRefs, row.scene_ids);
+    const sourceOrigin = normalizeSourceOrigin(
+      row.source_origin
+        ?? row.origin
+        ?? (row.owned === true || row.operator_owned === true ? "owned_source" : null),
+    );
+    const sourceReviewStatus = String(
+      row.source_review_status
+        ?? row.review_status
+        ?? (row.approved === true ? "approved_clean" : "needs_manual_review"),
+    ).toLowerCase();
+    const sourceImagePath = row.conditioning_image_path ?? row.reference_image_path ?? row.path;
+    const sourceImageSha256 = row.source_image_sha256 ?? await hashFile(sourceImagePath);
     anchors.push({
       ref_id: refId,
       kind: "character_state",
@@ -1465,8 +1679,8 @@ function sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterSt
       priority: row.priority ?? "required",
       generation_mode: "source_only",
       required_before_imagegen: false,
-      reference_image_path: row.reference_image_path ?? row.path,
-      conditioning_image_path: row.conditioning_image_path ?? row.reference_image_path ?? row.path,
+      reference_image_path: sourceImagePath,
+      conditioning_image_path: sourceImagePath,
       prompt_anchor: ensureLandscapeReferenceAnchor(
         row.prompt_anchor
           ?? `face source identity anchor for ${character}, source image supplies facial likeness only, state refs supply wardrobe, body language, pose, and anime/manhwa styling`,
@@ -1479,17 +1693,33 @@ function sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterSt
         "Approved source portrait supplies face identity continuity for generated anime/manhwa character-state refs.",
       ],
       manual_review_required: row.manual_review_required ?? row.approved !== true,
+      evidence_asset_ids: normalizedOptionalStringArray(row.evidence_asset_ids) ?? [],
+      canonical_subject_id: row.canonical_subject_id ?? slug(character, refId),
+      conditioning_subject_count: 1,
+      conditioning_asset_role: "identity_state",
+      identity_usage: "face_only",
+      reference_cleanliness_contract_version: referenceCleanlinessContractVersion,
       source_face_character: character,
       source_face_aliases: aliases,
       source_face_status: row.approved === true ? "approved" : (row.status ?? "needs_manual_review"),
       source: row.source ?? null,
+      source_origin: sourceOrigin,
+      source_review_status: sourceReviewStatus,
+      source_review_receipt_path: row.source_review_receipt_path
+        ?? row.review_receipt_path
+        ?? (row.approved === true ? characterBiblePath : null),
+      source_image_id: row.source_image_id ?? refId,
+      source_image_sha256: sourceImageSha256,
+      source_image_qa_status: row.source_image_qa_status ?? null,
+      source_image_qa_receipt_path: row.source_image_qa_receipt_path ?? null,
+      source_cut_id: null,
     });
   }
   return anchors;
 }
 
-function applySourceFaceAnchors({ referenceTargets, characterStateRefs, characterBible, scenes }) {
-  const anchors = sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterStateRefs);
+async function applySourceFaceAnchors({ referenceTargets, characterStateRefs, characterBible, scenes }) {
+  const anchors = await sourceFaceAnchorsFromCharacterBible(characterBible, scenes, characterStateRefs);
   if (!anchors.length) {
     return { referenceTargets, characterStateRefs, warnings: [] };
   }
@@ -1575,6 +1805,11 @@ function identityMergeGroupKey(target) {
   return `${identityKey}::state_delta::${slug(stateDelta, "state")}`;
 }
 
+function isFaceOnlySourceDependency(target) {
+  return String(target?.generation_mode ?? "").toLowerCase() === "source_only"
+    && String(target?.identity_usage ?? "").toLowerCase() === "face_only";
+}
+
 function isExplicitBaseIdentityTarget(target) {
   if (String(target.kind ?? "").toLowerCase() !== "character_state") return false;
   const refId = String(target.ref_id ?? "");
@@ -1634,6 +1869,7 @@ function isDirectorRequiredStateVariantTarget(target) {
 }
 
 function isCanonicalIdentityCandidate(target) {
+  if (isFaceOnlySourceDependency(target)) return false;
   const refId = String(target.ref_id ?? "");
   if (isDirectorRequiredStateVariantTarget(target)) return false;
   if (isYouthVariantTarget(target) && !isExplicitBaseIdentityTarget(target)) return false;
@@ -1690,7 +1926,7 @@ function mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs) {
   }
   for (const [key, rows] of candidateGroups.entries()) {
     if (!rows.length) continue;
-    const allRows = allGroups.get(key) ?? rows;
+    const allRows = (allGroups.get(key) ?? rows).filter((row) => !isFaceOnlySourceDependency(row));
     const explicitRows = rows.filter(isExplicitBaseIdentityTarget);
     const primaryPool = explicitRows.length ? explicitRows : allRows;
     const sorted = [...primaryPool].sort((a, b) => identityTargetScore(b) - identityTargetScore(a) || String(a.ref_id).localeCompare(String(b.ref_id)));
@@ -1769,6 +2005,7 @@ function mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs) {
 }
 
 function isMergeableIdentityAliasTarget(target) {
+  if (isFaceOnlySourceDependency(target)) return false;
   if (normalizeKind(target?.kind) !== "character_state") return false;
   if (isGenericGroupCharacterTarget(target)) return false;
   if (isDirectorRequiredStateVariantTarget(target)) return false;
@@ -1878,7 +2115,11 @@ function collapseCharacterIdentityAliasTargets(referenceTargets, characterStateR
     };
   });
   const generatedCandidates = [...targetById.values()]
-    .filter((target) => normalizeKind(target.kind) === "character_state" && generatedOrAttachableTarget(target))
+    .filter((target) => (
+      normalizeKind(target.kind) === "character_state"
+      && generatedOrAttachableTarget(target)
+      && !isFaceOnlySourceDependency(target)
+    ))
     .sort((a, b) => identityAliasPrimaryScore(b) - identityAliasPrimaryScore(a) || String(a.ref_id).localeCompare(String(b.ref_id)));
   function canonicalTargetForStateRef(ref, { allowYouth = false } = {}) {
     const keys = [ref.character, ref.state_ref_id, ref.source_ref_id, ref.base_identity_ref_id]
@@ -2321,6 +2562,423 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
   };
 }
 
+function sourceReferencePath(target) {
+  return String(
+    target?.reference_image_path
+      ?? target?.conditioning_image_path
+      ?? target?.required_reference_path
+      ?? target?.path
+      ?? "",
+  ).trim();
+}
+
+function characterConditioningRole(target) {
+  const explicit = String(target?.conditioning_asset_role ?? "").trim().toLowerCase();
+  if (["identity_state", "creature_identity", "faction_language"].includes(explicit)) return explicit;
+  const subtype = String(target?.identity_subtype ?? "").trim().toLowerCase();
+  if (/^(?:creature|construct|summon|spirit|undead)$/.test(subtype)) return "creature_identity";
+  if (/^(?:creature_group|group|faction)$/.test(subtype) || isCollectiveGroupSubject(`${target?.subject ?? ""} ${target?.ref_id ?? ""}`)) return "faction_language";
+  return "identity_state";
+}
+
+function approvedSourceQaStatus(value) {
+  return /^passed(?:_|$)/i.test(String(value ?? "").trim());
+}
+
+function sourceOnlyReferenceFindings(target) {
+  if (String(target?.generation_mode ?? "").toLowerCase() !== "source_only") return [];
+  const findings = [];
+  const refId = target?.ref_id ?? null;
+  const kind = normalizeKind(target?.kind);
+  const role = kind === "character_state" ? characterConditioningRole(target) : null;
+  const origin = normalizeSourceOrigin(target?.source_origin);
+  const reviewStatus = slug(target?.source_review_status, "");
+  const pathValue = sourceReferencePath(target);
+  const sourceImageId = String(target?.source_image_id ?? target?.source_cut_id ?? "").trim();
+  const sourceHash = String(target?.source_image_sha256 ?? "").trim().toLowerCase();
+  const reviewReceiptPath = String(target?.source_review_receipt_path ?? "").trim();
+  const qaReceiptPath = String(target?.source_image_qa_receipt_path ?? "").trim();
+  const add = (code, message, extra = {}) => findings.push({
+    code,
+    severity: "blocker",
+    production_blocking: true,
+    ref_id: refId,
+    kind,
+    ...extra,
+    message,
+  });
+
+  if (!pathValue) add("source_only_reference_missing_path", `Source-only reference ${refId} must carry an exact reference_image_path or conditioning_image_path.`);
+  if (!sourceImageId) add("source_only_reference_missing_image_id", `Source-only reference ${refId} must identify its source image.`);
+  if (!/^[a-f0-9]{64}$/.test(sourceHash)) add("source_only_reference_missing_image_hash", `Source-only reference ${refId} must carry the exact 64-character source_image_sha256.`);
+  if (!origin || !["owned_source", "accepted_production_cut"].includes(origin)) {
+    add("source_only_reference_invalid_origin", `Source-only reference ${refId} must use source_origin owned_source or accepted_production_cut.`, { source_origin: origin });
+  }
+  if (reviewStatus !== "approved_clean") {
+    add("source_only_reference_not_clean_approved", `Source-only reference ${refId} must carry source_review_status=approved_clean.`, { source_review_status: target?.source_review_status ?? null });
+  }
+  if (!reviewReceiptPath) add("source_only_reference_missing_review_receipt", `Source-only reference ${refId} must carry source_review_receipt_path for its clean review.`);
+
+  if (origin === "accepted_production_cut") {
+    if (!["location", "prop", "ui"].includes(kind)) {
+      add("production_cut_source_kind_not_allowed", `Accepted production-cut source ${refId} is ${kind}; production cuts may source only location, prop, or UI references.`);
+    }
+    if (!String(target?.source_cut_id ?? "").trim()) {
+      add("production_cut_source_missing_cut_id", `Accepted production-cut source ${refId} must identify source_cut_id.`);
+    }
+    if (!approvedSourceQaStatus(target?.source_image_qa_status)) {
+      add("production_cut_source_not_qa_passed", `Accepted production-cut source ${refId} must carry a passed source_image_qa_status.`, { source_image_qa_status: target?.source_image_qa_status ?? null });
+    }
+    if (!qaReceiptPath) add("production_cut_source_missing_qa_receipt", `Accepted production-cut source ${refId} must carry source_image_qa_receipt_path.`);
+  }
+
+  if (kind === "character_state") {
+    if (origin !== "owned_source") {
+      add("character_source_must_be_owned", `Character source-only reference ${refId} must be an owned_source, never a production story cut.`);
+    }
+    if (role === "identity_state" && String(target?.identity_usage ?? "").toLowerCase() !== "face_only") {
+      add("human_source_identity_not_face_only", `Human source-only reference ${refId} must use identity_usage=face_only; generated state refs own body, wardrobe, pose, and styling.`);
+    }
+  } else if (origin === "owned_source" && String(target?.identity_usage ?? "").toLowerCase() === "face_only") {
+    add("non_character_source_marked_face_only", `Non-character source-only reference ${refId} cannot use face_only identity usage.`);
+  }
+  return findings;
+}
+
+function approvedCleanSourceOnlyTarget(target) {
+  return String(target?.generation_mode ?? "").toLowerCase() === "source_only"
+    && sourceOnlyReferenceFindings(target).length === 0;
+}
+
+const detachableReferenceObjectPattern = "(?:weapon|sword|blade|spear|bow|shield|gun|rifle|pistol|axe|hammer|staff|wand|knife|dagger|book|phone|smartphone|tablet|laptop|cup|bottle|bag|briefcase|suitcase|crutch|cane|coin|key|card|document|paper|folder|pen|pencil|microphone|camera|tool|map|scroll|torch|lantern|bell|orb|gem|crystal|crown|mask|amulet|necklace|ring|rope|chain)";
+const integratedObjectLikePattern = /\b(?:bell|orb|core|gem|crystal|crown|mask|clock|lens|emblem|sigil|disc|plate|blade|spike|horn)\b/i;
+const anatomyAttachmentLocationPattern = /\b(?:head|face|forehead|skull|neck|throat|chest|torso|back|shoulder|shoulders|arm|arms|hand|hands|waist|hip|hips|leg|legs|foot|feet|tail|tails|wing|wings)\b/i;
+const anatomyAttachmentRelationPattern = /\b(?:integrated|built[- ]?in|fused|embedded|anatomical|prosthetic|cybernetic|organic|attached|growing|grown|forming|set|mounted|within|along)\b/i;
+
+function matchHasClauseNegation(text, index) {
+  const start = Math.max(
+    0,
+    text.lastIndexOf(".", index - 1) + 1,
+    text.lastIndexOf(";", index - 1) + 1,
+    text.lastIndexOf(",", index - 1) + 1,
+  );
+  const prefix = text.slice(start, index);
+  return /\b(?:no|not|never|without|omit|omits|omitted|exclude|excludes|excluded|avoid|avoids|absent|free of)\b[^,.;]{0,55}$/i.test(prefix);
+}
+
+function affirmativeHeldPropInAnchor(value) {
+  const text = String(value ?? "");
+  const patterns = [
+    new RegExp(`\\b(?:holding|wielding|gripping|clutching|carrying|brandishing|aiming|swinging|raising|using|wearing|slinging|slung|strapping|strapped|sheathing|sheathed|holstering|holstered)\\b[^,.;]{0,80}\\b${detachableReferenceObjectPattern}\\b`, "ig"),
+    new RegExp(`\\b${detachableReferenceObjectPattern}\\b[^,.;]{0,55}\\b(?:in (?:his|her|their|its|a|the)?\\s*(?:right|left)?\\s*(?:hand|hands|grip)|gripped by|at (?:his|her|their|its) (?:hip|waist)|on (?:his|her|their|its) (?:back|belt)|slung over|strapped to|sheathed at|holstered at)\\b`, "ig"),
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      if (matchHasClauseNegation(text, Number(match.index ?? 0))) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+function affirmativeActionPoseInAnchor(value) {
+  const text = String(value ?? "");
+  const pattern = /\b(?:lunging|running|sprinting|leaping|jumping|attacking|fighting|striking|swinging|casting|aiming|shooting|chasing|wrestling)\b/ig;
+  for (const match of text.matchAll(pattern)) {
+    if (!matchHasClauseNegation(text, Number(match.index ?? 0))) return true;
+  }
+  return false;
+}
+
+function integratedFeatureLooksLikeDetachableProp(value) {
+  const text = String(value ?? "");
+  if (!new RegExp(`\\b${detachableReferenceObjectPattern}\\b`, "i").test(text)) return false;
+  if (anatomyAttachmentRelationPattern.test(text) && anatomyAttachmentLocationPattern.test(text)) return false;
+  return !/\b(?:integrated|built[- ]?in|fused|anatomical|prosthetic|cybernetic|organic|part of (?:the|its|his|her|their) body|body structure|attachment point)\b/i.test(text);
+}
+
+function integratedObjectFeatureMissingAttachment(value) {
+  const text = String(value ?? "");
+  if (!integratedObjectLikePattern.test(text)) return false;
+  return !anatomyAttachmentLocationPattern.test(text) || !anatomyAttachmentRelationPattern.test(text);
+}
+
+function explicitAnchorHandCounts(value) {
+  const text = String(value ?? "");
+  const wordCounts = new Map([
+    ["no", 0], ["zero", 0], ["one", 1], ["two", 2], ["both", 2], ["three", 3],
+    ["four", 4], ["five", 5], ["six", 6], ["seven", 7], ["eight", 8],
+  ]);
+  const counts = [];
+  const pattern = /\b(?:exactly\s+)?(no|zero|one|two|both|three|four|five|six|seven|eight|\d+)\b((?:\s+(?:total|visible|natural|documented|prosthetic|grasping|stone|hand-like|present|anatomically|right|left|empty|relaxed|open)){0,7}\s+)\b(hand|hands|claw|claws|appendage|appendages)\b/ig;
+  for (const match of text.matchAll(pattern)) {
+    if (/\b(?:extra|additional|duplicate|duplicated)\b/i.test(match[2] ?? "")) continue;
+    const count = wordCounts.has(String(match[1]).toLowerCase())
+      ? wordCounts.get(String(match[1]).toLowerCase())
+      : Number(match[1]);
+    if (Number.isInteger(count) && count >= 0) counts.push(count);
+  }
+  return counts;
+}
+
+function integratedFeatureAnchored(feature, promptAnchor) {
+  const stop = new Set(["a", "an", "the", "one", "two", "three", "four", "of", "to", "into", "in", "on", "at", "and", "or", "its", "his", "her", "their", "body", "structure", "integrated"]);
+  const featureTokens = normalizedTokens(feature).filter((token) => !stop.has(token));
+  const promptTokens = new Set(normalizedTokens(promptAnchor));
+  if (!featureTokens.length) return false;
+  const overlap = featureTokens.filter((token) => promptTokens.has(token)).length;
+  const requiredOverlap = Math.max(Math.min(2, featureTokens.length), Math.ceil(featureTokens.length * 0.6));
+  const attachmentTokens = new Set([
+    "head", "face", "forehead", "skull", "neck", "throat", "chest", "torso", "back",
+    "shoulder", "shoulders", "arm", "arms", "hand", "hands", "waist", "hip", "hips",
+    "leg", "legs", "foot", "feet", "tail", "tails", "wing", "wings", "left", "right",
+    "center", "centre", "front", "rear", "above", "below", "beneath", "between",
+  ]);
+  const requiredAttachmentTokens = featureTokens.filter((token) => attachmentTokens.has(token));
+  return overlap >= requiredOverlap && requiredAttachmentTokens.every((token) => promptTokens.has(token));
+}
+
+function affirmativePatternPresent(text, pattern) {
+  for (const match of String(text ?? "").matchAll(pattern)) {
+    if (!matchHasClauseNegation(String(text ?? ""), Number(match.index ?? 0))) return true;
+  }
+  return false;
+}
+
+function nonCharacterReferenceContentFindings(target) {
+  if (String(target?.generation_mode ?? "").toLowerCase() === "source_only") return [];
+  const kind = normalizeKind(target?.kind);
+  if (!["location", "prop", "ui", "action", "style"].includes(kind)) return [];
+  const promptAnchor = String(target?.prompt_anchor ?? "");
+  const findings = [];
+  const add = (code, message) => findings.push({
+    code,
+    severity: "blocker",
+    production_blocking: true,
+    ref_id: target?.ref_id ?? null,
+    kind,
+    message,
+  });
+  const actorPattern = /\b(?:person|people|men|women|boys?|girls?|warriors?|soldiers?|students?|crowds?|characters?|humans?|figures?)\b|\bguards?\b(?!\s+rails?\b)/ig;
+  const contextualBodyPartPattern = /\b(?:person|man|woman|boy|girl|warrior|soldier|student|character|human|figure)(?:'s|s')\s+(?:face|body|hand|hands|arm|arms)\b|\b(?:face|body|hand|hands|arm|arms)\b[^,.;]{0,28}\bof\s+(?:a|the)\s+(?:person|man|woman|boy|girl|warrior|soldier|student|character|human|figure)\b|\b(?:held|carried|wielded|gripped)\b[^,.;]{0,35}\b(?:by|in)\b[^,.;]{0,18}\b(?:hand|hands|arm|arms)\b/ig;
+  const hasActor = affirmativePatternPresent(promptAnchor, actorPattern)
+    || affirmativePatternPresent(promptAnchor, contextualBodyPartPattern);
+  if (kind === "prop" && (hasActor || affirmativeHeldPropInAnchor(promptAnchor) || affirmativePatternPresent(promptAnchor, /\b(?:held|wielded|carried|gripped)\b/ig))) {
+    add("prop_reference_anchor_contains_holder", `Prop reference ${target?.ref_id ?? "unknown"} must depict one isolated unheld object with no hand, body, or actor.`);
+  }
+  if (kind === "location") {
+    if (hasActor) add("location_reference_anchor_contains_actor", `Location reference ${target?.ref_id ?? "unknown"} must be an unoccupied environment plate with no featured actor or body part.`);
+    const featuredObjectPattern = new RegExp(`\\b(?:foreground|prominent|featured|centered|close[- ]?up)\\b[^,.;]{0,50}\\b${detachableReferenceObjectPattern}\\b|\\b${detachableReferenceObjectPattern}\\b[^,.;]{0,50}\\b(?:foreground|prominent|featured|centered|close[- ]?up)\\b`, "ig");
+    if (affirmativePatternPresent(promptAnchor, featuredObjectPattern)) {
+      add("location_reference_anchor_contains_featured_prop", `Location reference ${target?.ref_id ?? "unknown"} must not center a detachable foreground prop that can contaminate later scenes.`);
+    }
+  }
+  if (kind === "ui" && (hasActor || affirmativePatternPresent(promptAnchor, /\b(?:phone|smartphone|tablet|laptop|device)\b/ig))) {
+    add("ui_reference_anchor_contains_actor_or_device", `UI reference ${target?.ref_id ?? "unknown"} must isolate the interface motif without a person, hand, body, or physical device.`);
+  }
+  if (kind === "action" && (hasActor || affirmativeHeldPropInAnchor(promptAnchor))) {
+    add("action_reference_anchor_contains_story_actor", `Action/effect reference ${target?.ref_id ?? "unknown"} must isolate effect or motion language on a neutral field without a story actor or held prop.`);
+  }
+  if (kind === "style" && affirmativePatternPresent(promptAnchor, /\b(?:person|people|character|face|portrait|hand|body|speech bubble|ui panel)\b/ig)) {
+    add("style_reference_anchor_contains_concrete_subject", `Style reference ${target?.ref_id ?? "unknown"} must remain an abstract rendering/material/lighting sample without identities or interface panels.`);
+  }
+  return findings;
+}
+
+function characterReferenceContentFindings(target) {
+  if (normalizeKind(target?.kind) !== "character_state") return [];
+  if (String(target?.generation_mode ?? "").toLowerCase() === "source_only") return [];
+  const findings = [];
+  const role = characterConditioningRole(target);
+  const refId = target?.ref_id ?? null;
+  const expectedPose = role === "faction_language" ? "neutral_separated_lineup" : "neutral_single";
+  const expectedHands = role === "creature_identity" ? "empty_or_unoccupied" : "relaxed_empty";
+  const expectedSubjectCount = role === "faction_language" ? "3_to_5" : "1";
+  const promptAnchor = String(target?.prompt_anchor ?? "");
+  const add = (code, message, extra = {}) => findings.push({
+    code,
+    severity: "blocker",
+    production_blocking: true,
+    ref_id: refId,
+    conditioning_asset_role: role,
+    ...extra,
+    message,
+  });
+
+  if (String(target?.reference_cleanliness_contract_version ?? "") !== referenceCleanlinessContractVersion) {
+    add("character_reference_cleanliness_contract_missing", `Character reference ${refId} must use ${referenceCleanlinessContractVersion}.`);
+  }
+  const identitySubtype = String(target?.identity_subtype ?? "").trim().toLowerCase();
+  const humanSubtypes = new Set(["human", "person"]);
+  const creatureSubtypes = new Set(["creature", "construct", "summon", "spirit", "undead"]);
+  const groupSubtypes = new Set(["group", "creature_group", "faction"]);
+  const subtypeRoleConflict = (role === "identity_state" && (creatureSubtypes.has(identitySubtype) || groupSubtypes.has(identitySubtype)))
+    || (role === "creature_identity" && (humanSubtypes.has(identitySubtype) || groupSubtypes.has(identitySubtype)))
+    || (role === "faction_language" && (humanSubtypes.has(identitySubtype) || creatureSubtypes.has(identitySubtype)));
+  if (identitySubtype && subtypeRoleConflict) {
+    add("character_reference_role_subtype_conflict", `Character reference ${refId} has conditioning_asset_role=${role} but incompatible identity_subtype=${identitySubtype}; the explicit role and subtype must describe the same conditioning concept.`, { identity_subtype: identitySubtype });
+  }
+  if (String(target?.reference_pose ?? "").toLowerCase() !== expectedPose) {
+    add("character_reference_pose_not_neutral", `Character reference ${refId} must use reference_pose=${expectedPose}.`, { reference_pose: target?.reference_pose ?? null });
+  }
+  const visibleCount = Number(target?.visible_subject_count);
+  if (role === "faction_language") {
+    if (!Number.isInteger(visibleCount) || visibleCount < 3 || visibleCount > 5) {
+      add("faction_reference_visible_subject_count_invalid", `Faction reference ${refId} must contain three through five separated visible subjects.`, { visible_subject_count: target?.visible_subject_count ?? null });
+    }
+  } else if (visibleCount !== 1) {
+    add("character_reference_visible_subject_count_invalid", `Character reference ${refId} must contain exactly one visible subject.`, { visible_subject_count: target?.visible_subject_count ?? null, expected_visible_subject_count: expectedSubjectCount });
+  }
+  if (String(target?.hands_policy ?? "").toLowerCase() !== expectedHands) {
+    add("character_reference_hands_policy_invalid", `Character reference ${refId} must use hands_policy=${expectedHands}.`, { hands_policy: target?.hands_policy ?? null });
+  }
+  let exactExpectedVisibleHands = null;
+  if (role !== "faction_language") {
+    const expectedVisibleHandsValue = target?.expected_visible_hands;
+    const expectedVisibleHands = expectedVisibleHandsValue !== null
+      && expectedVisibleHandsValue !== undefined
+      && expectedVisibleHandsValue !== ""
+      ? Number(expectedVisibleHandsValue)
+      : null;
+    if (!Number.isInteger(expectedVisibleHands) || expectedVisibleHands < 0) {
+      add("character_reference_expected_visible_hands_invalid", `Character reference ${refId} must state the exact nonnegative expected_visible_hands for its authored anatomy.`, { expected_visible_hands: target?.expected_visible_hands ?? null });
+    } else {
+      exactExpectedVisibleHands = expectedVisibleHands;
+    }
+  }
+  if (!Array.isArray(target?.detachable_props)) {
+    add("character_reference_detachable_props_contract_missing", `Character reference ${refId} must carry detachable_props as an explicit empty array.`);
+  } else if (target.detachable_props.length) {
+    add("character_reference_contains_detachable_props", `Character reference ${refId} must keep every detachable weapon and prop in a separate prop/action reference.`, { detachable_props: target.detachable_props });
+  }
+  if (!Array.isArray(target?.integrated_anatomy_features)) {
+    add("character_reference_integrated_anatomy_contract_missing", `Character reference ${refId} must carry integrated_anatomy_features as an explicit array.`);
+  } else {
+    const disguisedProps = target.integrated_anatomy_features.filter(integratedFeatureLooksLikeDetachableProp);
+    if (disguisedProps.length) {
+      add("integrated_anatomy_contains_detachable_prop", `Character reference ${refId} places a detachable object in integrated_anatomy_features; move it to a separate prop reference.`, { integrated_anatomy_features: disguisedProps });
+    }
+    const underspecifiedAttachments = target.integrated_anatomy_features.filter(integratedObjectFeatureMissingAttachment);
+    if (underspecifiedAttachments.length) {
+      add("integrated_anatomy_attachment_unspecified", `Character reference ${refId} contains an object-like integrated feature without an explicit body attachment and relationship; state exactly where and how it is integrated so Klein cannot relocate it.`, { integrated_anatomy_features: underspecifiedAttachments });
+    }
+    const unanchoredFeatures = target.integrated_anatomy_features.filter((feature) => !integratedFeatureAnchored(feature, promptAnchor));
+    if (unanchoredFeatures.length) {
+      add("integrated_anatomy_missing_from_anchor", `Character reference ${refId} must repeat every integrated anatomy feature consistently in prompt_anchor.`, { integrated_anatomy_features: unanchoredFeatures });
+    }
+  }
+  if (exactExpectedVisibleHands != null) {
+    const anchorHandCounts = explicitAnchorHandCounts(promptAnchor);
+    if (!anchorHandCounts.length) {
+      add("character_reference_anchor_missing_expected_hand_count", `Character reference ${refId} prompt_anchor must state exactly ${exactExpectedVisibleHands} visible hands or grasping appendages.`);
+    } else if (anchorHandCounts.some((count) => count !== exactExpectedVisibleHands)) {
+      add("character_reference_anchor_hand_count_conflict", `Character reference ${refId} prompt_anchor contradicts expected_visible_hands=${exactExpectedVisibleHands}.`, { anchor_hand_counts: anchorHandCounts });
+    }
+  }
+  if (!/\bneutral\b/i.test(promptAnchor)) {
+    add("character_reference_anchor_missing_neutral_pose", `Character reference ${refId} prompt_anchor must explicitly describe its neutral pose.`);
+  }
+  if (role === "faction_language" && !/\b(?:separated|lineup|line-up)\b/i.test(promptAnchor)) {
+    add("faction_reference_anchor_missing_separation", `Faction reference ${refId} prompt_anchor must explicitly keep members separated in a neutral lineup.`);
+  }
+  if (role === "creature_identity") {
+    const zeroAppendageContract = exactExpectedVisibleHands === 0
+      && /\b(?:no|zero)\b[^.;]{0,35}\b(?:hand|hands|claw|claws|grasping|hand-like|appendage|appendages)\b|\bwithout\b[^.;]{0,35}\b(?:hand|hands|claw|claws|grasping|hand-like|appendage|appendages)\b/i.test(promptAnchor);
+    if (!zeroAppendageContract && !/(?:\bempty\b|\bunoccupied\b)[^.;]{0,55}\b(?:hand|hands|claw|claws|grasping|appendage|appendages)\b|\b(?:hand|hands|claw|claws|grasping|appendage|appendages)\b[^.;]{0,55}(?:\bempty\b|\bunoccupied\b)/i.test(promptAnchor)) {
+      add("creature_reference_anchor_missing_empty_appendages", `Creature reference ${refId} prompt_anchor must explicitly keep every grasping or hand-like appendage empty/unoccupied.`);
+    }
+  } else {
+    const zeroHandContract = exactExpectedVisibleHands === 0
+      && /\b(?:no|zero)\b[^.;]{0,25}\bhands?\b|\bwithout\b[^.;]{0,25}\bhands?\b/i.test(promptAnchor);
+    if (!zeroHandContract && !/\bempty[- ]handed\b|\b(?:hand|hands)\b[^.;]{0,45}\bempty\b|\bempty\b[^.;]{0,45}\b(?:hand|hands)\b/i.test(promptAnchor)) {
+      add("character_reference_anchor_missing_empty_hands", `Human/faction reference ${refId} prompt_anchor must explicitly keep all hands relaxed and empty, or explicitly state that no hands are anatomically present.`);
+    }
+  }
+  if (affirmativeHeldPropInAnchor(promptAnchor)) {
+    add("character_reference_anchor_depicts_detachable_prop", `Character reference ${refId} prompt_anchor affirmatively depicts a held weapon or detachable prop.`);
+  }
+  if (affirmativeActionPoseInAnchor(promptAnchor)) {
+    add("character_reference_anchor_depicts_action_pose", `Character reference ${refId} prompt_anchor depicts an action pose instead of a neutral identity/anatomy plate.`);
+  }
+  return findings;
+}
+
+function evidenceAssetCoverageKeys(asset) {
+  return new Set([
+    asset?.asset_id,
+    asset?.ref_id,
+    asset?.canonical_subject_id,
+    asset?.canonical_subject_key,
+    asset?.subject,
+    ...(asset?.observed_aliases ?? []),
+  ].map((value) => slug(value, "")).filter(Boolean));
+}
+
+function targetCoverageKeys(target) {
+  return new Set([
+    target?.inventory_asset_id,
+    target?.canonical_subject_id,
+    target?.base_asset_id,
+    target?.ref_id,
+    target?.subject,
+    ...(target?.evidence_asset_ids ?? []),
+  ].map((value) => slug(value, "")).filter(Boolean));
+}
+
+function targetCoversEvidenceAsset(target, asset) {
+  if (normalizeKind(target?.kind) !== normalizeKind(asset?.kind)) return false;
+  const assetKeys = evidenceAssetCoverageKeys(asset);
+  const targetKeys = targetCoverageKeys(target);
+  for (const key of targetKeys) if (assetKeys.has(key)) return true;
+  return false;
+}
+
+function bindingRecurringEvidenceAsset(asset) {
+  const kind = normalizeKind(asset?.kind);
+  const beats = Number(asset?.beat_count ?? asset?.beat_ids?.length ?? 0);
+  const scenes = Number(asset?.distinct_scene_count ?? asset?.scene_ids?.length ?? 0);
+  if (kind === "character_state") return beats >= 2 || scenes >= 2;
+  if (["location", "prop", "ui"].includes(kind)) return beats >= 3 || scenes >= 2;
+  return false;
+}
+
+function recurringReferenceCoverageFindings(evidenceLedger, referenceTargets, { legacyRevalidation = false } = {}) {
+  if (legacyRevalidation) return [];
+  const findings = [];
+  for (const asset of (evidenceLedger?.assets ?? []).filter(bindingRecurringEvidenceAsset)) {
+    const matchingTargets = (referenceTargets ?? []).filter((target) => targetCoversEvidenceAsset(target, asset));
+    const cleanTargets = matchingTargets.filter((target) => {
+      const mode = String(target?.generation_mode ?? "").toLowerCase();
+      if (mode === "standalone_ref") return true;
+      if (!approvedCleanSourceOnlyTarget(target)) return false;
+      return !(
+        normalizeKind(asset?.kind) === "character_state"
+        && String(target?.identity_usage ?? "").toLowerCase() === "face_only"
+      );
+    });
+    if (cleanTargets.length) continue;
+    findings.push({
+      code: "recurring_reference_coverage_missing",
+      severity: "blocker",
+      production_blocking: true,
+      review_required: true,
+      review_disposition: "director_must_select_clean_reference",
+      asset_id: asset.asset_id ?? null,
+      ref_id: asset.ref_id ?? null,
+      kind: normalizeKind(asset.kind),
+      subject: asset.subject ?? null,
+      beat_count: Number(asset.beat_count ?? asset.beat_ids?.length ?? 0),
+      distinct_scene_count: Number(asset.distinct_scene_count ?? asset.scene_ids?.length ?? 0),
+      scene_ids: asset.scene_ids ?? [],
+      beat_ids: asset.beat_ids ?? [],
+      matching_target_ids: matchingTargets.map((target) => target.ref_id).filter(Boolean),
+      matching_generation_modes: matchingTargets.map((target) => target.generation_mode ?? null),
+      message: `Global reference director omitted binding recurring coverage for ${asset.subject ?? asset.asset_id}. It must select an evidence-linked standalone_ref or approved-clean full conditioning source; a face-only source is only an identity dependency and does not replace a recurring character-state plate. Deterministic code will not invent one.`,
+    });
+  }
+  return findings;
+}
+
 function finalDirectorSelectionFindings(referenceTargets, {
   llmTargetIds = new Set(),
   knownSceneIds = new Set(),
@@ -2330,6 +2988,11 @@ function finalDirectorSelectionFindings(referenceTargets, {
   const canonicalGroups = new Map();
   for (const target of referenceTargets ?? []) {
     const mode = String(target.generation_mode ?? "").toLowerCase();
+    if (!legacyRevalidation) {
+      findings.push(...sourceOnlyReferenceFindings(target));
+      findings.push(...characterReferenceContentFindings(target));
+      findings.push(...nonCharacterReferenceContentFindings(target));
+    }
     if (!legacyRevalidation && (mode === "no_ref_needed" || /^derive_from_/i.test(mode))) {
       findings.push({
         code: "director_selected_non_clean_reference_mode",
@@ -2387,7 +3050,7 @@ function finalDirectorSelectionFindings(referenceTargets, {
         style: new Set(["style_language"]),
         character_state: new Set(["identity_state", "creature_identity", "faction_language"]),
         location: new Set(["environment"]),
-        prop: new Set(["prop", "faction_language"]),
+        prop: new Set(["prop"]),
         ui: new Set(["ui_motif"]),
         action: new Set(["action_effect"]),
       }[normalizeKind(target.kind)] ?? new Set();
@@ -2404,7 +3067,10 @@ function finalDirectorSelectionFindings(referenceTargets, {
     }
     const canonicalId = String(target.canonical_subject_id ?? "").trim();
     if (canonicalId) {
-      const key = [normalizeKind(target.kind), canonicalId, String(target.state_delta ?? "base")].join("|");
+      const identityRole = isFaceOnlySourceDependency(target)
+        ? "face_source_dependency"
+        : String(target.state_delta ?? "base");
+      const key = [normalizeKind(target.kind), canonicalId, identityRole].join("|");
       if (!canonicalGroups.has(key)) canonicalGroups.set(key, []);
       canonicalGroups.get(key).push(target.ref_id);
     }
@@ -2559,6 +3225,26 @@ export function referenceDirectorSelectionFindingsForTests(referenceTargets, opt
   return finalDirectorSelectionFindings(referenceTargets, options);
 }
 
+export function recurringReferenceCoverageFindingsForTests(evidenceLedger, referenceTargets, options = {}) {
+  return recurringReferenceCoverageFindings(evidenceLedger, referenceTargets, options);
+}
+
+export function characterReferenceContentFindingsForTests(target) {
+  return characterReferenceContentFindings(target);
+}
+
+export function nonCharacterReferenceContentFindingsForTests(target) {
+  return nonCharacterReferenceContentFindings(target);
+}
+
+export function sourceOnlyReferenceFindingsForTests(target) {
+  return sourceOnlyReferenceFindings(target);
+}
+
+export function approvedCleanSourceOnlyTargetForTests(target) {
+  return approvedCleanSourceOnlyTarget(target);
+}
+
 export function referenceCharacterStateFindingsForTests(characterStateRefs, referenceTargets, options = {}) {
   return characterStateDirectorFindings(characterStateRefs, referenceTargets, options);
 }
@@ -2613,6 +3299,7 @@ async function main() {
   const guidance = { visualStyleBible, characterBible, episodeVisualDirection, storyFactLedger };
   const referenceEvidenceLedger = buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
     outputPath: referenceEvidenceLedgerOutputPath,
+    storyFactLedger,
   });
   const locationContractLedger = buildLocationContractLedger(scopedSemantic, {
     outputPath: locationContractLedgerOutputPath,
@@ -2665,7 +3352,7 @@ async function main() {
       ? { ...normalized, ...ref, state_ref_id: normalized.state_ref_id, scene_ids: normalized.scene_ids }
       : normalized;
   });
-  const sourceFaceAnchoring = applySourceFaceAnchors({
+  const sourceFaceAnchoring = await applySourceFaceAnchors({
     referenceTargets,
     characterStateRefs,
     characterBible,
@@ -2700,12 +3387,13 @@ async function main() {
     knownSceneIds,
     legacyRevalidation,
   });
+  const recurringCoverageFindings = recurringReferenceCoverageFindings(referenceEvidenceLedger, referenceTargets, { legacyRevalidation });
   const openingIdentityFindings = openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
   const characterStateFindings = characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation });
   const nonhumanSelectionFindings = unselectedDistinctNonhumanActorFindingsForTests(referenceEvidenceLedger, referenceTargets);
   const coverageFindings = locationContractLedger.findings ?? [];
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
-  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...openingIdentityFindings, ...characterStateFindings, ...nonhumanSelectionFindings];
+  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...recurringCoverageFindings, ...openingIdentityFindings, ...characterStateFindings, ...nonhumanSelectionFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const referenceInventoryLedger = buildSelectedReferenceInventory(referenceTargets, {
     sourceScriptHash: semanticPlan.source_script_hash,
@@ -2757,6 +3445,9 @@ async function main() {
     reference_director_contract_version: legacyRevalidation
       ? (existingReferencePlan.reference_director_contract_version ?? "legacy_revalidation")
       : "reference_director_v2",
+    reference_cleanliness_contract_version: legacyRevalidation
+      ? (existingReferencePlan.reference_cleanliness_contract_version ?? null)
+      : referenceCleanlinessContractVersion,
     reference_evidence_ledger_path: referenceEvidenceLedgerOutputPath,
     location_contract_ledger_path: locationContractLedgerOutputPath,
     reference_inventory_ledger_path: referenceInventoryLedgerOutputPath,

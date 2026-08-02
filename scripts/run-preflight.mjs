@@ -44,6 +44,12 @@ import {
   LTX_VIDEO_PROVIDER,
   normalizeLtxVideoPolicy,
 } from "./lib/ltx-video-contract.mjs";
+import {
+  normalizeWinnerNarration,
+  sha256Text,
+  validateWinnerPackageContract,
+  validateWinnerSourceRelease,
+} from "./lib/winner-source-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -56,6 +62,7 @@ const week = flags.week;
 const episode = flags.episode;
 const title = flags.title ?? flags["episode-title"] ?? "";
 const sourcePath = flags.source ? path.resolve(flags.source) : null;
+const winnerReleasePath = flags["winner-release"] ? path.resolve(flags["winner-release"]) : null;
 const allowPartInWeek = flags["allow-part-in-week"] === "true";
 const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "modelslab");
@@ -409,6 +416,119 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+async function readJsonWithBytes(filePath, label) {
+  const bytes = await fs.readFile(filePath).catch(() => null);
+  if (!bytes) throw new Error(`Missing ${label}: ${filePath}`);
+  let value;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(`Invalid ${label} JSON at ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { bytes, value };
+}
+
+function resolveReleaseArtifactPath(releaseFilePath, value, label) {
+  const text = String(value ?? "").trim();
+  if (!text) throw new Error(`Winner source release is missing ${label}.`);
+  return path.isAbsolute(text) ? path.normalize(text) : path.resolve(path.dirname(releaseFilePath), text);
+}
+
+async function loadWinnerSourceReleaseBinding(releaseFilePath, {
+  expectedChannel,
+  expectedTitle,
+  expectedSourcePath,
+}) {
+  if (!expectedSourcePath) {
+    throw new Error("--winner-release requires --source so preflight can bind the exact released narration bytes.");
+  }
+  if (!String(expectedTitle ?? "").trim()) {
+    throw new Error("--winner-release requires --title matching the approved winner package.");
+  }
+  const resolvedReleasePath = path.resolve(releaseFilePath);
+  const { bytes: releaseBytes, value: release } = await readJsonWithBytes(
+    resolvedReleasePath,
+    "winner source release",
+  );
+  const releaseSourcePath = resolveReleaseArtifactPath(
+    resolvedReleasePath,
+    release.source_path,
+    "source_path",
+  );
+  const winnerPackagePath = resolveReleaseArtifactPath(
+    resolvedReleasePath,
+    release.winner_package_path ?? release.package_path,
+    "winner_package_path",
+  );
+  const releaseSourceBytes = await fs.readFile(releaseSourcePath).catch(() => null);
+  if (!releaseSourceBytes) throw new Error(`Missing winner release source: ${releaseSourcePath}`);
+  const requestedSourceBytes = await fs.readFile(expectedSourcePath).catch(() => null);
+  if (!requestedSourceBytes) throw new Error(`Missing preflight source: ${expectedSourcePath}`);
+  const { bytes: packageBytes, value: packageContract } = await readJsonWithBytes(
+    winnerPackagePath,
+    "winner package",
+  );
+  const packageValidation = validateWinnerPackageContract(packageContract);
+  if (!packageValidation.done) {
+    throw new Error(`Invalid winner package contract: ${packageValidation.blockers.join(", ")}`);
+  }
+  const releaseValidation = validateWinnerSourceRelease(release, {
+    sourceText: releaseSourceBytes.toString("utf8"),
+    packageContract,
+  });
+  if (!releaseValidation.done) {
+    throw new Error(`Invalid winner source release: ${releaseValidation.blockers.join(", ")}`);
+  }
+  const actualPackageSha256 = sha256(packageBytes);
+  if (release.winner_package_sha256 !== actualPackageSha256) {
+    throw new Error(`Winner package hash mismatch: release records ${release.winner_package_sha256}, current file is ${actualPackageSha256}.`);
+  }
+  const requestedSourceScriptSha256 = sha256Text(normalizeWinnerNarration(requestedSourceBytes.toString("utf8")));
+  if (requestedSourceScriptSha256 !== release.source_script_sha256) {
+    throw new Error(`--source does not match the released narration: expected ${release.source_script_sha256}, found ${requestedSourceScriptSha256}.`);
+  }
+  if (release.channel !== expectedChannel || packageContract.channel !== expectedChannel) {
+    throw new Error(`Winner release channel mismatch: expected ${expectedChannel}, release has ${release.channel}, package has ${packageContract.channel}.`);
+  }
+  if (release.selected_title !== expectedTitle || packageContract.selected_title !== expectedTitle) {
+    throw new Error(`--title does not match the approved winner package: expected "${packageContract.selected_title}", received "${expectedTitle}".`);
+  }
+  if (release.development_slug !== packageContract.development_slug) {
+    throw new Error("Winner release development_slug does not match the current winner package.");
+  }
+  if (release.selected_candidate_id && release.selected_candidate_id !== packageContract.selected_candidate_id) {
+    throw new Error("Winner release selected_candidate_id does not match the current winner package.");
+  }
+  if (release.formula_version && release.formula_version !== packageContract.formula_version) {
+    throw new Error("Winner release formula_version does not match the current winner package.");
+  }
+  if (release.formula_sha256 && release.formula_sha256 !== packageContract.formula_sha256) {
+    throw new Error("Winner release formula_sha256 does not match the current winner package.");
+  }
+  return {
+    schema: "goldflow_run_identity_winner_source_release_binding_v1",
+    release_path: resolvedReleasePath,
+    release_sha256: sha256(releaseBytes),
+    channel: release.channel,
+    development_slug: release.development_slug,
+    selected_candidate_id: packageContract.selected_candidate_id,
+    selected_title: release.selected_title,
+    source_path: releaseSourcePath,
+    source_file_sha256: sha256(releaseSourceBytes),
+    source_script_sha256: release.source_script_sha256,
+    preflight_source_path: path.resolve(expectedSourcePath),
+    preflight_source_file_sha256: sha256(requestedSourceBytes),
+    winner_package_path: winnerPackagePath,
+    winner_package_sha256: actualPackageSha256,
+    winner_gate_sha256: release.winner_gate_sha256,
+    formula_version: packageContract.formula_version,
+    formula_sha256: packageContract.formula_sha256,
+    released_by: release.released_by,
+    released_at: release.released_at,
+    bound_at: new Date().toISOString(),
+  };
+}
+
 function requiredFlag(name, value) {
   if (!value) throw new Error(`Missing required --${name}. Run identity must be explicit before ingest.`);
 }
@@ -445,6 +565,13 @@ async function main() {
     throw new Error(`Episode identity mismatch: title/series/week implies episode ${implied}, but --episode is ${episode}. Use ep_${String(implied).padStart(2, "0")} or pass --confirm-episode-identity true with operator approval.`);
   }
   if (sourcePath && !(await exists(sourcePath))) throw new Error(`Missing source file: ${sourcePath}`);
+  const winnerSourceRelease = winnerReleasePath
+    ? await loadWinnerSourceReleaseBinding(winnerReleasePath, {
+        expectedChannel: channel,
+        expectedTitle: title,
+        expectedSourcePath: sourcePath,
+      })
+    : null;
   validateImageFallbackPolicy();
   const git = await gitSnapshot();
   validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
@@ -597,6 +724,7 @@ async function main() {
     model_versions: lockedModelVersions(),
     source_path: sourcePath,
     source_sha256: sourcePath ? sha256(await fs.readFile(sourcePath)) : null,
+    winner_source_release: winnerSourceRelease,
     episode_identity_policy: {
       episode_number_lives_in: "--episode",
       week_slug_policy: "Do not encode Part 2/Part 3 in --week for sequel episodes unless the operator explicitly approves a standalone run.",

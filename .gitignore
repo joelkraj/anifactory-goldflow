@@ -7,4 +7,5 @@ temp/
 *.log
 scratch/
 ab-validation/
+generated/
 HANDOFF-*.md

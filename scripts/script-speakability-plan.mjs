@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { runCodexCli } from "./lib/codex-cli-runner.mjs";
+import { contentProfileForIdentity } from "./lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -21,6 +22,7 @@ const scriptPath = path.join(episodeDir, "script_clean.md");
 const reportPath = path.join(episodeDir, "script_speakability_report.json");
 const overridesPath = path.join(episodeDir, "tts_spoken_overrides.json");
 const protectedTermsPath = path.join(episodeDir, "protected_terms_report.json");
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
 
 function parseFlags(parts) {
   const parsed = {};
@@ -235,7 +237,7 @@ async function biblePacket() {
   return packet;
 }
 
-function buildPrompt(script, bibles, detectedTerms) {
+function buildPrompt(script, bibles, detectedTerms, contentProfile) {
   return `You are AniFactory's TTS speakability reviewer.
 
 Goal: prepare an approved narration script for text-to-speech without rewriting the story.
@@ -244,7 +246,7 @@ Rules:
 - Do not rewrite the script.
 - Do not change captions, plot, facts, names, scene order, or style.
 - Produce spoken equivalents only for tokens/phrases that are risky for TTS.
-- Spoken equivalents must preserve meaning and be natural for a controlled anime/manhwa narrator.
+- Spoken equivalents must preserve meaning and be natural for a controlled narrator in the ${contentProfile.content_family} content family.
 - Prefer exact literal phrase replacements. Use regex only for simple repeated token classes.
 - Flag and repair ambiguous homographs when context proves the intended meaning, especially "live" meaning live-stream and "content" meaning media/clip content.
 - Mark story rewrites as forbidden. This is a TTS guidance artifact, not an enhancement pass.
@@ -370,8 +372,10 @@ async function main() {
   await requireApproval(scriptHash);
   const detectedTerms = deterministicScan(script);
   const bibles = await biblePacket();
+  const runIdentity = await readJson(runIdentityPath, {});
+  const contentProfile = contentProfileForIdentity(runIdentity);
   const stageName = `${episode}_script_speakability`;
-  const prompt = buildPrompt(script, bibles, detectedTerms);
+  const prompt = buildPrompt(script, bibles, detectedTerms, contentProfile);
   const llm = flags["deterministic-only"] === "true"
     ? { provider: "deterministic", model: null, parsed: { status: "passed", summary: "Deterministic scan only.", warnings: [], replacements: [], pronunciation_map: [], pacing_notes: [] } }
     : isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
@@ -390,6 +394,11 @@ async function main() {
     series_slug: series,
     week,
     episode,
+    content_profile: {
+      id: contentProfile.id,
+      version: contentProfile.version,
+      sha256: runIdentity.content_profile_sha256 ?? null,
+    },
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
     policy: "Analyze TTS speakability without rewriting script_clean.md. Captions and visuals keep approved script text; TTS may use approved spoken equivalents.",

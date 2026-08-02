@@ -11,6 +11,12 @@ import {
   applyBeatLocationSceneIds,
   applyDeterministicLocationSceneIds,
 } from "./lib/visual-scope-utils.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfilePlannerDirective,
+  contentProfilePlannerRole,
+  contentProfileReferenceInstruction,
+} from "./lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -19,6 +25,7 @@ const channel = flags.channel ?? "53rebirth";
 const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
+let activeContentProfile = contentProfileForIdentity({});
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
@@ -1009,6 +1016,8 @@ function compactInventoryForPrompt(inventoryLedger, sceneIds = null, options = {
 }
 
 function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventoryLedger = null, locationContractLedger = null } = {}) {
+  const contentProfile = guidance.contentProfile ?? activeContentProfile;
+  const plannerDirective = contentProfilePlannerDirective(contentProfile);
   const compact = {
     source_script_hash: semanticPlan.source_script_hash,
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -1018,6 +1027,9 @@ function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventory
   };
   return `Propose canonical visual-reference candidates from this evidence-backed story chunk.
 ${chunkLabel ? `\nThis is ${chunkLabel}. Propose only assets with plausible episode-level continuity value. A later global director call makes every final generation decision.\n` : ""}
+
+CONTENT PROFILE: ${contentProfile.id}
+${plannerDirective || "- Preserve recurring visual identity and physical continuity from the locked narration."}
 
 Rules:
 - This chunk stage supplies evidence-backed candidates to the global reference director. It does not decide the final reference budget and it does not write final scene-image prompts.
@@ -1030,7 +1042,7 @@ Rules:
 - A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted is not a prop. Propose it as kind character_state. Use conditioning_asset_role creature_identity for one distinct creature/construct identity and faction_language only for a true recurring creature group or shared species/faction design.
 - A distinct nonhuman actor should receive a clean standalone identity reference when it recurs across two or more beats, is the decisive threat/contact target in an action sequence, or has signature anatomy that text-only scene prompting is likely to reinterpret. Its scene_prompt_anchor must repeat one concise positive anatomy contract across every covered beat, including exact silhouette, material, head/face construction, limb/body construction, and whether a signature object-like feature is integrated into the body, worn, held, or separate in the environment.
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
-- For real named public creators, streamers, celebrities, or influencers whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and anime/manhwa styling.
+- For real named public figures whose likeness matters, request a face-only source identity anchor before the episode character-state ref is generated. Do not rely on text-only "inspired by" likeness prompts for production. The source anchor supplies facial likeness only; the character-state ref supplies wardrobe, pose, body state, and ${contentProfile.content_family} styling.
 - Use each scene's visual_beats when present. A named character that appears in a beat excerpt through replay footage, livestream panels, phone screens, broadcast feeds, camera files, dossiers, avatars, or video walls still needs current-scene reference coverage if their likeness may be visible in that cut.
 - Treat each beat's active_state_constraints and depiction_mode as binding evidence. Select refs for materially recurring visible states; do not collapse incompatible wardrobe/injury states and do not create refs for transient text-only state changes.
 - When visual_beats carry ref_needs or beat_ref_requirements, treat those as advisory local transcript-timed evidence, not locked reference targets. Semantic scene ref_requirements remain broad scene coverage. The LLM decides the final episode-level reference strategy and may merge, downgrade, upgrade, rename, or replace beat suggestions when the story context supports it.
@@ -1044,9 +1056,9 @@ Rules:
 - Convert risks into concrete construction when helpful: exact visible subject count, role, pose, action direction, wardrobe construction, frame composition, and location details.
 - Keep narrative state separate from visible state. Semantic emotional_state, financial_state, social_state, or loose state phrases such as broke, ruined, betrayed, humiliated, indebted, rejected, or emotionally collapsed are story context, not automatic costume/body damage. Use them to choose props, posture, expression, staging, witnesses, UI, receipts, screens, isolation, or power dynamics. Only put dirt, ragged clothing, torn fabric, wounds, illness, homelessness, dumpster-like styling, or severe physical decay into a character prompt_anchor/scene_prompt_anchor when the locked script or semantic visible_state explicitly says that physical detail is visible.
 - Prompt anchors must be concrete and specific enough for image generation, but they are draft anchors requiring manual review before reference generation.
-- Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
+- Every prompt_anchor must begin with the matching content-profile reference instruction and depict exactly one reusable conditioning concept.
 - Reference kind taxonomy is strict:
-  - style refs define polished 2D anime/manhwa rendering language, line quality, color, lighting, and shot polish.
+  - style refs follow: ${contentProfileReferenceInstruction(contentProfile, "style")}.
   - character_state refs define one identity/state: human face/body/wardrobe, one distinct creature/construct anatomy, or one coherent faction/species language. They are identity/anatomy evidence, not reusable pose instructions.
   - location refs define environment, architecture, materials, lighting, and scale; use open environment-only staging with enough clean space for later scene characters.
   - prop refs define object shape, surface, markings, and scale.
@@ -1163,6 +1175,8 @@ Return:
 }
 
 function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
+  const contentProfile = guidance.contentProfile ?? activeContentProfile;
+  const plannerDirective = contentProfilePlannerDirective(contentProfile);
   const compact = {
     source_script_hash: semanticPlan.source_script_hash,
     episode_summary: semanticPlan.episode_summary ?? "",
@@ -1229,6 +1243,9 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
   }));
   return `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
 
+CONTENT PROFILE: ${contentProfile.id}
+${plannerDirective || "- Preserve recurring visual identity and physical continuity from the locked narration."}
+
 Rules:
 - You are the sole episode-level reference director. Code validates your output but never restores an asset you omit and never guesses a replacement.
 - Use REFERENCE EVIDENCE LEDGER and CHUNK CANDIDATES as evidence, not deterministic target authoring. Semantic scenes provide broad context, visual beats provide local transcript truth, and LOCATION CONTRACT LEDGER carries textual location scope. You remain the sole creative selector, but the final plan will be blocked if it omits a character_state asset recurring in at least two beats or two scenes, or a location/prop/ui asset recurring in at least three beats or two scenes.
@@ -1237,7 +1254,7 @@ Rules:
 - Treat chunk plans as proposals. Keep only references that materially improve consistency and trace each selection through evidence_asset_ids. If several chunks propose aliases or state variants of the same asset, choose one canonical_subject_id and one base_asset_id, then retain only visually material state deltas.
 - Merge duplicate character/location/prop/UI/action targets across chunks.
 - Resolve role/title aliases to canonical named characters when the script or semantic scenes establish that relationship. If a named person is also the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, do not create a separate generic character ref for later role-only mentions. Expand the existing named character's state/scope instead.
-- For real named public creators, streamers, celebrities, or influencers whose likeness matters, preserve or request face-only source identity anchors and use those anchors as base_identity_ref_id for the generated anime/manhwa character-state refs. Do not merge these into generic role refs or text-only lookalikes.
+- For real named public figures whose likeness matters, preserve or request face-only source identity anchors and use those anchors as base_identity_ref_id for generated character-state refs. Do not merge these into generic role refs or text-only lookalikes.
 - Preserve all relevant scene_ids from the chunk plans.
 - Final generation_mode is limited to standalone_ref, manual_review, or source_only. Omit text-only one-off assets. Do not derive references from populated story cuts. source_only is valid only when an exact clean asset already exists and the target carries reference_image_path, source_origin, source_review_status=approved_clean, source_review_receipt_path, source_image_id, and source_image_sha256. source_origin is owned_source or accepted_production_cut. accepted_production_cut additionally requires source_cut_id, passed source_image_qa_status, and source_image_qa_receipt_path, and is permitted only for location, prop, or UI refs. A human source identity must be an operator-owned face-only source.
 - Write normal descriptive prompt anchors that preserve story-faithful UI labels, status phrases, and concise absence states when they are the point of the reference.
@@ -1251,9 +1268,9 @@ Rules:
 - Distinguish people, distinct nonhuman actors, and true groups/factions. A recurring named person gets a character_state/base identity ref when needed. A named or distinct creature, boss, guardian, construct, or summon that moves, attacks, reacts, is fought, or is physically contacted is an identity-bearing actor, never a prop; keep it as kind character_state with conditioning_asset_role creature_identity. A recurring group or creature system may receive a clean group/faction design plate when its shared silhouette, uniform, armor, or visual system matters; never pretend it is one person's face identity.
 - Preserve a clean standalone identity ref for a distinct nonhuman actor when it recurs across two or more beats, is the decisive threat/contact target in an action sequence, or has signature anatomy that text-only prompts can reinterpret. Its scene_prompt_anchor must carry one concise positive anatomy contract unchanged across its covered beats, including exact silhouette, materials, head/face construction, limb/body construction, and whether any object-like feature is integrated, worn, held, or environmental.
 - If a character state ref is visually reused as replay/screen evidence in a later scene, include that later scene_id in the ref scope and explain the screen-visible or replay-footage usage in risk_notes.
-- Every prompt_anchor for every reference kind should start as a 16:9 landscape anime/manhwa reference card or plate; character refs should use plain backgrounds, location refs should use environment-only staging plates, and prop/UI/action refs should be landscape design plates.
+- Every prompt_anchor must begin with the matching content-profile reference instruction and depict exactly one reusable conditioning concept.
 - Reference kind taxonomy is strict:
-  - style refs define polished 2D anime/manhwa rendering language, line quality, color, lighting, and shot polish.
+  - style refs follow: ${contentProfileReferenceInstruction(contentProfile, "style")}.
   - character_state refs define one human identity/state, one distinct creature/construct anatomy, or one coherent faction/species language; they are identity/anatomy evidence, not reusable pose instructions.
   - location refs define environment, architecture, materials, lighting, and scale; use open environment-only staging with enough clean space for later scene characters.
   - prop refs define object shape, surface, markings, and scale.
@@ -1379,7 +1396,14 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a visual reference strategy planner for longform anime/manhwa production. Preserve story intent and keep provider-facing content in normal prompt anchor fields." },
+          {
+            role: "system",
+            content: `Return only valid JSON. You are a ${contentProfilePlannerRole(
+              activeContentProfile,
+              "reference",
+              "visual reference strategy planner for longform production",
+            )}. Preserve story intent and keep provider-facing content in normal prompt anchor fields.`,
+          },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -2392,13 +2416,11 @@ function sanitizeChunkReferenceCandidates(plan) {
 
 function landscapePrefixForKind(kind) {
   const normalized = String(kind ?? "").toLowerCase();
-  if (normalized === "style") return "16:9 landscape polished 2D anime/manhwa style reference card";
-  if (normalized === "character_state") return "16:9 landscape polished 2D anime/manhwa single-character identity reference card";
-  if (normalized === "location") return "16:9 landscape polished 2D anime/manhwa environment-only location reference card";
-  if (normalized === "prop") return "16:9 landscape polished 2D anime/manhwa prop reference card";
-  if (normalized === "ui") return "16:9 landscape polished 2D anime/manhwa UI reference card";
-  if (normalized === "action") return "16:9 landscape polished 2D anime/manhwa action and effect reference card";
-  return "16:9 landscape polished 2D anime/manhwa production reference card";
+  return contentProfileReferenceInstruction(
+    activeContentProfile,
+    normalized,
+    contentProfileReferenceInstruction(activeContentProfile, "style", "16:9 landscape production reference image"),
+  );
 }
 
 function ensureLandscapeReferenceAnchor(anchor, kind) {
@@ -3289,6 +3311,7 @@ async function main() {
     readJson(runIdentityPath, null),
   ]);
   if (semanticPlan?.status !== "passed" || !Array.isArray(semanticPlan.scenes) || !semanticPlan.scenes.length) throw new Error(`Missing passed semantic scene plan: ${semanticPlanPath}`);
+  activeContentProfile = contentProfileForIdentity(runIdentity ?? {});
   const semanticWithBeats = semanticPlanWithVisualBeats(semanticPlan, visualBeatPlan);
   const { plan: scopedSemantic, scope } = scopedSemanticPlan(semanticWithBeats);
   if (!Array.isArray(scopedSemantic.scenes) || !scopedSemantic.scenes.length) throw new Error("Visual reference planner scope selected zero semantic scenes.");
@@ -3296,7 +3319,13 @@ async function main() {
   if (runIdentity?.schema === "goldflow_run_identity_v2" && (storyFactLedger?.status !== "passed" || storyFactLedger.source_script_hash !== semanticPlan.source_script_hash)) {
     throw new Error(`Reference Director v2 requires current story_fact_ledger.json: ${storyFactLedgerPath}`);
   }
-  const guidance = { visualStyleBible, characterBible, episodeVisualDirection, storyFactLedger };
+  const guidance = {
+    visualStyleBible,
+    characterBible,
+    episodeVisualDirection,
+    storyFactLedger,
+    contentProfile: activeContentProfile,
+  };
   const referenceEvidenceLedger = buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
     outputPath: referenceEvidenceLedgerOutputPath,
     storyFactLedger,
@@ -3428,6 +3457,11 @@ async function main() {
     series_slug: series,
     week,
     episode,
+    content_profile: {
+      id: activeContentProfile.id,
+      version: activeContentProfile.version,
+      sha256: runIdentity?.content_profile_sha256 ?? null,
+    },
     source_script_hash: semanticPlan.source_script_hash,
     source_artifact_paths: sourceArtifactPaths,
     source_hashes: Object.fromEntries((await Promise.all(sourceArtifactPaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),

@@ -1,0 +1,64 @@
+{
+  "schema": "goldflow_content_profile_v1",
+  "id": "manhwa_recap_v1",
+  "version": "2026-08-01.1",
+  "label": "Longform manhwa recap",
+  "content_family": "fictional_manhwa_recap",
+  "planner_roles": {
+    "semantic": "a production semantic planner for longform anime/manhwa recap videos",
+    "editorial": "an editorial beat director for timed manhwa recap narration",
+    "reference": "a visual reference strategy planner for longform anime/manhwa production",
+    "visual_prompt": "a precise anime/manhwa image prompt planner"
+  },
+  "visual": {
+    "scene_prompt_style_phrase": "16:9 landscape anime/manhwa frame",
+    "required_scene_prompt_phrases_any": [
+      "anime",
+      "manhwa",
+      "webtoon",
+      "manga"
+    ],
+    "reference_style_label": "anime/manhwa visual language",
+    "reference_kind_instructions": {
+      "style": "16:9 landscape anime/manhwa rendering sample with one coherent frame, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
+      "character_state": "16:9 landscape polished 2D anime/manhwa identity reference card on a plain studio background",
+      "location": "16:9 landscape unoccupied environment-only conditioning image in polished 2D anime/manhwa style with readable architecture, scale, lighting, materials, pathways, surfaces, and geography",
+      "prop": "16:9 landscape prop conditioning image in polished 2D anime/manhwa style with exactly one inert object on a plain neutral surface",
+      "ui": "16:9 landscape UI conditioning image in polished 2D anime/manhwa style with one coherent interface motif",
+      "action": "16:9 landscape action or effect conditioning image in polished 2D anime/manhwa style with one readable movement or interaction pattern"
+    },
+    "visual_jobs": [
+      "premise_image",
+      "humiliation_image",
+      "system_reveal",
+      "reaction_shot",
+      "ui_insert",
+      "remote_witness_cutaway",
+      "location_transition",
+      "physical_action",
+      "consequence",
+      "threat_reveal",
+      "cliffhanger_question",
+      "story_progression"
+    ],
+    "shot_jobs": [
+      "environment_establishing",
+      "body_state_proof",
+      "object_insert",
+      "interaction",
+      "physical_action",
+      "emotional_reaction",
+      "consequence",
+      "ui_reveal",
+      "transition"
+    ],
+    "planner_directives": [
+      "Use one coherent anime/manhwa frame rather than a collage or reference sheet.",
+      "Treat recurring character identity and visible state as the primary continuity problem."
+    ]
+  },
+  "factuality": {
+    "evidence_ledger_required": false,
+    "documentary_truth_modes": []
+  }
+}

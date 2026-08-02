@@ -24,6 +24,14 @@ import {
   productionProfileSummary,
 } from "./lib/production-profiles.mjs";
 import {
+  DEFAULT_CONTENT_PROFILE,
+  contentProfileDefinition,
+  contentProfileRequiresEvidenceLedger,
+} from "./lib/content-profiles.mjs";
+import {
+  factualEvidenceBinding,
+} from "./lib/factual-evidence-contract.mjs";
+import {
   validateLocalWhisperIdentityContract,
 } from "./lib/local-whisper-policy.mjs";
 import {
@@ -78,6 +86,14 @@ const productionProfile = normalizeProductionProfile(
   flags["production-profile"] ?? flags.profile ?? DEFAULT_PRODUCTION_PROFILE,
 );
 const productionProfileConfig = productionProfileSummary(productionProfile);
+const contentProfileDefinitionValue = contentProfileDefinition(
+  flags["content-profile"] ?? DEFAULT_CONTENT_PROFILE,
+);
+const contentProfile = contentProfileDefinitionValue.config;
+const factualEvidenceLedgerPath = flags["evidence-ledger"]
+  ? path.resolve(flags["evidence-ledger"])
+  : null;
+const proofSourceComplete = flags["proof-source-complete"] === "true";
 const localWhisperTimingContract = structuredClone(
   productionProfileConfig.audio.local_whisper_timing,
 );
@@ -565,6 +581,35 @@ async function main() {
     throw new Error(`Episode identity mismatch: title/series/week implies episode ${implied}, but --episode is ${episode}. Use ep_${String(implied).padStart(2, "0")} or pass --confirm-episode-identity true with operator approval.`);
   }
   if (sourcePath && !(await exists(sourcePath))) throw new Error(`Missing source file: ${sourcePath}`);
+  if (proofSourceComplete && runIntent !== "proof") {
+    throw new Error("--proof-source-complete is valid only with --run-intent proof.");
+  }
+  if (proofSourceComplete && !sourcePath) {
+    throw new Error("A standalone bounded proof requires --source <proof narration> with --proof-source-complete true.");
+  }
+  if (contentProfileRequiresEvidenceLedger(contentProfile) && !factualEvidenceLedgerPath) {
+    throw new Error(`Content profile ${contentProfile.id} requires --evidence-ledger <factual-evidence.json>.`);
+  }
+  let factualEvidence = null;
+  if (factualEvidenceLedgerPath) {
+    const evidenceBytes = await fs.readFile(factualEvidenceLedgerPath).catch(() => null);
+    if (!evidenceBytes) throw new Error(`Missing factual evidence ledger: ${factualEvidenceLedgerPath}`);
+    let evidenceLedger;
+    try {
+      evidenceLedger = JSON.parse(evidenceBytes.toString("utf8"));
+    } catch (error) {
+      throw new Error(`Invalid factual evidence ledger JSON at ${factualEvidenceLedgerPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    factualEvidence = factualEvidenceBinding(
+      evidenceLedger,
+      evidenceBytes,
+      factualEvidenceLedgerPath,
+      { expectedProfileId: contentProfile.id },
+    );
+    if (title && factualEvidence.title !== title) {
+      throw new Error(`Factual evidence title mismatch: preflight title is "${title}", ledger title is "${factualEvidence.title}".`);
+    }
+  }
   const winnerSourceRelease = winnerReleasePath
     ? await loadWinnerSourceReleaseBinding(winnerReleasePath, {
         expectedChannel: channel,
@@ -602,6 +647,12 @@ async function main() {
       qwen_native_speed: qwenNativeSpeed,
     }),
     audio_target: audioTarget,
+    content_profile: contentProfile.id,
+    content_profile_version: contentProfile.version,
+    content_profile_path: contentProfileDefinitionValue.path,
+    content_profile_sha256: contentProfileDefinitionValue.sha256,
+    content_profile_config: contentProfile,
+    factual_evidence: factualEvidence,
     production_profile: productionProfile,
     production_profile_config: productionProfileConfig,
     pace_policy: pacePolicy,
@@ -631,6 +682,7 @@ async function main() {
     visual_prompt_review_policy: "blockers_only_after_harden",
     run_intent: runIntent,
     proof_scope: proofScope,
+    proof_source_mode: proofSourceComplete ? "standalone_bounded_source" : "audited_baseline_or_full_source",
     git,
     dirty_worktree_waiver: git.dirty ? {
       allowed: true,
@@ -639,6 +691,9 @@ async function main() {
       recorded_at: now,
     } : null,
     provider_locks: {
+      content_profile: contentProfile.id,
+      content_profile_version: contentProfile.version,
+      content_profile_sha256: contentProfileDefinitionValue.sha256,
       image_provider: imageProvider,
       image_model: lockedModelVersions().image_model,
       reference_model: lockedModelVersions().reference_model,
@@ -732,6 +787,7 @@ async function main() {
     },
     production_gates: {
       script_hash_approval_required_before_downstream: true,
+      factual_evidence_required: contentProfileRequiresEvidenceLedger(contentProfile),
       whisper_timing_required_before_sfx_score_visual_beats_and_render: true,
       local_whisper_contract_required: true,
       longform_mix_required_for_production_render: true,

@@ -25,6 +25,11 @@ import {
   unresolvedBlockerFindings as sharedUnresolvedBlockerFindings,
   visualResolveScopeForBlockers,
 } from "./lib/visual-resolution-utils.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfilePlannerDirective,
+  contentProfileSceneStylePhrase,
+} from "./lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -41,6 +46,7 @@ const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? null;
 const visualReferencePlanPath = flags.visualRefs ?? flags["visual-refs"] ?? path.join(episodeDir, "visual_reference_plan.json");
 const locationContractLedgerPath = flags.locationContractLedger ?? flags["location-contract-ledger"] ?? path.join(episodeDir, "location_contract_ledger.json");
 const characterStateRefsPath = flags.characterStateRefs ?? flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json");
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts_reviewed.json");
 const reviewReportPath = flags.reviewOutput ?? flags["review-output"] ?? flags.report ?? flags["report-output"] ?? path.join(episodeDir, `visual_prompt_review_${episode}.json`);
 const reviewValueReportPath = flags["review-value-output"] ?? path.join(episodeDir, `review_value_report_${episode}.json`);
@@ -52,6 +58,8 @@ const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.jo
 const manualAgentReviewPath = flags["manual-agent-review-output"] ?? path.join(episodeDir, `visual_manual_agent_review_${episode}.json`);
 const hardenFeedbackPath = flags["harden-feedback-report"] ?? flags["harden-report"] ?? path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
 const hardenFeedbackEnabled = flags["harden-feedback"] !== "false";
+const legacySceneStylePhrase = "16:9 landscape anime/manhwa frame";
+let activeContentProfile = contentProfileForIdentity({});
 
 function parseFlags(parts) {
   const parsed = {};
@@ -329,7 +337,10 @@ function buildPrompt({ promptPlan, timedPlan, visualReferencePlan, characterStat
     scene: scenesById.get(prompt.scene_id) ?? null,
     prompt: compactPrompt(prompt),
   }));
-  return `Review and fix image prompts for longform anime/manhwa production.
+  return `Review and fix image prompts for ${activeContentProfile.content_family} production.
+
+CONTENT PROFILE: ${activeContentProfile.id}
+${contentProfilePlannerDirective(activeContentProfile) || "- Preserve the exact local story truth and one decisive visual moment per cut."}
 
 You are the second LLM pass. Do not change scene structure, timing, image IDs, or scene IDs.
 You may revise the prompt wording when it improves visual correctness.
@@ -380,7 +391,7 @@ Rules:
 - Use a calm foreground character only when that beat excerpt is about stillness, calculation, realization, or a character reveal.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Rewrite prompts that start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt is optional provider-specific wording for Codex/OpenAI image generation. If it exists, review it for the same shot_manifest, visible subjects, action, location, and refs as image_prompt; preserve it when good and repair it only when needed.
-- Every scene prompt should preserve concise anime/manhwa style intent without adding boilerplate. Prefer a short phrase such as "16:9 landscape anime/manhwa frame" only when style would otherwise be ambiguous. Do not add long repeated style phrases such as clean line art, cel-shaded characters, cinematic webtoon lighting, or non-photorealistic painted background to every cut.
+- Every scene prompt should preserve the content profile's concise style intent without adding boilerplate. Include the exact phrase "${contentProfileSceneStylePhrase(activeContentProfile) || legacySceneStylePhrase}" once when style would otherwise be ambiguous. Do not add long repeated style boilerplate to every cut.
 - Background extras are neither preferred nor forbidden. Preserve shot_manifest.background_population when presence is explicit or implied, and make its concrete population and subordinate staging visible in prompt prose. Do not erase implied witnesses from an active hearing, ceremony, class, market, public humiliation, audience reaction, staffed workplace, or assembled formation merely because the local clause omits a crowd noun. Do not add extras from a public location alone; keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Composition is beat-authored, not globally defaulted. Preserve or repair close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or another framing only when that shot scale serves the current visual job and narration excerpt. Do not impose a universal wide/full-frame/medium-wide default.
 - Each prompt should start with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
@@ -1515,13 +1526,15 @@ async function writeReviewValueReport({ startedAtMs, mode, inputPlan, outputPlan
 
 async function main() {
   const startedAtMs = Date.now();
-  const [promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger] = await Promise.all([
+  const [promptPlan, timedPlan, visualReferencePlan, characterStateRefs, locationContractLedger, runIdentity] = await Promise.all([
     readJson(promptPath, null),
     readJson(timedPlanPath, null),
     readJson(visualReferencePlanPath, null),
     readJson(characterStateRefsPath, null),
     readJson(locationContractLedgerPath, null),
+    readJson(runIdentityPath, {}),
   ]);
+  activeContentProfile = contentProfileForIdentity(runIdentity);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) throw new Error(`Missing passed visual prompt plan: ${promptPath}`);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (promptPlan.source_script_hash !== timedPlan.source_script_hash) throw new Error("section_image_prompts and timed_scene_plan script hashes do not match.");

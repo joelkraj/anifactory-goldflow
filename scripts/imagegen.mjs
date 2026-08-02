@@ -25,6 +25,12 @@ import {
   modelslabProfileForWorkId,
   publicModelslabAccount,
 } from "./lib/modelslab-account-pool.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfileReferenceInstruction,
+  contentProfileSceneStyleSatisfied,
+  contentProfileStyleLabel,
+} from "./lib/content-profiles.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -57,6 +63,7 @@ const referenceImageModelOverride = flags["reference-image-model-route"]
   ?? null;
 let runIdentityImageModel = null;
 let runIdentityReferenceModel = null;
+let activeContentProfile = contentProfileForIdentity({});
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
 const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? process.env.ANIFACTORY_MAX_SCENE_REFERENCES ?? 4)));
 const providerFilter = normalizeProviderFilter(flags["provider-filter"] ?? flags.providerFilter ?? "");
@@ -149,6 +156,7 @@ async function assertRunIdentityImageProvider() {
   }
   runIdentityImageModel = runIdentity?.model_versions?.image_model ?? runIdentity?.provider_locks?.image_model ?? null;
   runIdentityReferenceModel = runIdentity?.model_versions?.reference_model ?? runIdentity?.provider_locks?.reference_model ?? null;
+  activeContentProfile = contentProfileForIdentity(runIdentity);
   if (imageModelOverride && runIdentityImageModel && imageModelOverride !== runIdentityImageModel && !confirmImageProvider) {
     throw new Error(`Image model mismatch: run_identity.json locks ${runIdentityImageModel}, command requested ${imageModelOverride}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
   }
@@ -254,7 +262,7 @@ function referencePrompt(target) {
     : expectedVisibleHands == null
       ? "all grasping or hand-like appendages are relaxed, clearly readable, separated from the torso, and empty"
       : `show exactly ${expectedVisibleHands} grasping or hand-like ${expectedVisibleHands === 1 ? "appendage" : "appendages"}, relaxed, clearly readable, separated from the torso, and empty; do not add another`;
-  const kindInstruction = {
+  const manhwaKindInstruction = {
     style: "16:9 landscape anime/manhwa rendering sample with one coherent frame, clean linework, cel-shaded color, webtoon lighting, and polished production finish",
     character_state: creatureCharacterState
       ? `16:9 landscape creature conditioning image in polished 2D anime/manhwa style: exactly one canonical nonhuman actor in one neutral pose on a plain studio background, one coherent full silhouette, explicit head and face construction, exact limb and body anatomy, texture, markings, eyes, and materials; ${creatureHandInstruction}; object-like anatomical features remain visibly integrated at their exact body attachment point; detachable equipment belongs to separate prop plates`
@@ -266,6 +274,15 @@ function referencePrompt(target) {
     ui: "16:9 landscape UI conditioning image in polished 2D anime/manhwa style: one coherent interface motif with clear panel geometry, color, glow, icon language, and hierarchy",
     action: "16:9 landscape action/effect conditioning image in polished 2D anime/manhwa style: one readable effect shape, movement path, energy color, interaction pattern, and spatial logic on a neutral field",
   }[kind] ?? "production reference image";
+  const profileKindInstruction = contentProfileReferenceInstruction(activeContentProfile, kind, "production reference image");
+  const kindInstruction = activeContentProfile.id === "manhwa_recap_v1"
+    ? manhwaKindInstruction
+    : [
+        profileKindInstruction,
+        kind === "character_state"
+          ? `${groupCharacterState ? "Every visible hand is relaxed and empty." : humanHandInstruction}; detachable equipment belongs to a separate prop plate.`
+          : null,
+      ].filter(Boolean).join("; ");
   const conditioningIsolationInstruction = kind === "character_state"
     ? creatureCharacterState
       ? "conditioning isolation contract: creature identity and integrated anatomy only; every grasping appendage is empty and every detachable object is supplied later by a separate scene or prop contract"
@@ -608,7 +625,7 @@ function referenceSlotPurpose(requirement) {
   if (kind.includes("character") && identityUsage === "face_only") return `facial likeness only for ${subject}`;
   if (kind.includes("character")) return `character identity and wardrobe for ${subject}`;
   if (kind.includes("location")) return `location environment for ${subject}`;
-  if (kind.includes("style")) return "anime manhwa style language";
+  if (kind.includes("style")) return contentProfileStyleLabel(activeContentProfile);
   if (kind.includes("action")) return `action or effect design for ${subject}`;
   if (kind.includes("ui")) return `UI design for ${subject}`;
   if (kind.includes("prop")) return `prop design for ${subject}`;
@@ -679,7 +696,7 @@ function referenceSlotRole(slot, prompt) {
     return `Use Image ${slotNo} for the action/effect energy shape, motion language, color behavior, and interaction pattern.`;
   }
   if (kind.includes("style")) {
-    return `Use Image ${slotNo} for the overall anime/manhwa visual style, rendering finish, and color treatment.`;
+    return `Use Image ${slotNo} for the overall ${contentProfileStyleLabel(activeContentProfile)}, rendering finish, and color treatment.`;
   }
   return `Use Image ${slotNo} for ${purpose}.`;
 }
@@ -702,7 +719,7 @@ function conciseReferenceSlotRole(slot, prompt, index) {
   if (kind.includes("prop")) return `${source} = exact prop design and materials`;
   if (kind.includes("ui")) return `${source} = exact UI design language`;
   if (kind.includes("action") || kind.includes("effect")) return `${source} = exact action or effect design language`;
-  if (kind.includes("style")) return `${source} = exact anime/manhwa rendering style`;
+  if (kind.includes("style")) return `${source} = exact ${contentProfileStyleLabel(activeContentProfile)}`;
   return `${source} = ${subject}`;
 }
 
@@ -1035,6 +1052,7 @@ export function attachReferencePathsToPromptsForTests(plan, referenceById, chara
 }
 
 export function scenePromptProductionContractFindingsForTests(prompts, options = {}) {
+  const contentProfile = options.contentProfile ?? activeContentProfile;
   const referenceLimit = Number(options.maxSceneReferences ?? maxSceneReferences);
   const findings = [];
   for (const prompt of prompts ?? []) {
@@ -1063,11 +1081,11 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       }
     }
     const promptText = promptTextForImageProvider(prompt, "modelslab");
-    if (!/\b(?:anime|manhwa|webtoon|manga)\b/i.test(promptText)) {
+    if (!contentProfileSceneStyleSatisfied(promptText, contentProfile)) {
       findings.push({
         image_id: prompt.image_id,
         code: "scene_prompt_style_contract_missing",
-        message: "ModelsLab scene prompt must explicitly preserve anime/manhwa/webtoon/manga style.",
+        message: `ModelsLab scene prompt must explicitly preserve the ${contentProfile.label ?? contentProfile.id} style contract.`,
       });
     }
     if (prompt?.shot_manifest?.shot_job === "physical_action" && !String(prompt?.shot_manifest?.foreground_action ?? "").trim()) {

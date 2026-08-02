@@ -584,6 +584,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
     targeted_speakability: `node bin/goldflow.mjs script targeted ${base}`,
     semantic_scene_plan: identity?.proof_scope?.mode === "bounded"
+      && identity?.proof_source_mode !== "standalone_bounded_source"
       ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
       : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${planner.semantic_concurrency} --semantic-chunk-validation-attempts ${planner.chunk_validation_attempts} --resume-incomplete-chunks true`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
@@ -623,7 +624,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
-    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}`,
+    premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}${identity?.proof_scope?.mode === "bounded" ? ` --diagnostic-proof true --proof-scope-end-sec ${Number(identity.proof_scope.end_sec)}` : ""}`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,
     upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
     youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,

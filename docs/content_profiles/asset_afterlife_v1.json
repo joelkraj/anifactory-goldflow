@@ -1,0 +1,106 @@
+{
+  "schema": "goldflow_content_profile_v1",
+  "id": "asset_afterlife_v1",
+  "version": "2026-08-01.1",
+  "label": "Asset Afterlife factual documentary",
+  "content_family": "factual_asset_afterlife_documentary",
+  "viewer_promise": "Follow a valuable object after its final public moment and reveal who controls it, what remains valuable, what decisions determine its fate, and where it ultimately goes.",
+  "episode_grammar": [
+    "valuable_or_high_scale_asset",
+    "terminal_event",
+    "hidden_chain_of_custody",
+    "consequential_decision_tree",
+    "visible_transformation",
+    "final_verdict"
+  ],
+  "planner_roles": {
+    "semantic": "a production semantic planner for a sourced longform factual documentary",
+    "editorial": "an editorial beat director for timed factual documentary narration about the hidden afterlife of valuable objects",
+    "reference": "a documentary visual-reference director preserving real-world asset, location, process, and custody continuity",
+    "visual_prompt": "a precise factual-documentary reconstruction and technical-visualization prompt planner"
+  },
+  "visual": {
+    "scene_prompt_style_phrase": "16:9 landscape cinematic factual documentary reconstruction",
+    "required_scene_prompt_phrases_any": [
+      "factual documentary",
+      "documentary reconstruction",
+      "editorial documentary",
+      "technical documentary"
+    ],
+    "reference_style_label": "cinematic factual-documentary visual language",
+    "reference_kind_instructions": {
+      "style": "16:9 landscape cinematic factual-documentary visualization sample with physically plausible materials, restrained editorial lighting, realistic scale, clean composition, and no baked captions or logos",
+      "character_state": "16:9 landscape documentary reenactment identity plate with exactly one clearly adult worker in practical role-appropriate clothing, neutral pose, plain studio background, and no visible brand marks",
+      "location": "16:9 landscape unoccupied factual-documentary environment plate with physically plausible architecture, workflow geometry, scale, lighting, materials, pathways, and clean space for later subjects",
+      "prop": "16:9 landscape asset continuity plate with exactly one inert real-world object on a neutral surface, physically plausible geometry, materials, wear, scale cues, and no invented logo or readable serial text",
+      "ui": "16:9 landscape technical-documentary diagram or interface motif with simple geometry, restrained color coding, sparse icon language, and no dense generated text",
+      "action": "16:9 landscape factual process-demonstration plate showing one physically plausible operation, movement path, machine relationship, or custody transfer without sensational spectacle"
+    },
+    "visual_jobs": [
+      "terminal_moment",
+      "mystery_question",
+      "chain_of_custody",
+      "ownership_transfer",
+      "process_step",
+      "document_evidence",
+      "map_or_route",
+      "value_reveal",
+      "decision_fork",
+      "scale_comparison",
+      "before_after_transformation",
+      "final_destination",
+      "story_progression"
+    ],
+    "shot_jobs": [
+      "environment_establishing",
+      "asset_hero",
+      "object_insert",
+      "process_action",
+      "custody_handoff",
+      "document_or_diagram",
+      "map_route",
+      "value_reveal",
+      "before_after",
+      "consequence",
+      "transition"
+    ],
+    "planner_directives": [
+      "Treat the object as the episode protagonist and preserve its visible make, color, wear, tags, damage, and state across cuts.",
+      "Prefer one hero asset, one process relationship, or one evidence object per frame; never solve complexity with a collage.",
+      "Show custody, transport, inspection, sorting, valuation, repair, resale, donation, recycling, or destruction through physically plausible cause and effect.",
+      "Never invent a company logo, serial number, legal document, price, machine, workflow, or destination that the narration and evidence ledger do not support.",
+      "Generated scenes are illustrative reconstructions, not archival footage. Exact labels, figures, routes, and quotations belong in deterministic render overlays.",
+      "Use diagrams, maps, object inserts, scale comparisons, and before-after states to vary the first three minutes instead of repeating warehouse tableaux."
+    ]
+  },
+  "factuality": {
+    "evidence_ledger_required": true,
+    "evidence_ledger_schema": "goldflow_factual_evidence_ledger_v1",
+    "documentary_truth_modes": [
+      "documented_source",
+      "generic_illustration",
+      "labeled_reconstruction",
+      "diagram_or_map"
+    ],
+    "default_generated_truth_mode": "labeled_reconstruction",
+    "source_priority": [
+      "primary_authority",
+      "official_operator",
+      "technical_standard",
+      "reputable_secondary"
+    ],
+    "hard_rules": [
+      "Every factual number, legal rule, ownership claim, standard practice, and named destination must map to at least one evidence-ledger claim.",
+      "Distinguish standard practice from a named company's process and from an illustrative composite journey.",
+      "Do not present generated imagery as a photograph or recording of the documented event.",
+      "Do not infer a universal process from one jurisdiction, airline, buyer, or case."
+    ]
+  },
+  "packaging": {
+    "title_pattern": "A complete plain-language question naming the asset and its terminal condition.",
+    "thumbnail_subjects_max": 2,
+    "thumbnail_arrows_max": 1,
+    "thumbnail_main_text_words_max": 3,
+    "thumbnail_rule": "One hero asset, one before-after contrast, one arrow, and no collage."
+  }
+}

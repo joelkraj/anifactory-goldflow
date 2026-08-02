@@ -19,6 +19,10 @@ import {
   retimeLockedEditorialBeats,
 } from "./lib/editorial-beat-director.mjs";
 import { ltxVideoEnabled } from "./lib/ltx-video-contract.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfilePlannerRole,
+} from "./lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -1298,7 +1302,7 @@ function editorialAtomChunks(atoms, maxAtoms = 40) {
   return chunks;
 }
 
-async function callEditorialLlm(prompt, stageName) {
+async function callEditorialLlm(prompt, stageName, options = {}) {
   if (isLocalLLMRoute(stageName)) {
     const response = await fetch(localLLMChatCompletionURL(stageName), {
       method: "POST",
@@ -1306,7 +1310,14 @@ async function callEditorialLlm(prompt, stageName) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return one valid JSON object only. You are an editorial beat director for timed manhwa recap narration." },
+          {
+            role: "system",
+            content: `Return one valid JSON object only. You are a ${contentProfilePlannerRole(
+              options.contentProfile,
+              "editorial",
+              "editorial beat director for timed manhwa recap narration",
+            )}.`,
+          },
           { role: "user", content: prompt },
         ],
         temperature: Number(flags["llm-temperature"] ?? 0.25),
@@ -1356,7 +1367,11 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
         ? basePrompt
         : `${basePrompt}\n\nCorrection pass: the prior grouping failed deterministic validation with: ${lastError?.message}. Return complete corrected JSON satisfying atom coverage, transition barriers, evidence, and timing rails.`;
       try {
-        const call = await callEditorialLlm(prompt, `${episode}_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_${attempt}`);
+        const call = await callEditorialLlm(
+          prompt,
+          `${episode}_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_${attempt}`,
+          options,
+        );
         const normalized = normalizeEditorialGrouping(call.parsed, chunk, factLedger, episode, options);
         await recordPlannerChunkCheckpoint({
           episodeDir,
@@ -1531,6 +1546,7 @@ async function main() {
   if (!scriptText.trim()) throw new Error(`Missing script: ${scriptPath}`);
   if (wordTiming?.status !== "passed" || !Array.isArray(wordTiming.words) || !wordTiming.words.length) throw new Error(`Missing passed local Whisper word timing: ${wordTimingPath}`);
   const scriptHash = sha256(scriptText);
+  const contentProfile = contentProfileForIdentity(runIdentity);
   if (timedPlan.source_script_hash && timedPlan.source_script_hash !== scriptHash) throw new Error("timed_scene_plan.json is stale for current script_clean.md.");
   if (wordTiming.source_script_hash && wordTiming.source_script_hash !== scriptHash) throw new Error("narration_word_timing is stale for current script_clean.md.");
   const useEditorialDirector = runIdentity.schema === "goldflow_run_identity_v2" && flags["legacy-deterministic-beats"] !== "true";
@@ -1544,6 +1560,7 @@ async function main() {
     }
     editorialResult = await editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, {
       animationEnabled: ltxVideoEnabled(runIdentity),
+      contentProfile,
     });
     if (editorialResult.reused) {
       console.log(JSON.stringify({ status: "passed", output_path: outputPath, reused_grouping_lock: true, visual_beat_count: editorialResult.report.visual_beat_count }, null, 2));
@@ -1646,6 +1663,11 @@ async function main() {
     retention_ramp_sec: retentionRampSec,
     retention_ramp_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) >= hookDurationSec && Number(beat.start_sec) < retentionRampSec).length,
     animation_policy: runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
+    content_profile: {
+      id: contentProfile.id,
+      version: contentProfile.version,
+      sha256: runIdentity.content_profile_sha256 ?? null,
+    },
     animation_intent_count: beatsWithQuality.filter((beat) => beat.animation_intent).length,
     editorial_cue_counts: cueCounts,
     visual_beat_quality_findings: qualityFindings,

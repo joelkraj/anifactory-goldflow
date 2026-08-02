@@ -9,6 +9,13 @@ import {
   validateWinnerPackageContract,
   validateWinnerSourceRelease,
 } from "./lib/winner-source-contract.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfileRequiresEvidenceLedger,
+} from "./lib/content-profiles.mjs";
+import {
+  factualEvidenceBinding,
+} from "./lib/factual-evidence-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -232,6 +239,34 @@ async function main() {
       if (actual !== expected) throw new Error(`Run identity mismatch for ${key}: command has ${actual}, run_identity.json has ${expected}.`);
     }
   }
+  const contentProfile = contentProfileForIdentity(runIdentity ?? {});
+  const boundFactualEvidence = runIdentity?.factual_evidence ?? null;
+  if (contentProfileRequiresEvidenceLedger(contentProfile) && !boundFactualEvidence) {
+    throw new Error(`Content profile ${contentProfile.id} requires a factual evidence ledger bound during preflight.`);
+  }
+  let factualEvidenceLineage = null;
+  let factualEvidenceBytes = null;
+  if (boundFactualEvidence) {
+    factualEvidenceBytes = await fs.readFile(boundFactualEvidence.path).catch(() => null);
+    if (!factualEvidenceBytes) throw new Error(`Missing preflight-bound factual evidence ledger: ${boundFactualEvidence.path}`);
+    let factualEvidenceLedger;
+    try {
+      factualEvidenceLedger = JSON.parse(factualEvidenceBytes.toString("utf8"));
+    } catch (error) {
+      throw new Error(`Invalid preflight-bound factual evidence ledger JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    factualEvidenceLineage = factualEvidenceBinding(
+      factualEvidenceLedger,
+      factualEvidenceBytes,
+      boundFactualEvidence.path,
+      { expectedProfileId: contentProfile.id },
+    );
+    for (const field of ["sha256", "content_profile", "title", "claim_count", "source_count"]) {
+      if (factualEvidenceLineage[field] !== boundFactualEvidence[field]) {
+        throw new Error(`Factual evidence binding mismatch for ${field}: run identity has ${boundFactualEvidence[field]}, current ledger has ${factualEvidenceLineage[field]}.`);
+      }
+    }
+  }
   const source = storyText ?? (sourcePath ? await fs.readFile(sourcePath, "utf8") : "");
   if (!source.trim()) throw new Error("source-ingest requires --source <path> or --story <text>.");
   const identityWinnerRelease = runIdentity?.winner_source_release ?? null;
@@ -265,9 +300,13 @@ async function main() {
   }
   const operatorSourcePath = path.join(episodeDir, "operator_source_story.md");
   const scriptPath = path.join(episodeDir, "script_clean.md");
+  const evidenceOutputPath = factualEvidenceBytes
+    ? path.join(episodeDir, "source_evidence_ledger.json")
+    : null;
   await fs.mkdir(episodeDir, { recursive: true });
   await fs.writeFile(operatorSourcePath, operatorSource, "utf8");
   await fs.writeFile(scriptPath, scriptClean, "utf8");
+  if (evidenceOutputPath) await fs.writeFile(evidenceOutputPath, factualEvidenceBytes);
   const report = {
     schema: "goldflow_source_ingest_v1",
     status: "source_ingested_pending_review_and_approval",
@@ -281,6 +320,13 @@ async function main() {
     script_clean_path: scriptPath,
     operator_source_hash: sourceHash,
     script_clean_hash: scriptHash,
+    content_profile: contentProfile.id,
+    content_profile_version: contentProfile.version,
+    factual_evidence: factualEvidenceLineage ? {
+      ...factualEvidenceLineage,
+      ingested_path: evidenceOutputPath,
+      ingested_sha256: sha256(factualEvidenceBytes),
+    } : null,
     strip_annotations_applied: stripAnnotations,
     annotation_warnings: annotationWarnings(operatorSource),
     winner_source_release: winnerSourceLineage,
@@ -299,6 +345,13 @@ async function main() {
     operator_source_hash: sourceHash,
     script_clean_hash: scriptHash,
     script_clean_path: scriptPath,
+    content_profile: contentProfile.id,
+    factual_evidence: factualEvidenceLineage ? {
+      source_path: boundFactualEvidence.path,
+      source_sha256: factualEvidenceLineage.sha256,
+      ingested_path: evidenceOutputPath,
+      ingested_sha256: sha256(factualEvidenceBytes),
+    } : null,
     winner_source_release: winnerSourceLineage,
     updated_at: report.updated_at,
   });

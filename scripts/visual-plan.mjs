@@ -37,6 +37,13 @@ import {
   sanitizeAnatomyContracts,
   sanitizeEquipmentContracts,
 } from "./lib/shot-manifest-risk-contracts.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfilePlannerDirective,
+  contentProfilePlannerRole,
+  contentProfileSceneStylePhrase,
+  contentProfileShotJobs,
+} from "./lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -45,6 +52,7 @@ const channel = flags.channel ?? "53rebirth";
 const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
+let activeContentProfile = contentProfileForIdentity({});
 const weekDir = path.join(dataRoot, "channels", channel, "weekly_runs", week);
 const episodeDir = path.join(weekDir, "episodes", episode);
 const timedPlanPath = flags.timed ?? path.join(episodeDir, "timed_scene_plan.json");
@@ -616,13 +624,22 @@ function compactAuthorRiskRules(compactTimedPlan) {
   return rules;
 }
 
-function buildCompactAuthorPrompt({ compactTimedPlan, compactSemanticPlan, correctionDirectives, activeProvider, activeProviderOptions }) {
+function buildCompactAuthorPrompt({ compactTimedPlan, compactSemanticPlan, correctionDirectives, activeProvider, activeProviderOptions, contentProfile }) {
   const unitLabel = compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene";
   const riskRules = compactAuthorRiskRules(compactTimedPlan);
   const animationEnabled = Boolean(compactTimedPlan.animation_direction?.enabled);
+  const sceneStylePhrase = contentProfileSceneStylePhrase(contentProfile);
+  const plannerDirective = contentProfilePlannerDirective(contentProfile);
+  const shotJobs = contentProfileShotJobs(contentProfile);
+  const shotJobContract = shotJobs.length
+    ? shotJobs.join("|")
+    : "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition";
   return `Author one production image prompt for every ${unitLabel} below.
 
 ${providerPromptGuidance(activeProvider, activeProviderOptions)}
+
+CONTENT PROFILE: ${contentProfile?.id ?? "manhwa_recap_v1"}
+${plannerDirective || "- Preserve the exact local story truth and author one decisive visual moment per cut."}
 
 Core contract:
 - You are the creative visual editor. The exact local visual_beat_script_excerpt, visual_beat_action, timing, visual_job, local location, and current-scene candidate refs are the source of truth.
@@ -650,7 +667,7 @@ Core contract:
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete animation_intent into shot_manifest.animation_intent and make provider_prompt an animation-ready first keyframe: clear silhouettes, visible limbs, unambiguous contact, movement room, and separable depth when supported. Do not invent new action. UI/screen beats remain eligible and exact generated text legibility is not required.
 - The still is the exact starting frame, not the whole performance. Pose subjects at animation_intent.start_state with space to complete subject_motion and reach end_state. For physical_contact, keep the contact point explicit and anatomically readable. For locomotion_action, preserve a visible path and screen direction.
 - When sequence_eligible_with_next=true, preserve the same lens language, screen direction, wardrobe, prop state, and spatial layout needed by continuity_bridge. Compose this starting keyframe so a 5-12 second uninterrupted LTX shot can reach end_frame_composition without a scene reset.` : "- ANIMATION MODE IS DISABLED. Do not author shot_manifest.animation_intent or alter compositions for generated video."}
-- Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "16:9 landscape anime/manhwa frame" once.
+- Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "${sceneStylePhrase}" once.
 - Background extras are neither preferred nor forbidden. Copy the beat's background_population contract into shot_manifest. Preserve explicit groups, and preserve implied population when the editorial beat says an active social situation needs anonymous people to read correctly. Describe those people and their subordinate staging in provider prose. Never infer extras from a public location alone, and keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
 - Keep image_strategy as fresh unless editorial_reuse.eligible is true and one listed candidate image genuinely depicts the same stable location, cast, state, and emotional purpose. For deliberate reuse, set image_strategy to reuse_prior_approved and copy one exact candidate id into reuse_source_image_id. Still author the full current-beat provider_prompt and motion_intent so the cut can safely fall back to fresh generation and receive its own edit movement.
@@ -682,7 +699,7 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
     "provider_prompt": "one production prompt optimized for target_provider_route",
     "image_provider_route": "copy target_provider_route",
     "shot_manifest": {
-      "shot_job": "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition",
+      "shot_job": "${shotJobContract}",
       "visible_characters": [],
       "mentioned_only_characters": [],
       "primary_character": null,
@@ -786,6 +803,7 @@ function promptLocationDictionary(storyFactLedger, locationContractLedger, visua
 }
 
 function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null, storyFactLedger = null, runIdentity = null) {
+  const contentProfile = contentProfileForIdentity(runIdentity ?? {});
   const sourceRows = visualBeatPlan?.status === "passed" && Array.isArray(visualBeatPlan.beats) && visualBeatPlan.beats.length
     ? visualBeatPlan.beats
     : timedPlan.scenes;
@@ -824,6 +842,10 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
       enabled: ltxVideoEnabled(runIdentity),
       policy: runIdentity?.animation_policy ?? runIdentity?.ltx_video_policy ?? "disabled",
     },
+    content_profile: {
+      id: contentProfile.id,
+      version: contentProfile.version,
+    },
     entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows),
     location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows),
     scenes: (sourceRows ?? []).map((scene, index, rows) => {
@@ -858,6 +880,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
       correctionDirectives,
       activeProvider,
       activeProviderOptions,
+      contentProfile,
     });
   }
   return `Author production image prompts from the timed semantic scene plan.
@@ -904,7 +927,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - Provider-specific prompt fields should be written only when useful for the active image provider route above. Any provider-specific prompt that is present must keep the same visible subject, action, location, references, and shot_manifest as image_prompt.
 - modelslab_image_prompt should be a polished image-generation prompt, not a metadata summary. Do not start with "Cut 001", "scene", "beat", or title bookkeeping.
 - codex_image_prompt should use natural Codex-friendly image prose with the same shot_manifest contract.
-- Every scene prompt should carry concise anime/manhwa style intent without boilerplate. Prefer a short tail such as "16:9 landscape anime/manhwa frame" when the prompt would otherwise be ambiguous. Do not append long repeated style phrases such as clean line art, cel-shaded characters, cinematic webtoon lighting, or non-photorealistic painted background to every cut.
+- Every scene prompt should carry concise ${contentProfile.content_family} style intent without boilerplate. Include the exact short phrase "${contentProfileSceneStylePhrase(contentProfile)}" once when the prompt would otherwise be ambiguous. Do not append long repeated style boilerplate to every cut.
 - Background extras are neither preferred nor forbidden. Preserve the beat's background_population contract in shot_manifest. An explicit group stays visible. An implied population stays visible when the beat identifies a concrete social situation—such as a hearing, ceremony, active class or market, public humiliation, audience reaction, staffed workplace, or assembled formation—that would become visually misleading if rendered empty. Keep anonymous people out of visible_characters and character_staging; describe them through background_population and provider prose. A public location by itself is not evidence. Use presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - ModelsLab Flux handles multi-character shots at surfaces poorly. Whenever two or more characters are positioned at, behind, leaning on, or separated by ANY surface or large object that can cross or occlude a human body (waist-to-chest-height objects — recognize the actual surface from the beat and location, do not rely on a fixed list of furniture types), modelslab_image_prompt must: (a) give each visible character a clear spatial relationship to that surface — near side, far side, behind it, beside its edge, or another explicit side-of-surface placement; (b) state body clearance concretely — full torso above the surface line, feet grounded, hands resting on or above the edge, and body silhouette clear of the surface plane; and (c) prefer asymmetric or diagonal placement over flat centered bilateral staging, offsetting one character forward or to a near corner and the other farther back. codex_image_prompt may keep a more centered, cinematic composition as long as the bodies stay discrete, side-of-surface placement is readable, and body/surface placement is clear.
 - Start each prompt with the concrete visible moment, subject, action, and location from visual_beat_script_excerpt.
@@ -1165,7 +1188,14 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a precise anime/manhwa image prompt planner. Preserve the local beat's visible story intent. Keep all provider prompt content in the normal prompt fields." },
+          {
+            role: "system",
+            content: `Return only valid JSON. You are a ${contentProfilePlannerRole(
+              activeContentProfile,
+              "visual_prompt",
+              "precise production image prompt planner",
+            )}. Preserve the local beat's visible story intent. Keep all provider prompt content in the normal prompt fields.`,
+          },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.12) : 0,
@@ -2426,6 +2456,7 @@ async function main() {
   const activeImageProviderOptions = {
     ...(runIdentity?.image_provider_options ?? {}),
   };
+  activeContentProfile = contentProfileForIdentity(runIdentity ?? {});
   if (flags["codex-opening-sec"] != null || flags["codex-opening-duration-sec"] != null) {
     const value = Number(flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"]);
     if (Number.isFinite(value) && value > 0) activeImageProviderOptions.codex_opening_sec = value;
@@ -3035,6 +3066,11 @@ async function main() {
     series_slug: series,
     week,
     episode,
+    content_profile: {
+      id: activeContentProfile.id,
+      version: activeContentProfile.version,
+      sha256: runIdentity?.content_profile_sha256 ?? null,
+    },
     source_script_hash: timedPlan.source_script_hash,
     source_artifact_paths: sourcePaths,
     source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),

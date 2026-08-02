@@ -472,6 +472,18 @@ function canonicalAssetId(value, rows, idField) {
 
 export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = [], options = {}) {
   const animationEnabled = Boolean(options.animationEnabled);
+  const contentProfile = options.contentProfile ?? {};
+  const plannerRole = contentProfile.planner_roles?.editorial
+    ?? "editorial beat director for timed manhwa recap narration";
+  const plannerDirectives = Array.isArray(contentProfile.visual?.planner_directives)
+    ? contentProfile.visual.planner_directives.map((directive) => `- ${directive}`).join("\n")
+    : "";
+  const visualJobs = Array.isArray(contentProfile.visual?.visual_jobs) && contentProfile.visual.visual_jobs.length
+    ? contentProfile.visual.visual_jobs.join("|")
+    : "premise_image|humiliation_image|system_reveal|reaction_shot|ui_insert|remote_witness_cutaway|location_transition|physical_action|consequence|threat_reveal|cliffhanger_question|story_progression";
+  const shotJobs = Array.isArray(contentProfile.visual?.shot_jobs) && contentProfile.visual.shot_jobs.length
+    ? contentProfile.visual.shot_jobs.join("|")
+    : "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition";
   const dictionaries = canonicalDictionaries(factLedger);
   const sceneIds = new Set(atoms.map((atom) => atom.scene_id).filter(Boolean));
   const sceneContext = (timedScenes ?? []).filter((scene) => sceneIds.has(scene.scene_id)).map((scene) => ({
@@ -484,7 +496,10 @@ export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = []
     props: scene.props ?? [],
     ui_text_on_screen: scene.ui_text_on_screen ?? [],
   }));
-  return `Act as the editorial beat director for timed manhwa recap narration.
+  return `Act as the ${plannerRole}.
+
+CONTENT PROFILE: ${contentProfile.id ?? "manhwa_recap_v1"}
+${plannerDirectives || "- Preserve the exact local narration truth and make each beat visually distinct."}
 
 Decide what the viewer needs to see right now to understand, feel, and keep watching. You own visual job, depiction mode, visible/screen/preview/mentioned entities, location, foreground action, and composition. Do not write an image-generation prompt.
 
@@ -543,8 +558,8 @@ Return JSON only:
 {
   "beats": [{
     "source_atom_ids": ["contiguous atom ids"],
-    "visual_job": "premise_image|humiliation_image|system_reveal|reaction_shot|ui_insert|remote_witness_cutaway|location_transition|physical_action|consequence|threat_reveal|cliffhanger_question|story_progression",
-    "shot_job": "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition",
+    "visual_job": "${visualJobs}",
+    "shot_job": "${shotJobs}",
     "depiction_mode": "current_reality|system_preview|hypothetical_preview|memory_or_flashback|document_or_screen",
     "location_id": "canonical location id",
     "physically_visible_entity_ids": [],

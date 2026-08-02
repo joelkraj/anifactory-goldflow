@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import {
+  contentProfileForIdentity,
+  contentProfilePlannerDirective,
+  contentProfilePlannerRole,
+} from "./lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -20,6 +25,7 @@ const episodeDir = path.join(weekDir, "episodes", episode);
 const scriptPath = path.join(episodeDir, "script_clean.md");
 const outputPath = flags.output ?? path.join(episodeDir, "semantic_scene_plan.json");
 const storyFactLedgerPath = flags["fact-ledger-output"] ?? path.join(episodeDir, "story_fact_ledger.json");
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const proofBaselineTimingPath = flags["proof-baseline-word-timing"] ?? null;
 const manualLocationRefRepairsPath = flags["manual-location-ref-repairs"]
   ? path.resolve(flags["manual-location-ref-repairs"])
@@ -29,6 +35,7 @@ const manualSemanticRepairsPath = flags["manual-semantic-repairs"]
   : null;
 const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
 const scopeEndSec = flags["scope-end-sec"] == null ? null : Number(flags["scope-end-sec"]);
+let activeContentProfile = contentProfileForIdentity({});
 
 function parseFlags(parts) {
   const parsed = {};
@@ -950,8 +957,12 @@ function buildPrompt(script, bibles, targets, chunk = null) {
     ? `This is chunk ${chunk.chunk_index} of ${chunk.chunk_count} from the locked script. Extract semantic scenes only for this chunk, preserving local order.`
     : "Extract a semantic scene plan from the locked narration script.";
   const bibleLimit = chunk ? Number(flags["semantic-chunk-bible-chars"] ?? 8000) : 30_000;
+  const plannerDirective = contentProfilePlannerDirective(activeContentProfile);
   return `Extract a semantic scene plan from the locked narration script.
 ${scopeLine}
+
+CONTENT PROFILE: ${activeContentProfile.id}
+${plannerDirective || "- Preserve the exact visible story truth without inventing facts."}
 
 Rules:
 - Use only the locked script and bibles below.
@@ -1030,7 +1041,14 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       body: JSON.stringify({
         model: getLLMModel(stageName),
         messages: [
-          { role: "system", content: "Return only valid JSON. You are a production semantic planner for longform anime/manhwa recap videos." },
+          {
+            role: "system",
+            content: `Return only valid JSON. You are a ${contentProfilePlannerRole(
+              activeContentProfile,
+              "semantic",
+              "production semantic planner for longform narration",
+            )}.`,
+          },
           { role: "user", content: retryPrompt },
         ],
         temperature: attempt === 1 ? Number(flags["llm-temperature"] ?? 0.15) : 0,
@@ -1397,6 +1415,8 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
 }
 
 async function main() {
+  const runIdentity = await readJson(runIdentityPath, {});
+  activeContentProfile = contentProfileForIdentity(runIdentity);
   const script = await readText(scriptPath);
   if (!script.trim()) throw new Error(`Missing script_clean.md at ${scriptPath}`);
   const scriptHash = sha256(script);
@@ -1628,6 +1648,11 @@ async function main() {
     series_slug: series,
     week,
     episode,
+    content_profile: {
+      id: activeContentProfile.id,
+      version: activeContentProfile.version,
+      sha256: runIdentity.content_profile_sha256 ?? null,
+    },
     source_script_hash: scriptHash,
     source_script_path: scriptPath,
     source_hashes: {

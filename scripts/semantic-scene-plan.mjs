@@ -1527,7 +1527,13 @@ async function main() {
     };
   } else {
     const prompt = buildPrompt(planningScript, bibles, targets);
-    llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+    llm = isLocalLLMRoute(stageName)
+      ? await callLocal(prompt, stageName)
+      : await reusableCodexCall(
+        stageName,
+        prompt,
+        (parsed) => Array.isArray(parsed?.scenes) && parsed.scenes.length >= targets.minimum,
+      ) ?? await callCodex(prompt, stageName);
     parsedChunks = [{
       chunk: {
         chunk_index: 1,

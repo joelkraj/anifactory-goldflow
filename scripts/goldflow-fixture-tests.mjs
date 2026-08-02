@@ -5118,6 +5118,31 @@ function testRecurringReferenceCoverageCanonicalizesAliases() {
     .assets.filter((asset) => asset.canonical_subject_id === "death_sword");
   assert.equal(oneWordAliasRows.length, 1, "unique one-word signature-prop aliases must aggregate");
   assert.equal(oneWordAliasRows[0].beat_count, 3);
+
+  const organizationEvidence = referenceEvidenceLedgerForTests({
+    status: "passed",
+    source_script_hash: "fixture_hash",
+    scenes: [{
+      scene_id: "scene_001",
+      visual_beats: [{
+        visual_beat_id: "beat_organization",
+        parent_scene_id: "scene_001",
+        ref_needs: [{ kind: "character_state", ref_id: "sample_airline", subject: "Sample Airline" }],
+      }],
+    }],
+  }, {
+    canonical_entities: [{
+      entity_id: "sample_airline",
+      display_name: "Sample Airline",
+      kind: "organization",
+      aliases: ["the airline"],
+    }],
+  });
+  assert.equal(
+    organizationEvidence.assets.some((asset) => asset.canonical_subject_id === "sample_airline"),
+    false,
+    "organizations must not become character-state reference obligations",
+  );
 }
 
 function testCharacterReferenceCleanlinessContracts() {
@@ -5247,6 +5272,28 @@ function testCharacterReferenceCleanlinessContracts() {
     prompt_anchor: "16:9 landscape unoccupied bridge with guard rails beside a body of water.",
   }]) {
     assert.deepEqual(nonCharacterReferenceContentFindingsForTests(safeReference), [], `${safeReference.ref_id} must not be a body-part false positive`);
+  }
+  for (const documentaryReference of [{
+    ref_id: "documentary_location",
+    kind: "location",
+    generation_mode: "standalone_ref",
+    prompt_anchor: "16:9 unoccupied baggage hall with ample clean space for later characters and luggage, no airline logo, readable signage, people, luggage, or invented machinery.",
+  }, {
+    ref_id: "documentary_ui",
+    kind: "ui",
+    generation_mode: "standalone_ref",
+    prompt_anchor: "16:9 clean four-node interface motif, no routes, names, flight numbers, timestamps, devices, dense text, location, or people.",
+  }, {
+    ref_id: "documentary_prop",
+    kind: "prop",
+    generation_mode: "standalone_ref",
+    prompt_anchor: "16:9 isolated sweatshirt on a neutral surface, no logo, readable label, hanger, packaging, person, hand, or additional garment.",
+  }]) {
+    assert.deepEqual(
+      nonCharacterReferenceContentFindingsForTests(documentaryReference),
+      [],
+      `${documentaryReference.ref_id} comma-separated exclusions must remain negative`,
+    );
   }
 }
 

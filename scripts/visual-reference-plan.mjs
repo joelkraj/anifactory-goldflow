@@ -350,7 +350,11 @@ function canonicalReferenceAliasIndex(storyFactLedger = {}) {
       const normalizedId = slug(canonicalId, "");
       if (!normalizedId) continue;
       const displayName = String(row?.display_name ?? row?.name ?? row?.label ?? canonicalId).trim();
-      const record = { canonical_id: normalizedId, display_name: displayName || normalizedId };
+      const record = {
+        canonical_id: normalizedId,
+        display_name: displayName || normalizedId,
+        entity_kind: kind === "character_state" ? String(row?.kind ?? "").trim().toLowerCase() || null : null,
+      };
       const shortEvidenceAliases = (Array.isArray(row?.evidence) ? row.evidence : [])
         .map((item) => String(item?.exact_excerpt ?? "").replace(/\s+/g, " ").trim())
         .filter((label) => label && label.length <= 120 && label.split(/\s+/).length <= 12);
@@ -428,6 +432,8 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
       .find(Boolean)
       ?? canonicalFromEvidenceContainment(cleanSubject, canonicalIndex.evidence_phrases, assetKind)
       ?? null;
+    const resolvedEntityKind = String(entityKind ?? canonical?.entity_kind ?? "").trim().toLowerCase() || null;
+    if (assetKind === "character_state" && resolvedEntityKind === "organization") return;
     if (canonical?.display_name) cleanSubject = canonical.display_name;
     let resolvedRefId = refId
       ? slug(refId)
@@ -480,7 +486,7 @@ function buildReferenceEvidenceLedger(scopedSemantic, visualBeatPlan, {
     if (beat?.visual_beat_id) row.beat_ids.add(beat.visual_beat_id);
     if (semanticRefId) row.semantic_ref_ids.add(semanticRefId);
     if (refId) row.beat_ref_ids.add(refId);
-    if (entityKind) row.entity_kinds.add(String(entityKind));
+    if (resolvedEntityKind) row.entity_kinds.add(resolvedEntityKind);
     if (reason) row.reasons.add(String(reason).slice(0, 180));
     if (source) row.sources.add(source);
     const start = Number(beat?.start_sec ?? scenes.get(sceneId)?.start_sec ?? scenes.get(sceneId)?.startSec);
@@ -2678,14 +2684,43 @@ const anatomyAttachmentLocationPattern = /\b(?:head|face|forehead|skull|neck|thr
 const anatomyAttachmentRelationPattern = /\b(?:integrated|built[- ]?in|fused|embedded|anatomical|prosthetic|cybernetic|organic|attached|growing|grown|forming|set|mounted|within|along)\b/i;
 
 function matchHasClauseNegation(text, index) {
-  const start = Math.max(
+  const localStart = Math.max(
     0,
     text.lastIndexOf(".", index - 1) + 1,
     text.lastIndexOf(";", index - 1) + 1,
     text.lastIndexOf(",", index - 1) + 1,
   );
-  const prefix = text.slice(start, index);
-  return /\b(?:no|not|never|without|omit|omits|omitted|exclude|excludes|excluded|avoid|avoids|absent|free of)\b[^,.;]{0,55}$/i.test(prefix);
+  const localPrefix = text.slice(localStart, index);
+  const negationPattern = /\b(?:no|not|never|without|omit|omits|omitted|exclude|excludes|excluded|avoid|avoids|absent|free of)\b/ig;
+  if (new RegExp(`${negationPattern.source}[^,.;]{0,55}$`, "i").test(localPrefix)) return true;
+
+  // Reference prompts commonly end with a comma-separated exclusion list.
+  // Keep that leading "no" in scope unless a contrast or a new depicted subject
+  // clearly starts before the matched token.
+  const sentenceStart = Math.max(
+    0,
+    text.lastIndexOf(".", index - 1) + 1,
+    text.lastIndexOf(";", index - 1) + 1,
+  );
+  const sentencePrefix = text.slice(sentenceStart, index);
+  const negations = [...sentencePrefix.matchAll(negationPattern)];
+  const lastNegation = negations.at(-1);
+  if (!lastNegation) return false;
+  const tail = sentencePrefix.slice(Number(lastNegation.index ?? 0) + lastNegation[0].length);
+  if (tail.length > 320) return false;
+  if (/\b(?:but|however|although|though|while|yet|featuring|showing|depicting|alongside)\b/i.test(tail)) return false;
+  if (/,\s*(?:a|an|the|one|two|three|several|many)\s+[^,.;]{0,28}$/i.test(tail)) return false;
+  return true;
+}
+
+function matchIsNonDepictedStagingOrScaleMention(text, index, matchText) {
+  const before = String(text ?? "").slice(Math.max(0, index - 100), index);
+  if (/\b(?:space|room|area)\s+for\s+(?:(?:a|an|the)\s+)?(?:later\s+)?$/i.test(before)) return true;
+  const around = String(text ?? "").slice(
+    Math.max(0, index - 35),
+    Math.min(String(text ?? "").length, index + String(matchText ?? "").length + 45),
+  );
+  return /\b(?:realistic|believable)\s+(?:human|person|people)(?:\s+and\s+\w+){0,2}\s+scale\b/i.test(around);
 }
 
 function affirmativeHeldPropInAnchor(value) {
@@ -2762,7 +2797,10 @@ function integratedFeatureAnchored(feature, promptAnchor) {
 
 function affirmativePatternPresent(text, pattern) {
   for (const match of String(text ?? "").matchAll(pattern)) {
-    if (!matchHasClauseNegation(String(text ?? ""), Number(match.index ?? 0))) return true;
+    const index = Number(match.index ?? 0);
+    if (matchHasClauseNegation(String(text ?? ""), index)) continue;
+    if (matchIsNonDepictedStagingOrScaleMention(String(text ?? ""), index, match[0])) continue;
+    return true;
   }
   return false;
 }

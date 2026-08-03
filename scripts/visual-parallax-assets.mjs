@@ -4,12 +4,17 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { buildParallaxAssets } from "./editorial-parallax-assets.mjs";
+import {
+  buildParallaxForegroundEvidence,
+  completeParallaxAssetsFromForegroundEvidence,
+} from "./editorial-parallax-assets.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
 import { parallaxAssetContractSha256 } from "./lib/parallax-contract.mjs";
 import {
+  authoredParallaxCandidatePool,
+  classifyParallaxSeparationEvidence,
   inspectedParallaxCandidateOverrides,
-  selectAuthoredParallaxCandidates,
+  selectEvidenceBackedParallaxCandidates,
 } from "./lib/parallax-policy.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -36,6 +41,24 @@ function boundedNumber(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
+}
+
+function parseList(value) {
+  return String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(items.length || 1, concurrency)) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function readJson(filePath, fallback = null) {
@@ -106,6 +129,43 @@ async function writeReviewSheet(candidates, outputPath) {
   return outputPath;
 }
 
+async function writeForegroundEvidenceSheet(rows, outputPath) {
+  if (!rows.length) return null;
+  const width = 400;
+  const rowHeight = 267;
+  const columns = 3;
+  const composites = [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    const evidence = row.foreground_evidence;
+    const classification = row.separation_evidence_classification;
+    const coverage = evidence?.local_separation_evidence?.foreground_coverage_ratio;
+    const panels = [
+      [row.image_path, `${row.image_id} accepted source`, false],
+      [evidence.mask_path, `${classification.separation_class}; coverage=${coverage ?? "?"}`, true],
+      [evidence.foreground_path, `local foreground; ${classification.recommended_disposition}`, true],
+    ];
+    for (let column = 0; column < panels.length; column += 1) {
+      const [filePath, label, flatten] = panels[column];
+      composites.push({
+        input: await reviewPanel(filePath, label, { width, flatten }),
+        left: column * width,
+        top: rowIndex * rowHeight,
+      });
+    }
+  }
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await sharp({
+    create: {
+      width: columns * width,
+      height: rows.length * rowHeight,
+      channels: 3,
+      background: "#080808",
+    },
+  }).composite(composites).jpeg({ quality: 90 }).toFile(outputPath);
+  return outputPath;
+}
+
 async function main() {
   const channel = flags.channel ?? "53rebirth";
   const series = flags.series ?? flags.seriesSlug ?? "series";
@@ -122,6 +182,9 @@ async function main() {
   const outputPath = path.resolve(flags.output ?? path.join(episodeDir, `parallax_asset_report_${episode}.json`));
   const assetsDir = path.resolve(flags["assets-dir"] ?? path.join(episodeDir, "assets", "motion", "parallax"));
   const reviewSheetPath = path.resolve(flags["review-sheet"] ?? path.join(episodeDir, "review_samples", "parallax_assets", `parallax_asset_review_${episode}.jpg`));
+  const foregroundEvidencePath = path.resolve(flags["foreground-evidence-report"] ?? path.join(episodeDir, `parallax_foreground_evidence_${episode}.json`));
+  const foregroundEvidenceSheetPath = path.resolve(flags["foreground-evidence-sheet"] ?? path.join(episodeDir, "review_samples", "parallax_assets", `parallax_foreground_evidence_${episode}.jpg`));
+  const repairIds = new Set(parseList(flags["image-ids"]));
   const [promptPlan, imagegenReport, imageQa, identity, candidateOverrides] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenPath),
@@ -147,18 +210,28 @@ async function main() {
   if (!["modelslab_flux_klein", "local_blur_legacy"].includes(backgroundProvider)) {
     throw new Error(`Unsupported parallax background provider: ${backgroundProvider}`);
   }
-  const selected = parallaxPolicy === "selective_inspected"
-    ? (candidateOverrides
-      ? inspectedParallaxCandidateOverrides(promptPlan.prompts, candidateOverrides, { maxCandidates, openingWindowSec })
-      : selectAuthoredParallaxCandidates(promptPlan.prompts, {
-          maxCandidates,
-          minSpacingSec,
-          firstWindowSec,
-          openingWindowSec,
-          firstWindowTarget,
-          retentionWindowTarget,
-        }))
+  const acceptedHashes = imageQa.accepted_image_hashes ?? {};
+  const scopedRepairEvidence = repairIds.size ? await readJson(foregroundEvidencePath, null) : null;
+  const inspectedOverrides = candidateOverrides
+    ? inspectedParallaxCandidateOverrides(promptPlan.prompts, candidateOverrides, { maxCandidates: 20, openingWindowSec })
+    : null;
+  let evidencePool = parallaxPolicy === "selective_inspected"
+    ? (inspectedOverrides ?? authoredParallaxCandidatePool(promptPlan.prompts, {
+        openingWindowSec,
+        acceptedImageIds: acceptedHashes,
+      }))
     : [];
+  if (repairIds.size) {
+    const poolById = new Map([
+      ...evidencePool,
+      ...(scopedRepairEvidence?.candidates ?? []),
+    ].map((row) => [String(row.image_id ?? ""), row]));
+    evidencePool = [...poolById.values()].filter((row) => row.image_id);
+    const knownPoolIds = new Set(evidencePool.map((row) => row.image_id));
+    const unknownRepairIds = [...repairIds].filter((imageId) => !knownPoolIds.has(imageId));
+    if (unknownRepairIds.length) throw new Error(`Scoped parallax repair ids are not eligible accepted cuts: ${unknownRepairIds.join(", ")}`);
+    evidencePool = evidencePool.filter((row) => repairIds.has(row.image_id));
+  }
   const sourceHashes = Object.fromEntries(await Promise.all(
     [promptPath, imagegenPath, imageQaPath, identityPath, candidateOverridesPath].filter(Boolean).map(async (filePath) => [filePath, await sha256File(filePath)]),
   ));
@@ -168,7 +241,6 @@ async function main() {
       throw new Error(`Parallax revalidation requires an existing passed asset report: ${outputPath}`);
     }
     const promptById = new Map((promptPlan.prompts ?? []).map((prompt) => [String(prompt.image_id ?? ""), prompt]));
-    const acceptedHashes = imageQa.accepted_image_hashes ?? {};
     const candidates = [];
     for (const candidate of existing.candidates) {
       const imageId = String(candidate.image_id ?? "");
@@ -214,53 +286,84 @@ async function main() {
     }, null, 2));
     return;
   }
-  if (!selected.length) {
-    const waiverRequested = isTrue(flags["no-suitable-parallax"]);
-    const reviewer = String(flags.reviewer ?? "").trim();
-    const note = String(flags.note ?? "").trim();
-    const policyRequiresDecision = parallaxPolicy === "selective_inspected";
-    const status = policyRequiresDecision && !waiverRequested ? "blocked" : "passed";
-    if (waiverRequested && (!reviewer || !note)) throw new Error("A no-suitable-parallax waiver requires --reviewer and --note.");
-    const report = {
-      schema: "goldflow_parallax_asset_report_v1",
-      status,
-      review_status: status === "passed" ? "skipped_with_waiver" : "needs_no_candidate_decision",
-      channel,
-      series_slug: series,
-      week,
-      episode,
-      parallax_policy: parallaxPolicy,
-      background_provider: backgroundProvider,
-      candidate_count: 0,
-      candidates: [],
-      no_suitable_parallax_waiver: waiverRequested ? { reviewer, note, approved_at: new Date().toISOString() } : null,
-      blockers: status === "blocked" ? [{ code: "parallax_no_candidate_decision_required", message: "No LLM-authored separable hero frame survived selection. Confirm the explicit no-suitable-parallax waiver or repair motion depth nominations." }] : [],
-      next_command_shape: status === "blocked"
-        ? `node bin/goldflow.mjs visual parallax-assets --channel ${channel} --series ${series} --week ${week} --episode ${episode} --no-suitable-parallax true --reviewer <name> --note "<reason>"`
-        : null,
-      source_hashes: sourceHashes,
-      updated_at: new Date().toISOString(),
-    };
-    report.asset_contract_sha256 = parallaxAssetContractSha256(report);
-    await writeJson(outputPath, report);
-    console.log(JSON.stringify({ status, output_path: outputPath, candidate_count: 0, next_command_shape: report.next_command_shape }, null, 2));
-    if (status !== "passed") process.exitCode = 2;
-    return;
-  }
-
   const resultById = new Map((imagegenReport.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
-  const acceptedHashes = imageQa.accepted_image_hashes ?? {};
-  const candidateResults = await Promise.all(selected.map(async (candidate) => {
+  const priorReport = repairIds.size ? await readJson(outputPath, null) : null;
+  const priorEvidence = scopedRepairEvidence;
+  const retainedCandidates = (priorReport?.candidates ?? []).filter((row) => !repairIds.has(String(row.image_id ?? "")));
+  const retainedEvidenceRows = (priorEvidence?.candidates ?? []).filter((row) => !repairIds.has(String(row.image_id ?? "")));
+  const retainedFailures = (priorReport?.candidate_failures ?? []).filter((row) => !repairIds.has(String(row.image_id ?? "")));
+  const evidenceResults = await mapWithConcurrency(evidencePool, Number(flags["mask-concurrency"] ?? 6), async (candidate) => {
     try {
       const generated = resultById.get(candidate.image_id);
       const generatedImagePath = String(generated?.image_path ?? "").trim();
-      if (!generatedImagePath) throw new Error(`Missing generated image for parallax candidate ${candidate.image_id}.`);
+      if (!generatedImagePath) return { candidate: null, failure: {
+        image_id: candidate.image_id,
+        phase: "accepted_image_binding",
+        critical: true,
+        error: `Missing generated image for accepted parallax cut ${candidate.image_id}.`,
+      } };
       const imagePath = path.resolve(generatedImagePath);
       const imageHash = await sha256File(imagePath);
-      if (acceptedHashes[candidate.image_id] !== imageHash) throw new Error(`Parallax candidate is not bound to an accepted image hash: ${candidate.image_id}`);
+      if (acceptedHashes[candidate.image_id] !== imageHash) return { candidate: null, failure: {
+        image_id: candidate.image_id,
+        phase: "accepted_image_binding",
+        critical: true,
+        error: `Parallax candidate is not bound to the accepted image hash: ${candidate.image_id}.`,
+      } };
       const slug = candidate.image_id.replace(/[^a-zA-Z0-9._-]+/g, "-");
-      const assetReport = await buildParallaxAssets({
+      const foregroundEvidence = await buildParallaxForegroundEvidence({
         imagePath,
+        outputDir: path.join(assetsDir, slug),
+        slug,
+      });
+      return { candidate: {
+        ...candidate,
+        image_path: imagePath,
+        image_sha256: imageHash,
+        foreground_evidence_path: foregroundEvidence.report_path,
+        foreground_evidence: foregroundEvidence,
+        separation_evidence_classification: classifyParallaxSeparationEvidence(foregroundEvidence),
+      }, failure: null };
+    } catch (error) {
+      return { candidate: null, failure: {
+        image_id: candidate.image_id,
+        phase: "local_foreground_evidence",
+        critical: false,
+        error: error instanceof Error ? error.message : String(error),
+      } };
+    }
+  });
+  const freshEvidenceRows = evidenceResults.map((row) => row.candidate).filter(Boolean);
+  const evidenceFailures = evidenceResults.map((row) => row.failure).filter(Boolean);
+  const allEvidenceRows = [...retainedEvidenceRows, ...freshEvidenceRows]
+    .sort((left, right) => Number(left.start_sec ?? 0) - Number(right.start_sec ?? 0));
+  const evidenceSheet = await writeForegroundEvidenceSheet(allEvidenceRows, foregroundEvidenceSheetPath);
+  const evidenceReport = {
+    schema: "goldflow_parallax_foreground_evidence_report_v1",
+    status: evidenceFailures.some((row) => row.critical) ? "blocked" : "passed",
+    policy: "Accepted source images are checked with local foreground masks before any Flux Klein rear-plate spend. Aesthetic separation weakness is nonblocking and falls back to single-plane motion.",
+    automatic_retry_count: 0,
+    candidate_pool_count: allEvidenceRows.length + evidenceFailures.length,
+    evidence_count: allEvidenceRows.length,
+    candidates: allEvidenceRows,
+    failures: [...(priorEvidence?.failures ?? []).filter((row) => !repairIds.has(String(row.image_id ?? ""))), ...evidenceFailures],
+    review_sheet_path: evidenceSheet,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJson(foregroundEvidencePath, evidenceReport);
+  const selected = selectEvidenceBackedParallaxCandidates(freshEvidenceRows, {
+    maxCandidates,
+    minSpacingSec,
+    firstWindowSec,
+    openingWindowSec,
+    firstWindowTarget,
+    retentionWindowTarget,
+  });
+  const assetResults = await Promise.all(selected.map(async (candidate) => {
+    try {
+      const slug = candidate.image_id.replace(/[^a-zA-Z0-9._-]+/g, "-");
+      const assetReport = await completeParallaxAssetsFromForegroundEvidence({
+        foregroundEvidence: candidate.foreground_evidence,
         outputDir: path.join(assetsDir, slug),
         slug,
         backgroundProvider,
@@ -269,49 +372,33 @@ async function main() {
       });
       return { candidate: {
         ...candidate,
-        image_path: imagePath,
-        image_sha256: imageHash,
         asset_report_path: assetReport.report_path,
         asset_report: assetReport,
       }, failure: null };
     } catch (error) {
       return { candidate: null, failure: {
         image_id: candidate.image_id,
+        phase: "rear_plate_generation",
+        critical: false,
+        disposition: "repairable",
         error: error instanceof Error ? error.message : String(error),
       } };
     }
   }));
-  const candidates = candidateResults.map((row) => row.candidate).filter(Boolean);
-  const candidateFailures = candidateResults.map((row) => row.failure).filter(Boolean);
-  if (!candidates.length) {
-    const report = {
-      schema: "goldflow_parallax_asset_report_v1",
-      status: "blocked",
-      review_status: "no_assets_generated",
-      channel,
-      series_slug: series,
-      week,
-      episode,
-      parallax_policy: parallaxPolicy,
-      background_provider: backgroundProvider,
-      candidate_count: 0,
-      candidates: [],
-      candidate_failures: candidateFailures,
-      blockers: [{ code: "parallax_all_candidates_failed", message: "Every selected parallax candidate failed local layer extraction; repair only the failed candidate set or record an explicit no-suitable waiver." }],
-      source_hashes: sourceHashes,
-      updated_at: new Date().toISOString(),
-    };
-    report.asset_contract_sha256 = parallaxAssetContractSha256(report);
-    await writeJson(outputPath, report);
-    console.log(JSON.stringify({ status: report.status, output_path: outputPath, candidate_count: 0, failed_candidate_count: candidateFailures.length }, null, 2));
-    process.exitCode = 2;
-    return;
-  }
+  const freshCandidates = assetResults.map((row) => row.candidate).filter(Boolean);
+  const assetFailures = assetResults.map((row) => row.failure).filter(Boolean);
+  const candidates = [...retainedCandidates, ...freshCandidates]
+    .sort((left, right) => Number(left.start_sec ?? 0) - Number(right.start_sec ?? 0));
+  const candidateFailures = [...retainedFailures, ...evidenceFailures, ...assetFailures];
+  const criticalFailures = candidateFailures.filter((row) => row.critical);
+  const repairableFailureIds = [...new Set(candidateFailures.filter((row) => !row.critical).map((row) => row.image_id))];
+  const criticalFailureIds = [...new Set(criticalFailures.map((row) => row.image_id))];
   const reviewSheet = await writeReviewSheet(candidates, reviewSheetPath);
+  const status = criticalFailures.length ? "blocked" : "passed";
   const report = {
-    schema: "goldflow_parallax_asset_report_v1",
-    status: "passed",
-    review_status: "needs_review",
+    schema: "goldflow_parallax_asset_report_v2",
+    status,
+    review_status: candidates.length ? "needs_review" : "automatic_single_plane_fallback",
     channel,
     series_slug: series,
     week,
@@ -319,8 +406,11 @@ async function main() {
     parallax_policy: parallaxPolicy,
     background_provider: backgroundProvider,
     candidate_count: candidates.length,
-    selected_candidate_count: selected.length,
+    selected_candidate_count: candidates.length + assetFailures.length,
     candidate_failures: candidateFailures,
+    critical_failure_ids: criticalFailureIds,
+    repairable_failure_ids: repairableFailureIds,
+    automatic_retry_count: 0,
     target_max: maxCandidates,
     min_spacing_sec: minSpacingSec,
     first_window_sec: firstWindowSec,
@@ -329,10 +419,33 @@ async function main() {
     opening_window_sec: openingWindowSec,
     first_window_candidate_count: candidates.filter((row) => row.start_sec < firstWindowSec).length,
     retention_window_candidate_count: candidates.filter((row) => row.start_sec >= firstWindowSec && row.start_sec < openingWindowSec).length,
-    selection_source: candidateOverrides ? "inspected_candidate_overrides" : "llm_authored_depth_candidates",
+    selection_source: candidateOverrides
+      ? "inspected_override_plus_accepted_image_local_separation_evidence"
+      : "accepted_image_local_separation_evidence",
     candidate_overrides_path: candidateOverridesPath,
+    foreground_evidence_report_path: foregroundEvidencePath,
+    foreground_evidence_report_sha256: await sha256File(foregroundEvidencePath),
+    foreground_evidence_review_sheet_path: evidenceSheet,
     review_sheet_path: reviewSheet,
     candidates,
+    no_suitable_parallax: candidates.length ? null : {
+      disposition: "accepted_single_plane_motion_fallback",
+      reason: evidencePool.length
+        ? "No locally evidenced separation produced a reviewable rear plate; the accepted still treatment remains valid."
+        : "No eligible accepted frame required layered separation; the accepted still treatment remains valid.",
+      aesthetic_outcome_nonblocking: true,
+    },
+    blockers: criticalFailures.length ? [{
+      code: "parallax_accepted_image_binding_failed",
+      image_ids: criticalFailureIds,
+      message: "Accepted-image provenance is missing or stale. Repair only these exact image ids; all passed mask/rear-plate assets remain preserved.",
+    }] : [],
+    next_command_shape: criticalFailureIds.length
+      ? `node bin/goldflow.mjs visual parallax-assets --channel ${channel} --series ${series} --week ${week} --episode ${episode} --image-ids ${criticalFailureIds.join(",")}`
+      : null,
+    optional_repair_command_shape: repairableFailureIds.length
+      ? `node bin/goldflow.mjs visual parallax-assets --channel ${channel} --series ${series} --week ${week} --episode ${episode} --image-ids ${repairableFailureIds.join(",")}`
+      : null,
     estimated_background_cost_usd: Number(candidates.reduce(
       (sum, row) => sum + Number(row.asset_report?.background_provider_result?.estimated_cost_usd ?? 0),
       0,
@@ -343,13 +456,16 @@ async function main() {
   report.asset_contract_sha256 = parallaxAssetContractSha256(report);
   await writeJson(outputPath, report);
   console.log(JSON.stringify({
-    status: "passed",
+    status,
     output_path: outputPath,
     candidate_count: candidates.length,
     failed_candidate_count: candidateFailures.length,
+    critical_failure_count: criticalFailures.length,
+    repairable_failure_count: repairableFailureIds.length,
     review_sheet_path: reviewSheet,
     review_status: report.review_status,
   }, null, 2));
+  if (status !== "passed") process.exitCode = 2;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

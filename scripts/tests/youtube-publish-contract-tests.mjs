@@ -8,14 +8,19 @@ import { promisify } from "node:util";
 import sharp from "sharp";
 import { sha256File } from "../lib/file-hash.mjs";
 import {
+  LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING,
+  LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   extractMarkdownSection,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
+  validateYoutubeThumbnailUpdateReceipt,
   validateYoutubeUploadReceipt,
+  youtubeEffectiveThumbnailState,
   youtubePinnedCommentReceiptComplete,
   youtubePublishContractInternalsForTests,
   youtubePublishManifestComplete,
@@ -106,6 +111,12 @@ function validSpec(now = new Date()) {
         no_collage: true,
         simple_read_order: true,
         mobile_reviewed: true,
+        provider: "codex_imagen",
+        generation_mode: "full_raster_from_scratch",
+        reference_count: 0,
+        text_rendered_by_model: true,
+        locally_composited_text: false,
+        locally_composited_arrows: false,
         research_evidence_ids: ["own_one", "niche_two"],
         selection_reason: "Two faces, one object, one arrow, and four main words.",
       },
@@ -212,6 +223,83 @@ export async function runYoutubePublishContractTests() {
     now,
   });
   assert.deepEqual(valid.blockers, []);
+  assert.deepEqual(valid.warnings, []);
+  assert.equal(valid.schema_mode, "current");
+
+  const invalidThumbnailGenerationContract = structuredClone(spec);
+  Object.assign(invalidThumbnailGenerationContract.thumbnail_candidates[0], {
+    provider: "modelslab",
+    generation_mode: "reference_conditioned",
+    reference_count: 1,
+    text_rendered_by_model: false,
+    locally_composited_text: true,
+    locally_composited_arrows: true,
+  });
+  const invalidThumbnailGenerationValidation = validateYoutubePackagingSpec(invalidThumbnailGenerationContract, {
+    markdown,
+    thumbnailMetadata: { width: 1280, height: 720, format: "png" },
+    thumbnailBytes: 1000,
+    now,
+  });
+  for (const blocker of [
+    "selected_thumbnail_provider_must_be_codex_imagen",
+    "selected_thumbnail_generation_mode_must_be_full_raster_from_scratch",
+    "selected_thumbnail_reference_count_must_be_zero",
+    "selected_thumbnail_text_must_be_rendered_by_model",
+    "selected_thumbnail_local_text_compositing_forbidden",
+    "selected_thumbnail_local_arrow_compositing_forbidden",
+  ]) {
+    assert.equal(invalidThumbnailGenerationValidation.blockers.includes(blocker), true, blocker);
+  }
+
+  const legacySpec = structuredClone(spec);
+  legacySpec.schema = LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA;
+  for (const field of [
+    "provider",
+    "generation_mode",
+    "reference_count",
+    "text_rendered_by_model",
+    "locally_composited_text",
+    "locally_composited_arrows",
+  ]) {
+    delete legacySpec.thumbnail_candidates[0][field];
+  }
+  const legacyWithoutAdapter = validateYoutubePackagingSpec(legacySpec, {
+    markdown,
+    thumbnailMetadata: { width: 1280, height: 720, format: "png" },
+    thumbnailBytes: 1000,
+    now,
+  });
+  assert.equal(
+    legacyWithoutAdapter.blockers.includes("packaging_spec_legacy_schema_requires_explicit_adapter"),
+    true,
+  );
+  const adaptedLegacy = validateYoutubePackagingSpec(legacySpec, {
+    markdown,
+    thumbnailMetadata: { width: 1280, height: 720, format: "png" },
+    thumbnailBytes: 1000,
+    now,
+    allowLegacyAdapter: true,
+  });
+  assert.deepEqual(adaptedLegacy.blockers, []);
+  assert.deepEqual(adaptedLegacy.warnings, [LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING]);
+  assert.equal(adaptedLegacy.legacy_adapter_applied, true);
+
+  const legacyDraft = structuredClone(legacySpec);
+  legacyDraft.status = "draft";
+  delete legacyDraft.approved_by;
+  delete legacyDraft.approved_at;
+  const legacyDraftValidation = validateYoutubePackagingSpec(legacyDraft, {
+    markdown,
+    thumbnailMetadata: { width: 1280, height: 720, format: "png" },
+    thumbnailBytes: 1000,
+    now,
+    allowLegacyAdapter: true,
+  });
+  assert.equal(
+    legacyDraftValidation.blockers.includes("packaging_spec_legacy_schema_requires_explicit_adapter"),
+    true,
+  );
 
   const operatorAuthoredPackage = structuredClone(spec);
   operatorAuthoredPackage.title_candidates = operatorAuthoredPackage.title_candidates.map((candidate) => ({
@@ -280,6 +368,13 @@ export async function runYoutubePublishContractTests() {
       }).png().toFile(thumbnailPath),
     ]);
     assert.equal((await youtubeUploadPackagingComplete(episodeDir, episode)).done, true);
+    await fs.writeFile(specPath, `${JSON.stringify(legacySpec, null, 2)}\n`, "utf8");
+    const legacyCompletion = await youtubeUploadPackagingComplete(episodeDir, episode);
+    assert.equal(legacyCompletion.done, true);
+    assert.equal(legacyCompletion.legacy_adapter_applied, true);
+    assert.deepEqual(legacyCompletion.warnings, [LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING]);
+    assert.match(legacyCompletion.evidence, /thumbnail_generation_provenance_unverified/);
+    await fs.writeFile(specPath, `${JSON.stringify(spec, null, 2)}\n`, "utf8");
     const draftSpec = structuredClone(spec);
     draftSpec.status = "draft";
     delete draftSpec.approved_by;
@@ -387,6 +482,29 @@ export async function runYoutubePublishContractTests() {
       final_video_sha256: await sha256File(videoPath),
     }, null, 2)}\n`, "utf8");
 
+    const legacyCliSpec = structuredClone(cliSpec);
+    legacyCliSpec.schema = LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA;
+    for (const field of [
+      "provider",
+      "generation_mode",
+      "reference_count",
+      "text_rendered_by_model",
+      "locally_composited_text",
+      "locally_composited_arrows",
+    ]) {
+      delete legacyCliSpec.thumbnail_candidates[0][field];
+    }
+    await fs.writeFile(specPath, `${JSON.stringify(legacyCliSpec, null, 2)}\n`, "utf8");
+    await assert.rejects(execFileAsync(process.execPath, [
+      path.join(repoRoot, "scripts", "youtube-publish.mjs"),
+      "approve-packaging",
+      "--episode-dir", cliEpisodeDir,
+      "--approve", "true",
+      "--approved-by", "operator",
+    ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 }));
+    assert.equal((await readJsonForTest(specPath)).status, "draft");
+    await fs.writeFile(specPath, `${JSON.stringify(cliSpec, null, 2)}\n`, "utf8");
+
     await execFileAsync(process.execPath, [
       path.join(repoRoot, "scripts", "youtube-publish.mjs"),
       "approve-packaging",
@@ -402,6 +520,24 @@ export async function runYoutubePublishContractTests() {
       "--episode-dir", cliEpisodeDir,
     ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
     assert.equal((await youtubePublishManifestComplete(cliEpisodeDir, episode)).done, true);
+    const preparedManifest = await readJsonForTest(path.join(cliEpisodeDir, `youtube_publish_manifest_${episode}.json`));
+    assert.equal(preparedManifest.packaging_schema_mode, "current");
+    assert.deepEqual(preparedManifest.packaging_validation_warnings, []);
+    assert.deepEqual({
+      provider: preparedManifest.thumbnail.provider,
+      generation_mode: preparedManifest.thumbnail.generation_mode,
+      reference_count: preparedManifest.thumbnail.reference_count,
+      text_rendered_by_model: preparedManifest.thumbnail.text_rendered_by_model,
+      locally_composited_text: preparedManifest.thumbnail.locally_composited_text,
+      locally_composited_arrows: preparedManifest.thumbnail.locally_composited_arrows,
+    }, {
+      provider: "codex_imagen",
+      generation_mode: "full_raster_from_scratch",
+      reference_count: 0,
+      text_rendered_by_model: true,
+      locally_composited_text: false,
+      locally_composited_arrows: false,
+    });
 
     await assert.rejects(execFileAsync(process.execPath, [
       path.join(repoRoot, "scripts", "youtube-publish.mjs"),
@@ -418,8 +554,8 @@ export async function runYoutubePublishContractTests() {
       path.join(repoRoot, "scripts", "youtube-publish.mjs"),
       "record-upload",
       "--episode-dir", cliEpisodeDir,
-      "--video-id", "abc123xyz89",
-      "--watch-url", "https://www.youtube.com/watch?v=abc123xyz89",
+      "--video-id=-abc123xyz8",
+      "--watch-url", "https://www.youtube.com/watch?v=-abc123xyz8",
       "--visibility", "public",
       "--channel-verified", "true",
       "--initial-private-verified", "true",
@@ -435,6 +571,76 @@ export async function runYoutubePublishContractTests() {
       "--recorded-by", "codex-agent",
     ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
     assert.equal((await youtubeUploadReceiptComplete(cliEpisodeDir, episode)).done, true);
+    assert.equal((await readJsonForTest(path.join(cliEpisodeDir, `youtube_upload_receipt_${episode}.json`))).video_id, "-abc123xyz8");
+
+    const uploadReceiptPath = path.join(cliEpisodeDir, `youtube_upload_receipt_${episode}.json`);
+    const uploadReceiptHashBeforeUpdates = await sha256File(uploadReceiptPath);
+    const thumbnailV2Path = path.join(cliEpisodeDir, "thumbnail_scratch_v2.png");
+    const thumbnailV3Path = path.join(cliEpisodeDir, "thumbnail_scratch_v3.png");
+    await Promise.all([
+      sharp({
+        create: { width: 1280, height: 720, channels: 3, background: "#1e88e5" },
+      }).png().toFile(thumbnailV2Path),
+      sharp({
+        create: { width: 1280, height: 720, channels: 3, background: "#6a1b9a" },
+      }).png().toFile(thumbnailV3Path),
+    ]);
+    const thumbnailUpdateBaseArgs = [
+      path.join(repoRoot, "scripts", "youtube-publish.mjs"),
+      "record-thumbnail-update",
+      "--episode-dir", cliEpisodeDir,
+      "--video-id=-abc123xyz8",
+      "--studio-url", "https://studio.youtube.com/video/-abc123xyz8/edit",
+      "--expected-channel", "Joey Manhwa",
+      "--schedule-preserved", "true",
+      "--channel-verified", "true",
+      "--thumbnail-verified", "true",
+      "--verified-at", new Date().toISOString(),
+      "--operator", "operator",
+    ];
+    await execFileAsync(process.execPath, [
+      ...thumbnailUpdateBaseArgs,
+      "--old-thumbnail", thumbnailPath,
+      "--new-thumbnail", thumbnailV2Path,
+    ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
+    const firstUpdatePath = path.join(cliEpisodeDir, `youtube_thumbnail_update_receipt_${episode}_01.json`);
+    const firstUpdate = await readJsonForTest(firstUpdatePath);
+    assert.equal(firstUpdate.schema, YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA);
+    assert.equal(firstUpdate.old_thumbnail.sha256, await sha256File(thumbnailPath));
+    assert.equal(firstUpdate.new_thumbnail.sha256, await sha256File(thumbnailV2Path));
+    assert.deepEqual(validateYoutubeThumbnailUpdateReceipt(firstUpdate, {
+      manifest: await readJsonForTest(path.join(cliEpisodeDir, `youtube_publish_manifest_${episode}.json`)),
+      uploadReceipt: await readJsonForTest(uploadReceiptPath),
+      uploadReceiptHash: uploadReceiptHashBeforeUpdates,
+      currentThumbnail: { path: thumbnailPath, sha256: await sha256File(thumbnailPath) },
+      priorReceiptHash: null,
+      newThumbnailSha256: await sha256File(thumbnailV2Path),
+    }).blockers, []);
+    await assert.rejects(execFileAsync(process.execPath, [
+      ...thumbnailUpdateBaseArgs,
+      "--old-thumbnail", thumbnailPath,
+      "--new-thumbnail", thumbnailV3Path,
+    ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 }));
+    assert.equal(await fs.stat(path.join(cliEpisodeDir, `youtube_thumbnail_update_receipt_${episode}_02.json`)).catch(() => null), null);
+
+    await execFileAsync(process.execPath, [
+      path.join(repoRoot, "bin", "goldflow.mjs"),
+      "youtube", "record-thumbnail-update",
+      ...thumbnailUpdateBaseArgs.slice(2),
+      "--old-thumbnail", thumbnailV2Path,
+      "--new-thumbnail", thumbnailV3Path,
+    ], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 4 });
+    const secondUpdatePath = path.join(cliEpisodeDir, `youtube_thumbnail_update_receipt_${episode}_02.json`);
+    const secondUpdate = await readJsonForTest(secondUpdatePath);
+    assert.equal(secondUpdate.prior_update_receipt_sha256, await sha256File(firstUpdatePath));
+    assert.equal(await sha256File(uploadReceiptPath), uploadReceiptHashBeforeUpdates);
+    const effectiveThumbnail = await youtubeEffectiveThumbnailState(cliEpisodeDir, episode);
+    assert.equal(effectiveThumbnail.status, "passed");
+    assert.equal(effectiveThumbnail.update_count, 2);
+    assert.equal(effectiveThumbnail.path, thumbnailV3Path);
+    const uploadCompletionAfterUpdates = await youtubeUploadReceiptComplete(cliEpisodeDir, episode);
+    assert.equal(uploadCompletionAfterUpdates.done, true);
+    assert.match(uploadCompletionAfterUpdates.evidence, /effective thumbnail thumbnail_scratch_v3\.png from update receipt #2/);
 
     await execFileAsync(process.execPath, [
       path.join(repoRoot, "scripts", "youtube-publish.mjs"),

@@ -8,6 +8,10 @@ import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompleti
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import {
+  buildReferenceDirectorSelectionReceipt,
+  referenceDirectorSelectionFidelityFindings,
+} from "./lib/reference-selection-fidelity.mjs";
+import {
   applyBeatLocationSceneIds,
   applyDeterministicLocationSceneIds,
 } from "./lib/visual-scope-utils.mjs";
@@ -33,6 +37,8 @@ const semanticPlanPath = flags.semantic ?? path.join(episodeDir, "semantic_scene
 const visualBeatPlanPath = flags.beats ?? flags["visual-beats"] ?? path.join(episodeDir, "visual_beat_plan.json");
 const storyFactLedgerPath = flags["story-fact-ledger"] ?? path.join(episodeDir, "story_fact_ledger.json");
 const outputPath = flags.output ?? path.join(episodeDir, "visual_reference_plan.json");
+const referencePartialPath = flags["reference-partial"]
+  ?? path.join(episodeDir, `visual_reference_partial_${episode}.json`);
 const referenceInventoryLedgerOutputPath = flags.referenceInventory
   ?? flags["reference-inventory"]
   ?? path.join(path.dirname(outputPath), "reference_inventory_ledger.json");
@@ -680,7 +686,8 @@ function buildLocationContractLedger(scopedSemantic, { outputPath: ledgerPath = 
     if (physicalLocation && !/^(?:none|unknown|n\/a|na|abstract|unspecified)$/i.test(physicalLocation) && !requirements.length) {
       findings.push({
         code: "scene_missing_location_contract",
-        severity: "blocker",
+        severity: "warning",
+        production_blocking: false,
         scene_id: sceneId,
         location: physicalLocation,
         message: `Physical scene ${sceneId} has no explicit semantic location contract.`,
@@ -812,7 +819,7 @@ function buildSelectedReferenceInventory(referenceTargets, {
     status: "passed",
     source_script_hash: sourceScriptHash,
     source_artifact_paths: [evidenceLedgerPath, locationLedgerPath],
-    policy: "LLM-selected canonical attachable reference inventory. Deterministic stages may validate or remove invalid rows but may not restore omitted evidence observations or invent reference targets.",
+    policy: "LLM-selected canonical attachable reference inventory. Deterministic stages validate the complete global-director selection without capping, pruning, merging away, or downgrading selected targets; unusable structural rows remain explicit blockers rather than disappearing.",
     output_path: ledgerPath,
     summary: {
       asset_count: assets.length,
@@ -837,7 +844,8 @@ function applyLocationContractSceneIds(referenceTargets, locationContractLedger)
       if (!contract) {
         findings.push({
           code: "unknown_location_contract_id",
-          severity: "blocker",
+          severity: "warning",
+          production_blocking: false,
           ref_id: target.ref_id,
           location_contract_id: contractId,
           message: `Location reference ${target.ref_id} cites unknown location contract ${contractId}.`,
@@ -1039,7 +1047,7 @@ ${plannerDirective || "- Preserve recurring visual identity and physical continu
 
 Rules:
 - This chunk stage supplies evidence-backed candidates to the global reference director. It does not decide the final reference budget and it does not write final scene-image prompts.
-- Use REFERENCE EVIDENCE LEDGER as observations, not direct authoring orders. Semantic scenes provide broad context and location contracts; visual beats provide local transcript evidence. You remain the sole creative selector, but deterministic validation will block a final plan that omits binding recurring coverage: character_state assets recurring in at least two beats or at least two scenes, and location/prop/ui assets recurring in at least three beats or at least two scenes.
+- Use REFERENCE EVIDENCE LEDGER as observations, not direct authoring orders. Semantic scenes provide broad context and location contracts; visual beats provide local transcript evidence. You remain the sole creative selector. Recurrence thresholds are continuity goals and deterministic validation reports misses as advisory review findings; they never override or prune your final selection.
 - Reuse stable evidence asset ids. Canonicalize aliases and state variants under canonical_subject_id and base_asset_id instead of inventing duplicate identities.
 - Return only candidates that might deserve a clean attachable reference. Omit text-only one-scene nouns entirely; location scope remains available separately through LOCATION CONTRACT LEDGER.
 - Every candidate must list evidence_asset_ids, planned_beat_ids, estimated_use_count, reference_value_reason, and why_text_is_insufficient.
@@ -1085,9 +1093,9 @@ Rules:
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
 - Omit lower-priority entities from candidate output. Their story facts remain available as prompt text and location contracts.
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
-- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, and one-off props may be omitted when they do not meet a high-risk exception. Do not omit a character_state asset observed in at least two beats or two scenes, or a location/prop/ui asset observed in at least three beats or two scenes; deterministic coverage validation treats those recurrence thresholds as binding.
-- Recurring character_state assets that reach two beats or two scenes must use standalone_ref or an approved-clean full conditioning source_only asset. A face-only source is an identity dependency for generating the clean character-state plate; it does not satisfy recurring state coverage by itself. manual_review is a hold and does not satisfy binding recurring coverage.
-- A selected recurring character identity that is visibly depicted in the first 30 seconds must be standalone_ref with required_before_imagegen true. manual_review is a planning hold, not a generatable opening identity.
+- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, and one-off props may be omitted when they do not meet a high-risk exception. Repeated character/location/prop/UI evidence is a strong continuity signal, not a deterministic quota.
+- Recurring character_state assets that reach two beats or two scenes should usually use standalone_ref or an approved-clean full conditioning source_only asset. A face-only source remains an identity dependency rather than a full state plate. Departures are advisory review findings.
+- A selected recurring character identity visibly depicted in the first 30 seconds should usually be standalone_ref with required_before_imagegen true. Other choices remain visible advisory decisions rather than automatic blockers.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not by itself enough for a one-scene standalone ref; omit it unless distinct identity continuity is mission-critical.
 - Recurring locations that reach three beats or two scenes must use clean environment-only standalone plates or an approved-clean source_only asset. Do not upgrade every one-scene opening sublocation merely because it is early, and do not derive location refs from populated story cuts without an explicit accepted-production-cut source review.
@@ -1253,8 +1261,8 @@ CONTENT PROFILE: ${contentProfile.id}
 ${plannerDirective || "- Preserve recurring visual identity and physical continuity from the locked narration."}
 
 Rules:
-- You are the sole episode-level reference director. Code validates your output but never restores an asset you omit and never guesses a replacement.
-- Use REFERENCE EVIDENCE LEDGER and CHUNK CANDIDATES as evidence, not deterministic target authoring. Semantic scenes provide broad context, visual beats provide local transcript truth, and LOCATION CONTRACT LEDGER carries textual location scope. You remain the sole creative selector, but the final plan will be blocked if it omits a character_state asset recurring in at least two beats or two scenes, or a location/prop/ui asset recurring in at least three beats or two scenes.
+- You are the sole episode-level reference director. Code validates your output but never restores an asset you omit, never guesses a replacement, and never caps or prunes the clean targets you select.
+- Use REFERENCE EVIDENCE LEDGER and CHUNK CANDIDATES as evidence, not deterministic target authoring. Semantic scenes provide broad context, visual beats provide local transcript truth, and LOCATION CONTRACT LEDGER carries textual location scope. Recurrence thresholds are continuity goals; omissions are advisory findings for approval review, not deterministic blockers.
 - The merged output should feel like a human art director chose the cast, location, prop, UI, uniform/faction, and action references that actually buy consistency.
 - There is no fixed numeric reference budget. Right-size the selection to the episode's length and visual complexity. Do not optimize for the smallest possible count, and do not keep low-value refs merely to hit a quota; every selected ref must have concrete reuse or risk-reduction value.
 - Treat chunk plans as proposals. Keep only references that materially improve consistency and trace each selection through evidence_asset_ids. If several chunks propose aliases or state variants of the same asset, choose one canonical_subject_id and one base_asset_id, then retain only visually material state deltas.
@@ -1294,11 +1302,11 @@ Rules:
   - Later character_state refs and scene_prompt_anchor values must dictate the current visible state explicitly: hairstyle, shave/facial hair, body shape, fitness, posture, wardrobe quality, cleanliness, social status expressed through visible styling, and emotional bearing expressed through expression/posture. Do not visualize abstract wealth loss, debt, betrayal, shame, or social ruin as grime or raggedness unless the script explicitly describes those physical signs.
   - Later states must use the base identity as a face-only continuity source; do not treat earlier overweight, injured, poor, dirty, weak, or young states as body/wardrobe references for later transformed states.
   - State anchors should describe the visible progression clearly enough that a viewer can read the arc without narration.
-- Recurring character_state assets that reach two beats or two scenes must use standalone_ref or an approved-clean full conditioning source_only asset. A face-only source is an identity dependency for generating the clean character-state plate; it does not satisfy recurring state coverage by itself. manual_review is a hold and does not satisfy binding recurring coverage.
-- A selected recurring character identity that is visibly depicted in the first 30 seconds must be standalone_ref with required_before_imagegen true. manual_review is a planning hold, not a generatable opening identity.
+- Recurring character_state assets that reach two beats or two scenes should usually use standalone_ref or an approved-clean full conditioning source_only asset. A face-only source is an identity dependency rather than a full state plate; exceptions are advisory.
+- A selected recurring character identity visibly depicted in the first 30 seconds should usually be standalone_ref with required_before_imagegen true; alternative choices remain explicit advisory decisions.
 - Omit lower-priority entities entirely. Their facts remain available to scene prompting as text.
 - Standalone references are for production leverage: recurring named characters, major character states, opening-retention location anchors, key recurring locations, signature recurring system/UI motifs, critical recurring props, and high-risk physical-contact character interactions.
-- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, and one-off props may be omitted when they do not meet a high-risk exception. Do not omit character_state evidence recurring in two beats or two scenes, or location/prop/ui evidence recurring in three beats or two scenes.
+- Minor role characters, generic witnesses/crowds, single-use wardrobe variants, one-off documents, one-off dashboards, and one-off props may be omitted when they do not meet a high-risk exception. Give repeated character/location/prop/UI evidence strong weight, but choose the final library yourself.
 - Do not upgrade every one-scene opening sublocation solely because it is early. Standalone opening locations must be a small curated set with real multi-beat clarity value.
 - Any named human character who physically touches, fights, restrains, shoves, carries, rescues, grabs, strikes, escorts, wrestles, or otherwise has real body-contact interaction with a recurring protagonist should use standalone_ref before imagegen, even if they appear in only one scene. Contact scenes are high identity-blend risk.
 - Being merely beside, watching, confronting verbally, appearing on a screen, or sharing a two-character frame is not enough for a one-scene standalone ref unless distinct identity continuity is mission-critical.
@@ -1391,9 +1399,13 @@ Return:
 }
 
 async function callLocal(prompt, stageName, maxTokens = null) {
-  const attempts = Number(flags["visual-ref-json-attempts"] ?? 3);
+  // Reference planning gets one creative attempt. A malformed response is
+  // preserved as failure evidence and repaired explicitly; it is never sent
+  // back through an automatic same-input creative retry.
+  const attempts = 1;
   let lastError = null;
   let lastContent = "";
+  let lastOutputPath = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const retryPrompt = attempt === 1 ? prompt : `${prompt}\n\nReturn one complete valid JSON object only. No markdown fences, commentary, trailing commas, or partial objects.`;
     const response = await fetch(localLLMChatCompletionURL(stageName), {
@@ -1418,17 +1430,29 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_VISUAL_REF_PLAN_TIMEOUT_MS ?? 1_200_000)),
     });
     const raw = await response.text();
-    if (!response.ok) throw new Error(`local-qwen visual refs HTTP ${response.status}: ${raw.slice(0, 1000)}`);
-    const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
+    let responsePayload = null;
+    try { responsePayload = JSON.parse(raw); } catch {}
+    const content = responsePayload?.choices?.[0]?.message?.content ?? raw;
     lastContent = content;
+    const callDir = path.join(weekDir, "_llm_calls");
+    await fs.mkdir(callDir, { recursive: true });
+    lastOutputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-attempt-${attempt}-output.txt`);
+    await fs.writeFile(lastOutputPath, content, "utf8");
+    if (!response.ok) {
+      const error = new Error(`local-qwen visual refs HTTP ${response.status}: ${raw.slice(0, 1000)}`);
+      error.outputPath = lastOutputPath;
+      throw error;
+    }
     try {
-      return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content), json_attempt: attempt };
+      return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content), json_attempt: attempt, output_path: lastOutputPath };
     } catch (error) {
       lastError = error;
       console.error(`visual refs ${stageName}: invalid JSON attempt ${attempt}/${attempts}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  throw new Error(`local-qwen visual refs returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
+  const error = new Error(`local-qwen visual refs returned invalid JSON after ${attempts} attempt: ${lastError instanceof Error ? lastError.message : String(lastError)}; raw output: ${lastOutputPath}; content preview: ${lastContent.slice(0, 600)}`);
+  error.outputPath = lastOutputPath;
+  throw error;
 }
 
 async function callCodex(prompt, stageName) {
@@ -1468,15 +1492,28 @@ async function callCodex(prompt, stageName) {
     }
   }
   const outputPath = path.join(callDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${stageName}-output.txt`);
-  const call = await runCodexCli({
-    prompt,
-    stageName,
-    repoRoot,
-    outputPath,
-    model: flags.model ?? flags["llm-model"] ?? null,
-    reasoningEffort: flags["reasoning-effort"] ?? null,
-    timeoutMs: Number(process.env.ANIFACTORY_VISUAL_REF_PLAN_TIMEOUT_MS ?? 1_200_000),
-  });
+  let call;
+  try {
+    call = await runCodexCli({
+      prompt,
+      stageName,
+      repoRoot,
+      outputPath,
+      model: flags.model ?? flags["llm-model"] ?? null,
+      reasoningEffort: flags["reasoning-effort"] ?? null,
+      timeoutMs: Number(process.env.ANIFACTORY_VISUAL_REF_PLAN_TIMEOUT_MS ?? 1_200_000),
+    });
+  } catch (error) {
+    error.outputPath = outputPath;
+    throw error;
+  }
+  let parsed;
+  try {
+    parsed = extractJson(call.content);
+  } catch (error) {
+    error.outputPath = outputPath;
+    throw error;
+  }
   return {
     provider: "codex",
     model: call.model,
@@ -1485,7 +1522,7 @@ async function callCodex(prompt, stageName) {
     codex_cli_version: call.codex_cli_version,
     output_path: outputPath,
     content: call.content,
-    parsed: extractJson(call.content),
+    parsed,
   };
 }
 
@@ -2436,13 +2473,254 @@ function ensureLandscapeReferenceAnchor(anchor, kind) {
   return [prefix, text].filter(Boolean).join(", ");
 }
 
+function referenceRepairFlags() {
+  return {
+    chunkIds: parseListFlag(flags["repair-chunk-ids"] ?? flags.repairChunkIds),
+    sceneIds: parseListFlag(flags["repair-scene-ids"] ?? flags.repairSceneIds),
+    repairGlobal: flags["repair-global"] === "true" || flags.repairGlobal === "true",
+  };
+}
+
+function pendingReferencePartial(partial) {
+  return partial && ["needs_chunk_repair", "needs_global_repair", "needs_explicit_repair"].includes(String(partial.status ?? ""));
+}
+
+function normalizePartialPassedChunks(partial) {
+  if (Array.isArray(partial?.passed_chunks)) return partial.passed_chunks;
+  const retainedTargets = Array.isArray(partial?.retained_reference_targets) ? partial.retained_reference_targets : [];
+  if (!retainedTargets.length) return [];
+  return [{
+    chunk_id: "legacy_preserved_chunks",
+    scene_ids: [],
+    input_sha256: null,
+    raw_target_count: retainedTargets.length,
+    output_path: null,
+    candidate_plan: {
+      reference_targets: retainedTargets,
+      character_state_refs: Array.isArray(partial?.retained_character_state_refs) ? partial.retained_character_state_refs : [],
+      warnings: [{
+        code: "legacy_partial_candidates_preserved",
+        severity: "info",
+        message: "Candidates were recovered from a v1 visual-reference partial artifact.",
+      }],
+    },
+  }];
+}
+
+function uniqueByChunkId(rows = []) {
+  const byId = new Map();
+  for (const row of rows) {
+    const id = String(row?.chunk_id ?? "").trim();
+    if (id) byId.set(id, row);
+  }
+  return [...byId.values()];
+}
+
+export function selectReferencePartialRepairScopeForTests(partial, {
+  chunkIds = [],
+  sceneIds = [],
+  repairGlobal = false,
+} = {}) {
+  if (!pendingReferencePartial(partial)) throw new Error("No pending visual-reference partial artifact is available for repair.");
+  const failedChunks = Array.isArray(partial.failed_chunks) ? partial.failed_chunks : [];
+  const requestedChunkIds = [...new Set(chunkIds.map(String).filter(Boolean))];
+  const requestedSceneIds = [...new Set(sceneIds.map(String).filter(Boolean))];
+  const selected = [];
+  if (repairGlobal) {
+    if (requestedChunkIds.length || requestedSceneIds.length) throw new Error("Global repair cannot be combined with chunk or scene repair scope.");
+    if (failedChunks.length) throw new Error("Repair the exact failed reference chunks before repairing the global director.");
+    return { mode: "global", selected_chunks: [], requested_chunk_ids: [], requested_scene_ids: [] };
+  }
+  if (!requestedChunkIds.length && !requestedSceneIds.length) {
+    throw new Error("Reference recovery requires --repair-chunk-ids, --repair-scene-ids, or --repair-global true.");
+  }
+  const failedById = new Map(failedChunks.map((row) => [String(row?.chunk_id ?? ""), row]));
+  const failedSceneIds = new Set(failedChunks.flatMap((row) => row?.scene_ids ?? []).map(String));
+  const unknownChunks = requestedChunkIds.filter((id) => !failedById.has(id));
+  const unknownScenes = requestedSceneIds.filter((id) => !failedSceneIds.has(id));
+  if (unknownChunks.length || unknownScenes.length) {
+    throw new Error(`Reference repair scope contains non-failed IDs: ${[...unknownChunks, ...unknownScenes].join(", ")}`);
+  }
+  const sceneSet = new Set(requestedSceneIds);
+  for (const failed of failedChunks) {
+    const chunkId = String(failed?.chunk_id ?? "");
+    const allSceneIds = (failed?.scene_ids ?? []).map(String).filter(Boolean);
+    if (requestedChunkIds.includes(chunkId)) {
+      selected.push({ ...failed, repair_scene_ids: allSceneIds, full_chunk_repair: true });
+      continue;
+    }
+    const matched = allSceneIds.filter((sceneId) => sceneSet.has(sceneId));
+    if (matched.length) selected.push({ ...failed, repair_scene_ids: matched, full_chunk_repair: matched.length === allSceneIds.length });
+  }
+  if (!selected.length) throw new Error("Reference repair selected no failed chunks or scenes.");
+  return {
+    mode: "chunks",
+    selected_chunks: selected,
+    requested_chunk_ids: requestedChunkIds,
+    requested_scene_ids: requestedSceneIds,
+  };
+}
+
+export function mergeReferencePartialRepairForTests(partial, repairResults = []) {
+  const priorPassed = normalizePartialPassedChunks(partial);
+  const priorFailed = Array.isArray(partial?.failed_chunks) ? partial.failed_chunks : [];
+  const replacementByOriginal = new Map();
+  for (const result of repairResults) {
+    const originalId = String(result?.original_chunk_id ?? result?.chunk_id ?? "");
+    if (!replacementByOriginal.has(originalId)) replacementByOriginal.set(originalId, []);
+    replacementByOriginal.get(originalId).push(result);
+  }
+  const passedChunks = [...priorPassed];
+  const failedChunks = [];
+  for (const failed of priorFailed) {
+    const originalId = String(failed?.chunk_id ?? "");
+    const replacements = replacementByOriginal.get(originalId);
+    if (!replacements?.length) {
+      failedChunks.push(failed);
+      continue;
+    }
+    const repairedScenes = new Set(replacements.flatMap((row) => row?.repair_scene_ids ?? row?.scene_ids ?? []).map(String));
+    const remainingScenes = (failed.scene_ids ?? []).map(String).filter((sceneId) => !repairedScenes.has(sceneId));
+    if (remainingScenes.length) failedChunks.push({ ...failed, scene_ids: remainingScenes });
+    for (const row of replacements) {
+      if (row.status === "passed" && row.passed_chunk) passedChunks.push(row.passed_chunk);
+      if (row.status === "failed" && row.failed_chunk) failedChunks.push(row.failed_chunk);
+    }
+  }
+  return {
+    passed_chunks: uniqueByChunkId(passedChunks),
+    failed_chunks: uniqueByChunkId(failedChunks),
+  };
+}
+
+function referencePartialArtifact({
+  semanticPlan,
+  passedChunks,
+  failedChunks,
+  globalDirector = null,
+  status = null,
+}) {
+  const resolvedStatus = status ?? (failedChunks.length ? "needs_chunk_repair" : "needs_global_repair");
+  return {
+    schema: "goldflow_visual_reference_partial_v2",
+    status: resolvedStatus,
+    episode,
+    source_script_hash: semanticPlan?.source_script_hash ?? null,
+    source_scene_ids: (semanticPlan?.scenes ?? []).map((scene) => String(scene.scene_id ?? "")).filter(Boolean),
+    automatic_creative_retry_count: 0,
+    passed_chunk_count: passedChunks.length,
+    failed_chunk_count: failedChunks.length,
+    passed_chunks: passedChunks,
+    failed_chunks: failedChunks,
+    retained_reference_targets: passedChunks.flatMap((row) => row?.candidate_plan?.reference_targets ?? []),
+    retained_character_state_refs: passedChunks.flatMap((row) => row?.candidate_plan?.character_state_refs ?? []),
+    global_director: globalDirector,
+    recovery: failedChunks.length
+      ? {
+          failed_chunk_ids: failedChunks.map((row) => row.chunk_id).filter(Boolean),
+          failed_scene_ids: [...new Set(failedChunks.flatMap((row) => row.scene_ids ?? []).map(String).filter(Boolean))],
+          action: "Run one later explicit repair invocation naming only these failed chunk IDs or scene IDs. Passed candidates are immutable.",
+        }
+      : {
+          failed_chunk_ids: [],
+          failed_scene_ids: [],
+          action: resolvedStatus === "needs_global_repair"
+            ? "Run one later explicit --repair-global true invocation. Preserved chunk candidates will be reused without regeneration."
+            : "No repair remains.",
+        },
+    updated_at: new Date().toISOString(),
+  };
+}
+
 async function createReferencePlan(semanticPlan, stageName, guidance = {}, evidenceLedger = null, locationContractLedger = null) {
   const useLocalRoute = isLocalLLMRoute(stageName);
-  const useChunking = flags["visual-ref-chunking"] !== "false"
-    && semanticPlan.scenes.length > Number(flags["visual-ref-single-call-max-scenes"] ?? 12);
+  const repair = referenceRepairFlags();
+  const repairRequested = repair.repairGlobal || repair.chunkIds.length > 0 || repair.sceneIds.length > 0;
+  const existingPartial = await readJson(referencePartialPath, null);
+  if (pendingReferencePartial(existingPartial) && !repairRequested) {
+    throw new Error(`Visual-reference partial recovery is pending. Use its exact failed chunk/scene scope instead of rerunning passed chunks: ${referencePartialPath}`);
+  }
+  if (repairRequested) {
+    if (!pendingReferencePartial(existingPartial)) throw new Error(`Reference repair requires a pending partial artifact: ${referencePartialPath}`);
+    if (existingPartial.source_script_hash && existingPartial.source_script_hash !== semanticPlan.source_script_hash) {
+      throw new Error("Reference partial source_script_hash is stale; do not merge candidates from a different locked script.");
+    }
+  }
+  const partialChunked = Array.isArray(existingPartial?.passed_chunks) && existingPartial.passed_chunks.length > 0
+    || Array.isArray(existingPartial?.failed_chunks) && existingPartial.failed_chunks.length > 0;
+  const useChunking = repairRequested
+    ? partialChunked
+    : flags["visual-ref-chunking"] !== "false"
+      && semanticPlan.scenes.length > Number(flags["visual-ref-single-call-max-scenes"] ?? 12);
   if (!useChunking) {
     const prompt = buildPrompt(semanticPlan, { guidance, inventoryLedger: evidenceLedger, locationContractLedger });
-    const result = useLocalRoute ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+    if (repairRequested && !repair.repairGlobal) {
+      throw new Error("This partial contains a single global-director call; repair it with --repair-global true.");
+    }
+    let result;
+    try {
+      result = useLocalRoute ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "visual_reference_plan",
+        chunkId: "global_director",
+        inputHash: sha256(prompt),
+        expectedIds: (semanticPlan.scenes ?? []).map((scene) => scene.scene_id).filter(Boolean),
+        status: "passed",
+        attempt: 1,
+        reused: Boolean(result.reused_cached_output),
+        outputPath: result.output_path ?? null,
+        metadata: {
+          selected_target_count: result.parsed?.reference_targets?.length ?? 0,
+          automatic_creative_retry_count: 0,
+        },
+      });
+    } catch (error) {
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "visual_reference_plan",
+        chunkId: "global_director",
+        inputHash: sha256(prompt),
+        expectedIds: (semanticPlan.scenes ?? []).map((scene) => scene.scene_id).filter(Boolean),
+        status: "failed",
+        attempt: 1,
+        outputPath: error?.outputPath ?? null,
+        findings: [{
+          code: "reference_global_director_single_attempt_failed",
+          message: error instanceof Error ? error.message : String(error),
+          recovery: "Use one later explicit --repair-global true invocation. Automatic creative retry is disabled.",
+        }],
+        metadata: { automatic_creative_retry_count: 0 },
+      });
+      await writeJson(referencePartialPath, referencePartialArtifact({
+        semanticPlan,
+        passedChunks: [],
+        failedChunks: [],
+        status: "needs_global_repair",
+        globalDirector: {
+          status: "failed",
+          input_sha256: sha256(prompt),
+          raw_output_path: error?.outputPath ?? null,
+          error: error instanceof Error ? error.message : String(error),
+          automatic_creative_retry_count: 0,
+        },
+      }));
+      throw new Error(`Global visual-reference director made one failed creative submission. Exact global repair artifact: ${referencePartialPath}`);
+    }
+    if (repairRequested) {
+      await writeJson(referencePartialPath, referencePartialArtifact({
+        semanticPlan,
+        passedChunks: [],
+        failedChunks: [],
+        status: "completed",
+        globalDirector: {
+          status: "passed",
+          input_sha256: sha256(prompt),
+          output_path: result.output_path ?? null,
+          selected_target_count: result.parsed?.reference_targets?.length ?? 0,
+        },
+      }));
+    }
     return {
       ...result,
       chunk_raw_target_count: Array.isArray(result.parsed?.reference_targets) ? result.parsed.reference_targets.length : 0,
@@ -2451,7 +2729,46 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     };
   }
 
-  const sceneChunks = chunkArray(semanticPlan.scenes, Number(flags["visual-ref-chunk-scenes"] ?? 8));
+  const repairSelection = repairRequested
+    ? selectReferencePartialRepairScopeForTests(existingPartial, repair)
+    : null;
+  if (repairSelection?.mode === "global") {
+    // All chunk candidates have already passed and are consumed below without
+    // sending any chunk back to the creative provider.
+  }
+  const semanticSceneById = new Map((semanticPlan.scenes ?? []).map((scene) => [String(scene.scene_id ?? ""), scene]));
+  const initialChunkDescriptors = repairSelection?.mode === "chunks"
+    ? repairSelection.selected_chunks.map((failed) => {
+        const selectedSceneIds = (failed.repair_scene_ids ?? failed.scene_ids ?? []).map(String);
+        const selectedScenes = selectedSceneIds.map((sceneId) => semanticSceneById.get(sceneId)).filter(Boolean);
+        if (selectedScenes.length !== selectedSceneIds.length) {
+          throw new Error(`Reference partial names scene IDs missing from the current semantic plan: ${selectedSceneIds.filter((id) => !semanticSceneById.has(id)).join(", ")}`);
+        }
+        const suffix = failed.full_chunk_repair
+          ? String(failed.chunk_id)
+          : `${String(failed.chunk_id)}_repair_${sha256(selectedSceneIds.join(",")).slice(0, 8)}`;
+        return {
+          sceneChunk: selectedScenes,
+          chunkLabel: `explicit repair for ${failed.chunk_id}`,
+          stageSuffix: suffix,
+          displayLabel: `explicit repair ${failed.chunk_id}`,
+          originalChunkId: String(failed.chunk_id),
+          repairSceneIds: selectedSceneIds,
+        };
+      })
+    : repairSelection?.mode === "global"
+      ? []
+      : chunkArray(semanticPlan.scenes, Number(flags["visual-ref-chunk-scenes"] ?? 8)).map((sceneChunk, index, chunks) => ({
+          sceneChunk,
+          chunkLabel: `chunk ${index + 1} of ${chunks.length}`,
+          stageSuffix: `chunk_${String(index + 1).padStart(2, "0")}`,
+          displayLabel: `chunk ${index + 1}/${chunks.length}`,
+          originalChunkId: `chunk_${String(index + 1).padStart(2, "0")}`,
+          repairSceneIds: sceneChunk.map((scene) => String(scene.scene_id ?? "")).filter(Boolean),
+        }));
+  const sourceChunkCount = repairRequested
+    ? Number(existingPartial?.source_chunk_count ?? normalizePartialPassedChunks(existingPartial).length + (existingPartial?.failed_chunks?.length ?? 0))
+    : initialChunkDescriptors.length;
   const chunkConcurrency = Math.max(1, Number(flags["visual-ref-chunk-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REF_CHUNK_CONCURRENCY ?? 8));
   const maxChunkPromptChars = Math.max(100_000, Number(
     flags["visual-ref-max-prompt-chars"]
@@ -2459,7 +2776,14 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
       ?? 950_000,
   ));
 
-  const planChunk = async ({ sceneChunk, chunkLabel, stageSuffix, displayLabel }) => {
+  const planChunk = async ({
+    sceneChunk,
+    chunkLabel,
+    stageSuffix,
+    displayLabel,
+    originalChunkId = stageSuffix,
+    repairSceneIds = sceneChunk.map((scene) => String(scene.scene_id ?? "")).filter(Boolean),
+  }) => {
     const chunkSemanticPlan = {
       ...semanticPlan,
       scenes: sceneChunk,
@@ -2480,55 +2804,134 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
         chunkLabel: `${chunkLabel}, adaptive part ${childIndex + 1} of ${children.length}`,
         stageSuffix: `${stageSuffix}_part_${String(childIndex + 1).padStart(2, "0")}`,
         displayLabel: `${displayLabel} part ${childIndex + 1}/${children.length}`,
+        originalChunkId,
+        repairSceneIds: child.map((scene) => String(scene.scene_id ?? "")).filter(Boolean),
       }));
       return childResults.flat();
     }
     const chunkStageName = `${stageName}_${stageSuffix}`;
-    const llm = useLocalRoute
-      ? await callLocal(prompt, chunkStageName, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000))
-      : await callCodex(prompt, chunkStageName);
-    const rawTargetCount = Array.isArray(llm.parsed?.reference_targets) ? llm.parsed.reference_targets.length : 0;
-    const candidatePlan = sanitizeChunkReferenceCandidates(llm.parsed);
-    await recordPlannerChunkCheckpoint({
-      episodeDir,
-      plannerStage: "visual_reference_plan",
-      chunkId: stageSuffix,
-      inputHash: sha256(prompt),
-      expectedIds: sceneChunk.map((scene) => scene.scene_id).filter(Boolean),
-      status: "passed",
-      attempt: 1,
-      reused: Boolean(llm.reused_cached_output),
-      outputPath: llm.output_path,
-      metadata: {
-        scene_count: sceneChunk.length,
-        raw_target_count: rawTargetCount,
-        retained_candidate_count: candidatePlan.reference_targets.length,
-      },
-    });
-    console.error(`visual refs ${displayLabel}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
-    return [{ candidatePlan, rawTargetCount }];
+    let llm = null;
+    try {
+      llm = useLocalRoute
+        ? await callLocal(prompt, chunkStageName, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000))
+        : await callCodex(prompt, chunkStageName);
+      const rawTargetCount = Array.isArray(llm.parsed?.reference_targets) ? llm.parsed.reference_targets.length : 0;
+      const candidatePlan = sanitizeChunkReferenceCandidates(llm.parsed);
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "visual_reference_plan",
+        chunkId: stageSuffix,
+        inputHash: sha256(prompt),
+        expectedIds: sceneChunk.map((scene) => scene.scene_id).filter(Boolean),
+        status: "passed",
+        attempt: 1,
+        reused: Boolean(llm.reused_cached_output),
+        outputPath: llm.output_path,
+        metadata: {
+          scene_count: sceneChunk.length,
+          raw_target_count: rawTargetCount,
+          retained_candidate_count: candidatePlan.reference_targets.length,
+          automatic_creative_retry_count: 0,
+        },
+      });
+      console.error(`visual refs ${displayLabel}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
+      return [{
+        status: "passed",
+        original_chunk_id: originalChunkId,
+        repair_scene_ids: repairSceneIds,
+        passed_chunk: {
+          chunk_id: stageSuffix,
+          source_chunk_id: originalChunkId,
+          scene_ids: sceneChunk.map((scene) => String(scene.scene_id ?? "")).filter(Boolean),
+          input_sha256: sha256(prompt),
+          raw_target_count: rawTargetCount,
+          output_path: llm.output_path ?? null,
+          candidate_plan: candidatePlan,
+        },
+      }];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const sceneIds = sceneChunk.map((scene) => scene.scene_id).filter(Boolean);
+      const referenceIds = (llm?.parsed?.reference_targets ?? []).map((target) => String(target?.ref_id ?? "").trim()).filter(Boolean);
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "visual_reference_plan",
+        chunkId: stageSuffix,
+        inputHash: sha256(prompt),
+        expectedIds: sceneIds,
+        status: "failed",
+        attempt: 1,
+        outputPath: llm?.output_path ?? error?.outputPath ?? null,
+        findings: [{
+          code: "reference_chunk_single_attempt_failed",
+          message,
+          scene_ids: sceneIds,
+          reference_ids: referenceIds,
+          recovery: "Use exact failed ref IDs when recoverable from the raw output; otherwise perform an explicit manual structured repair. Automatic creative retry is disabled.",
+        }],
+        metadata: {
+          scene_count: sceneChunk.length,
+          automatic_creative_retry_count: 0,
+          explicit_manual_repair_required: true,
+        },
+      });
+      console.error(`visual refs ${displayLabel}: single creative attempt failed; preserving passed chunks and requiring explicit repair`);
+      return [{
+        status: "failed",
+        original_chunk_id: originalChunkId,
+        repair_scene_ids: repairSceneIds,
+        failed_chunk: {
+          chunk_id: stageSuffix,
+          source_chunk_id: originalChunkId,
+          scene_ids: sceneIds,
+          reference_ids: referenceIds,
+          input_sha256: sha256(prompt),
+          raw_output_path: llm?.output_path ?? error?.outputPath ?? null,
+          message,
+        },
+      }];
+    }
   };
 
-  const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
-    console.error(`visual refs chunk ${index + 1}/${sceneChunks.length}: ${sceneChunks[index].length} scenes`);
-    return planChunk({
-      sceneChunk,
-      chunkLabel: `chunk ${index + 1} of ${sceneChunks.length}`,
-      stageSuffix: `chunk_${String(index + 1).padStart(2, "0")}`,
-      displayLabel: `chunk ${index + 1}/${sceneChunks.length}`,
-    });
+  const chunkResults = await mapWithConcurrency(initialChunkDescriptors, chunkConcurrency, async (descriptor, index) => {
+    console.error(`visual refs ${descriptor.displayLabel}: ${descriptor.sceneChunk.length} scenes (${index + 1}/${initialChunkDescriptors.length})`);
+    return planChunk(descriptor);
   });
   const plannedChunks = chunkResults.flat();
-  const chunkPlans = plannedChunks.map((result) => result.candidatePlan);
-  const chunkRawTargetCount = plannedChunks.reduce((sum, result) => sum + result.rawTargetCount, 0);
-  if (!chunkPlans.some((plan) => plan.reference_targets.length)) throw new Error("Visual reference chunks returned no clean reference candidates for global director selection.");
+  let passedChunks;
+  let failedChunks;
+  if (repairSelection?.mode === "chunks") {
+    const mergedPartial = mergeReferencePartialRepairForTests(existingPartial, plannedChunks);
+    passedChunks = mergedPartial.passed_chunks;
+    failedChunks = mergedPartial.failed_chunks;
+  } else if (repairSelection?.mode === "global") {
+    passedChunks = normalizePartialPassedChunks(existingPartial);
+    failedChunks = [];
+  } else {
+    passedChunks = uniqueByChunkId(plannedChunks.filter((result) => result.status === "passed").map((result) => result.passed_chunk));
+    failedChunks = uniqueByChunkId(plannedChunks.filter((result) => result.status === "failed").map((result) => result.failed_chunk));
+  }
+  const chunkPlans = passedChunks.map((row) => row.candidate_plan).filter(Boolean);
+  const chunkRawTargetCount = passedChunks.reduce((sum, row) => sum + Number(row.raw_target_count ?? 0), 0);
+  if (failedChunks.length) {
+    await writeJson(referencePartialPath, {
+      ...referencePartialArtifact({ semanticPlan, passedChunks, failedChunks, status: "needs_chunk_repair" }),
+      source_chunk_count: sourceChunkCount,
+    });
+    throw new Error(`Visual reference planning preserved ${passedChunks.length} passed chunk(s), but ${failedChunks.length} exact chunk scope(s) need later repair. Partial artifact: ${referencePartialPath}`);
+  }
+  if (!chunkPlans.length) throw new Error("Visual reference recovery has no preserved or repaired chunk candidate plans.");
+  if (!chunkPlans.some((plan) => plan.reference_targets.length)) {
+    console.error("visual refs: chunk calls selected zero candidates; the one global director submission will make the episode-level decision from locked evidence");
+  }
   console.error(`visual refs merge: ${chunkPlans.length} chunk plans`);
   if (String(flags["visual-ref-merge-mode"] ?? "").toLowerCase() === "deterministic") {
     throw new Error("Deterministic visual-reference merge is disabled in director v2. The global LLM director must make the final creative selection.");
   }
   const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans, guidance, evidenceLedger, locationContractLedger);
   const mergeInputHash = sha256(mergePrompt);
-  const maxMergeAttempts = Math.max(1, Number(flags["visual-ref-merge-validation-attempts"] ?? 2));
+  const globalExpectedSceneIds = (semanticPlan.scenes ?? []).map((scene) => String(scene.scene_id ?? "")).filter(Boolean);
+  const maxMergeAttempts = 1;
   let merged = null;
   let lastMergeError = null;
   for (let attempt = 1; attempt <= maxMergeAttempts; attempt += 1) {
@@ -2549,7 +2952,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
         plannerStage: "visual_reference_plan",
         chunkId: "global_merge",
         inputHash: mergeInputHash,
-        expectedIds: sceneChunks.flatMap((chunk) => chunk.map((scene) => scene.scene_id)).filter(Boolean),
+        expectedIds: globalExpectedSceneIds,
         status: "passed",
         attempt,
         reused: Boolean(candidate.reused_cached_output),
@@ -2564,14 +2967,56 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
         plannerStage: "visual_reference_plan",
         chunkId: "global_merge",
         inputHash: mergeInputHash,
+        expectedIds: globalExpectedSceneIds,
         status: "failed",
         attempt,
-        findings: [{ code: "reference_global_merge_validation_failed", message: lastMergeError.message }],
+        outputPath: lastMergeError?.outputPath ?? null,
+        findings: [{
+          code: "reference_global_merge_validation_failed",
+          message: lastMergeError.message,
+          recovery: "Automatic creative retry is disabled. Repair the named references from the preserved raw output when available, or provide an explicit manual structured global selection.",
+        }],
+        metadata: { automatic_creative_retry_count: 0, explicit_manual_repair_required: true },
       });
     }
   }
-  if (!merged) throw new Error(`Global visual-reference director failed after ${maxMergeAttempts} scoped attempts: ${lastMergeError?.message}`);
+  if (!merged) {
+    await writeJson(referencePartialPath, {
+      ...referencePartialArtifact({
+        semanticPlan,
+        passedChunks,
+        failedChunks: [],
+        status: "needs_global_repair",
+        globalDirector: {
+          status: "failed",
+          input_sha256: mergeInputHash,
+          raw_output_path: lastMergeError?.outputPath ?? null,
+          error: lastMergeError?.message ?? "global director failed",
+          automatic_creative_retry_count: 0,
+        },
+      }),
+      source_chunk_count: sourceChunkCount,
+    });
+    throw new Error(`Global visual-reference director made one failed creative submission. Preserved chunk candidates require a later explicit --repair-global true invocation: ${referencePartialPath}`);
+  }
   const parsed = merged.parsed;
+  if (repairRequested || pendingReferencePartial(existingPartial)) {
+    await writeJson(referencePartialPath, {
+      ...referencePartialArtifact({
+        semanticPlan,
+        passedChunks,
+        failedChunks: [],
+        status: "completed",
+        globalDirector: {
+          status: "passed",
+          input_sha256: mergeInputHash,
+          output_path: merged.output_path ?? null,
+          selected_target_count: parsed.reference_targets.length,
+        },
+      }),
+      source_chunk_count: sourceChunkCount,
+    });
+  }
   return {
     provider: merged.provider,
     model: useLocalRoute ? getLLMModel(stageName) : merged.model ?? configuredCodexModel(),
@@ -2580,9 +3025,9 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     codex_cli_version: merged.codex_cli_version ?? null,
     output_path: merged.output_path ?? null,
     chunked: true,
-    chunk_count: plannedChunks.length,
-    source_chunk_count: sceneChunks.length,
-    chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
+    chunk_count: passedChunks.length,
+    source_chunk_count: sourceChunkCount,
+    chunk_concurrency: Math.min(Math.max(1, sourceChunkCount), chunkConcurrency),
     chunk_raw_target_count: chunkRawTargetCount,
     merged_target_count: parsed.reference_targets.length,
     parsed,
@@ -2813,8 +3258,9 @@ function nonCharacterReferenceContentFindings(target) {
   const findings = [];
   const add = (code, message) => findings.push({
     code,
-    severity: "blocker",
-    production_blocking: true,
+    severity: "warning",
+    production_blocking: false,
+    review_disposition: "manual_fix_or_accept",
     ref_id: target?.ref_id ?? null,
     kind,
     message,
@@ -2857,8 +3303,9 @@ function characterReferenceContentFindings(target) {
   const promptAnchor = String(target?.prompt_anchor ?? "");
   const add = (code, message, extra = {}) => findings.push({
     code,
-    severity: "blocker",
-    production_blocking: true,
+    severity: "warning",
+    production_blocking: false,
+    review_disposition: "manual_fix_or_accept",
     ref_id: refId,
     conditioning_asset_role: role,
     ...extra,
@@ -3019,8 +3466,8 @@ function recurringReferenceCoverageFindings(evidenceLedger, referenceTargets, { 
     if (cleanTargets.length) continue;
     findings.push({
       code: "recurring_reference_coverage_missing",
-      severity: "blocker",
-      production_blocking: true,
+      severity: "warning",
+      production_blocking: false,
       review_required: true,
       review_disposition: "director_must_select_clean_reference",
       asset_id: asset.asset_id ?? null,
@@ -3056,7 +3503,8 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (!legacyRevalidation && (mode === "no_ref_needed" || /^derive_from_/i.test(mode))) {
       findings.push({
         code: "director_selected_non_clean_reference_mode",
-        severity: "blocker",
+        severity: "warning",
+        production_blocking: false,
         ref_id: target.ref_id,
         generation_mode: mode,
         message: `Reference director selected ${target.ref_id} with ${mode}; v2 permits only clean standalone, manual-review, or approved source references.`,
@@ -3066,6 +3514,7 @@ function finalDirectorSelectionFindings(referenceTargets, {
       findings.push({
         code: "post_llm_reference_target_expansion",
         severity: "blocker",
+        production_blocking: true,
         ref_id: target.ref_id,
         message: `Post-LLM processing introduced ${target.ref_id}; deterministic stages may not restore or invent reference targets.`,
       });
@@ -3074,7 +3523,8 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (unknownSceneIds.length) {
       findings.push({
         code: "reference_target_unknown_scene_scope",
-        severity: "blocker",
+        severity: "warning",
+        production_blocking: false,
         ref_id: target.ref_id,
         scene_ids: unknownSceneIds,
         message: `Reference ${target.ref_id} contains scene ids outside the locked semantic plan.`,
@@ -3091,7 +3541,8 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (!legacyRevalidation && mode !== "source_only" && !String(target.clean_plate_contract ?? "").trim()) {
       findings.push({
         code: "reference_target_missing_clean_plate_contract",
-        severity: "blocker",
+        severity: "warning",
+        production_blocking: false,
         ref_id: target.ref_id,
         message: `Reference ${target.ref_id} does not state a clean_plate_contract.`,
       });
@@ -3099,7 +3550,8 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (!legacyRevalidation && mode !== "source_only" && Number(target.conditioning_subject_count) !== 1) {
       findings.push({
         code: "reference_target_not_single_conditioning_concept",
-        severity: "blocker",
+        severity: "warning",
+        production_blocking: false,
         ref_id: target.ref_id,
         conditioning_subject_count: target.conditioning_subject_count,
         message: `Reference ${target.ref_id} must condition exactly one identity/state, environment, prop, UI motif, faction language, action/effect language, or style language.`,
@@ -3117,7 +3569,8 @@ function finalDirectorSelectionFindings(referenceTargets, {
       if (!allowedRoles.has(String(target.conditioning_asset_role ?? ""))) {
         findings.push({
           code: "reference_target_conditioning_role_mismatch",
-          severity: "blocker",
+          severity: "warning",
+          production_blocking: false,
           ref_id: target.ref_id,
           kind: target.kind,
           conditioning_asset_role: target.conditioning_asset_role ?? null,
@@ -3139,7 +3592,8 @@ function finalDirectorSelectionFindings(referenceTargets, {
     if (ids.length <= 1) continue;
     findings.push({
       code: "duplicate_canonical_reference_family",
-      severity: "blocker",
+      severity: "warning",
+      production_blocking: false,
       canonical_key: key,
       ref_ids: ids,
       message: `Global director returned duplicate refs for canonical family ${key}: ${ids.join(", ")}.`,
@@ -3156,14 +3610,14 @@ export function dropUnknownReferenceSceneScopesForTests(referenceTargets, knownS
     const dropped = original.filter((sceneId) => !known.has(sceneId));
     if (dropped.length) {
       findings.push({
-        code: "reference_target_unknown_scene_scope_dropped",
+        code: "reference_target_unknown_scene_scope_preserved",
         severity: "warning",
         ref_id: target.ref_id,
         scene_ids: dropped,
-        message: `Dropped retired or unknown scene scope from ${target.ref_id}; deterministic validation did not author a replacement scope.`,
+        message: `Preserved retired or unknown scene scope on ${target.ref_id}; deterministic validation reports it for review but does not rewrite the global director's selection.`,
       });
     }
-    return { ...target, scene_ids: original.filter((sceneId) => known.has(sceneId)) };
+    return { ...target, scene_ids: original };
   });
   return { targets, findings };
 }
@@ -3187,7 +3641,8 @@ function openingSelectedIdentityFindings(referenceTargets, visualBeatPlan) {
     if (generatable) return [];
     return [{
       code: "opening_visible_identity_not_generatable",
-      severity: "blocker",
+      severity: "warning",
+      production_blocking: false,
       ref_id: target.ref_id,
       canonical_subject_id: subjectId,
       generation_mode: mode,
@@ -3207,6 +3662,7 @@ function characterStateDirectorFindings(characterStateRefs, referenceTargets, { 
       findings.push({
         code: "character_state_ref_missing_id",
         severity: "blocker",
+        production_blocking: true,
         message: "Character state contract is missing state_ref_id.",
       });
       continue;
@@ -3235,7 +3691,8 @@ function characterStateDirectorFindings(characterStateRefs, referenceTargets, { 
     if (isCollectiveGroupSubject(`${ref.character ?? ""} ${stateRefId}`)) {
       findings.push({
         code: "generic_group_character_state_ref",
-        severity: "blocker",
+        severity: "warning",
+        production_blocking: false,
         state_ref_id: stateRefId,
         character: ref.character ?? null,
         message: `Generic group ${ref.character ?? stateRefId} must use a group/faction design target or scene prose, not a character identity state contract.`,
@@ -3261,14 +3718,19 @@ function referenceSelectionTelemetry({
     byKind[kind] = (byKind[kind] ?? 0) + 1;
     byMode[mode] = (byMode[mode] ?? 0) + 1;
   }
+  const selectedIds = new Set(
+    (llm?.parsed?.reference_targets ?? []).map((target) => String(target?.ref_id ?? "")).filter(Boolean),
+  );
+  const finalIds = new Set((finalTargets ?? []).map((target) => String(target?.ref_id ?? "")).filter(Boolean));
   return {
-    contract_version: "reference_director_v2",
+    contract_version: "reference_director_v3_full_selection",
     evidence_observation_count: evidenceLedger?.assets?.length ?? 0,
     location_contract_count: locationContractLedger?.contracts?.length ?? 0,
     chunk_raw_proposal_count: Number(llm?.chunk_raw_target_count ?? llmTargetCount),
     llm_merged_target_count: Number(llm?.merged_target_count ?? llmTargetCount),
     llm_selected_target_count: llmTargetCount,
     final_target_count: finalTargets.length,
+    post_director_removed_target_count: [...selectedIds].filter((refId) => !finalIds.has(refId)).length,
     source_only_dependency_count_added_after_llm: sourceOnlyAddedCount,
     post_llm_non_source_expansion_count: finalTargets.filter((target) =>
       String(target.generation_mode ?? "").toLowerCase() !== "source_only"
@@ -3400,9 +3862,28 @@ async function main() {
       ? { ...normalized, ...target, ref_id: normalized.ref_id, scene_ids: normalized.scene_ids, generation_mode: normalized.generation_mode }
       : normalized;
   });
-  const llmTargetIds = new Set(referenceTargets.map((target) => String(target.ref_id ?? "")));
-  const llmTargetCount = referenceTargets.length;
-  const shouldDropStyleRefs = dropStyleRefs || (Boolean(visualStyleBible) && !keepStyleRefs);
+  const fullSelectionContract = !legacyRevalidation
+    || String(existingReferencePlan?.reference_director_contract_version ?? "") === "reference_director_v3_full_selection";
+  const directorSelectionReceipt = fullSelectionContract
+    ? (existingReferencePlan?.reference_director_selection_receipt
+      ?? buildReferenceDirectorSelectionReceipt(referenceTargets, {
+        sourceOutputPath: llm.output_path ?? null,
+        sourceOutputSha256: llm.output_path ? await hashFile(llm.output_path) : null,
+      }))
+    : null;
+  const llmTargetIds = new Set(
+    (directorSelectionReceipt?.selected_ref_ids ?? referenceTargets.map((target) => String(target.ref_id ?? "")))
+      .map(String)
+      .filter(Boolean),
+  );
+  const llmTargetCount = Number(directorSelectionReceipt?.selected_target_count ?? referenceTargets.length);
+  // In the full-selection contract, a style reference selected by the global
+  // director is part of the same production library as every other target.
+  // A style bible can make the director omit that asset, but deterministic code
+  // may not remove it after selection.
+  const shouldDropStyleRefs = fullSelectionContract
+    ? false
+    : dropStyleRefs || (Boolean(visualStyleBible) && !keepStyleRefs);
   if (shouldDropStyleRefs) {
     referenceTargets = referenceTargets.filter((target) => String(target.kind ?? "").toLowerCase() !== "style");
   }
@@ -3431,20 +3912,27 @@ async function main() {
     String(target.generation_mode ?? "").toLowerCase() === "source_only"
     && !llmTargetIds.has(String(target.ref_id ?? ""))
   ).length;
-  const canonicalIdentityMerge = mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs);
-  referenceTargets = canonicalIdentityMerge.referenceTargets;
-  characterStateRefs = canonicalIdentityMerge.characterStateRefs;
-  const finalCanonicalIdentityMerge = mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs);
-  referenceTargets = finalCanonicalIdentityMerge.referenceTargets;
-  characterStateRefs = finalCanonicalIdentityMerge.characterStateRefs;
-  const finalIdentityAliasCollapse = collapseCharacterIdentityAliasTargets(referenceTargets, characterStateRefs);
-  referenceTargets = finalIdentityAliasCollapse.referenceTargets;
-  characterStateRefs = finalIdentityAliasCollapse.characterStateRefs;
+  let canonicalIdentityMerge = { referenceTargets, characterStateRefs, warnings: [] };
+  let finalCanonicalIdentityMerge = { referenceTargets, characterStateRefs, warnings: [] };
+  let finalIdentityAliasCollapse = { referenceTargets, characterStateRefs, warnings: [] };
+  if (!fullSelectionContract) {
+    canonicalIdentityMerge = mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs);
+    referenceTargets = canonicalIdentityMerge.referenceTargets;
+    characterStateRefs = canonicalIdentityMerge.characterStateRefs;
+    finalCanonicalIdentityMerge = mergeCanonicalBaseIdentityRefs(referenceTargets, characterStateRefs);
+    referenceTargets = finalCanonicalIdentityMerge.referenceTargets;
+    characterStateRefs = finalCanonicalIdentityMerge.characterStateRefs;
+    finalIdentityAliasCollapse = collapseCharacterIdentityAliasTargets(referenceTargets, characterStateRefs);
+    referenceTargets = finalIdentityAliasCollapse.referenceTargets;
+    characterStateRefs = finalIdentityAliasCollapse.characterStateRefs;
+  }
   const anchorLanguageWarnings = [
     ...providerExclusionPayloadAnchorWarnings(referenceTargets, characterStateRefs),
     ...abstractStatusAsPhysicalAnchorWarnings(referenceTargets, characterStateRefs),
   ];
-  const promptFacingPrune = prunePromptFacingNoRefTargets(referenceTargets);
+  const promptFacingPrune = fullSelectionContract
+    ? { referenceTargets, warnings: [], prunedTargetIds: [] }
+    : prunePromptFacingNoRefTargets(referenceTargets);
   referenceTargets = promptFacingPrune.referenceTargets;
   const knownSceneIds = new Set(scopedSemantic.scenes.map((scene) => String(scene.scene_id ?? "")));
   const unknownSceneScopeDrop = dropUnknownReferenceSceneScopesForTests(referenceTargets, knownSceneIds);
@@ -3458,9 +3946,16 @@ async function main() {
   const openingIdentityFindings = openingSelectedIdentityFindings(referenceTargets, visualBeatPlan);
   const characterStateFindings = characterStateDirectorFindings(characterStateRefs, referenceTargets, { legacyRevalidation });
   const nonhumanSelectionFindings = unselectedDistinctNonhumanActorFindingsForTests(referenceEvidenceLedger, referenceTargets);
+  const selectionFidelityFindings = fullSelectionContract
+    ? referenceDirectorSelectionFidelityFindings({
+        reference_director_contract_version: "reference_director_v3_full_selection",
+        reference_director_selection_receipt: directorSelectionReceipt,
+        reference_targets: referenceTargets,
+      })
+    : [];
   const coverageFindings = locationContractLedger.findings ?? [];
   const styleFindings = shouldDropStyleRefs ? [] : styleReferenceContaminationFindings(referenceTargets);
-  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...recurringCoverageFindings, ...openingIdentityFindings, ...characterStateFindings, ...nonhumanSelectionFindings];
+  const findings = [...coverageFindings, ...locationContractScope.findings, ...unknownSceneScopeDrop.findings, ...styleFindings, ...directorSelectionFindings, ...recurringCoverageFindings, ...openingIdentityFindings, ...characterStateFindings, ...nonhumanSelectionFindings, ...selectionFidelityFindings];
   const status = findings.some((finding) => finding.severity === "blocker") ? "blocked" : "passed";
   const referenceInventoryLedger = buildSelectedReferenceInventory(referenceTargets, {
     sourceScriptHash: semanticPlan.source_script_hash,
@@ -3514,9 +4009,10 @@ async function main() {
       episode_visual_direction_path: episodeVisualDirection.trim() ? episodeVisualDirectionPath : null,
     },
     visual_reference_scope: scope,
-    reference_director_contract_version: legacyRevalidation
-      ? (existingReferencePlan.reference_director_contract_version ?? "legacy_revalidation")
-      : "reference_director_v2",
+    reference_director_contract_version: fullSelectionContract
+      ? "reference_director_v3_full_selection"
+      : (existingReferencePlan.reference_director_contract_version ?? "legacy_revalidation"),
+    reference_director_selection_receipt: directorSelectionReceipt,
     reference_cleanliness_contract_version: legacyRevalidation
       ? (existingReferencePlan.reference_cleanliness_contract_version ?? null)
       : referenceCleanlinessContractVersion,
@@ -3542,14 +4038,20 @@ async function main() {
       chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       chunk_raw_target_count: llm.chunk_raw_target_count ?? null,
       merged_target_count: llm.merged_target_count ?? llmTargetCount,
+      creative_attempts_per_chunk: 1,
+      global_director_creative_attempts: 1,
+      automatic_creative_retry_count: 0,
       revalidated_without_llm: legacyRevalidation,
       revalidated_at: legacyRevalidation ? new Date().toISOString() : null,
     },
     reference_budget: {
-      profile: "llm_directed_v2",
-      policy: "The global reference-director LLM is the sole creative selector. Deterministic code may validate, canonicalize, scope, and add source-only dependencies; it never restores omitted generated targets.",
+      profile: fullSelectionContract ? "llm_full_selection_v3" : "llm_directed_v2",
+      policy: fullSelectionContract
+        ? "The full clean global LLM director selection is the production library. Deterministic code never caps, prunes, merges away, or downgrades a selected generated target; the separate four-reference limit applies only when attaching refs to an individual scene cut."
+        : "The global reference-director LLM is the sole creative selector. Deterministic code may validate, canonicalize, scope, and add source-only dependencies; it never restores omitted generated targets.",
       llm_selected_target_count: llmTargetCount,
       final_target_count: referenceTargets.length,
+      post_director_removed_target_count: Math.max(0, llmTargetCount - referenceTargets.filter((target) => llmTargetIds.has(String(target.ref_id ?? ""))).length),
     },
     provider_exclusion_payload_policy: "LLM-authored anchor language is preserved. Separate provider-exclusion payload fields and embedded provider-exclusion sections are disallowed before provider use.",
     policy: "Reference strategy only. Manual review must approve prompt anchors before reference generation or production imagegen.",
@@ -3596,7 +4098,26 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(outputPath, { schema: "goldflow_visual_reference_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    const [partial, existing] = await Promise.all([
+      readJson(referencePartialPath, null),
+      readJson(outputPath, null),
+    ]);
+    if (existing?.status !== "passed") {
+      await writeJson(outputPath, {
+        schema: "goldflow_visual_reference_plan_v1",
+        status: pendingReferencePartial(partial) ? "blocked" : "failed",
+        error: error instanceof Error ? error.message : String(error),
+        reference_partial_path: pendingReferencePartial(partial) ? referencePartialPath : null,
+        failed_chunk_ids: pendingReferencePartial(partial)
+          ? (partial.failed_chunks ?? []).map((row) => row.chunk_id).filter(Boolean)
+          : [],
+        failed_scene_ids: pendingReferencePartial(partial)
+          ? [...new Set((partial.failed_chunks ?? []).flatMap((row) => row.scene_ids ?? []).map(String).filter(Boolean))]
+          : [],
+        passed_chunks_preserved: pendingReferencePartial(partial) ? Number(partial.passed_chunk_count ?? 0) : 0,
+        updated_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

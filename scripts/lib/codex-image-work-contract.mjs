@@ -6,7 +6,9 @@ import sharp from "sharp";
 
 export const CODEX_WORK_SCHEMA = "goldflow_codex_image_work_manifest_v1";
 export const DEFAULT_LEASE_SECONDS = 900;
-export const DEFAULT_MAX_ATTEMPTS = 3;
+// One creative attempt per asset. A failed item is dead-lettered and repaired
+// later by exact ID; the worker queue never silently asks for another image.
+export const DEFAULT_MAX_ATTEMPTS = 1;
 export const DEFAULT_ASPECT_RATIO = 16 / 9;
 export const DEFAULT_ASPECT_TOLERANCE = 0.08;
 export const DEFAULT_RECOMMENDED_CONCURRENCY = 8;

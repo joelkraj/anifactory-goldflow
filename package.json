@@ -12,6 +12,7 @@
     "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
     "test:planner": "node scripts/tests/planner-tests.mjs",
     "test:media": "node scripts/tests/media-tests.mjs",
+    "test:reference-parallax": "node scripts/tests/reference-parallax-policy-tests.mjs",
     "test:integration": "node scripts/tests/integration-tests.mjs",
     "test:fixtures": "npm run test:stage-contract && npm run test:planner && npm run test:media && npm run test:integration",
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",

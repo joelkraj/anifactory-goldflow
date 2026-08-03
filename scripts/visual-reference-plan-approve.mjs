@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { referencePlanApprovalContractSha256 } from "./lib/reference-plan-contract.mjs";
+import { assertReferenceDirectorSelectionFidelity } from "./lib/reference-selection-fidelity.mjs";
 
 const flags = parseFlags(process.argv.slice(2));
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -319,6 +320,7 @@ async function main() {
   if (blockers.length) throw new Error(`Reference plan has ${blockers.length} unresolved blocker(s).`);
   const targets = Array.isArray(plan.reference_targets) ? plan.reference_targets : [];
   if (!targets.length) throw new Error("Reference plan has no selected targets.");
+  assertReferenceDirectorSelectionFidelity(plan);
   const cleanlinessContractVersion = normalizedText(plan.reference_cleanliness_contract_version);
   if (cleanlinessContractVersion && cleanlinessContractVersion !== REFERENCE_CLEANLINESS_CONTRACT_VERSION) {
     throw new Error(`Unsupported reference_cleanliness_contract_version: ${cleanlinessContractVersion}`);
@@ -340,6 +342,7 @@ async function main() {
     visual_reference_plan_sha256: planHash,
     reference_plan_contract_sha256: planContractHash,
     reference_director_contract_version: plan.reference_director_contract_version ?? null,
+    reference_director_selection_receipt: plan.reference_director_selection_receipt ?? null,
     ...(cleanlinessContractVersion === REFERENCE_CLEANLINESS_CONTRACT_VERSION ? {
       reference_cleanliness_contract_version: cleanlinessContractVersion,
       source_only_provenance_enforced: true,

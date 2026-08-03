@@ -63,6 +63,7 @@ import {
   materializeProductionManifest,
 } from "./lib/execution-provenance.mjs";
 import {
+  acceptedImageHashesForRows,
   applyImageQaDecisionsToLedger,
   donorRecoveryFinding,
   imageQaNeedsRecovery,
@@ -314,6 +315,8 @@ import { buildRetentionAttributionForTests, normalizeRetentionRowsForTests } fro
 import {
   closeVisualBeatTimelineForTests,
   factLedgerMatchesScriptForTests,
+  mergeEditorialRecoveryBeatsForTests,
+  retentionBeatDensityFindingsForTests,
   scriptPrefixForTimedWordsForTests,
   visualBeatInternalsForTests,
 } from "./visual-beat-plan.mjs";
@@ -1723,41 +1726,25 @@ async function testRunStatusParallaxDecisionStages() {
     render_profile: "smooth_subpixel_ken_burns",
   });
   const reportPath = path.join(episodeDir, "parallax_asset_report_ep_01.json");
-  await writeJson(reportPath, {
-    schema: "goldflow_parallax_asset_report_v1",
-    status: "blocked",
-    candidate_count: 0,
-    candidates: [],
-    blockers: [{ code: "parallax_no_candidate_decision_required" }],
-    next_command_shape: "visual parallax-assets --no-suitable-parallax true --reviewer <name> --note <reason>",
-  });
-  let result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
-    cwd: process.cwd(),
-    env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
-  });
-  let status = JSON.parse(result.stdout);
-  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").state, "blocked");
-  assert.match(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").next_command_shape, /no-suitable-parallax/);
-
   const sourcePath = path.join(episodeDir, "parallax-source.json");
   await writeJson(sourcePath, { fixture: true });
-  const waivedReport = {
+  const emptyReport = {
     schema: "goldflow_parallax_asset_report_v1",
     status: "passed",
     candidate_count: 0,
     candidates: [],
-    no_suitable_parallax_waiver: { reviewer: "fixture", note: "No clean separable foreground exists." },
+    no_suitable_parallax: { disposition: "accepted_single_plane_motion_fallback" },
     source_hashes: { [sourcePath]: await sha256File(sourcePath) },
   };
-  waivedReport.asset_contract_sha256 = parallaxAssetContractSha256(waivedReport);
-  await writeJson(reportPath, waivedReport);
-  result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
+  emptyReport.asset_contract_sha256 = parallaxAssetContractSha256(emptyReport);
+  await writeJson(reportPath, emptyReport);
+  const result = await execFileAsync(process.execPath, ["scripts/run-status.mjs", "--episode-dir", episodeDir], {
     cwd: process.cwd(),
     env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
   });
-  status = JSON.parse(result.stdout);
-  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").state, "skipped_with_waiver");
-  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_approval").state, "skipped_with_waiver");
+  const status = JSON.parse(result.stdout);
+  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_generation").state, "passed");
+  assert.equal(status.stage_ledger.find((row) => row.stage === "parallax_asset_approval").state, "passed");
 }
 
 async function testAppendOnlyExecutionProvenance() {
@@ -1983,7 +1970,7 @@ async function testCumulativeImagegenHistoryAndEpisodeTruth() {
   assert.equal(cumulative.wall_time_sec, 6);
   assert.equal(episodeImageStatusForTests("passed", "partial"), "partial");
   assert.equal(episodeImageStatusForTests("passed", "passed"), "passed");
-  assert.equal(episodeImageStatusForTests("failed", "passed"), "failed");
+  assert.equal(episodeImageStatusForTests("failed", "passed"), "passed");
 }
 
 function testPinnedCodexRuntimeContracts() {
@@ -2288,13 +2275,13 @@ function testSemanticSceneQualityFindings() {
   assert.equal(manualSemanticRepair.ledger.canonical_locations[0].location_id, "answer_area");
 }
 
-function testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement() {
+function testReferenceDirectorPreservesRetiredSceneScopesAsAdvisory() {
   const result = dropUnknownReferenceSceneScopesForTests([
     { ref_id: "rail_office_ref", scene_ids: ["scene_069", "scene_070", "scene_070a"] },
   ], new Set(["scene_069", "scene_070a"]));
-  assert.deepEqual(result.targets[0].scene_ids, ["scene_069", "scene_070a"]);
+  assert.deepEqual(result.targets[0].scene_ids, ["scene_069", "scene_070", "scene_070a"]);
   assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0].code, "reference_target_unknown_scene_scope_dropped");
+  assert.equal(result.findings[0].code, "reference_target_unknown_scene_scope_preserved");
   assert.deepEqual(result.findings[0].scene_ids, ["scene_070"]);
 }
 
@@ -2863,10 +2850,31 @@ function testEditorialBeatDirectorContracts() {
   const pauseInflated = structuredClone(atoms);
   pauseInflated[1].start_sec = 5;
   pauseInflated[1].end_sec = Math.max(5.4, pauseInflated[1].end_sec + 2);
-  assert.throws(() => normalizeEditorialGrouping(raw, pauseInflated, ledger, "ep_01"), /editorial_retention_rail_violation/i);
+  const pauseInflatedNormalized = normalizeEditorialGrouping(raw, pauseInflated, ledger, "ep_01");
+  assert.equal(pauseInflatedNormalized.findings.some((finding) => (
+    finding.code === "editorial_retention_timing_goal_miss" && finding.severity === "warning"
+  )), true);
+  const fourSecondAtom = {
+    ...atoms[0],
+    start_sec: 1300,
+    end_sec: 1304,
+    duration_sec: 4,
+    transition_barrier_before: false,
+  };
+  const fourSecondRaw = { beats: [{ ...raw.beats[0], source_atom_ids: [fourSecondAtom.atom_id] }] };
+  const fourSecondNormalized = normalizeEditorialGrouping(fourSecondRaw, [fourSecondAtom], ledger, "ep_01");
+  assert.equal(fourSecondNormalized.beats[0].duration_sec, 4);
+  assert.equal(fourSecondNormalized.findings.some((finding) => (
+    finding.code === "editorial_retention_timing_goal_miss" && finding.severity === "warning"
+  )), true);
+  const fourSecondAppliedFinding = editorialRetentionRailFindings(fourSecondNormalized.beats)[0];
+  assert.equal(fourSecondAppliedFinding.severity, "warning");
+  assert.equal(fourSecondAppliedFinding.code, "editorial_applied_hold_timing_goal_miss");
   const prompt = buildEditorialDirectorPrompt(atoms, ledger, timedScenes);
   assert.match(prompt, /You own visual job, depiction mode/i);
   assert.match(prompt, /Never merge across an atom with transition_barrier_before=true/i);
+  assert.match(prompt, /Retention timing is an editorial goal, never a validity gate/i);
+  assert.match(prompt, /a 4-second beat is valid in any band/i);
   assert.match(prompt, /nonhuman actor/i);
   assert.match(prompt, /CANONICAL PROPS:/);
   assert.match(prompt, /CANONICAL UI MOTIFS:/);
@@ -2881,6 +2889,19 @@ function testEditorialBeatDirectorContracts() {
   assert.match(animationPrompt, /UI\/screen shots remain eligible/);
   assert.deepEqual(retentionRailForTime(0), { band: "0_30", min_sec: 2.2, max_sec: 4.5 });
   assert.deepEqual(retentionRailForTime(1300), { band: "1200_plus", min_sec: 7, max_sec: 15 });
+  const densityWarnings = retentionBeatDensityFindingsForTests([
+    { start_sec: 0, end_sec: 30, duration_sec: 30 },
+    { start_sec: 30, end_sec: 180, duration_sec: 150 },
+  ]);
+  assert.equal(densityWarnings.every((finding) => finding.severity === "warning"), true);
+  assert.equal(densityWarnings.some((finding) => finding.code === "hook_beat_density_goal_miss"), true);
+  assert.equal(densityWarnings.some((finding) => finding.code === "retention_ramp_beat_density_goal_miss"), true);
+  const recoveryMerged = mergeEditorialRecoveryBeatsForTests(
+    [normalized.beats[0], normalized.beats[2]],
+    [normalized.beats[1], normalized.beats[3]],
+  );
+  assert.deepEqual(recoveryMerged.map((beat) => beat.visual_beat_id), normalized.beats.map((beat) => beat.visual_beat_id));
+  assert.throws(() => mergeEditorialRecoveryBeatsForTests([normalized.beats[0]], [normalized.beats[0]]), /duplicate beat/i);
 
   const multiplierScript = "The system appeared. [PROJECTED RETURN: 0X] Joey closed the laptop.";
   const multiplierTokens = ["The", "system", "appeared", "PROJECTED", "RETURN", "zero", "times", "Joey", "closed", "the", "laptop"];
@@ -3631,6 +3652,13 @@ function testImageOutputQaRiskAndDonorPolicies() {
   });
   assert.equal(accepted.status, "complete");
   assert.equal(accepted.decisions[0].decision, "accepted");
+  const aestheticReplacement = mergeRiskReviewDecisions(riskRows, {}, {
+    reviewer: "fixture",
+    note: "usable image retained; prettier replacement requested",
+    rejectedIds: ["cut_001"],
+  });
+  assert.equal(aestheticReplacement.status, "complete");
+  assert.equal(aestheticReplacement.decisions[0].decision, "rejected");
   const resumed = mergeRiskReviewDecisions(riskRows, accepted, { reviewer: "", note: "" });
   assert.equal(resumed.reviewer, "fixture");
   assert.equal(resumed.note, "inspected exact image hash");
@@ -3661,8 +3689,9 @@ function testImageOutputQaRiskAndDonorPolicies() {
   ], {
     decisions: [{ image_id: "cut_001", image_sha256: "hash-a", decision: "rejected" }],
   }, new Set(), "fixture", "2026-01-01T00:00:00.000Z");
-  assert.deepEqual(ledgerResult.invalidated_motion_image_ids, ["cut_001"]);
-  assert.equal(ledgerResult.ledger.cuts[0].motion_clip_path, null);
+  assert.deepEqual(ledgerResult.invalidated_motion_image_ids, []);
+  assert.equal(ledgerResult.ledger.cuts[0].motion_clip_path, "/tmp/a.mp4");
+  assert.equal(ledgerResult.ledger.cuts[0].image_qa_status, "passed_with_aesthetic_advisory");
   assert.equal(ledgerResult.ledger.cuts[1].motion_clip_path, "/tmp/b.mp4");
   assert.equal(ledgerResult.ledger.cuts[1].image_qa_status, "passed_structural");
   assert.equal(ledgerResult.ledger.cuts[2].image_sha256, "fresh-hash");
@@ -3688,8 +3717,13 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.match(codexRecoveryCommand, /imagegen codex-work/);
   assert.match(codexRecoveryCommand, /--image-ids cut_002/);
   assert.match(codexRecoveryCommand, /--qa-recovery true/);
-  assert.equal(imageQaNeedsRecovery([], ["cut_001"]), true);
+  assert.equal(imageQaNeedsRecovery([], ["cut_001"]), false);
+  assert.equal(imageQaNeedsRecovery([{ image_id: "cut_001" }], []), true);
   assert.equal(imageQaNeedsRecovery([], []), false);
+  assert.deepEqual(acceptedImageHashesForRows([
+    { image_id: "cut_001", image_sha256: "hash-a" },
+    { image_id: "cut_002", image_sha256: "hash-b" },
+  ], new Set(["cut_002"])), { cut_001: "hash-a" });
 }
 
 function testExceptionDrivenQaAndAutomaticFocalAnalysis() {
@@ -3731,9 +3765,10 @@ function testExceptionDrivenQaAndAutomaticFocalAnalysis() {
     shot_manifest: { visible_characters: ["Joey"], shot_job: "emotional_reaction" },
     reference_requirements: [{}, {}, {}, {}],
   };
-  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 0 }).tier, "structural_auto_pass");
-  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 1 }).tier, "deterministic_integration_sample");
-  assert.equal(imageManualReviewPolicy(fourRefPrompt, [{ severity: "needs_review", code: "focal_anchor_near_frame_edge" }], { openingSec: 180, integrationSampleRate: 0 }).tier, "mandatory_exception_review");
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 0 }).tier, "advisory_review_log");
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 1 }).tier, "advisory_review_log");
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [], { openingSec: 180, integrationSampleRate: 1 }).requires_manual_review, false);
+  assert.equal(imageManualReviewPolicy(fourRefPrompt, [{ severity: "needs_review", code: "focal_anchor_near_frame_edge" }], { openingSec: 180, integrationSampleRate: 0 }).tier, "advisory_review_log");
 
   const intent = {
     image_id: "cut_sample",
@@ -4661,7 +4696,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8/);
   assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 8/);
   assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 8/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8 --visual-chunk-validation-attempts 2/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8 .*--visual-chunk-validation-attempts 1/);
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
@@ -7700,7 +7735,7 @@ async function testNarrationPaceChecks() {
   assert.equal(diagnosticAudioReport.status, "passed");
   assert.equal(diagnosticAudioReport.pace_policy, "diagnostic");
   assert.equal(diagnosticAudioReport.pace_gate_enforced, false);
-  assert.equal(diagnosticAudioReport.diagnostic_pace_status, "blocked");
+  assert.equal(diagnosticAudioReport.diagnostic_pace_status, "outside_target");
   assert.equal(diagnosticAudioReport.blocker, null);
 
   const outOfRange = await execFileAsync(process.execPath, [
@@ -7711,7 +7746,7 @@ async function testNarrationPaceChecks() {
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   assert.match(outOfRange.stdout, /"status": "passed"/);
   const outOfRangeReport = JSON.parse(await fs.readFile(path.join(episodeDir, "narration_pace_report_ep_01.json"), "utf8"));
-  assert.equal(outOfRangeReport.diagnostic_pace_status, "blocked");
+  assert.equal(outOfRangeReport.diagnostic_pace_status, "outside_target");
   assert.equal(outOfRangeReport.pace_gate_enforced, false);
 }
 
@@ -7754,7 +7789,7 @@ async function testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases() {
   const configuredReport = JSON.parse(await fs.readFile(path.join(episodeDir, "script_pace_report.json"), "utf8"));
   assert.equal(configuredReport.status, "passed");
   assert.equal(configuredReport.hook_gate_enforced, false);
-  assert.equal(configuredReport.diagnostic_hook_status, "blocked");
+  assert.equal(configuredReport.diagnostic_hook_status, "missed_goal");
   assert.equal(configuredReport.hook_milestone_report.configured, true);
   assert.equal(configuredReport.hook_milestone_report.warnings.some((warning) => warning.code === "late_configured_promise"), true);
 
@@ -7769,7 +7804,7 @@ async function testScriptPaceDoesNotUseBuiltInEpisodeHookPhrases() {
   assert.equal(diagnosticReport.status, "passed");
   assert.equal(diagnosticReport.pace_policy, "diagnostic");
   assert.equal(diagnosticReport.hook_gate_enforced, false);
-  assert.equal(diagnosticReport.diagnostic_hook_status, "blocked");
+  assert.equal(diagnosticReport.diagnostic_hook_status, "missed_goal");
   assert.equal(diagnosticReport.blocker, null);
 }
 
@@ -8600,8 +8635,8 @@ function testVisualResolveScopePrefersCutIds() {
   );
   assert.deepEqual(merged.map((prompt) => prompt.prompt), ["keep", "new two", "old three"]);
   const sceneScope = visualResolveScopeForBlockers([{ severity: "blocker", resolved: false, scene_id: "scene_002", code: "scene_level" }]);
-  assert.equal(sceneScope.mode, "scene_ids");
-  assert.deepEqual(sceneScope.args, ["--only-scenes", "scene_002"]);
+  assert.equal(sceneScope.mode, "manual_exact_scope_required");
+  assert.deepEqual(sceneScope.args, []);
 }
 
 async function testImagegenDeadletterRefusal() {
@@ -10831,14 +10866,16 @@ async function testTimingBindMatchesPossessiveAnchorsAfterCursor() {
     "--series", "series",
     "--week", "run",
     "--episode", "ep_01",
-    "--max-scene-duration-sec", "10",
+    "--max-scene-duration-sec", "2",
   ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
   const timed = JSON.parse(await fs.readFile(path.join(episodeDir, "timed_scene_plan.json"), "utf8"));
   const scene = timed.scenes.find((item) => item.scene_id === "scene_002");
   assert.equal(scene.start_resolution, "whisper_phrase_match");
   assert.equal(scene.matched_start_words, "His mother's piano");
   assert.equal(scene.start_sec, 12);
-  assert.equal(scene.duration_sec < 10, true);
+  assert.equal(scene.duration_sec > 2, true);
+  assert.equal(timed.status, "passed");
+  assert.equal(timed.timing_advisories.some((row) => row.scene_id === "scene_002" && row.code === "scene_duration_above_editorial_goal"), true);
 }
 
 async function testRunStatusBlocksStaleVisualBeatSourceHashes() {
@@ -11911,7 +11948,7 @@ const FIXTURE_SUITES = {
     testSemanticSceneAnchorValidation,
     testSemanticSceneCoverageRejectsCollapsedTail,
     testSemanticSceneQualityFindings,
-    testReferenceDirectorDropsRetiredSceneScopesWithoutReplacement,
+    testReferenceDirectorPreservesRetiredSceneScopesAsAdvisory,
     testSemanticPlannerPromptContracts,
     testSemanticChunkingSplitsLongSingleParagraph,
     testBoundedProofBaselineScoping,

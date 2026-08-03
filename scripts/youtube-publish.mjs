@@ -6,13 +6,18 @@ import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { sha256File } from "./lib/file-hash.mjs";
 import {
+  LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
+  YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
+  listYoutubeThumbnailUpdateReceipts,
+  validateYoutubeThumbnailUpdateReceipt,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
   validateYoutubeUploadReceipt,
+  youtubeEffectiveThumbnailState,
   youtubeTextSha256,
 } from "./lib/youtube-publish-contract.mjs";
 
@@ -25,6 +30,11 @@ function parseFlags(parts) {
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index];
     if (!part.startsWith("--")) continue;
+    const equalsIndex = part.indexOf("=", 2);
+    if (equalsIndex !== -1) {
+      parsed[part.slice(2, equalsIndex)] = part.slice(equalsIndex + 1);
+      continue;
+    }
     const key = part.slice(2);
     const value = parts[index + 1] && !parts[index + 1].startsWith("--") ? parts[index + 1] : "true";
     parsed[key] = value;
@@ -64,6 +74,17 @@ async function writeJson(filePath, value) {
   await fs.rename(tempPath, filePath);
 }
 
+async function writeJsonExclusive(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const handle = await fs.open(filePath, "wx");
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 function episodeDirectory() {
   if (flags["episode-dir"]) return path.resolve(flags["episode-dir"]);
   requiredFlag("channel", flags.channel);
@@ -98,7 +119,7 @@ async function packagingInputs(episodeDir, episode) {
     readJson(specPath),
   ]);
   if (!spec) throw new Error(`Missing or invalid packaging spec: ${specPath}`);
-  if (spec.schema !== YOUTUBE_PACKAGING_SPEC_SCHEMA) {
+  if (![YOUTUBE_PACKAGING_SPEC_SCHEMA, LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA].includes(spec.schema)) {
     throw new Error(`Unsupported packaging spec schema: ${spec.schema ?? "missing"}`);
   }
   const thumbnailPath = path.resolve(episodeDir, clean(spec.thumbnail_final_path));
@@ -165,7 +186,7 @@ async function approvePackaging() {
 async function prepareManifest() {
   const { episodeDir, identity, identityPath, episode } = await episodeContext();
   const inputs = await packagingInputs(episodeDir, episode);
-  const validation = packagingValidation(inputs);
+  const validation = packagingValidation(inputs, { allowLegacyAdapter: true });
   if (validation.status !== "passed") {
     console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
     process.exitCode = 2;
@@ -210,6 +231,8 @@ async function prepareManifest() {
     source_hashes: sourceHashes,
     packaging_spec_path: inputs.specPath,
     packaging_spec_sha256: sourceHashes[inputs.specPath],
+    packaging_schema_mode: validation.schema_mode,
+    packaging_validation_warnings: validation.warnings,
     upload_package_path: inputs.packagePath,
     video: {
       path: videoPath,
@@ -231,6 +254,14 @@ async function prepareManifest() {
       subjects: selectedThumbnail.subjects,
       labels: selectedThumbnail.labels ?? [],
       arrows: selectedThumbnail.arrows ?? [],
+      provider: selectedThumbnail.provider ?? null,
+      generation_mode: selectedThumbnail.generation_mode ?? null,
+      reference_count: selectedThumbnail.reference_count ?? null,
+      text_rendered_by_model: selectedThumbnail.text_rendered_by_model ?? null,
+      locally_composited_text: selectedThumbnail.locally_composited_text ?? null,
+      locally_composited_arrows: selectedThumbnail.locally_composited_arrows ?? null,
+      legacy_adapter_applied: validation.legacy_adapter_applied,
+      validation_warnings: validation.warnings,
     },
     pinned_comment: {
       text: clean(inputs.spec.pinned_comment?.text),
@@ -254,6 +285,7 @@ async function prepareManifest() {
     video_path: videoPath,
     thumbnail_path: inputs.thumbnailPath,
     title: manifest.title,
+    packaging_validation_warnings: validation.warnings,
     next_action: "Use the youtube-studio-publish skill to upload privately and record the verified result.",
   }, null, 2));
 }
@@ -400,10 +432,135 @@ async function recordComment() {
   }, null, 2));
 }
 
+async function thumbnailFileEvidence(filePath) {
+  const [metadata, stat, sha256] = await Promise.all([
+    sharp(filePath).metadata(),
+    fs.stat(filePath),
+    sha256File(filePath),
+  ]);
+  const format = clean(metadata.format).toLowerCase();
+  const width = Number(metadata.width ?? 0);
+  const height = Number(metadata.height ?? 0);
+  if (!["png", "jpeg", "jpg"].includes(format)) {
+    throw new Error(`Thumbnail must be PNG or JPEG: ${filePath}`);
+  }
+  if (width < 1280 || !(height > 0) || Math.abs(width / height - 16 / 9) > 0.03) {
+    throw new Error(`Thumbnail must be at least 1280 px wide and 16:9: ${filePath}`);
+  }
+  if (!(stat.size > 0) || stat.size > 50 * 1024 * 1024) {
+    throw new Error(`Thumbnail file size is invalid: ${filePath}`);
+  }
+  return { path: filePath, sha256, bytes: stat.size, width, height, format };
+}
+
+async function recordThumbnailUpdate() {
+  const { episodeDir, episode } = await episodeContext();
+  const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
+  const uploadReceiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
+  const [manifest, uploadReceipt, manifestHash, uploadReceiptHash] = await Promise.all([
+    readJson(manifestPath),
+    readJson(uploadReceiptPath),
+    sha256File(manifestPath).catch(() => null),
+    sha256File(uploadReceiptPath).catch(() => null),
+  ]);
+  if (!manifest || manifest.schema !== YOUTUBE_PUBLISH_MANIFEST_SCHEMA || manifest.status !== "passed") {
+    throw new Error(`Passed YouTube publish manifest required: ${manifestPath}`);
+  }
+  const uploadValidation = validateYoutubeUploadReceipt(uploadReceipt, { manifest, manifestHash });
+  if (uploadValidation.status !== "passed") {
+    throw new Error(`Passed YouTube upload receipt required: ${uploadValidation.blockers.join(", ")}`);
+  }
+  for (const name of [
+    "video-id",
+    "studio-url",
+    "old-thumbnail",
+    "new-thumbnail",
+    "expected-channel",
+    "verified-at",
+    "operator",
+  ]) requiredFlag(name, flags[name]);
+  if (!isTrue(flags["channel-verified"])) throw new Error("Thumbnail update requires --channel-verified true.");
+  if (!isTrue(flags["thumbnail-verified"])) throw new Error("Thumbnail update requires --thumbnail-verified true.");
+  if (!isTrue(flags["schedule-preserved"])) throw new Error("Thumbnail update requires --schedule-preserved true.");
+
+  const oldThumbnailPath = path.resolve(episodeDir, clean(flags["old-thumbnail"]));
+  const newThumbnailPath = path.resolve(episodeDir, clean(flags["new-thumbnail"]));
+  if (!(await exists(oldThumbnailPath))) throw new Error(`Old thumbnail missing: ${oldThumbnailPath}`);
+  if (!(await exists(newThumbnailPath))) throw new Error(`New thumbnail missing: ${newThumbnailPath}`);
+  const [oldThumbnail, newThumbnail, effective, receiptFiles] = await Promise.all([
+    thumbnailFileEvidence(oldThumbnailPath),
+    thumbnailFileEvidence(newThumbnailPath),
+    youtubeEffectiveThumbnailState(episodeDir, episode, { manifest, uploadReceipt, uploadReceiptHash }),
+    listYoutubeThumbnailUpdateReceipts(episodeDir, episode),
+  ]);
+  if (effective.status !== "passed") {
+    throw new Error(`Existing thumbnail update chain is invalid: ${effective.blockers.join(", ")}`);
+  }
+  if (path.resolve(effective.path) !== oldThumbnail.path || effective.sha256 !== oldThumbnail.sha256) {
+    throw new Error("--old-thumbnail does not match the current effective uploaded thumbnail.");
+  }
+  const sequence = receiptFiles.length + 1;
+  const priorReceiptPath = sequence > 1 ? receiptFiles.at(-1)?.path ?? null : null;
+  const receiptPath = path.join(
+    episodeDir,
+    `youtube_thumbnail_update_receipt_${episode}_${String(sequence).padStart(2, "0")}.json`,
+  );
+  if (await exists(receiptPath)) throw new Error(`Thumbnail update receipt already exists: ${receiptPath}`);
+  const receipt = {
+    schema: YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
+    status: "passed",
+    episode,
+    sequence,
+    upload_receipt_path: uploadReceiptPath,
+    upload_receipt_sha256: uploadReceiptHash,
+    prior_update_receipt_path: priorReceiptPath,
+    prior_update_receipt_sha256: priorReceiptPath ? await sha256File(priorReceiptPath) : null,
+    video_id: clean(flags["video-id"]),
+    studio_url: clean(flags["studio-url"]),
+    expected_channel: clean(flags["expected-channel"]),
+    schedule_preserved: true,
+    schedule_at: clean(uploadReceipt.schedule_at) || null,
+    field_verification: {
+      active_channel: true,
+      thumbnail: true,
+    },
+    old_thumbnail: oldThumbnail,
+    new_thumbnail: newThumbnail,
+    verified_at: clean(flags["verified-at"]),
+    operator: clean(flags.operator),
+    recorded_at: new Date().toISOString(),
+    note: clean(flags.note) || null,
+  };
+  const validation = validateYoutubeThumbnailUpdateReceipt(receipt, {
+    manifest,
+    uploadReceipt,
+    uploadReceiptHash,
+    currentThumbnail: effective,
+    priorReceiptHash: receipt.prior_update_receipt_sha256,
+    newThumbnailSha256: newThumbnail.sha256,
+  });
+  if (validation.status !== "passed") {
+    console.log(JSON.stringify({ status: "blocked", receipt_path: null, blockers: validation.blockers }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  receipt.blockers = [];
+  await writeJsonExclusive(receiptPath, receipt);
+  console.log(JSON.stringify({
+    status: "passed",
+    receipt_path: receiptPath,
+    sequence,
+    video_id: receipt.video_id,
+    old_thumbnail_sha256: oldThumbnail.sha256,
+    new_thumbnail_sha256: newThumbnail.sha256,
+  }, null, 2));
+}
+
 async function main() {
   if (action === "approve-packaging") return approvePackaging();
   if (action === "prepare") return prepareManifest();
   if (action === "record-upload") return recordUpload();
+  if (action === "record-thumbnail-update") return recordThumbnailUpdate();
   if (action === "record-comment") return recordComment();
   throw new Error(`Unknown YouTube publishing action: ${action || "missing"}.`);
 }

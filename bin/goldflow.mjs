@@ -27,6 +27,11 @@ function parseFlags(parts) {
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index];
     if (!part.startsWith("--")) continue;
+    const equalsIndex = part.indexOf("=", 2);
+    if (equalsIndex !== -1) {
+      parsed[part.slice(2, equalsIndex)] = part.slice(equalsIndex + 1);
+      continue;
+    }
     const key = part.slice(2);
     const value = parts[index + 1] && !parts[index + 1].startsWith("--") ? parts[index + 1] : "true";
     parsed[key] = value;
@@ -357,6 +362,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("youtube-publish.mjs", ["prepare", ...flags]);
 } else if (command === "youtube" && subcommand === "record-upload") {
   run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "record-thumbnail-update") {
+  run("youtube-publish.mjs", ["record-thumbnail-update", ...flags]);
 } else if (command === "youtube" && subcommand === "record-comment") {
   run("youtube-publish.mjs", ["record-comment", ...flags]);
 } else if (command === "analytics" && subcommand === "ingest") {

@@ -12,7 +12,9 @@ const profiles = {
       editorial_concurrency: 8,
       visual_ref_chunk_concurrency: 8,
       visual_chunk_concurrency: 8,
-      chunk_validation_attempts: 2,
+      // One authored response per planner unit. A failed unit is repaired later
+      // by exact ID/chunk while every passed content-addressed unit stays frozen.
+      chunk_validation_attempts: 1,
     },
     media: {
       tts_concurrency: 1,
@@ -23,6 +25,9 @@ const profiles = {
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,
+      // A value of one means one creative provider submission, not one retry.
+      // Status polling for an already-created provider job is still allowed.
+      creative_submission_attempts: 1,
     },
     audio: {
       local_whisper_timing: productionLocalWhisperContract(),
@@ -40,12 +45,17 @@ const profiles = {
       wavefront_min_cuts: 15,
       wavefront_max_wait_ms: 5000,
       planner_recovery_policy: "scoped_only",
+      passed_artifact_policy: "immutable",
+      automatic_retry_policy: "none",
+      aesthetic_finding_policy: "advisory",
+      timing_rail_policy: "advisory",
     },
     advance: {
       authorize_planner_spend: true,
       authorize_media_spend: true,
       authorize_render: true,
       agent_validated_stages: ["visual_beat_plan"],
+      max_attempts_per_stage: 1,
     },
   },
   balanced_v1: {
@@ -57,7 +67,7 @@ const profiles = {
       editorial_concurrency: 4,
       visual_ref_chunk_concurrency: 6,
       visual_chunk_concurrency: 6,
-      chunk_validation_attempts: 2,
+      chunk_validation_attempts: 1,
     },
     media: {
       tts_concurrency: 1,
@@ -68,6 +78,7 @@ const profiles = {
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,
+      creative_submission_attempts: 1,
     },
     audio: {
       local_whisper_timing: productionLocalWhisperContract(),
@@ -85,12 +96,17 @@ const profiles = {
       wavefront_min_cuts: 15,
       wavefront_max_wait_ms: 5000,
       planner_recovery_policy: "scoped_only",
+      passed_artifact_policy: "immutable",
+      automatic_retry_policy: "none",
+      aesthetic_finding_policy: "advisory",
+      timing_rail_policy: "advisory",
     },
     advance: {
       authorize_planner_spend: false,
       authorize_media_spend: false,
       authorize_render: false,
       agent_validated_stages: [],
+      max_attempts_per_stage: 1,
     },
   },
 };

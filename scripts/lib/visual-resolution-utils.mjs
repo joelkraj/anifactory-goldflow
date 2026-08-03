@@ -30,10 +30,11 @@ export function visualResolveScopeForBlockers(blockers) {
     };
   }
   return {
-    mode: "scene_ids",
-    args: sceneIds.length ? ["--only-scenes", sceneIds.join(",")] : [],
+    mode: "manual_exact_scope_required",
+    args: [],
     image_ids: imageIds,
     scene_ids: sceneIds,
+    reason: "At least one blocker lacks an exact image_id; automatic scene-wide creative repair is forbidden.",
   };
 }
 

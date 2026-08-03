@@ -5,10 +5,24 @@ import sharp from "sharp";
 import { sha256File } from "./file-hash.mjs";
 
 export const YOUTUBE_PUBLISH_CONTRACT_VERSION = "2026-07-29.3";
-export const YOUTUBE_PACKAGING_SPEC_SCHEMA = "goldflow_youtube_packaging_spec_v1";
+export const YOUTUBE_PACKAGING_SPEC_SCHEMA = "goldflow_youtube_packaging_spec_v2";
+export const LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA = "goldflow_youtube_packaging_spec_v1";
 export const YOUTUBE_PUBLISH_MANIFEST_SCHEMA = "goldflow_youtube_publish_manifest_v1";
 export const YOUTUBE_UPLOAD_RECEIPT_SCHEMA = "goldflow_youtube_upload_receipt_v1";
 export const YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA = "goldflow_youtube_pinned_comment_receipt_v1";
+
+export const YOUTUBE_THUMBNAIL_GENERATION_CONTRACT = Object.freeze({
+  provider: "codex_imagen",
+  generation_mode: "full_raster_from_scratch",
+  reference_count: 0,
+  text_rendered_by_model: true,
+  locally_composited_text: false,
+  locally_composited_arrows: false,
+});
+
+export const LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING =
+  "legacy_packaging_spec_v1_thumbnail_generation_provenance_unverified";
+export const YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA = "goldflow_youtube_thumbnail_update_receipt_v1";
 
 const TITLE_MAX_CHARS = 100;
 const DESCRIPTION_MAX_CHARS = 5000;
@@ -112,6 +126,19 @@ export function selectedThumbnailCandidate(spec) {
   return (spec?.thumbnail_candidates ?? []).find((candidate) => clean(candidate?.id) === selectedId) ?? null;
 }
 
+export function adaptLegacyYoutubePackagingSpec(spec) {
+  const eligible = spec?.schema === LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA
+    && clean(spec?.status) === "approved"
+    && Boolean(clean(spec?.approved_by))
+    && Boolean(clean(spec?.approved_at));
+  if (!eligible) return null;
+  return {
+    spec,
+    mode: "legacy_adapter_v1",
+    warnings: [LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING],
+  };
+}
+
 function validateResearchEvidence(spec, blockers, options = {}) {
   const evidence = Array.isArray(spec?.research_evidence) ? spec.research_evidence : [];
   const evidenceIds = evidence.map((row) => clean(row?.id)).filter(Boolean);
@@ -177,7 +204,7 @@ function validateTitle(spec, blockers, validEvidenceIds) {
   }
 }
 
-function validateThumbnail(spec, blockers, validEvidenceIds) {
+function validateThumbnail(spec, blockers, validEvidenceIds, options = {}) {
   const candidates = Array.isArray(spec?.thumbnail_candidates) ? spec.thumbnail_candidates : [];
   const candidateIds = candidates.map((candidate) => clean(candidate?.id)).filter(Boolean);
   push(blockers, candidates.length < 2 || candidates.length > 3, "thumbnail_candidates_must_number_two_or_three");
@@ -211,6 +238,38 @@ function validateThumbnail(spec, blockers, validEvidenceIds) {
   if (selected) {
     push(blockers, !truthy(selected?.mobile_reviewed), "selected_thumbnail_not_mobile_reviewed");
     push(blockers, !clean(selected?.selection_reason), "selected_thumbnail_reason_missing");
+    if (options.enforceGenerationContract !== false) {
+      push(
+        blockers,
+        clean(selected?.provider) !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.provider,
+        "selected_thumbnail_provider_must_be_codex_imagen",
+      );
+      push(
+        blockers,
+        clean(selected?.generation_mode) !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.generation_mode,
+        "selected_thumbnail_generation_mode_must_be_full_raster_from_scratch",
+      );
+      push(
+        blockers,
+        selected?.reference_count !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.reference_count,
+        "selected_thumbnail_reference_count_must_be_zero",
+      );
+      push(
+        blockers,
+        selected?.text_rendered_by_model !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.text_rendered_by_model,
+        "selected_thumbnail_text_must_be_rendered_by_model",
+      );
+      push(
+        blockers,
+        selected?.locally_composited_text !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.locally_composited_text,
+        "selected_thumbnail_local_text_compositing_forbidden",
+      );
+      push(
+        blockers,
+        selected?.locally_composited_arrows !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.locally_composited_arrows,
+        "selected_thumbnail_local_arrow_compositing_forbidden",
+      );
+    }
   }
 }
 
@@ -251,8 +310,22 @@ function validatePublishSettings(spec, blockers) {
 
 export function validateYoutubePackagingSpec(spec, options = {}) {
   const blockers = [];
+  const warnings = [];
   const requireApproval = options.requireApproval !== false;
-  push(blockers, spec?.schema !== YOUTUBE_PACKAGING_SPEC_SCHEMA, "packaging_spec_schema_invalid");
+  let schemaMode = null;
+  if (spec?.schema === YOUTUBE_PACKAGING_SPEC_SCHEMA) {
+    schemaMode = "current";
+  } else if (spec?.schema === LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA) {
+    const adapter = options.allowLegacyAdapter === true ? adaptLegacyYoutubePackagingSpec(spec) : null;
+    if (adapter) {
+      schemaMode = adapter.mode;
+      warnings.push(...adapter.warnings);
+    } else {
+      push(blockers, true, "packaging_spec_legacy_schema_requires_explicit_adapter");
+    }
+  } else {
+    push(blockers, true, "packaging_spec_schema_invalid");
+  }
   if (requireApproval) {
     push(blockers, clean(spec?.status) !== "approved", "packaging_spec_not_approved");
     push(blockers, !clean(spec?.approved_by), "packaging_spec_approver_missing");
@@ -262,7 +335,9 @@ export function validateYoutubePackagingSpec(spec, options = {}) {
   validateResearchEvidence(spec, blockers, options);
   const validEvidenceIds = new Set((spec?.research_evidence ?? []).map((row) => clean(row?.id)).filter(Boolean));
   validateTitle(spec, blockers, validEvidenceIds);
-  validateThumbnail(spec, blockers, validEvidenceIds);
+  validateThumbnail(spec, blockers, validEvidenceIds, {
+    enforceGenerationContract: schemaMode !== "legacy_adapter_v1",
+  });
   validateDescriptionAndComment(spec, blockers);
   validatePublishSettings(spec, blockers);
 
@@ -290,6 +365,9 @@ export function validateYoutubePackagingSpec(spec, options = {}) {
   return {
     status: blockers.length ? "blocked" : "passed",
     blockers: uniqueStrings(blockers),
+    warnings: uniqueStrings(warnings),
+    schema_mode: schemaMode,
+    legacy_adapter_applied: schemaMode === "legacy_adapter_v1",
     selected_title_candidate: selectedTitleCandidate(spec),
     selected_thumbnail_candidate: selectedThumbnailCandidate(spec),
   };
@@ -358,9 +436,18 @@ export async function youtubeUploadPackagingComplete(episodeDir, episode) {
     markdown,
     thumbnailMetadata: evidence.metadata,
     thumbnailBytes: evidence.bytes,
+    allowLegacyAdapter: true,
   });
   if (validation.status === "passed") {
-    return { done: true, evidence: `upload package + approved CTR spec + ${path.basename(thumbnailPath)}` };
+    const warningEvidence = validation.warnings.length
+      ? `; warnings: ${validation.warnings.join(", ")}`
+      : "";
+    return {
+      done: true,
+      evidence: `upload package + approved CTR spec + ${path.basename(thumbnailPath)}${warningEvidence}`,
+      warnings: validation.warnings,
+      legacy_adapter_applied: validation.legacy_adapter_applied,
+    };
   }
   const approvalBlockers = new Set([
     "packaging_spec_not_approved",
@@ -428,9 +515,157 @@ export async function youtubeUploadReceiptComplete(episodeDir, episode) {
   ]);
   if (!receipt) return { done: false, evidence: `youtube_upload_receipt_${episode}.json missing` };
   const validation = validateYoutubeUploadReceipt(receipt, { manifest, manifestHash });
-  return validation.status === "passed"
-    ? { done: true, evidence: `YouTube video ${receipt.video_id} recorded as ${receipt.visibility}` }
-    : { done: false, state: "blocked", evidence: validation.blockers.join(", ") };
+  if (validation.status !== "passed") {
+    return { done: false, state: "blocked", evidence: validation.blockers.join(", ") };
+  }
+  const effectiveThumbnail = await youtubeEffectiveThumbnailState(episodeDir, episode, {
+    manifest,
+    uploadReceipt: receipt,
+    uploadReceiptHash: await sha256File(receiptPath).catch(() => null),
+  });
+  const thumbnailEvidence = effectiveThumbnail.update_count > 0
+    ? `; effective thumbnail ${path.basename(effectiveThumbnail.path)} from update receipt #${effectiveThumbnail.update_count}`
+    : "";
+  const warning = effectiveThumbnail.status === "blocked"
+    ? `; thumbnail update receipt warning: ${effectiveThumbnail.blockers.join(", ")}`
+    : "";
+  return {
+    done: true,
+    evidence: `YouTube video ${receipt.video_id} recorded as ${receipt.visibility}${thumbnailEvidence}${warning}`,
+  };
+}
+
+function thumbnailUpdateReceiptSequence(fileName, episode) {
+  const escaped = String(episode).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(fileName).match(new RegExp(`^youtube_thumbnail_update_receipt_${escaped}_(\\d+)\\.json$`));
+  return match ? Number(match[1]) : null;
+}
+
+export async function listYoutubeThumbnailUpdateReceipts(episodeDir, episode) {
+  const names = await fs.readdir(episodeDir).catch(() => []);
+  return names
+    .map((name) => ({ name, sequence: thumbnailUpdateReceiptSequence(name, episode) }))
+    .filter((row) => Number.isInteger(row.sequence) && row.sequence > 0)
+    .sort((left, right) => left.sequence - right.sequence)
+    .map((row) => ({ ...row, path: path.join(episodeDir, row.name) }));
+}
+
+export function validateYoutubeThumbnailUpdateReceipt(receipt, options = {}) {
+  const blockers = [];
+  const uploadReceipt = options.uploadReceipt ?? null;
+  const currentThumbnail = options.currentThumbnail ?? null;
+  const expectedChannels = new Set([
+    clean(options.manifest?.youtube_channel?.expected_name),
+    clean(options.manifest?.youtube_channel?.expected_handle),
+  ].filter(Boolean));
+  const videoId = clean(receipt?.video_id);
+  const studioUrl = clean(receipt?.studio_url);
+  const verifiedAt = new Date(receipt?.verified_at);
+  push(blockers, receipt?.schema !== YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA, "youtube_thumbnail_update_receipt_schema_invalid");
+  push(blockers, clean(receipt?.status) !== "passed", "youtube_thumbnail_update_receipt_not_passed");
+  push(blockers, !uploadReceipt || receipt?.upload_receipt_sha256 !== options.uploadReceiptHash, "youtube_thumbnail_update_upload_receipt_hash_stale");
+  push(blockers, videoId !== clean(uploadReceipt?.video_id), "youtube_thumbnail_update_video_id_mismatch");
+  push(blockers, !/^https:\/\/studio\.youtube\.com\/video\//.test(studioUrl), "youtube_thumbnail_update_studio_url_invalid");
+  push(blockers, videoId && !studioUrl.includes(videoId), "youtube_thumbnail_update_studio_url_video_id_mismatch");
+  push(blockers, !clean(receipt?.expected_channel), "youtube_thumbnail_update_expected_channel_missing");
+  push(
+    blockers,
+    expectedChannels.size > 0 && !expectedChannels.has(clean(receipt?.expected_channel)),
+    "youtube_thumbnail_update_expected_channel_mismatch",
+  );
+  push(blockers, receipt?.field_verification?.active_channel !== true, "youtube_thumbnail_update_channel_not_verified");
+  push(blockers, receipt?.field_verification?.thumbnail !== true, "youtube_thumbnail_update_thumbnail_not_verified");
+  push(blockers, receipt?.schedule_preserved !== true, "youtube_thumbnail_update_schedule_not_preserved");
+  push(
+    blockers,
+    clean(uploadReceipt?.visibility) === "scheduled"
+      && clean(receipt?.schedule_at) !== clean(uploadReceipt?.schedule_at),
+    "youtube_thumbnail_update_schedule_time_mismatch",
+  );
+  push(blockers, !Number.isInteger(Number(receipt?.sequence)) || Number(receipt?.sequence) < 1, "youtube_thumbnail_update_sequence_invalid");
+  push(blockers, !clean(receipt?.old_thumbnail?.path), "youtube_thumbnail_update_old_path_missing");
+  push(blockers, !clean(receipt?.old_thumbnail?.sha256), "youtube_thumbnail_update_old_hash_missing");
+  push(blockers, !clean(receipt?.new_thumbnail?.path), "youtube_thumbnail_update_new_path_missing");
+  push(blockers, !clean(receipt?.new_thumbnail?.sha256), "youtube_thumbnail_update_new_hash_missing");
+  push(
+    blockers,
+    currentThumbnail && (
+      path.resolve(clean(receipt?.old_thumbnail?.path)) !== path.resolve(clean(currentThumbnail.path))
+      || clean(receipt?.old_thumbnail?.sha256) !== clean(currentThumbnail.sha256)
+    ),
+    "youtube_thumbnail_update_old_thumbnail_not_current",
+  );
+  push(
+    blockers,
+    clean(receipt?.new_thumbnail?.sha256) === clean(receipt?.old_thumbnail?.sha256),
+    "youtube_thumbnail_update_hash_unchanged",
+  );
+  push(
+    blockers,
+    Object.hasOwn(options, "newThumbnailSha256")
+      && (
+        !clean(options.newThumbnailSha256)
+        || clean(receipt?.new_thumbnail?.sha256) !== clean(options.newThumbnailSha256)
+      ),
+    "youtube_thumbnail_update_new_hash_stale",
+  );
+  push(
+    blockers,
+    Number(receipt?.sequence) > 1
+      && receipt?.prior_update_receipt_sha256 !== options.priorReceiptHash,
+    "youtube_thumbnail_update_prior_receipt_hash_stale",
+  );
+  push(blockers, !clean(receipt?.verified_at) || Number.isNaN(verifiedAt.getTime()), "youtube_thumbnail_update_verified_at_invalid");
+  push(blockers, !clean(receipt?.operator), "youtube_thumbnail_update_operator_missing");
+  return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };
+}
+
+export async function youtubeEffectiveThumbnailState(episodeDir, episode, options = {}) {
+  const manifestPath = path.join(episodeDir, `youtube_publish_manifest_${episode}.json`);
+  const uploadReceiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
+  const manifest = options.manifest ?? await readJson(manifestPath);
+  const uploadReceipt = options.uploadReceipt ?? await readJson(uploadReceiptPath);
+  const uploadReceiptHash = options.uploadReceiptHash ?? await sha256File(uploadReceiptPath).catch(() => null);
+  const current = {
+    path: clean(manifest?.thumbnail?.path),
+    sha256: clean(manifest?.thumbnail?.sha256),
+  };
+  const receiptFiles = await listYoutubeThumbnailUpdateReceipts(episodeDir, episode);
+  if (!current.path || !current.sha256) {
+    return { status: "blocked", blockers: ["youtube_manifest_thumbnail_missing"], ...current, update_count: 0 };
+  }
+  let effective = current;
+  let priorReceiptHash = null;
+  for (let index = 0; index < receiptFiles.length; index += 1) {
+    const receiptFile = receiptFiles[index];
+    const receipt = await readJson(receiptFile.path);
+    const newThumbnailSha256 = await sha256File(receipt?.new_thumbnail?.path ?? "").catch(() => null);
+    const validation = validateYoutubeThumbnailUpdateReceipt(receipt, {
+      manifest,
+      uploadReceipt,
+      uploadReceiptHash,
+      currentThumbnail: effective,
+      priorReceiptHash,
+      newThumbnailSha256,
+    });
+    if (receiptFile.sequence !== index + 1) validation.blockers.push("youtube_thumbnail_update_sequence_gap");
+    if (Number(receipt?.sequence) !== receiptFile.sequence) validation.blockers.push("youtube_thumbnail_update_sequence_filename_mismatch");
+    if (validation.blockers.length) {
+      return {
+        status: "blocked",
+        blockers: uniqueStrings(validation.blockers),
+        ...effective,
+        update_count: index,
+      };
+    }
+    effective = {
+      path: clean(receipt.new_thumbnail.path),
+      sha256: clean(receipt.new_thumbnail.sha256),
+      receipt_path: receiptFile.path,
+    };
+    priorReceiptHash = await sha256File(receiptFile.path);
+  }
+  return { status: "passed", blockers: [], ...effective, update_count: receiptFiles.length };
 }
 
 export function validateYoutubePinnedCommentReceipt(receipt, options = {}) {

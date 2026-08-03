@@ -540,7 +540,7 @@ export function editorialMotionDistributionFindings(rows, options = {}) {
   const staticShare = staticCount / ordered.length;
   if (staticShare < minimumStaticShare) {
     findings.push({
-      severity: "blocker",
+      severity: "warning",
       code: "motion_static_hold_share_too_low",
       image_id: ordered[0]?.image_id ?? null,
       cut_count: ordered.length,
@@ -563,7 +563,7 @@ export function editorialMotionDistributionFindings(rows, options = {}) {
   const opening = ordered.filter((row) => row.start_sec < openingEndSec);
   if (opening.length >= 6 && !opening.some((row) => row.behavior === "static_hold")) {
     findings.push({
-      severity: "blocker",
+      severity: "warning",
       code: "motion_opening_has_no_static_contrast",
       image_id: opening[0]?.image_id ?? null,
       opening_end_sec: openingEndSec,
@@ -579,7 +579,7 @@ export function editorialMotionDistributionFindings(rows, options = {}) {
     }
     if (streak.length >= maxAnimatedStreak) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "motion_continuous_movement_streak_too_long",
         image_id: streak[0]?.image_id ?? null,
         end_image_id: streak.at(-1)?.image_id ?? null,
@@ -707,17 +707,17 @@ export function motionTraceFindings(traceRows) {
         const expectedDirection = direction(values);
         for (let index = 1; index < values.length; index += 1) {
           const delta = values[index] - values[index - 1];
-          if (expectedDirection && Math.sign(delta) && Math.sign(delta) !== expectedDirection) findings.push({ severity: "blocker", code: "motion_direction_reversal", image_id: imageId, layer, field, frame: segmentRows[index].frame, segment_index: segmentId });
+          if (expectedDirection && Math.sign(delta) && Math.sign(delta) !== expectedDirection) findings.push({ severity: "warning", code: "motion_direction_reversal", image_id: imageId, layer, field, frame: segmentRows[index].frame, segment_index: segmentId });
         }
       }
       const values = rows.map((row) => Number(row[field]));
       for (let index = 1; index < values.length; index += 1) {
         const delta = values[index] - values[index - 1];
         const maxDelta = field === "scale" ? 0.012 : 0.025;
-        if (Math.abs(delta) > maxDelta) findings.push({ severity: "blocker", code: "motion_frame_discontinuity", image_id: imageId, layer, field, frame: index, delta });
+        if (Math.abs(delta) > maxDelta) findings.push({ severity: "warning", code: "motion_frame_discontinuity", image_id: imageId, layer, field, frame: index, delta });
         const keyframeVelocityLimit = field === "scale" ? 0.0045 : 0.004;
         if (Number(rows[index].keyframe_count ?? 2) > 2 && Math.abs(delta) > keyframeVelocityLimit) {
-          findings.push({ severity: "blocker", code: "motion_keyframe_velocity_excessive", image_id: imageId, layer, field, frame: index, delta, limit: keyframeVelocityLimit });
+          findings.push({ severity: "warning", code: "motion_keyframe_velocity_excessive", image_id: imageId, layer, field, frame: index, delta, limit: keyframeVelocityLimit });
         }
       }
     }

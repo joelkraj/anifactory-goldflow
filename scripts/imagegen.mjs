@@ -1067,6 +1067,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       findings.push({
         image_id: prompt.image_id,
         code: "required_scene_references_disabled",
+        severity: "critical",
         message: `Scene references are disabled, but ${attachableRequired.length} required approved reference(s) are available.`,
       });
     }
@@ -1076,6 +1077,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
           image_id: prompt.image_id,
           ref_id: requirement.ref_id,
           code: "required_reference_slot_missing",
+          severity: "critical",
           message: `Required approved ref ${requirement.ref_id} is not materialized in reference_slots.`,
         });
       }
@@ -1085,6 +1087,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       findings.push({
         image_id: prompt.image_id,
         code: "scene_prompt_style_contract_missing",
+        severity: "advisory",
         message: `ModelsLab scene prompt must explicitly preserve the ${contentProfile.label ?? contentProfile.id} style contract.`,
       });
     }
@@ -1092,6 +1095,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       findings.push({
         image_id: prompt.image_id,
         code: "physical_action_contract_missing",
+        severity: "advisory",
         message: "Physical-action cut is missing shot_manifest.foreground_action.",
       });
     }
@@ -2108,8 +2112,11 @@ function imageResultPassed(row) {
 }
 
 function episodeImageStatus(currentBatchStatus, cutLedgerStatus) {
-  if (currentBatchStatus === "failed") return "failed";
-  return cutLedgerStatus === "passed" ? "passed" : "partial";
+  // A scoped batch result cannot invalidate already-complete episode truth.
+  // Missing cuts remain partial and receive exact-ID repair; the whole episode
+  // is failed only by an invocation-level critical exception.
+  if (cutLedgerStatus === "passed") return "passed";
+  return "partial";
 }
 
 function imagegenCostSummary(rows = []) {
@@ -2182,7 +2189,11 @@ async function writeAuditableImagegenReport(report, { kind, currentRows }) {
     estimated_count: history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.estimated_count ?? 0), 0),
     estimated_cost_usd: Number(history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.estimated_cost_usd ?? 0), 0).toFixed(6)),
     wall_time_sec: Number(history.reduce((sum, row) => sum + Number(row.report.wall_time_sec ?? 0), 0).toFixed(3)),
-    retry_batch_count: Math.max(0, history.length - 1),
+    automatic_retry_batch_count: 0,
+    scoped_repair_batch_count: history.filter((row) => /scoped_.*(?:repair|retry)/i.test(String(row.report.batch_kind ?? ""))).length,
+    // Kept for report readers that still expect this field. Additional scoped
+    // batches are repairs, not blind retries.
+    retry_batch_count: 0,
     immutable_batch_report_paths: history.map((row) => row.filePath),
   };
   const materialized = {
@@ -2395,10 +2406,11 @@ async function main() {
     generationPrompts.filter((prompt) => promptRoute(prompt) === "modelslab"),
     { maxSceneReferences },
   );
-  if (productionContractFindings.length) {
+  const criticalProductionContractFindings = productionContractFindings.filter((finding) => finding.severity === "critical");
+  if (criticalProductionContractFindings.length) {
     throw new Error(
-      `Scene image production contract failed for ${productionContractFindings.length} finding(s): ` +
-      productionContractFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.code}`).join(", "),
+      `Scene image production contract failed for ${criticalProductionContractFindings.length} critical finding(s): ` +
+      criticalProductionContractFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.code}`).join(", "),
     );
   }
   await fs.mkdir(imageDir, { recursive: true });
@@ -2458,6 +2470,7 @@ async function main() {
     adaptive_scene_concurrency: pool.adaptive_concurrency,
     codex_opening_sec: codexOpeningSec,
     provider_filter: providerFilter,
+    production_contract_findings: productionContractFindings,
     seed_derived_refs: seedDerivedRefs,
     seed_derived_ref_count: seedDerivedTargets.length,
     seed_derived_image_ids: [...seedDerivedImageIds],
@@ -2479,7 +2492,7 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   const materialized = await writeAuditableImagegenReport(report, {
-    kind: batchKindOverride ?? (seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images"),
+    kind: batchKindOverride ?? (seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_repair" : "scene_images"),
     currentRows: [...referenceRun.results, ...results],
   });
   console.log(JSON.stringify({ status: materialized.status, current_batch_status: materialized.current_batch_status, report_path: reportPath, immutable_batch_report_path: materialized.immutable_batch_report_path, image_count: materialized.image_count, current_batch_image_count: materialized.current_batch_image_count }, null, 2));

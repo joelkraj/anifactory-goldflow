@@ -36,6 +36,11 @@ const reviewer = String(flags.reviewer ?? "").trim();
 const reviewNote = String(flags.note ?? "").trim();
 const rejectedIds = new Set(parseList(flags["reject-cut-ids"] ?? flags["reject-image-ids"]));
 const acceptedIds = new Set(parseList(flags["accept-cut-ids"] ?? flags["accept-image-ids"]));
+const criticalRejectedIds = new Set(parseList(
+  flags["critical-reject-cut-ids"]
+  ?? flags["structural-reject-cut-ids"]
+  ?? flags["critical-reject-image-ids"],
+));
 const openingReviewSec = Math.max(0, Number(flags["opening-review-sec"] ?? 180));
 const contactWindowSec = Math.max(60, Number(flags["contact-window-sec"] ?? 300));
 const integrationSampleRate = Math.max(0, Math.min(1, Number(flags["integration-sample-rate"] ?? 0.08)));
@@ -126,35 +131,22 @@ function deterministicSampleSelected(imageId, rate) {
 
 export function imageManualReviewPolicy(prompt, compositionFindings = [], options = {}) {
   const reasons = imageRiskReasons(prompt, { openingSec: options.openingSec ?? 180 });
-  const advisoryOnlyReasons = new Set([
-    "immutable_anatomy_adherence",
-    "equipment_count_hand_and_contact_geometry",
-  ]);
-  const mandatoryReasons = reasons.filter((reason) => reason !== "four_reference_integration" && !advisoryOnlyReasons.has(reason));
   const compositionReasons = [];
   for (const finding of compositionFindings) {
     if (String(finding?.severity ?? "").toLowerCase() === "needs_review") {
       const reason = `composition:${finding.code}`;
-      mandatoryReasons.push(reason);
       compositionReasons.push(reason);
     }
   }
-  if (mandatoryReasons.length) {
-    return { tier: "mandatory_exception_review", requires_manual_review: true, reasons: [...new Set([...reasons, ...compositionReasons])], sampled: false };
-  }
   const sampleCandidate = reasons.includes("four_reference_integration");
   const sampled = sampleCandidate && deterministicSampleSelected(prompt?.image_id, Number(options.integrationSampleRate ?? 0.08));
-  if (sampled) {
-    return {
-      tier: "deterministic_integration_sample",
-      requires_manual_review: true,
-      reasons: [...new Set(["sampled_four_reference_integration", ...reasons.filter((reason) => advisoryOnlyReasons.has(reason))])],
-      sampled: true,
-    };
-  }
-  const advisoryReasons = reasons.filter((reason) => advisoryOnlyReasons.has(reason));
+  const advisoryReasons = [...new Set([
+    ...(sampled ? ["sampled_four_reference_integration"] : []),
+    ...reasons,
+    ...compositionReasons,
+  ])];
   if (advisoryReasons.length) {
-    return { tier: "advisory_review_log", requires_manual_review: false, reasons: [...new Set(advisoryReasons)], sampled: false };
+    return { tier: "advisory_review_log", requires_manual_review: false, reasons: advisoryReasons, sampled };
   }
   return { tier: "structural_auto_pass", requires_manual_review: false, reasons: [], sampled: false };
 }
@@ -172,7 +164,12 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
   const acceptIds = new Set(options.acceptedIds ?? []);
   const rejectIds = new Set(options.rejectedIds ?? []);
   const priorById = new Map((prior.decisions ?? []).map((row) => [String(row.image_id ?? ""), row]));
-  const currentDecisions = rows.filter((row) => row.requires_manual_risk_review).map((row) => {
+  const currentDecisions = rows.filter((row) => (
+    row.requires_manual_risk_review
+    || acceptIds.has(row.image_id)
+    || rejectIds.has(row.image_id)
+    || priorById.get(row.image_id)?.image_sha256 === row.image_sha256
+  )).map((row) => {
     const previous = priorById.get(row.image_id);
     const hashMatches = previous?.image_sha256 === row.image_sha256;
     let decision = hashMatches ? normalizedReviewDecision(previous?.decision) : "not_inspected";
@@ -189,7 +186,7 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
       focal_override: hashMatches ? previous?.focal_override ?? null : null,
     };
   });
-  const currentIds = new Set(currentDecisions.map((row) => row.image_id));
+  const currentIds = new Set(rows.map((row) => row.image_id));
   const decisions = options.preserveUnseen === true
     ? [
         ...currentDecisions,
@@ -197,13 +194,13 @@ export function mergeRiskReviewDecisions(rows, prior = {}, options = {}) {
       ]
     : currentDecisions;
   const counts = Object.fromEntries([...REVIEW_DECISIONS].map((value) => [value, decisions.filter((row) => row.decision === value).length]));
-  const status = counts.rejected > 0 ? "blocked" : counts.not_inspected > 0 ? "pending_review" : "complete";
+  const status = counts.not_inspected > 0 ? "pending_review" : "complete";
   return {
     schema: "goldflow_image_output_review_decisions_v2",
     status,
     reviewer: reviewerValue,
     note: noteValue,
-    decision_contract: "Every listed hash-bound risk cut must be accepted, rejected, or not_inspected. Generated-image spelling is outside this review contract.",
+    decision_contract: "Hash-bound accepted/rejected decisions are advisory packaging and replacement notes. Only an explicit critical rejection or a deterministic structural failure blocks the exact cut. Generated-image spelling is outside this review contract.",
     counts,
     decisions,
     updated_at: new Date().toISOString(),
@@ -373,10 +370,13 @@ export function applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, stru
     const row = rowById.get(String(cut.image_id ?? ""));
     if (!row || (cut.image_sha256 && cut.image_sha256 !== row.image_sha256)) return cut;
     const decision = decisionById.get(row.image_id)?.decision ?? (row.requires_manual_risk_review ? "not_inspected" : "accepted");
-    const rejected = decision === "rejected" || structuralBlockerIds.has(row.image_id);
-    if (rejected && (cut.motion_profile_hash || cut.motion_clip_path || cut.motion_clip_sha256)) invalidatedMotionIds.push(row.image_id);
-    const imageQaStatus = rejected
+    const structuralReject = structuralBlockerIds.has(row.image_id);
+    const aestheticReplacementRequested = decision === "rejected" && !structuralReject;
+    if (structuralReject && (cut.motion_profile_hash || cut.motion_clip_path || cut.motion_clip_sha256)) invalidatedMotionIds.push(row.image_id);
+    const imageQaStatus = structuralReject
       ? "rejected"
+      : aestheticReplacementRequested
+        ? "passed_with_aesthetic_advisory"
       : row.requires_manual_risk_review
         ? decision === "accepted" ? "passed_manual_risk" : "pending_manual_risk"
         : "passed_structural";
@@ -385,11 +385,15 @@ export function applyImageQaDecisionsToLedger(ledger, rows, decisionLedger, stru
       image_path: row.image_path,
       image_sha256: row.image_sha256,
       image_qa_status: imageQaStatus,
-      image_qa_note: rejected ? "Rejected during output QA; regenerate this cut only." : note,
-      image_qa_reviewed_at: imageQaStatus.startsWith("passed") || rejected ? now : null,
-      motion_profile_hash: rejected ? null : cut.motion_profile_hash ?? null,
-      motion_clip_path: rejected ? null : cut.motion_clip_path ?? null,
-      motion_clip_sha256: rejected ? null : cut.motion_clip_sha256 ?? null,
+      image_qa_note: structuralReject
+        ? "Critical structural image failure; repair this exact cut only."
+        : aestheticReplacementRequested
+          ? "Aesthetic replacement requested; current usable image remains non-blocking."
+          : note,
+      image_qa_reviewed_at: imageQaStatus.startsWith("passed") || structuralReject ? now : null,
+      motion_profile_hash: structuralReject ? null : cut.motion_profile_hash ?? null,
+      motion_clip_path: structuralReject ? null : cut.motion_clip_path ?? null,
+      motion_clip_sha256: structuralReject ? null : cut.motion_clip_sha256 ?? null,
     };
   });
   const updated = {
@@ -432,7 +436,7 @@ export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, ru
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const commands = [];
   if (codexIds.length) {
-    commands.push(`node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids ${codexIds.join(",")} --qa-recovery true --max-attempts 3 --lease-sec 900`);
+    commands.push(`node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids ${codexIds.join(",")} --qa-recovery true --max-attempts 1 --lease-sec 900`);
   }
   if (modelslabIds.length) {
     const providerFilter = /hybrid/i.test(provider) ? " --provider-filter modelslab" : "";
@@ -442,7 +446,17 @@ export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, ru
 }
 
 export function imageQaNeedsRecovery(structuralBlockers = [], rejectedDecisionIds = []) {
-  return structuralBlockers.length > 0 || rejectedDecisionIds.length > 0;
+  // Aesthetic dislikes may request a later replacement but do not invalidate a
+  // readable, hash-bound cut. Only structural failures require repair.
+  return structuralBlockers.length > 0;
+}
+
+export function acceptedImageHashesForRows(rows = [], structuralBlockerIds = new Set()) {
+  return Object.fromEntries(
+    rows
+      .filter((row) => !structuralBlockerIds.has(row.image_id))
+      .map((row) => [row.image_id, row.image_sha256]),
+  );
 }
 
 async function main() {
@@ -465,14 +479,29 @@ async function main() {
   if (approve && isV2 && !legacyBulkApproval) {
     throw new Error(`Per-cut review required for v2 runs. Edit ${reviewDecisionsPath} or use --accept-cut-ids/--reject-cut-ids with --reviewer and --note. --approve true is legacy-only.`);
   }
-  if ((approve || acceptedIds.size || rejectedIds.size) && (!reviewer || !reviewNote)) throw new Error("Image decisions require --reviewer and --note so output QA has review provenance.");
+  if ((approve || acceptedIds.size || rejectedIds.size || criticalRejectedIds.size) && (!reviewer || !reviewNote)) {
+    throw new Error("Image decisions require --reviewer and --note so output QA has review provenance.");
+  }
 
   const audit = await structuralAudit(promptPlan, imagegenReport, focalAnalysis);
   const packets = await writeReviewPackets(audit.rows);
+  const currentImageIds = new Set(audit.rows.map((row) => row.image_id));
+  const unknownCriticalIds = [...criticalRejectedIds].filter((imageId) => !currentImageIds.has(imageId));
+  if (unknownCriticalIds.length) {
+    throw new Error(`Critical rejection ids are not current readable cuts: ${unknownCriticalIds.join(", ")}`);
+  }
+  for (const imageId of criticalRejectedIds) {
+    audit.findings.push({
+      image_id: imageId,
+      severity: "blocker",
+      code: "operator_confirmed_story_or_identity_failure",
+      message: `${imageId} was explicitly classified as a story-critical or identity-critical failure by ${reviewer}: ${reviewNote}`,
+    });
+  }
   const structuralBlockers = audit.findings.filter((finding) => finding.severity === "blocker");
   const riskIds = new Set(audit.rows.filter((row) => row.requires_manual_risk_review).map((row) => row.image_id));
-  const unknownDecisionIds = [...new Set([...acceptedIds, ...rejectedIds])].filter((imageId) => !riskIds.has(imageId));
-  if (unknownDecisionIds.length) throw new Error(`Decision ids are not current risk cuts: ${unknownDecisionIds.join(", ")}`);
+  const unknownDecisionIds = [...new Set([...acceptedIds, ...rejectedIds])].filter((imageId) => !currentImageIds.has(imageId));
+  if (unknownDecisionIds.length) throw new Error(`Decision ids are not current readable cuts: ${unknownDecisionIds.join(", ")}`);
   const priorDecisions = await readJson(reviewDecisionsPath, {});
   const decisionLedger = mergeRiskReviewDecisions(audit.rows, priorDecisions, {
     reviewer,
@@ -502,23 +531,20 @@ async function main() {
     : packets;
   await writeJsonAtomic(reviewDecisionsPath, { ...decisionLedger, contact_sheets: contactSheets });
   const structuralBlockerIds = new Set(structuralBlockers.map((finding) => finding.image_id).filter(Boolean));
-  const decisionById = new Map(decisionLedger.decisions.map((row) => [row.image_id, row]));
   const rejectedDecisionIds = decisionLedger.decisions.filter((row) => row.decision === "rejected").map((row) => row.image_id);
   const notInspectedIds = decisionLedger.decisions.filter((row) => row.decision === "not_inspected").map((row) => row.image_id);
   const recoveryRequired = imageQaNeedsRecovery(structuralBlockers, rejectedDecisionIds);
-  const status = structuralBlockers.length || rejectedDecisionIds.length
+  const status = structuralBlockers.length
     ? "blocked"
     : notInspectedIds.length
       ? "needs_manual_review"
       : "passed";
-  const failedImageIds = [...new Set([...structuralBlockerIds, ...rejectedDecisionIds])].filter(Boolean);
+  const failedImageIds = [...structuralBlockerIds].filter(Boolean);
   const ledgerUpdate = updateCutLedger
     ? await updateLedgerQa(audit.rows, decisionLedger, structuralBlockerIds, decisionLedger.note || null)
     : null;
-  const incrementallyAcceptedRows = audit.rows.filter((row) => (
-    !structuralBlockerIds.has(row.image_id)
-    && (!row.requires_manual_risk_review || decisionById.get(row.image_id)?.decision === "accepted")
-  ));
+  const acceptedRows = audit.rows.filter((row) => !structuralBlockerIds.has(row.image_id));
+  const acceptedImageHashes = acceptedImageHashesForRows(audit.rows, structuralBlockerIds);
   const report = {
     schema: incrementalPacket ? "goldflow_incremental_image_output_qa_v1" : "goldflow_image_output_qa_v2",
     status,
@@ -537,7 +563,7 @@ async function main() {
     provider_circuit_open: imagegenReport.provider_circuit_open ?? false,
     cut_execution_ledger_path: ledgerPath,
     image_count: audit.rows.length,
-    structurally_valid_count: audit.rows.length - new Set(structuralBlockers.map((finding) => finding.image_id)).size,
+    structurally_valid_count: acceptedRows.length,
     risk_cut_count: audit.rows.filter((row) => row.requires_manual_risk_review).length,
     advisory_risk_cut_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,
     qa_policy: {
@@ -545,20 +571,22 @@ async function main() {
       opening_review_sec: openingReviewSec,
       integration_sample_rate: integrationSampleRate,
       full_contact_sheets_enabled: writeFullContactSheets,
-      manual_review_tiers: ["mandatory_exception_review", "deterministic_integration_sample"],
+      manual_review_tiers: [],
       advisory_review_tiers: ["advisory_review_log"],
       structural_auto_pass_count: audit.rows.filter((row) => row.qa_tier === "structural_auto_pass").length,
       advisory_review_log_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,
-      mandatory_exception_review_count: audit.rows.filter((row) => row.qa_tier === "mandatory_exception_review").length,
-      deterministic_sample_count: audit.rows.filter((row) => row.qa_tier === "deterministic_integration_sample").length,
+      mandatory_exception_review_count: 0,
+      deterministic_sample_count: audit.rows.filter((row) => row.deterministic_sample).length,
       review_reason_counts: audit.rows.flatMap((row) => row.risk_reasons ?? []).reduce((counts, reason) => ({ ...counts, [reason]: (counts[reason] ?? 0) + 1 }), {}),
     },
     unique_raster_count: new Set(audit.rows.map((row) => row.image_sha256)).size,
     editorial_reuse_cut_count: audit.rows.length - new Set(audit.rows.map((row) => row.image_sha256)).size,
     opening_review_sec: openingReviewSec,
     findings: audit.findings,
-    unresolved_blocker_count: structuralBlockers.length + rejectedDecisionIds.length,
+    unresolved_blocker_count: structuralBlockers.length,
     rejected_image_ids: rejectedDecisionIds,
+    aesthetic_replacement_requested_image_ids: rejectedDecisionIds,
+    critical_rejected_image_ids: [...criticalRejectedIds],
     not_inspected_image_ids: notInspectedIds,
     manual_review_required: notInspectedIds.length > 0,
     review_decisions_path: reviewDecisionsPath,
@@ -566,14 +594,11 @@ async function main() {
     review_decision_counts: decisionLedger.counts,
     invalidated_motion_image_ids: ledgerUpdate?.invalidated_motion_image_ids ?? [],
     review_packets: contactSheets,
-    accepted_image_hashes: incrementalPacket
-      ? Object.fromEntries(incrementallyAcceptedRows.map((row) => [row.image_id, row.image_sha256]))
-      : status === "passed"
-        ? Object.fromEntries(audit.rows.map((row) => [row.image_id, row.image_sha256]))
-        : {},
+    accepted_image_hashes: acceptedImageHashes,
+    preserved_passed_image_count: acceptedRows.length,
     incremental_packet: incrementalPacket,
     incremental_accepted_images: incrementalPacket
-      ? incrementallyAcceptedRows.map((row) => ({
+      ? acceptedRows.map((row) => ({
           image_id: row.image_id,
           image_path: row.image_path,
           image_sha256: row.image_sha256,

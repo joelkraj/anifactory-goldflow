@@ -4,6 +4,12 @@ import path from "node:path";
 
 export const LTX_VIDEO_MODEL_ID = "ltx-2.3";
 export const LTX_VIDEO_PROVIDER = "modelslab";
+export const LTX_SINGLE_SHOT_POLICY = Object.freeze({
+  provider_image_inputs: Object.freeze(["init_image"]),
+  candidates_per_motion_moment: 1,
+  automatic_generation_retries: 0,
+  unavailable_or_rejected_disposition: "accepted_still_fallback",
+});
 export const LTX_VIDEO_POLICIES = Object.freeze([
   "disabled",
   "selective_ltx23",
@@ -19,6 +25,16 @@ export const ANIMATION_SHOT_CLASSES = Object.freeze([
   "ui_or_screen",
   "environment_establishing",
   "effect_or_impact",
+]);
+
+export const LTX_SINGLE_SHOT_REQUIRED_INTENT_FIELDS = Object.freeze([
+  "start_state",
+  "subject_motion",
+  "end_state",
+  "animation_ready_composition",
+  "camera_end_state",
+  "end_frame_composition",
+  "continuity_bridge",
 ]);
 
 export function sha256(value) {
@@ -87,6 +103,14 @@ export function sanitizeAnimationIntent(value) {
   };
 }
 
+export function ltxSingleShotIntentFindings(value) {
+  const intent = sanitizeAnimationIntent(value);
+  if (!intent) return ["invalid_animation_intent"];
+  return LTX_SINGLE_SHOT_REQUIRED_INTENT_FIELDS
+    .filter((field) => !String(intent[field] ?? "").trim())
+    .map((field) => `missing_${field}`);
+}
+
 export function clampLtxDuration(value, fallback = 5) {
   const parsed = Number(value);
   const selected = Number.isFinite(parsed) ? parsed : Number(fallback);
@@ -100,7 +124,6 @@ export function ltxMotionPromptForCut(prompt = {}) {
     prompt.shot_manifest?.animation_intent?.video_prompt,
     prompt.shot_manifest?.motion_intent?.video_prompt,
   );
-  if (explicit) return explicit;
   const intent = prompt.shot_manifest?.motion_intent ?? {};
   const authoredPrompt = firstNonEmpty(
     prompt.provider_prompt,
@@ -112,6 +135,7 @@ export function ltxMotionPromptForCut(prompt = {}) {
   const animation = sanitizeAnimationIntent(
     prompt.shot_manifest?.animation_intent ?? prompt.animation_intent,
   );
+  if (explicit && !animation) return explicit;
   const cutDuration = Math.max(0.1, Number(prompt.duration_sec ?? 5));
   const actionEnd = Math.min(4.5, Math.max(1.2, cutDuration - 0.25));
   const motionParts = [
@@ -119,17 +143,22 @@ export function ltxMotionPromptForCut(prompt = {}) {
     intent.focal_subject ? `Focus: ${compactInstruction(intent.focal_subject, 80)}` : "",
   ].filter(Boolean).join(" ");
   const directedParts = animation ? [
+    animation.start_state ? `Starting physical state in the accepted first frame: ${compactInstruction(animation.start_state, 140)}` : "",
     animation.subject_motion ? `One action from 0.0 to ${actionEnd.toFixed(1)} seconds: ${compactInstruction(animation.subject_motion, 140)}` : "",
     animation.camera_motion ? `Camera: ${compactInstruction(animation.camera_motion, 80)}` : "",
     animation.environmental_motion ? `Secondary: ${compactInstruction(animation.environmental_motion, 40)}` : "",
-    "Then settle into a readable hold.",
+    animation.end_state ? `Terminal physical state: ${compactInstruction(animation.end_state, 140)}` : "",
+    animation.camera_end_state ? `Terminal camera state: ${compactInstruction(animation.camera_end_state, 100)}` : "",
+    animation.end_frame_composition ? `Terminal composition: ${compactInstruction(animation.end_frame_composition, 120)}` : "",
+    animation.continuity_bridge ? `Next-shot continuity bridge: ${compactInstruction(animation.continuity_bridge, 120)}` : "",
+    "The terminal state must be physically reachable from the accepted first frame through this one uninterrupted action. Then settle into a readable hold.",
   ].filter(Boolean).join(" ")
     : "";
   return [
     animation
       ? "Preserve the exact accepted anime/manhwa frame, identities, wardrobe, anatomy, objects, environment, and composition."
       : "Use the accepted image as the exact first frame. Preserve its character identities, wardrobe, anatomy, objects, environment, lighting, and spatial layout.",
-    animation ? "" : authoredPrompt,
+    animation ? explicit : explicit || authoredPrompt,
     directedParts,
     motionParts,
     animation
@@ -141,39 +170,23 @@ export function ltxMotionPromptForCut(prompt = {}) {
 export function ltxMotionPromptForSequence(direction = {}) {
   const coverage = Array.isArray(direction.coverage) ? direction.coverage : [];
   if (coverage.length <= 1) return ltxMotionPromptForCut(direction.directed_prompt ?? direction);
-  const phases = coverage.map((row, index) => {
-    const intent = sanitizeAnimationIntent(row.animation_intent) ?? {};
-    const start = Number(row.source_offset_sec ?? 0);
-    const end = Number(row.source_end_offset_sec ?? start + Number(row.timeline_duration_sec ?? 0));
-    return [
-      `Phase ${index + 1}, ${start.toFixed(1)}-${end.toFixed(1)} seconds:`,
-      compactInstruction(intent.subject_motion || row.foreground_action, 130),
-      intent.camera_motion ? `Camera ${compactInstruction(intent.camera_motion, 70)}` : "",
-      intent.end_state ? `Land on ${compactInstruction(intent.end_state, 90)}` : "",
-    ].filter(Boolean).join(" ");
-  });
-  const first = coverage[0];
-  const last = coverage.at(-1);
-  const firstIntent = sanitizeAnimationIntent(first.animation_intent) ?? {};
-  const lastIntent = sanitizeAnimationIntent(last.animation_intent) ?? {};
-  return [
-    "Use the accepted source image as the exact first frame of one continuous anime/manhwa shot.",
-    "Preserve every identity, face, hairstyle, wardrobe item, body count, prop, environment feature, and screen direction throughout.",
-    ...phases,
-    lastIntent.end_state
-      ? `Final frame: ${compactInstruction(lastIntent.end_state, 140)}`
-      : "",
-    lastIntent.camera_end_state
-      ? `Final camera state: ${compactInstruction(lastIntent.camera_end_state, 100)}`
-      : "",
-    lastIntent.end_frame_composition
-      ? `Final composition: ${compactInstruction(lastIntent.end_frame_composition, 120)}`
-      : "",
-    firstIntent.continuity_bridge || lastIntent.continuity_bridge
-      ? `Continuity bridge: ${compactInstruction(lastIntent.continuity_bridge || firstIntent.continuity_bridge, 120)}`
-      : "",
-    "Motion must progress forward without a cut, reset, duplicated action, identity swap, new subject, or scene change. Settle cleanly on the authored final state.",
-  ].filter(Boolean).join(" ");
+  throw new Error(
+    "LTX 2.3 production motion is single-shot: one accepted init_image may animate one reachable cut, not a multi-cut transformation.",
+  );
+}
+
+export function ltxProviderPayloadForClip(clip = {}, { trackId = null } = {}) {
+  return {
+    model_id: LTX_VIDEO_MODEL_ID,
+    init_image: clip.init_image_url,
+    prompt: clip.motion_prompt,
+    negative_prompt: clip.negative_prompt,
+    resolution: "16:9",
+    duration: String(clip.duration_sec),
+    base64: false,
+    temp: false,
+    ...(trackId ? { track_id: trackId } : {}),
+  };
 }
 
 export function ltxNegativePrompt() {
@@ -208,6 +221,9 @@ export function ltxPlanHash(plan = {}) {
       motion_prompt_sha256: clip.motion_prompt_sha256,
       duration_sec: clip.duration_sec,
       candidate_count: Number(clip.candidate_count ?? 1),
+      sequence_mode: clip.sequence_mode ?? "standalone_shot",
+      start_frame_contract: clip.start_frame_contract ?? null,
+      end_frame_contract: clip.end_frame_contract ?? null,
       coverage: (clip.coverage ?? []).map((row) => ({
         image_id: row.image_id,
         image_sha256: row.image_sha256,

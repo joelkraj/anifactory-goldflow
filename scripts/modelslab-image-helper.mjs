@@ -12,6 +12,10 @@ const fluxKleinGuidanceScale = Number(process.env.ANIFACTORY_FLUX_KLEIN_GUIDANCE
 const modelslabImageSamples = Math.min(2, Math.max(1, Number(process.env.ANIFACTORY_MODELSLAB_IMAGE_SAMPLES ?? 1) || 1));
 const gptImage2Size = String(process.env.ANIFACTORY_MODELSLAB_GPT_IMAGE2_SIZE ?? "2048x1152").trim();
 const gptImage2AllowSquareFallback = process.env.ANIFACTORY_MODELSLAB_GPT_IMAGE2_ALLOW_SQUARE_FALLBACK === "true";
+// Creative submits are intentionally single-shot. Retrying a timed-out submit
+// can create and bill a duplicate provider job. Polling an existing job ID and
+// retrying a reference upload are transport recovery, not regeneration.
+const creativeSubmitRetries = 0;
 
 export function nowIso() {
   return new Date().toISOString();
@@ -350,7 +354,7 @@ export async function generateModelslabImage({
       track_id: `anifactory-${path.basename(outputPath, path.extname(outputPath))}`,
       ...(referenceUrls.length ? { init_image: referenceUrls } : {}),
     };
-    const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, 2, resolvedAccount);
+    const initial = await postModelslabJson(endpoint, payload, `${selectedModel} image`, creativeSubmitRetries, resolvedAccount);
     const resolved = await resolveModelslabImage(initial, "/api/v7/images/fetch", `${selectedModel} image`, resolvedAccount);
     const imageUrl = await download(modelslabOutputs(resolved), outputPath);
     const nativeGeometry = await imageGeometry(outputPath);
@@ -379,6 +383,7 @@ export async function generateModelslabImage({
       modelslab_endpoint: endpoint,
       modelslab_reference_count: referenceUrls.length,
       modelslab_request_id: initial.id ?? resolved.id ?? null,
+      modelslab_creative_submission_attempts: creativeSubmitRetries + 1,
       modelslab_model_id: selectedModel,
       modelslab_size: payload.size,
       modelslab_native_width: nativeGeometry.width,
@@ -420,7 +425,7 @@ export async function generateModelslabImage({
         strength: requestSettings.strength,
       }
     : { ...commonPayload };
-  const initial = await postModelslabJson(endpoint, payload, `${model} image`, 2, resolvedAccount);
+  const initial = await postModelslabJson(endpoint, payload, `${model} image`, creativeSubmitRetries, resolvedAccount);
   const resolved = await resolveModelslabImage(initial, "/api/v6/images/fetch", `${model} image`, resolvedAccount);
   const imageUrl = await download(modelslabOutputs(resolved), outputPath);
   const actualGeometry = await assertLandscapeOutput(outputPath, requestedWidth, requestedHeight);
@@ -435,6 +440,7 @@ export async function generateModelslabImage({
     modelslab_endpoint: endpoint,
     modelslab_reference_count: referenceUrls.length,
     modelslab_request_id: initial.id ?? resolved.id ?? null,
+    modelslab_creative_submission_attempts: creativeSubmitRetries + 1,
     modelslab_model_id: model,
     modelslab_submitted_prompt: String(prompt ?? ""),
     modelslab_prompt_compacted: false,

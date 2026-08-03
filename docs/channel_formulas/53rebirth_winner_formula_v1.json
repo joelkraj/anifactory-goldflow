@@ -177,7 +177,8 @@
       "Use one to four main words and at most eight overlay words total.",
       "Use at most one primary arrow; a second is allowed only when it clarifies the transfer or replacement.",
       "Add information the title does not already say.",
-      "Compose for a full Codex-generated thumbnail with exact text and arrows when requested by the operator."
+      "Generate the complete final sixteen-by-nine thumbnail from scratch with Codex Imagen; supply zero image references of any kind.",
+      "Require Codex Imagen to render the exact text, labels, and arrows inside the finished raster; local work is limited to resize, format conversion, and compression, never content compositing or repair."
     ],
     "opening": [
       "Show the title contradiction through a physical or social event in the first thirty seconds.",

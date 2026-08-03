@@ -23,6 +23,8 @@ The title must be a complete causal sentence. It must identify the betrayer or i
 
 The thumbnail must be one scene with one to three subjects. Prefer Joey and one antagonist or replacement figure. Use one dominant relationship, object, gesture, number, or status proof. Main text must be one to four words. All overlay text together must remain within the supplied limit. The thumbnail must add a fact, judgment, or proof that the title does not already say.
 
+Author the thumbnail as one complete final 16:9 Codex Imagen raster generated from scratch. Use zero image references: no episode stills, character or scene references, contact sheets, old thumbnails, or channel art. Codex Imagen must render the exact text, labels, and arrows within the image. Local processing is limited to resize, format conversion, and compression; never plan local text, arrow, compositing, inpainting, or content repair.
+
 BETRAYAL IS THE SPINE, NOT A LANE
 
 Do not generate betrayal concepts and mechanic concepts as separate categories. Every candidate follows the same chassis:
@@ -125,7 +127,7 @@ Use this shape:
         "betrayal_signal": "what makes the betrayal readable",
         "reversal_signal": "what makes the reversal readable",
         "additive_fact": "what this adds beyond the title",
-        "image_prompt": "single-scene 16:9 finished thumbnail prompt including exact text and any arrow"
+        "image_prompt": "single-scene 16:9 complete Codex Imagen thumbnail generated from scratch with zero image references, including exact in-image text, labels, and any arrow"
       },
       "premise": "One hundred fifty to three hundred words explaining the original story premise without an outline dump.",
       "core_advantage": {

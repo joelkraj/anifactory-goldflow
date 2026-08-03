@@ -221,6 +221,50 @@ export function donorRecoveryFinding(metadata, imageId) {
   };
 }
 
+export function duplicateHashFindingsForRows(rows = []) {
+  const byHash = new Map();
+  for (const row of rows) {
+    const imageId = String(row?.image_id ?? "").trim();
+    const imageHash = String(row?.image_sha256 ?? "").trim();
+    if (!imageId || !imageHash) continue;
+    const group = byHash.get(imageHash) ?? [];
+    group.push(row);
+    byHash.set(imageHash, group);
+  }
+  const findings = [];
+  for (const group of byHash.values()) {
+    if (group.length < 2) continue;
+    const canonicalRows = group.filter((row) => row?.editorial_reuse_approved !== true);
+    if (canonicalRows.length === 1) {
+      const canonicalId = String(canonicalRows[0].image_id ?? "").trim();
+      for (const row of group) {
+        const imageId = String(row.image_id ?? "").trim();
+        if (imageId === canonicalId) continue;
+        if (row?.editorial_reuse_approved === true
+          && String(row?.reuse_source_image_id ?? "").trim() === canonicalId) continue;
+        findings.push({
+          image_id: imageId,
+          severity: "blocker",
+          code: "scene_image_duplicate_hash",
+          message: `${imageId} is byte-identical to ${canonicalId}.`,
+        });
+      }
+      continue;
+    }
+    const ownerId = String(group[0].image_id ?? "").trim();
+    for (const row of group.slice(1)) {
+      const imageId = String(row.image_id ?? "").trim();
+      findings.push({
+        image_id: imageId,
+        severity: "blocker",
+        code: "scene_image_duplicate_hash",
+        message: `${imageId} is byte-identical to ${ownerId}.`,
+      });
+    }
+  }
+  return findings;
+}
+
 function svgEscape(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -276,7 +320,7 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null)
   const focalById = new Map((focalAnalysis?.analyses ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const rows = [];
   const findings = [];
-  const hashOwners = new Map();
+  const duplicateAuditRows = [];
   for (const prompt of promptPlan.prompts ?? []) {
     if (prompt.image_generation_required === false) continue;
     const imageId = String(prompt.image_id ?? "");
@@ -301,16 +345,12 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null)
     }
     const imageHash = await hashFile(imagePath);
     const sidecar = await readJson(`${imagePath}.metadata.json`, null);
-    const previousOwner = hashOwners.get(imageHash);
-    if (previousOwner && previousOwner !== imageId) {
-      const approvedReuse = sidecar?.editorial_reuse_approved === true
-        && String(sidecar?.reuse_source_image_id ?? "") === String(previousOwner);
-      if (!approvedReuse) {
-        findings.push({ image_id: imageId, severity: "blocker", code: "scene_image_duplicate_hash", message: `${imageId} is byte-identical to ${previousOwner}.` });
-      }
-    } else {
-      hashOwners.set(imageHash, imageId);
-    }
+    duplicateAuditRows.push({
+      image_id: imageId,
+      image_sha256: imageHash,
+      editorial_reuse_approved: sidecar?.editorial_reuse_approved === true,
+      reuse_source_image_id: sidecar?.reuse_source_image_id ?? null,
+    });
     const donorFinding = donorRecoveryFinding(sidecar, imageId);
     if (donorFinding) findings.push(donorFinding);
     const focal = focalById.get(imageId) ?? null;
@@ -339,6 +379,7 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null)
       composition_findings: focal?.findings ?? [],
     });
   }
+  findings.push(...duplicateHashFindingsForRows(duplicateAuditRows));
   return { rows, findings };
 }
 

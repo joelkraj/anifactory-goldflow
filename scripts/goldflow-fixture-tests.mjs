@@ -66,6 +66,7 @@ import {
   acceptedImageHashesForRows,
   applyImageQaDecisionsToLedger,
   donorRecoveryFinding,
+  duplicateHashFindingsForRows,
   imageQaNeedsRecovery,
   imageManualReviewPolicy,
   imageRiskReasons,
@@ -3678,6 +3679,24 @@ function testImageOutputQaRiskAndDonorPolicies() {
     { image_id: "cut_001", image_sha256: "hash-a", status: "generated" },
     { image_id: "cut_002", image_sha256: "hash-a", status: "reused_fresh" },
   ]), [["cut_001", "cut_002"]]);
+  assert.deepEqual(duplicateHashFindingsForRows([
+    {
+      image_id: "cut_reuse_first",
+      image_sha256: "hash-a",
+      editorial_reuse_approved: true,
+      reuse_source_image_id: "cut_canonical_later",
+    },
+    { image_id: "cut_canonical_later", image_sha256: "hash-a" },
+  ]), []);
+  assert.deepEqual(duplicateHashFindingsForRows([
+    {
+      image_id: "cut_bad_reuse",
+      image_sha256: "hash-a",
+      editorial_reuse_approved: true,
+      reuse_source_image_id: "cut_wrong_source",
+    },
+    { image_id: "cut_canonical", image_sha256: "hash-a" },
+  ]).map((row) => row.image_id), ["cut_bad_reuse"]);
   assert.deepEqual(unapprovedDuplicateImageGroupsForTests([
     { image_id: "cut_001", image_sha256: "hash-a", status: "generated" },
     {

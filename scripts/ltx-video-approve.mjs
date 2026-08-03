@@ -19,6 +19,7 @@ const outputDir = path.resolve(flags["output-dir"] ?? (proof
   : path.join(episodeDir, "assets", "motion", "ltx23")));
 const reportPath = path.resolve(flags.report ?? path.join(outputDir, `ltx_video_report_${episode}${proof ? `-${proofLabel}` : ""}.json`));
 const outputPath = path.resolve(flags.output ?? path.join(outputDir, `ltx_video_approval_${episode}${proof ? `-${proofLabel}` : ""}.json`));
+const revalidateExisting = boolFlag(flags["revalidate-existing"]);
 
 function parseFlags(parts) {
   const parsed = {};
@@ -58,6 +59,60 @@ async function main() {
   const report = await readJson(reportPath);
   if (report?.schema !== "goldflow_ltx23_video_report_v1" || report?.status !== "passed") {
     throw new Error(`LTX approval requires a passed generation report: ${reportPath}`);
+  }
+  if (revalidateExisting) {
+    const existing = await readJson(outputPath);
+    if (existing?.schema !== "goldflow_ltx23_video_approval_v1" || existing?.status !== "passed") {
+      throw new Error(`LTX approval revalidation requires an existing passed approval: ${outputPath}`);
+    }
+    if (report.timing_revalidated_without_provider_submission !== true
+      || Number(report.generation_requests_submitted) !== 0
+      || Number(report.creative_resubmission_count) !== 0
+      || existing.report_sha256 !== report.timing_revalidated_from_report_sha256) {
+      throw new Error("LTX approval revalidation requires the exact zero-submit timing-revalidation chain.");
+    }
+    const decisionId = (row) => String(row.candidate_id ?? row.image_id ?? "");
+    const clips = Array.isArray(report.clips) ? report.clips : [];
+    const decisions = Array.isArray(existing.decisions) ? existing.decisions : [];
+    const decisionById = new Map(decisions.map((row) => [decisionId(row), row]));
+    if (decisionById.size !== decisions.length || decisions.length !== clips.length) {
+      throw new Error("LTX approval revalidation decision identities no longer exactly cover generated clips.");
+    }
+    for (const clip of clips) {
+      const id = decisionId(clip);
+      const decision = decisionById.get(id);
+      if (!decision || !["accepted", "rejected"].includes(String(decision.decision ?? ""))) {
+        throw new Error(`LTX approval revalidation is missing a valid preserved decision for ${id}.`);
+      }
+      if (decision.image_id !== clip.image_id
+        || decision.source_image_sha256 !== clip.source_image_sha256
+        || decision.video_sha256 !== clip.normalized_video_sha256
+        || await hashFile(clip.source_image_path) !== clip.source_image_sha256
+        || await hashFile(clip.normalized_video_path) !== clip.normalized_video_sha256) {
+        throw new Error(`LTX approval revalidation creative/media hash mismatch for ${id}.`);
+      }
+    }
+    const revalidated = {
+      ...existing,
+      report_path: reportPath,
+      report_sha256: await hashFile(reportPath),
+      contact_sheet_path: report.contact_sheet_path ?? null,
+      accepted_count: decisions.filter((row) => row.decision === "accepted").length,
+      rejected_count: decisions.filter((row) => row.decision === "rejected").length,
+      decisions,
+      timing_revalidated_without_review_change: true,
+      timing_revalidated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await writeJson(outputPath, revalidated);
+    console.log(JSON.stringify({
+      status: revalidated.status,
+      output_path: outputPath,
+      accepted_count: revalidated.accepted_count,
+      rejected_count: revalidated.rejected_count,
+      timing_revalidated_without_review_change: true,
+    }, null, 2));
+    return;
   }
   const approveIds = ids(flags["approve-ids"]);
   const rejectIds = ids(flags["reject-ids"] ?? flags["decline-ids"]);
@@ -131,12 +186,14 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(outputPath, {
-      schema: "goldflow_ltx23_video_approval_v1",
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error),
-      updated_at: new Date().toISOString(),
-    }).catch(() => {});
+    if (!revalidateExisting) {
+      await writeJson(outputPath, {
+        schema: "goldflow_ltx23_video_approval_v1",
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+        updated_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

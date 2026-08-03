@@ -56,6 +56,7 @@ import {
 } from "./lib/youtube-publish-contract.mjs";
 import {
   ltxApprovalMatches,
+  ltxPlanHash,
   ltxVideoEnabled,
 } from "./lib/ltx-video-contract.mjs";
 import { semanticFailedUnitIds } from "./lib/semantic-planner-recovery.mjs";
@@ -1269,11 +1270,39 @@ async function ltxVideoGenerationComplete(episodeDir, episode) {
   }
   const sourceState = await sourceHashState(report.source_hashes);
   if (!sourceState.count || sourceState.stale.length) {
-    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale or missing` };
+    return {
+      done: false,
+      state: "stale",
+      evidence: `${path.basename(reportPath)} source hashes stale or missing`,
+      next_command_shape: `node bin/goldflow.mjs visual ltx-video --episode-dir ${episodeDir} --revalidate-existing true --workflow-bypass true`,
+    };
   }
-  for (const clip of report.clips ?? []) {
+  const plan = await readJson(report.plan_path, null);
+  if (!plan
+    || await fileSha256(report.plan_path) !== report.plan_sha256
+    || ltxPlanHash(plan) !== report.plan_contract_sha256
+    || ltxPlanHash(plan) !== plan.plan_sha256) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} plan file or contract hash stale` };
+  }
+  if (report.timing_revalidated_without_provider_submission === true
+    && (Number(report.generation_requests_submitted) !== 0
+      || Number(report.creative_resubmission_count) !== 0
+      || plan.timing_revalidated_without_provider_submission !== true
+      || Number(plan.generation_requests_submitted) !== 0
+      || Number(plan.creative_resubmission_count) !== 0)) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} zero-submit timing marker invalid` };
+  }
+  const generated = report.clips ?? [];
+  const omitted = report.omitted_clips ?? [];
+  if (Number(report.generated_count) !== generated.length
+    || Number(report.clip_count) !== generated.length
+    || Number(report.omitted_count) !== omitted.length
+    || Number(report.planned_count) !== generated.length + omitted.length) {
+    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} clip counts inconsistent` };
+  }
+  for (const clip of [...generated, ...omitted]) {
     if (await fileSha256(clip.source_image_path) !== clip.source_image_sha256
-      || await fileSha256(clip.normalized_video_path) !== clip.normalized_video_sha256) {
+      || (clip.status === "generated" && await fileSha256(clip.normalized_video_path) !== clip.normalized_video_sha256)) {
       return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale clip/source for ${clip.image_id}` };
     }
   }
@@ -1296,7 +1325,12 @@ async function animationDirectionPlanComplete(episodeDir, episode) {
   }
   const sourceState = await sourceHashState(report.source_hashes);
   if (!sourceState.count || sourceState.stale.length) {
-    return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale or missing` };
+    return {
+      done: false,
+      state: "stale",
+      evidence: `${path.basename(reportPath)} source hashes stale or missing`,
+      next_command_shape: `node bin/goldflow.mjs visual animation-plan --episode-dir ${episodeDir} --revalidate-existing true --workflow-bypass true`,
+    };
   }
   for (const row of directions) {
     if (await fileSha256(row.source_image_path) !== row.source_image_sha256 || !String(row.motion_prompt ?? "").trim()) {
@@ -1316,7 +1350,14 @@ async function ltxVideoApprovalComplete(episodeDir, episode) {
   const [report, approval] = await Promise.all([readJson(reportPath, null), readJson(approvalPath, null)]);
   if (!report || !approval) return { done: false, evidence: `${path.basename(approvalPath)} missing` };
   if (!await ltxApprovalMatches(report, approval, { reportPath })) {
-    return { done: false, state: "stale", evidence: `${path.basename(approvalPath)} decisions or hashes stale` };
+    return {
+      done: false,
+      state: "stale",
+      evidence: `${path.basename(approvalPath)} decisions or hashes stale`,
+      ...(report.timing_revalidated_without_provider_submission === true ? {
+        next_command_shape: `node bin/goldflow.mjs visual approve-ltx-video --episode-dir ${episodeDir} --revalidate-existing true --workflow-bypass true`,
+      } : {}),
+    };
   }
   return { done: true, evidence: `${path.basename(approvalPath)} accepted=${approval.accepted_count}; rejected=${approval.rejected_count}` };
 }

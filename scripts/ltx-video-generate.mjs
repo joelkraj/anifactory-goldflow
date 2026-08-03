@@ -56,6 +56,7 @@ const concurrency = boundedInteger(flags.concurrency, 15, 1, 30);
 const requestedDuration = flags.duration == null ? null : clampLtxDuration(flags.duration);
 const pollIntervalMs = boundedInteger(flags["poll-interval-ms"], 7000, 2000, 60000);
 const timeoutMs = boundedInteger(flags["timeout-ms"], 900000, 30000, 3600000);
+const revalidateExisting = boolFlag(flags["revalidate-existing"]);
 const modelslabProfiles = configuredModelslabProfiles({
   flagValue: flags["modelslab-profiles"],
 });
@@ -93,6 +94,242 @@ async function readJson(filePath, fallback = null) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function jsonEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function withoutCoverageTiming(coverage = []) {
+  return coverage.map((row) => {
+    const value = structuredClone(row);
+    delete value.timeline_duration_sec;
+    delete value.source_offset_sec;
+    delete value.source_end_offset_sec;
+    return value;
+  });
+}
+
+function retimedCoverage(coverage = [], direction = {}) {
+  const cutDurationSec = Number(direction.cut_duration_sec);
+  return coverage.map((row) => ({
+    ...row,
+    timeline_duration_sec: cutDurationSec,
+    source_offset_sec: 0,
+    source_end_offset_sec: Number(cutDurationSec.toFixed(3)),
+  }));
+}
+
+function assertExact(label, left, right, imageId) {
+  if (!jsonEqual(left, right)) {
+    throw new Error(`LTX zero-submit timing revalidation creative/hash mismatch for ${imageId}: ${label}.`);
+  }
+}
+
+async function revalidateExistingLtx({ animationDirection }) {
+  const [existingPlan, existingReport, existingPlanFileHash, existingReportFileHash] = await Promise.all([
+    readJson(planPath, null),
+    readJson(outputPath, null),
+    hashFile(planPath),
+    hashFile(outputPath),
+  ]);
+  if (existingPlan?.schema !== "goldflow_ltx23_video_plan_v1" || existingPlan?.status !== "passed") {
+    throw new Error(`LTX zero-submit timing revalidation requires an existing passed plan: ${planPath}`);
+  }
+  if (existingReport?.schema !== "goldflow_ltx23_video_report_v1" || existingReport?.status !== "passed") {
+    throw new Error(`LTX zero-submit timing revalidation requires an existing passed report: ${outputPath}`);
+  }
+  if (animationDirection?.schema !== "goldflow_animation_direction_plan_v1"
+    || animationDirection?.status !== "passed"
+    || animationDirection?.timing_revalidated_without_creative_replan !== true) {
+    throw new Error(
+      `LTX zero-submit timing revalidation requires a timing-revalidated animation direction plan: ${animationDirectionPath}`,
+    );
+  }
+  const animationSourceEntries = Object.entries(animationDirection.source_hashes ?? {});
+  if (!animationSourceEntries.length) {
+    throw new Error("LTX zero-submit timing revalidation requires hash-bound animation source provenance.");
+  }
+  for (const [sourcePath, expectedHash] of animationSourceEntries) {
+    if (!expectedHash || await hashFile(sourcePath) !== expectedHash) {
+      throw new Error(`LTX zero-submit timing revalidation animation source hash mismatch: ${sourcePath}.`);
+    }
+  }
+  if (existingReport.plan_sha256 !== existingPlanFileHash
+    || existingPlan.plan_sha256 !== ltxPlanHash(existingPlan)
+    || existingReport.plan_contract_sha256 !== ltxPlanHash(existingPlan)) {
+    throw new Error("LTX zero-submit timing revalidation refused a stale or internally inconsistent baseline plan/report pair.");
+  }
+  if (existingPlan.provider !== LTX_VIDEO_PROVIDER
+    || existingPlan.model_id !== LTX_VIDEO_MODEL_ID
+    || existingReport.provider !== LTX_VIDEO_PROVIDER
+    || existingReport.model_id !== LTX_VIDEO_MODEL_ID
+    || existingPlan.resolution !== "16:9") {
+    throw new Error("LTX zero-submit timing revalidation creative/hash mismatch: provider, model, or resolution changed.");
+  }
+  const planClips = Array.isArray(existingPlan.clips) ? existingPlan.clips : [];
+  const reportClips = Array.isArray(existingReport.clips) ? existingReport.clips : [];
+  const omittedClips = Array.isArray(existingReport.omitted_clips) ? existingReport.omitted_clips : [];
+  const reportRows = [...reportClips, ...omittedClips];
+  if (planClips.length !== reportRows.length
+    || Number(existingReport.planned_count) !== reportRows.length
+    || Number(existingReport.clip_count) !== reportClips.length
+    || Number(existingReport.generated_count) !== reportClips.length
+    || Number(existingReport.omitted_count) !== omittedClips.length
+    || Number(existingReport.failed_count ?? 0) !== 0) {
+    throw new Error("LTX zero-submit timing revalidation refused inconsistent historical clip counts.");
+  }
+  const directionById = new Map((animationDirection.directions ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const planById = new Map();
+  for (const clip of planClips) {
+    const imageId = String(clip.image_id ?? "");
+    if (!imageId || planById.has(imageId)) {
+      throw new Error("LTX zero-submit timing revalidation requires unique non-empty plan image IDs.");
+    }
+    planById.set(imageId, clip);
+  }
+  const candidateIds = new Set();
+  for (const row of reportRows) {
+    const imageId = String(row.image_id ?? "");
+    const candidateId = String(row.candidate_id ?? "");
+    if (!planById.has(imageId) || candidateId !== `${imageId}-candidate-01` || candidateIds.has(candidateId)) {
+      throw new Error(`LTX zero-submit timing revalidation candidate identity mismatch for ${imageId || "<missing>"}.`);
+    }
+    candidateIds.add(candidateId);
+  }
+  if (candidateIds.size !== planClips.length) {
+    throw new Error("LTX zero-submit timing revalidation report rows do not exactly cover the historical plan.");
+  }
+
+  const retimedPlanClips = [];
+  for (const clip of planClips) {
+    const imageId = String(clip.image_id);
+    const direction = directionById.get(imageId);
+    if (!direction) throw new Error(`LTX zero-submit timing revalidation lost direction ${imageId}.`);
+    assertExact("animation_sequence_id", clip.animation_sequence_id ?? null, direction.animation_sequence_id ?? null, imageId);
+    assertExact("scene_id", clip.scene_id ?? null, direction.scene_id ?? null, imageId);
+    assertExact("visual_beat_id", clip.visual_beat_id ?? null, direction.visual_beat_id ?? null, imageId);
+    assertExact("sequence_mode", clip.sequence_mode ?? null, direction.sequence_mode ?? null, imageId);
+    assertExact("source_image_path", clip.source_image_path ?? null, direction.source_image_path ?? null, imageId);
+    assertExact("source_image_sha256", clip.source_image_sha256 ?? null, direction.source_image_sha256 ?? null, imageId);
+    assertExact("source_prompt_sha256", clip.source_prompt_sha256 ?? null, direction.source_prompt_sha256 ?? null, imageId);
+    assertExact("motion_prompt", clip.motion_prompt ?? null, direction.motion_prompt ?? null, imageId);
+    assertExact("motion_prompt_sha256", clip.motion_prompt_sha256 ?? null, sha256(direction.motion_prompt ?? ""), imageId);
+    assertExact("negative_prompt", clip.negative_prompt ?? null, direction.negative_prompt ?? null, imageId);
+    assertExact("generation_duration", Number(clip.duration_sec), Number(direction.requested_generation_duration_sec), imageId);
+    assertExact("start_frame_contract", clip.start_frame_contract ?? null, direction.start_frame_contract ?? null, imageId);
+    assertExact("end_frame_contract", clip.end_frame_contract ?? null, direction.end_frame_contract ?? null, imageId);
+    assertExact("provider_image_inputs", clip.provider_image_inputs ?? null, direction.provider_image_inputs ?? null, imageId);
+    assertExact("candidate_count", Number(clip.candidate_count ?? 1), Number(direction.candidate_count ?? 1), imageId);
+    assertExact(
+      "coverage_creative_contract",
+      withoutCoverageTiming(clip.coverage ?? []),
+      withoutCoverageTiming(direction.coverage ?? []),
+      imageId,
+    );
+    if (await hashFile(clip.source_image_path) !== clip.source_image_sha256) {
+      throw new Error(`LTX zero-submit timing revalidation source-image hash mismatch for ${imageId}.`);
+    }
+    const cutDurationSec = Number(direction.cut_duration_sec);
+    retimedPlanClips.push({
+      ...clip,
+      start_sec: Number(direction.start_sec),
+      cut_duration_sec: cutDurationSec,
+      sequence_timeline_duration_sec: Number(cutDurationSec.toFixed(3)),
+      coverage: retimedCoverage(clip.coverage, direction),
+    });
+  }
+
+  const reportByImageId = new Map(reportRows.map((row) => [String(row.image_id), row]));
+  for (const clip of planClips) {
+    const imageId = String(clip.image_id);
+    const row = reportByImageId.get(imageId);
+    for (const field of [
+      "animation_sequence_id",
+      "scene_id",
+      "visual_beat_id",
+      "sequence_mode",
+      "source_image_path",
+      "source_image_sha256",
+      "source_prompt_sha256",
+      "motion_prompt_sha256",
+      "start_frame_contract",
+      "end_frame_contract",
+    ]) assertExact(`report_${field}`, row?.[field] ?? null, clip?.[field] ?? null, imageId);
+    assertExact("report_generation_duration", Number(row?.requested_duration_sec), Number(clip.duration_sec), imageId);
+    assertExact(
+      "report_coverage_creative_contract",
+      withoutCoverageTiming(row?.coverage ?? []),
+      withoutCoverageTiming(clip.coverage ?? []),
+      imageId,
+    );
+    if (row.status === "generated") {
+      if (!row.request_id) throw new Error(`LTX zero-submit timing revalidation missing request ID for ${imageId}.`);
+      if (!row.normalized_video_path || !row.normalized_video_sha256
+        || await hashFile(row.normalized_video_path) !== row.normalized_video_sha256) {
+        throw new Error(`LTX zero-submit timing revalidation normalized-video hash mismatch for ${imageId}.`);
+      }
+    } else if (row.status !== "omitted" || row.disposition !== LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition) {
+      throw new Error(`LTX zero-submit timing revalidation invalid omission contract for ${imageId}.`);
+    }
+  }
+
+  const animationDirectionHash = await hashFile(animationDirectionPath);
+  const sourceHashes = {
+    ...animationDirection.source_hashes,
+    [animationDirectionPath]: animationDirectionHash,
+  };
+  const revalidatedAt = new Date().toISOString();
+  const nextPlan = {
+    ...existingPlan,
+    source_hashes: sourceHashes,
+    clips: retimedPlanClips,
+    timing_revalidated_without_provider_submission: true,
+    timing_revalidated_at: revalidatedAt,
+    generation_requests_submitted: 0,
+    creative_resubmission_count: 0,
+    updated_at: revalidatedAt,
+  };
+  nextPlan.plan_sha256 = ltxPlanHash(nextPlan);
+  const serializedPlan = `${JSON.stringify(nextPlan, null, 2)}\n`;
+  const nextPlanFileHash = sha256(serializedPlan);
+  const retimeRow = (row) => {
+    const direction = directionById.get(String(row.image_id));
+    const cutDurationSec = Number(direction.cut_duration_sec);
+    return {
+      ...row,
+      start_sec: Number(direction.start_sec),
+      cut_duration_sec: cutDurationSec,
+      sequence_timeline_duration_sec: Number(cutDurationSec.toFixed(3)),
+      coverage: retimedCoverage(row.coverage, direction),
+    };
+  };
+  const nextReport = {
+    ...existingReport,
+    plan_sha256: nextPlanFileHash,
+    plan_contract_sha256: nextPlan.plan_sha256,
+    source_hashes: sourceHashes,
+    clips: reportClips.map(retimeRow),
+    omitted_clips: omittedClips.map(retimeRow),
+    timing_revalidated_without_provider_submission: true,
+    timing_revalidated_at: revalidatedAt,
+    timing_revalidated_from_report_sha256: existingReportFileHash,
+    generation_requests_submitted: 0,
+    creative_resubmission_count: 0,
+    updated_at: revalidatedAt,
+  };
+  await fs.writeFile(planPath, serializedPlan, "utf8");
+  await writeJson(outputPath, nextReport);
+  console.log(JSON.stringify({
+    status: nextReport.status,
+    output_path: outputPath,
+    plan_path: planPath,
+    clip_count: nextReport.clip_count,
+    omitted_count: nextReport.omitted_count,
+    generation_requests_submitted: 0,
+    creative_resubmission_count: 0,
+    timing_revalidated_without_provider_submission: true,
+  }, null, 2));
 }
 
 function values(value) {
@@ -363,14 +600,18 @@ async function contactSheet(clips, sheetPath) {
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, imageQa, identity, animationDirection, modelslabAccounts] = await Promise.all([
+  const [promptPlan, imagegenReport, imageQa, identity, animationDirection] = await Promise.all([
     readJson(promptPath),
     readJson(imagegenReportPath),
     readJson(imageQaPath),
     readJson(identityPath, {}),
     readJson(animationDirectionPath, null),
-    loadConfiguredModelslabAccounts(modelslabProfiles, { cwd: repoRoot }),
   ]);
+  if (revalidateExisting) {
+    await revalidateExistingLtx({ animationDirection });
+    return;
+  }
+  const modelslabAccounts = await loadConfiguredModelslabAccounts(modelslabProfiles, { cwd: repoRoot });
   const accountByProfile = new Map(modelslabAccounts.map((account) => [account.profile, account]));
   let plan;
   const explicitProofDirection = proof && workflowBypass && Boolean(flags["animation-direction-plan"]);
@@ -599,12 +840,14 @@ async function main() {
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await writeJson(outputPath, {
-      schema: "goldflow_ltx23_video_report_v1",
-      status: "failed",
-      error: redactLtxAccountProfileNames(errorMessage, modelslabProfiles),
-      updated_at: new Date().toISOString(),
-    }).catch(() => {});
+    if (!revalidateExisting) {
+      await writeJson(outputPath, {
+        schema: "goldflow_ltx23_video_report_v1",
+        status: "failed",
+        error: redactLtxAccountProfileNames(errorMessage, modelslabProfiles),
+        updated_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
     console.error(errorMessage);
     process.exitCode = 1;
   });

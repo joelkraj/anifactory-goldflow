@@ -655,12 +655,23 @@ function subtitleEventsFromScript(words, stitchReport) {
       candidateWords.push(word);
       candidateGlobalIndices.push(index);
     }
+    const strictLocalIndices = candidateWords.flatMap((word, index) => {
+      const midpoint = (Number(word.start_sec) + Number(word.end_sec)) / 2;
+      return midpoint >= Number(segment.start_sec) && midpoint < Number(segment.end_sec)
+        ? [index]
+        : [];
+    });
     const tokens = captionTokens(segment.caption_text);
     const localAnchors = captionTokenWordAnchors(tokens, candidateWords);
     const firstAnchor = localAnchors[0] ?? null;
     const lastAnchor = localAnchors.at(-1) ?? null;
     let segmentWords;
-    if (firstAnchor && lastAnchor) {
+    if (strictLocalIndices.length) {
+      const firstStrictIndex = strictLocalIndices[0];
+      const lastStrictIndex = strictLocalIndices.at(-1);
+      segmentWords = candidateWords.slice(firstStrictIndex, lastStrictIndex + 1);
+      wordCursor = candidateGlobalIndices[lastStrictIndex] + 1;
+    } else if (firstAnchor && lastAnchor) {
       segmentWords = candidateWords.slice(firstAnchor.word_index, lastAnchor.word_index + 1);
       wordCursor = candidateGlobalIndices[lastAnchor.word_index] + 1;
     } else {

@@ -3096,6 +3096,33 @@ function testPhraseAwareSubtitleGrouping() {
     row.end_sec > row.start_sec && (index === 0 || row.start_sec >= rows[index - 1].end_sec)
   )), true);
 
+  const compactExpandedCurrency = buildSubtitleEventsForTests({
+    words: [
+      { word: "Mileage", start_sec: 0.1, end_sec: 0.5 },
+      { word: "reward", start_sec: 0.55, end_sec: 1.0 },
+      { word: "eight", start_sec: 1.4, end_sec: 1.8 },
+      { word: "hundred", start_sec: 1.8, end_sec: 2.3 },
+      { word: "forty-seven", start_sec: 2.3, end_sec: 2.9 },
+      { word: "million", start_sec: 2.9, end_sec: 3.4 },
+      { word: "three", start_sec: 3.4, end_sec: 3.7 },
+      { word: "hundred", start_sec: 3.7, end_sec: 4.1 },
+      { word: "ten", start_sec: 4.1, end_sec: 4.4 },
+      { word: "thousand", start_sec: 4.4, end_sec: 4.9 },
+      { word: "dollars.", start_sec: 4.9, end_sec: 5.35 },
+      { word: "Next", start_sec: 5.65, end_sec: 5.9 },
+      { word: "line.", start_sec: 5.9, end_sec: 6.3 },
+    ],
+  }, {
+    segments: [
+      { unit_id: "money", duration_sec: 5.5, caption_text: "[MILEAGE REWARD: $847,310,000]" },
+      { unit_id: "next", duration_sec: 1, caption_text: "Next line." },
+    ],
+  });
+  assert.equal(compactExpandedCurrency.source, "audio_stitch_caption_text_word_aligned_to_whisper");
+  assert.equal(compactExpandedCurrency.events[0].text, "[MILEAGE REWARD: $847,310,000]");
+  assert.equal(compactExpandedCurrency.events[0].end_sec, 5.35);
+  assert.equal(compactExpandedCurrency.events[1].start_sec, 5.65);
+
   const alignedMultiplier = alignExpandedZeroMultiplierCaptionsForTests([
     { start_sec: 178.86, end_sec: 182.18, text: "730] [RECIPROCITY RETURN:" },
     { start_sec: 183.06, end_sec: 183.84, text: "0X]" },
@@ -7129,6 +7156,22 @@ function testVoiceDirectionCharacterization() {
 
   const cardinalNumbers = voiceDirectionTransformForTests("418 students connected to 4,812 shadows for 100,000 years.");
   assert.equal(cardinalNumbers.qwen_spoken_text, "four hundred and eighteen students connected to four thousand eight hundred and twelve shadows for one hundred thousand years.");
+
+  const currencyDecimal = voiceDirectionTransformForTests("The Mileage System credited another $2.4 million.");
+  assert.equal(currencyDecimal.qwen_spoken_text, "The Mileage System credited another two point four million dollars.");
+  assert.deepEqual(currencyDecimal.paragraph_units.map((unit) => unit.caption_text), [
+    "The Mileage System credited another $2.4 million.",
+  ]);
+
+  const transportUi = voiceDirectionTransformForTests("Pickup: Halcyon East Entrance.");
+  assert.equal(transportUi.qwen_spoken_text, "Pickup: Halcyon East Entrance.");
+  assert.deepEqual(transportUi.paragraph_units, [{
+    kind: "system_ui",
+    speaker: "SYSTEM",
+    text: "Pickup: Halcyon East Entrance.",
+    performed_text: "Pickup: Halcyon East Entrance.",
+    caption_text: "Pickup: Halcyon East Entrance.",
+  }]);
 
   const initialisms = voiceDirectionTransformForTests("The CEO told HR to send the NDA as a PDF through the API, but the SYSTEM stayed active.");
   assert.equal(initialisms.qwen_spoken_text, "The C E O told H R to send the N D A as a P D F through the A P I, but the System stayed active.");

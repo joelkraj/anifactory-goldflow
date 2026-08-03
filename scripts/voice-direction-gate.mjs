@@ -1173,10 +1173,10 @@ function colonSystemUiUnit(text, dialogueContext = {}) {
     .trim()
     .replace(/^\[COMMENT_BAIT\]\s*/i, "")
     .replace(/^\[BREATH_BEAT\]\s*/i, "");
-  const match = clean.match(/^([A-Z][A-Z0-9 _'’. -]{1,80}):\s*(\S.*)$/);
+  const match = clean.match(/^([A-Z][A-Za-z0-9 _'’. -]{1,80}):\s*(\S.*)$/);
   if (!match) return null;
   const label = match[1].trim();
-  const explicitInterfaceLabel = /^(?:SYSTEM|SYSTEM UI|UI|NOTICE|WARNING)\b/i.test(label);
+  const explicitInterfaceLabel = /^(?:SYSTEM|SYSTEM UI|UI|NOTICE|WARNING|PICKUP|DESTINATION|DROPOFF|DROP-OFF)\b/i.test(label);
   const allCapsRecord = !/[a-z]/.test(clean)
     && /[A-Z]/.test(match[2])
     && !isKnownDialogueSpeakerLabel(label, dialogueContext);
@@ -1225,6 +1225,7 @@ function splitIntoSentences(text) {
   };
   const protectedValue = value
     .replace(/\[[^\]\n]+\]/g, protect)
+    .replace(/\b\d[\d,]*\.\d+\b/g, protect)
     .replace(/\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St)\./g, protect)
     .replace(/\b(?:a\.m\.|p\.m\.)/gi, protect)
     .replace(/\b[A-Z]\./g, protect);
@@ -2672,6 +2673,9 @@ function qwenPronunciationText(value) {
     ))
     .replace(/\b(\d[\d,]*(?:\.\d+)?)\s*\/\s*(\d[\d,]*(?:\.\d+)?)\b/g, (_match, left, right) => `${numberToSpokenWords(left)} out of ${numberToSpokenWords(right)}`)
     .replace(/\b(\d[\d,]*(?:\.\d+)?)%/g, (_match, number) => `${numberToSpokenWords(number)} percent`)
+    .replace(/\$(\d[\d,]*(?:\.\d+)?)(?:\s+(thousand|million|billion))?(?:\s+dollars?)?/gi, (_match, number, scale) => (
+      `${numberToSpokenWords(number)}${scale ? ` ${String(scale).toLowerCase()}` : ""} dollars`
+    ))
     .replace(/\b\d[\d,]*(?:\.\d+)?\b/g, (number) => numberToSpokenWords(number))
     .replace(/\s+/g, " ")
     .trim();

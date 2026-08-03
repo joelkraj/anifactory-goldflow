@@ -151,6 +151,21 @@ function requireCanonicalQwenLiamOptions(options) {
   return options;
 }
 
+export function canonicalQwenProfileAdapterEligibleForTests(identity = {}) {
+  if (identity.tts_profile && identity.tts_profile !== QWEN_LIAM_PROFILE_ID) return false;
+  try {
+    const policy = narrationPolicy.narrationTtsPolicyForIdentity(identity);
+    narrationPolicy.validateNarrationTtsPolicy(policy, { production: true });
+    return policy?.primary?.provider === "qwen_local"
+      && policy?.primary?.voice_id === "joel_owned_narrator_clone"
+      && policy?.fallback == null
+      && JSON.stringify(policy?.synthesis_contract)
+        === JSON.stringify(narrationPolicy.QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT);
+  } catch {
+    return false;
+  }
+}
+
 export function recoveryKindForIdentityForTests(identity = {}) {
   const provider = cleanValue(identity.tts_provider);
   const voiceId = cleanValue(identity.narrator_voice_id ?? identity.tts_voice_id);
@@ -780,9 +795,9 @@ async function main() {
     );
   }
   if (recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND) {
-    if (identity.tts_profile !== QWEN_LIAM_PROFILE_ID) {
+    if (!canonicalQwenProfileAdapterEligibleForTests(identity)) {
       throw new Error(
-        `Qwen/Liam planner-fix relock requires the existing canonical profile ${QWEN_LIAM_PROFILE_ID}; found ${identity.tts_profile ?? "missing"}.`,
+        `Qwen/Liam planner-fix relock requires the existing canonical profile ${QWEN_LIAM_PROFILE_ID} or a validated equivalent v2 identity; found ${identity.tts_profile ?? "missing"}.`,
       );
     }
     narrationPolicy.validateNarrationTtsPolicy(

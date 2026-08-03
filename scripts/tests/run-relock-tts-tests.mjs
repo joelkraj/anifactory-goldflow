@@ -8,6 +8,7 @@ import {
   PUCK_TO_QWEN_RECOVERY_KIND,
   QWEN_PLANNER_FIX_RECOVERY_KIND,
   QWEN_LIAM_PROFILE_ID,
+  canonicalQwenProfileAdapterEligibleForTests,
   interruptedQwenTtsInventoryForTests,
   recoveryDisposition,
   recoveryEvidence,
@@ -20,6 +21,7 @@ import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
 } from "../lib/qwen-liam-batch-contract.mjs";
+import { defaultNarrationVoiceProviderOptions } from "../lib/narration-tts-policy.mjs";
 import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 
 function fixtureVoiceProviderOptions() {
@@ -464,6 +466,33 @@ export async function runRelockTtsTests() {
     recoveryKindForIdentityForTests(beforePlannerFix),
     QWEN_PLANNER_FIX_RECOVERY_KIND,
   );
+  const missingProfilePlannerFix = {
+    schema: "goldflow_run_identity_v2",
+    tts_provider: "qwen_local",
+    tts_fallback_provider: null,
+    narrator_voice_id: "joel_owned_narrator_clone",
+    tts_voice_id: "joel_owned_narrator_clone",
+    tts_native_speed: null,
+    voice_provider_options: defaultNarrationVoiceProviderOptions({
+      provider: "qwen_local",
+      fallbackProvider: null,
+      voiceId: "joel_owned_narrator_clone",
+      nativeSpeed: null,
+    }),
+  };
+  assert.equal(canonicalQwenProfileAdapterEligibleForTests(missingProfilePlannerFix), true);
+  assert.equal(canonicalQwenProfileAdapterEligibleForTests({
+    ...missingProfilePlannerFix,
+    narrator_voice_id: "wrong_voice",
+    tts_voice_id: "wrong_voice",
+    voice_provider_options: {
+      ...missingProfilePlannerFix.voice_provider_options,
+      primary: {
+        ...missingProfilePlannerFix.voice_provider_options.primary,
+        voice_id: "wrong_voice",
+      },
+    },
+  }), false);
   assert.equal(
     recoveryDisposition(QWEN_PLANNER_FIX_RECOVERY_KIND),
     "full_official_qwen_joel_voice_plan_and_narration_rebuild_after_committed_planner_fix",

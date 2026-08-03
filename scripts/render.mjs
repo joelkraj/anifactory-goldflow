@@ -196,6 +196,11 @@ function explicitEditorialReuse(metadata = {}, sourceImageId = null) {
   return approved && Boolean(source) && (!sourceImageId || String(source) === String(sourceImageId));
 }
 
+function explicitRenderEditorialReuse(prompt = {}, metadata = {}, sourceImageId = null) {
+  return explicitEditorialReuse(prompt, sourceImageId)
+    && explicitEditorialReuse(metadata, sourceImageId);
+}
+
 function forbiddenDonorRecovery(metadata = {}) {
   const mode = String(metadata.recovery_mode ?? metadata.generated?.recovery_mode ?? "").toLowerCase();
   const donorId = metadata.donor_image_id ?? metadata.copied_from_image_id ?? metadata.source_image_id ?? null;
@@ -224,7 +229,7 @@ async function assertRenderImageIntegrity(promptPlan, imagegenReport, identity, 
   const acceptedHashes = imageOutputQa?.accepted_image_hashes ?? {};
   const resultById = new Map((imagegenReport?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const ledgerById = new Map((cutLedger?.cuts ?? []).map((row) => [String(row.image_id ?? ""), row]));
-  const hashOwners = new Map();
+  const integrityRows = [];
   let checked = 0;
   for (const prompt of promptPlan?.prompts ?? []) {
     if (prompt.image_generation_required === false) continue;
@@ -236,11 +241,6 @@ async function assertRenderImageIntegrity(promptPlan, imagegenReport, identity, 
     const metadata = await readJson(`${imagePath}.metadata.json`, {});
     const donor = forbiddenDonorRecovery(metadata);
     if (donor) throw new Error(`Render refused donor/hash-perturbation recovery for ${imageId} from ${donor}. Generate the actual cut.`);
-    const priorOwner = hashOwners.get(imageHash);
-    if (priorOwner && priorOwner !== imageId && !explicitEditorialReuse(metadata, priorOwner)) {
-      throw new Error(`Render refused byte-identical scene images ${priorOwner} and ${imageId}. Record deliberate editorial reuse explicitly or regenerate the failed cut.`);
-    }
-    hashOwners.set(imageHash, priorOwner ?? imageId);
     if (qaRequired) {
       const ledgerRow = ledgerById.get(imageId);
       if (acceptedHashes[imageId] !== imageHash) throw new Error(`Render image ${imageId} changed after output QA; rerun imagegen qa.`);
@@ -248,14 +248,39 @@ async function assertRenderImageIntegrity(promptPlan, imagegenReport, identity, 
         throw new Error(`Render image ${imageId} lacks hash-matched passed QA in ${cutExecutionLedgerPath}.`);
       }
     }
+    integrityRows.push({ imageId, imageHash, metadata, prompt });
     checked += 1;
   }
   if (!checked) throw new Error("Render found no generated scene images to validate.");
+
+  const rowsByHash = new Map();
+  for (const row of integrityRows) {
+    if (!rowsByHash.has(row.imageHash)) rowsByHash.set(row.imageHash, []);
+    rowsByHash.get(row.imageHash).push(row);
+  }
+  let approvedEditorialReuseCount = 0;
+  for (const rows of rowsByHash.values()) {
+    if (rows.length < 2) continue;
+    const canonicalRows = rows.filter((row) => !explicitRenderEditorialReuse(row.prompt, row.metadata));
+    const ids = rows.map((row) => row.imageId).join(", ");
+    if (canonicalRows.length !== 1) {
+      throw new Error(`Render refused byte-identical scene images ${ids}. Deliberate editorial reuse requires exactly one canonical source image.`);
+    }
+    const canonicalId = canonicalRows[0].imageId;
+    for (const row of rows) {
+      if (row.imageId === canonicalId) continue;
+      if (!explicitRenderEditorialReuse(row.prompt, row.metadata, canonicalId)) {
+        throw new Error(`Render refused byte-identical scene images ${canonicalId} and ${row.imageId}. Record deliberate editorial reuse explicitly or regenerate the failed cut.`);
+      }
+      approvedEditorialReuseCount += 1;
+    }
+  }
   return {
     qa_required: qaRequired,
     qa_report_path: qaRequired ? imageOutputQaPath : null,
     checked_image_count: checked,
     duplicate_hash_count: 0,
+    approved_editorial_reuse_count: approvedEditorialReuseCount,
     donor_recovery_count: 0,
   };
 }

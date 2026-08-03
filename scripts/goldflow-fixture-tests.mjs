@@ -4474,6 +4474,66 @@ async function testRenderRequiresHashMatchedImageQa() {
   );
 }
 
+async function testRenderAllowsOrderIndependentDeclaredEditorialReuse() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-render-editorial-reuse-"));
+  const reusePath = path.join(tempDir, "cut_reuse.png");
+  const canonicalPath = path.join(tempDir, "cut_canonical.png");
+  const bytes = Buffer.from("same approved editorial frame");
+  await Promise.all([
+    fs.writeFile(reusePath, bytes),
+    fs.writeFile(canonicalPath, bytes),
+  ]);
+  await writeJson(`${reusePath}.metadata.json`, {
+    editorial_reuse_approved: true,
+    reuse_source_image_id: "cut_canonical",
+  });
+  await writeJson(`${canonicalPath}.metadata.json`, {});
+  const promptPlan = {
+    prompts: [
+      {
+        image_id: "cut_reuse",
+        image_generation_required: true,
+        editorial_reuse_approved: true,
+        reuse_source_image_id: "cut_canonical",
+      },
+      { image_id: "cut_canonical", image_generation_required: true },
+    ],
+  };
+  const imagegenReport = {
+    results: [
+      { image_id: "cut_reuse", image_path: reusePath },
+      { image_id: "cut_canonical", image_path: canonicalPath },
+    ],
+  };
+  const result = await assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {});
+  assert.equal(result.checked_image_count, 2);
+  assert.equal(result.approved_editorial_reuse_count, 1);
+
+  delete promptPlan.prompts[0].editorial_reuse_approved;
+  delete promptPlan.prompts[0].reuse_source_image_id;
+  await assert.rejects(
+    () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {}),
+    /requires exactly one canonical source image/i,
+  );
+  promptPlan.prompts[0].editorial_reuse_approved = true;
+  promptPlan.prompts[0].reuse_source_image_id = "cut_canonical";
+
+  await writeJson(`${reusePath}.metadata.json`, {
+    editorial_reuse_approved: true,
+    reuse_source_image_id: "cut_wrong_source",
+  });
+  await assert.rejects(
+    () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {}),
+    /Record deliberate editorial reuse explicitly/i,
+  );
+
+  await writeJson(`${reusePath}.metadata.json`, {});
+  await assert.rejects(
+    () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {}),
+    /requires exactly one canonical source image/i,
+  );
+}
+
 async function testIncrementalMotionClipPrebuildReusesExactCache() {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-motion-prebuild-"));
   const imagePath = path.join(tempDir, "cut_static.png");
@@ -12130,6 +12190,7 @@ const FIXTURE_SUITES = {
     testMotionPlanConsumesApprovedParallax,
     testStreamingRenderHashFinalization,
     testRenderRequiresHashMatchedImageQa,
+    testRenderAllowsOrderIndependentDeclaredEditorialReuse,
     testIncrementalMotionClipPrebuildReusesExactCache,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,

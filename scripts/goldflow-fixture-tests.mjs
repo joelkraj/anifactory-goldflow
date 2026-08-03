@@ -251,6 +251,7 @@ import {
   runIdentityWhisperCompleteForTests,
   selectedNarratorVoiceIdForTests,
   ttsStatusIdentityFieldsForTests,
+  unapprovedDuplicateImageGroupsForTests,
 } from "./run-status.mjs";
 import { plannerChunkIdentityFindings } from "./lib/planner-chunk-ledger.mjs";
 import {
@@ -3663,6 +3664,29 @@ function testImageOutputQaRiskAndDonorPolicies() {
   assert.equal(populationReasons.includes("background_population"), true);
   assert.equal(donorRecoveryFinding({ donor_image_id: "cut_001", hash_perturbation: true }, "cut_002")?.code, "scene_image_donor_recovery_forbidden");
   assert.equal(donorRecoveryFinding({ editorial_reuse_approved: true, reuse_source_image_id: "cut_001" }, "cut_002"), null);
+
+  assert.deepEqual(unapprovedDuplicateImageGroupsForTests([
+    { image_id: "cut_001", image_sha256: "hash-a", status: "generated" },
+    {
+      image_id: "cut_002",
+      image_sha256: "hash-a",
+      status: "editorial_reuse",
+      generated: { editorial_reuse_approved: true, reuse_source_image_id: "cut_001" },
+    },
+  ]), []);
+  assert.deepEqual(unapprovedDuplicateImageGroupsForTests([
+    { image_id: "cut_001", image_sha256: "hash-a", status: "generated" },
+    { image_id: "cut_002", image_sha256: "hash-a", status: "reused_fresh" },
+  ]), [["cut_001", "cut_002"]]);
+  assert.deepEqual(unapprovedDuplicateImageGroupsForTests([
+    { image_id: "cut_001", image_sha256: "hash-a", status: "generated" },
+    {
+      image_id: "cut_002",
+      image_sha256: "hash-a",
+      status: "editorial_reuse",
+      generated: { editorial_reuse_approved: true, reuse_source_image_id: "cut_999" },
+    },
+  ]), [["cut_001", "cut_002"]]);
 
   const riskRows = [{
     image_id: "cut_001",

@@ -841,6 +841,37 @@ async function derivedReferenceImagegenStatus(episodeDir, promptPlan, latestImag
   };
 }
 
+function approvedEditorialReuseSourceId(row = {}) {
+  const metadata = row.generated ?? row.metadata ?? row;
+  if (metadata?.editorial_reuse_approved !== true) return null;
+  const sourceId = String(metadata?.reuse_source_image_id ?? "").trim();
+  return sourceId || null;
+}
+
+export function unapprovedDuplicateImageGroupsForTests(rows = []) {
+  const byHash = new Map();
+  for (const row of rows) {
+    const imageId = String(row?.image_id ?? "").trim();
+    const imageHash = String(row?.resolved_image_sha256 ?? row?.image_sha256 ?? "").trim();
+    if (!imageId || !imageHash) continue;
+    const group = byHash.get(imageHash) ?? [];
+    group.push(row);
+    byHash.set(imageHash, group);
+  }
+  return [...byHash.values()]
+    .filter((group) => group.length > 1)
+    .filter((group) => {
+      const canonicalRows = group.filter((row) => !approvedEditorialReuseSourceId(row));
+      if (canonicalRows.length !== 1) return true;
+      const canonicalId = String(canonicalRows[0].image_id ?? "").trim();
+      return group.some((row) => {
+        if (String(row.image_id ?? "").trim() === canonicalId) return false;
+        return approvedEditorialReuseSourceId(row) !== canonicalId;
+      });
+    })
+    .map((group) => group.map((row) => String(row.image_id ?? "").trim()));
+}
+
 async function imageReportComplete(episodeDir, episode, identity) {
   const promptPlanPath = path.join(episodeDir, "section_image_prompts_hardened.json");
   const promptPlan = await readJson(promptPlanPath, null);
@@ -860,16 +891,14 @@ async function imageReportComplete(episodeDir, episode, identity) {
   }
   reports.sort((left, right) => right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name));
   async function duplicateSummary(report) {
-    const byHash = new Map();
+    const hashedRows = [];
     for (const row of report.results ?? []) {
       if (!row?.image_id || !row.image_path || !(await exists(row.image_path))) continue;
       const hash = row.generated?.output_sha256 ?? await fileSha256(row.image_path);
       if (!hash) continue;
-      const rows = byHash.get(hash) ?? [];
-      rows.push(row.image_id);
-      byHash.set(hash, rows);
+      hashedRows.push({ ...row, resolved_image_sha256: hash });
     }
-    return [...byHash.values()].filter((rows) => rows.length > 1).map((rows) => rows.join("="));
+    return unapprovedDuplicateImageGroupsForTests(hashedRows).map((rows) => rows.join("="));
   }
   const latestReport = reports[0]?.report ?? null;
   const cutExecutionLedger = await readJson(path.join(episodeDir, "cut_execution_ledger.json"), null);

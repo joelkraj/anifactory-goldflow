@@ -192,8 +192,9 @@ function imageOutputQaRequired(identity = {}) {
 
 function explicitEditorialReuse(metadata = {}, sourceImageId = null) {
   const approved = metadata.editorial_reuse_approved === true || metadata.generated?.editorial_reuse_approved === true;
-  const source = metadata.reuse_source_image_id ?? metadata.editorial_reuse_source_image_id ?? metadata.generated?.reuse_source_image_id ?? null;
-  return approved && Boolean(source) && (!sourceImageId || String(source) === String(sourceImageId));
+  const source = String(metadata.reuse_source_image_id ?? metadata.generated?.reuse_source_image_id ?? "").trim();
+  const expectedSource = sourceImageId === null ? null : String(sourceImageId).trim();
+  return approved && Boolean(source) && (expectedSource === null || source === expectedSource);
 }
 
 function explicitRenderEditorialReuse(prompt = {}, metadata = {}, sourceImageId = null) {
@@ -201,12 +202,12 @@ function explicitRenderEditorialReuse(prompt = {}, metadata = {}, sourceImageId 
     && explicitEditorialReuse(metadata, sourceImageId);
 }
 
-function forbiddenDonorRecovery(metadata = {}) {
+function forbiddenDonorRecovery(prompt = {}, metadata = {}) {
   const mode = String(metadata.recovery_mode ?? metadata.generated?.recovery_mode ?? "").toLowerCase();
   const donorId = metadata.donor_image_id ?? metadata.copied_from_image_id ?? metadata.source_image_id ?? null;
   const perturbed = metadata.hash_perturbation === true || metadata.generated?.hash_perturbation === true;
   if (!donorId && !/donor|nearest.?neighbor|copied.?scene|hash.?perturb/.test(mode) && !perturbed) return null;
-  if (explicitEditorialReuse(metadata, donorId)) return null;
+  if (explicitRenderEditorialReuse(prompt, metadata, donorId)) return null;
   return donorId ?? "unknown";
 }
 
@@ -239,7 +240,7 @@ async function assertRenderImageIntegrity(promptPlan, imagegenReport, identity, 
     if (!imagePath || !(await exists(imagePath))) throw new Error(`Render image missing for ${imageId}: ${imagePath ?? "no path"}`);
     const imageHash = await hashFile(imagePath);
     const metadata = await readJson(`${imagePath}.metadata.json`, {});
-    const donor = forbiddenDonorRecovery(metadata);
+    const donor = forbiddenDonorRecovery(prompt, metadata);
     if (donor) throw new Error(`Render refused donor/hash-perturbation recovery for ${imageId} from ${donor}. Generate the actual cut.`);
     if (qaRequired) {
       const ledgerRow = ledgerById.get(imageId);

@@ -4534,6 +4534,55 @@ async function testRenderAllowsOrderIndependentDeclaredEditorialReuse() {
   );
 }
 
+async function testRenderDonorRecoveryRequiresPromptAndSidecarReuse() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-render-donor-reuse-"));
+  const reusePath = path.join(tempDir, "cut_reuse.png");
+  const canonicalPath = path.join(tempDir, "cut_canonical.png");
+  const bytes = Buffer.from("same deliberate editorial frame");
+  await Promise.all([
+    fs.writeFile(reusePath, bytes),
+    fs.writeFile(canonicalPath, bytes),
+  ]);
+  const promptPlan = {
+    prompts: [
+      {
+        image_id: "cut_reuse",
+        image_generation_required: true,
+        editorial_reuse_approved: true,
+        reuse_source_image_id: "cut_canonical",
+      },
+      { image_id: "cut_canonical", image_generation_required: true },
+    ],
+  };
+  const imagegenReport = {
+    results: [
+      { image_id: "cut_reuse", image_path: reusePath },
+      { image_id: "cut_canonical", image_path: canonicalPath },
+    ],
+  };
+  await writeJson(`${reusePath}.metadata.json`, {
+    recovery_mode: "donor_copy",
+    donor_image_id: "cut_canonical",
+    editorial_reuse_approved: true,
+    reuse_source_image_id: "cut_canonical",
+  });
+  await writeJson(`${canonicalPath}.metadata.json`, {});
+  const passed = await assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {});
+  assert.equal(passed.approved_editorial_reuse_count, 1);
+
+  delete promptPlan.prompts[0].reuse_source_image_id;
+  await assert.rejects(
+    () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {}),
+    /refused donor/i,
+  );
+
+  promptPlan.prompts[0].editorial_reuse_source_image_id = "cut_canonical";
+  await assert.rejects(
+    () => assertRenderImageIntegrityForTests(promptPlan, imagegenReport, {}, {}, {}),
+    /refused donor/i,
+  );
+}
+
 async function testIncrementalMotionClipPrebuildReusesExactCache() {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-motion-prebuild-"));
   const imagePath = path.join(tempDir, "cut_static.png");
@@ -12191,6 +12240,7 @@ const FIXTURE_SUITES = {
     testStreamingRenderHashFinalization,
     testRenderRequiresHashMatchedImageQa,
     testRenderAllowsOrderIndependentDeclaredEditorialReuse,
+    testRenderDonorRecoveryRequiresPromptAndSidecarReuse,
     testIncrementalMotionClipPrebuildReusesExactCache,
     testGptImage2PreservesFullPromptAndUsesLandscapeDefault,
     testVoiceDirectionCharacterization,

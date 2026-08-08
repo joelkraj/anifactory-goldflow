@@ -1478,6 +1478,28 @@ function lightlyPunctuate(text, mode) {
   return text;
 }
 
+export function isInlineQuotedNarrationTerm({ before = "", quotedText = "" } = {}) {
+  const cleanQuotedText = String(quotedText ?? "").trim();
+  if (!cleanQuotedText || words(cleanQuotedText).length > 8) return false;
+  if (/[.!?…—]["”’\])]*$/u.test(cleanQuotedText)) return false;
+  return /\b(?:write|writes|wrote|written|type|typed|enter|entered|label|labeled|mark|marked|list|listed|name|named|call|called|describe|described|record|recorded)\s*[:=-]?\s*$/i
+    .test(String(before ?? "").trim());
+}
+
+export function hasTtsTerminalPunctuation(text) {
+  return /[.!?…—]["”’\])]*$/u.test(String(text ?? "").trim());
+}
+
+export function normalizeAtomicSpokenTerminal(spokenText, { sourceText = "", kind = "narration" } = {}) {
+  const cleanSpokenText = String(spokenText ?? "").trim();
+  if (!cleanSpokenText || hasTtsTerminalPunctuation(cleanSpokenText)) return cleanSpokenText;
+  const cleanSourceText = String(sourceText ?? "").trim();
+  const allCapsDisplayLine = /[A-Z]/.test(cleanSourceText)
+    && /^[A-Z0-9][A-Z0-9 '&:/+,%().-]*$/u.test(cleanSourceText);
+  if (kind === "system_ui" || allCapsDisplayLine) return `${cleanSpokenText}.`;
+  return cleanSpokenText;
+}
+
 function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = {}) {
   const units = [];
   let dialogueTurnIndex = 0;
@@ -1541,6 +1563,16 @@ function paragraphUnits(script, tags, speakabilityRules = {}, dialogueContext = 
     let cursor = 0;
     const quotes = [...paragraph.matchAll(/"([^"]+)"/g)];
     if (!quotes.length) {
+      units.push(...narrationPerformanceUnits(paragraph));
+      rememberNarrationContext(paragraph);
+      units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
+      continue;
+    }
+    const allQuotesAreInlineNarrationTerms = quotes.every((quote) => isInlineQuotedNarrationTerm({
+      before: paragraph.slice(0, quote.index ?? 0),
+      quotedText: quote[1],
+    }));
+    if (allQuotesAreInlineNarrationTerms) {
       units.push(...narrationPerformanceUnits(paragraph));
       rememberNarrationContext(paragraph);
       units.push({ kind: "segment_boundary", speaker: "BOUNDARY", text: "", performed_text: "", caption_text: "" });
@@ -3449,7 +3481,7 @@ function sentenceCompleteUnitBoundaryIntegrity(units, enabled) {
         source_text: sourceText,
       });
     }
-    if (!/[.!?…]["”’\])]*$/u.test(spokenText)) {
+    if (!hasTtsTerminalPunctuation(spokenText)) {
       blockers.push({
         code: "tts_unit_missing_terminal_punctuation",
         unit_id: unit?.unit_id ?? null,
@@ -3531,7 +3563,10 @@ function buildQwenGenerationPlan(
         : "narrator";
       const rawPerformanceText = unit.performed_text ?? unit.text ?? unit.caption_text;
       const spoken = qwenSpokenTextDetailed(rawPerformanceText, sourceSpeaker, ttsOverrides);
-      const spokenText = spoken.text;
+      const spokenText = normalizeAtomicSpokenTerminal(spoken.text, {
+        sourceText: unit.text ?? "",
+        kind: unit.kind ?? "narration",
+      });
       if (!isSpeakableQwenText(spokenText)) continue;
       const sourceUnitIndex = sourceUnitOffset + 1;
       const qwenInstruction = qwenInstructForUnit({ segment, unit: { ...unit, speaker: sourceSpeaker }, role, cast });

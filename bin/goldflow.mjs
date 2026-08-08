@@ -21,12 +21,18 @@ const args = process.argv.slice(2);
 const command = args[0] ?? "help";
 const subcommand = args[1] ?? "";
 const flags = args.slice(command === "help" ? 1 : 2);
+const helpRequested = args.some((arg) => arg === "--help" || arg === "-h");
 
 function parseFlags(parts) {
   const parsed = {};
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index];
     if (!part.startsWith("--")) continue;
+    const equalsIndex = part.indexOf("=", 2);
+    if (equalsIndex !== -1) {
+      parsed[part.slice(2, equalsIndex)] = part.slice(equalsIndex + 1);
+      continue;
+    }
     const key = part.slice(2);
     const value = parts[index + 1] && !parts[index + 1].startsWith("--") ? parts[index + 1] : "true";
     parsed[key] = value;
@@ -172,11 +178,12 @@ Stage registry: ${PIPELINE_STAGE_REGISTRY_VERSION}
 
 Commands:
 ${registryCommands}
-  goldflow run codex-doctor        Inspect the pinned Codex runtime
+  goldflow run codex-doctor        Inspect the identity-locked Web/Codex planning runtime
   goldflow run status              Print the artifact-backed stage ledger
   goldflow run advance             Advance automatic stages continuously using the locked production profile
   goldflow run audio-semantic-fork Run semantic planning and the voice/TTS/Whisper branch concurrently
   goldflow run visual-wavefront    Prefetch hardened ModelsLab cuts while prompt chunks are authored
+  goldflow run web-archive-cleanup Archive legacy unscoped GPT Image chats through one throttled maintenance lane
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -201,12 +208,14 @@ Common flags:
   --week <week>
   --episode ep_01
   --run-intent proof --proof-scope 0-300 locks an isolated bounded proof
-  --production-profile fast-premium locks eight-way planner concurrency and authorized continuous automatic stages
+  --planning-provider chatgpt_web --planning-effort-policy web_pro_adaptive_v1 locks authenticated Web planning (default for new runs)
+  --chatgpt-project-url https://chatgpt.com/g/g-p-<id>/project scopes Web planning and GPT Image chats to one disposable run project
+  --production-profile fast-premium locks provider-aware planner concurrency and authorized continuous automatic stages
   --allow-dirty-worktree true --dirty-reason <reason> is diagnostic/proof-only
 
 Production profiles:
-  fast-premium (default for new preflights): semantic 8, editorial beats 8, reference chunks 8, prompt chunks 8, local Qwen with the owned Joel reference 1, reference/images 15, render 4
-  fast-premium orchestration: semantic || voice/TTS/Whisper fork, scoped-only planner recovery, prompt-to-ModelsLab wavefront prefetch
+  fast-premium (default for new preflights): ChatGPT Web text queue 10, heavy starts 2/15 min, Extra High/Pro 1, GPT Image 3, shared browser host 10; local Qwen narration 1; render 4
+  fast-premium orchestration: semantic || voice/TTS/Whisper fork, scoped-only planner recovery, identity-locked prompt-to-image wavefront prefetch
   balanced: legacy 4/4/6/6 planner concurrency and explicit spend flags for run advance
   Selecting fast-premium at preflight authorizes planner/media/render spend for run advance. Creative review gates still hold.
 
@@ -217,6 +226,8 @@ Render profiles:
   Motion clips are hash cached; compliant concat streams skip the redundant normalization encode.
 
 Validation-batch flags:
+  --image-provider chatgpt_web_gpt_image --image-model chatgpt_web_gpt_image --reference-model chatgpt_web_gpt_image
+  (production default; uses three authenticated GPT Image workers; pass --chatgpt-project-url to avoid per-chat cleanup)
   --image-provider modelslab --image-model gpt-image-2-t2i --reference-model gpt-image-2-i2i --image-fallback-provider codex_imagegen --image-fallback-condition modelslab_credit_exhausted
   Locks GPT Image 2 end to end and permits built-in Codex Imagen fallback only after an explicit ModelsLab insufficient-credit response.
   Default narration is local Qwen3-TTS 1.7B Base with the pinned owned Joel reference clone: sentence-complete 45-60-word units (hard max 60), 80 ms joins, deterministic batch-four synthesis, no fallback, no continuous request, and no speed or post-tempo control.
@@ -239,7 +250,7 @@ Prompt-repair migration guardrails:
 `);
 }
 
-if (command === "help" || command === "--help" || command === "-h") {
+if (command === "help" || command === "--help" || command === "-h" || helpRequested) {
   help();
 } else if (command === "run" && subcommand === "preflight") {
   run("run-preflight.mjs", flags);
@@ -255,6 +266,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("run-audio-semantic-fork.mjs", flags);
 } else if (command === "run" && subcommand === "visual-wavefront") {
   run("run-visual-wavefront.mjs", flags);
+} else if (command === "run" && subcommand === "web-archive-cleanup") {
+  run("chatgpt-web-archive-cleanup.mjs", flags);
 } else if (command === "run" && subcommand === "import-proof-baseline") {
   run("proof-baseline-import.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {
@@ -357,6 +370,8 @@ if (command === "help" || command === "--help" || command === "-h") {
   run("youtube-publish.mjs", ["prepare", ...flags]);
 } else if (command === "youtube" && subcommand === "record-upload") {
   run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "record-thumbnail-update") {
+  run("youtube-publish.mjs", ["record-thumbnail-update", ...flags]);
 } else if (command === "youtube" && subcommand === "record-comment") {
   run("youtube-publish.mjs", ["record-comment", ...flags]);
 } else if (command === "analytics" && subcommand === "ingest") {

@@ -58,6 +58,13 @@ import {
   ltxApprovalMatches,
   ltxVideoEnabled,
 } from "./lib/ltx-video-contract.mjs";
+import { semanticFailedUnitIds } from "./lib/semantic-planner-recovery.mjs";
+import {
+  DEFAULT_WEB_PLANNING_EFFORT_POLICY,
+  normalizePlanningEffort,
+  normalizePlanningEffortPolicy,
+  normalizePlanningProvider,
+} from "./lib/planning-runtime-policy.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -182,6 +189,7 @@ function normalizeAudioTarget(value) {
 function normalizeImageProvider(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
+  if (["chatgpt_web", "chatgpt_web_image", "chatgpt_web_gpt_image", "web_gpt_image"].includes(normalized)) return "chatgpt_web_gpt_image";
   if ([
     "hybrid",
     "hybrid_codex_refs_multichar",
@@ -226,14 +234,14 @@ function codexOpeningSec(identity) {
 }
 
 function imagegenOpeningFlag(identity) {
-  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  const provider = normalizeImageProvider(identity?.image_provider ?? "chatgpt_web_gpt_image");
   return provider === "hybrid_codex_opening_modelslab_rest"
     || provider === "hybrid_codex_refs_opening_risky_modelslab_rest"
     || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest" ? ` --codex-opening-sec ${codexOpeningSec(identity)}` : "";
 }
 
 function usesCodexReferences(identity) {
-  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  const provider = normalizeImageProvider(identity?.image_provider ?? "chatgpt_web_gpt_image");
   return provider === "codex_imagegen"
     || provider === "hybrid_codex_refs_multichar"
     || provider === "hybrid_codex_opening_modelslab_rest"
@@ -241,7 +249,7 @@ function usesCodexReferences(identity) {
 }
 
 function usesCodexSceneCuts(identity) {
-  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  const provider = normalizeImageProvider(identity?.image_provider ?? "chatgpt_web_gpt_image");
   return provider === "codex_imagegen"
     || provider === "hybrid_codex_refs_multichar"
     || provider === "hybrid_codex_opening_modelslab_rest"
@@ -469,6 +477,87 @@ function runIdentityWhisperComplete(runIdentity = {}) {
   return validateLocalWhisperIdentityContract(runIdentity);
 }
 
+function runIdentityPlanningComplete(runIdentity = {}) {
+  const topProvider = runIdentity.planning_provider ?? null;
+  const lockedProvider = runIdentity.provider_locks?.planning_provider ?? null;
+  if (!topProvider && !lockedProvider) {
+    return {
+      done: true,
+      evidence: "legacy planning identity adapter: codex_cli + uniform effort",
+      provider: "codex_cli",
+      legacy: true,
+    };
+  }
+  const mismatches = [];
+  const lockedEffortPolicy = runIdentity.provider_locks?.planning_effort_policy ?? null;
+  const topEffortPolicy = runIdentity.planning_effort_policy ?? null;
+  const lockedDefaultEffort = runIdentity.provider_locks?.planning_default_reasoning_effort ?? null;
+  const modelDefaultEffort = runIdentity.model_versions?.planning_reasoning_effort ?? null;
+  if (!lockedProvider) mismatches.push("provider_locks.planning_provider");
+  if (!topProvider) mismatches.push("planning_provider");
+  if (!lockedEffortPolicy) mismatches.push("provider_locks.planning_effort_policy");
+  if (!topEffortPolicy) mismatches.push("planning_effort_policy");
+  if (!lockedDefaultEffort) mismatches.push("provider_locks.planning_default_reasoning_effort");
+  if (!modelDefaultEffort) mismatches.push("model_versions.planning_reasoning_effort");
+  let provider;
+  let effortPolicy;
+  let defaultEffort;
+  try { provider = normalizePlanningProvider(lockedProvider ?? topProvider); } catch { mismatches.push("planning_provider"); }
+  try {
+    effortPolicy = normalizePlanningEffortPolicy(
+      lockedEffortPolicy ?? topEffortPolicy,
+    );
+  } catch { mismatches.push("planning_effort_policy"); }
+  try {
+    defaultEffort = normalizePlanningEffort(
+      lockedDefaultEffort ?? modelDefaultEffort,
+    );
+  } catch { mismatches.push("planning_default_reasoning_effort"); }
+  if (topProvider && lockedProvider) {
+    try {
+      if (normalizePlanningProvider(topProvider) !== normalizePlanningProvider(lockedProvider)) {
+        mismatches.push("provider_locks.planning_provider");
+      }
+    } catch {
+      mismatches.push("provider_locks.planning_provider");
+    }
+  }
+  if (topEffortPolicy && lockedEffortPolicy) {
+    try {
+      if (normalizePlanningEffortPolicy(topEffortPolicy) !== normalizePlanningEffortPolicy(lockedEffortPolicy)) {
+        mismatches.push("provider_locks.planning_effort_policy");
+      }
+    } catch {
+      mismatches.push("provider_locks.planning_effort_policy");
+    }
+  }
+  if (lockedDefaultEffort && modelDefaultEffort) {
+    try {
+      if (normalizePlanningEffort(lockedDefaultEffort) !== normalizePlanningEffort(modelDefaultEffort)) {
+        mismatches.push("model_versions.planning_reasoning_effort");
+      }
+    } catch {
+      mismatches.push("model_versions.planning_reasoning_effort");
+    }
+  }
+  const model = runIdentity.model_versions?.planning_model ?? null;
+  const lockedModel = runIdentity.provider_locks?.planning_model ?? null;
+  if (!model || !lockedModel || model !== lockedModel) mismatches.push("planning_model");
+  if (provider === "chatgpt_web" && effortPolicy !== DEFAULT_WEB_PLANNING_EFFORT_POLICY
+    && effortPolicy !== "uniform_v1") mismatches.push("planning_effort_policy");
+  if (provider !== "chatgpt_web" && defaultEffort === "max") mismatches.push("planning_default_reasoning_effort");
+  return {
+    done: mismatches.length === 0,
+    evidence: mismatches.length
+      ? `planning identity mismatch: ${[...new Set(mismatches)].join(", ")}`
+      : `${provider}; ${effortPolicy}; default ${defaultEffort}; ${model}`,
+    provider,
+    effort_policy: effortPolicy,
+    default_effort: defaultEffort,
+    legacy: false,
+  };
+}
+
 function renderCommand(identity, base, episode) {
   const profile = String(identity?.render_profile ?? "smooth_subpixel_ken_burns").toLowerCase();
   const common = `node bin/goldflow.mjs render start ${base} --prompts <episode-dir>/section_image_prompts_hardened.json --audio-bed-report <episode-dir>/<final-longform-audio-report>.json --transition-plan <episode-dir>/transition_edit_plan_${episode}.json --hook-xfade true --hook-xfade-duration-sec 0.28 --retention-xfade-sec 180`;
@@ -497,9 +586,10 @@ function visualRefsApproveCommand(identity) {
 }
 
 function imagegenStartCommand(identity, extra = "") {
-  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
-  const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? "flux-klein";
-  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency 15 --reference-concurrency 15${extra}`;
+  const provider = normalizeImageProvider(identity?.image_provider ?? "chatgpt_web_gpt_image");
+  const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? (provider === "chatgpt_web_gpt_image" ? "chatgpt_web_gpt_image" : "flux-klein");
+  const providerConcurrency = provider === "chatgpt_web_gpt_image" ? 3 : 15;
+  return `node bin/goldflow.mjs imagegen start ${commandBase(identity)}${imagegenOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${providerConcurrency} --reference-concurrency ${providerConcurrency}${extra}`;
 }
 
 function codexWorkCommand(identity, ids, { references = false, qaRecovery = false, seedDerivedRefs = false } = {}) {
@@ -509,14 +599,14 @@ function codexWorkCommand(identity, ids, { references = false, qaRecovery = fals
     qaRecovery ? "--qa-recovery true" : "",
     seedDerivedRefs ? "--seed-derived-refs true" : "",
   ].filter(Boolean).join(" ");
-  return `node bin/goldflow.mjs imagegen codex-work ${commandBase(identity)} --action create ${modeFlags} ${idFlag} ${ids.join(",")} --max-attempts 3 --lease-sec 900`;
+  return `node bin/goldflow.mjs imagegen codex-work ${commandBase(identity)} --action create ${modeFlags} ${idFlag} ${ids.join(",")} --max-attempts 1 --lease-sec 900`;
 }
 
 function promptUsesCodex(prompt, identity) {
   const explicit = String(prompt?.image_provider_route ?? prompt?.provider_route ?? prompt?.provider ?? "").toLowerCase();
   if (explicit.includes("codex")) return true;
   if (explicit.includes("modelslab")) return false;
-  const provider = normalizeImageProvider(identity?.image_provider ?? "modelslab");
+  const provider = normalizeImageProvider(identity?.image_provider ?? "chatgpt_web_gpt_image");
   if (provider === "codex_imagegen") return true;
   if (provider === "modelslab") return false;
   if (provider === "hybrid_codex_opening_modelslab_rest" || provider === "hybrid_modelslab_refs_codex_opening_modelslab_rest") {
@@ -535,13 +625,13 @@ function scopedImagegenRecoveryCommand(identity, ids, promptPlan, options = {}) 
   const prompts = (promptPlan?.prompts ?? []).filter((prompt) => idSet.has(String(prompt?.image_id ?? "")));
   const codexIds = prompts.filter((prompt) => promptUsesCodex(prompt, identity)).map((prompt) => String(prompt.image_id));
   const codexSet = new Set(codexIds);
-  const modelslabIds = ids.map(String).filter((id) => !codexSet.has(id));
+  const providerIds = ids.map(String).filter((id) => !codexSet.has(id));
   const commands = [];
   if (codexIds.length) commands.push(codexWorkCommand(identity, codexIds, options));
-  if (modelslabIds.length) {
+  if (providerIds.length) {
     const providerFilter = usesCodexSceneCuts(identity) ? " --provider-filter modelslab" : "";
     const recoveryFlags = `${options.seedDerivedRefs ? " --seed-derived-refs true" : ""}${options.qaRecovery ? " --qa-recovery true" : ""}`;
-    commands.push(imagegenStartCommand(identity, ` --cut-ids ${modelslabIds.join(",")}${providerFilter}${recoveryFlags}`));
+    commands.push(imagegenStartCommand(identity, ` --cut-ids ${providerIds.join(",")}${providerFilter}${recoveryFlags}`));
   }
   return commands.join("; then ") || imagegenStartCommand(identity);
 }
@@ -556,6 +646,15 @@ function imagegenPromoteDerivedRefsCommand(identity) {
 
 function commandFor(stage, identity) {
   return buildStageCommand(stage, identity);
+}
+
+export function semanticRecoveryCommandForTests(artifact, identity) {
+  const failedIds = semanticFailedUnitIds(artifact);
+  if (String(artifact?.status ?? "").toLowerCase() !== "blocked" || !failedIds.length) return null;
+  const base = commandFor("semantic_scene_plan", identity)
+    .replace(/\s+--semantic-chunk-ids\s+\S+/g, "")
+    .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+  return `${base} --semantic-chunk-ids ${failedIds.join(",")}`;
 }
 
 function inferredState(validation = {}) {
@@ -612,8 +711,8 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const reviewedStatus = String(reviewedPlan?.status ?? "").toLowerCase();
   const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
   const manualReviewPath = reviewedPlan?.visual_manual_agent_review_path ?? path.join(episodeDir, `visual_manual_agent_review_${episode}.json`);
-  const blockerReviewCommand = `node bin/goldflow.mjs visual review ${base} --prompts <episode-dir>/section_image_prompts.json --blockers-only true --auto-resolve true --max-resolve-iterations 2 --harden-report <episode-dir>/visual_prompt_hardening_${episode}.json`;
-  const scopedReviewCommand = `node bin/goldflow.mjs visual review ${base} --resume-blocked true --auto-resolve true --max-resolve-iterations 2`;
+  const blockerReviewCommand = `node bin/goldflow.mjs visual review ${base} --prompts <episode-dir>/section_image_prompts.json --blockers-only true --auto-resolve true --max-resolve-iterations 1 --harden-report <episode-dir>/visual_prompt_hardening_${episode}.json`;
+  const scopedReviewCommand = `node bin/goldflow.mjs visual review ${base} --resume-blocked true --auto-resolve true --max-resolve-iterations 1`;
   const hardenOriginalCommand = `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`;
   const hardenReviewedCommand = `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts_reviewed.json`;
   if (hardenedPlan?.status === "passed" && Array.isArray(hardenedPlan.prompts) && hardenedPlan.prompts.length) {
@@ -918,13 +1017,13 @@ async function imageReportComplete(episodeDir, episode, identity) {
   if (missingIds.length && latestReport?.prompt_plan_hash === promptPlanHash) {
     const creditIds = codexCreditFallbackEnabled(identity) ? creditExhaustedIdsFromReport(latestReport) : [];
     const creditIdSet = new Set(creditIds);
-    const modelslabRecoveryIds = missingIds.filter((id) => !creditIdSet.has(id));
+    const providerRecoveryIds = missingIds.filter((id) => !creditIdSet.has(id));
     const skippedCount = (latestReport?.results ?? []).filter((row) =>
       row?.image_id && String(row.status ?? "").toLowerCase() === "skipped_provider_circuit_open"
     ).length;
     const recoveryCommands = [
       creditIds.length ? codexCreditFallbackCommand(identity, creditIds) : null,
-      modelslabRecoveryIds.length ? scopedImagegenRecoveryCommand(identity, modelslabRecoveryIds, promptPlan) : null,
+      providerRecoveryIds.length ? scopedImagegenRecoveryCommand(identity, providerRecoveryIds, promptPlan) : null,
     ].filter(Boolean);
     return {
       done: false,
@@ -1165,11 +1264,11 @@ async function imageOutputQaComplete(episodeDir, episode, identity) {
     const decisions = await readJson(decisionsPath, null);
     const decisionsHash = await fileSha256(decisionsPath);
     const rows = Array.isArray(decisions?.decisions) ? decisions.decisions : [];
-    const invalidDecision = rows.find((row) => String(row?.decision ?? "").toLowerCase() !== "accepted");
+    const unresolvedDecision = rows.find((row) => String(row?.decision ?? "").toLowerCase() === "not_inspected");
     if (!decisionsHash || decisionsHash !== report.review_decisions_sha256) {
       return { done: false, state: "stale", evidence: `${path.basename(reportPath)} review decisions hash stale`, next_command_shape: commandFor("image_output_qa", identity) };
     }
-    if (String(decisions?.status ?? "").toLowerCase() !== "complete" || invalidDecision) {
+    if (String(decisions?.status ?? "").toLowerCase() !== "complete" || unresolvedDecision) {
       return { done: false, state: "blocked", evidence: `${path.basename(decisionsPath)} has unresolved per-cut decisions`, next_command_shape: commandFor("image_output_qa", identity) };
     }
   }
@@ -1226,11 +1325,7 @@ async function parallaxAssetGenerationComplete(episodeDir, episode) {
     return { done: false, state: "failed", evidence: `${path.basename(reportPath)} candidate count mismatch` };
   }
   if (!candidates.length) {
-    const waiver = report.no_suitable_parallax_waiver;
-    if (!waiver?.reviewer || !waiver?.note) {
-      return { done: false, state: "blocked", evidence: `${path.basename(reportPath)} requires explicit no-suitable-parallax decision` };
-    }
-    return { state: "skipped_with_waiver", evidence: `${path.basename(reportPath)} no suitable candidate; reviewer=${waiver.reviewer}` };
+    return { done: true, evidence: `${path.basename(reportPath)} candidates=0; accepted still/single-plane fallback` };
   }
   if (!report.review_sheet_path || !(await exists(report.review_sheet_path))) {
     return { done: false, state: "stale", evidence: `${path.basename(reportPath)} review sheet missing` };
@@ -1271,26 +1366,36 @@ async function ltxVideoGenerationComplete(episodeDir, episode) {
       return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale clip/source for ${clip.image_id}` };
     }
   }
-  return { done: true, evidence: `${path.basename(reportPath)} clips=${report.generated_count}; hashes=current` };
+  return {
+    done: true,
+    evidence: `${path.basename(reportPath)} generated=${report.generated_count}; omitted_to_still=${report.omitted_count ?? 0}; hashes=current`,
+  };
 }
 
 async function animationDirectionPlanComplete(episodeDir, episode) {
   const reportPath = path.join(episodeDir, `animation_direction_plan_${episode}.json`);
   const report = await readJson(reportPath, null);
   if (!report) return { done: false, evidence: `${path.basename(reportPath)} missing` };
-  if (report.schema !== "goldflow_animation_direction_plan_v1" || report.status !== "passed" || !(report.directions ?? []).length) {
-    return { done: false, state: report.status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} invalid or empty` };
+  const directions = report.directions ?? [];
+  const validEmptyFallback = directions.length === 0
+    && report.no_suitable_motion_fallback?.disposition === "accepted_stills_for_all_cuts";
+  if (report.schema !== "goldflow_animation_direction_plan_v1" || report.status !== "passed"
+    || (!directions.length && !validEmptyFallback)) {
+    return { done: false, state: report.status === "failed" ? "failed" : "blocked", evidence: `${path.basename(reportPath)} invalid or empty without still fallback` };
   }
   const sourceState = await sourceHashState(report.source_hashes);
   if (!sourceState.count || sourceState.stale.length) {
     return { done: false, state: "stale", evidence: `${path.basename(reportPath)} source hashes stale or missing` };
   }
-  for (const row of report.directions ?? []) {
+  for (const row of directions) {
     if (await fileSha256(row.source_image_path) !== row.source_image_sha256 || !String(row.motion_prompt ?? "").trim()) {
       return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale image or missing direction for ${row.image_id}` };
     }
   }
-  return { done: true, evidence: `${path.basename(reportPath)} directions=${report.direction_count}; candidates=${report.candidate_generation_count}; hashes=current` };
+  return {
+    done: true,
+    evidence: `${path.basename(reportPath)} directions=${report.direction_count}; candidates=${report.candidate_generation_count}; still_fallbacks=${report.still_fallback_count ?? 0}; hashes=current`,
+  };
 }
 
 async function ltxVideoApprovalComplete(episodeDir, episode) {
@@ -1315,10 +1420,7 @@ async function parallaxAssetApprovalComplete(episodeDir, episode) {
   ]);
   if (report?.status !== "passed") return { done: false, evidence: `${path.basename(reportPath)} not passed` };
   if (!Number(report.candidate_count ?? 0)) {
-    const waiver = report.no_suitable_parallax_waiver;
-    return waiver?.reviewer && waiver?.note
-      ? { state: "skipped_with_waiver", evidence: `${path.basename(reportPath)} no suitable candidate waiver` }
-      : { done: false, state: "blocked", evidence: `${path.basename(reportPath)} no-candidate waiver missing` };
+    return { done: true, evidence: `${path.basename(reportPath)} candidates=0; approval skipped for still/single-plane fallback` };
   }
   if (!approval) return { done: false, evidence: `${path.basename(approvalPath)} missing` };
   if (!parallaxApprovalMatches(report, approval, { reportSha256: reportHash })) {
@@ -1326,7 +1428,7 @@ async function parallaxAssetApprovalComplete(episodeDir, episode) {
   }
   return {
     done: true,
-    evidence: `${path.basename(approvalPath)} approved=${approval.approved_image_ids?.length ?? 0}; declined=${approval.declined_image_ids?.length ?? 0}`,
+    evidence: `${path.basename(approvalPath)} approved=${approval.approved_image_ids?.length ?? 0}; low_motion=${approval.approved_low_motion_image_ids?.length ?? 0}; repairable=${approval.repairable_image_ids?.length ?? 0}; declined=${approval.declined_image_ids?.length ?? 0}`,
   };
 }
 
@@ -2563,20 +2665,27 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     const warningOnlyAutomatedQaRequired = String(
       ttsReport.selection_policy_version ?? "",
     ).startsWith("narration_tts_selection_v4_");
+    const explicitSingleSubmissionRepairPolicy =
+      Number(ttsReport.retry_policy?.maximum_creative_submissions_per_invocation) === 1
+      && ttsReport.retry_policy?.structural_failure_action === "stop_and_emit_exact_unit_repair_scope";
     const warningOnlyAutomatedQaPassed = !warningOnlyAutomatedQaRequired || (
       ttsReport.retry_policy?.automated_acoustic_findings_are_review_warnings === true
       && ttsReport.retry_policy?.automated_asr_findings_are_review_warnings === true
       && ttsReport.retry_policy?.automated_voice_continuity_findings_are_review_warnings === true
       && ttsReport.retry_policy?.automated_qa_warnings_block_stitching === false
       && ttsReport.retry_policy?.automated_qa_warnings_trigger_retry === false
-      && ttsReport.retry_policy?.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures === true
+      && (explicitSingleSubmissionRepairPolicy
+        ? ttsReport.retry_policy?.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures === false
+        : ttsReport.retry_policy?.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures === true)
     );
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
       || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== true
-      || ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true
+      || (explicitSingleSubmissionRepairPolicy
+        ? ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== false
+        : ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true)
       || ttsReport.retry_policy?.other_acoustic_or_voice_identity_blockers_require_review !== true
       || !warningOnlyAutomatedQaPassed) {
-      return { done: false, evidence: "Qwen Liam retry policy must keep every automated acoustic, ASR, and voice-continuity finding non-blocking and non-retrying, while reserving hard stops and automatic recovery for structural audio or synthesis/process failures" };
+      return { done: false, evidence: "Qwen narration policy must keep automated acoustic, ASR, and voice-continuity findings non-blocking and non-retrying; current reports must stop on a structural synthesis failure and expose only the exact unit repair scope, while historical reports retain their locked legacy recovery contract" };
     }
     const fullQaForBoundaryContract = await readJson(
       path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
@@ -3224,6 +3333,27 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
   const visualPlanPath = path.join(episodeDir, "visual_reference_plan.json");
   const inventoryLedgerPath = path.join(episodeDir, "reference_inventory_ledger.json");
   const characterRefsPath = path.join(episodeDir, "character_state_refs.json");
+  const partialPath = path.join(episodeDir, `visual_reference_partial_${identity.episode ?? "ep_01"}.json`);
+  const partial = await readJson(partialPath, null);
+  if (["needs_chunk_repair", "needs_global_repair", "needs_explicit_repair"].includes(String(partial?.status ?? ""))) {
+    const failedChunks = Array.isArray(partial.failed_chunks) ? partial.failed_chunks : [];
+    const failedChunkIds = [...new Set(failedChunks.map((row) => String(row?.chunk_id ?? "")).filter(Boolean))];
+    const failedSceneIds = [...new Set(failedChunks.flatMap((row) => row?.scene_ids ?? []).map(String).filter(Boolean))];
+    const base = commandFor("visual_reference_plan", identity);
+    const nextCommand = failedChunkIds.length
+      ? `${base} --repair-chunk-ids ${failedChunkIds.join(",")}`
+      : failedSceneIds.length
+        ? `${base} --repair-scene-ids ${failedSceneIds.join(",")}`
+        : String(partial.status) === "needs_global_repair" || partial.global_director?.status === "failed"
+          ? `${base} --repair-global true`
+          : "Manual structured reference repair required: inspect the preserved visual_reference_partial artifact; do not rerun passed chunks.";
+    return {
+      done: false,
+      state: "blocked",
+      evidence: `${path.basename(partialPath)} status=${partial.status}; passed_chunks=${partial.passed_chunk_count ?? partial.passed_chunks?.length ?? 0}; failed_chunks=${failedChunks.length}; passed candidates preserved`,
+      next_command_shape: nextCommand,
+    };
+  }
   const visual = await jsonStatusWithSourceHashesComplete(visualPlanPath, "visual_reference_plan.json");
   const visualPlan = await readJson(visualPlanPath, null);
   const inventoryPath = visualPlan?.reference_inventory_ledger_path ?? inventoryLedgerPath;
@@ -3235,7 +3365,7 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
     };
   }
   let directorLedgerEvidence = "";
-  if (visualPlan?.reference_director_contract_version === "reference_director_v2") {
+  if (["reference_director_v2", "reference_director_v3_full_selection"].includes(visualPlan?.reference_director_contract_version)) {
     const evidenceLedgerPath = visualPlan.reference_evidence_ledger_path ?? path.join(episodeDir, "reference_evidence_ledger.json");
     const locationContractLedgerPath = visualPlan.location_contract_ledger_path ?? path.join(episodeDir, "location_contract_ledger.json");
     const [evidenceLedger, locationContractLedger] = await Promise.all([
@@ -3245,13 +3375,13 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
     if (evidenceLedger?.status !== "passed" || !Array.isArray(evidenceLedger?.assets)) {
       return {
         done: false,
-        evidence: `${visual.evidence}; reference_evidence_ledger.json missing or invalid for reference_director_v2`,
+        evidence: `${visual.evidence}; reference_evidence_ledger.json missing or invalid for the reference-director contract`,
       };
     }
     if (locationContractLedger?.status !== "passed" || !Array.isArray(locationContractLedger?.contracts)) {
       return {
         done: false,
-        evidence: `${visual.evidence}; location_contract_ledger.json missing, invalid, or blocked for reference_director_v2`,
+        evidence: `${visual.evidence}; location_contract_ledger.json missing or invalid for the reference-director contract`,
       };
     }
     directorLedgerEvidence = `; evidence_assets=${evidenceLedger.assets.length}; location_contracts=${locationContractLedger.contracts.length}`;
@@ -3376,8 +3506,10 @@ async function main() {
     series_slug: flags.series ?? flags.seriesSlug ?? runIdentity.series_slug,
     week: flags.week ?? runIdentity.week,
     episode: flags.episode ?? runIdentity.episode ?? path.basename(episodeDir),
+    planning_provider: runIdentity.planning_provider ?? runIdentity.provider_locks?.planning_provider ?? null,
+    planning_effort_policy: runIdentity.planning_effort_policy ?? runIdentity.provider_locks?.planning_effort_policy ?? null,
     audio_target: flags["audio-target"] ?? runIdentity.audio_target ?? "narrator_only",
-    image_provider: flags["image-provider"] ?? flags.provider ?? runIdentity.image_provider ?? "modelslab",
+    image_provider: flags["image-provider"] ?? flags.provider ?? runIdentity.image_provider ?? "chatgpt_web_gpt_image",
     image_provider_options: runIdentity.image_provider_options ?? {},
     ...ttsIdentityFields,
     image_output_qa_required: runIdentity.image_output_qa_required ?? runIdentity.production_gates?.image_output_qa_required_before_render ?? false,
@@ -3417,7 +3549,10 @@ async function main() {
   const whisperTiming = await whisperTimingComplete(episodeDir, episode, scriptHash, identity);
   const audioPace = await paceReportComplete(path.join(episodeDir, `narration_pace_report_${episode}.json`), scriptHash, `narration_pace_report_${episode}.json`, identity);
   const audioPaceNextCommand = await audioPaceRecoveryCommand(episodeDir, identity);
-  const semanticPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "semantic_scene_plan.json"), "semantic_scene_plan.json");
+  const semanticPlanPath = path.join(episodeDir, "semantic_scene_plan.json");
+  const semanticPlan = await jsonStatusWithSourceHashesComplete(semanticPlanPath, "semantic_scene_plan.json");
+  const semanticPlanArtifact = await readJson(semanticPlanPath, null);
+  const semanticRecoveryCommand = semanticRecoveryCommandForTests(semanticPlanArtifact, identity);
   const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
   const timedScenePlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");
@@ -3435,17 +3570,6 @@ async function main() {
         done: false,
         state: contract !== CURRENT_VISUAL_BEAT_CONTRACT_VERSION ? "stale" : "missing",
         evidence: `visual_beat_plan.json requires ${CURRENT_VISUAL_BEAT_CONTRACT_VERSION} and current visual_beat_approval.json`,
-      };
-    }
-  }
-  if (!legacyIdentity && visualBeatPlan.done && ltxVideoEnabled(identity)) {
-    const beatArtifact = await readJson(visualBeatPlanPath, null);
-    const missingAnimationIntent = (beatArtifact?.beats ?? []).find((beat) => !beat.animation_intent);
-    if (missingAnimationIntent) {
-      visualBeatPlan = {
-        done: false,
-        state: "stale",
-        evidence: `visual_beat_plan.json lacks animation_intent for ${missingAnimationIntent.visual_beat_id ?? "an animation-enabled beat"}`,
       };
     }
   }
@@ -3507,21 +3631,29 @@ async function main() {
   const transitionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `transition_edit_plan_${episode}.json`), `transition_edit_plan_${episode}.json`);
   const motionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `motion_edit_plan_${episode}.json`), `motion_edit_plan_${episode}.json`);
   const semanticValidation = legacyIdentity
-    ? { ...semanticPlan, evidence: `${semanticPlan.evidence ?? "semantic_scene_plan.json"}; legacy run: story_fact_ledger waived` }
+    ? {
+        ...semanticPlan,
+        evidence: `${semanticPlan.evidence ?? "semantic_scene_plan.json"}; legacy run: story_fact_ledger waived`,
+        ...(semanticRecoveryCommand ? { next_command_shape: semanticRecoveryCommand } : {}),
+      }
     : {
         done: semanticPlan.done && storyFactLedger.done,
         evidence: `${semanticPlan.evidence}; ${storyFactLedger.evidence}`,
+        state: semanticPlan.state ?? storyFactLedger.state,
+        ...(semanticRecoveryCommand ? { next_command_shape: semanticRecoveryCommand } : {}),
       };
   const runIdentityTts = runIdentityTtsComplete(runIdentity);
   const runIdentityWhisper = runIdentityWhisperComplete(runIdentity);
+  const runIdentityPlanning = runIdentityPlanningComplete(runIdentity);
   const validationByStage = {
     run_identity: {
       done: await exists(runIdentityPath)
         && runIdentityTts.done
-        && runIdentityWhisper.done,
+        && runIdentityWhisper.done
+        && runIdentityPlanning.done,
       evidence:
         `${legacyIdentity ? "run_identity.json legacy adapter" : "run_identity.json v2"}; `
-        + `${runIdentityTts.evidence}; ${runIdentityWhisper.evidence}`,
+        + `${runIdentityTts.evidence}; ${runIdentityWhisper.evidence}; ${runIdentityPlanning.evidence}`,
     },
     source_ingest: {
       done: await exists(path.join(episodeDir, "script_clean.md")) && await exists(path.join(episodeDir, "source_story_ingest_report.json")),
@@ -3657,6 +3789,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  runIdentityPlanningComplete as runIdentityPlanningCompleteForTests,
   runIdentityTtsComplete as runIdentityTtsCompleteForTests,
   runIdentityWhisperComplete as runIdentityWhisperCompleteForTests,
   selectedNarratorVoiceId as selectedNarratorVoiceIdForTests,

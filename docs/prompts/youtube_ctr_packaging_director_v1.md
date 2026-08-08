@@ -71,7 +71,9 @@ Use large faces, readable emotion, one dominant object or gesture, strong warm v
 
 The image must show both betrayal and revenge. Examples include a stolen crest flying back to its owner, a replacement standing behind the betrayer while the protagonist walks away powered up, or a severed party tag beside the stronger new team.
 
-Generate base art without baked text. Add exact text, labels, and arrows locally so spelling and placement remain controlled.
+Generate the selected thumbnail as one complete sixteen-by-nine raster from scratch with Codex Imagen. The model must render the scene, exact main text, any labels, and any arrows together inside that single final raster.
+
+Use no episode stills, character references, scene references, style references, or other input images. The generation has `reference_count: 0`. Do not add, replace, redraw, or composite text, labels, or arrows locally. After generation, local processing is limited to geometry and format normalization such as crop, resize, or PNG/JPEG conversion; it must not change depicted content.
 
 Use yellow or white headline text with a heavy black outline when it improves contrast. Use a thick yellow arrow with black outline and a small white glow. Do not add decorative badges, tiny captions, repeated faces, reaction circles, split panels, or background crowds.
 
@@ -115,13 +117,13 @@ Pinned Comment
 
 The text under those three sections must exactly match the selected values in the JSON spec.
 
-Create youtube_packaging_spec_EPISODE.json using schema goldflow_youtube_packaging_spec_v1. Start with status draft. Include the episode, expected YouTube channel name or handle, research evidence, title candidates, selected title, thumbnail candidates, selected thumbnail candidate identifier, final thumbnail path, description contract, tags, pinned comment, and publish settings.
+Create youtube_packaging_spec_EPISODE.json using schema goldflow_youtube_packaging_spec_v2. Start with status draft. Include the episode, expected YouTube channel name or handle, research evidence, title candidates, selected title, thumbnail candidates, selected thumbnail candidate identifier, final thumbnail path, description contract, tags, pinned comment, and publish settings.
 
 Each research row needs id, source_type, source_ref, title, observed_at, metrics, and lesson. source_type must be own_channel or niche_outlier.
 
 Each title candidate needs title, betrayal_phrase, revenge_phrase, explains_full_video, research_evidence_ids, and a selection_reason for the selected candidate.
 
-Each thumbnail candidate needs id, subjects with role and emotion, main_text, labels, arrows with purpose, betrayal_signal, revenge_signal, single_scene, no_collage, simple_read_order, research_evidence_ids, and a selection_reason plus mobile_reviewed for the selected candidate.
+Each thumbnail candidate needs id, subjects with role and emotion, main_text, labels, arrows with purpose, betrayal_signal, revenge_signal, single_scene, no_collage, simple_read_order, and research_evidence_ids. The selected candidate also needs a selection_reason, mobile_reviewed, `provider: "codex_imagen"`, `generation_mode: "full_raster_from_scratch"`, `reference_count: 0`, `text_rendered_by_model: true`, `locally_composited_text: false`, and `locally_composited_arrows: false`.
 
 Do not mark the spec approved. The operator approval command owns that state change.
 
@@ -132,6 +134,8 @@ Verify the title tells the betrayal and revenge.
 Verify the thumbnail uses no more than three subjects, two arrows, two labels, four main words, and eight total overlay words.
 
 Verify the finished thumbnail exists and remains readable at phone size.
+
+Verify it is one Codex Imagen raster generated from scratch with zero image references, with all text, labels, and arrows rendered by the model and no local visual compositing beyond geometry/format normalization.
 
 Verify the description opening contains the selected one or two keywords.
 

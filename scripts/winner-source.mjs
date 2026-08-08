@@ -4,8 +4,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  configuredCodexModel,
-  configuredCodexReasoningEffort,
   runCodexCli,
 } from "./lib/codex-cli-runner.mjs";
 import {
@@ -201,8 +199,8 @@ async function modelResponse({
     stageName,
     repoRoot,
     outputPath,
-    model: configuredCodexModel(flags.model ?? null),
-    reasoningEffort: configuredCodexReasoningEffort(flags["reasoning-effort"] ?? "high"),
+    model: flags.model ?? null,
+    reasoningEffort: flags["reasoning-effort"] ?? null,
     verbosity: flags.verbosity ?? "medium",
     timeoutMs,
   });
@@ -567,6 +565,7 @@ ${JSON.stringify(lightScriptStoryBrief(loaded.packageContract), null, 2)}
     prompt_path: promptPath,
     prompt_sha256: sha256Text(prompt),
     model: response.model ?? "external_response",
+    provider: response.provider ?? "external_response",
     reasoning_effort: response.reasoning_effort ?? null,
     deterministic_review: deterministicReport,
     updated_at: new Date().toISOString(),

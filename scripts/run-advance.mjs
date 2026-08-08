@@ -10,7 +10,10 @@ import { productionProfileById, productionProfileForIdentity } from "./lib/produ
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
 const maxSteps = Math.max(1, Number(flags["max-steps"] ?? 50));
-const maxAttemptsPerStage = Math.max(1, Number(flags["max-attempts-per-stage"] ?? 2));
+// Normal production gets one command invocation per stage. A non-zero exit or
+// unresolved artifact is a triage boundary, never an instruction to run the
+// same command again. A later recovery is a separate exact-ID/chunk command.
+const maxAttemptsPerStage = 1;
 const dryRun = isTrue(flags["dry-run"]);
 const allowSpend = isTrue(flags["allow-spend"]);
 const explicitAllowPlannerSpend = allowSpend || isTrue(flags["allow-planner-spend"]);

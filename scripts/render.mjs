@@ -1629,6 +1629,26 @@ export function xfadeTimelineGroupsForTests(imageIds, selectedToImageIds) {
   return xfadeTimelineGroups(rows, durations).map((group) => group.map((row) => row.prompt.image_id));
 }
 
+export function assertTransitionAccounting({
+  plannedTransitionCount,
+  selectedBoundaryCount,
+  suppressedContinuousLtxTransitionCount,
+  appliedTransitionCount = null,
+}) {
+  if (selectedBoundaryCount + suppressedContinuousLtxTransitionCount !== plannedTransitionCount) {
+    throw new Error(`Transition plan contains ${plannedTransitionCount} events but ${selectedBoundaryCount} map to adjacent timeline boundaries and ${suppressedContinuousLtxTransitionCount} were suppressed for continuous LTX sequences.`);
+  }
+  if (appliedTransitionCount !== null && appliedTransitionCount !== selectedBoundaryCount) {
+    throw new Error(`Planned/applied transition mismatch: selected=${selectedBoundaryCount}, suppressed=${suppressedContinuousLtxTransitionCount}, planned=${plannedTransitionCount}, applied=${appliedTransitionCount}.`);
+  }
+  return {
+    planned_transition_count: plannedTransitionCount,
+    selected_transition_count: selectedBoundaryCount,
+    suppressed_continuous_ltx_transition_count: suppressedContinuousLtxTransitionCount,
+    applied_transition_count: appliedTransitionCount,
+  };
+}
+
 export function xfadeSegmentTimingForTests(clipDurations, transitionDurations) {
   let cumulative = 0;
   const boundaries = [];
@@ -1765,9 +1785,12 @@ async function buildMotionClips(
     selectedBoundaryRows.push({ current, next, planned, duration });
   }
   const plannedTransitionCount = Array.isArray(transitionEditPlan?.transition_events) ? transitionEditPlan.transition_events.length : selectedBoundaryRows.length;
-  if (!options.prebuildOnly && transitionEditPlan
-    && selectedBoundaryRows.length + suppressedContinuousLtxTransitions.length !== plannedTransitionCount) {
-    throw new Error(`Transition plan contains ${plannedTransitionCount} events but ${selectedBoundaryRows.length} map to adjacent timeline boundaries and ${suppressedContinuousLtxTransitions.length} were suppressed for continuous LTX sequences.`);
+  if (!options.prebuildOnly && transitionEditPlan) {
+    assertTransitionAccounting({
+      plannedTransitionCount,
+      selectedBoundaryCount: selectedBoundaryRows.length,
+      suppressedContinuousLtxTransitionCount: suppressedContinuousLtxTransitions.length,
+    });
   }
   for (const row of clipRows) {
     const tailSec = selectedXfadeDurations.get(row.index) ?? 0;
@@ -2015,7 +2038,12 @@ async function buildMotionClips(
     }
     lines.push(`file '${concatEscape(segmentPath)}'`);
   }
-  if (appliedXfadeTransitions.length !== plannedTransitionCount) throw new Error(`Planned/applied transition mismatch: planned=${plannedTransitionCount}, applied=${appliedXfadeTransitions.length}.`);
+  assertTransitionAccounting({
+    plannedTransitionCount,
+    selectedBoundaryCount: selectedBoundaryRows.length,
+    suppressedContinuousLtxTransitionCount: suppressedContinuousLtxTransitions.length,
+    appliedTransitionCount: appliedXfadeTransitions.length,
+  });
 
   const motionTraceRows = clipRows.flatMap((row) => {
     if (!row.motionIntent) return [];
@@ -2635,6 +2663,8 @@ async function main() {
       planned_transition_count: concat.planned_transition_count,
       applied_transition_count: concat.applied_transition_count,
       applied_transitions: concat.applied_transitions,
+      suppressed_continuous_ltx_transition_count: concat.suppressed_continuous_ltx_transition_count,
+      suppressed_continuous_ltx_transitions: concat.suppressed_continuous_ltx_transitions,
       motion_trace_path: concat.motion_trace_path,
       motion_trace_frame_count: concat.motion_trace_frame_count,
       motion_trace_blocker_count: concat.motion_trace_blocker_count,

@@ -9,11 +9,13 @@ import sharp from "sharp";
 import {
   LTX_VIDEO_MODEL_ID,
   LTX_VIDEO_PROVIDER,
+  LTX_SINGLE_SHOT_POLICY,
   clampLtxDuration,
   hashFile,
   ltxMotionPromptForCut,
   ltxNegativePrompt,
   ltxPlanHash,
+  ltxProviderPayloadForClip,
   ltxVideoEnabled,
   sha256,
 } from "./lib/ltx-video-contract.mjs";
@@ -21,8 +23,12 @@ import {
   configuredModelslabProfiles,
   loadConfiguredModelslabAccounts,
   modelslabProfileForWorkId,
-  publicModelslabAccount,
 } from "./lib/modelslab-account-pool.mjs";
+import {
+  publicLtxClipResult,
+  publicLtxModelslabAccountPool,
+  redactLtxAccountProfileNames,
+} from "./lib/ltx-video-report-contract.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -286,6 +292,15 @@ async function buildPlan({ promptPlan, imagegenReport, imageQa, identity }) {
       motion_prompt: motionPrompt,
       motion_prompt_sha256: sha256(motionPrompt),
       negative_prompt: ltxNegativePrompt(),
+      sequence_mode: "standalone_shot",
+      coverage: [{
+        image_id: imageId,
+        image_sha256: actualHash,
+        source_offset_sec: 0,
+        source_end_offset_sec: Number(prompt.duration_sec ?? durationSec),
+      }],
+      provider_image_inputs: ["init_image"],
+      candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
     });
   }
   const plan = {
@@ -301,6 +316,8 @@ async function buildPlan({ promptPlan, imagegenReport, imageQa, identity }) {
     model_id: LTX_VIDEO_MODEL_ID,
     resolution: "16:9",
     requested_concurrency: concurrency,
+    provider_image_inputs: [...LTX_SINGLE_SHOT_POLICY.provider_image_inputs],
+    automatic_generation_retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
     source_hashes: {
       [promptPath]: await hashFile(promptPath),
       [imagegenReportPath]: await hashFile(imagegenReportPath),
@@ -364,32 +381,49 @@ async function main() {
     const explicit = new Set(requestedCutIds());
     const selected = (animationDirection.directions ?? []).filter((row) => !explicit.size || explicit.has(String(row.image_id)));
     if (explicit.size && selected.length !== explicit.size) throw new Error("One or more requested --cut-ids are absent from the animation direction plan.");
-    const clips = selected.map((row) => ({
-      image_id: row.image_id,
-      scene_id: row.scene_id,
-      visual_beat_id: row.visual_beat_id,
-      start_sec: row.start_sec,
-      cut_duration_sec: row.cut_duration_sec,
-      duration_sec: row.requested_generation_duration_sec,
-      animation_sequence_id: row.animation_sequence_id ?? null,
-      sequence_mode: row.sequence_mode ?? "standalone_shot",
-      sequence_timeline_duration_sec: row.sequence_timeline_duration_sec ?? row.cut_duration_sec,
-      coverage: row.coverage ?? [{
+    const clips = selected.map((row) => {
+      const coverage = row.coverage ?? [{
         image_id: row.image_id,
         image_sha256: row.source_image_sha256,
         source_offset_sec: 0,
         source_end_offset_sec: row.cut_duration_sec,
-      }],
-      start_frame_contract: row.start_frame_contract ?? null,
-      end_frame_contract: row.end_frame_contract ?? null,
-      source_image_path: row.source_image_path,
-      source_image_sha256: row.source_image_sha256,
-      source_prompt_sha256: row.source_prompt_sha256,
-      motion_prompt: row.motion_prompt,
-      motion_prompt_sha256: sha256(row.motion_prompt),
-      negative_prompt: row.negative_prompt,
-      candidate_count: row.candidate_count ?? 1,
-    }));
+      }];
+      if (row.sequence_mode !== "standalone_shot" || coverage.length !== 1
+        || String(coverage[0]?.image_id ?? "") !== String(row.image_id ?? "")) {
+        throw new Error(
+          `LTX direction ${row.image_id} violates the one-init-image/one-reachable-shot production contract.`,
+        );
+      }
+      if (!String(row.start_frame_contract?.state ?? "").trim()
+        || !String(row.end_frame_contract?.state ?? "").trim()
+        || !String(row.end_frame_contract?.camera_state ?? "").trim()
+        || !String(row.end_frame_contract?.composition ?? "").trim()
+        || !String(row.end_frame_contract?.continuity_bridge ?? "").trim()) {
+        throw new Error(`LTX direction ${row.image_id} is missing its explicit single-shot terminal contract.`);
+      }
+      return {
+        image_id: row.image_id,
+        scene_id: row.scene_id,
+        visual_beat_id: row.visual_beat_id,
+        start_sec: row.start_sec,
+        cut_duration_sec: row.cut_duration_sec,
+        duration_sec: row.requested_generation_duration_sec,
+        animation_sequence_id: row.animation_sequence_id ?? null,
+        sequence_mode: "standalone_shot",
+        sequence_timeline_duration_sec: row.cut_duration_sec,
+        coverage,
+        start_frame_contract: row.start_frame_contract,
+        end_frame_contract: row.end_frame_contract,
+        provider_image_inputs: ["init_image"],
+        source_image_path: row.source_image_path,
+        source_image_sha256: row.source_image_sha256,
+        source_prompt_sha256: row.source_prompt_sha256,
+        motion_prompt: row.motion_prompt,
+        motion_prompt_sha256: sha256(row.motion_prompt),
+        negative_prompt: row.negative_prompt,
+        candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
+      };
+    });
     plan = {
       schema: "goldflow_ltx23_video_plan_v1",
       status: "passed",
@@ -403,6 +437,8 @@ async function main() {
       model_id: LTX_VIDEO_MODEL_ID,
       resolution: "16:9",
       requested_concurrency: concurrency,
+      provider_image_inputs: [...LTX_SINGLE_SHOT_POLICY.provider_image_inputs],
+      automatic_generation_retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
       animation_direction_plan_path: animationDirectionPath,
       source_hashes: { ...animationDirection.source_hashes, [animationDirectionPath]: await hashFile(animationDirectionPath) },
       clip_count: clips.length,
@@ -416,49 +452,55 @@ async function main() {
   await writeJson(planPath, plan);
   await fs.mkdir(path.join(outputDir, "raw"), { recursive: true });
   await fs.mkdir(path.join(outputDir, "normalized"), { recursive: true });
-  const rows = plan.clips.flatMap((clip) => Array.from(
-    { length: Math.max(1, Number(clip.candidate_count ?? 1)) },
-    (_, index) => ({
-      ...clip,
-      candidate_index: index + 1,
-      candidate_id: `${clip.image_id}-candidate-${String(index + 1).padStart(2, "0")}`,
-      status: "planned",
-    }),
-  ));
+  const rows = plan.clips.map((clip) => ({
+    ...clip,
+    candidate_count: LTX_SINGLE_SHOT_POLICY.candidates_per_motion_moment,
+    candidate_index: 1,
+    candidate_id: `${clip.image_id}-candidate-01`,
+    creative_generation_attempt: 1,
+    automatic_generation_retry_allowed: false,
+    status: "planned",
+  }));
   for (const row of rows) {
     const profile = modelslabProfileForWorkId(row.candidate_id, modelslabProfiles);
     row.modelslab_account = accountByProfile.get(profile);
-    if (!row.modelslab_account) throw new Error(`ModelsLab account profile ${profile} was not loaded.`);
+    if (!row.modelslab_account) throw new Error("The assigned ModelsLab account was not loaded.");
   }
   const batchStartedMs = Date.now();
   await runLimited(rows, concurrency, async (row) => {
     row.upload_started_at = new Date().toISOString();
-    row.init_image_url = await uploadImage(row.source_image_path, row.modelslab_account);
-    row.upload_elapsed_ms = Date.now() - Date.parse(row.upload_started_at);
-    row.status = "uploaded";
+    try {
+      row.init_image_url = await uploadImage(row.source_image_path, row.modelslab_account);
+      row.upload_elapsed_ms = Date.now() - Date.parse(row.upload_started_at);
+      row.status = "uploaded";
+    } catch (error) {
+      row.status = "omitted";
+      row.omission_stage = "init_image_upload";
+      row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
+      row.error = error instanceof Error ? error.message : String(error);
+    }
   });
-  await runLimited(rows, concurrency, async (row) => {
+  const uploadedRows = rows.filter((row) => row.status === "uploaded");
+  await runLimited(uploadedRows, concurrency, async (row) => {
     const startedAtMs = Date.now();
     row.request_started_at = new Date(startedAtMs).toISOString();
     try {
-      const initial = await postJson("https://modelslab.com/api/v6/video/img2video_ultra", {
-        model_id: LTX_VIDEO_MODEL_ID,
-        init_image: row.init_image_url,
-        prompt: row.motion_prompt,
-        negative_prompt: row.negative_prompt,
-        resolution: "16:9",
-        duration: String(row.duration_sec),
-        base64: false,
-        temp: false,
-        track_id: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
-      }, {
+      const initial = await postJson(
+        "https://modelslab.com/api/v6/video/img2video_ultra",
+        ltxProviderPayloadForClip(row, {
+          trackId: `goldflow-${episode}-${proofLabel}-${row.candidate_id}`,
+        }),
+        {
         account: row.modelslab_account,
-        rateLimitRetries: 1,
-      });
+          retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
+          rateLimitRetries: 0,
+        },
+      );
       row.request_id = initial.id ?? null;
       row.initial_eta_sec = initial.eta ?? null;
       row.submit_latency_ms = Date.now() - startedAtMs;
       row.status = String(initial.status ?? "processing");
+      row.initial_provider_result = initial;
       row.initial_response = {
         status: initial.status ?? null,
         id: initial.id ?? null,
@@ -466,7 +508,9 @@ async function main() {
         message: initial.message ?? null,
       };
     } catch (error) {
-      row.status = "failed";
+      row.status = "omitted";
+      row.omission_stage = "creative_generation_submission";
+      row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
       row.error = error instanceof Error ? error.message : String(error);
     }
   });
@@ -474,8 +518,8 @@ async function main() {
   await runLimited(submittedRows, concurrency, async (row) => {
     const startedAtMs = Date.parse(row.request_started_at);
     try {
-      const result = row.status === "success" && responseUrls(row.initial_response).length
-        ? row.initial_response
+      const result = row.status === "success" && responseUrls(row.initial_provider_result).length
+        ? row.initial_provider_result
         : await pollResult(row.request_id, startedAtMs, row.modelslab_account);
       row.provider_generation_time_sec = result.generationTime ?? null;
       const rawPath = path.join(outputDir, "raw", `${row.candidate_id}-ltx23.mp4`);
@@ -491,18 +535,21 @@ async function main() {
       row.status = "generated";
       delete row.init_image_url;
       delete row.download_url;
+      delete row.initial_provider_result;
     } catch (error) {
-      row.status = "failed";
+      row.status = "omitted";
+      row.omission_stage = "provider_result_or_normalization";
+      row.disposition = LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition;
       row.error = error instanceof Error ? error.message : String(error);
     }
   });
   const completed = rows.filter((row) => row.status === "generated");
-  const failures = rows.filter((row) => row.status !== "generated");
+  const omitted = rows.filter((row) => row.status !== "generated");
   const sheetPath = path.join(outputDir, `ltx_video_contact_sheet_${episode}${proof ? `-${proofLabel}` : ""}.jpg`);
   if (completed.length) await contactSheet(completed, sheetPath);
   const report = {
     schema: "goldflow_ltx23_video_report_v1",
-    status: failures.length ? "failed" : "passed",
+    status: "passed",
     channel,
     series_slug: series,
     week,
@@ -516,50 +563,23 @@ async function main() {
     plan_contract_sha256: plan.plan_sha256,
     source_hashes: plan.source_hashes,
     requested_concurrency: concurrency,
-    modelslab_account_pool: modelslabAccounts.map((account) => ({
-      profile: account.profile,
-      ...publicModelslabAccount(account),
-    })),
-    clip_count: rows.length,
+    provider_image_inputs: [...LTX_SINGLE_SHOT_POLICY.provider_image_inputs],
+    candidate_policy: "one_candidate_per_motion_moment",
+    automatic_generation_retries: LTX_SINGLE_SHOT_POLICY.automatic_generation_retries,
+    modelslab_account_pool: publicLtxModelslabAccountPool(modelslabAccounts),
+    planned_count: rows.length,
+    attempted_count: uploadedRows.length,
+    creative_submission_count: uploadedRows.length,
+    creative_resubmission_count: 0,
+    clip_count: completed.length,
     generated_count: completed.length,
-    failed_count: failures.length,
+    failed_count: 0,
+    omitted_count: omitted.length,
+    omitted_disposition: LTX_SINGLE_SHOT_POLICY.unavailable_or_rejected_disposition,
     batch_wall_time_sec: Number(((Date.now() - batchStartedMs) / 1000).toFixed(3)),
     contact_sheet_path: completed.length ? sheetPath : null,
-    clips: rows.map((row) => ({
-      image_id: row.image_id,
-      candidate_id: row.candidate_id,
-      candidate_index: row.candidate_index,
-      scene_id: row.scene_id,
-      visual_beat_id: row.visual_beat_id,
-      start_sec: row.start_sec,
-      cut_duration_sec: row.cut_duration_sec,
-      requested_duration_sec: row.duration_sec,
-      animation_sequence_id: row.animation_sequence_id ?? null,
-      sequence_mode: row.sequence_mode ?? "standalone_shot",
-      sequence_timeline_duration_sec: row.sequence_timeline_duration_sec ?? row.cut_duration_sec,
-      coverage: row.coverage ?? null,
-      start_frame_contract: row.start_frame_contract ?? null,
-      end_frame_contract: row.end_frame_contract ?? null,
-      source_image_path: row.source_image_path,
-      source_image_sha256: row.source_image_sha256,
-      source_prompt_sha256: row.source_prompt_sha256,
-      motion_prompt_sha256: row.motion_prompt_sha256,
-      modelslab_account_profile: row.modelslab_account?.profile ?? null,
-      modelslab_account_fingerprint: row.modelslab_account?.fingerprint ?? null,
-      request_id: row.request_id ?? null,
-      initial_eta_sec: row.initial_eta_sec ?? null,
-      submit_latency_ms: row.submit_latency_ms ?? null,
-      wall_time_sec: row.wall_time_sec ?? null,
-      provider_generation_time_sec: row.provider_generation_time_sec ?? null,
-      raw_video_path: row.raw_video_path ?? null,
-      raw_video_sha256: row.raw_video_sha256 ?? null,
-      raw_probe: row.raw_probe ?? null,
-      normalized_video_path: row.normalized_video_path ?? null,
-      normalized_video_sha256: row.normalized_video_sha256 ?? null,
-      normalized_probe: row.normalized_probe ?? null,
-      status: row.status,
-      error: row.error ?? null,
-    })),
+    clips: completed.map((row) => publicLtxClipResult(row, { accountProfiles: modelslabProfiles })),
+    omitted_clips: omitted.map((row) => publicLtxClipResult(row, { accountProfiles: modelslabProfiles })),
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
@@ -571,20 +591,21 @@ async function main() {
     clip_count: report.clip_count,
     generated_count: report.generated_count,
     failed_count: report.failed_count,
+    omitted_count: report.omitted_count,
     batch_wall_time_sec: report.batch_wall_time_sec,
   }, null, 2));
-  if (failures.length) process.exitCode = 1;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     await writeJson(outputPath, {
       schema: "goldflow_ltx23_video_report_v1",
       status: "failed",
-      error: error instanceof Error ? error.message : String(error),
+      error: redactLtxAccountProfileNames(errorMessage, modelslabProfiles),
       updated_at: new Date().toISOString(),
     }).catch(() => {});
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(errorMessage);
     process.exitCode = 1;
   });
 }

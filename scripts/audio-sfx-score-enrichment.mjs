@@ -172,10 +172,6 @@ async function apiKey() {
   return key;
 }
 
-async function modelPolicy() {
-  return readJson(path.join(repoRoot, "config", "model-policy.json"), {});
-}
-
 function llmContent(json) {
   return json?.choices?.[0]?.message?.content
     ?? json?.choices?.[0]?.text
@@ -206,8 +202,8 @@ async function callPlannerLlm(prompt, stageName) {
     const outputPath = path.resolve(String(flags["planner-output"]));
     const content = await readText(outputPath);
     return {
-      provider: "codex",
-      model: "codex_reused_output",
+      provider: "imported_planner_output",
+      model: "imported_planner_output",
       promptPath: null,
       outputPath,
       contentPath: outputPath,
@@ -218,8 +214,10 @@ async function callPlannerLlm(prompt, stageName) {
   }
   if (isLocalLLMRoute(stageName)) return callLocalQwenPlanner(prompt, stageName);
   const provider = String(flags["planner-provider"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_PLANNER_PROVIDER ?? "codex").toLowerCase();
-  if (provider !== "modelslab") return callCodexPlanner(prompt, stageName);
-  return callModelslabPlanner(prompt, stageName);
+  if (provider === "modelslab") {
+    throw new Error("ModelsLab LLM planning is disabled. Audio planning must use the run-identity ChatGPT Web/Codex/local-Qwen route or an explicit imported planner artifact.");
+  }
+  return callCodexPlanner(prompt, stageName);
 }
 
 async function resolvePlannerArtifact(parsed) {
@@ -296,7 +294,7 @@ async function callCodexPlanner(prompt, stageName) {
   const reasoningEffort = flags.reasoning
     ?? flags["reasoning-effort"]
     ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_REASONING
-    ?? "medium";
+    ?? null;
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
   const stamp = nowIso().replace(/[:.]/g, "-");
@@ -314,7 +312,7 @@ async function callCodexPlanner(prompt, stageName) {
     detached: true,
   });
   return {
-    provider: "codex",
+    provider: call.provider ?? "codex_cli",
     model: call.model,
     reasoning_effort: call.reasoning_effort,
     codex_cli_path: call.codex_cli_path,
@@ -326,70 +324,6 @@ async function callCodexPlanner(prompt, stageName) {
     parsed: extractJson(call.content),
     retry_attempt: 0,
   };
-}
-
-async function callModelslabPlanner(prompt, stageName) {
-  const key = await apiKey();
-  const policy = await modelPolicy();
-  const model = flags.model
-    ?? flags["llm-model"]
-    ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_LLM_MODEL
-    ?? policy.modelslab?.default_unlimited_llm
-    ?? "qwen-qwen3.5-plus-02-15";
-  const callDir = path.join(weekDir, "_modelslab_llm_calls");
-  await fs.mkdir(callDir, { recursive: true });
-  const stamp = nowIso().replace(/[:.]/g, "-");
-  const promptPath = path.join(callDir, `${stamp}-${stageName}-prompt.md`);
-  const outputPath = path.join(callDir, `${stamp}-${stageName}-output.json`);
-  const contentPath = path.join(callDir, `${stamp}-${stageName}-content.txt`);
-  await fs.writeFile(promptPath, prompt, "utf8");
-  const body = {
-    key,
-    model,
-    model_id: model,
-    messages: [
-      {
-        role: "system",
-        content: "You are an expert longform anime/manhwa recap sound editor. Return only valid JSON. Match sound and music vocabulary to the provided episode world; do not use hardcoded genre templates.",
-      },
-      { role: "user", content: prompt },
-    ],
-    max_tokens: Number(flags["llm-max-tokens"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_MAX_TOKENS ?? 18000),
-    temperature: Number(flags["llm-temperature"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_TEMPERATURE ?? 0.45),
-  };
-  const retries = clampInt(flags["llm-retries"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_LLM_RETRIES ?? 3, 0, 6);
-  let lastError = null;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    const attemptOutputPath = attempt === 0 ? outputPath : outputPath.replace(/\.json$/, `-retry_${attempt}.json`);
-    const attemptContentPath = attempt === 0 ? contentPath : contentPath.replace(/\.txt$/, `-retry_${attempt}.txt`);
-    try {
-      const response = await fetch("https://modelslab.com/api/v7/llm/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Number(process.env.ANIFACTORY_AUDIO_ENRICHMENT_LLM_TIMEOUT_MS ?? 1_200_000)),
-      });
-      const raw = await response.text();
-      await fs.writeFile(attemptOutputPath, raw, "utf8");
-      if (!response.ok) throw new Error(`ModelsLab LLM ${stageName} HTTP ${response.status}: ${raw.slice(0, 1000)}`);
-      const json = JSON.parse(raw);
-      const content = llmContent(json);
-      await fs.writeFile(attemptContentPath, content, "utf8");
-      const parsed = extractJson(content);
-      if (attempt > 0) {
-        await fs.copyFile(attemptOutputPath, outputPath);
-        await fs.copyFile(attemptContentPath, contentPath);
-      }
-      return { provider: "modelslab", model, promptPath, outputPath, contentPath, content, parsed, retry_attempt: attempt };
-    } catch (error) {
-      lastError = error;
-      const message = String(error?.message ?? error);
-      const retryable = /server error|try again|HTTP 429|HTTP 5\d\d|timeout|aborted|fetch failed|did not contain a JSON object/i.test(message);
-      if (!retryable || attempt >= retries) throw error;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(20_000, 4_000 * (attempt + 1))));
-    }
-  }
-  throw lastError ?? new Error(`ModelsLab LLM ${stageName} failed.`);
 }
 
 function audioLinks(response) {

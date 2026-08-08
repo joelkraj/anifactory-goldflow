@@ -1189,9 +1189,10 @@ function ttsStatusContract({
       provider: policy.primary.provider,
       same_voice_reference_required: true,
       exact_unit_only: true,
-      maximum_attempts_per_unit: 2,
+      maximum_creative_submissions_per_invocation: 1,
+      maximum_attempts_per_unit_across_explicit_repair_invocations: 2,
       retry_only_confirmed_skip_truncation_or_stutter: true,
-      automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio: true,
+      automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio: false,
       other_acoustic_or_voice_identity_blockers_require_review: true,
       uncertain_asr_findings_are_warning_only: true,
       automated_acoustic_findings_are_review_warnings: true,
@@ -1199,7 +1200,8 @@ function ttsStatusContract({
       automated_voice_continuity_findings_are_review_warnings: true,
       automated_qa_warnings_block_stitching: false,
       automated_qa_warnings_trigger_retry: false,
-      automatic_retry_limited_to_structural_audio_or_synthesis_process_failures: true,
+      automatic_retry_limited_to_structural_audio_or_synthesis_process_failures: false,
+      structural_failure_action: "stop_and_emit_exact_unit_repair_scope",
       structural_audio_hard_stops: [
         "missing",
         "unreadable",
@@ -2621,14 +2623,9 @@ async function main() {
     await qaSynthesis("qwen", 1, units, {
       synthesisMode: firstTakeSynthesisMode,
     });
-    const automaticRetryIds = new Set(
-      candidates
-        .filter((candidate) => (
-          candidate.attempt === 1
-          && candidate.disposition?.status === "confirmed_retry_required"
-        ))
-        .map((candidate) => String(candidate.unit_id)),
-    );
+    // First-take structural failures stop with their exact unit IDs exposed.
+    // Only a later evidence-bound scoped repair invocation may resynthesize.
+    const scopedRecoveryIds = new Set();
     const confirmedEvidenceById = new Map();
     let confirmedEvidencePath = null;
     let confirmedEvidenceSha256 = null;
@@ -2645,7 +2642,7 @@ async function main() {
         currentCandidates: candidates,
       });
       for (const unitId of requestedIds) selected.delete(unitId);
-      for (const unitId of requestedIds) automaticRetryIds.add(unitId);
+      for (const unitId of requestedIds) scopedRecoveryIds.add(unitId);
       for (const row of validatedEvidence) {
         confirmedEvidenceById.set(String(row.unit_id), row);
       }
@@ -2660,15 +2657,12 @@ async function main() {
         confirmed_artifacts: validatedEvidence,
       };
     }
-    // Keep first takes when automated acoustic, ASR, or voice-continuity
-    // diagnostics raise review warnings. Only a structural missing,
-    // unreadable, empty, corrupt, token-limited, or failed synthesis result,
-    // or a hash-bound human listen confirming a skip, truncation, or stutter,
-    // can enter exact-unit recovery.
-    const automaticRetryUnits = units.filter(
-      (unit) => automaticRetryIds.has(String(unit.unit_id)),
+    // Automated diagnostics never resubmit. This branch contains only an
+    // explicitly requested, hash-bound exact-unit recovery invocation.
+    const scopedRecoveryUnits = units.filter(
+      (unit) => scopedRecoveryIds.has(String(unit.unit_id)),
     );
-    if (automaticRetryUnits.length) {
+    if (scopedRecoveryUnits.length) {
       if (policy.synthesis_contract.mode
         === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
         const attemptOneById = new Map(
@@ -2678,7 +2672,7 @@ async function main() {
         );
         const bindingByUnit = qwenBatchBindingByUnit(batchPlan);
         const recoveryProvenanceByUnit = new Map();
-        for (const unit of automaticRetryUnits) {
+        for (const unit of scopedRecoveryUnits) {
           const unitId = String(unit.unit_id);
           const confirmed = confirmedEvidenceById.get(unitId);
           recoveryProvenanceByUnit.set(
@@ -2705,7 +2699,7 @@ async function main() {
           }),
           synthesis_recovery_mode: QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
           batch_plan_sha256: batchPlan.batch_plan_sha256,
-          exact_unit_ids: automaticRetryUnits.map((unit) => unit.unit_id),
+          exact_unit_ids: scopedRecoveryUnits.map((unit) => unit.unit_id),
           exact_unit_provenance_sha256: Object.fromEntries(
             [...recoveryProvenanceByUnit.entries()].map(
               ([unitId, provenance]) => [
@@ -2715,12 +2709,12 @@ async function main() {
             ),
           ),
         };
-        await qaSynthesis("qwen", 2, automaticRetryUnits, {
+        await qaSynthesis("qwen", 2, scopedRecoveryUnits, {
           synthesisMode: QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
           recoveryProvenanceByUnit,
         });
       } else {
-        await qaSynthesis("qwen", 2, automaticRetryUnits, {
+        await qaSynthesis("qwen", 2, scopedRecoveryUnits, {
           synthesisMode: policy.synthesis_contract.mode,
         });
       }
@@ -3175,7 +3169,7 @@ async function main() {
     fallback_selected_unit_ids: [],
     fallback_scope_policy: "no_alternate_provider_or_voice",
     retry_scope_policy:
-      "same_qwen_liam_exact_unit_only_after_confirmed_delivery_defect_or_structural_failure",
+      "no_automatic_retry; later_hash_bound_exact_unit_repair_only",
     attempt_events_path: eventsPath,
     attempt_count: attemptEvents.length,
     unit_qa_path: unitQaPath,

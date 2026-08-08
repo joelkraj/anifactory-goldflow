@@ -95,7 +95,7 @@ function testAutomatedQaWarnsWhileStructuralFailuresRemainHard() {
     assert.equal(qa.status, "blocked", code);
     assert.equal(
       candidateDisposition(qa, "qwen_local").status,
-      "confirmed_retry_required",
+      "exact_unit_repair_required",
       code,
     );
   }

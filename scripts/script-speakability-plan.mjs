@@ -324,7 +324,7 @@ async function callCodex(prompt, stageName) {
     timeoutMs: Number(process.env.ANIFACTORY_SPEAKABILITY_TIMEOUT_MS ?? 900_000),
   });
   return {
-    provider: "codex",
+    provider: call.provider ?? "codex_cli",
     model: call.model,
     reasoning_effort: call.reasoning_effort,
     codex_cli_path: call.codex_cli_path,

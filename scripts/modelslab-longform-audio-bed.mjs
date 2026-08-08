@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sha256File } from "./lib/file-hash.mjs";
+import { narrationDuckingFilterChain, resolveNarrationDuckingPolicy } from "./lib/narration-ducking-policy.mjs";
 import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
 
 const execFile = promisify(execFileCb);
@@ -40,9 +41,30 @@ const dryRun = flags["dry-run"] === "true";
 const maxDurationSec = Number(flags["max-duration-sec"] ?? 0);
 const reportSuffix = flags.reportSuffix ?? (maxDurationSec > 0 ? `-test-${Math.round(maxDurationSec)}s` : "");
 const scoreVolumeDb = Number(flags["score-volume-db"] ?? -26);
+const scoreBedTrimDb = Number(flags["score-bed-trim-db"] ?? 0);
+if (!Number.isFinite(scoreBedTrimDb)) throw new Error("--score-bed-trim-db must be a finite number.");
+const scoreBedLevelMode = flags["score-bed-level-mode"] ?? "dynamic_ducking";
+if (!["dynamic_ducking", "fixed_ducked"].includes(scoreBedLevelMode)) {
+  throw new Error("--score-bed-level-mode must be dynamic_ducking or fixed_ducked.");
+}
+const scoreBedFixedDuckDb = Number(flags["score-bed-fixed-duck-db"] ?? 0);
+if (!Number.isFinite(scoreBedFixedDuckDb) || scoreBedFixedDuckDb > 0 || scoreBedFixedDuckDb < -60) {
+  throw new Error("--score-bed-fixed-duck-db must be between -60 and 0 dB.");
+}
 const scoreDropVolumeDb = Number(flags["score-drop-volume-db"] ?? -18);
 const scoreDropBoostDb = Number(flags["score-drop-boost-db"] ?? 0);
 const scoreDropDuckDb = Number(flags["score-drop-duck-db"] ?? -8);
+const scoreNarrationDucking = flags["score-narration-ducking"] === "true";
+const scoreNarrationDuckingPolicy = resolveNarrationDuckingPolicy({
+  threshold: flags["score-narration-duck-threshold"],
+  ratio: flags["score-narration-duck-ratio"],
+  attack_ms: flags["score-narration-duck-attack-ms"],
+  release_ms: flags["score-narration-duck-release-ms"],
+  silence_surge_cap_threshold: flags["score-silence-surge-cap-threshold"],
+  silence_surge_cap_ratio: flags["score-silence-surge-cap-ratio"],
+  silence_surge_cap_attack_ms: flags["score-silence-surge-cap-attack-ms"],
+  silence_surge_cap_release_ms: flags["score-silence-surge-cap-release-ms"],
+});
 const sfxVolumeBoostDb = Number(flags["sfx-boost-db"] ?? 0);
 const signatureSfxBoostDb = Number(flags["signature-sfx-boost-db"] ?? 0);
 const incidentalSfxBoostDb = Number(flags["incidental-sfx-boost-db"] ?? 0);
@@ -644,8 +666,9 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
   const transitionEvents = buildDeterministicTransitionSfxEvents(promptPlan, bankMap, durationSec);
   const existingEvents = [];
   const inputs = ["-i", narrationPath];
-  const filters = [`[0:a]volume=${narrationVolumeDb}dB[narr]`];
-  const labels = ["[narr]"];
+  const filters = [];
+  const scoreBedLabels = [];
+  const accentAndSfxLabels = [];
   let inputIndex = 1;
 
   for (const chapter of chapters) {
@@ -654,12 +677,13 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     const start = Number(chapter.start_sec ?? 0);
     const end = Math.min(durationSec, Number(chapter.end_sec ?? start + 180));
     const chapterDuration = Math.max(0.5, end - start);
-    const gain = Number.isFinite(Number(chapter.gain_db)) ? Number(chapter.gain_db) : scoreVolumeDb;
+    const authoredGain = Number.isFinite(Number(chapter.gain_db)) ? Number(chapter.gain_db) : scoreVolumeDb;
+    const gain = authoredGain + scoreBedTrimDb + (scoreBedLevelMode === "fixed_ducked" ? scoreBedFixedDuckDb : 0);
     inputs.push("-stream_loop", "-1", "-i", score.asset_path);
     const label = `score${inputIndex}`;
     const delay = Math.max(0, Math.round(start * 1000));
     filters.push(`[${inputIndex}:a]atrim=0:${chapterDuration.toFixed(3)},asetpts=PTS-STARTPTS,${scoreVolumeFilter(gain, start, end, scoreDrops)},adelay=${delay}|${delay}[${label}]`);
-    labels.push(`[${label}]`);
+    scoreBedLabels.push(`[${label}]`);
     inputIndex += 1;
   }
 
@@ -675,7 +699,7 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     const delay = Math.max(0, Math.round(start * 1000));
     const fadeOutStart = Math.max(0, dropDuration - 0.35);
     filters.push(`[${inputIndex}:a]atrim=0:${dropDuration.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.120,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=0.350,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
-    labels.push(`[${label}]`);
+    accentAndSfxLabels.push(`[${label}]`);
     inputIndex += 1;
   }
 
@@ -694,7 +718,7 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     const label = `sfx${inputIndex}`;
     const delay = Math.max(0, Math.round(start * 1000));
     filters.push(`[${inputIndex}:a]atrim=0:${Math.min(eventDuration, durationSec).toFixed(3)},asetpts=PTS-STARTPTS,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
-    labels.push(`[${label}]`);
+    accentAndSfxLabels.push(`[${label}]`);
     inputIndex += 1;
   }
 
@@ -711,9 +735,25 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     const delay = Math.max(0, Math.round(start * 1000));
     const fadeOutStart = Math.max(0, eventDuration - 0.08);
     filters.push(`[${inputIndex}:a]atrim=0:${Math.min(eventDuration, durationSec).toFixed(3)},asetpts=PTS-STARTPTS,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=0.080,volume=${gain}dB,adelay=${delay}|${delay}[${label}]`);
-    labels.push(`[${label}]`);
+    accentAndSfxLabels.push(`[${label}]`);
     inputIndex += 1;
   }
+
+  const duckScoreBeds = scoreBedLevelMode === "dynamic_ducking" && scoreNarrationDucking && scoreBedLabels.length > 0;
+  const labels = ["[narr]"];
+  if (duckScoreBeds) {
+    filters.unshift(
+      `[0:a]aformat=sample_rates=44100:channel_layouts=stereo,asplit=2[narrsource][narrkey]`,
+      `[narrsource]volume=${narrationVolumeDb}dB[narr]`,
+    );
+    filters.push(`${scoreBedLabels.join("")}amix=inputs=${scoreBedLabels.length}:duration=longest:normalize=0[scorebed]`);
+    filters.push(`[scorebed][narrkey]${narrationDuckingFilterChain(scoreNarrationDuckingPolicy)}[duckedscorebed]`);
+    labels.push("[duckedscorebed]");
+  } else {
+    filters.unshift(`[0:a]volume=${narrationVolumeDb}dB[narr]`);
+    labels.push(...scoreBedLabels);
+  }
+  labels.push(...accentAndSfxLabels);
 
   const loudnessFilter = Number.isFinite(targetLufs)
     ? `,loudnorm=I=${targetLufs}:TP=${truePeakDb}:LRA=${loudnessRange}:print_format=summary`
@@ -729,6 +769,15 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
     score_drop_input_count: scoreDropRows.length,
     score_drop_event_count: scoreDrops.length,
     score_drop_mix_policy: "Short local ACE-Step accents are faded in/out and normal score beds are ducked during overlapping drop windows.",
+    score_narration_ducking_requested: scoreNarrationDucking,
+    score_narration_ducking_applied: duckScoreBeds,
+    score_narration_ducking_policy: duckScoreBeds ? scoreNarrationDuckingPolicy : null,
+    score_narration_ducking_scope: duckScoreBeds ? "continuous_chapter_score_beds_only; post-duck silence-surge cap; score drops and SFX retain authored gain" : null,
+    score_bed_trim_db: scoreBedTrimDb,
+    score_bed_level_mode: scoreBedLevelMode,
+    score_bed_fixed_duck_db: scoreBedLevelMode === "fixed_ducked" ? scoreBedFixedDuckDb : null,
+    score_bed_effective_adjustment_db: scoreBedTrimDb + (scoreBedLevelMode === "fixed_ducked" ? scoreBedFixedDuckDb : 0),
+    score_bed_trim_scope: "continuous_chapter_score_beds_only; score drops and SFX retain authored gain",
     narration_volume_db: narrationVolumeDb,
     sfx_volume_boost_db: sfxVolumeBoostDb,
     signature_sfx_boost_db: signatureSfxBoostDb,

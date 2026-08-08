@@ -198,7 +198,7 @@ Return:
 
 async function callCodex(prompt, stageName) {
   const model = flags.model ?? flags["llm-model"] ?? process.env.ANIFACTORY_SCORE_PLANNER_CODEX_MODEL ?? "";
-  const reasoningEffort = flags["reasoning-effort"] ?? process.env.ANIFACTORY_SCORE_PLANNER_REASONING_EFFORT ?? "medium";
+  const reasoningEffort = flags["reasoning-effort"] ?? process.env.ANIFACTORY_SCORE_PLANNER_REASONING_EFFORT ?? null;
   const callDir = path.join(weekDir, "_codex_calls");
   await fs.mkdir(callDir, { recursive: true });
   const stamp = nowIso().replace(/[:.]/g, "-");
@@ -216,7 +216,7 @@ async function callCodex(prompt, stageName) {
     detached: true,
   });
   return {
-    provider: "codex",
+    provider: call.provider ?? "codex_cli",
     model: call.model,
     reasoning_effort: call.reasoning_effort,
     codex_cli_path: call.codex_cli_path,

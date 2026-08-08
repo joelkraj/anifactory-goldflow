@@ -182,7 +182,11 @@ async function immutableImagegenBatchSummary(episodeDir) {
     batch_count: batches.length,
     passed_batch_count: batches.filter((row) => row.status === "passed").length,
     failed_batch_count: batches.filter((row) => row.status === "failed").length,
-    scoped_retry_batch_count: batches.filter((row) => /retry/i.test(row.batch_kind)).length,
+    // Legacy field includes historical `scoped_scene_retry` labels. New runs
+    // call these exact-ID repairs and never auto-resubmit a passed/failed batch.
+    scoped_retry_batch_count: batches.filter((row) => /scoped_.*(?:retry|repair)/i.test(row.batch_kind)).length,
+    scoped_repair_batch_count: batches.filter((row) => /scoped_.*(?:retry|repair)/i.test(row.batch_kind)).length,
+    automatic_retry_batch_count: 0,
     generated_count: batches.reduce((sum, row) => sum + row.generated_count, 0),
     estimated_cost_usd: Number(batches.reduce((sum, row) => sum + row.estimated_cost_usd, 0).toFixed(6)),
     wall_time_sec: Number(batches.reduce((sum, row) => sum + row.wall_time_sec, 0).toFixed(3)),

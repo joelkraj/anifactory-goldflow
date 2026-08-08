@@ -142,7 +142,7 @@ export function softenPrimaryQa(qa) {
         (finding) => finding?.disposition_policy === "automated_tts_qa_review_warning",
       ).length,
       retry_policy:
-        "Automated acoustic, ASR, and voice-continuity findings are non-blocking review warnings and never trigger retry. Retry only an exact unit after a hash-bound confirmed audible skip, truncation, or stutter, or after a structural missing, unreadable, empty, corrupt, token-limited, or failed synthesis result.",
+        "Automated findings never trigger resubmission. A structural failure stops and emits its exact unit ID; a later hash-bound repair invocation may resynthesize only that unit after confirmed evidence.",
     },
   };
 }
@@ -163,7 +163,7 @@ export function candidateDisposition(qa, provider) {
     return {
       status: manualReviewCodes.length
         ? "blocked_manual_review"
-        : "confirmed_retry_required",
+        : "exact_unit_repair_required",
       accepted: false,
       blocker_codes: blockerCodes,
     };

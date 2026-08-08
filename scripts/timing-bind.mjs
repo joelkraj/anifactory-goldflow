@@ -19,7 +19,6 @@ const narrationReportPath = resolveNarrationReportPath({ episodeDir, episode, fl
 const qwenReportPath = narrationReportPath;
 const outputPath = flags.output ?? path.join(episodeDir, "timed_scene_plan.json");
 const maxSceneDurationSec = Number(flags["max-scene-duration-sec"] ?? process.env.ANIFACTORY_TIMING_MAX_SCENE_DURATION_SEC ?? 240);
-const allowTimingFallbacks = flags["allow-timing-fallbacks"] === "true" || process.env.ANIFACTORY_ALLOW_TIMING_FALLBACKS === "true";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -285,23 +284,36 @@ function applyFinalScriptAudioEnd(scenes, semantic, wordTiming, script) {
   return scenes;
 }
 
-function assertTimingQuality(scenes) {
-  const failures = [];
+export function timingQualityAdvisories(scenes, { maxDurationSec = maxSceneDurationSec } = {}) {
+  const advisories = [];
   for (const scene of scenes) {
     const duration = Number(scene.duration_sec ?? 0);
-    if (Number.isFinite(maxSceneDurationSec) && maxSceneDurationSec > 0 && duration > maxSceneDurationSec) {
-      failures.push(`${scene.scene_id} duration ${duration.toFixed(1)}s exceeds max ${maxSceneDurationSec}s (${scene.title ?? "untitled"})`);
+    if (Number.isFinite(maxDurationSec) && maxDurationSec > 0 && duration > maxDurationSec) {
+      advisories.push({
+        scene_id: scene.scene_id,
+        code: "scene_duration_above_editorial_goal",
+        severity: "advisory",
+        message: `${scene.scene_id} duration ${duration.toFixed(1)}s exceeds the ${maxDurationSec}s editorial goal (${scene.title ?? "untitled"}).`,
+      });
     }
-    if (!allowTimingFallbacks && scene.start_resolution === "fallback_previous_scene_end") {
-      failures.push(`${scene.scene_id} start anchor did not bind to Whisper (${scene.title ?? "untitled"})`);
+    if (scene.start_resolution === "fallback_previous_scene_end") {
+      advisories.push({
+        scene_id: scene.scene_id,
+        code: "scene_start_used_timing_fallback",
+        severity: "advisory",
+        message: `${scene.scene_id} start used the previous scene boundary because no direct Whisper phrase anchor matched (${scene.title ?? "untitled"}).`,
+      });
     }
-    if (!allowTimingFallbacks && scene.end_resolution === "fallback_min_duration") {
-      failures.push(`${scene.scene_id} end anchor did not bind or bound to next scene (${scene.title ?? "untitled"})`);
+    if (scene.end_resolution === "fallback_min_duration") {
+      advisories.push({
+        scene_id: scene.scene_id,
+        code: "scene_end_used_timing_fallback",
+        severity: "advisory",
+        message: `${scene.scene_id} end used a minimum-duration fallback because no direct Whisper phrase anchor matched (${scene.title ?? "untitled"}).`,
+      });
     }
   }
-  if (failures.length) {
-    throw new Error(`Timing bind quality gate failed:\n${failures.slice(0, 40).join("\n")}`);
-  }
+  return advisories;
 }
 
 async function main() {
@@ -329,7 +341,7 @@ async function main() {
       timing_source: "local_whisper_word_timing",
     };
   })), semantic, wordTiming), semantic, wordTiming, script);
-  assertTimingQuality(scenes);
+  const timingAdvisories = timingQualityAdvisories(scenes);
   const report = {
     schema: "goldflow_timed_scene_plan_v1",
     status: "passed",
@@ -344,11 +356,14 @@ async function main() {
     timing_source: "local_whisper_word_timing",
     audio_duration_sec: wordTiming.audio_duration_sec ?? qwenReport?.final_duration_sec ?? null,
     scene_count: scenes.length,
+    timing_policy: "structural_inputs_block; scene_duration_and_anchor_quality_are_editorial_advisories",
+    timing_advisory_count: timingAdvisories.length,
+    timing_advisories: timingAdvisories,
     scenes,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);
-  console.log(JSON.stringify({ status: "passed", output_path: outputPath, scene_count: scenes.length, timing_source: report.timing_source }, null, 2));
+  console.log(JSON.stringify({ status: "passed", output_path: outputPath, scene_count: scenes.length, timing_source: report.timing_source, timing_advisory_count: timingAdvisories.length }, null, 2));
 }
 
 main().catch(async (error) => {

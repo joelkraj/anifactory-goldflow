@@ -72,18 +72,36 @@ export async function recordPlannerChunkCheckpoint({
       entries: {},
     });
     const prior = ledger.entries?.[key] ?? null;
+    const outputSha256 = await fileHash(outputPath);
+    const attemptRecord = {
+      attempt: Number(attempt ?? 1),
+      status,
+      reused_cached_output: Boolean(reused),
+      output_path: outputPath,
+      output_sha256: outputSha256,
+      findings,
+      metadata,
+      recorded_at: new Date().toISOString(),
+    };
+    const priorPassed = prior?.status === "passed";
+    const preservePassed = priorPassed && status !== "passed";
     const entry = {
       planner_stage: plannerStage,
       chunk_id: chunkId,
       input_sha256: inputHash,
-      expected_ids: expectedIds.map(String),
-      status,
+      expected_ids: expectedIds.length
+        ? expectedIds.map(String)
+        : (prior?.expected_ids ?? []),
+      status: preservePassed ? prior.status : status,
       attempt_count: Math.max(Number(prior?.attempt_count ?? 0), Number(attempt ?? 1)),
-      reused_cached_output: Boolean(reused),
-      output_path: outputPath,
-      output_sha256: await fileHash(outputPath),
-      findings,
-      metadata,
+      reused_cached_output: preservePassed
+        ? Boolean(prior.reused_cached_output)
+        : Boolean(reused),
+      output_path: preservePassed ? prior.output_path : outputPath,
+      output_sha256: preservePassed ? prior.output_sha256 : outputSha256,
+      findings: preservePassed ? prior.findings : findings,
+      metadata: preservePassed ? prior.metadata : metadata,
+      attempts: [...(prior?.attempts ?? []), attemptRecord],
       updated_at: new Date().toISOString(),
     };
     const entries = { ...(ledger.entries ?? {}), [key]: entry };
@@ -108,4 +126,3 @@ export async function recordPlannerChunkCheckpoint({
   writeQueues.set(ledgerPath, queued.catch(() => {}));
   return queued;
 }
-

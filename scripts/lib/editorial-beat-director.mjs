@@ -503,11 +503,11 @@ ${plannerDirectives || "- Preserve the exact local narration truth and make each
 
 Decide what the viewer needs to see right now to understand, feel, and keep watching. You own visual job, depiction mode, visible/screen/preview/mentioned entities, location, foreground action, and composition. Do not write an image-generation prompt.
 
-Hard rails:
+Structural requirements:
 - Use every atom_id exactly once and in order. You may merge adjacent atoms into one beat.
 - Never reorder, overlap, omit, duplicate, or invent atoms.
 - Never merge across an atom with transition_barrier_before=true.
-- Retention holds: 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s. Measure a beat from its first atom start through the next unmerged atom start, because the image remains visible during the narration pause. Merge adjacent atoms to fit when story truth allows. An indivisible atom or mandatory transition may use a concise rail_exception.
+- Retention timing is an editorial goal, never a validity gate: aim for 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s when the narration and visual idea support it. Measure a beat from its first atom start through the next unmerged atom start because the image remains visible during narration pauses. Prefer the strongest truthful grouping even when it is shorter or longer; a 4-second beat is valid in any band and no timing exception is required.
 - Current reality, screen/replay, preview/hypothetical, memory/flashback, and mentioned-only are distinct depiction modes.
 - Mentioned-only entities stay offscreen. Every visible entity needs an exact evidence excerpt from the grouped atoms.
 - Identity-bearing actors include people, creatures, bosses, guardians, constructs, summons, and recurring creature systems. A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted belongs in the appropriate visible entity list, never in props.
@@ -522,8 +522,8 @@ Hard rails:
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED FOR THIS PRODUCTION. Author animation_intent for every beat. This is pre-image direction: choose an animation-ready starting composition, one coherent subject action, one camera move, restrained environmental motion, a readable end state, continuity into the next shot, and immutable elements. UI/screen shots remain eligible; exact generated text legibility is not required.
 - Set eligibility=animate when generated motion adds story value. Use still_preferred only when motion would undermine a decisive frozen tableau. Never invent an action beyond local evidence.
-- Choose preferred_generation_duration_sec from 5 through 12 based on the complete action, not the still-cut length. Set sequence_eligible_with_next=true only when this beat and the immediately following beat can play as one uninterrupted shot in the same physical scene, depiction mode, identities, wardrobe, and screen direction.
-- Author the end frame deliberately. camera_end_state and end_frame_composition must describe a stable terminal frame that can hand cleanly into the next beat; continuity_bridge must say what remains spatially unchanged across that handoff.
+- Choose preferred_generation_duration_sec from 5 through 12 based on this beat's one complete reachable action, not the still-cut length. Set sequence_eligible_with_next=false: the production provider accepts one starting image and every selected motion moment is one standalone shot.
+- Author the terminal frame deliberately. camera_end_state and end_frame_composition must describe a stable state physically reachable from start_state within one uninterrupted action; continuity_bridge must say what remains spatially unchanged for the separate following shot.
 - Favor animation-ready staging: clear silhouettes, visible limbs, unambiguous contact, movement room, and separated depth planes. For physical contact, lock the contact point and keep the action small. For locomotion, state direction and destination. For reactions, prefer eyes, posture, breathing, hair, and one restrained gesture.` : "- ANIMATION MODE IS DISABLED. Do not return animation_intent or animation-specific direction."}
 
 ATOMS:
@@ -597,8 +597,7 @@ Return JSON only:
       "end_frame_composition": "subject positions, gaze, props, and negative space at the terminal frame",
       "locked_elements": ["identity, wardrobe, anatomy, props, spatial facts"]
     },` : ""}
-    "editorial_cues": [],
-    "rail_exception": null
+    "editorial_cues": []
   }],
   "warnings": []
 }`;
@@ -676,8 +675,15 @@ function groupingFindings(rows, atoms, factLedger) {
     const nextRowFirst = nextRowFirstId ? atomMap.get(String(nextRowFirstId))?.atom : null;
     const duration = (nextRowFirst?.start_sec ?? last.end_sec) - first.start_sec;
     const rail = retentionRailForTime(first.start_sec);
-    if ((duration < rail.min_sec - 0.05 || duration > rail.max_sec + 0.05) && !normalizeText(row.rail_exception)) {
-      findings.push({ severity: "blocker", code: "editorial_retention_rail_violation", row_index: rowIndex, duration_sec: duration, rail });
+    if (duration < rail.min_sec - 0.05 || duration > rail.max_sec + 0.05) {
+      findings.push({
+        severity: "warning",
+        code: "editorial_retention_timing_goal_miss",
+        row_index: rowIndex,
+        duration_sec: Number(duration.toFixed(3)),
+        rail,
+        message: "Beat duration is outside the retention timing goal; grouping remains valid when story structure supports it.",
+      });
     }
   }
   return findings;
@@ -710,7 +716,14 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
         && String(intent.subject_motion ?? "").trim()
         && String(intent.camera_motion ?? "").trim()
         && String(intent.end_state ?? "").trim();
-      if (!valid) findings.push({ severity: "blocker", code: "editorial_animation_intent_missing_or_invalid", row_index: rowIndex });
+      if (!valid) {
+        findings.push({
+          severity: "warning",
+          code: "editorial_animation_intent_missing_or_invalid",
+          row_index: rowIndex,
+          message: "Animation intent is optional; this beat will keep its accepted still-image motion treatment.",
+        });
+      }
     });
   }
   const blockers = findings.filter((finding) => finding.severity === "blocker");
@@ -779,7 +792,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
       editorial_cues: unique(row.editorial_cues ?? []),
       visual_novelty_directive: normalizeText(row.composition_intent),
       local_continuity_note: normalizeText(row.continuity_note),
-      ...(animationEnabled ? { animation_intent: row.animation_intent } : {}),
+      ...(animationEnabled ? { animation_intent: row.animation_intent ?? null } : {}),
       rail_exception: normalizeText(row.rail_exception) || null,
       retention_rail: retentionRailForTime(first.start_sec),
       hook_visual: first.start_sec < 30,
@@ -793,15 +806,16 @@ export function editorialRetentionRailFindings(beats) {
   return (beats ?? []).flatMap((beat, index) => {
     const rail = beat.retention_rail ?? retentionRailForTime(beat.start_sec);
     const duration = Number(beat.duration_sec ?? (Number(beat.end_sec ?? 0) - Number(beat.start_sec ?? 0)));
-    // Rails guide editorial rhythm; sub-second timing alignment variance is not a production blocker.
-    if (normalizeText(beat.rail_exception) || duration >= rail.min_sec - 0.75 && duration <= rail.max_sec + 0.75) return [];
+    if (duration >= rail.min_sec - 0.75 && duration <= rail.max_sec + 0.75) return [];
     return [{
-      severity: "blocker",
-      code: "editorial_applied_hold_rail_violation",
+      severity: "warning",
+      code: "editorial_applied_hold_timing_goal_miss",
       beat_index: index,
       visual_beat_id: beat.visual_beat_id ?? null,
+      start_sec: Number(beat.start_sec ?? 0),
       duration_sec: Number(duration.toFixed(3)),
       rail,
+      message: "Applied hold is outside the retention timing goal; this is diagnostic only.",
     }];
   });
 }

@@ -8,7 +8,6 @@ import {
   editorialMotionDistributionFindings,
   motionIntentFindings,
   motionIntentForPrompt,
-  rebalanceEditorialMotionStreaks,
 } from "./lib/motion-plan-utils.mjs";
 import { parallaxApprovalMatches } from "./lib/parallax-contract.mjs";
 import { noticeableParallaxTreatment } from "./lib/parallax-policy.mjs";
@@ -162,16 +161,17 @@ async function main() {
   if (parallaxPolicy === "selective_inspected") {
     if (parallaxReport?.status !== "passed") throw new Error(`Motion planning requires a passed parallax asset decision: ${parallaxReportPath}`);
     parallaxSourcePaths = [parallaxReportPath];
-    if (Number(parallaxReport.candidate_count ?? 0) === 0) {
-      const waiver = parallaxReport.no_suitable_parallax_waiver;
-      if (!waiver?.reviewer || !waiver?.note) throw new Error("Motion planning requires an explicit no-suitable-parallax waiver when no candidate is selected.");
-    } else {
+    if (Number(parallaxReport.candidate_count ?? 0) > 0) {
       const reportHash = await hashFile(parallaxReportPath);
       if (!parallaxApprovalMatches(parallaxReport, parallaxApproval, { reportSha256: reportHash })) {
         throw new Error(`Motion planning requires current per-candidate parallax approval: ${parallaxApprovalPath}`);
       }
       parallaxSourcePaths.push(parallaxApprovalPath);
-      const approvedIds = new Set(parallaxApproval.approved_image_ids ?? []);
+      const approvedIds = new Set([
+        ...(parallaxApproval.approved_image_ids ?? []),
+        ...(parallaxApproval.approved_low_motion_image_ids ?? []),
+      ]);
+      const decisionById = new Map((parallaxApproval.decisions ?? []).map((row) => [String(row.image_id ?? ""), row.decision]));
       for (const candidate of parallaxReport.candidates ?? []) {
         if (!approvedIds.has(candidate.image_id)) continue;
         for (const [assetPath, expectedHash] of [
@@ -182,7 +182,10 @@ async function main() {
             throw new Error(`Approved parallax layer is missing or stale for ${candidate.image_id}: ${assetPath ?? "missing path"}`);
           }
         }
-        approvedParallaxById.set(String(candidate.image_id), candidate);
+        approvedParallaxById.set(String(candidate.image_id), {
+          ...candidate,
+          approval_disposition: decisionById.get(String(candidate.image_id)) ?? "approved",
+        });
       }
     }
   }
@@ -196,6 +199,7 @@ async function main() {
       intent,
       assetReport: candidate.asset_report,
       candidate,
+      disposition: candidate.approval_disposition,
     });
     if (!treatment) throw new Error(`Approved parallax treatment is invalid for ${intent.image_id}.`);
     return {
@@ -206,12 +210,13 @@ async function main() {
         foreground_subject: candidate.foreground_subject,
         background_plane: candidate.background_plane,
         editorial_reason: candidate.editorial_reason,
+        disposition: candidate.approval_disposition,
       },
     };
   });
-  if (identity?.motion_policy === "selective_editorial_v1") {
-    intents = rebalanceEditorialMotionStreaks(intents, { maximumMovingCuts: 7 });
-  }
+  // Static-share and moving-streak targets are editorial diagnostics. Preserve
+  // the authored per-cut motion instead of rewriting good cuts to satisfy a
+  // deterministic aesthetic quota.
   let approvedLtxById = new Map();
   const ltxSourcePaths = [];
   if (ltxVideoEnabled(identity) || allowLtxRescue) {
@@ -222,9 +227,6 @@ async function main() {
       throw new Error(`LTX rescue requires a production-eligible approval: ${ltxVideoApprovalPath}`);
     }
     approvedLtxById = await approvedLtxCoverageByImage(ltxVideoReport, ltxVideoApproval, { reportPath: ltxVideoReportPath });
-    if (!approvedLtxById.size) {
-      throw new Error(`LTX video policy is enabled but no current approved clips were found in ${ltxVideoApprovalPath}.`);
-    }
     ltxSourcePaths.push(ltxVideoReportPath, ltxVideoApprovalPath);
     intents = intents.map((intent) => {
       const coverage = approvedLtxById.get(String(intent.image_id ?? ""));
@@ -263,7 +265,7 @@ async function main() {
     series_slug: series,
     week,
     episode,
-    policy: "LLM-authored shot_manifest.motion_intent is the baseline. Explicit image-QA focal overrides supersede it; otherwise hash-bound automatic image saliency may translate authored anchors without changing behavior. Legacy prompts without authored motion use conservative shot-staging fallback; missing focal intent becomes a smooth static hold. Hash-random motion is forbidden. Only reviewed, hash-bound parallax candidates may add layered depth.",
+    policy: "LLM-authored shot_manifest.motion_intent is the baseline. Explicit image-QA focal overrides supersede it; otherwise hash-bound automatic image saliency may translate authored anchors without changing behavior. Legacy prompts without authored motion use conservative shot-staging fallback; missing focal intent becomes a smooth static hold. Static-share, repetition, velocity, and movement-streak findings are advisory and never rewrite or block an otherwise structurally valid plan. Hash-random motion is forbidden. Only reviewed, hash-bound parallax candidates may add layered depth.",
     motion_policy: identity?.motion_policy ?? "legacy",
     parallax_policy: parallaxPolicy,
     ltx_rescue_override: allowLtxRescue ? {
@@ -283,6 +285,13 @@ async function main() {
     approved_parallax_candidate_count: approvedParallaxById.size,
     ltx_video_policy: identity?.ltx_video_policy ?? "disabled",
     approved_ltx_video_count: approvedLtxById.size,
+    ltx_still_fallback_count: Math.max(
+      0,
+      Number(ltxVideoReport?.planned_count ?? ltxVideoReport?.clip_count ?? 0) - approvedLtxById.size,
+    ),
+    ltx_no_approved_clip_disposition: approvedLtxById.size
+      ? null
+      : "accepted_still_motion_for_all_cuts",
     ltx_video_report_path: ltxVideoEnabled(identity) || allowLtxRescue ? ltxVideoReportPath : null,
     ltx_video_approval_path: ltxVideoEnabled(identity) || allowLtxRescue ? ltxVideoApprovalPath : null,
     qa_override_count: intents.filter((row) => row.qa_override).length,

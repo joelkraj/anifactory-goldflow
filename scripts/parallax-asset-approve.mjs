@@ -50,30 +50,41 @@ async function main() {
   const outputPath = path.resolve(flags.output ?? path.join(episodeDir, `parallax_asset_approval_${episode}.json`));
   const report = await readJson(reportPath);
   if (report?.status !== "passed") throw new Error("Parallax asset report must pass before approval.");
-  if (!Number(report.candidate_count ?? 0)) throw new Error("No parallax candidates require approval; use the recorded no-suitable waiver.");
+  if (!Number(report.candidate_count ?? 0)) {
+    throw new Error("No parallax candidates require approval; the accepted still/single-plane fallback is already complete.");
+  }
   const reviewer = String(flags.reviewer ?? "").trim();
   const note = String(flags.note ?? "").trim();
   if (!reviewer || !note) throw new Error("Parallax approval requires --reviewer and --note.");
   const candidateIds = new Set((report.candidates ?? []).map((row) => String(row.image_id)));
   const approvedIds = new Set(isTrue(flags["approve-all"]) ? [...candidateIds] : parseList(flags["approve-ids"]));
+  const approvedLowMotionIds = new Set(parseList(flags["approved-low-motion-ids"]));
+  const repairableIds = new Set(parseList(flags["repairable-ids"]));
   const declinedIds = new Set(parseList(flags["decline-ids"]));
-  const overlap = [...approvedIds].filter((id) => declinedIds.has(id));
-  if (overlap.length) throw new Error(`Parallax ids cannot be both approved and declined: ${overlap.join(", ")}`);
-  const unknown = [...new Set([...approvedIds, ...declinedIds])].filter((id) => !candidateIds.has(id));
+  const dispositionSets = [approvedIds, approvedLowMotionIds, repairableIds, declinedIds];
+  const overlap = [...candidateIds].filter((id) => dispositionSets.filter((set) => set.has(id)).length > 1);
+  if (overlap.length) throw new Error(`Parallax ids can have only one disposition: ${overlap.join(", ")}`);
+  const unknown = [...new Set(dispositionSets.flatMap((set) => [...set]))].filter((id) => !candidateIds.has(id));
   if (unknown.length) throw new Error(`Unknown parallax candidate ids: ${unknown.join(", ")}`);
-  const undecided = [...candidateIds].filter((id) => !approvedIds.has(id) && !declinedIds.has(id));
-  if (undecided.length) throw new Error(`Every parallax candidate requires an explicit approved or declined decision: ${undecided.join(", ")}`);
+  const undecided = [...candidateIds].filter((id) => dispositionSets.every((set) => !set.has(id)));
+  if (undecided.length) throw new Error(`Every parallax candidate requires approved, approved_low_motion, repairable, or declined: ${undecided.join(", ")}`);
   const decisions = (report.candidates ?? []).map((candidate) => ({
     image_id: candidate.image_id,
     image_sha256: candidate.image_sha256,
-    decision: approvedIds.has(candidate.image_id) ? "approved" : "declined",
+    decision: approvedIds.has(candidate.image_id)
+      ? "approved"
+      : approvedLowMotionIds.has(candidate.image_id)
+        ? "approved_low_motion"
+        : repairableIds.has(candidate.image_id)
+          ? "repairable"
+          : "declined",
     asset_report_path: candidate.asset_report_path,
     mask_sha256: candidate.asset_report?.mask_sha256 ?? null,
     foreground_sha256: candidate.asset_report?.foreground_sha256 ?? null,
     background_sha256: candidate.asset_report?.background_sha256 ?? null,
   }));
   const approval = {
-    schema: "goldflow_parallax_asset_approval_v1",
+    schema: "goldflow_parallax_asset_approval_v2",
     status: "approved",
     asset_report_path: reportPath,
     asset_report_sha256: await sha256File(reportPath),
@@ -81,12 +92,21 @@ async function main() {
     reviewer,
     note,
     approved_image_ids: [...approvedIds],
+    approved_low_motion_image_ids: [...approvedLowMotionIds],
+    repairable_image_ids: [...repairableIds],
     declined_image_ids: [...declinedIds],
     decisions,
     approved_at: new Date().toISOString(),
   };
   await writeJson(outputPath, approval);
-  console.log(JSON.stringify({ status: "approved", output_path: outputPath, approved_count: approvedIds.size, declined_count: declinedIds.size }, null, 2));
+  console.log(JSON.stringify({
+    status: "approved",
+    output_path: outputPath,
+    approved_count: approvedIds.size,
+    approved_low_motion_count: approvedLowMotionIds.size,
+    repairable_count: repairableIds.size,
+    declined_count: declinedIds.size,
+  }, null, 2));
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

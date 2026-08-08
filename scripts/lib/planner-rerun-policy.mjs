@@ -13,6 +13,10 @@ const SCOPED_FLAGS = Object.freeze([
   "only-scenes",
   "scene-ids",
   "scene-id",
+  "semantic-chunk-ids",
+  "semantic-chunk-id",
+  "chunk-ids",
+  "chunk-id",
   "cut-ids",
   "cut-id",
   "image-ids",
@@ -21,6 +25,8 @@ const SCOPED_FLAGS = Object.freeze([
   "beat-id",
   "reference-ids",
   "reference-id",
+  "repair-chunk-ids",
+  "repair-scene-ids",
   "scope-start-sec",
   "scope-end-sec",
   "proof-start-sec",
@@ -40,6 +46,7 @@ export function plannerInvocationScope(flags = {}) {
   const scopeFlags = SCOPED_FLAGS.filter((name) => hasValue(flags[name]) && (
     name !== "blockers-only" || isTrue(flags[name])
   ));
+  if (isTrue(flags["repair-global"])) scopeFlags.push("repair-global");
   const resumesIncompleteChunks = isTrue(flags["resume-incomplete-chunks"]);
   return {
     scoped: scopeFlags.length > 0,

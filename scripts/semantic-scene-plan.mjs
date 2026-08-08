@@ -8,6 +8,14 @@ import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, local
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import {
+  readPassedSemanticChunkCheckpoint,
+  semanticChunkId,
+  semanticPartialFailureArtifact,
+  semanticRequestedUnitIds,
+  semanticSceneCountFindings,
+  writeSemanticChunkCheckpoint,
+} from "./lib/semantic-planner-recovery.mjs";
+import {
   contentProfileForIdentity,
   contentProfilePlannerDirective,
   contentProfilePlannerRole,
@@ -269,6 +277,13 @@ function sanitizeCanonicalRows(rows, key) {
   return [...byId.values()];
 }
 
+function normalizeSemanticRefKind(value) {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (normalized === "character") return "character_state";
+  if (normalized === "effect") return "action";
+  return normalized;
+}
+
 function normalizeScenes(scenes) {
   return scenes.map((scene, index) => ({
     ...scene,
@@ -277,6 +292,7 @@ function normalizeScenes(scenes) {
     ref_requirements: (scene.ref_requirements ?? []).map((requirement) => ({
       ...requirement,
       ref_id: requirement?.ref_id ? sanitizeCanonicalIdForTests(requirement.ref_id) : requirement?.ref_id,
+      kind: normalizeSemanticRefKind(requirement?.kind),
     })),
   }));
 }
@@ -751,7 +767,7 @@ export function semanticSceneCoverageFindingsForTests(scenes, script, maxSceneSp
     const spanWords = scriptText.slice(start, next).split(/\s+/).filter(Boolean).length;
     if (spanWords > maxSceneSpanWords) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "semantic_scene_span_too_large",
         scene_id: String(scenes[index]?.scene_id ?? ""),
         title: String(scenes[index]?.title ?? ""),
@@ -786,7 +802,7 @@ export function semanticSceneCoverageFindingsForTests(scenes, script, maxSceneSp
       : scriptText.slice(lastEndIndex + lastEnd.length).split(/\s+/).filter(Boolean).length;
     if (trailingWords > 24) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "semantic_final_scene_does_not_cover_script_end",
         scene_id: String(lastScene.scene_id ?? ""),
         trailing_words: trailingWords,
@@ -848,12 +864,12 @@ function semanticSceneQualityFindings(scenes) {
     }
     if (location && !/^(?:none|unknown|n\/a|na|abstract|unspecified)$/i.test(location) && !locationRefRequirements.length) {
       findings.push({
-        severity: "blocker",
+        severity: "warning",
         code: "semantic_physical_scene_missing_location_ref_requirement",
         scene_id: sceneId,
         title,
         location,
-        message: "Physical scenes must include a location ref_requirement so downstream reference scoping has an explicit location target. This target may later be downgraded to no_ref_needed or derive_from_best_cut; it is not an automatic standalone image order.",
+        message: "This physical scene has textual location truth but no separate location ref_requirement. The location contract remains usable; add a location reference candidate only when reusable visual conditioning would improve consistency.",
       });
     }
     for (const subject of scene?.visible_subjects ?? []) {
@@ -981,12 +997,12 @@ Rules:
 - Resolve role/title aliases to canonical named characters when the script establishes that relationship. If a named person is introduced as the dean, boss, chairman, judge, professor, host, rival, spouse, parent, or another title, later role-only mentions such as "the dean" or "the judge" should refer to that named person instead of creating a new generic character. In visible_subjects and character_states, use the named character and put the role in their state, for example "Kai Cenat, acting as dean and final judge." Only create a separate role character when the script clearly introduces a different person.
 - Use one canonical display name for each named person after the script establishes it. Do not alternate between a first name and a full name for the same character in visible_subjects, character_states, or character ref IDs; keep role/title aliases in the state or continuity notes.
 - Treat location as one visible physical environment for this scene, not merely the parent venue name and not a mixture of UI, overlays, phone views, document views, remote call locations, or montage destinations. If a passage moves through several physical environments, split it into separate semantic scenes whenever possible. If the passage is a communication or montage beat that cannot be split cleanly, set location to the camera's primary physical environment and describe remote/on-screen material in ui_text_on_screen, action_staging, or continuity_notes.
-- If a story arc stays inside one larger venue but moves through distinct visible areas, give each scene the specific area name and a matching location ref requirement. Do not reuse one broad location ref ID for different visible areas such as entrance, hallway, main room, screen wall, table area, plaza, roof, basement, server room, witness stand, audience floor, or exterior approach. Same building/campus/city/arena/company/palace is not enough to merge location refs when the visuals should change.
+- If a story arc stays inside one larger venue but moves through distinct visible areas, give each scene the specific area name. When reusable conditioning would help, propose separate location refs for genuinely distinct areas instead of one broad venue ref.
 - visible_subjects means physically visible named people or people visibly shown through a specific screen/broadcast/replay that the scene will depict. Put remote callers, online commenters, text-message senders, and remembered people in ui_text_on_screen, action_staging, or continuity_notes unless the current visual should literally show them on a device or screen. Anonymous groups are neither a default nor forbidden: include workers, audience, employees, reporters, customers, guards, or similar groups when explicitly named or when a concrete active social situation logically needs them to read correctly, such as a hearing, ceremony, class in session, active market, public humiliation, audience reaction, staffed workplace, or assembled formation. A merely public location is insufficient; private, lonely, abandoned, isolated, after-hours, and object/UI-only scenes remain unpopulated unless the script says otherwise.
 - props means tangible foreground objects the camera should show. Do not put rooms, doors, windows, desks, walls, stages, screens, dashboards, webpages, feeds, architecture, lighting, or whole locations in props. Put architecture and surfaces in location/action_staging, and put screens/dashboards/feeds in ui_text_on_screen or action_staging.
 - ui_text_on_screen should be concise image/render guidance: short system labels, numbers, chat snippets, document titles, or key words. Do not dump long multi-line system messages, documents, article text, captions, or dense lists into imagegen text. Summarize dense UI as a visual motif here and leave exact long wording to narration/subtitles or render-layer overlays.
-- Location ref_requirements are the source of truth for downstream scene scoping. Use stable, specific snake_case location ref IDs that match the scene's visible physical area. A later reference planner may merge true duplicates, but deterministic code will not invent replacement locations after this stage.
-- Every scene with a concrete physical location must include at least one ref_requirements row with kind "location" and a stable location ref_id for that visible area. This is mandatory even when the location is one-scene, late, minor, or likely to become no_ref_needed later. Location ref requirements are scoped coverage, not standalone image orders.
+- Textual scene locations are the source of physical truth and feed location contracts. Optional location ref_requirements are reusable-conditioning candidates; when proposed, use stable, specific snake_case IDs for the visible area.
+- For a concrete physical location, propose a stable kind "location" ref_requirement only when a reusable visual-conditioning image would materially improve consistency. The scene's textual location remains authoritative, and omitting an image candidate is advisory rather than blocking.
 - Semantic ref_requirements are scoped target suggestions, not automatic standalone image-generation orders. Include refs for canonical recurring characters, named or distinct recurring nonhuman actors, signature bosses/guardians/constructs with unusual anatomy, major visible states, distinct visible physical locations, signature recurring UI motifs, critical props, and high-risk one-scene close-contact actors. Use kind "character" for identity-bearing human or nonhuman actors so downstream reference planning can preserve their identity and anatomy. Do not create semantic refs for generic background groups, throwaway one-scene UI text, ordinary desks/doors/screens, or props that can be safely derived from the scene image.
 - Avoid editorial/package words in semantic fields, such as hook, retention, thumbnail, CTR, narrator, recap, or what the viewer should feel. Describe the story fact visible in the scene.
 - script_excerpt_start and script_excerpt_end must be exact words copied from this script text so Whisper timing can bind them later. Use short verbatim spans from the actual first and final sentence of the scene; do not summarize, paraphrase, remove clauses, or change quotation marks.
@@ -1018,7 +1034,7 @@ Return one valid JSON object:
       "sfx_cues": ["..."],
       "character_states": [{"character":"...","state":"...","visible_state":"camera-visible body, grooming, wardrobe, cleanliness, posture, expression, and injury facts only","emotional_state":"...","financial_state":"...","social_state":"...","wardrobe":"..."}],
       "props": ["..."],
-      "ref_requirements": [{"ref_id":"specific_visible_area_location_ref","kind":"location","required":true,"reason":"mandatory scoped location coverage for this concrete physical scene"}, {"ref_id":"...","kind":"character|prop|ui|style","required":true,"reason":"character covers identity-bearing people, creatures, bosses, guardians, constructs, and summons"}],
+      "ref_requirements": [{"ref_id":"specific_visible_area_location_ref","kind":"location","required":true,"reason":"optional reusable visual-conditioning candidate for this concrete physical scene"}, {"ref_id":"...","kind":"character|prop|ui|style","required":true,"reason":"character covers identity-bearing people, creatures, bosses, guardians, constructs, and summons"}],
       "action_staging": "...",
       "continuity_notes": ["..."]
     }
@@ -1028,7 +1044,7 @@ Return one valid JSON object:
 }
 
 async function callLocal(prompt, stageName, maxTokens = null) {
-  const attempts = Number(flags["semantic-json-attempts"] ?? 3);
+  const attempts = 1;
   let lastError = null;
   let lastContent = "";
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1067,7 +1083,14 @@ async function callLocal(prompt, stageName, maxTokens = null) {
       console.error(`semantic ${stageName}: invalid JSON attempt ${attempt}/${attempts}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  throw new Error(`local-qwen semantic plan returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
+  const error = new Error(`local-qwen semantic plan returned invalid JSON after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}; content preview: ${lastContent.slice(0, 600)}`);
+  error.llm_failure_packet = {
+    provider: "local-qwen",
+    model: getLLMModel(stageName),
+    content: lastContent,
+    parsed: null,
+  };
+  throw error;
 }
 
 async function callCodex(prompt, stageName) {
@@ -1084,15 +1107,32 @@ async function callCodex(prompt, stageName) {
     reasoningEffort: flags["reasoning-effort"] ?? null,
     timeoutMs: Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000),
   });
+  let parsed;
+  try {
+    parsed = extractJson(call.content);
+  } catch (error) {
+    const wrapped = error instanceof Error ? error : new Error(String(error));
+    wrapped.llm_failure_packet = {
+      provider: call.provider ?? "codex_cli",
+      model: call.model,
+      reasoning_effort: call.reasoning_effort,
+      codex_cli_path: call.codex_cli_path,
+      codex_cli_version: call.codex_cli_version,
+      output_path: outputPath,
+      content: call.content,
+      parsed: null,
+    };
+    throw wrapped;
+  }
   return {
-    provider: "codex",
+    provider: call.provider ?? "codex_cli",
     model: call.model,
     reasoning_effort: call.reasoning_effort,
     codex_cli_path: call.codex_cli_path,
     codex_cli_version: call.codex_cli_version,
     output_path: outputPath,
     content: call.content,
-    parsed: extractJson(call.content),
+    parsed,
   };
 }
 
@@ -1116,10 +1156,15 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
       promptHash: sha256(prompt),
     })) continue;
     const content = await fs.readFile(outputPath, "utf8");
-    const parsed = extractJson(content);
+    let parsed;
+    try {
+      parsed = extractJson(content);
+    } catch {
+      continue;
+    }
     if (validateParsed && !validateParsed(parsed)) continue;
     return {
-      provider: "codex-cache",
+      provider: `${metadata.provider ?? "codex_cli"}_cache`,
       model: metadata.model,
       reasoning_effort: metadata.reasoning_effort,
       codex_cli_path: metadata.codex_cli_path,
@@ -1189,7 +1234,7 @@ Hard rules:
 - Do not manufacture costume damage, injury, grime, wealth, location, relationships, props, UI, or physical presence from emotional/social language.
 - Use injury for body injury or physical entrapment, possession for held objects, location for movement, wardrobe for clothing, and status for social/system role. Do not duplicate a physical condition as a generic status transition.
 - Temporary states need their later exact closure transition when the script reverses them; a trapped, armed, transformed, or role-assigned state must not remain active after explicit release, loss, reversion, or replacement evidence.
-- Preserve the semantic scene schema from the extracted rows, including mandatory location ref_requirements for concrete physical scenes.
+- Preserve the semantic scene schema and textual location truth from the extracted rows. Preserve any evidence-backed location ref_requirements that were proposed, but do not invent one merely to satisfy a quota.
 
 BIBLES:
 ${JSON.stringify(bibles).slice(0, 20_000)}
@@ -1353,18 +1398,33 @@ export function storyFactEvidenceFindingsForTests(ledger, script) {
   return findings;
 }
 
-async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName) {
+async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stageName, { exactRepair = false } = {}) {
   const reconciliationStage = `${stageName}_global_reconciliation`;
   const basePrompt = buildReconciliationPrompt(script, bibles, parsedChunks, targets);
-  let lastFindings = [];
-  for (let attempt = 1; attempt <= Math.max(1, Number(flags["semantic-reconciliation-attempts"] ?? 2)); attempt += 1) {
-    const attemptStage = attempt === 1 ? reconciliationStage : `${reconciliationStage}_attempt_${attempt}`;
-    const prompt = attempt === 1
-      ? basePrompt
-      : `${basePrompt}\n\nCorrection pass: the previous response failed deterministic evidence or scene-coverage validation with ${JSON.stringify(lastFindings.slice(0, 20))}. Return the complete JSON object again. Fix every listed issue. Preserve the useful scene boundaries from the overlapping chunk extractions, split any oversized catch-all scene at supplied exact anchors, and cover the locked script through its actual final narration. Copy every exact_excerpt and transition_evidence_excerpt byte-for-byte from LOCKED SCRIPT, including punctuation and any internal line breaks.`;
-    const llm = isLocalLLMRoute(attemptStage)
-      ? await callLocal(prompt, attemptStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
-      : await reusableCodexCall(attemptStage, prompt) ?? await callCodex(prompt, attemptStage);
+  const chunkId = "global_reconciliation";
+  const inputHash = sha256(basePrompt);
+  const cachedCheckpoint = await readPassedSemanticChunkCheckpoint({
+    episodeDir,
+    chunkId,
+    inputHash,
+  });
+  let llm = cachedCheckpoint ? {
+    provider: cachedCheckpoint.artifact.provider,
+    model: cachedCheckpoint.artifact.model,
+    reasoning_effort: cachedCheckpoint.artifact.reasoning_effort,
+    output_path: cachedCheckpoint.artifact.provider_output_path,
+    parsed: cachedCheckpoint.artifact.parsed,
+    reused_output: true,
+  } : null;
+  try {
+    if (!llm) {
+      const callStage = exactRepair ? `${reconciliationStage}_exact_repair` : reconciliationStage;
+      llm = isLocalLLMRoute(callStage)
+        ? await callLocal(basePrompt, callStage, Number(flags["semantic-reconciliation-max-tokens"] ?? 18_000))
+        : exactRepair
+          ? await callCodex(basePrompt, callStage)
+          : await reusableCodexCall(callStage, basePrompt) ?? await callCodex(basePrompt, callStage);
+    }
     const parsed = llm.parsed ?? {};
     const canonicalEntities = sanitizeCanonicalRows(parsed.canonical_entities, "entity_id");
     const canonicalLocations = sanitizeCanonicalRows(parsed.canonical_locations, "location_id");
@@ -1391,7 +1451,7 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
         model: llm.model ?? null,
         reasoning_effort: llm.reasoning_effort ?? null,
         output_path: llm.output_path ?? null,
-        attempt,
+        attempt: 1,
       },
       updated_at: new Date().toISOString(),
     };
@@ -1403,15 +1463,110 @@ async function reconcileSemanticPlan(script, bibles, parsedChunks, targets, stag
       ...semanticSceneAnchorFindings(snappedScenes, script),
       ...semanticSceneCoverageFindingsForTests(snappedScenes, script),
       ...visibleEntityCoverageFindings,
+      ...semanticSceneQualityFindings(snappedScenes),
+      ...semanticSceneCountFindings(snappedScenes.length, targets),
     ];
     const reconciliationFindings = [...evidenceFindings, ...sceneFindings];
-    if (!reconciliationFindings.some((finding) => finding.severity === "blocker")) {
-      return { llm, parsed, ledger, evidenceFindings, sceneFindings };
+    const blockers = reconciliationFindings.filter((finding) => finding.severity === "blocker");
+    if (blockers.length) {
+      const preview = blockers.slice(0, 10).map((finding) => `${finding.fact_id ?? finding.scene_id ?? "unknown"}:${finding.code}`).join(", ");
+      throw new Error(`Semantic reconciliation failed structural evidence or scene-coverage validation: ${preview}`);
     }
-    lastFindings = reconciliationFindings;
+    const checkpoint = cachedCheckpoint ?? await writeSemanticChunkCheckpoint({
+      episodeDir,
+      chunkId,
+      inputHash,
+      chunk: {
+        chunk_index: 1,
+        chunk_count: 1,
+        word_start_index: 0,
+        word_end_index_exclusive: wordCount(script),
+        overlap_words: 0,
+        words: wordCount(script),
+      },
+      targets,
+      llm,
+      status: "passed",
+    });
+    await recordPlannerChunkCheckpoint({
+      episodeDir,
+      plannerStage: "semantic_scene_plan",
+      chunkId,
+      inputHash,
+      expectedIds: [chunkId],
+      status: "passed",
+      attempt: 1,
+      reused: Boolean(cachedCheckpoint || llm.reused_output),
+      outputPath: checkpoint.path,
+      metadata: {
+        scene_count: normalizedScenes.length,
+        unit_role: "global_reconciliation",
+      },
+    });
+    return {
+      llm,
+      parsed,
+      ledger,
+      evidenceFindings,
+      sceneFindings,
+      checkpoint_path: checkpoint.path,
+      checkpoint_sha256: checkpoint.sha256,
+      input_hash: inputHash,
+      reused_checkpoint: Boolean(cachedCheckpoint),
+    };
+  } catch (error) {
+    llm ??= error?.llm_failure_packet ?? null;
+    const message = error instanceof Error ? error.message : String(error);
+    const checkpoint = await writeSemanticChunkCheckpoint({
+      episodeDir,
+      chunkId,
+      inputHash,
+      chunk: {
+        chunk_index: 1,
+        chunk_count: 1,
+        word_start_index: 0,
+        word_end_index_exclusive: wordCount(script),
+        overlap_words: 0,
+        words: wordCount(script),
+      },
+      targets,
+      llm,
+      status: "failed",
+      failure: { code: "semantic_global_reconciliation_failed", message },
+    });
+    await recordPlannerChunkCheckpoint({
+      episodeDir,
+      plannerStage: "semantic_scene_plan",
+      chunkId,
+      inputHash,
+      expectedIds: [chunkId],
+      status: "failed",
+      attempt: 1,
+      reused: Boolean(llm?.reused_output),
+      outputPath: checkpoint.path,
+      findings: [{ code: "semantic_global_reconciliation_failed", message }],
+      metadata: { unit_role: "global_reconciliation" },
+    });
+    const wrapped = error instanceof Error ? error : new Error(message);
+    wrapped.semantic_failure_result = {
+      chunk_id: chunkId,
+      input_hash: inputHash,
+      checkpoint_path: checkpoint.path,
+      checkpoint_sha256: checkpoint.sha256,
+      error: message,
+    };
+    throw wrapped;
   }
-  const preview = lastFindings.slice(0, 10).map((finding) => `${finding.fact_id}:${finding.code}`).join(", ");
-  throw new Error(`Semantic reconciliation failed evidence or scene-coverage validation: ${preview}`);
+}
+
+function semanticRecoveryCommand(unitIds) {
+  const proofFlags = proofBaselineTimingPath
+    ? ` --proof-baseline-word-timing ${proofBaselineTimingPath} --scope-start-sec ${scopeStartSec} --scope-end-sec ${scopeEndSec}`
+    : "";
+  return `node bin/goldflow.mjs semantic plan --channel ${channel} --series ${series} --week ${week} --episode ${episode}`
+    + ` --concurrency ${Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 8)))}`
+    + " --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1"
+    + ` --semantic-chunk-ids ${unitIds.join(",")}${proofFlags}`;
 }
 
 async function main() {
@@ -1452,114 +1607,244 @@ async function main() {
   let semanticParsed = {};
   let parsedChunks = [];
   const useChunking = flags["semantic-chunking"] !== "false" && targets.words > Number(flags["semantic-single-call-max-words"] ?? 2500);
-  if (useChunking) {
-    const chunks = scriptChunks(planningScript);
-    const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 8)));
-    parsedChunks = await runPool(chunks, async (chunk) => {
-      const chunkTargets = chunkSceneCountTargets(chunk.text);
-      const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
-      console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: ${chunk.words} words, target ${chunkTargets.target} scenes`);
-      const chunkId = `chunk_${String(chunk.chunk_index).padStart(2, "0")}`;
-      const inputHash = sha256(chunkPrompt);
-      const maxValidationAttempts = Math.max(1, Number(flags["semantic-chunk-validation-attempts"] ?? 2));
-      let lastError = null;
-      for (let attempt = 1; attempt <= maxValidationAttempts; attempt += 1) {
-        const attemptStageName = attempt === 1 ? `${stageName}_${chunkId}` : `${stageName}_${chunkId}_repair_${attempt}`;
-        const attemptPrompt = attempt === 1
-          ? chunkPrompt
-          : `${chunkPrompt}\n\nChunk-local correction: the previous response failed deterministic validation with ${lastError?.message}. Return the complete chunk JSON again, preserve exact script evidence, and include at least ${chunkTargets.minimum} scenes.`;
-        const hasEnoughScenes = (parsed) => Array.isArray(parsed?.scenes) && parsed.scenes.length >= chunkTargets.minimum;
-        try {
-          const chunkLlm = isLocalLLMRoute(attemptStageName)
-            ? await callLocal(attemptPrompt, attemptStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
-            : await reusableCodexCall(attemptStageName, attemptPrompt, hasEnoughScenes) ?? await callCodex(attemptPrompt, attemptStageName);
-          const chunkScenes = Array.isArray(chunkLlm.parsed.scenes) ? chunkLlm.parsed.scenes : [];
-          if (chunkScenes.length < chunkTargets.minimum) {
-            throw new Error(`returned ${chunkScenes.length} scenes, minimum is ${chunkTargets.minimum} for ${chunkTargets.words} words`);
-          }
-          await recordPlannerChunkCheckpoint({
-            episodeDir,
-            plannerStage: "semantic_scene_plan",
-            chunkId,
-            inputHash,
-            status: "passed",
-            attempt,
-            reused: Boolean(chunkLlm.reused_output),
-            outputPath: chunkLlm.output_path,
-            metadata: {
-              word_start_index: chunk.word_start_index,
-              word_end_index_exclusive: chunk.word_end_index_exclusive,
-              scene_count: chunkScenes.length,
-            },
-          });
-          if (chunkLlm.reused_output) console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: reused ${chunkLlm.output_path}`);
-          console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
-          return { chunk, targets: chunkTargets, llm: chunkLlm, scenes: chunkScenes };
-        } catch (error) {
-          lastError = error instanceof Error ? error : new Error(String(error));
-          await recordPlannerChunkCheckpoint({
-            episodeDir,
-            plannerStage: "semantic_scene_plan",
-            chunkId,
-            inputHash,
-            status: "failed",
-            attempt,
-            findings: [{ code: "semantic_chunk_validation_failed", message: lastError.message }],
-            metadata: {
-              word_start_index: chunk.word_start_index,
-              word_end_index_exclusive: chunk.word_end_index_exclusive,
-            },
-          });
-        }
-      }
-      throw new Error(`Semantic chunk ${chunk.chunk_index}/${chunk.chunk_count} failed after ${maxValidationAttempts} scoped attempts: ${lastError?.message}`);
-    }, semanticConcurrency);
-    llm = {
-      provider: parsedChunks[0]?.llm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
-      model: parsedChunks[0]?.llm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel()),
-      reasoning_effort: parsedChunks[0]?.llm?.reasoning_effort ?? null,
-      codex_cli_path: parsedChunks[0]?.llm?.codex_cli_path ?? null,
-      codex_cli_version: parsedChunks[0]?.llm?.codex_cli_version ?? null,
-      chunked: true,
-      chunk_count: chunks.length,
-      concurrency: semanticConcurrency,
-      reused_chunk_count: parsedChunks.filter((item) => item.llm?.reused_output).length,
-    };
-  } else {
-    const prompt = buildPrompt(planningScript, bibles, targets);
-    llm = isLocalLLMRoute(stageName)
-      ? await callLocal(prompt, stageName)
-      : await reusableCodexCall(
-        stageName,
-        prompt,
-        (parsed) => Array.isArray(parsed?.scenes) && parsed.scenes.length >= targets.minimum,
-      ) ?? await callCodex(prompt, stageName);
-    parsedChunks = [{
-      chunk: {
-        chunk_index: 1,
-        chunk_count: 1,
-        word_start_index: 0,
-        word_end_index_exclusive: targets.words,
-        overlap_words: 0,
-      },
-      targets,
-      llm,
-      scenes: Array.isArray(llm.parsed.scenes) ? llm.parsed.scenes : [],
-    }];
+  const chunks = useChunking ? scriptChunks(planningScript) : [{
+    text: planningScript,
+    words: targets.words,
+    word_start_index: 0,
+    word_end_index_exclusive: targets.words,
+    char_start: 0,
+    char_end: planningScript.length,
+    overlap_words: 0,
+    chunk_index: 1,
+    chunk_count: 1,
+  }];
+  const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 8)));
+  const expectedChunkIds = chunks.map((chunk) => semanticChunkId(chunk.chunk_index));
+  const expectedUnitIds = [...expectedChunkIds, "global_reconciliation"];
+  const requestedUnitIds = semanticRequestedUnitIds(flags);
+  const unknownRequestedIds = requestedUnitIds.filter((id) => !expectedUnitIds.includes(id));
+  if (unknownRequestedIds.length) {
+    throw new Error(`Unknown semantic repair unit IDs: ${unknownRequestedIds.join(", ")}. Expected one of ${expectedUnitIds.join(", ")}.`);
   }
-  const reconciliation = await reconcileSemanticPlan(planningScript, bibles, parsedChunks, targets, stageName);
+  const requestedSet = new Set(requestedUnitIds);
+  const chunkResults = await runPool(chunks, async (chunk) => {
+    const chunkTargets = chunkSceneCountTargets(chunk.text);
+    const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
+    const chunkId = semanticChunkId(chunk.chunk_index);
+    const inputHash = sha256(chunkPrompt);
+    console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: ${chunk.words} words, target ${chunkTargets.target} scenes`);
+    const cachedCheckpoint = await readPassedSemanticChunkCheckpoint({ episodeDir, chunkId, inputHash });
+    if (cachedCheckpoint) {
+      const chunkLlm = {
+        provider: cachedCheckpoint.artifact.provider,
+        model: cachedCheckpoint.artifact.model,
+        reasoning_effort: cachedCheckpoint.artifact.reasoning_effort,
+        output_path: cachedCheckpoint.artifact.provider_output_path,
+        parsed: cachedCheckpoint.artifact.parsed,
+        reused_output: true,
+      };
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "semantic_scene_plan",
+        chunkId,
+        inputHash,
+        expectedIds: [chunkId],
+        status: "passed",
+        attempt: 1,
+        reused: true,
+        outputPath: cachedCheckpoint.path,
+        metadata: {
+          word_start_index: chunk.word_start_index,
+          word_end_index_exclusive: chunk.word_end_index_exclusive,
+          scene_count: cachedCheckpoint.artifact.scenes.length,
+        },
+      });
+      console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: preserved checkpoint ${cachedCheckpoint.path}`);
+      return {
+        ok: true,
+        chunk_id: chunkId,
+        input_hash: inputHash,
+        chunk,
+        targets: chunkTargets,
+        llm: chunkLlm,
+        scenes: cachedCheckpoint.artifact.scenes,
+        checkpoint_path: cachedCheckpoint.path,
+        checkpoint_sha256: cachedCheckpoint.sha256,
+        reused_checkpoint: true,
+      };
+    }
+    if (requestedSet.size && !requestedSet.has(chunkId)) {
+      return {
+        ok: false,
+        chunk_id: chunkId,
+        input_hash: inputHash,
+        chunk,
+        targets: chunkTargets,
+        scenes: [],
+        error: "Passed semantic checkpoint is missing; exact recovery must include this chunk ID.",
+      };
+    }
+    let chunkLlm = null;
+    try {
+      const attemptStageName = requestedSet.has(chunkId)
+        ? `${stageName}_${chunkId}_exact_repair`
+        : `${stageName}_${chunkId}`;
+      const structurallyUsable = (parsed) => Array.isArray(parsed?.scenes) && parsed.scenes.length > 0;
+      chunkLlm = isLocalLLMRoute(attemptStageName)
+        ? await callLocal(chunkPrompt, attemptStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
+        : await reusableCodexCall(attemptStageName, chunkPrompt, structurallyUsable) ?? await callCodex(chunkPrompt, attemptStageName);
+      const chunkScenes = Array.isArray(chunkLlm?.parsed?.scenes) ? chunkLlm.parsed.scenes : [];
+      if (!chunkScenes.length) throw new Error("returned no semantic scenes");
+      const checkpoint = await writeSemanticChunkCheckpoint({
+        episodeDir,
+        chunkId,
+        inputHash,
+        chunk,
+        targets: chunkTargets,
+        llm: chunkLlm,
+        status: "passed",
+      });
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "semantic_scene_plan",
+        chunkId,
+        inputHash,
+        expectedIds: [chunkId],
+        status: "passed",
+        attempt: 1,
+        reused: Boolean(chunkLlm.reused_output),
+        outputPath: checkpoint.path,
+        metadata: {
+          word_start_index: chunk.word_start_index,
+          word_end_index_exclusive: chunk.word_end_index_exclusive,
+          scene_count: chunkScenes.length,
+          scene_count_findings: semanticSceneCountFindings(chunkScenes.length, chunkTargets),
+        },
+      });
+      console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
+      return {
+        ok: true,
+        chunk_id: chunkId,
+        input_hash: inputHash,
+        chunk,
+        targets: chunkTargets,
+        llm: chunkLlm,
+        scenes: chunkScenes,
+        checkpoint_path: checkpoint.path,
+        checkpoint_sha256: checkpoint.sha256,
+        reused_checkpoint: false,
+      };
+    } catch (error) {
+      chunkLlm ??= error?.llm_failure_packet ?? null;
+      const message = error instanceof Error ? error.message : String(error);
+      const checkpoint = await writeSemanticChunkCheckpoint({
+        episodeDir,
+        chunkId,
+        inputHash,
+        chunk,
+        targets: chunkTargets,
+        llm: chunkLlm,
+        status: "failed",
+        failure: { code: "semantic_chunk_structural_failure", message },
+      });
+      await recordPlannerChunkCheckpoint({
+        episodeDir,
+        plannerStage: "semantic_scene_plan",
+        chunkId,
+        inputHash,
+        expectedIds: [chunkId],
+        status: "failed",
+        attempt: 1,
+        reused: Boolean(chunkLlm?.reused_output),
+        outputPath: checkpoint.path,
+        findings: [{ code: "semantic_chunk_structural_failure", message }],
+        metadata: {
+          word_start_index: chunk.word_start_index,
+          word_end_index_exclusive: chunk.word_end_index_exclusive,
+        },
+      });
+      return {
+        ok: false,
+        chunk_id: chunkId,
+        input_hash: inputHash,
+        chunk,
+        targets: chunkTargets,
+        scenes: [],
+        checkpoint_path: checkpoint.path,
+        checkpoint_sha256: checkpoint.sha256,
+        error: message,
+      };
+    }
+  }, semanticConcurrency);
+  const failedChunkResults = chunkResults.filter((result) => !result.ok);
+  const passedChunkResults = chunkResults.filter((result) => result.ok);
+  if (failedChunkResults.length) {
+    const failedIds = failedChunkResults.map((result) => result.chunk_id);
+    await writeJson(outputPath, semanticPartialFailureArtifact({
+      identity: { channel, series_slug: series, week, episode },
+      sourceScriptHash: scriptHash,
+      sourceScriptPath: scriptPath,
+      expectedUnitIds,
+      passedResults: passedChunkResults,
+      failedResults: failedChunkResults,
+      sceneCountPolicy: targets,
+      requestedUnitIds,
+      recoveryCommand: semanticRecoveryCommand(failedIds),
+    }));
+    const error = new Error(`Semantic chunk batch stopped with exact failed scope: ${failedIds.join(", ")}`);
+    error.goldflow_artifact_preserved = true;
+    throw error;
+  }
+  parsedChunks = passedChunkResults.map((result) => ({
+    chunk: result.chunk,
+    targets: result.targets,
+    llm: result.llm,
+    scenes: result.scenes,
+  }));
+  llm = {
+    provider: parsedChunks[0]?.llm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "identity_locked_llm"),
+    model: parsedChunks[0]?.llm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel()),
+    reasoning_effort: parsedChunks[0]?.llm?.reasoning_effort ?? null,
+    codex_cli_path: parsedChunks[0]?.llm?.codex_cli_path ?? null,
+    codex_cli_version: parsedChunks[0]?.llm?.codex_cli_version ?? null,
+    chunked: useChunking,
+    chunk_count: chunks.length,
+    concurrency: semanticConcurrency,
+    reused_chunk_count: passedChunkResults.filter((item) => item.reused_checkpoint || item.llm?.reused_output).length,
+  };
+  let reconciliation;
+  try {
+    reconciliation = await reconcileSemanticPlan(planningScript, bibles, parsedChunks, targets, stageName, {
+      exactRepair: requestedSet.has("global_reconciliation"),
+    });
+  } catch (error) {
+    const failure = error?.semantic_failure_result ?? {
+      chunk_id: "global_reconciliation",
+      input_hash: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    await writeJson(outputPath, semanticPartialFailureArtifact({
+      identity: { channel, series_slug: series, week, episode },
+      sourceScriptHash: scriptHash,
+      sourceScriptPath: scriptPath,
+      expectedUnitIds,
+      passedResults: passedChunkResults,
+      failedResults: [failure],
+      sceneCountPolicy: targets,
+      requestedUnitIds,
+      recoveryCommand: semanticRecoveryCommand(["global_reconciliation"]),
+    }));
+    const wrapped = error instanceof Error ? error : new Error(String(error));
+    wrapped.goldflow_artifact_preserved = true;
+    throw wrapped;
+  }
   semanticParsed = reconciliation.parsed;
   scenes = Array.isArray(reconciliation.parsed.scenes) ? reconciliation.parsed.scenes : [];
   if (!scenes.length) throw new Error("Semantic scene planner returned no scenes.");
-  if (scenes.length < targets.minimum) {
-    throw new Error(`Semantic scene planner under-segmented locked script: returned ${scenes.length} scenes, minimum is ${targets.minimum} for ${targets.words} words.`);
-  }
-  if (scenes.length > targets.maximum) {
-    throw new Error(`Semantic scene planner over-segmented locked script: returned ${scenes.length} scenes, maximum is ${targets.maximum} for ${targets.words} words.`);
-  }
+  const sceneCountFindings = semanticSceneCountFindings(scenes.length, targets);
   const normalizedScenes = normalizeScenes(scenes);
-  const reconciliationOutputSha256 = reconciliation.llm.output_path
-    ? sha256(await fs.readFile(reconciliation.llm.output_path))
+  const reconciliationOutputSha256 = reconciliation.checkpoint_path
+    ? sha256(await fs.readFile(reconciliation.checkpoint_path))
     : null;
   const manualSemanticRepairResult = applyManualSemanticRepairsForTests(
     normalizedScenes,
@@ -1580,12 +1865,6 @@ async function main() {
     },
   );
   const repairedScenes = manualLocationRepairResult.scenes;
-  if (repairedScenes.length < targets.minimum || repairedScenes.length > targets.maximum) {
-    throw new Error(
-      `Manual semantic repair produced ${repairedScenes.length} scenes outside `
-      + `${targets.minimum}-${targets.maximum} for ${targets.words} words.`,
-    );
-  }
   const anchorSnapReport = snapSemanticSceneAnchors(repairedScenes, planningScript);
   const anchorFindings = semanticSceneAnchorFindings(anchorSnapReport.scenes, planningScript);
   const coverageFindings = semanticSceneCoverageFindingsForTests(anchorSnapReport.scenes, planningScript);
@@ -1683,6 +1962,8 @@ async function main() {
     manual_semantic_repair: semanticRepairMetadata,
     scene_count_policy: targets,
     semantic_validation: {
+      scene_count_finding_count: sceneCountFindings.length,
+      scene_count_findings_by_code: countByCode(sceneCountFindings),
       anchor_finding_count: anchorFindings.length,
       anchor_findings_by_code: countByCode(anchorFindings),
       coverage_finding_count: coverageFindings.length,
@@ -1692,8 +1973,11 @@ async function main() {
       quality_findings_by_code: countByCode(semanticQualityFindings),
     },
     semantic_anchor_snaps: anchorSnapReport.snaps,
-    semantic_quality_findings: semanticQualityFindings,
+    semantic_quality_findings: [...sceneCountFindings, ...semanticQualityFindings],
     planner: {
+      maximum_creative_submissions_per_unit_per_invocation: 1,
+      passed_outputs_are_immutable: true,
+      exact_scope_repair_only: true,
       provider: llm.provider,
       model: llm.model ?? null,
       reasoning_effort: llm.reasoning_effort ?? null,
@@ -1711,6 +1995,9 @@ async function main() {
         model: reconciliation.llm.model ?? null,
         reasoning_effort: reconciliation.llm.reasoning_effort ?? null,
         output_path: reconciliation.llm.output_path ?? null,
+        checkpoint_path: reconciliation.checkpoint_path,
+        checkpoint_sha256: reconciliation.checkpoint_sha256,
+        reused_checkpoint: reconciliation.reused_checkpoint,
       },
     },
     ...semanticParsed,
@@ -1728,7 +2015,16 @@ async function main() {
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
   main().catch(async (error) => {
-    await writeJson(outputPath, { schema: "goldflow_semantic_scene_plan_v1", status: "failed", error: error instanceof Error ? error.message : String(error), updated_at: new Date().toISOString() }).catch(() => {});
+    const existing = await readJson(outputPath, null);
+    if (!error?.goldflow_artifact_preserved && !["passed", "blocked"].includes(String(existing?.status ?? ""))) {
+      await writeJson(outputPath, {
+        schema: "goldflow_semantic_scene_plan_v2",
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+        preserved_existing_artifact: false,
+        updated_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

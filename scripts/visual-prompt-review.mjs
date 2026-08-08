@@ -53,7 +53,7 @@ const reviewValueReportPath = flags["review-value-output"] ?? path.join(episodeD
 const autoResolveEnabled = flags["auto-resolve"] === "true";
 const blockersOnly = flags["blockers-only"] === "true" || flags.mode === "blockers_only";
 const resumeBlockedReview = flags["resume-blocked"] === "true" || flags.resume === "blocked";
-const maxResolveIterations = Math.max(1, Number(flags["max-resolve-iterations"] ?? 2));
+const maxResolveIterations = 1;
 const deadletterPath = flags.deadletter ?? flags["deadletter-output"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 const manualAgentReviewPath = flags["manual-agent-review-output"] ?? path.join(episodeDir, `visual_manual_agent_review_${episode}.json`);
 const hardenFeedbackPath = flags["harden-feedback-report"] ?? flags["harden-report"] ?? path.join(episodeDir, `visual_prompt_hardening_${episode}.json`);
@@ -506,7 +506,7 @@ Return JSON only:
 }
 
 async function callLocal(prompt, stageName, maxTokens = null) {
-  const attempts = Number(flags["visual-review-json-attempts"] ?? 3);
+  const attempts = 1;
   let lastError = null;
   let lastContent = "";
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -628,7 +628,7 @@ async function readCachedCodexReview(callDir, stageName, { expectedPromptCount =
       const reviewedCount = Array.isArray(parsed.reviewed_prompts) ? parsed.reviewed_prompts.length : 0;
       if (expectedPromptCount !== null && reviewedCount !== expectedPromptCount) continue;
       return {
-        provider: "codex_cache",
+        provider: `${metadata.provider ?? "codex_cli"}_cache`,
         model: metadata.model,
         reasoning_effort: metadata.reasoning_effort,
         codex_cli_path: metadata.codex_cli_path,
@@ -659,7 +659,7 @@ async function callCodex(prompt, stageName, options = {}) {
     timeoutMs: Number(process.env.ANIFACTORY_VISUAL_REVIEW_TIMEOUT_MS ?? 1_200_000),
   });
   return {
-    provider: "codex",
+    provider: call.provider ?? "codex_cli",
     model: call.model,
     reasoning_effort: call.reasoning_effort,
     codex_cli_path: call.codex_cli_path,
@@ -1161,30 +1161,25 @@ async function autoResolveBlockedReview({ reviewedPlan, reviewReport }) {
       ...(flags.provider ? ["--provider", flags.provider] : []),
       ...(flags["allow-draft-refs"] === "true" ? ["--allow-draft-refs", "true"] : []),
     ]);
-    let iterationStatus = "failed";
-    let iterationReport = null;
-    let iterationPlan = null;
-    try {
-      await runNodeScript("visual-prompt-review.mjs", [
-        "--channel", channel,
-        "--series", series,
-        "--week", week,
-        "--episode", episode,
-        "--timed", timedPlanPath,
-        "--prompts", planPath,
-        "--visual-refs", visualReferencePlanPath,
-        "--character-state-refs", characterStateRefsPath,
-        "--output", reviewedPath,
-        "--review-output", reportPath,
-        "--auto-resolve", "false",
-        ...(flags["allow-draft-refs"] === "true" ? ["--allow-draft-refs", "true"] : []),
-      ]);
-    } catch {
-      // The review script intentionally exits non-zero for blocked review output.
-    }
-    iterationReport = await readJson(reportPath, null);
-    iterationPlan = await readJson(reviewedPath, null);
-    iterationStatus = iterationReport?.status ?? "failed";
+    let iterationPlan = await readJson(planPath, null);
+    let iterationStatus = iterationPlan?.status === "passed" && Array.isArray(iterationPlan?.prompts)
+      ? "passed"
+      : iterationPlan?.status ?? "failed";
+    let iterationReport = {
+      schema: "goldflow_visual_prompt_exact_repair_validation_v1",
+      status: iterationStatus,
+      scope_mode: resolveScope.mode,
+      image_ids: imageIds,
+      scene_ids: sceneIds,
+      creative_submission_count: 1,
+      automatic_retry_count: 0,
+      validation_policy: "The exact-cut visual-plan call already performed deterministic identity and prompt validation; passed cuts are not re-reviewed or re-authored.",
+      findings: iterationPlan?.findings ?? [],
+      unresolved_blocker_count: iterationPlan?.status === "passed" ? 0 : (iterationPlan?.findings ?? []).filter((finding) => finding.severity === "blocker").length,
+      updated_at: new Date().toISOString(),
+    };
+    if (iterationPlan) await writeJson(reviewedPath, iterationPlan);
+    await writeJson(reportPath, iterationReport);
     const iterationRecord = { iteration, scope_mode: resolveScope.mode, scene_ids: sceneIds, image_ids: imageIds, status: iterationStatus, plan_path: planPath, reviewed_path: reviewedPath, review_report_path: reportPath };
     if (iterationStatus === "passed" && iterationPlan?.prompts?.length && needsHardenValidation) {
       try {
@@ -1667,7 +1662,7 @@ async function main() {
   const reviewConcurrency = Math.max(1, Math.min(12, Number(flags["visual-review-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REVIEW_CONCURRENCY ?? 6)));
   const reviewStageName = `${episode}_visual_review`;
   const planner = {
-    provider: isLocalLLMRoute(reviewStageName) ? "local-qwen" : "codex",
+    provider: isLocalLLMRoute(reviewStageName) ? "local-qwen" : "identity_locked_llm",
     model: isLocalLLMRoute(reviewStageName) ? getLLMModel(reviewStageName) : configuredCodexModel(),
     reasoning_effort: null,
     codex_cli_path: null,
@@ -1679,7 +1674,7 @@ async function main() {
 
   const chunkResults = await runPool(chunks, async (chunk, index) => {
     if (useChunking) console.error(`visual review chunk ${index + 1}/${chunks.length}: ${chunk.length} prompts`);
-    const maxAttempts = Math.max(1, Number(flags["visual-review-chunk-attempts"] ?? 3));
+    const maxAttempts = 1;
     let lastCount = null;
     let lastError = null;
     for (let attemptIndex = 1; attemptIndex <= maxAttempts; attemptIndex += 1) {

@@ -10,6 +10,7 @@ import {
   hashFile,
   ltxMotionPromptForSequence,
   ltxNegativePrompt,
+  ltxSingleShotIntentFindings,
   ltxVideoEnabled,
   sanitizeAnimationIntent,
 } from "./lib/ltx-video-contract.mjs";
@@ -53,25 +54,12 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function riskAndCandidateCount(intent, prompt) {
+function riskClass(intent, prompt) {
   const highRisk = ["physical_contact", "locomotion_action", "effect_or_impact"].includes(intent.shot_class);
   const denseCast = (prompt.shot_manifest?.visible_characters ?? []).length >= 3;
-  return {
-    risk: highRisk || denseCast ? "high" : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? "medium" : "low",
-    candidate_count: highRisk || denseCast ? 3 : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? 2 : 1,
-  };
-}
-
-function sequenceCompatible(left, right, currentDurationSec) {
-  if (!left?.intent?.sequence_eligible_with_next || !right) return false;
-  if (Number(right.index) !== Number(left.index) + 1) return false;
-  if (left.prompt.scene_id !== right.prompt.scene_id) return false;
-  if ((left.prompt.depiction_mode ?? null) !== (right.prompt.depiction_mode ?? null)) return false;
-  const leftLocation = left.prompt.shot_manifest?.location_id ?? left.beat?.location_id ?? null;
-  const rightLocation = right.prompt.shot_manifest?.location_id ?? right.beat?.location_id ?? null;
-  if (leftLocation !== rightLocation) return false;
-  const nextDuration = Number(right.prompt.duration_sec ?? 0);
-  return currentDurationSec + Math.max(0, nextDuration) <= 12;
+  return highRisk || denseCast
+    ? "high"
+    : ["dialogue_pair", "ui_or_screen"].includes(intent.shot_class) ? "medium" : "low";
 }
 
 async function main() {
@@ -93,56 +81,53 @@ async function main() {
   const accepted = imageQa.accepted_image_hashes ?? {};
   const eligiblePrompts = promptPlan.prompts.filter((row) => row.image_generation_required !== false);
   const candidates = [];
+  const stillFallbacks = [];
   for (const [index, prompt] of eligiblePrompts.entries()) {
     const beat = beatById.get(String(prompt.visual_beat_id ?? ""));
-    const intent = sanitizeAnimationIntent(prompt.shot_manifest?.animation_intent ?? beat?.animation_intent);
-    if (!intent) throw new Error(`Animation-enabled cut ${prompt.image_id} has no valid beat-authored animation_intent.`);
-    if (policy === "selective_ltx23" && intent.eligibility !== "animate") continue;
+    const rawIntent = prompt.shot_manifest?.animation_intent ?? beat?.animation_intent;
+    const intent = sanitizeAnimationIntent(rawIntent);
+    if (policy === "selective_ltx23" && intent?.eligibility !== "animate") {
+      stillFallbacks.push({
+        image_id: prompt.image_id,
+        visual_beat_id: prompt.visual_beat_id ?? null,
+        disposition: "accepted_still_fallback",
+        reason_codes: [intent ? "still_preferred" : "invalid_animation_intent"],
+      });
+      continue;
+    }
+    const intentFindings = ltxSingleShotIntentFindings(rawIntent);
+    if (intentFindings.length) {
+      stillFallbacks.push({
+        image_id: prompt.image_id,
+        visual_beat_id: prompt.visual_beat_id ?? null,
+        disposition: "accepted_still_fallback",
+        reason_codes: intentFindings,
+      });
+      continue;
+    }
     const image = imageById.get(String(prompt.image_id ?? ""));
     const imagePath = image?.image_path ? path.resolve(image.image_path) : null;
     const imageHash = imagePath ? await hashFile(imagePath) : null;
     if (!imagePath || !imageHash || accepted[prompt.image_id] !== imageHash) {
       throw new Error(`Animation direction requires the current accepted image hash for ${prompt.image_id}.`);
     }
-    const risk = riskAndCandidateCount(intent, prompt);
-    candidates.push({ index, prompt, beat, intent, imagePath, imageHash, risk });
+    candidates.push({ index, prompt, beat, intent, imagePath, imageHash, risk: riskClass(intent, prompt) });
   }
-  const groups = [];
-  for (let index = 0; index < candidates.length;) {
-    const group = [candidates[index]];
-    let durationSec = Math.max(0, Number(candidates[index].prompt.duration_sec ?? 0));
-    while (index + group.length < candidates.length) {
-      const left = group.at(-1);
-      const right = candidates[index + group.length];
-      if (!sequenceCompatible(left, right, durationSec)) break;
-      group.push(right);
-      durationSec += Math.max(0, Number(right.prompt.duration_sec ?? 0));
-    }
-    groups.push(group);
-    index += group.length;
-  }
-  const directions = groups.map((group, groupIndex) => {
-    const first = group[0];
-    const last = group.at(-1);
-    let offsetSec = 0;
-    const coverage = group.map((row) => {
-      const durationSec = Math.max(0.001, Number(row.prompt.duration_sec ?? 0));
-      const covered = {
-        image_id: row.prompt.image_id,
-        image_sha256: row.imageHash,
-        visual_beat_id: row.prompt.visual_beat_id ?? null,
-        timeline_duration_sec: durationSec,
-        source_offset_sec: Number(offsetSec.toFixed(3)),
-        source_end_offset_sec: Number((offsetSec + durationSec).toFixed(3)),
-        foreground_action: row.prompt.visual_beat_action ?? row.beat?.foreground_action ?? null,
-        animation_intent: row.intent,
-      };
-      offsetSec += durationSec;
-      return covered;
-    });
+  const directions = candidates.map((first, directionIndex) => {
+    const cutDurationSec = Math.max(0.001, Number(first.prompt.duration_sec ?? 0));
+    const coverage = [{
+      image_id: first.prompt.image_id,
+      image_sha256: first.imageHash,
+      visual_beat_id: first.prompt.visual_beat_id ?? null,
+      timeline_duration_sec: cutDurationSec,
+      source_offset_sec: 0,
+      source_end_offset_sec: Number(cutDurationSec.toFixed(3)),
+      foreground_action: first.prompt.visual_beat_action ?? first.beat?.foreground_action ?? null,
+      animation_intent: first.intent,
+    }];
     const preferredDuration = Math.max(
-      offsetSec,
-      ...group.map((row) => Number(row.intent.preferred_generation_duration_sec ?? 5)),
+      cutDurationSec,
+      Number(first.intent.preferred_generation_duration_sec ?? 5),
     );
     const sequenceIdentity = {
       scene_id: first.prompt.scene_id ?? null,
@@ -153,12 +138,12 @@ async function main() {
         source_end_offset_sec: row.source_end_offset_sec,
       })),
     };
-    const animationSequenceId = `ltx-seq-${String(groupIndex + 1).padStart(4, "0")}-${sha256(JSON.stringify(sequenceIdentity)).slice(0, 12)}`;
+    const animationSequenceId = `ltx-shot-${String(directionIndex + 1).padStart(4, "0")}-${sha256(JSON.stringify(sequenceIdentity)).slice(0, 12)}`;
     const prior = eligiblePrompts[first.index - 1];
-    const next = eligiblePrompts[last.index + 1];
+    const next = eligiblePrompts[first.index + 1];
     const directedPrompt = {
       ...first.prompt,
-      duration_sec: offsetSec,
+      duration_sec: cutDurationSec,
       animation_intent: first.intent,
       shot_manifest: { ...(first.prompt.shot_manifest ?? {}), animation_intent: first.intent },
     };
@@ -167,10 +152,10 @@ async function main() {
       scene_id: first.prompt.scene_id ?? null,
       visual_beat_id: first.prompt.visual_beat_id ?? null,
       animation_sequence_id: animationSequenceId,
-      sequence_mode: group.length > 1 ? "continuous_scene_sequence" : "standalone_shot",
+      sequence_mode: "standalone_shot",
       start_sec: Number(first.prompt.start_sec ?? 0),
-      cut_duration_sec: Number(first.prompt.duration_sec ?? 5),
-      sequence_timeline_duration_sec: Number(offsetSec.toFixed(3)),
+      cut_duration_sec: cutDurationSec,
+      sequence_timeline_duration_sec: Number(cutDurationSec.toFixed(3)),
       requested_generation_duration_sec: clampLtxDuration(preferredDuration),
       source_image_path: first.imagePath,
       source_image_sha256: first.imageHash,
@@ -184,21 +169,21 @@ async function main() {
         composition: first.intent.animation_ready_composition,
       },
       end_frame_contract: {
-        state: last.intent.end_state,
-        camera_state: last.intent.camera_end_state,
-        composition: last.intent.end_frame_composition,
-        continuity_bridge: last.intent.continuity_bridge,
-        next_start_image_id: next?.scene_id === last.prompt.scene_id ? next.image_id : null,
+        provider_input: false,
+        state: first.intent.end_state,
+        camera_state: first.intent.camera_end_state,
+        composition: first.intent.end_frame_composition,
+        continuity_bridge: first.intent.continuity_bridge,
+        next_start_image_id: next?.scene_id === first.prompt.scene_id ? next.image_id : null,
       },
-      risk_class: group.some((row) => row.risk.risk === "high")
-        ? "high"
-        : group.some((row) => row.risk.risk === "medium") ? "medium" : "low",
-      candidate_count: Math.max(...group.map((row) => row.risk.candidate_count)),
+      provider_image_inputs: ["init_image"],
+      risk_class: first.risk,
+      candidate_count: 1,
       scene_continuity: {
         previous_image_id: prior?.scene_id === first.prompt.scene_id ? prior.image_id : null,
         previous_action: prior?.scene_id === first.prompt.scene_id ? prior.visual_beat_action ?? null : null,
-        next_image_id: next?.scene_id === last.prompt.scene_id ? next.image_id : null,
-        next_action: next?.scene_id === last.prompt.scene_id ? next.visual_beat_action ?? null : null,
+        next_image_id: next?.scene_id === first.prompt.scene_id ? next.image_id : null,
+        next_action: next?.scene_id === first.prompt.scene_id ? next.visual_beat_action ?? null : null,
       },
       directed_prompt: directedPrompt,
       negative_prompt: ltxNegativePrompt(),
@@ -206,7 +191,6 @@ async function main() {
     direction.motion_prompt = ltxMotionPromptForSequence(direction);
     return direction;
   });
-  if (!directions.length) throw new Error("Animation policy selected no cuts.");
   const sourcePaths = [identityPath, beatPath, promptPath, imagegenPath, imageQaPath];
   const report = {
     schema: "goldflow_animation_direction_plan_v1",
@@ -221,7 +205,16 @@ async function main() {
     source_paths: sourcePaths,
     source_hashes: Object.fromEntries(await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))),
     direction_count: directions.length,
-    candidate_generation_count: directions.reduce((sum, row) => sum + row.candidate_count, 0),
+    candidate_generation_count: directions.length,
+    selection_policy: "one_accepted_init_image_to_one_reachable_single_shot_v1",
+    provider_image_inputs: ["init_image"],
+    automatic_generation_retries: 0,
+    still_fallback_count: stillFallbacks.length,
+    still_fallbacks: stillFallbacks,
+    no_suitable_motion_fallback: directions.length === 0 ? {
+      disposition: "accepted_stills_for_all_cuts",
+      reason: "No cut carried a complete reachable single-shot animation contract.",
+    } : null,
     ui_policy: "ui_and_screen_shots_are_animation_eligible; exact_generated_text_legibility_not_required",
     directions,
     updated_at: new Date().toISOString(),

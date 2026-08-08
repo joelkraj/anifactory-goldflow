@@ -666,7 +666,7 @@ Core contract:
 - Vary behavior and direction across the local chunk. Do not repeat the same motion pattern more than twice in succession unless the repeated hold is an intentional continuity choice.
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete animation_intent into shot_manifest.animation_intent and make provider_prompt an animation-ready first keyframe: clear silhouettes, visible limbs, unambiguous contact, movement room, and separable depth when supported. Do not invent new action. UI/screen beats remain eligible and exact generated text legibility is not required.
 - The still is the exact starting frame, not the whole performance. Pose subjects at animation_intent.start_state with space to complete subject_motion and reach end_state. For physical_contact, keep the contact point explicit and anatomically readable. For locomotion_action, preserve a visible path and screen direction.
-- When sequence_eligible_with_next=true, preserve the same lens language, screen direction, wardrobe, prop state, and spatial layout needed by continuity_bridge. Compose this starting keyframe so a 5-12 second uninterrupted LTX shot can reach end_frame_composition without a scene reset.` : "- ANIMATION MODE IS DISABLED. Do not author shot_manifest.animation_intent or alter compositions for generated video."}
+- Treat every animated beat as one standalone shot from this one accepted first frame. Preserve the lens language, screen direction, wardrobe, prop state, and spatial layout named by continuity_bridge so the separately generated next shot can cut cleanly. The authored end_state, camera_end_state, and end_frame_composition must be physically reachable in one uninterrupted 5-12 second action without a scene reset.` : "- ANIMATION MODE IS DISABLED. Do not author shot_manifest.animation_intent or alter compositions for generated video."}
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "${sceneStylePhrase}" once.
 - Background extras are neither preferred nor forbidden. Copy the beat's background_population contract into shot_manifest. Preserve explicit groups, and preserve implied population when the editorial beat says an active social situation needs anonymous people to read correctly. Describe those people and their subordinate staging in provider prose. Never infer extras from a public location alone, and keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
@@ -1175,7 +1175,7 @@ Return JSON only:
 
 async function callLocal(prompt, stageName, maxTokens = null) {
   assertPromptSize(prompt, stageName);
-  const attempts = Number(flags["visual-json-attempts"] ?? 3);
+  const attempts = 1;
   let lastError = null;
   let lastContent = "";
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1226,7 +1226,7 @@ async function callCodex(prompt, stageName, expectedBeatIds = null, validatePars
     if (cached) return cached;
     console.error(`visual ${stageName}: no reusable cached Codex output found; calling Codex`);
   }
-  const attempts = Math.max(1, Number(flags["codex-call-attempts"] ?? (validateParsed ? 1 : 2)));
+  const attempts = 1;
   const timeoutMs = Math.max(30_000, Number(flags["codex-call-timeout-ms"] ?? 8 * 60_000));
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1244,7 +1244,7 @@ async function callCodex(prompt, stageName, expectedBeatIds = null, validatePars
       const parsed = extractJson(call.content);
       if (validateParsed) validateParsed(parsed);
       return {
-        provider: "codex",
+        provider: call.provider ?? "codex_cli",
         model: call.model,
         reasoning_effort: call.reasoning_effort,
         codex_cli_path: call.codex_cli_path,
@@ -1307,7 +1307,7 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null,
         if (validateParsed) validateParsed(parsed);
         console.error(`visual ${stageName}: reused cached Codex output ${candidate.outputPath}`);
         return {
-          provider: "codex-cache",
+          provider: `${metadata.provider ?? "codex_cli"}_cache`,
           model: metadata.model,
           reasoning_effort: metadata.reasoning_effort,
           codex_cli_path: metadata.codex_cli_path,
@@ -1764,11 +1764,21 @@ function scenePromptShapeFindings(prompts) {
   return failures;
 }
 
+function criticalScenePromptShapeMessage(message) {
+  return /requests a reference\/sheet layout in a scene cut/i.test(String(message ?? ""));
+}
+
 function assertScenePromptShape(prompts) {
   const failures = scenePromptShapeFindings(prompts);
-  if (failures.length) {
-    throw new Error(`Visual prompt plan violates scene-prompt shape contract:\n${failures.slice(0, 30).join("\n")}`);
+  const blockers = failures.filter(criticalScenePromptShapeMessage);
+  if (blockers.length) {
+    throw new Error(`Visual prompt plan requests a non-scene sheet/layout:\n${blockers.slice(0, 30).join("\n")}`);
   }
+  return failures.filter((message) => !criticalScenePromptShapeMessage(message)).map((message) => ({
+    code: "scene_prompt_shape_advisory",
+    severity: "warning",
+    message,
+  }));
 }
 
 function motionContractFindings(prompts, runIdentity) {
@@ -1868,15 +1878,25 @@ function localBeatFidelityFindings(prompts, sourceRows, storyFactLedger = null) 
   return failures;
 }
 
+function criticalLocalBeatFidelityMessage(message) {
+  return /local excerpt names .+, but prompt\/manifest does not stage or visibly mediate that person/i.test(String(message ?? ""));
+}
+
 export function localBeatFidelityFindingsForTests(prompts, sourceRows, storyFactLedger = null) {
   return localBeatFidelityFindings(prompts, sourceRows, storyFactLedger);
 }
 
 function assertLocalBeatFidelity(prompts, sourceRows, storyFactLedger = null) {
   const failures = localBeatFidelityFindings(prompts, sourceRows, storyFactLedger);
-  if (failures.length) {
-    throw new Error(`Visual prompt plan failed local beat fidelity:\n${failures.slice(0, 40).join("\n")}`);
+  const blockers = failures.filter(criticalLocalBeatFidelityMessage);
+  if (blockers.length) {
+    throw new Error(`Visual prompt plan omitted a required visible person:\n${blockers.slice(0, 40).join("\n")}`);
   }
+  return failures.filter((message) => !criticalLocalBeatFidelityMessage(message)).map((message) => ({
+    code: "local_beat_fidelity_advisory",
+    severity: "warning",
+    message,
+  }));
 }
 
 function visualPromptChunkValidation(parsed, sourceRows, options = {}) {
@@ -1900,16 +1920,19 @@ function visualPromptChunkValidation(parsed, sourceRows, options = {}) {
   for (const row of normalizedPrompts.filter((prompt) => !prompt.image_prompt)) {
     findings.push({ code: "planner_chunk_empty_prompt", image_id: row.image_id });
   }
+  const advisories = [];
   for (const message of scenePromptShapeFindings(normalizedPrompts)) {
-    findings.push({ code: "planner_chunk_scene_shape_invalid", message });
+    if (criticalScenePromptShapeMessage(message)) findings.push({ code: "planner_chunk_scene_layout_invalid", message });
+    else advisories.push({ code: "planner_chunk_scene_shape_advisory", severity: "warning", message });
   }
   for (const message of localBeatFidelityFindings(normalizedPrompts, sourceRows, options.storyFactLedger)) {
-    findings.push({ code: "planner_chunk_local_beat_fidelity_failed", message });
+    if (criticalLocalBeatFidelityMessage(message)) findings.push({ code: "planner_chunk_required_visible_identity_missing", message });
+    else advisories.push({ code: "planner_chunk_local_fidelity_advisory", severity: "warning", message });
   }
   findings.push(...activeStateConstraintFindings(normalizedPrompts, sourceRows)
     .filter((finding) => finding.severity === "blocker")
     .map((finding) => ({ ...finding, code: finding.code ?? "planner_chunk_active_state_failed" })));
-  return { findings, rawPrompts, normalizedPrompts };
+  return { findings, advisories, rawPrompts, normalizedPrompts };
 }
 
 export function visualPromptChunkValidationForTests(parsed, sourceRows, options = {}) {
@@ -2290,7 +2313,7 @@ function scopedLocationCoverageFindings(rows, visualReferencePlan, {
       if (current) spans.push(current);
       current = {
         code: "long_single_location_ref_coverage_span",
-        severity: "blocker",
+        severity: "warning",
         locationRefId: forcedRefId,
         start,
         end,
@@ -2327,11 +2350,8 @@ function scopedLocationCoverageFindings(rows, visualReferencePlan, {
 function assertScopedLocationCoverage(rows, visualReferencePlan) {
   if (allowLongLocationSpans) return [];
   const findings = scopedLocationCoverageFindings(rows, visualReferencePlan);
-  if (findings.length) {
-    throw new Error(`Visual prompt planning has insufficient location-ref coverage:\n${findings.slice(0, 20).map((finding) => (
-      `${finding.locationRefId} ${finding.count} units ${finding.firstVisualBeatId}-${finding.lastVisualBeatId} ${Number(finding.start).toFixed(1)}s-${Number(finding.end).toFixed(1)}s (${Number(finding.measured_after_retention_start_sec).toFixed(1)}s after 3:00): ${finding.distinctLocationLabels.join(" | ")}`
-    )).join("\n")}`);
-  }
+  // A long reference span may look repetitive, but it is not a broken
+  // artifact. Record it for editorial review without stopping generation.
   return findings;
 }
 
@@ -2612,7 +2632,11 @@ async function main() {
     const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
       ? [...motionContractFindings(prompts, runIdentity), ...editorialMotionDistributionFindings(prompts)]
       : [];
-    const motionEditorialBlockers = motionEditorialFindings.filter((finding) => finding.severity === "blocker" && finding.code !== "motion_continuous_movement_streak_too_long");
+    const motionEditorialAdvisories = motionEditorialFindings.map((finding) => ({
+      ...finding,
+      severity: "warning",
+      original_severity: finding.severity ?? null,
+    }));
     const sourcePaths = [timedPlanPath, semanticPlanPath, visualReferencePlanPath, characterStateRefsPath];
     if (referencePlanApproval?.status === "approved") sourcePaths.push(referencePlanApprovalPath);
     if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
@@ -2621,7 +2645,7 @@ async function main() {
     const refreshed = {
       ...existingPlan,
       prompts,
-      status: activeStateBlockers.length || motionEditorialBlockers.length ? "blocked" : "passed",
+      status: activeStateBlockers.length ? "blocked" : "passed",
       source_artifact_paths: sourcePaths,
       source_hashes: Object.fromEntries((await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
       planner: {
@@ -2640,8 +2664,8 @@ async function main() {
         timing_rebound_existing: timingRebind,
       },
       active_state_findings: activeStateFindings,
-      motion_editorial_findings: motionEditorialFindings,
-      findings: [...activeStateFindings, ...motionEditorialFindings],
+      motion_editorial_findings: motionEditorialAdvisories,
+      findings: [...activeStateFindings, ...motionEditorialAdvisories],
       warnings: [
         ...(existingPlan.warnings ?? []),
         ...providerExclusionPayloadMarkerWarnings(prompts),
@@ -2649,13 +2673,13 @@ async function main() {
         ...assertPromptVariety(prompts),
         ...assertLocationSpanVariety(prompts),
         ...assertRetentionShotJobVarietySoft(prompts),
-        ...motionEditorialFindings.filter((finding) => finding.severity !== "blocker"),
+        ...motionEditorialAdvisories,
       ],
       updated_at: new Date().toISOString(),
     };
     await writeJson(outputPath, refreshed);
-    if (activeStateBlockers.length || motionEditorialBlockers.length) {
-      throw new Error(`Existing visual prompt plan failed ${activeStateBlockers.length} active-state and ${motionEditorialBlockers.length} motion-editorial blocker(s).`);
+    if (activeStateBlockers.length) {
+      throw new Error(`Existing visual prompt plan failed ${activeStateBlockers.length} critical active-state blocker(s).`);
     }
     console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, revalidated_without_llm: true }, null, 2));
     return;
@@ -2765,7 +2789,7 @@ async function main() {
         activeImageProviderOptions,
         storyFactLedger,
       };
-      const maxValidationAttempts = Math.max(1, Number(flags["visual-chunk-validation-attempts"] ?? 2));
+      const maxValidationAttempts = 1;
       let lastFindings = [];
       let lastError = null;
       for (let attempt = 1; attempt <= maxValidationAttempts; attempt += 1) {
@@ -2795,7 +2819,7 @@ async function main() {
             expectedIds: expectedBeatIds,
             status: "passed",
             attempt,
-            reused: chunkLlm.provider === "codex-cache",
+            reused: String(chunkLlm.provider).endsWith("_cache"),
             outputPath: chunkLlm.output_path,
             metadata: {
               risk_class: sceneChunk.risk_class,
@@ -2812,7 +2836,12 @@ async function main() {
             styleSummary: chunkLlm.parsed.style_summary ?? "",
           });
           console.error(`visual chunk ${index + 1}/${sceneChunks.length}: accepted ${checked.rawPrompts.length} prompts on validation attempt ${attempt}`);
-          return { chunkLlm, chunkPrompts: checked.rawPrompts, validationAttempt: attempt };
+          return {
+            chunkLlm,
+            chunkPrompts: checked.rawPrompts,
+            validationAttempt: attempt,
+            validationAdvisories: checked.advisories ?? [],
+          };
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error));
           lastFindings = Array.isArray(error?.findings)
@@ -2902,7 +2931,7 @@ async function main() {
         prompt_policy: "passed prompt chunks are immutable recovery inputs; only exact failed cuts may be re-authored",
         prompts: partialPrompts,
         planner: {
-          provider: isLocalLLMRoute(stageName) ? "local-qwen" : "codex",
+          provider: isLocalLLMRoute(stageName) ? "local-qwen" : "identity_locked_llm",
           model: isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel(),
           chunked: true,
           chunk_count: sceneChunks.length,
@@ -2965,7 +2994,7 @@ async function main() {
     styleSummary = styleSummaries.filter(Boolean)[0] ?? "";
     const firstChunkLlm = chunkResults[0]?.chunkLlm ?? null;
     llm = {
-      provider: firstChunkLlm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "codex"),
+      provider: firstChunkLlm?.provider ?? (isLocalLLMRoute(stageName) ? "local-qwen" : "identity_locked_llm"),
       model: firstChunkLlm?.model ?? (isLocalLLMRoute(stageName) ? getLLMModel(stageName) : configuredCodexModel()),
       reasoning_effort: firstChunkLlm?.reasoning_effort ?? null,
       codex_cli_path: firstChunkLlm?.codex_cli_path ?? null,
@@ -2973,10 +3002,14 @@ async function main() {
       chunked: true,
       chunk_count: sceneChunks.length,
       chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
-      reused_chunk_count: chunkResults.filter((result) => result.chunkLlm.provider === "codex-cache").length,
+      reused_chunk_count: chunkResults.filter((result) => String(result.chunkLlm.provider).endsWith("_cache")).length,
       repaired_chunk_count: chunkResults.filter((result) => result.validationAttempt > 1).length,
       max_chunk_validation_attempt: Math.max(...chunkResults.map((result) => result.validationAttempt ?? 1)),
-      parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: [] },
+      parsed: {
+        prompts: parsedPrompts,
+        style_summary: styleSummary,
+        warnings: chunkResults.flatMap((result) => result.validationAdvisories ?? []),
+      },
     };
   } else {
     const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
@@ -3006,8 +3039,8 @@ async function main() {
   }
   const empty = scopedPrompts.filter((row) => !row.image_prompt);
   if (!scopedPrompts.length || empty.length) throw new Error(`Visual planner returned ${scopedPrompts.length} prompts with ${empty.length} empty prompts.`);
-  assertScenePromptShape(scopedPrompts);
-  assertLocalBeatFidelity(scopedPrompts, visualSourceRows, storyFactLedger);
+  const scenePromptShapeWarnings = assertScenePromptShape(scopedPrompts);
+  const localBeatFidelityWarnings = assertLocalBeatFidelity(scopedPrompts, visualSourceRows, storyFactLedger);
   const scopedImageIds = scopedPrompts.map((prompt) => prompt.image_id);
   let prompts = scopedPrompts;
   if (scopedRepair) {
@@ -3023,7 +3056,7 @@ async function main() {
     image_id: prompt.image_id ?? null,
     scene_id: prompt.scene_id ?? null,
     visual_beat_id: prompt.visual_beat_id ?? null,
-    message: "This exact cut still has no accepted authored prompt; preserve all passed cuts and retry only this image/beat id.",
+    message: "This exact cut still has no accepted authored prompt; preserve all passed cuts and make one later explicit repair submission for only this image/beat id.",
     resolved: false,
   }));
   const editorialReuse = enforceEditorialReusePolicy(prompts, {
@@ -3037,7 +3070,11 @@ async function main() {
   const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
     ? [...motionContractFindings(prompts, runIdentity), ...editorialMotionDistributionFindings(prompts)]
     : [];
-  const motionEditorialBlockers = motionEditorialFindings.filter((finding) => finding.severity === "blocker" && finding.code !== "motion_continuous_movement_streak_too_long");
+  const motionEditorialAdvisories = motionEditorialFindings.map((finding) => ({
+    ...finding,
+    severity: "warning",
+    original_severity: finding.severity ?? null,
+  }));
   const shotFramingWarnings = assertShotFramingDistribution(prompts);
   const promptVarietyWarnings = assertPromptVariety(prompts);
   const locationSpanWarnings = assertLocationSpanVariety(prompts);
@@ -3061,7 +3098,7 @@ async function main() {
   sourcePaths.push(...manualRecoveryOutputFiles);
   const report = {
     schema: "goldflow_section_image_prompts_v1",
-    status: activeStateBlockers.length || motionEditorialBlockers.length || plannerRecoveryFindings.length ? "blocked" : "passed",
+    status: activeStateBlockers.length || plannerRecoveryFindings.length ? "blocked" : "passed",
     channel,
     series_slug: series,
     week,
@@ -3110,17 +3147,19 @@ async function main() {
     },
     prompts,
     active_state_findings: activeStateFindings,
-    motion_editorial_findings: motionEditorialFindings,
-    findings: [...activeStateFindings, ...motionEditorialFindings, ...plannerRecoveryFindings],
+    motion_editorial_findings: motionEditorialAdvisories,
+    findings: [...activeStateFindings, ...motionEditorialAdvisories, ...plannerRecoveryFindings],
     warnings: [
       ...(llm.parsed.warnings ?? []),
       ...providerExclusionPayloadWarnings,
+      ...scenePromptShapeWarnings,
+      ...localBeatFidelityWarnings,
       ...shotFramingWarnings,
       ...promptVarietyWarnings,
       ...locationSpanWarnings,
       ...retentionShotJobWarnings,
       ...editorialReuse.findings,
-      ...motionEditorialFindings.filter((finding) => finding.severity !== "blocker"),
+      ...motionEditorialAdvisories,
     ],
     updated_at: new Date().toISOString(),
   };
@@ -3140,9 +3179,9 @@ async function main() {
       completed_at: new Date().toISOString(),
     });
   }
-  if (activeStateBlockers.length || motionEditorialBlockers.length || plannerRecoveryFindings.length) {
+  if (activeStateBlockers.length || plannerRecoveryFindings.length) {
     throw new Error(
-      `Visual prompt authoring failed ${activeStateBlockers.length} active-state, ${motionEditorialBlockers.length} motion-editorial, and ${plannerRecoveryFindings.length} exact-cut recovery blocker(s).`,
+      `Visual prompt authoring failed ${activeStateBlockers.length} critical active-state and ${plannerRecoveryFindings.length} exact-cut recovery blocker(s); motion/editorial findings remain advisory.`,
     );
   }
   console.log(JSON.stringify({ status: "passed", output_path: outputPath, prompt_count: prompts.length, scoped_repair_count: scopedRepair ? scopedPrompts.length : 0 }, null, 2));

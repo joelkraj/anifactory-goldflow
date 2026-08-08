@@ -104,6 +104,7 @@ async function runCodexJson(prompt, stageName, callDir, { force = false, timeout
         parsed: extractJson(cached),
         outputPath,
         reused: true,
+        provider: `${metadata.provider ?? "codex_cli"}_cache`,
         model: metadata.model,
         reasoning_effort: metadata.reasoning_effort,
         codex_cli_path: metadata.codex_cli_path,
@@ -134,6 +135,7 @@ async function runCodexJson(prompt, stageName, callDir, { force = false, timeout
         parsed,
         outputPath,
         reused: false,
+        provider: call.provider ?? "codex_cli",
         model: call.model,
         reasoning_effort: call.reasoning_effort,
         codex_cli_path: call.codex_cli_path,
@@ -691,7 +693,7 @@ async function main() {
       scope_end_sec: scopeEndSec,
       scope_hash: scopeHash,
       source_script_hash: semantic.source_script_hash,
-      planner: { provider: "codex", output_path: ledgerCall.outputPath, reused: ledgerCall.reused },
+      planner: { provider: ledgerCall.provider, output_path: ledgerCall.outputPath, reused: ledgerCall.reused },
       updated_at: new Date().toISOString(),
     };
     await writeJson(ledgerPath, ledger);
@@ -735,7 +737,7 @@ async function main() {
     timing_source: baselinePlan.timing_source ?? "local_whisper_word_timing",
     scope_end_sec: scopeEndSec,
     scope_hash: scopeHash,
-    planner: { provider: "codex", mode: "evidence_ledger_editorial_director" },
+    planner: { provider: variantBeats.length ? "identity_locked_llm" : null, mode: "evidence_ledger_editorial_director" },
     beat_count: variantBeats.length,
     beats: variantBeats,
     updated_at: new Date().toISOString(),

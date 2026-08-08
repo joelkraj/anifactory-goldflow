@@ -10,6 +10,8 @@
 - Scene prompts must explicitly carry the factual-documentary style contract rather than anime/manhwa language.
 - The object is treated as the visual protagonist. Custody, process, value, decision, transformation, and destination beats replace fiction-specific beat jobs.
 - Generated visuals are illustrative reconstructions. Exact figures, legal text, labels, and routes belong in deterministic overlays rather than generated image text.
+- Continuous documentary score beds stay narration-forward at one fixed level. The profile bakes in the measured `-16.23 dB` under-voice attenuation and applies a further `-2 dB` operator trim, so the bed never recovers between phrases. Short score accents and SFX retain their authored gain.
+- Electronic scanner chirps require a visible, story-relevant scan action. Do not use generic UI beeps as unsynchronized retention punctuation.
 
 ## Evidence Ledger
 

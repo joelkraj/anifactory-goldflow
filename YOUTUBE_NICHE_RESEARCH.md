@@ -6,6 +6,8 @@ Last updated: August 1, 2026
 
 This document is the opportunity backlog for new Goldflow YouTube channels and production profiles. It records possible niches, why demand may exist, where competition may be weak, how well each format fits voiceover plus generated visuals, and what evidence is required before production.
 
+The canonical implementation and restart checkpoint for the current top factual lane is [ASSET_AFTERLIFE_CHANNEL_PLAYBOOK.md](ASSET_AFTERLIFE_CHANNEL_PLAYBOOK.md). The separate second-person identity-simulation lane is preserved in [IMMERSIVE_POV_CHANNEL_PLAYBOOK.md](IMMERSIVE_POV_CHANNEL_PLAYBOOK.md).
+
 An entry in this document is not automatically a validated niche. Demand and competition change quickly. Every candidate must pass the live YouTube validation gate below before receiving a channel, production profile, or three-video test.
 
 ## Current Market Signals

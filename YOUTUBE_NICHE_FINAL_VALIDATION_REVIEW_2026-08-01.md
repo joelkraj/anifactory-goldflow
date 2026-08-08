@@ -2,6 +2,8 @@
 
 Date: August 1, 2026
 
+Current implementation, proof, premise bank, and restart decisions are preserved in [ASSET_AFTERLIFE_CHANNEL_PLAYBOOK.md](ASSET_AFTERLIFE_CHANNEL_PLAYBOOK.md).
+
 ## Decision Status
 
 The supplied market report is accepted as a strong conditional decision artifact, not as completed formal validation.

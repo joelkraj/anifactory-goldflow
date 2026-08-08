@@ -12,7 +12,17 @@ const profiles = {
       editorial_concurrency: 8,
       visual_ref_chunk_concurrency: 8,
       visual_chunk_concurrency: 8,
-      chunk_validation_attempts: 2,
+      chatgpt_web_semantic_concurrency: 10,
+      chatgpt_web_editorial_concurrency: 10,
+      chatgpt_web_visual_ref_chunk_concurrency: 10,
+      chatgpt_web_deep_text_concurrency: 1,
+      chatgpt_web_reasoning_starts_per_window: 2,
+      chatgpt_web_reasoning_window_ms: 900_000,
+      // Text and GPT Image retain independent queues beneath the shared browser-host cap.
+      chatgpt_web_visual_chunk_concurrency: 10,
+      // One authored response per planner unit. A failed unit is repaired later
+      // by exact ID/chunk while every passed content-addressed unit stays frozen.
+      chunk_validation_attempts: 1,
     },
     media: {
       tts_concurrency: 1,
@@ -22,7 +32,12 @@ const profiles = {
       qwen_tts_batch_size: 4,
       reference_concurrency: 15,
       image_concurrency: 15,
+      chatgpt_web_reference_concurrency: 3,
+      chatgpt_web_image_concurrency: 3,
       focal_analysis_concurrency: 8,
+      // A value of one means one creative provider submission, not one retry.
+      // Status polling for an already-created provider job is still allowed.
+      creative_submission_attempts: 1,
     },
     audio: {
       local_whisper_timing: productionLocalWhisperContract(),
@@ -33,6 +48,7 @@ const profiles = {
       final_preset: "veryfast",
     },
     orchestration: {
+      chatgpt_web_browser_host_concurrency: 10,
       parallel_audio_semantic: true,
       visual_wavefront_prefetch: true,
       incremental_image_qa: true,
@@ -40,12 +56,17 @@ const profiles = {
       wavefront_min_cuts: 15,
       wavefront_max_wait_ms: 5000,
       planner_recovery_policy: "scoped_only",
+      passed_artifact_policy: "immutable",
+      automatic_retry_policy: "none",
+      aesthetic_finding_policy: "advisory",
+      timing_rail_policy: "advisory",
     },
     advance: {
       authorize_planner_spend: true,
       authorize_media_spend: true,
       authorize_render: true,
       agent_validated_stages: ["visual_beat_plan"],
+      max_attempts_per_stage: 1,
     },
   },
   balanced_v1: {
@@ -57,7 +78,11 @@ const profiles = {
       editorial_concurrency: 4,
       visual_ref_chunk_concurrency: 6,
       visual_chunk_concurrency: 6,
-      chunk_validation_attempts: 2,
+      chatgpt_web_semantic_concurrency: 4,
+      chatgpt_web_editorial_concurrency: 4,
+      chatgpt_web_visual_ref_chunk_concurrency: 5,
+      chatgpt_web_visual_chunk_concurrency: 5,
+      chunk_validation_attempts: 1,
     },
     media: {
       tts_concurrency: 1,
@@ -68,6 +93,7 @@ const profiles = {
       reference_concurrency: 15,
       image_concurrency: 15,
       focal_analysis_concurrency: 8,
+      creative_submission_attempts: 1,
     },
     audio: {
       local_whisper_timing: productionLocalWhisperContract(),
@@ -85,12 +111,17 @@ const profiles = {
       wavefront_min_cuts: 15,
       wavefront_max_wait_ms: 5000,
       planner_recovery_policy: "scoped_only",
+      passed_artifact_policy: "immutable",
+      automatic_retry_policy: "none",
+      aesthetic_finding_policy: "advisory",
+      timing_rail_policy: "advisory",
     },
     advance: {
       authorize_planner_spend: false,
       authorize_media_spend: false,
       authorize_render: false,
       agent_validated_stages: [],
+      max_attempts_per_stage: 1,
     },
   },
 };

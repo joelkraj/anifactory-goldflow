@@ -90,6 +90,14 @@ export async function runContentProfileTests() {
   assert.equal(statusIdentity.content_profile, documentary.id);
   assert.equal(statusIdentity.factual_evidence.sha256, "evidence-sha");
   assert.doesNotMatch(buildStageCommand("semantic_scene_plan", statusIdentity), /proof-baseline-word-timing/);
+  const audioMixCommand = buildStageCommand("longform_audio_mix", {
+    ...statusIdentity,
+    audio_target: "scored_sfx",
+  });
+  assert.match(audioMixCommand, /--score-bed-trim-db -3\.5/);
+  assert.match(audioMixCommand, /--score-bed-level-mode fixed_ducked/);
+  assert.match(audioMixCommand, /--score-bed-fixed-duck-db -16\.23/);
+  assert.doesNotMatch(audioMixCommand, /--score-narration-ducking true/);
   const renderCommand = buildStageCommand("premium_render", standaloneProofIdentity);
   assert.match(renderCommand, /--diagnostic-proof true/);
   assert.match(renderCommand, /--proof-scope-end-sec 180/);

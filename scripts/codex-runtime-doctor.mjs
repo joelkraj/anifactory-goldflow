@@ -22,10 +22,20 @@ function parseFlags(parts) {
   return parsed;
 }
 
+export function normalizedDoctorProbeResponse(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^```(?:text)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .replace(/\\([_*`])/g, "$1")
+    .trim();
+}
+
 async function main() {
   const model = flags.model ?? flags["llm-model"] ?? null;
   const reasoningEffort = flags["reasoning-effort"] ?? null;
-  const summary = await codexRuntimeSummary({ model, reasoningEffort });
+  const provider = flags["planning-provider"] ?? flags.provider ?? null;
+  const summary = await codexRuntimeSummary({ model, reasoningEffort, provider });
   if (flags.probe === "true") {
     const outputPath = path.join(os.tmpdir(), `goldflow-codex-doctor-${process.pid}.txt`);
     const result = await runCodexCli({
@@ -35,15 +45,19 @@ async function main() {
       outputPath,
       model,
       reasoningEffort,
+      provider,
       timeoutMs: Number(flags["timeout-ms"] ?? 120_000),
     });
+    const normalizedOutput = normalizedDoctorProbeResponse(result.content);
     summary.probe = {
-      status: result.content.trim() === "MODEL_OK" ? "passed" : "unexpected_output",
+      status: normalizedOutput === "MODEL_OK" ? "passed" : "unexpected_output",
       output: result.content.trim(),
+      normalized_output: normalizedOutput,
       metadata_path: `${outputPath}.meta.json`,
     };
     await fs.rm(outputPath, { force: true });
     await fs.rm(`${outputPath}.meta.json`, { force: true });
+    if (summary.probe.status !== "passed") process.exitCode = 1;
   }
   console.log(JSON.stringify(summary, null, 2));
 }

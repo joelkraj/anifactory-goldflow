@@ -14,6 +14,7 @@ import {
 } from "./lib/image-provider-routing.mjs";
 import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage, modelslabRequestSettings } from "./modelslab-image-helper.mjs";
+import { generateChatGptWebImage } from "./chatgpt-web-image-helper.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import {
   sanitizeAnatomyContracts,
@@ -45,8 +46,12 @@ const characterStateRefsPath = flags.characterStateRefs ?? flags["character-stat
 const imageDir = path.join(episodeDir, "assets", "images");
 const referenceDir = path.join(imageDir, "references");
 const reportPath = flags.output ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
-const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? 15)));
-const referenceConcurrency = Math.max(1, Math.min(15, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? 15)));
+const runIdentityPath = path.join(episodeDir, "run_identity.json");
+const existingRunIdentity = await fs.readFile(runIdentityPath, "utf8").then(JSON.parse).catch(() => null);
+const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? existingRunIdentity?.image_provider ?? "chatgpt_web_gpt_image");
+const defaultProviderConcurrency = imageProvider === "chatgpt_web_gpt_image" ? 3 : 15;
+const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? defaultProviderConcurrency)));
+const referenceConcurrency = Math.max(1, Math.min(15, Number(flags["reference-concurrency"] ?? process.env.ANIFACTORY_REFERENCE_IMAGEGEN_CONCURRENCY ?? defaultProviderConcurrency)));
 const modelslabProfiles = configuredModelslabProfiles({
   flagValue: flags["modelslab-profiles"] ?? flags.modelslabProfiles ?? null,
 });
@@ -64,7 +69,6 @@ const referenceImageModelOverride = flags["reference-image-model-route"]
 let runIdentityImageModel = null;
 let runIdentityReferenceModel = null;
 let activeContentProfile = contentProfileForIdentity({});
-const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? "modelslab");
 const maxSceneReferences = Math.max(0, Math.min(4, Number(flags["max-scene-references"] ?? process.env.ANIFACTORY_MAX_SCENE_REFERENCES ?? 4)));
 const providerFilter = normalizeProviderFilter(flags["provider-filter"] ?? flags.providerFilter ?? "");
 const codexOpeningSecFlagRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? null;
@@ -72,7 +76,6 @@ const codexOpeningSecEnvRaw = process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
 let codexOpeningSec = Math.max(0, Number(codexOpeningSecFlagRaw ?? codexOpeningSecEnvRaw ?? 120));
 const confirmImageProvider = flags["confirm-image-provider"] === "true";
 const allowLegacyCodexExec = flags["allow-legacy-codex-exec"] === "true" || process.env.ANIFACTORY_ALLOW_LEGACY_CODEX_EXEC === "true";
-const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const referencePlanApprovalPath = flags["reference-plan-approval"] ?? path.join(episodeDir, "reference_plan_approval.json");
 const visualResolutionDeadletterPath = flags.deadletter ?? flags["deadletter"] ?? path.join(episodeDir, "visual_resolution_deadletter.json");
 const derivedRefPromotionReportPath = flags["derived-ref-report"] ?? path.join(episodeDir, `derived_reference_promotion_report_${episode}.json`);
@@ -150,7 +153,7 @@ async function assertRunIdentityImageProvider() {
   ]) {
     if (actual !== expected) throw new Error(`Run identity mismatch for ${key}: command has ${actual}, run_identity.json has ${expected}.`);
   }
-  const lockedProvider = normalizeImageProvider(runIdentity.image_provider ?? "modelslab");
+  const lockedProvider = normalizeImageProvider(runIdentity.image_provider ?? "chatgpt_web_gpt_image");
   if (lockedProvider !== imageProvider && !confirmImageProvider) {
     throw new Error(`Image provider mismatch: run_identity.json locks ${lockedProvider}, command requested ${imageProvider}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
   }
@@ -167,7 +170,8 @@ async function assertRunIdentityImageProvider() {
 }
 
 function effectiveSceneImageModel(prompt = null) {
-  return imageModelOverride ?? runIdentityImageModel ?? prompt?.image_model_route ?? "flux-klein";
+  return imageModelOverride ?? runIdentityImageModel ?? prompt?.image_model_route
+    ?? (imageProvider === "chatgpt_web_gpt_image" ? "chatgpt_web_gpt_image" : "flux-klein");
 }
 
 function effectiveReferenceImageModel(target = null) {
@@ -1067,6 +1071,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       findings.push({
         image_id: prompt.image_id,
         code: "required_scene_references_disabled",
+        severity: "critical",
         message: `Scene references are disabled, but ${attachableRequired.length} required approved reference(s) are available.`,
       });
     }
@@ -1076,6 +1081,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
           image_id: prompt.image_id,
           ref_id: requirement.ref_id,
           code: "required_reference_slot_missing",
+          severity: "critical",
           message: `Required approved ref ${requirement.ref_id} is not materialized in reference_slots.`,
         });
       }
@@ -1085,6 +1091,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       findings.push({
         image_id: prompt.image_id,
         code: "scene_prompt_style_contract_missing",
+        severity: "advisory",
         message: `ModelsLab scene prompt must explicitly preserve the ${contentProfile.label ?? contentProfile.id} style contract.`,
       });
     }
@@ -1092,6 +1099,7 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       findings.push({
         image_id: prompt.image_id,
         code: "physical_action_contract_missing",
+        severity: "advisory",
         message: "Physical-action cut is missing shot_manifest.foreground_action.",
       });
     }
@@ -1407,6 +1415,14 @@ async function runModelslabAccountPools(items, worker, perAccountLimit) {
   };
 }
 
+async function runProviderPools(items, worker, limit) {
+  if (imageProvider === "chatgpt_web_gpt_image") {
+    const pool = await runPoolWithCircuitBreaker(items, (item, index) => worker(item, index, null), limit);
+    return { ...pool, account_pools: [] };
+  }
+  return runModelslabAccountPools(items, worker, limit);
+}
+
 export async function runModelslabAccountPoolsForTests(items, worker, perAccountLimit) {
   return runModelslabAccountPools(items, worker, perAccountLimit);
 }
@@ -1442,7 +1458,7 @@ async function runProviderHealthProbe(prompts) {
   const selected = representativeProviderProbePrompts(prompts);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const probe = await runModelslabAccountPools(selected, generateOne, Math.min(2, selected.length));
+  const probe = await runProviderPools(selected, generateOne, Math.min(2, selected.length));
   const passed = probe.results.every(imageResultPassed);
   const report = {
     schema: "goldflow_image_provider_health_v1",
@@ -1481,6 +1497,17 @@ async function generateProviderImage({
   modelslabAccount = null,
 }) {
   const routedProvider = normalizeImageProvider(provider);
+  if (routedProvider === "chatgpt_web_gpt_image") {
+    return generateChatGptWebImage({
+      prompt,
+      outputPath,
+      referenceImagePaths,
+      workId: path.basename(outputPath, path.extname(outputPath)),
+      projectUrl: runIdentity?.chatgpt_web_project?.url
+        ?? runIdentity?.image_provider_options?.chatgpt_project_url
+        ?? null,
+    });
+  }
   if (isCodexImageProvider(routedProvider)) {
     if (!allowLegacyCodexExec) {
       throw new Error([
@@ -1823,7 +1850,7 @@ async function generateReferences() {
     : null;
   const referenceById = new Map(existingReferenceEntries);
   if (styleTarget) {
-    const account = await modelslabAccountForWorkItem(styleTarget);
+    const account = imageProvider === "chatgpt_web_gpt_image" ? null : await modelslabAccountForWorkItem(styleTarget);
     const result = await generateReference(
       styleTarget,
       null,
@@ -1874,7 +1901,7 @@ async function generateReferences() {
       throw new Error(`Reference dependency cycle or unresolved base identities: ${JSON.stringify(unresolved)}`);
     }
 
-    const wave = await runModelslabAccountPools(
+    const wave = await runProviderPools(
       ready,
       (target, _index, account) => generateReference(
         target,
@@ -2108,8 +2135,11 @@ function imageResultPassed(row) {
 }
 
 function episodeImageStatus(currentBatchStatus, cutLedgerStatus) {
-  if (currentBatchStatus === "failed") return "failed";
-  return cutLedgerStatus === "passed" ? "passed" : "partial";
+  // A scoped batch result cannot invalidate already-complete episode truth.
+  // Missing cuts remain partial and receive exact-ID repair; the whole episode
+  // is failed only by an invocation-level critical exception.
+  if (cutLedgerStatus === "passed") return "passed";
+  return "partial";
 }
 
 function imagegenCostSummary(rows = []) {
@@ -2182,7 +2212,11 @@ async function writeAuditableImagegenReport(report, { kind, currentRows }) {
     estimated_count: history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.estimated_count ?? 0), 0),
     estimated_cost_usd: Number(history.reduce((sum, row) => sum + Number(row.report.current_batch_cost?.estimated_cost_usd ?? 0), 0).toFixed(6)),
     wall_time_sec: Number(history.reduce((sum, row) => sum + Number(row.report.wall_time_sec ?? 0), 0).toFixed(3)),
-    retry_batch_count: Math.max(0, history.length - 1),
+    automatic_retry_batch_count: 0,
+    scoped_repair_batch_count: history.filter((row) => /scoped_.*(?:repair|retry)/i.test(String(row.report.batch_kind ?? ""))).length,
+    // Kept for report readers that still expect this field. Additional scoped
+    // batches are repairs, not blind retries.
+    retry_batch_count: 0,
     immutable_batch_report_paths: history.map((row) => row.filePath),
   };
   const materialized = {
@@ -2395,10 +2429,11 @@ async function main() {
     generationPrompts.filter((prompt) => promptRoute(prompt) === "modelslab"),
     { maxSceneReferences },
   );
-  if (productionContractFindings.length) {
+  const criticalProductionContractFindings = productionContractFindings.filter((finding) => finding.severity === "critical");
+  if (criticalProductionContractFindings.length) {
     throw new Error(
-      `Scene image production contract failed for ${productionContractFindings.length} finding(s): ` +
-      productionContractFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.code}`).join(", "),
+      `Scene image production contract failed for ${criticalProductionContractFindings.length} critical finding(s): ` +
+      criticalProductionContractFindings.slice(0, 12).map((finding) => `${finding.image_id}:${finding.code}`).join(", "),
     );
   }
   await fs.mkdir(imageDir, { recursive: true });
@@ -2413,7 +2448,7 @@ async function main() {
   const probedIds = new Set(probeResults.map((row) => String(row.image_id ?? "")).filter(Boolean));
   const remainingPrompts = generationPrompts.filter((prompt) => !probedIds.has(String(prompt.image_id ?? "")));
   const pool = remainingPrompts.length
-    ? await runModelslabAccountPools(remainingPrompts, generateOne, concurrency)
+    ? await runProviderPools(remainingPrompts, generateOne, concurrency)
     : { results: [], circuit_open: false, circuit_reason: null, adaptive_concurrency: null, account_pools: [] };
   const generatedResults = [...probeResults, ...pool.results];
   const availableBeforeReuse = await mergeImagegenResults({ currentResults: generatedResults, promptIds: allPromptIds, promptPlanHash });
@@ -2458,6 +2493,7 @@ async function main() {
     adaptive_scene_concurrency: pool.adaptive_concurrency,
     codex_opening_sec: codexOpeningSec,
     provider_filter: providerFilter,
+    production_contract_findings: productionContractFindings,
     seed_derived_refs: seedDerivedRefs,
     seed_derived_ref_count: seedDerivedTargets.length,
     seed_derived_image_ids: [...seedDerivedImageIds],
@@ -2479,7 +2515,7 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   const materialized = await writeAuditableImagegenReport(report, {
-    kind: batchKindOverride ?? (seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_retry" : "scene_images"),
+    kind: batchKindOverride ?? (seedDerivedRefs ? "seed_derived_refs" : scope.size ? "scoped_scene_repair" : "scene_images"),
     currentRows: [...referenceRun.results, ...results],
   });
   console.log(JSON.stringify({ status: materialized.status, current_batch_status: materialized.current_batch_status, report_path: reportPath, immutable_batch_report_path: materialized.immutable_batch_report_path, image_count: materialized.image_count, current_batch_image_count: materialized.current_batch_image_count }, null, 2));

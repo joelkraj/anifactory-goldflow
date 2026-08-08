@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Goldflow Studio</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header><span>ANI FACTORY</span><h1>Goldflow<br><i>Worker</i></h1></header>
+    <main>
+      <section>
+        <div class="kicker">LOCAL LINK</div>
+        <label for="serverUrl">Studio URL</label>
+        <input id="serverUrl" value="http://127.0.0.1:4317">
+        <label for="pairCode">Six-digit pairing code</label>
+        <div class="pair"><input id="pairCode" inputmode="numeric" maxlength="6" placeholder="000000"><button id="pairButton">Pair</button></div>
+        <p id="pairState">Not paired</p>
+      </section>
+      <section>
+        <div class="kicker">DISPATCH</div>
+        <div class="row"><label for="enabled">Worker pool</label><input id="enabled" type="checkbox"></div>
+        <label for="concurrency">Concurrent ChatGPT tabs</label>
+        <select id="concurrency"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option></select>
+        <div class="checks"><label><input id="llmType" type="checkbox" checked> Planning</label><label><input id="imageType" type="checkbox" checked> Images</label></div>
+        <button id="saveButton" class="wide">Save and dispatch</button>
+      </section>
+      <section>
+        <div class="kicker">LIVE TABS</div>
+        <div id="activeJobs" class="jobs"><p>No active jobs.</p></div>
+      </section>
+      <section>
+        <div class="kicker">EVENT TAPE</div>
+        <div id="events" class="events"><p>Waiting for controller.</p></div>
+      </section>
+      <button id="studioButton" class="wide ghost">Open operator dashboard</button>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

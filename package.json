@@ -8,10 +8,15 @@
   },
   "scripts": {
     "check": "node scripts/check-syntax.mjs && node scripts/generate-workflow-guidance.mjs --check",
+    "studio:desktop": "node apps/goldflow-studio/desktop/main.mjs",
+    "studio:login": "node apps/goldflow-studio/desktop/login.mjs",
+    "studio:worker": "node apps/goldflow-studio/desktop/connect.mjs",
+    "test:studio": "node apps/goldflow-studio/tests/run-tests.mjs",
     "status": "git status --short",
     "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
     "test:planner": "node scripts/tests/planner-tests.mjs",
     "test:media": "node scripts/tests/media-tests.mjs",
+    "test:reference-parallax": "node scripts/tests/reference-parallax-policy-tests.mjs",
     "test:integration": "node scripts/tests/integration-tests.mjs",
     "test:fixtures": "npm run test:stage-contract && npm run test:planner && npm run test:media && npm run test:integration",
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
@@ -21,6 +26,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "playwright-core": "1.62.1",
     "sharp": "0.35.0"
   }
 }

@@ -1,6 +1,7 @@
 export function normalizeImageProvider(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
+  if (["chatgpt_web", "chatgpt_web_image", "chatgpt_web_gpt_image", "web_gpt_image"].includes(normalized)) return "chatgpt_web_gpt_image";
   if ([
     "hybrid",
     "hybrid_codex_refs_multichar",
@@ -38,6 +39,7 @@ export function normalizeImageProvider(value) {
 export function providerSlug(provider) {
   const normalized = normalizeImageProvider(provider);
   if (normalized === "codex_imagegen") return "codex-imagegen";
+  if (normalized === "chatgpt_web_gpt_image") return "chatgpt-web-gpt-image";
   if (normalized === "hybrid_codex_refs_multichar") return "hybrid";
   if (normalized === "hybrid_codex_opening_modelslab_rest") return "hybrid-opening";
   if (normalized === "hybrid_codex_refs_opening_risky_modelslab_rest") return "hybrid-codex-refs-opening-risky";

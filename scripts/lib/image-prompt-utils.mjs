@@ -12,7 +12,7 @@ function firstNonEmpty(values) {
 
 export function promptTextForImageProvider(prompt, provider) {
   const normalized = normalizeImageProviderForPrompt(provider);
-  if (normalized === "codex_imagegen") {
+  if (normalized === "codex_imagegen" || normalized === "chatgpt_web_gpt_image") {
     return firstNonEmpty([
       prompt?.codex_image_prompt,
       prompt?.provider_prompt,

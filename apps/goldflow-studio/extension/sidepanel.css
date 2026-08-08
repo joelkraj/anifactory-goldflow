@@ -1,0 +1,26 @@
+:root { --paper:#f1eadb; --ink:#172222; --teal:#0b6d6b; --rust:#d94f2b; --signal:#f5b83d; --line:rgba(23,34,34,.2); }
+* { box-sizing: border-box; }
+body { margin:0; color:var(--ink); background:linear-gradient(rgba(23,34,34,.045) 1px,transparent 1px),var(--paper); background-size:28px 28px; font-family:"Avenir Next","Gill Sans",sans-serif; }
+header { position:relative; padding:30px 18px 20px; background:var(--ink); color:white; }
+header::before { content:""; position:absolute; inset:0 0 auto; height:7px; background:repeating-linear-gradient(135deg,var(--signal) 0 12px,var(--ink) 12px 24px); }
+header span,.kicker { color:var(--rust); font-size:10px; font-weight:800; letter-spacing:.17em; }
+h1 { margin:8px 0 0; font:700 2.8rem/.75 "Iowan Old Style",Georgia,serif; letter-spacing:-.05em; }
+h1 i { color:var(--signal); font-weight:400; }
+main { padding:14px; }
+section { margin-bottom:12px; padding:15px; border:1px solid var(--line); background:rgba(255,252,244,.86); box-shadow:0 10px 30px rgba(23,34,34,.08); }
+label { display:block; margin:11px 0 5px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
+input,select { width:100%; padding:9px; border:1px solid var(--line); background:white; font:12px "SFMono-Regular",Consolas,monospace; }
+.pair { display:grid; grid-template-columns:1fr auto; }
+button { border:1px solid var(--ink); background:var(--ink); color:white; font-size:10px; font-weight:800; letter-spacing:.04em; cursor:pointer; }
+.wide { width:100%; padding:11px; margin-top:12px; }
+.ghost { color:var(--ink); background:transparent; }
+.row { display:flex; justify-content:space-between; align-items:center; }
+.row input { width:auto; accent-color:var(--teal); }
+.checks { display:flex; gap:15px; }
+.checks input { width:auto; accent-color:var(--teal); }
+p { color:#65716e; font-size:11px; line-height:1.4; }
+.jobs article { border-left:4px solid var(--teal); padding:7px 9px; margin-top:7px; background:rgba(11,109,107,.08); font-size:11px; }
+.jobs code { display:block; overflow:hidden; text-overflow:ellipsis; color:var(--teal); }
+.events { max-height:170px; overflow:auto; font:10px/1.45 "SFMono-Regular",Consolas,monospace; }
+.events article { padding:6px 0; border-bottom:1px solid var(--line); }
+.events .error { color:var(--rust); }

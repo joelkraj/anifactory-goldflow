@@ -19,6 +19,16 @@ import {
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "./lib/codex-cli-runner.mjs";
 import {
+  DEFAULT_PLANNING_PROVIDER,
+  DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY,
+  DEFAULT_WEB_PLANNING_EFFORT_POLICY,
+  DEFAULT_WEB_PLANNING_REASONING_EFFORT,
+  CHATGPT_WEB_PLANNING_MODEL,
+  normalizePlanningEffort,
+  normalizePlanningEffortPolicy,
+  normalizePlanningProvider,
+} from "./lib/planning-runtime-policy.mjs";
+import {
   DEFAULT_PRODUCTION_PROFILE,
   normalizeProductionProfile,
   productionProfileSummary,
@@ -58,6 +68,10 @@ import {
   validateWinnerPackageContract,
   validateWinnerSourceRelease,
 } from "./lib/winner-source-contract.mjs";
+import {
+  CHATGPT_WEB_PROJECT_CLEANUP_POLICY,
+  normalizeChatGptWebProjectUrl,
+} from "./lib/chatgpt-web-project.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -73,7 +87,7 @@ const sourcePath = flags.source ? path.resolve(flags.source) : null;
 const winnerReleasePath = flags["winner-release"] ? path.resolve(flags["winner-release"]) : null;
 const allowPartInWeek = flags["allow-part-in-week"] === "true";
 const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
-const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "modelslab");
+const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "chatgpt_web_gpt_image");
 const imageFallbackProvider = flags["image-fallback-provider"]
   ? normalizeImageProvider(flags["image-fallback-provider"])
   : null;
@@ -86,6 +100,33 @@ const productionProfile = normalizeProductionProfile(
   flags["production-profile"] ?? flags.profile ?? DEFAULT_PRODUCTION_PROFILE,
 );
 const productionProfileConfig = productionProfileSummary(productionProfile);
+const planningProvider = normalizePlanningProvider(
+  flags["planning-provider"] ?? DEFAULT_PLANNING_PROVIDER,
+);
+const explicitPlanningReasoningEffort = flags["planning-reasoning-effort"] ?? null;
+const planningEffortPolicy = normalizePlanningEffortPolicy(
+  flags["planning-effort-policy"]
+    ?? (explicitPlanningReasoningEffort != null || planningProvider !== "chatgpt_web"
+      ? DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY
+      : DEFAULT_WEB_PLANNING_EFFORT_POLICY),
+);
+const planningDefaultReasoningEffort = normalizePlanningEffort(
+  explicitPlanningReasoningEffort
+    ?? (planningProvider === "chatgpt_web"
+      ? DEFAULT_WEB_PLANNING_REASONING_EFFORT
+      : DEFAULT_CODEX_REASONING_EFFORT),
+);
+const planningModel = String(flags["planning-model"]
+  ?? (planningProvider === "chatgpt_web" ? CHATGPT_WEB_PLANNING_MODEL : DEFAULT_CODEX_MODEL)).trim();
+if (planningProvider !== "chatgpt_web" && planningEffortPolicy === DEFAULT_WEB_PLANNING_EFFORT_POLICY) {
+  throw new Error(`${DEFAULT_WEB_PLANNING_EFFORT_POLICY} requires --planning-provider chatgpt_web.`);
+}
+if (planningProvider === "chatgpt_web" && planningModel !== CHATGPT_WEB_PLANNING_MODEL) {
+  throw new Error(`Authenticated ChatGPT Web planning is locked to ${CHATGPT_WEB_PLANNING_MODEL}; received ${planningModel}.`);
+}
+if (planningProvider !== "chatgpt_web" && planningDefaultReasoningEffort === "max") {
+  throw new Error("Pro/max reasoning is available only through --planning-provider chatgpt_web.");
+}
 const contentProfileDefinitionValue = contentProfileDefinition(
   flags["content-profile"] ?? DEFAULT_CONTENT_PROFILE,
 );
@@ -100,6 +141,8 @@ const localWhisperTimingContract = structuredClone(
 const allowDirtyWorktree = flags["allow-dirty-worktree"] === "true";
 const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
+const chatGptProjectUrlRaw = flags["chatgpt-project-url"] ?? process.env.GOLDFLOW_CHATGPT_PROJECT_URL ?? null;
+const chatGptProjectUrl = normalizeChatGptWebProjectUrl(chatGptProjectUrlRaw);
 const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "diagnostic");
 const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 180);
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 195);
@@ -331,8 +374,8 @@ function lockedModelVersions() {
     : ttsProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : null;
   const fallbackLock = ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK : null;
   return {
-    planning_model: flags["planning-model"] ?? process.env.ANIFACTORY_CODEX_MODEL ?? DEFAULT_CODEX_MODEL,
-    planning_reasoning_effort: flags["planning-reasoning-effort"] ?? process.env.ANIFACTORY_CODEX_REASONING_EFFORT ?? DEFAULT_CODEX_REASONING_EFFORT,
+    planning_model: planningModel,
+    planning_reasoning_effort: planningDefaultReasoningEffort,
     tts_model: genericTts ? primaryLock.model_id : flags["tts-model"] ?? "qwen-tts",
     tts_model_revision: genericTts ? primaryLock.model_revision : null,
     tts_runtime: genericTts ? `${primaryLock.runtime}@${primaryLock.runtime_version}` : null,
@@ -342,8 +385,8 @@ function lockedModelVersions() {
       ? `${fallbackLock.runtime}@${fallbackLock.runtime_version}`
       : null,
     local_whisper_model: localWhisperTimingContract.model,
-    image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
-    reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
+    image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? (imageProvider === "chatgpt_web_gpt_image" ? "chatgpt_web_gpt_image" : "flux-klein"),
+    reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? (imageProvider === "chatgpt_web_gpt_image" ? "chatgpt_web_gpt_image" : "flux-klein"),
     render_profile: renderProfile,
   };
 }
@@ -377,6 +420,10 @@ function imageProviderOptions(provider) {
       operator_approved: true,
       approval_source: "run_preflight_flags",
     };
+  }
+  if (provider === "chatgpt_web_gpt_image" && chatGptProjectUrl) {
+    options.chatgpt_project_url = chatGptProjectUrl;
+    options.chatgpt_project_cleanup_policy = CHATGPT_WEB_PROJECT_CLEANUP_POLICY;
   }
   return options;
 }
@@ -632,6 +679,13 @@ async function main() {
     episode,
     episode_number: epNumber,
     title,
+    planning_provider: planningProvider,
+    planning_effort_policy: planningEffortPolicy,
+    chatgpt_web_project: chatGptProjectUrl ? {
+      url: chatGptProjectUrl,
+      scope: "planning_and_images",
+      cleanup_policy: CHATGPT_WEB_PROJECT_CLEANUP_POLICY,
+    } : null,
     image_provider: imageProvider,
     image_provider_options: imageProviderOptions(imageProvider),
     voice_provider_options: voiceProviderOptions(),
@@ -691,6 +745,11 @@ async function main() {
       recorded_at: now,
     } : null,
     provider_locks: {
+      planning_provider: planningProvider,
+      planning_model: planningModel,
+      planning_effort_policy: planningEffortPolicy,
+      planning_default_reasoning_effort: planningDefaultReasoningEffort,
+      chatgpt_web_project_url: chatGptProjectUrl,
       content_profile: contentProfile.id,
       content_profile_version: contentProfile.version,
       content_profile_sha256: contentProfileDefinitionValue.sha256,
@@ -786,6 +845,10 @@ async function main() {
       sequel_rule: "Part 2 implies ep_02 by default; Part 3 implies ep_03 by default.",
     },
     production_gates: {
+      planning_provider_identity_lock_required: true,
+      planning_effort_policy_identity_lock_required: true,
+      chatgpt_web_local_tools_required: false,
+      deterministic_local_validation_after_web_planning_required: planningProvider === "chatgpt_web",
       script_hash_approval_required_before_downstream: true,
       factual_evidence_required: contentProfileRequiresEvidenceLedger(contentProfile),
       whisper_timing_required_before_sfx_score_visual_beats_and_render: true,

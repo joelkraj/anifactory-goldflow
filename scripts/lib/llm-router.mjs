@@ -1,8 +1,11 @@
 // LLM Router
 // ANIFACTORY_LLM_ROUTE values:
-//   codex       - Codex/GPT-5.6 Sol through the pinned CLI runner (default)
+//   codex       - Codex/GPT-5.6 Sol through the pinned CLI runner
+//   chatgpt-web - authenticated ChatGPT Web planning through the browser job runner (default for new work)
 //   local-qwen  - local Qwen via Rapid-MLX OpenAI-compatible endpoint
 //   auto        - local-qwen for volume stages, codex for quality stages
+
+import { planningRuntimeFromProcessContext } from "./planning-runtime-policy.mjs";
 
 const VOLUME_STAGES = new Set(["visual-author", "visual-review", "enhancement", "qa"]);
 const QUALITY_STAGES = new Set(["chatbot-package", "enhancement-judge"]);
@@ -20,7 +23,13 @@ function normalizeStage(stage = "") {
 }
 
 export function getLLMRoute(stage = "") {
-  const route = String(process.env.ANIFACTORY_LLM_ROUTE ?? "codex").trim().toLowerCase() || "codex";
+  const runtime = planningRuntimeFromProcessContext();
+  if (runtime.identity) {
+    if (runtime.provider === "chatgpt_web") return "chatgpt-web";
+    if (runtime.provider === "local_qwen") return "local-qwen";
+    return "codex";
+  }
+  const route = String(process.env.ANIFACTORY_LLM_ROUTE ?? "chatgpt-web").trim().toLowerCase() || "chatgpt-web";
   if (route === "auto") {
     const normalized = normalizeStage(stage);
     if (VOLUME_STAGES.has(normalized)) return "local-qwen";

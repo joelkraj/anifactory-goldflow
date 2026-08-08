@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Goldflow Studio</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="signal-strip" aria-hidden="true"></div>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">ANI FACTORY / OPERATIONS DESK</p>
+        <h1>Goldflow<br><i>Studio</i></h1>
+      </div>
+      <div class="masthead-status">
+        <span id="liveDot" class="live-dot"></span>
+        <div><strong id="serverState">Connecting</strong><small>Local control plane</small></div>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero-grid">
+        <article class="panel dispatch-panel">
+          <div class="panel-kicker">01 / CHROME LINK</div>
+          <h2>Pair the visual crew.</h2>
+          <p>One signed-in Pro profile. Up to five isolated worker tabs. No cookie export, no third-party relay.</p>
+          <div class="pair-code" id="pairingCode">------</div>
+          <div class="contract-list">
+            <span>PLAN <b id="planLabel">Pro</b></span>
+            <span>MODEL <b id="modelLabel">GPT-5.6 Sol</b></span>
+            <span>EFFORT <b id="effortLabel">Medium</b></span>
+          </div>
+        </article>
+
+        <article class="panel queue-panel">
+          <div class="panel-kicker">02 / QUEUE PULSE</div>
+          <div class="metric-grid">
+            <div><strong id="llmQueued">0</strong><span>LLM waiting</span></div>
+            <div><strong id="llmActive">0</strong><span>LLM active</span></div>
+            <div><strong id="imagePending">0</strong><span>Images waiting</span></div>
+            <div><strong id="workerCount">0</strong><span>Workers paired</span></div>
+          </div>
+          <button id="pauseButton" class="button button-warn">Pause dispatch</button>
+        </article>
+      </section>
+
+      <section class="workbench">
+        <article class="panel run-panel">
+          <div class="panel-kicker">03 / RUN CONTROL</div>
+          <label for="episodeDir">Episode directory</label>
+          <input id="episodeDir" placeholder="/Users/joel/AniFactoryData/channels/.../episodes/ep_01">
+          <div class="button-row">
+            <button id="statusButton" class="button">Read stage ledger</button>
+            <button id="previewButton" class="button button-ghost">Preview next automatic stage</button>
+            <button id="executeButton" class="button button-warn">Run exactly one stage</button>
+          </div>
+          <pre id="runStatus" class="console">Choose an episode to inspect its guarded stage ledger.</pre>
+        </article>
+
+        <article class="panel manifest-panel">
+          <div class="panel-kicker">04 / IMAGE MANIFEST</div>
+          <div class="split-fields">
+            <div><label for="manifestMode">Work type</label><select id="manifestMode"><option value="scene">Scene cuts</option><option value="reference">References</option></select></div>
+            <div><label for="concurrency">Worker cap</label><select id="concurrency"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option></select></div>
+          </div>
+          <label for="assetIds">Exact IDs (optional, comma separated)</label>
+          <input id="assetIds" placeholder="cut_001, cut_002">
+          <button id="manifestButton" class="button">Create and activate manifest</button>
+          <p id="manifestResult" class="quiet">The existing Goldflow hash and lease contract remains authoritative.</p>
+        </article>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><div class="panel-kicker">05 / LIVE ARTIFACTS</div><h2>Nothing disappears between calls.</h2></div><button id="refreshButton" class="button button-ghost">Refresh</button></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Queue</th><th>Scope</th><th>State</th><th>Progress</th><th>Last signal</th></tr></thead><tbody id="artifactRows"><tr><td colspan="5" class="empty">Waiting for the first local heartbeat.</td></tr></tbody></table>
+        </div>
+      </section>
+
+      <section class="route-card">
+        <div><span class="panel-kicker">PLANNER ROUTE</span><h2>Existing Goldflow commands, better transport.</h2></div>
+        <pre id="routeCommand">Loading route environment...</pre>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app-config.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

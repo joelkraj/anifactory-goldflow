@@ -8,6 +8,7 @@ import {
   PUCK_TO_QWEN_RECOVERY_KIND,
   QWEN_PLANNER_FIX_RECOVERY_KIND,
   QWEN_LIAM_PROFILE_ID,
+  plannerFixProfileCompatibleForTests,
   interruptedQwenTtsInventoryForTests,
   recoveryDisposition,
   recoveryEvidence,
@@ -464,6 +465,14 @@ export async function runRelockTtsTests() {
     recoveryKindForIdentityForTests(beforePlannerFix),
     QWEN_PLANNER_FIX_RECOVERY_KIND,
   );
+  assert.equal(plannerFixProfileCompatibleForTests(beforePlannerFix), true);
+  const unlabeledCanonicalPlannerFix = structuredClone(beforePlannerFix);
+  delete unlabeledCanonicalPlannerFix.tts_profile;
+  assert.equal(plannerFixProfileCompatibleForTests(unlabeledCanonicalPlannerFix), true);
+  assert.equal(plannerFixProfileCompatibleForTests({
+    ...beforePlannerFix,
+    tts_profile: "conflicting_profile",
+  }), false);
   assert.equal(
     recoveryDisposition(QWEN_PLANNER_FIX_RECOVERY_KIND),
     "full_official_qwen_joel_voice_plan_and_narration_rebuild_after_committed_planner_fix",

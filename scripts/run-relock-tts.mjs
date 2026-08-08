@@ -171,6 +171,11 @@ export function recoveryKindForIdentityForTests(identity = {}) {
   );
 }
 
+export function plannerFixProfileCompatibleForTests(identity = {}) {
+  const profile = cleanValue(identity.tts_profile);
+  return profile == null || profile === QWEN_LIAM_PROFILE_ID;
+}
+
 function recoveryArchiveLabel(recoveryKind) {
   if (recoveryKind === PUCK_TO_QWEN_RECOVERY_KIND) return "puck-to-qwen-joel";
   if (recoveryKind === LIAM_TO_JOEL_RECOVERY_KIND) return "qwen-liam-to-joel";
@@ -780,7 +785,7 @@ async function main() {
     );
   }
   if (recoveryKind === QWEN_PLANNER_FIX_RECOVERY_KIND) {
-    if (identity.tts_profile !== QWEN_LIAM_PROFILE_ID) {
+    if (!plannerFixProfileCompatibleForTests(identity)) {
       throw new Error(
         `Qwen/Liam planner-fix relock requires the existing canonical profile ${QWEN_LIAM_PROFILE_ID}; found ${identity.tts_profile ?? "missing"}.`,
       );

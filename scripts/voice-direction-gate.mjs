@@ -5,6 +5,9 @@ import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+
+export { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import { foreignSeriesTermSpecs, protectedIpTermSpecs, resetAndTest } from "./series-foreign-lexicon.mjs";
 import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
@@ -1484,10 +1487,6 @@ export function isInlineQuotedNarrationTerm({ before = "", quotedText = "" } = {
   if (/[.!?…—]["”’\])]*$/u.test(cleanQuotedText)) return false;
   return /\b(?:write|writes|wrote|written|type|typed|enter|entered|label|labeled|mark|marked|list|listed|name|named|call|called|describe|described|record|recorded)\s*[:=-]?\s*$/i
     .test(String(before ?? "").trim());
-}
-
-export function hasTtsTerminalPunctuation(text) {
-  return /[.!?…—]["”’\])]*$/u.test(String(text ?? "").trim());
 }
 
 export function normalizeAtomicSpokenTerminal(spokenText, { sourceText = "", kind = "narration" } = {}) {

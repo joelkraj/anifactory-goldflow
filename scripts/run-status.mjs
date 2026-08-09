@@ -59,6 +59,7 @@ import {
   ltxVideoEnabled,
 } from "./lib/ltx-video-contract.mjs";
 import { semanticFailedUnitIds } from "./lib/semantic-planner-recovery.mjs";
+import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import {
   DEFAULT_WEB_PLANNING_EFFORT_POLICY,
   normalizePlanningEffort,
@@ -3032,7 +3033,7 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
           : []),
       ].map((value) => String(value ?? "").trim()).filter(Boolean))];
       return wordCount > QWEN_LIAM_UNIT_CONTRACT.hard_words_max
-        || !/[.!?…]["”’\])]*$/u.test(text)
+        || !hasTtsTerminalPunctuation(text)
         || sourceSegmentIds.length > 1;
     });
     if (groupingMismatches.length || invalidUnit) {

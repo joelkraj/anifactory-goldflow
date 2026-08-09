@@ -36,6 +36,7 @@ import {
   qwenBatchBindingByUnit,
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
+import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -854,7 +855,7 @@ export function normalizeNarrationUnitsForTests(plan, {
     if (unitWords > 60) {
       throw new Error(`Unit ${unitId} exceeds the hard 60-word Qwen request maximum`);
     }
-    if (!/[.!?…]["”’\])]*$/u.test(spokenText.trim())) {
+    if (!hasTtsTerminalPunctuation(spokenText)) {
       throw new Error(`Unit ${unitId} does not end on a complete sentence boundary`);
     }
     const expectedOrder = Number(row.order_index ?? index);

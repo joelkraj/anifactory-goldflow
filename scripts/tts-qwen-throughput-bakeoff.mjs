@@ -7,6 +7,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { QWEN_LIAM_PRIMARY_LOCK } from "./lib/narration-tts-policy.mjs";
+import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_PYTHON =
@@ -240,7 +241,7 @@ export function validateSourceRunReportForTests(sourceRun, requestedUnitIds) {
         `Unit ${unitId} is empty or exceeds the 60-word production hard maximum`,
       );
     }
-    if (!/[.!?…]["'”’)]*$/u.test(spokenText)) {
+    if (!hasTtsTerminalPunctuation(spokenText)) {
       throw new Error(`Unit ${unitId} is not sentence-complete`);
     }
     const identity = row.synthesis_identity ?? {};

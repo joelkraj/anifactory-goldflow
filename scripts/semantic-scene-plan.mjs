@@ -62,6 +62,14 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function semanticReasoningEffortForStage(stageName, stageFlags = {}) {
+  const isGlobalReconciliation = /global_reconciliation/i.test(String(stageName ?? ""));
+  const stageSpecific = isGlobalReconciliation
+    ? stageFlags["semantic-reconciliation-reasoning-effort"]
+    : stageFlags["semantic-chunk-reasoning-effort"];
+  return stageSpecific ?? stageFlags["reasoning-effort"] ?? null;
+}
+
 async function readText(filePath, fallback = "") {
   try {
     return await fs.readFile(filePath, "utf8");
@@ -1104,7 +1112,7 @@ async function callCodex(prompt, stageName) {
     repoRoot,
     outputPath,
     model: flags.model ?? flags["llm-model"] ?? null,
-    reasoningEffort: flags["reasoning-effort"] ?? null,
+    reasoningEffort: semanticReasoningEffortForStage(stageName, flags),
     timeoutMs: Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000),
   });
   let parsed;
@@ -1152,8 +1160,9 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
     const metadata = await readCodexCallMetadata(outputPath);
     if (!isCodexCacheCompatible(metadata, {
       model: flags.model ?? flags["llm-model"] ?? null,
-      reasoningEffort: flags["reasoning-effort"] ?? null,
+      reasoningEffort: semanticReasoningEffortForStage(stageName, flags),
       promptHash: sha256(prompt),
+      stageName,
     })) continue;
     const content = await fs.readFile(outputPath, "utf8");
     let parsed;

@@ -308,6 +308,7 @@ import {
   semanticSceneAnchorFindingsForTests,
   semanticSceneCoverageFindingsForTests,
   semanticSceneQualityFindingsForTests,
+  semanticReasoningEffortForStage,
   semanticScriptChunksForTests,
   semanticSnapSceneAnchorsForTests,
   semanticCodexCacheEnabledForTests,
@@ -1958,6 +1959,26 @@ function testPlannerCachesDefaultOn() {
     assert.equal(enabled({}), true);
     assert.equal(enabled({ "reuse-codex-calls": "false", "visual-ref-reuse-codex-chunks": "false", "codex-reuse-cache": "false" }), false);
   }
+}
+
+function testSemanticChunkAndReconciliationEffortRouting() {
+  const stageFlags = {
+    "reasoning-effort": "xhigh",
+    "semantic-chunk-reasoning-effort": "high",
+    "semantic-reconciliation-reasoning-effort": "max",
+  };
+  assert.equal(
+    semanticReasoningEffortForStage("ep_01_semantic_scene_plan_chunk_09_exact_repair", stageFlags),
+    "high",
+  );
+  assert.equal(
+    semanticReasoningEffortForStage("ep_01_semantic_scene_plan_global_reconciliation", stageFlags),
+    "max",
+  );
+  assert.equal(
+    semanticReasoningEffortForStage("ep_01_semantic_scene_plan_chunk_01", { "reasoning-effort": "xhigh" }),
+    "xhigh",
+  );
 }
 
 function testVisualReferencePlannerSplitsOnlyOversizedChunks() {
@@ -11999,6 +12020,7 @@ const FIXTURE_SUITES = {
     testRunStatusDerivedReferenceSeedPromoteAndScopedRetry,
   ],
   planner: [
+    testSemanticChunkAndReconciliationEffortRouting,
     testSemanticSceneAnchorValidation,
     testSemanticSceneCoverageRejectsCollapsedTail,
     testSemanticSceneQualityFindings,

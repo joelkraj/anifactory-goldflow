@@ -34,6 +34,18 @@ export function normalizeChatGptWebPlannerText(value) {
   return String(value ?? "").replace(/\\([_*`{}\[\]()#+.!>|~-])/g, "$1");
 }
 
+export function chatGptWebPlannerStartWindowOptionsForTests({ prompt, effort, timeoutMs }) {
+  const productionSizedReasoning = String(prompt ?? "").length >= 1_500
+    || effort === "high"
+    || effort === "xhigh"
+    || effort === "max";
+  return {
+    kind: "planner",
+    rateClass: productionSizedReasoning ? "reasoning" : "ordinary",
+    timeoutMs: Math.max(120_000, Number(timeoutMs) || 1_200_000),
+  };
+}
+
 async function atomicWrite(filePath, content) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
@@ -86,14 +98,10 @@ export async function runChatGptWebPlanner({
     if (effort === "xhigh" || effort === "max") {
       reasoningLease = await acquireChatGptWebWorkerLease({ kind: "deep_text", workId: id, timeoutMs });
     }
-    const productionSizedReasoning = String(prompt ?? "").length >= 1_500
-      || effort === "high"
-      || effort === "xhigh"
-      || effort === "max";
+    const startWindowOptions = chatGptWebPlannerStartWindowOptionsForTests({ prompt, effort, timeoutMs });
     startGate = await waitForChatGptWebStartWindow({
-      kind: "planner",
+      ...startWindowOptions,
       workId: id,
-      rateClass: productionSizedReasoning ? "reasoning" : "ordinary",
     });
     browserLease = await acquireChatGptWebWorkerLease({ kind: "browser", workId: id, timeoutMs });
     await assertChatGptWebCooldownClear({ operation: `planner ${id}` });

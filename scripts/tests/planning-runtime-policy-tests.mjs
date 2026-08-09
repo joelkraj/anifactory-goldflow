@@ -17,7 +17,10 @@ import {
 } from "../lib/chatgpt-web-project.mjs";
 import { isCodexCacheCompatible } from "../lib/codex-cli-runner.mjs";
 import { normalizedDoctorProbeResponse } from "../codex-runtime-doctor.mjs";
-import { normalizeChatGptWebPlannerText } from "../chatgpt-web-planner-helper.mjs";
+import {
+  chatGptWebPlannerStartWindowOptionsForTests,
+  normalizeChatGptWebPlannerText,
+} from "../chatgpt-web-planner-helper.mjs";
 import {
   escapeUnescapedJsonStringQuotes,
   parseJsonObjectFromPlannerOutput,
@@ -88,6 +91,18 @@ assert.deepEqual(
   { value: { already: 'valid "dialogue"' }, syntax_repair: null },
 );
 assert.equal(escapeUnescapedJsonStringQuotes('{"value":"plain"}').repair_count, 0);
+assert.deepEqual(
+  chatGptWebPlannerStartWindowOptionsForTests({ prompt: "short", effort: "medium", timeoutMs: 300_000 }),
+  { kind: "planner", rateClass: "ordinary", timeoutMs: 300_000 },
+);
+assert.deepEqual(
+  chatGptWebPlannerStartWindowOptionsForTests({ prompt: "x".repeat(1_500), effort: "medium", timeoutMs: 1_200_000 }),
+  { kind: "planner", rateClass: "reasoning", timeoutMs: 1_200_000 },
+);
+assert.deepEqual(
+  chatGptWebPlannerStartWindowOptionsForTests({ prompt: "short", effort: "high", timeoutMs: 60_000 }),
+  { kind: "planner", rateClass: "reasoning", timeoutMs: 120_000 },
+);
 
 assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_chunk_001", { runtime: standaloneRuntime }), "xhigh");
 assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_global_reconciliation", { runtime: standaloneRuntime }), "max");

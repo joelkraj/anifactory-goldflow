@@ -309,6 +309,7 @@ import {
   semanticSceneCoverageFindingsForTests,
   semanticSceneQualityFindingsForTests,
   semanticReasoningEffortForStage,
+  semanticReusableStageNamesForTests,
   semanticScriptChunksForTests,
   semanticSnapSceneAnchorsForTests,
   semanticCodexCacheEnabledForTests,
@@ -1978,6 +1979,17 @@ function testSemanticChunkAndReconciliationEffortRouting() {
   assert.equal(
     semanticReasoningEffortForStage("ep_01_semantic_scene_plan_chunk_01", { "reasoning-effort": "xhigh" }),
     "xhigh",
+  );
+  assert.deepEqual(
+    semanticReusableStageNamesForTests("ep_01_semantic_scene_plan_chunk_09_exact_repair"),
+    [
+      "ep_01_semantic_scene_plan_chunk_09_exact_repair",
+      "ep_01_semantic_scene_plan_chunk_09",
+    ],
+  );
+  assert.deepEqual(
+    semanticReusableStageNamesForTests("ep_01_semantic_scene_plan_chunk_09"),
+    ["ep_01_semantic_scene_plan_chunk_09"],
   );
 }
 

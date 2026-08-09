@@ -1154,8 +1154,9 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
   } catch {
     return null;
   }
-  const suffix = `-${stageName}-output.txt`;
-  const candidates = files.filter((file) => file.endsWith(suffix)).sort().reverse();
+  const reusableStageNames = semanticReusableStageNamesForTests(stageName);
+  const suffixes = reusableStageNames.map((candidateStageName) => `-${candidateStageName}-output.txt`);
+  const candidates = files.filter((file) => suffixes.some((suffix) => file.endsWith(suffix))).sort().reverse();
   for (const latest of candidates) {
     const outputPath = path.join(callDir, latest);
     const metadata = await readCodexCallMetadata(outputPath);
@@ -1187,6 +1188,13 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
     };
   }
   return null;
+}
+
+export function semanticReusableStageNamesForTests(stageName) {
+  const requested = String(stageName ?? "").trim();
+  if (!requested) return [];
+  const baseStage = requested.replace(/_exact_repair$/, "");
+  return [...new Set([requested, baseStage])];
 }
 
 function semanticCodexCacheEnabled(inputFlags = {}) {

@@ -46,6 +46,7 @@ import {
   planningProviderForIdentity,
   webPlannerEffortForStage,
 } from "./lib/planning-runtime-policy.mjs";
+import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import {
   attachReferencePathsToPromptsForTests,
   assertApprovedMaterializedReferenceHashesForTests,
@@ -1991,6 +1992,20 @@ function testSemanticChunkAndReconciliationEffortRouting() {
     semanticReusableStageNamesForTests("ep_01_semantic_scene_plan_chunk_09"),
     ["ep_01_semantic_scene_plan_chunk_09"],
   );
+}
+
+function testPlannerJsonRepairHandlesQuotedProseBeforeComma() {
+  const malformed = `{
+    "warning": "The chunk begins with "neck.", which continues the prior line.",
+    "script_excerpt_end": ""Let's take that one."",
+    "next": "ok"
+  }`;
+  const repaired = parseJsonObjectFromPlannerOutput(malformed);
+  assert.equal(repaired.value.warning, 'The chunk begins with "neck.", which continues the prior line.');
+  assert.equal(repaired.value.script_excerpt_end, '"Let\'s take that one."');
+  assert.equal(repaired.value.next, "ok");
+  assert.equal(repaired.syntax_repair?.kind, "escape_unescaped_string_quotes");
+  assert.equal(repaired.syntax_repair?.repair_count, 4);
 }
 
 function testVisualReferencePlannerSplitsOnlyOversizedChunks() {
@@ -12033,6 +12048,7 @@ const FIXTURE_SUITES = {
   ],
   planner: [
     testSemanticChunkAndReconciliationEffortRouting,
+    testPlannerJsonRepairHandlesQuotedProseBeforeComma,
     testSemanticSceneAnchorValidation,
     testSemanticSceneCoverageRejectsCollapsedTail,
     testSemanticSceneQualityFindings,

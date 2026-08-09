@@ -2,7 +2,17 @@ function quoteCanTerminateJsonString(text, quoteIndex) {
   let cursor = quoteIndex + 1;
   while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
   if (cursor >= text.length) return true;
-  return [":", ",", "}", "]"].includes(text[cursor]);
+  const next = text[cursor];
+  if (next !== ",") return [":", "}", "]"].includes(next);
+
+  // A quoted phrase inside prose can legitimately end before a comma. Treat
+  // the quote as structural only when the token after that comma can begin the
+  // next JSON value or object property.
+  cursor += 1;
+  while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+  if (cursor >= text.length) return true;
+  return ["\"", "{", "[", "}", "]"].includes(text[cursor])
+    || /[-0-9tfn]/.test(text[cursor]);
 }
 
 export function escapeUnescapedJsonStringQuotes(text) {

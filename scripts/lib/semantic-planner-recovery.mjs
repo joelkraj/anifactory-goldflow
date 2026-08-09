@@ -92,6 +92,7 @@ export async function writeSemanticChunkCheckpoint({
     provider: llm?.provider ?? null,
     model: llm?.model ?? null,
     reasoning_effort: llm?.reasoning_effort ?? null,
+    json_syntax_repair: llm?.json_syntax_repair ?? null,
     provider_output_path: llm?.output_path ?? null,
     raw_content: status === "failed" ? llm?.content ?? null : null,
     reused_cached_output: Boolean(llm?.reused_output),

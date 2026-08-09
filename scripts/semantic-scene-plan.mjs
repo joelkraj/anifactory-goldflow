@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
+import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import {
   readPassedSemanticChunkCheckpoint,
   semanticChunkId,
@@ -92,16 +93,7 @@ async function writeJson(filePath, value) {
 }
 
 function extractJson(text) {
-  const raw = String(text ?? "").trim();
-  try {
-    return JSON.parse(raw);
-  } catch {}
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced) return JSON.parse(fenced[1]);
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
-  throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
+  return parseJsonObjectFromPlannerOutput(text).value;
 }
 
 function approvedForHash(artifact, hash) {
@@ -1085,7 +1077,15 @@ async function callLocal(prompt, stageName, maxTokens = null) {
     const content = JSON.parse(raw)?.choices?.[0]?.message?.content ?? raw;
     lastContent = content;
     try {
-      return { provider: "local-qwen", model: getLLMModel(stageName), content, parsed: extractJson(content), json_attempt: attempt };
+      const extracted = parseJsonObjectFromPlannerOutput(content);
+      return {
+        provider: "local-qwen",
+        model: getLLMModel(stageName),
+        content,
+        parsed: extracted.value,
+        json_syntax_repair: extracted.syntax_repair,
+        json_attempt: attempt,
+      };
     } catch (error) {
       lastError = error;
       console.error(`semantic ${stageName}: invalid JSON attempt ${attempt}/${attempts}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1115,9 +1115,9 @@ async function callCodex(prompt, stageName) {
     reasoningEffort: semanticReasoningEffortForStage(stageName, flags),
     timeoutMs: Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000),
   });
-  let parsed;
+  let extracted;
   try {
-    parsed = extractJson(call.content);
+    extracted = parseJsonObjectFromPlannerOutput(call.content);
   } catch (error) {
     const wrapped = error instanceof Error ? error : new Error(String(error));
     wrapped.llm_failure_packet = {
@@ -1140,7 +1140,8 @@ async function callCodex(prompt, stageName) {
     codex_cli_version: call.codex_cli_version,
     output_path: outputPath,
     content: call.content,
-    parsed,
+    parsed: extracted.value,
+    json_syntax_repair: extracted.syntax_repair,
   };
 }
 
@@ -1165,13 +1166,13 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
       stageName,
     })) continue;
     const content = await fs.readFile(outputPath, "utf8");
-    let parsed;
+    let extracted;
     try {
-      parsed = extractJson(content);
+      extracted = parseJsonObjectFromPlannerOutput(content);
     } catch {
       continue;
     }
-    if (validateParsed && !validateParsed(parsed)) continue;
+    if (validateParsed && !validateParsed(extracted.value)) continue;
     return {
       provider: `${metadata.provider ?? "codex_cli"}_cache`,
       model: metadata.model,
@@ -1180,7 +1181,8 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
       codex_cli_version: metadata.codex_cli_version,
       output_path: outputPath,
       content,
-      parsed,
+      parsed: extracted.value,
+      json_syntax_repair: extracted.syntax_repair,
       reused_output: true,
     };
   }

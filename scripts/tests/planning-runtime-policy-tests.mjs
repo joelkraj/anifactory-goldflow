@@ -19,6 +19,10 @@ import { isCodexCacheCompatible } from "../lib/codex-cli-runner.mjs";
 import { normalizedDoctorProbeResponse } from "../codex-runtime-doctor.mjs";
 import { normalizeChatGptWebPlannerText } from "../chatgpt-web-planner-helper.mjs";
 import {
+  escapeUnescapedJsonStringQuotes,
+  parseJsonObjectFromPlannerOutput,
+} from "../lib/json-output-repair.mjs";
+import {
   CHATGPT_WEB_BROWSER_WORKER_LIMIT,
   CHATGPT_WEB_DEEP_TEXT_WORKER_LIMIT,
   CHATGPT_WEB_GLOBAL_START_INTERVAL_MS,
@@ -68,6 +72,22 @@ assert.deepEqual(
   { items: [1, 2], state: "case_specific" },
 );
 assert.equal(normalizeChatGptWebPlannerText('C:\\\\frames\\\\cut_001.png'), 'C:\\\\frames\\\\cut_001.png');
+const brokenDialogueJson = '{"script_excerpt_start":""Family only," the receptionist called.","script_excerpt_end":""I said out.""}';
+const repairedDialogue = parseJsonObjectFromPlannerOutput(brokenDialogueJson);
+assert.deepEqual(repairedDialogue.value, {
+  script_excerpt_start: '"Family only," the receptionist called.',
+  script_excerpt_end: '"I said out."',
+});
+assert.deepEqual(repairedDialogue.syntax_repair, {
+  schema: "goldflow_json_syntax_repair_v1",
+  kind: "escape_unescaped_string_quotes",
+  repair_count: 4,
+});
+assert.deepEqual(
+  parseJsonObjectFromPlannerOutput('{"already":"valid \\"dialogue\\""}'),
+  { value: { already: 'valid "dialogue"' }, syntax_repair: null },
+);
+assert.equal(escapeUnescapedJsonStringQuotes('{"value":"plain"}').repair_count, 0);
 
 assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_chunk_001", { runtime: standaloneRuntime }), "xhigh");
 assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_global_reconciliation", { runtime: standaloneRuntime }), "max");

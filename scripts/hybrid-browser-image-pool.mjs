@@ -359,7 +359,7 @@ export async function findSourceCompatibleHybridDeadletters({
     const loaded = await loadWorkManifest(manifestPath).catch(() => null);
     if (!loaded
       || loaded.manifest.mode !== mode
-      || loaded.manifest.provider !== HYBRID_WEB_FLOW_PROVIDER
+      || !isBrowserPoolWorkProvider(loaded.manifest.provider)
       || path.resolve(loaded.manifest.episode_dir ?? "") !== path.resolve(episodeDir)) continue;
     const itemById = new Map(loaded.manifest.items.map((item) => [String(item.asset_id), item]));
     for (const assetId of scope) {
@@ -390,6 +390,10 @@ export async function findSourceCompatibleHybridDeadletters({
 
 function orderedReferenceHashes(rows = []) {
   return rows.map((row) => ({ ref_id: row?.ref_id ?? null, sha256: row?.sha256 ?? null }));
+}
+
+function isBrowserPoolWorkProvider(value) {
+  return [HYBRID_WEB_FLOW_PROVIDER, FEDERATED_WEB_IMAGE_PROVIDER].includes(String(value ?? ""));
 }
 
 async function receiptValidHybridCompletion({ loaded, item, completion, downloadsRoot }) {
@@ -472,7 +476,7 @@ export async function findSourceCompatibleHybridCompletions({
     const loaded = await loadWorkManifest(manifestPath).catch(() => null);
     if (!loaded
       || loaded.manifest.mode !== mode
-      || loaded.manifest.provider !== HYBRID_WEB_FLOW_PROVIDER
+      || !isBrowserPoolWorkProvider(loaded.manifest.provider)
       || path.resolve(loaded.manifest.episode_dir ?? "") !== path.resolve(episodeDir)) continue;
     const itemById = new Map(loaded.manifest.items.map((item) => [String(item.asset_id), item]));
     for (const assetId of scope) {

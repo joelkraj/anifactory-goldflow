@@ -3653,7 +3653,7 @@ function buildQwenGenerationPlan(
       : QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id,
     voice_provider_options: {
       primary: ttsProvider === "qwen_local"
-        ? { ...QWEN_JOEL_PRIMARY_LOCK }
+        ? { ...QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK }
         : { voice_id: QWEN_LOCAL_FALLBACK_LOCK.reference_voice_id },
       fallback: ttsProvider === "qwen_local"
         ? null

@@ -164,6 +164,33 @@ QWEN_JOEL_REFERENCE = {
         "max_tokens": 1200,
     },
 }
+QWEN_JOEL_DRY_DEADPAN_REFERENCE = {
+    **QWEN_JOEL_REFERENCE,
+    "contract_id": "qwen_joel_dry_deadpan_primary_v1",
+    "voice_continuity_contract": (
+        "qwen_icl_clone_of_joel_owned_dry_deadpan_reference"
+    ),
+    "voice_clone_contract": (
+        "qwen_icl_clone_of_selected_joel_owned_dry_deadpan_reference"
+    ),
+    "audio_path": (
+        "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/"
+        "joel_narrator/joel_ref_03_dry_deadpan.wav"
+    ),
+    "audio_sha256": (
+        "e15a1bd90fcca701003f7ac9a0308e8f37e493a28713ad1cca6afbd09ca21c18"
+    ),
+    "text": (
+        "Renji stared at the royal disaster egg, the smoking receipt printer, "
+        "and the creature demanding tribute, then decided with professional "
+        "confidence that minimum wage did not include dragon childcare."
+    ),
+    "text_sha256": (
+        "cf6964e575a83f71a5d2aab2409818a0b435d36791b00318750e7d6ad1669a49"
+    ),
+    "source_model_revision": "joel_ref_03_dry_deadpan_v1",
+    "source_unit_id": "joel_ref_03_dry_deadpan",
+}
 QWEN_PUCK_REFERENCE = {
     "contract_id": "qwen_puck_legacy_fallback_v1",
     "voice_continuity_contract": "clone_primary_puck_identity",
@@ -208,6 +235,9 @@ QWEN_PUCK_REFERENCE = {
 }
 QWEN_REFERENCE_CONTRACTS = {
     QWEN_JOEL_REFERENCE["voice_continuity_contract"]: QWEN_JOEL_REFERENCE,
+    QWEN_JOEL_DRY_DEADPAN_REFERENCE["voice_continuity_contract"]: (
+        QWEN_JOEL_DRY_DEADPAN_REFERENCE
+    ),
     QWEN_LIAM_REFERENCE["voice_continuity_contract"]: QWEN_LIAM_REFERENCE,
     QWEN_PUCK_REFERENCE["voice_continuity_contract"]: QWEN_PUCK_REFERENCE,
 }

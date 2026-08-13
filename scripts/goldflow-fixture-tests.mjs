@@ -7753,11 +7753,11 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
   assert.equal(qwenLiamPlan.narrator_voice_id, "joel_owned_narrator_clone");
   assert.equal(
     qwenLiamPlan.provider_controls.qwen3.reference_audio_sha256,
-    QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256,
+    QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256,
   );
   assert.equal(
     qwenLiamPlan.provider_controls.qwen3.voice_continuity_contract,
-    QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract,
+    QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract,
   );
   assert.deepEqual(
     qwenLiamPlan.provider_controls.qwen3.synthesis_contract,
@@ -8069,7 +8069,7 @@ function testQwenPlanSpeaksStandaloneSystemUiWithoutBrackets() {
     && unit.provider_controls.qwen3.instruct_submitted === false
     && unit.provider_controls.qwen3.instruct === null
     && unit.provider_controls.qwen3.reference_audio_sha256
-      === QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256
+      === QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256
   )));
 }
 

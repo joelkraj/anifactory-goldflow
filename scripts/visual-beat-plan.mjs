@@ -1318,8 +1318,8 @@ function editorialAtomChunks(atoms, maxAtoms = 40) {
 
 async function callEditorialLlm(prompt, stageName, options = {}) {
   const repairProvider = /_recovery_\d+$/i.test(stageName)
-    ? flags["editorial-repair-provider"] ?? null
-    : null;
+    ? flags["editorial-repair-provider"] ?? flags["editorial-provider"] ?? null
+    : flags["editorial-provider"] ?? null;
   if (isLocalLLMRoute(stageName)) {
     const response = await fetch(localLLMChatCompletionURL(stageName), {
       method: "POST",
@@ -1589,8 +1589,14 @@ async function existingGroupingLock() {
   const plan = await readJson(outputPath, null);
   if (!approval || !plan) return null;
   const planHash = await hashFile(outputPath);
-  if (approval.status === "approved" && approval.visual_beat_plan_sha256 === planHash) return { approval, plan };
-  return null;
+  if (approval.status !== "approved" || approval.visual_beat_plan_sha256 !== planHash) return null;
+  const currentScriptHash = await hashFile(scriptPath);
+  if (!currentScriptHash || plan.source_script_hash !== currentScriptHash) return null;
+  for (const [sourcePath, recordedHash] of Object.entries(plan.source_hashes ?? {})) {
+    const currentHash = await hashFile(sourcePath);
+    if (!currentHash || currentHash !== recordedHash) return null;
+  }
+  return { approval, plan };
 }
 
 async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, options = {}) {

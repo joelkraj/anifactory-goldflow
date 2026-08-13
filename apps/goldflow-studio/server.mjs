@@ -59,6 +59,11 @@ function bearerToken(request) {
   return match?.[1] ?? null;
 }
 
+export function providerFailurePausesDispatch(code) {
+  return ["rate_limited", "usage_limited", "account_mismatch", "ui_contract_mismatch", "auth_required"]
+    .includes(String(code ?? ""));
+}
+
 function setBaseHeaders(response, origin = null) {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Referrer-Policy", "no-referrer");
@@ -433,7 +438,7 @@ export async function createStudioServer(options = {}) {
         const worker = await requireWorker(request);
         const body = await readJsonBody(request);
         const leaseWorker = leaseWorkerId(worker, body.slot, workerSlotCeiling);
-        if ((browserProvider !== "chatgpt" && ["image", "video"].includes(body.type)) || ["rate_limited", "usage_limited", "account_mismatch", "ui_contract_mismatch"].includes(body.code)) {
+        if (providerFailurePausesDispatch(body.code)) {
           runtime.paused = true;
           runtime.pause_reason = {
             code: body.code,

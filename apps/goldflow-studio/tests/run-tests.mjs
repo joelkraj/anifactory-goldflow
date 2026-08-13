@@ -47,11 +47,14 @@ import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldf
 import { chatGptEffortLabel, chatGptEffortSliderIndex, chatGptUiContractForLlmJob } from "../lib/chatgpt-ui-contract.mjs";
 import { LlmJobStore } from "../lib/llm-job-store.mjs";
 import { MediaJobStore } from "../lib/media-job-store.mjs";
-import { createStudioServer, studioServerOptionsFromFlags } from "../server.mjs";
+import { createStudioServer, providerFailurePausesDispatch, studioServerOptionsFromFlags } from "../server.mjs";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
 const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-studio-tests-"));
 const originalEnvironment = { ...process.env };
+
+assert.equal(providerFailurePausesDispatch("content_policy_rejected"), false, "one asset rejection must not pause its provider queue");
+assert.equal(providerFailurePausesDispatch("ui_contract_mismatch"), true, "a provider UI-contract break must pause dispatch");
 
 async function jsonRequest(url, { method = "GET", token = null, body = null } = {}) {
   const response = await fetch(url, {

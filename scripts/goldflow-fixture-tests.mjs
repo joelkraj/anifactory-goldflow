@@ -12,6 +12,7 @@ import sharp from "sharp";
 import {
   allowedRefIdsForScene,
   applyBeatLocationSceneIds,
+  applyCanonicalCharacterIdentitySceneIds,
   applyDeterministicLocationSceneIds,
   dropOutOfScopePromptRefs,
   locationCoverageFindings,
@@ -5090,6 +5091,27 @@ function testLocationSceneIdsDerivation() {
     { parent_scene_id: "scene_011", location_id: "loc_gate" },
   ]);
   assert.deepEqual(new Set(beatScoped.targets[0].scene_ids), new Set(["scene_012", "scene_001", "scene_011"]));
+}
+
+function testCanonicalCharacterIdentitySceneIds() {
+  const targets = [
+    { ref_id: "joey_identity_ref", kind: "character_state", scene_ids: ["scene_001"] },
+    { ref_id: "unrelated_identity_ref", kind: "character_state", scene_ids: ["scene_009"] },
+    { ref_id: "hall_ref", kind: "location", scene_ids: ["scene_001"] },
+  ];
+  const stateRefs = [
+    { state_ref_id: "joey_state", character: "Joey Vale", source_ref_id: "joey_identity_ref", scene_ids: ["scene_001"] },
+  ];
+  const beats = [
+    { scene_id: "scene_002", visible_characters: ["Joey Vale"] },
+    { parent_scene_id: "scene_003", visible_characters: ["JOEY VALE", "Someone Else"] },
+  ];
+  const result = applyCanonicalCharacterIdentitySceneIds(targets, stateRefs, beats);
+  assert.deepEqual(new Set(result.targets[0].scene_ids), new Set(["scene_001", "scene_002", "scene_003"]));
+  assert.deepEqual(result.targets[1].scene_ids, ["scene_009"]);
+  assert.deepEqual(result.targets[2].scene_ids, ["scene_001"]);
+  assert.deepEqual(result.targets.map((target) => target.ref_id), targets.map((target) => target.ref_id));
+  assert.deepEqual(result.additions[0].added_scene_ids, ["scene_002", "scene_003"]);
 }
 
 function testReferenceDirectorV2EvidenceAndLocationContracts() {
@@ -12683,6 +12705,7 @@ const FIXTURE_SUITES = {
     testFirstPersonBeatKeepsProtagonistVisible,
     testWhisperExcerptAlignmentInterpolatesUnspokenUi,
     testLocationSceneIdsDerivation,
+    testCanonicalCharacterIdentitySceneIds,
     testReferenceDirectorV2EvidenceAndLocationContracts,
     testReferenceDirectorTreatsDistinctNonhumansAsIdentities,
     testReferenceDirectorV2RejectsDeterministicExpansionAndDerivedCuts,

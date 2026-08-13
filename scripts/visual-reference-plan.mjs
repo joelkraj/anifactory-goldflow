@@ -13,6 +13,7 @@ import {
 } from "./lib/reference-selection-fidelity.mjs";
 import {
   applyBeatLocationSceneIds,
+  applyCanonicalCharacterIdentitySceneIds,
   applyDeterministicLocationSceneIds,
 } from "./lib/visual-scope-utils.mjs";
 import {
@@ -4457,6 +4458,12 @@ async function main() {
       ? { ...normalized, ...ref, state_ref_id: normalized.state_ref_id, scene_ids: normalized.scene_ids }
       : normalized;
   });
+  const canonicalCharacterScope = applyCanonicalCharacterIdentitySceneIds(
+    referenceTargets,
+    characterStateRefs,
+    visualBeatRows(visualBeatPlan),
+  );
+  referenceTargets = canonicalCharacterScope.targets;
   const sourceFaceAnchoring = await applySourceFaceAnchors({
     referenceTargets,
     characterStateRefs,
@@ -4578,6 +4585,10 @@ async function main() {
     reference_inventory_ledger_path: referenceInventoryLedgerOutputPath,
     reference_inventory_summary: referenceInventoryLedger.summary,
     reference_selection_telemetry: selectionTelemetry,
+    canonical_character_scope_overlay: {
+      policy: "Only exact canonical visible-character matches from approved editorial beats expand an already-selected base identity ref. No reference IDs are authored, removed, merged, or guessed.",
+      additions: canonicalCharacterScope.additions,
+    },
     style_reference_policy: shouldDropStyleRefs
       ? "style refs dropped for this run; use style bible/text guidance only"
       : "style refs allowed only as abstract rendering/material/lighting samples",

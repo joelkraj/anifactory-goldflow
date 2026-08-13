@@ -75,6 +75,60 @@ export function applyBeatLocationSceneIds(referenceTargets = [], visualBeats = [
   return { targets };
 }
 
+function comparableCharacterName(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+export function applyCanonicalCharacterIdentitySceneIds(referenceTargets = [], characterStateRefs = [], visualBeats = []) {
+  const canonicalNameByBaseRefId = new Map();
+  for (const stateRef of asArray(characterStateRefs)) {
+    const characterName = comparableCharacterName(stateRef?.character);
+    if (!characterName) continue;
+    const sourceRefId = normalizeRefId(stateRef?.source_ref_id);
+    const baseRefId = normalizeRefId(stateRef?.base_identity_ref_id);
+    if (baseRefId) canonicalNameByBaseRefId.set(baseRefId, characterName);
+    if (sourceRefId && !baseRefId) canonicalNameByBaseRefId.set(sourceRefId, characterName);
+  }
+
+  const visibleScenesByName = new Map();
+  for (const beat of asArray(visualBeats)) {
+    const sceneId = sceneScopeId(beat);
+    if (!sceneId) continue;
+    for (const visibleName of asArray(beat?.visible_characters)) {
+      const key = comparableCharacterName(visibleName);
+      if (!key) continue;
+      if (!visibleScenesByName.has(key)) visibleScenesByName.set(key, new Set());
+      visibleScenesByName.get(key).add(sceneId);
+    }
+  }
+
+  const additions = [];
+  const targets = asArray(referenceTargets).map((target) => {
+    if (normalizeRefKind(target?.kind) !== "character_state") return target;
+    const refId = normalizeRefId(target?.ref_id);
+    const characterName = canonicalNameByBaseRefId.get(refId);
+    if (!characterName) return target;
+    const original = asArray(target?.scene_ids).map(normalizeRefId).filter(Boolean);
+    const merged = new Set(original);
+    for (const sceneId of visibleScenesByName.get(characterName) ?? []) merged.add(sceneId);
+    const addedSceneIds = [...merged].filter((sceneId) => !original.includes(sceneId));
+    if (addedSceneIds.length) {
+      additions.push({
+        ref_id: refId,
+        character: characterName,
+        added_scene_ids: addedSceneIds,
+        reason: "exact canonical visible-character match from approved editorial beat",
+      });
+    }
+    return { ...target, scene_ids: [...merged] };
+  });
+  return { targets, additions };
+}
+
 export function isPhysicalLocationScene(scene) {
   const location = String(scene?.location ?? "").trim();
   if (!location) return false;

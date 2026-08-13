@@ -392,6 +392,10 @@ function buildIndexes(visualReferencePlan, characterStateRefs, referenceInventor
         conditioning_image_path: ref.conditioning_image_path ?? sourceTarget.conditioning_image_path ?? ref.reference_image_path ?? sourceTarget.reference_image_path ?? null,
         scene_prompt_anchor: ref.scene_prompt_anchor ?? sourceTarget.scene_prompt_anchor ?? null,
         prompt_anchor: ref.prompt_anchor ?? sourceTarget.prompt_anchor ?? null,
+        scene_ids: [...new Set([
+          ...(Array.isArray(sourceTarget.scene_ids) ? sourceTarget.scene_ids : []),
+          ...(Array.isArray(ref.scene_ids) ? ref.scene_ids : []),
+        ].map(String).filter(Boolean))],
       });
       refIdByStateId.set(stateId, stateId);
     }
@@ -455,12 +459,14 @@ function manifestNameSet(values) {
 }
 
 function characterRefNameMatches(ref, names) {
-  const labels = [
-    ref?.character,
-    ref?.subject,
-    ...(ref ? characterAliases(ref) : []),
-  ].map(normalize).filter(Boolean);
-  return labels.some((label) => names.has(label) || [...names].some((name) => label.includes(name) || name.includes(label)));
+  const explicitAliases = [
+    ...(Array.isArray(ref?.aliases) ? ref.aliases : []),
+    ...(Array.isArray(ref?.character_aliases) ? ref.character_aliases : []),
+  ];
+  const subjectLead = String(ref?.subject ?? "")
+    .split(/\s+(?:—|–|-)\s+|\s*:\s*|\s+\b(?:during|after|before|as)\b/i, 1)[0];
+  const labels = [ref?.character, subjectLead, ...explicitAliases].map(normalize).filter(Boolean);
+  return labels.some((label) => names.has(label));
 }
 
 function targetReferencePath(target) {
@@ -677,6 +683,12 @@ function deterministicVisibleCharacterTarget(availableRefs, visibleName, shotMan
     const canonicalId = indexes.refIdByStateId?.get(explicitId) ?? explicitId;
     const target = indexes.referenceById.get(canonicalId);
     if (target && availableRefs.some((candidate) => candidate.ref_id === target.ref_id)) return target;
+    const equivalent = availableRefs.find((candidate) => (
+      String(candidate.source_ref_id ?? "") === explicitId
+      || String(candidate.base_identity_ref_id ?? "") === explicitId
+      || String(candidate.ref_id ?? "") === String(target?.source_ref_id ?? "")
+    ));
+    if (equivalent) return equivalent;
   }
   const groups = new Map();
   for (const target of availableRefs) {

@@ -6705,6 +6705,11 @@ function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
     duplicateAliasPlan.prompts[0].reference_usage.find((row) => row.ref_id === "tamsin_identity_ref")?.usage,
     "available_not_attached_duplicate_resolved_reference",
   );
+  assert.deepEqual(
+    scenePromptProductionContractFindingsForTests(duplicateAliasPlan.prompts, { maxSceneReferences: 4 }),
+    [],
+    "one attached conditioning raster must satisfy every required alias that resolves to that exact asset",
+  );
 }
 
 async function testWorkManifestDeduplicatesReferenceAliasesByContentHash() {

@@ -1086,6 +1086,10 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
     const requirements = Array.isArray(prompt.reference_requirements) ? prompt.reference_requirements : [];
     const slots = Array.isArray(prompt.reference_slots) ? prompt.reference_slots : [];
     const slotIds = new Set(slots.map((slot) => String(slot?.ref_id ?? "").trim()).filter(Boolean));
+    const slotPaths = new Set(slots
+      .map((slot) => String(slot?.path ?? slot?.reference_image_path ?? "").trim())
+      .filter(Boolean)
+      .map((slotPath) => path.resolve(slotPath)));
     const attachableRequired = requirements.filter((requirement) => (
       requirement?.required === true
       && String(requirement?.reference_image_path ?? "").trim()
@@ -1099,7 +1103,9 @@ export function scenePromptProductionContractFindingsForTests(prompts, options =
       });
     }
     for (const requirement of attachableRequired) {
-      if (!slotIds.has(String(requirement.ref_id))) {
+      const requirementPath = String(requirement.reference_image_path ?? "").trim();
+      const coveredByExactAsset = requirementPath && slotPaths.has(path.resolve(requirementPath));
+      if (!slotIds.has(String(requirement.ref_id)) && !coveredByExactAsset) {
         findings.push({
           image_id: prompt.image_id,
           ref_id: requirement.ref_id,

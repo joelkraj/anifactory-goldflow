@@ -946,6 +946,16 @@ function withCharacterReferenceAliases(referenceById, characterRefs = []) {
   return resolved;
 }
 
+function uniqueReferenceRowsByResolvedPath(rows = []) {
+  const seenPaths = new Set();
+  return rows.filter((row) => {
+    const resolvedPath = path.resolve(String(row?.path ?? ""));
+    if (!resolvedPath || seenPaths.has(resolvedPath)) return false;
+    seenPaths.add(resolvedPath);
+    return true;
+  });
+}
+
 function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], referenceTargets = []) {
   const resolvedReferenceById = withCharacterReferenceAliases(referenceById, characterRefs);
   const inferVisibleSubjectRefs = !hasAuthoritativeHardenedReferenceOrder(plan);
@@ -992,10 +1002,15 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
           || a.sortKey.index - b.sortKey.index)
         : (a.sortKey.explicitOrder - b.sortKey.explicitOrder
           || a.sortKey.index - b.sortKey.index));
-    const nonStyleRows = availableRows.filter((row) => !isStyleReferenceRequirement(row.requirement));
-    const styleRows = availableRows.filter((row) => isStyleReferenceRequirement(row.requirement));
+    const nonStyleRows = uniqueReferenceRowsByResolvedPath(
+      availableRows.filter((row) => !isStyleReferenceRequirement(row.requirement)),
+    );
+    const styleRows = uniqueReferenceRowsByResolvedPath(
+      availableRows.filter((row) => isStyleReferenceRequirement(row.requirement)),
+    );
     const selected = (nonStyleRows.length ? nonStyleRows : styleRows).slice(0, maxSceneReferences);
     const selectedIds = new Set(selected.map((row) => row.requirement.ref_id));
+    const selectedPaths = new Set(selected.map((row) => path.resolve(String(row.path))));
     const referenceSlots = selected.map((row, index) => ({
       slot: index + 1,
       ref_id: row.requirement.ref_id,
@@ -1028,11 +1043,16 @@ function attachReferencePathsToPrompts(plan, referenceById, characterRefs = [], 
           };
         }
         if (!selectedIds.has(requirement.ref_id)) {
+          const duplicateResolvedAsset = selectedPaths.has(path.resolve(String(refPath)));
           return {
             ref_id: requirement.ref_id,
-            usage: "available_not_attached_reference_limit",
+            usage: duplicateResolvedAsset
+              ? "available_not_attached_duplicate_resolved_reference"
+              : "available_not_attached_reference_limit",
             reference_image_path: refPath,
-            reason: isStyleReferenceRequirement(requirement) && selected.length && !selectedIds.has(requirement.ref_id)
+            reason: duplicateResolvedAsset
+              ? "Another selected reference ID resolves to this exact conditioning asset; one attachment preserves the same visual evidence without double-weighting it."
+              : isStyleReferenceRequirement(requirement) && selected.length && !selectedIds.has(requirement.ref_id)
               ? "Style reference is only attached when no other scene references are available; concrete refs already carry style."
               : `Scene already uses the maximum ${maxSceneReferences} reference images for model stability.`,
           };

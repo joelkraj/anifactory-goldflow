@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
+import { validatePowerSystemComprehensionAudit } from "./lib/power-system-comprehension-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -11,8 +12,9 @@ const channel = flags.channel ?? "53rebirth";
 const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
-const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
+const episodeDir = path.resolve(flags["episode-dir"] ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode));
 const scriptPath = path.join(episodeDir, "script_clean.md");
+const powerAuditPath = path.resolve(flags["power-system-audit"] ?? path.join(episodeDir, "power_system_comprehension_audit.json"));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -54,6 +56,21 @@ async function main() {
     const preview = metaScan.blockers.slice(0, 5).map((row) => `${row.code} line ${row.line}: ${row.match}`).join("; ");
     throw new Error(`Refusing approval: script contains production/meta narration contamination (${preview}). Fix script_clean.md or pass --allow-script-meta-contamination true only for explicit diagnostic approval.`);
   }
+  let powerAudit;
+  try {
+    powerAudit = JSON.parse(await fs.readFile(powerAuditPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(`Refusing approval: required power-system comprehension audit is missing at ${powerAuditPath}. Run scripts/power-system-comprehension-audit.mjs before script approval.`);
+    }
+    throw new Error(`Refusing approval: power-system comprehension audit is unreadable at ${powerAuditPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const powerAuditValidation = validatePowerSystemComprehensionAudit(powerAudit, script);
+  if (powerAudit.status !== "passed" || powerAuditValidation.status !== "passed") {
+    const preview = powerAuditValidation.blockers.slice(0, 8).map((row) => `${row.code}${row.ability_id ? ` (${row.ability_id})` : ""}`).join("; ");
+    throw new Error(`Refusing approval: power-system comprehension audit is missing, stale, or blocked (${preview || `artifact status ${powerAudit.status ?? "missing"}`}).`);
+  }
+  const powerAuditHash = sha256(await fs.readFile(powerAuditPath));
   const approvedAt = new Date().toISOString();
   const base = {
     channel,
@@ -65,6 +82,8 @@ async function main() {
     script_hash: scriptHash,
     source_hash: scriptHash,
     source_script_hash: scriptHash,
+    power_system_comprehension_audit_path: powerAuditPath,
+    power_system_comprehension_audit_hash: powerAuditHash,
     approved: true,
     operator_approved: true,
     status: "approved",
@@ -90,7 +109,7 @@ async function main() {
   await writeJson(path.join(episodeDir, "manual_agent_script_review.json"), manualReview);
   await writeJson(path.join(episodeDir, "operator_script_approval.json"), operatorApproval);
   await writeJson(path.join(episodeDir, "script_lock.json"), scriptLock);
-  console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, files_written: ["script_meta_contamination_report.json", "manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
+  console.log(JSON.stringify({ status: "approved", script_clean_hash: scriptHash, power_system_comprehension_audit_hash: powerAuditHash, files_written: ["script_meta_contamination_report.json", "manual_agent_script_review.json", "operator_script_approval.json", "script_lock.json"] }, null, 2));
 }
 
 main().catch((error) => {

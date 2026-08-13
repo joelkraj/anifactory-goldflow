@@ -837,7 +837,7 @@ async function testDesktopHostContract() {
     "downloads-root": path.join(temporaryRoot, "desktop-downloads"),
   }, {}));
   assert.equal(config.concurrency, PRODUCTION_BROWSER_CONCURRENCY_CEILING);
-  assert.equal(config.submissionStaggerMs, 20_000);
+  assert.equal(config.submissionStaggerMs, 6_000);
   assert.deepEqual(config.types, ["llm", "image"]);
   assert.throws(() => assertDesktopConfig({ ...config, serverUrl: "https://example.com" }), /127\.0\.0\.1/);
   assert.equal(normalizeBrowserProvider("nano banana pro"), "google-flow");
@@ -853,8 +853,8 @@ async function testDesktopHostContract() {
   assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "20" }, {}).concurrency, 3);
   assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "21" }, {}).concurrency, 3);
   assert.equal(desktopConfig({ ...config, provider: "chatgpt", concurrency: "20" }, {}).concurrency, 3);
-  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "1" }, {}).submissionStaggerMs, 15_000);
-  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 25_000);
+  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "1" }, {}).submissionStaggerMs, 5_000);
+  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 8_000);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, types: ["llm", "image"] }), /image or video work/);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, concurrency: 2, flowProjectUrl: "https://labs.google/fx/tools/flow/project/example" }), /fresh project per job/);
   assert.equal(flowBlockingCode("Requesting generations too quickly. Try again later."), "rate_limited");

@@ -225,19 +225,27 @@ function referenceSlotsForPrompt(prompt) {
 
 async function bindReferenceInputs(slots, sourceDir) {
   const output = [];
+  const seenHashes = new Set();
   for (const [index, slot] of slots.entries()) {
     const referencePath = normalizeAbsolute(slot.path, sourceDir);
     if (!(await pathExists(referencePath))) throw new Error(`Missing reference input ${slot.ref_id}: ${referencePath}.`);
+    const referenceSha256 = await sha256File(referencePath);
+    if (seenHashes.has(referenceSha256)) continue;
+    seenHashes.add(referenceSha256);
     output.push({
-      slot: index + 1,
+      slot: output.length + 1,
       ref_id: slot.ref_id,
       kind: cleanText(slot.kind) || null,
       purpose: cleanText(slot.purpose ?? slot.slot_purpose ?? slot.reason) || null,
       path: referencePath,
-      sha256: await sha256File(referencePath),
+      sha256: referenceSha256,
     });
   }
   return output;
+}
+
+export async function bindReferenceInputsForTests(slots, sourceDir) {
+  return bindReferenceInputs(slots, sourceDir);
 }
 
 async function priorSceneHash(episodeDir, imageId, row) {

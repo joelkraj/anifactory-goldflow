@@ -55,6 +55,19 @@ async function waitForVisible(locator, timeoutMs = 60_000) {
   return null;
 }
 
+async function waitForVisibleEnabled(locator, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (let index = 0; index < await locator.count(); index += 1) {
+      const candidate = locator.nth(index);
+      if (await candidate.isVisible().catch(() => false)
+        && await candidate.isEnabled().catch(() => false)) return candidate;
+    }
+    await sleep(200);
+  }
+  return null;
+}
+
 function exactSha256(value, label) {
   const normalized = String(value ?? "").trim();
   if (!SHA256_PATTERN.test(normalized)) throw codedError("ui_contract_mismatch", `${label} must be an exact lowercase SHA-256.`);
@@ -260,7 +273,8 @@ export class GoogleGeminiBrowser {
 
   async newJobPage(type = "image") {
     const page = await this.context.newPage();
-    await page.goto(type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL, {
+    const expectedUrl = type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL;
+    await page.goto(expectedUrl, {
       waitUntil: "domcontentloaded",
       timeout: 90_000,
     });
@@ -268,6 +282,20 @@ export class GoogleGeminiBrowser {
     if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
       throw codedError("ui_contract_mismatch", "Gemini did not expose its prompt composer.");
     }
+    const routedCorrectly = type === "llm"
+      ? /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/i.test(page.url())
+      : isGeminiImageSurfaceUrl(page.url());
+    if (!routedCorrectly) {
+      throw codedError("ui_contract_mismatch", `Gemini ${type} job routed to ${page.url()} instead of ${expectedUrl}.`);
+    }
+    if (type === "image") {
+      await page.bringToFront();
+      const signedOut = await visibleLocator(page.locator(SIGNED_OUT_SELECTOR));
+      if (signedOut) {
+        throw codedError("auth_required", `Gemini Images is not authenticated at ${page.url()}. Sign in on the preserved /images tab before image dispatch.`);
+      }
+    }
+    this.log(`Gemini ${type} job surface verified: ${page.url()}`);
     return page;
   }
 
@@ -500,12 +528,18 @@ export class GoogleGeminiBrowser {
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       const baselineImageUrls = new Set(await this.visibleImageUrls(page));
-      let uploadButton = await visibleLocator(page.getByText("Upload files", { exact: true }));
-      if (!uploadButton) {
-        await uploadTools.click();
-        uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 15_000);
-      }
-      if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini Upload files action is missing.");
+      // The /images surface retains stale hidden/disabled menu rows after a
+      // previous attachment. Reopen the active tools menu and target its
+      // enabled menu item instead of clicking the first matching text node.
+      await page.keyboard.press("Escape").catch(() => {});
+      await uploadTools.click();
+      const uploadLabels = page.getByText("Upload files", { exact: true });
+      let uploadButton = await waitForVisibleEnabled(
+        uploadLabels.locator("xpath=ancestor::*[@role='menuitem' or self::gem-menu-item][1]"),
+        15_000,
+      );
+      if (!uploadButton) uploadButton = await waitForVisibleEnabled(uploadLabels, 2_000);
+      if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini /images Upload files action is missing or disabled in the active tools menu.");
       let chooserPromise = page.waitForEvent("filechooser", { timeout: 2_000 }).catch(() => null);
       await uploadButton.click();
       let chooser = await chooserPromise;
@@ -514,12 +548,13 @@ export class GoogleGeminiBrowser {
         if (!agree) throw codedError("ui_contract_mismatch", "Gemini upload did not open a file chooser or the one-time rights notice.");
         await agree.click();
         await agree.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
-        uploadButton = await visibleLocator(page.getByText("Upload files", { exact: true }));
-        if (!uploadButton) {
-          await uploadTools.click();
-          uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 10_000);
-        }
-        if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini Upload files action did not return after accepting the rights notice.");
+        await page.keyboard.press("Escape").catch(() => {});
+        await uploadTools.click();
+        uploadButton = await waitForVisibleEnabled(
+          page.getByText("Upload files", { exact: true }).locator("xpath=ancestor::*[@role='menuitem' or self::gem-menu-item][1]"),
+          10_000,
+        );
+        if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini /images Upload files action did not return enabled after accepting the rights notice.");
         chooserPromise = page.waitForEvent("filechooser", { timeout: 10_000 });
         await uploadButton.click();
         chooser = await chooserPromise;
@@ -664,6 +699,7 @@ export class GoogleGeminiBrowser {
     if (job.type === "llm") return this.runLlmJob({ job, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
     const page = await this.newJobPage("image");
+    let preservePage = false;
     try {
       await onPhase("verifying_ui_contract");
       const uiContract = await this.verifyUiContract(page);
@@ -703,8 +739,11 @@ export class GoogleGeminiBrowser {
         uiContract: { ...uiContract, reference_binding: referenceBinding },
         browserProvider: "google-gemini",
       };
+    } catch (error) {
+      preservePage = ["auth_required", "ui_contract_mismatch"].includes(error?.code);
+      throw error;
     } finally {
-      await page.close().catch(() => {});
+      if (!preservePage) await page.close().catch(() => {});
     }
   }
 }

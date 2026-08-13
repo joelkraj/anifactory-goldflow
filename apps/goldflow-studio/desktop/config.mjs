@@ -35,9 +35,9 @@ export function defaultChromeExecutable(platform = process.platform) {
 }
 
 export const PRODUCTION_BROWSER_CONCURRENCY_CEILING = 3;
-export const DEFAULT_BROWSER_SUBMISSION_STAGGER_MS = 20_000;
-export const MIN_BROWSER_SUBMISSION_STAGGER_MS = 15_000;
-export const MAX_BROWSER_SUBMISSION_STAGGER_MS = 25_000;
+export const DEFAULT_BROWSER_SUBMISSION_STAGGER_MS = 6_000;
+export const MIN_BROWSER_SUBMISSION_STAGGER_MS = 5_000;
+export const MAX_BROWSER_SUBMISSION_STAGGER_MS = 8_000;
 
 function boundedNumber(value, fallback, minimum, maximum) {
   const parsed = Number(value);

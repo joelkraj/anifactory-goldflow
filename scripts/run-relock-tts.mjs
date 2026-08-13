@@ -104,7 +104,7 @@ function requireCanonicalQwenLiamOptions(options) {
   if (primary.voice_id !== "joel_owned_narrator_clone") mismatches.push(`voice=${primary.voice_id ?? "missing"}`);
   if (options?.fallback != null) mismatches.push("fallback must be null");
   if (unit.sentence_complete !== true) mismatches.push("sentence_complete must be true");
-  if (Number(unit.target_words_min) !== 45) mismatches.push(`target_words_min=${unit.target_words_min ?? "missing"}`);
+  if (unit.target_words_min !== null) mismatches.push(`target_words_min=${unit.target_words_min ?? "missing"}`);
   if (Number(unit.target_words_max) !== 60) mismatches.push(`target_words_max=${unit.target_words_max ?? "missing"}`);
   if (Number(unit.hard_words_max) !== 60) mismatches.push(`hard_words_max=${unit.hard_words_max ?? "missing"}`);
   if (unit.continuous_requests !== false) mismatches.push("continuous_requests must be false");
@@ -240,7 +240,9 @@ function qwenLiamProviderLocks(primary, options) {
     tts_speech_tokenizer_weights_sha256: primary.speech_tokenizer_weights_sha256,
     tts_speech_tokenizer_config_sha256: primary.speech_tokenizer_config_sha256,
     tts_speed_control: "unsupported",
-    tts_unit_target_words_min: Number(options.unit_contract.target_words_min),
+    tts_unit_target_words_min: options.unit_contract.target_words_min == null
+      ? null
+      : Number(options.unit_contract.target_words_min),
     tts_unit_target_words_max: Number(options.unit_contract.target_words_max),
     tts_unit_hard_words_max: Number(options.unit_contract.hard_words_max),
     tts_sentence_complete_units: true,

@@ -8,7 +8,7 @@ export const DEFAULT_TTS_PROVIDER = "qwen_local";
 export const DEFAULT_TTS_FALLBACK_PROVIDER = null;
 export const DEFAULT_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
 export const DEFAULT_TTS_NATIVE_SPEED = null;
-export const DEFAULT_TTS_UNIT_TARGET_WORDS_MIN = 45;
+export const DEFAULT_TTS_UNIT_TARGET_WORDS_MIN = null;
 export const DEFAULT_TTS_UNIT_TARGET_WORDS_MAX = 60;
 export const DEFAULT_TTS_UNIT_HARD_WORDS_MAX = 60;
 export const DEFAULT_TTS_JOIN_SILENCE_MS = 80;
@@ -59,6 +59,8 @@ export const QWEN_LIAM_UNIT_CONTRACT = Object.freeze({
   target_words_max: DEFAULT_TTS_UNIT_TARGET_WORDS_MAX,
   hard_words_max: DEFAULT_TTS_UNIT_HARD_WORDS_MAX,
   continuous_requests: false,
+  boundary_authoring: "llm_actionable_or_deterministic_fallback",
+  minimum_word_target_enforced: false,
 });
 
 export const QWEN_LIAM_STITCH_CONTRACT = Object.freeze({
@@ -161,9 +163,24 @@ export const QWEN_JOEL_PRIMARY_LOCK = Object.freeze({
   retry_contract: QWEN_LIAM_RETRY_CONTRACT,
 });
 
-function qwenPrimaryLockForVoice(voiceId) {
+export const QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK = Object.freeze({
+  ...QWEN_JOEL_PRIMARY_LOCK,
+  reference_variant_id: "joel_ref_03_dry_deadpan",
+  reference_audio_path: "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_03_dry_deadpan.wav",
+  reference_audio_sha256: "e15a1bd90fcca701003f7ac9a0308e8f37e493a28713ad1cca6afbd09ca21c18",
+  reference_text: "Renji stared at the royal disaster egg, the smoking receipt printer, and the creature demanding tribute, then decided with professional confidence that minimum wage did not include dragon childcare.",
+  reference_text_sha256: "cf6964e575a83f71a5d2aab2409818a0b435d36791b00318750e7d6ad1669a49",
+  reference_source_model_revision: "joel_ref_03_dry_deadpan_v1",
+  reference_origin_unit_id: "joel_ref_03_dry_deadpan",
+  voice_continuity_contract: "qwen_icl_clone_of_joel_owned_dry_deadpan_reference",
+  voice_clone_contract: "qwen_icl_clone_of_selected_joel_owned_dry_deadpan_reference",
+});
+
+export function qwenPrimaryLockForVoice(voiceId, referenceVariantId = null) {
   return voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
     ? QWEN_LIAM_PRIMARY_LOCK
+    : referenceVariantId === QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id
+      ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK
     : QWEN_JOEL_PRIMARY_LOCK;
 }
 
@@ -211,6 +228,23 @@ const TTS_PROVIDER_ALIASES = new Map([
 function cleanId(value) {
   const text = String(value ?? "").trim();
   return text || null;
+}
+
+function resolveOwnedQwenReferenceVariant(primary = {}, identity = {}) {
+  const requested = cleanId(
+    primary.reference_variant_id
+      ?? identity.provider_locks?.primary_reference_variant_id,
+  );
+  if (!requested) return primary;
+  const selected = qwenPrimaryLockForVoice(primary.voice_id, requested);
+  return {
+    ...primary,
+    ...selected,
+    provider: primary.provider,
+    voice_id: primary.voice_id,
+    native_speed: primary.native_speed,
+    reference_variant_id: requested,
+  };
 }
 
 export function narrationPlanRunIdentityBindingFinding(
@@ -363,17 +397,25 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
       ?? QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT
     : null;
 
+  const rawPrimary = {
+    ...(primaryProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : {}),
+    ...(primaryProvider === "qwen_local" ? qwenPrimaryLockForVoice(
+      voiceId,
+      identity.voice_provider_options?.primary?.reference_variant_id
+        ?? identity.provider_locks?.primary_reference_variant_id
+        ?? null,
+    ) : {}),
+    ...(identity.voice_provider_options?.primary ?? {}),
+    provider: primaryProvider,
+    voice_id: voiceId,
+    native_speed: nativeSpeed,
+    ...(primaryProvider === "kokoro_local" ? KOKORO_VOICE_LOCKS[voiceId] ?? {} : {}),
+  };
   return {
     contract,
-    primary: {
-      ...(primaryProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : {}),
-      ...(primaryProvider === "qwen_local" ? qwenPrimaryLockForVoice(voiceId) : {}),
-      ...(identity.voice_provider_options?.primary ?? {}),
-      provider: primaryProvider,
-      voice_id: voiceId,
-      native_speed: nativeSpeed,
-      ...(primaryProvider === "kokoro_local" ? KOKORO_VOICE_LOCKS[voiceId] ?? {} : {}),
-    },
+    primary: primaryProvider === "qwen_local"
+      ? resolveOwnedQwenReferenceVariant(rawPrimary, identity)
+      : rawPrimary,
     fallback: fallbackProvider
       ? {
           ...(fallbackProvider === "qwen_local" && primaryProvider === "kokoro_local"
@@ -771,7 +813,10 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
     if (![DEFAULT_NARRATOR_VOICE_ID, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(policy.primary.voice_id)) {
       throw new Error(`Narration identities require an approved locked narrator voice; got ${policy.primary.voice_id ?? "missing"}.`);
     }
-    const expectedPrimaryLock = qwenPrimaryLockForVoice(policy.primary.voice_id);
+    const expectedPrimaryLock = qwenPrimaryLockForVoice(
+      policy.primary.voice_id,
+      policy.primary.reference_variant_id ?? null,
+    );
     const primaryLockFields = [
       "provider",
       "model_id",
@@ -834,7 +879,7 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
     }
     if (JSON.stringify(policy.unit_contract) !== JSON.stringify(QWEN_LIAM_UNIT_CONTRACT)
       || JSON.stringify(policy.primary.unit_contract) !== JSON.stringify(QWEN_LIAM_UNIT_CONTRACT)) {
-      throw new Error("Qwen Liam unit contract must be sentence-complete, target 45-60 words, hard maximum 60, and non-continuous.");
+      throw new Error("Qwen narrator units must be sentence-complete, have no forced minimum, stay within the hard 60-word maximum, and be non-continuous.");
     }
     if (JSON.stringify(policy.stitch_contract) !== JSON.stringify(QWEN_LIAM_STITCH_CONTRACT)
       || JSON.stringify(policy.primary.stitch_contract) !== JSON.stringify(QWEN_LIAM_STITCH_CONTRACT)) {
@@ -869,6 +914,7 @@ export function defaultNarrationVoiceProviderOptions({
   fallbackProvider = DEFAULT_TTS_FALLBACK_PROVIDER,
   voiceId = DEFAULT_NARRATOR_VOICE_ID,
   nativeSpeed = DEFAULT_TTS_NATIVE_SPEED,
+  referenceVariantId = null,
 } = {}) {
   const primaryProvider = normalizeTtsProvider(provider);
   const fallback = fallbackProvider ? normalizeTtsProvider(fallbackProvider) : null;
@@ -908,7 +954,7 @@ export function defaultNarrationVoiceProviderOptions({
     throw new Error("Qwen Liam has no native-speed control; omit nativeSpeed.");
   }
   return {
-    primary: QWEN_JOEL_PRIMARY_LOCK,
+    primary: qwenPrimaryLockForVoice(voiceId, referenceVariantId),
     fallback: null,
     qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
     pace_strategy: "qwen_reference_native_cadence_no_speed_no_post_tempo",

@@ -230,6 +230,7 @@ import {
   KOKORO_MODEL_LOCK,
   KOKORO_VOICE_LOCKS,
   QWEN_JOEL_PRIMARY_LOCK,
+  QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_RETRY_CONTRACT,
@@ -290,6 +291,7 @@ import {
   findSourceCompatibleHybridDeadletters,
 } from "./hybrid-browser-image-pool.mjs";
 import {
+  bindReferenceInputsForTests,
   codexWorkSourceRowSha256,
   completeWorkItem,
   createCodexWorkManifest,
@@ -4706,10 +4708,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.voice_provider_options.primary.model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(identity.voice_provider_options.primary.model_weights_sha256, QWEN_JOEL_PRIMARY_LOCK.model_weights_sha256);
   assert.equal(identity.voice_provider_options.primary.model_config_sha256, QWEN_JOEL_PRIMARY_LOCK.model_config_sha256);
-  assert.equal(identity.voice_provider_options.primary.reference_audio_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(identity.voice_provider_options.primary.reference_variant_id, "joel_ref_03_dry_deadpan");
+  assert.equal(identity.voice_provider_options.primary.reference_audio_sha256, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256);
   assert.equal(identity.voice_provider_options.primary.reference_manifest_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256);
   assert.equal(identity.voice_provider_options.primary.reference_metadata_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256);
-  assert.equal(identity.voice_provider_options.primary.voice_continuity_contract, QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract);
+  assert.equal(identity.voice_provider_options.primary.voice_continuity_contract, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract);
   assert.equal(identity.voice_provider_options.primary.repetition_penalty, 1.2);
   assert.equal(identity.voice_provider_options.fallback, null);
   assert.deepEqual(identity.voice_provider_options.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
@@ -4791,15 +4794,16 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.provider_locks.narrator_voice_identity, "joel_owned_narrator_clone");
   assert.equal(identity.provider_locks.tts_native_speed, null);
   assert.equal(identity.provider_locks.tts_speed_control, "unsupported");
-  assert.equal(identity.provider_locks.primary_reference_audio_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(identity.provider_locks.primary_reference_variant_id, "joel_ref_03_dry_deadpan");
+  assert.equal(identity.provider_locks.primary_reference_audio_sha256, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256);
   assert.equal(identity.provider_locks.primary_reference_manifest_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256);
   assert.equal(identity.provider_locks.primary_reference_metadata_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256);
-  assert.equal(identity.provider_locks.primary_voice_continuity_contract, QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract);
+  assert.equal(identity.provider_locks.primary_voice_continuity_contract, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract);
   assert.equal(identity.provider_locks.primary_similarity_model_sha256, QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_sha256);
   assert.equal(identity.provider_locks.primary_similarity_calibration_sha256, QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256);
   assert.equal(identity.provider_locks.primary_minimum_cosine_similarity, 0.88);
   assert.equal(identity.provider_locks.primary_warning_below_cosine_similarity, 0.9);
-  assert.equal(identity.provider_locks.tts_unit_target_words_min, 45);
+  assert.equal(identity.provider_locks.tts_unit_target_words_min, null);
   assert.equal(identity.provider_locks.tts_unit_target_words_max, 60);
   assert.equal(identity.provider_locks.tts_unit_hard_words_max, 60);
   assert.equal(identity.provider_locks.tts_sentence_complete_units, true);
@@ -6671,6 +6675,53 @@ function testSceneImageProductionContractBlocksDroppedRefsAndStyle() {
   }]);
   assert.equal(stateAliasPlan.prompts[0].reference_requirements.length, 1);
   assert.deepEqual(scenePromptProductionContractFindingsForTests(stateAliasPlan.prompts, { maxSceneReferences: 4 }), []);
+
+  const duplicateAliasPlan = attachReferencePathsToPromptsForTests({
+    prompt_policy: "deterministic hardening fixture",
+    prompts: [{
+      image_id: "ep_01-cut-duplicate-alias",
+      modelslab_image_prompt: "Anime/manhwa frame of Tamsin addressing Joey.",
+      reference_requirements: [
+        { ref_id: "tamsin_core_state", kind: "character_state", required: true, slot_order: 1 },
+        { ref_id: "tamsin_identity_ref", kind: "character_state", required: true, slot_order: 2 },
+        { ref_id: "hall_ref", kind: "location", required: true, slot_order: 3 },
+      ],
+      shot_manifest: { shot_job: "interaction" },
+    }],
+  }, new Map([
+    ["tamsin_identity_ref", "/tmp/tamsin.png"],
+    ["hall_ref", "/tmp/hall.png"],
+  ]), [{
+    state_ref_id: "tamsin_core_state",
+    source_ref_id: "tamsin_identity_ref",
+    character: "Tamsin",
+  }]);
+  assert.deepEqual(
+    duplicateAliasPlan.prompts[0].reference_slots.map((slot) => slot.ref_id),
+    ["tamsin_core_state", "hall_ref"],
+    "state aliases that resolve to the same conditioning raster must consume one attachment slot",
+  );
+  assert.equal(
+    duplicateAliasPlan.prompts[0].reference_usage.find((row) => row.ref_id === "tamsin_identity_ref")?.usage,
+    "available_not_attached_duplicate_resolved_reference",
+  );
+}
+
+async function testWorkManifestDeduplicatesReferenceAliasesByContentHash() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-ref-alias-"));
+  const firstPath = path.join(root, "tamsin_core_state.png");
+  const aliasPath = path.join(root, "tamsin_identity_ref.png");
+  const hallPath = path.join(root, "hall.png");
+  await fs.writeFile(firstPath, Buffer.from("same female conditioning raster"));
+  await fs.writeFile(aliasPath, Buffer.from("same female conditioning raster"));
+  await fs.writeFile(hallPath, Buffer.from("different environment raster"));
+  const bound = await bindReferenceInputsForTests([
+    { ref_id: "tamsin_core_state", path: firstPath, slot_order: 1 },
+    { ref_id: "tamsin_identity_ref", path: aliasPath, slot_order: 2 },
+    { ref_id: "hall_ref", path: hallPath, slot_order: 3 },
+  ], root);
+  assert.deepEqual(bound.map((row) => row.ref_id), ["tamsin_core_state", "hall_ref"]);
+  assert.deepEqual(bound.map((row) => row.slot), [1, 2]);
 }
 
 function testGroupReferencePromptDoesNotDemandOnePerson() {
@@ -7663,7 +7714,7 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
     unit.provider_controls.qwen3.delivery_control === "base_icl_reference_audio_only"
     && unit.provider_controls.qwen3.instruct_supported === false
     && unit.provider_controls.qwen3.instruct_submitted === false
-    && /exact text/i.test(unit.provider_controls.qwen3.authored_delivery_note)
+    && /exact text/i.test(unit.provider_controls.qwen3.diagnostic_delivery_note)
   )));
   const assertPuckFallbackIdentity = (control) => {
     assert.equal(control.target_voice_id, "am_puck");

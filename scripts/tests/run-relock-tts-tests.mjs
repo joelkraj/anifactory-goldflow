@@ -60,10 +60,12 @@ function fixtureVoiceProviderOptions() {
     allowed_production_voice_ids: ["joel_owned_narrator_clone"],
     unit_contract: {
       sentence_complete: true,
-      target_words_min: 45,
+      target_words_min: null,
       target_words_max: 60,
       hard_words_max: 60,
       continuous_requests: false,
+      boundary_authoring: "llm_actionable_or_deterministic_fallback",
+      minimum_word_target_enforced: false,
     },
     stitch_contract: {
       join_silence_ms: 80,
@@ -292,7 +294,7 @@ export async function runRelockTtsTests() {
   assert.equal(after.tts_native_speed, null);
   assert.equal(after.provider_locks.narrator_voice_sha256, "joel-voice-sha");
   assert.equal(after.provider_locks.tts_model_weights_sha256, "weights-sha");
-  assert.equal(after.provider_locks.tts_unit_target_words_min, 45);
+  assert.equal(after.provider_locks.tts_unit_target_words_min, null);
   assert.equal(after.provider_locks.tts_unit_target_words_max, 60);
   assert.equal(after.provider_locks.tts_unit_hard_words_max, 60);
   assert.equal(after.provider_locks.tts_sentence_complete_units, true);

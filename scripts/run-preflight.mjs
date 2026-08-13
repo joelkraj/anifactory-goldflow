@@ -76,6 +76,7 @@ import {
   DEFAULT_TTS_FALLBACK_PROVIDER,
   DEFAULT_TTS_PROVIDER,
   KOKORO_MODEL_LOCK,
+  QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK,
   QWEN_JOEL_PRIMARY_LOCK,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LOCAL_FALLBACK_LOCK,
@@ -262,6 +263,19 @@ const narratorVoiceId = cleanOptionalId(
     ? DEFAULT_NARRATOR_VOICE_ID
     : ttsProvider === "kokoro_local" ? "am_puck" : null),
 );
+const narratorReferenceVariantId = cleanOptionalId(
+  flags["narrator-reference-variant"]
+    ?? (ttsProvider === "qwen_local"
+      ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id
+      : null),
+);
+if (ttsProvider === "qwen_local"
+  && narratorReferenceVariantId
+    !== QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id) {
+  throw new Error(
+    `New Joel/Qwen narration requires --narrator-reference-variant ${QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id}.`,
+  );
+}
 if (ttsProvider === "qwen_local" && narratorVoiceId !== DEFAULT_NARRATOR_VOICE_ID) {
   throw new Error(`New narration identities use the owned Joel reference: --narrator-voice-id must be ${DEFAULT_NARRATOR_VOICE_ID}.`);
 }
@@ -563,12 +577,16 @@ function voiceProviderOptions() {
       fallbackProvider: ttsFallbackProvider,
       voiceId: narratorVoiceId,
       nativeSpeed: ttsNativeSpeed,
+      referenceVariantId: narratorReferenceVariantId,
     });
     validateNarrationTtsPolicy(narrationTtsPolicyForIdentity({
       episode,
       tts_provider: ttsProvider,
       tts_fallback_provider: ttsFallbackProvider,
       narrator_voice_id: narratorVoiceId,
+      provider_locks: {
+        primary_reference_variant_id: narratorReferenceVariantId,
+      },
       tts_native_speed: ttsNativeSpeed,
       voice_provider_options: options,
     }), { production: runIntent === "production" });
@@ -993,7 +1011,8 @@ async function main() {
       fallback_tts_model: lockedModelVersions().fallback_tts_model,
       fallback_tts_model_revision: lockedModelVersions().fallback_tts_model_revision,
       narrator_voice_identity: ttsProvider !== "modelslab_qwen" ? narratorVoiceId : qwenNarratorVoiceId,
-      primary_reference_audio_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256 : null,
+      primary_reference_variant_id: ttsProvider === "qwen_local" ? narratorReferenceVariantId : null,
+      primary_reference_audio_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256 : null,
       primary_reference_manifest_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256 : null,
       primary_reference_metadata_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256 : null,
       primary_voice_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_sha256 : null,
@@ -1001,7 +1020,7 @@ async function main() {
       primary_similarity_calibration_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256 : null,
       primary_minimum_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.minimum_cosine_similarity : null,
       primary_warning_below_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.warning_below_cosine_similarity : null,
-      primary_voice_continuity_contract: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_continuity_contract : null,
+      primary_voice_continuity_contract: ttsProvider === "qwen_local" ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract : null,
       tts_unit_target_words_min: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.target_words_min : null,
       tts_unit_target_words_max: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.target_words_max : null,
       tts_unit_hard_words_max: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.hard_words_max : null,

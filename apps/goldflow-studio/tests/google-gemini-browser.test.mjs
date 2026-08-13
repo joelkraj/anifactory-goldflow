@@ -221,9 +221,12 @@ async function opensEveryTextJobOnAnIndependentAppTab() {
   browser.context = {
     async newPage() {
       const navigations = [];
+      let currentUrl = "about:blank";
       const page = {
         navigations,
-        async goto(url) { navigations.push(url); },
+        async goto(url) { navigations.push(url); currentUrl = url; },
+        url() { return currentUrl; },
+        async bringToFront() {},
         locator() { return visibleMockLocator(); },
       };
       pages.push(page);
@@ -235,6 +238,51 @@ async function opensEveryTextJobOnAnIndependentAppTab() {
   assert.notEqual(first, second);
   assert.deepEqual(first.navigations, ["https://gemini.google.com/app"]);
   assert.deepEqual(second.navigations, ["https://gemini.google.com/app"]);
+}
+
+async function routesImageJobsOnlyToDedicatedImagesSurface() {
+  const browser = new GoogleGeminiBrowser();
+  let currentUrl = "about:blank";
+  let broughtToFront = false;
+  browser.context = {
+    async newPage() {
+      return {
+        async goto(url) { currentUrl = url; },
+        url() { return currentUrl; },
+        async bringToFront() { broughtToFront = true; },
+        locator(selector) {
+          if (/Sign in/.test(selector)) return visibleMockLocator({ visible: false });
+          return visibleMockLocator();
+        },
+      };
+    },
+  };
+  await browser.newJobPage("image");
+  assert.equal(currentUrl, "https://gemini.google.com/images");
+  assert.equal(broughtToFront, true);
+}
+
+async function blocksUnauthenticatedImagesSurfaceWithoutFallingBackToApp() {
+  const browser = new GoogleGeminiBrowser();
+  let currentUrl = "about:blank";
+  browser.context = {
+    async newPage() {
+      return {
+        async goto(url) { currentUrl = url; },
+        url() { return currentUrl; },
+        async bringToFront() {},
+        locator(selector) {
+          if (/Sign in/.test(selector)) return visibleMockLocator();
+          return visibleMockLocator();
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    () => browser.newJobPage("image"),
+    (error) => error.code === "auth_required" && /\/images/.test(error.message),
+  );
+  assert.equal(currentUrl, "https://gemini.google.com/images");
 }
 
 function recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel() {
@@ -253,6 +301,8 @@ await rejectsIncompleteOrChangedPrompt();
 await rejectsEmptyPrompt();
 await acceptsOnlyVerifiedGemini36FlashWithoutExtendedThinking();
 await opensEveryTextJobOnAnIndependentAppTab();
+await routesImageJobsOnlyToDedicatedImagesSurface();
+await blocksUnauthenticatedImagesSurfaceWithoutFallingBackToApp();
 recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 
 console.log("google-gemini-browser tests passed");

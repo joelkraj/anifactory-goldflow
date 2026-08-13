@@ -23,6 +23,7 @@ import {
   NARRATION_TTS_QA_POLICY_VERSION,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_JOEL_PRIMARY_LOCK,
+  qwenPrimaryLockForVoice,
   QWEN_LIAM_PRIMARY_LOCK,
   narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
@@ -37,14 +38,15 @@ import {
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
+import {
+  validateNarrationPerformanceBakeoffApproval,
+} from "./lib/narration-performance-contract.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
 const DEFAULT_SIMILARITY_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-speaker-similarity/bin/python";
-function qwenPinForVoiceId(voiceId) {
-  const voiceLock = voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
-    ? QWEN_LIAM_PRIMARY_LOCK
-    : QWEN_JOEL_PRIMARY_LOCK;
+function qwenPinForVoiceId(voiceId, referenceVariantId = null) {
+  const voiceLock = qwenPrimaryLockForVoice(voiceId, referenceVariantId);
   return Object.freeze({
     ...voiceLock,
     model_source: voiceLock.model_id,
@@ -681,7 +683,12 @@ function requiredExact(actual, expected, label, findings) {
 
 export function validateNarrationTtsPolicyForTests(identity) {
   const findings = [];
-  const qwenPin = qwenPinForVoiceId(identity?.narrator_voice_id);
+  const qwenPin = qwenPrimaryLockForVoice(
+    identity?.narrator_voice_id,
+    identity?.voice_provider_options?.primary?.reference_variant_id
+      ?? identity?.provider_locks?.primary_reference_variant_id
+      ?? null,
+  );
   const qwenReferenceText = qwenPin.reference_text;
   let policy;
   try {
@@ -768,14 +775,38 @@ export function validateNarrationTtsPolicyForTests(identity) {
   };
 }
 
+export function validateNarrationPerformanceGateForTests({
+  plan,
+  approval,
+} = {}) {
+  if (!plan?.performance_contract) {
+    return {
+      status: "legacy_not_required",
+      findings: [],
+      required: false,
+    };
+  }
+  const validation = validateNarrationPerformanceBakeoffApproval({
+    approval,
+    contract: plan.performance_contract,
+  });
+  return {
+    ...validation,
+    required: true,
+    performance_contract_sha256:
+      plan.performance_contract.contract_sha256,
+  };
+}
+
 function wordCount(value) {
   return String(value ?? "").trim().split(/\s+/).filter(Boolean).length;
 }
 
 export function normalizeNarrationUnitsForTests(plan, {
   voiceId = null,
+  referenceVariantId = null,
 } = {}) {
-  const expectedVoiceLock = qwenPinForVoiceId(voiceId);
+  const expectedVoiceLock = qwenPinForVoiceId(voiceId, referenceVariantId);
   const topLevel = Array.isArray(plan?.units) ? plan.units : null;
   const raw = topLevel ?? (plan?.segments ?? []).flatMap((segment) => {
     const rows = segment?.narration_units
@@ -930,13 +961,13 @@ export function validateNarrationPlanPolicyForTests(plan, policy) {
   }
   requiredExact(
     plan?.qwen_liam_unit_grouping?.target_spoken_words_min,
-    45,
+    null,
     "plan.qwen_liam_unit_grouping.target_spoken_words_min",
     findings,
   );
   requiredExact(
     plan?.qwen_liam_unit_grouping?.target_spoken_words_max,
-    60,
+    null,
     "plan.qwen_liam_unit_grouping.target_spoken_words_max",
     findings,
   );
@@ -1936,6 +1967,33 @@ async function main() {
   if (plan.system_ui_speech_coverage?.status !== "passed") {
     throw new Error("Narration plan system_ui_speech_coverage is missing or blocked");
   }
+  const performanceApprovalPath = path.resolve(
+    flags["performance-bakeoff-approval"]
+      ?? path.join(episodeDir, "narration_performance_bakeoff_approval.json"),
+  );
+  const performanceApproval = await readJson(performanceApprovalPath, null);
+  const performanceGate = validateNarrationPerformanceGateForTests({
+    plan,
+    approval: performanceApproval,
+  });
+  if (performanceGate.status === "blocked") {
+    throw new Error(
+      "Full narration synthesis requires a human-approved short performance "
+      + `bakeoff for this exact voice/reference/synthesis contract: ${JSON.stringify(performanceGate.findings)}. `
+      + `Expected ${performanceApprovalPath}`,
+    );
+  }
+  if (performanceGate.required) {
+    for (const sample of performanceApproval.samples ?? []) {
+      const samplePath = path.resolve(sample.audio_path);
+      const actualSampleSha256 = await sha256File(samplePath).catch(() => null);
+      if (!actualSampleSha256 || actualSampleSha256 !== sample.audio_sha256) {
+        throw new Error(
+          `Narration performance bakeoff sample is missing or stale: ${samplePath}`,
+        );
+      }
+    }
+  }
   const policy = validateNarrationTtsPolicyForTests(identity);
   if (policy.status !== "passed") {
     throw new Error(`Locked narration TTS policy failed: ${JSON.stringify(policy.findings)}`);
@@ -1944,7 +2002,10 @@ async function main() {
   if (planPolicy.status !== "passed") {
     throw new Error(`Narration plan provider policy failed: ${JSON.stringify(planPolicy.findings)}`);
   }
-  const selectedVoiceLock = qwenPinForVoiceId(policy.primary.voice_id);
+  const selectedVoiceLock = qwenPinForVoiceId(
+    policy.primary.voice_id,
+    policy.primary.reference_variant_id ?? null,
+  );
   if (await sha256File(policy.primary.reference_audio_path) !== policy.primary.reference_audio_sha256) {
     throw new Error("Locked local Qwen reference audio hash does not match");
   }
@@ -1991,6 +2052,7 @@ async function main() {
   }
   const units = normalizeNarrationUnitsForTests(plan, {
     voiceId: policy.primary.voice_id,
+    referenceVariantId: policy.primary.reference_variant_id ?? null,
   });
   const expectedBatchSize = Number(
     policy.synthesis_contract?.nominal_batch_size ?? 1,
@@ -2143,6 +2205,8 @@ async function main() {
     },
     policy,
     plan_policy: planPolicy,
+    performance_gate: performanceGate,
+    performance_bakeoff_approval_path: performanceApprovalPath,
   };
   if (dryRun || planOnly) {
     const validationPath = path.join(

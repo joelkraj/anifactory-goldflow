@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { materializeProductionManifest } from "../lib/execution-provenance.mjs";
 import { PIPELINE_STAGE_REGISTRY } from "../lib/pipeline-stage-registry.mjs";
+import { materializePowerSystemComprehensionAudit } from "../lib/power-system-comprehension-contract.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -59,6 +60,15 @@ async function runProviderFreeSyntheticE2e() {
     0,
   );
   const scriptPath = path.join(episodeDir, "script_clean.md");
+  const script = await fs.readFile(scriptPath, "utf8");
+  await writeJson(path.join(episodeDir, "power_system_comprehension_audit.json"), materializePowerSystemComprehensionAudit({
+    power_system_present: false,
+    no_power_system_rationale: "The synthetic fixture has no defined ability mechanics or ability evolution.",
+    abilities: [],
+  }, script, {
+    sourceScriptPath: scriptPath,
+    reviewedBy: "synthetic-suite",
+  }));
   await execFileAsync(process.execPath, ["scripts/script-approve.mjs", ...base, "--hash", await fileSha256(scriptPath)], { cwd: process.cwd(), env });
 
   const evidencePath = path.join(episodeDir, "synthetic_provider_free_evidence.json");

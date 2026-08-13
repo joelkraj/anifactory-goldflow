@@ -43,7 +43,8 @@ const manifestPath = flags.manifest ? path.resolve(flags.manifest) : null;
 const referenceDir = path.join(episodeDir, "assets", "images", "references");
 
 export function providerBatchManifestEligible(manifest) {
-  return [HYBRID_WEB_FLOW_PROVIDER, FEDERATED_WEB_IMAGE_PROVIDER].includes(String(manifest?.provider ?? ""))
+  const provider = String(manifest?.provider ?? "");
+  return [HYBRID_WEB_FLOW_PROVIDER, "hybrid_web_flow", FEDERATED_WEB_IMAGE_PROVIDER].includes(provider)
     && manifest?.policy?.browser_provider_receipt_required === true;
 }
 

@@ -142,6 +142,65 @@ async function runPool(items, concurrency, worker) {
   return output;
 }
 
+async function authoredChunk({
+  chunk,
+  index,
+  chunkCount,
+  callDir,
+  repoRoot,
+  provider,
+  model,
+  reasoningEffort,
+}) {
+  const basePrompt = promptForChunk(chunk, index, chunkCount);
+  const basePath = path.join(
+    callDir,
+    `performance_${String(index + 1).padStart(3, "0")}_${sha256(basePrompt).slice(0, 12)}.json`,
+  );
+  const attempts = [
+    { prompt: basePrompt, outputPath: basePath, recovery: false },
+    {
+      prompt: `${basePrompt}\n\nRECOVERY: The prior packet violated exact spoken-word preservation. You may only insert, delete, or replace punctuation characters and regroup adjacent supplied atoms. Do not insert, delete, replace, contract, or reorder any word. In particular, do not add connective words between sentences. Return the complete packet again.`,
+      outputPath: `${basePath}.recovery-1.json`,
+      recovery: true,
+    },
+  ];
+  let priorError = null;
+  for (const attempt of attempts) {
+    let content = await fs.readFile(attempt.outputPath, "utf8").catch(() => null);
+    let call = null;
+    if (!content) {
+      call = await runCodexCli({
+        prompt: attempt.prompt,
+        stageName: attempt.recovery
+          ? "narration_performance_authoring_recovery"
+          : "narration_performance_authoring",
+        repoRoot,
+        outputPath: attempt.outputPath,
+        provider,
+        model,
+        reasoningEffort,
+        timeoutMs: Number(process.env.ANIFACTORY_NARRATION_PERFORMANCE_TIMEOUT_MS ?? 1_200_000),
+      });
+      content = call.content;
+    }
+    try {
+      return {
+        units: validateChunkResult(extractJson(content), chunk),
+        provider: call?.provider ?? "content_addressed_cache",
+        model: call?.model ?? model ?? "identity_locked_model",
+        output_path: attempt.outputPath,
+        prompt_sha256: sha256(attempt.prompt),
+        reused: call === null,
+        recovery: attempt.recovery,
+      };
+    } catch (error) {
+      priorError = error;
+    }
+  }
+  throw priorError ?? new Error(`Narration performance packet ${index + 1} failed.`);
+}
+
 export async function authorNarrationPerformanceDirection({
   atomicUnits,
   sourceScriptSha256,
@@ -158,27 +217,20 @@ export async function authorNarrationPerformanceDirection({
   const chunks = segmentChunks(atomicUnits);
   const callDir = path.join(episodeDir, "_codex_calls", "narration-performance-author");
   await fs.mkdir(callDir, { recursive: true });
-  const calls = await runPool(chunks, Math.max(1, Math.min(3, Number(concurrency) || 3)), async (chunk, index) => {
-    const prompt = promptForChunk(chunk, index, chunks.length);
-    const outputPath = path.join(callDir, `performance_${String(index + 1).padStart(3, "0")}_${sha256(prompt).slice(0, 12)}.json`);
-    const call = await runCodexCli({
-      prompt,
-      stageName: "narration_performance_authoring",
+  const calls = await runPool(
+    chunks,
+    Math.max(1, Math.min(3, Number(concurrency) || 3)),
+    (chunk, index) => authoredChunk({
+      chunk,
+      index,
+      chunkCount: chunks.length,
+      callDir,
       repoRoot,
-      outputPath,
       provider,
       model,
       reasoningEffort,
-      timeoutMs: Number(process.env.ANIFACTORY_NARRATION_PERFORMANCE_TIMEOUT_MS ?? 1_200_000),
-    });
-    return {
-      units: validateChunkResult(extractJson(call.content), chunk),
-      provider: call.provider ?? "codex_cli",
-      model: call.model ?? model ?? "unknown",
-      output_path: outputPath,
-      prompt_sha256: sha256(prompt),
-    };
-  });
+    }),
+  );
   const providers = [...new Set(calls.map((call) => call.provider))];
   const models = [...new Set(calls.map((call) => call.model))];
   const artifact = {
@@ -209,4 +261,3 @@ export async function authorNarrationPerformanceDirection({
   await fs.writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
   return { artifact, artifactPath, callCount: calls.length };
 }
-

@@ -30,6 +30,9 @@ Verify all requirements:
 - `human_voice_over_policy_voice`: recurring characters primarily speak and act from distinct desire, fear, resentment, affection, pride, shame, or self-interest rather than sharing an abstract ethics-and-governance vocabulary
 - `opening_promises_resolved`: every salient opening promise, demanded answer, gift, prop, threat, or mystery is clarified, used, paid, or deliberately deferred as a live question
 - `power_provenance_clear`: every decisive power is clearly innate, stolen, learned, derived, or granted before its second decisive use
+- `cold_listener_comprehension`: at narration speed, every central mechanic and recurring coined term has one stable plain-language mental model: input or trigger, observable output, limit or cost, and present story purpose. Naming or repeatedly using a mechanic is not an explanation. A later expansion must visibly follow or explicitly update the established rule.
+- `terminology_unambiguous_by_ear`: technique names, steps, timing units, costs, failure states, and ordinary uses of the same word remain distinguishable in one forward listen. The listener never needs to reread or wait for later context to decode the current action.
+- `story_orientation_continuous`: throughout the opening, early story, middle, and ending, a one-pass listener can state the protagonist's current goal, immediate obstacle, and present location or situation, plus the change that ended the prior loop. A later explanation cannot retroactively repair a confusing current scene.
 - `possession_and_history_continuity`: possession, authority, injury, identity, death, location, and historical states are mutually compatible
 - `auditory_name_distinction`: important recurring names are distinguishable when heard once at narration speed
 - `reference_density_dominance`: when a reference frontier is supplied, the revised candidate wins every required dimension and material edge by viewer-payoff quality per 1,000 words and per estimated spoken minute; raw runtime and raw event totals never count
@@ -48,6 +51,28 @@ Return JSON only:
   "reference_merit_frontier_sha256": "SHA256 when a frontier is supplied",
   "reference_density_diagnostic_sha256": "SHA256 when a frontier is supplied",
   "requirements": [{"id": "...", "decision": "pass|fail"}],
+  "cold_listener_comprehension": {
+    "decision": "pass|fail",
+    "current_objective_plain_language": "what the protagonist is trying to accomplish now",
+    "central_concepts": [{
+      "spoken_name": "exact recurring mechanic or coined term",
+      "input_or_trigger": "plain-language activation or supplied input",
+      "observable_output": "what the audience can see it do",
+      "limit_or_cost": "stable boundary, tradeoff, or none established",
+      "why_it_matters_now": "connection to the current objective",
+      "first_clear_anchor": {"start_offset": 0, "end_offset": 1, "exact_text": "..."},
+      "distinct_from": ["adjacent terms a listener must not confuse with this one"]
+    }],
+    "orientation_checkpoints": [{
+      "section_label": "opening|early_story|middle|ending",
+      "current_goal": "plain-language immediate goal",
+      "immediate_obstacle": "plain-language immediate opposition",
+      "current_location_or_context": "where or under what present situation this occurs",
+      "what_changed": "the changed fact that moved the story here",
+      "anchor": {"start_offset": 0, "end_offset": 1, "exact_text": "..."}
+    }],
+    "confusion_points": [{"start_offset": 0, "end_offset": 1, "exact_text": "...", "reason": "..."}]
+  },
   "reference_density_verdicts": [
     {
       "id": "opening_hook",
@@ -72,4 +97,6 @@ Return JSON only:
 }
 
 When a frontier is supplied, each `reference_density_<dimension_id>` and `reference_edge_<edge_id>` requirement must be `pass` exactly when its verdict is `candidate_win`, and `reference_density_dominance` must be `pass` exactly when every dimension and edge wins. Acceptance requires every requirement to pass.
+
+`cold_listener_comprehension` is absolute, not comparative. A candidate cannot pass it merely by being clearer than the reference. Set its decision to `fail`, set all comprehension requirements to `fail`, and anchor every material confusion point when a first-time listener cannot correctly explain a recurring concept or current story orientation at the moment it governs a choice or result. Include at least one orientation checkpoint for opening, early story, middle, and ending.
 ```

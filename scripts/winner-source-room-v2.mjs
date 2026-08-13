@@ -1351,6 +1351,7 @@ async function architecture() {
       requireMeritDominanceContract: Boolean(room.referenceMeritFrontier),
       referenceMeritFrontierSha256: room.referenceMeritFrontier?.sha256 ?? null,
       referenceMeritFrontier: room.referenceMeritFrontier?.document ?? null,
+      requireMechanicComprehensionContract: true,
     },
     call: () => modelResponse({
       id: "story_architecture",
@@ -1660,6 +1661,7 @@ async function acceptV2() {
       referenceMeritFrontierSha256: room.referenceMeritFrontier?.sha256 ?? null,
       referenceDensityDiagnosticSha256: room.referenceDensity?.sha256 ?? null,
       referenceMeritFrontier: room.referenceMeritFrontier?.document ?? null,
+      requireColdListenerComprehension: true,
     },
     call: () => modelResponse({
       id: "source_semantic_acceptance",
@@ -1699,6 +1701,7 @@ async function releaseV2() {
     referenceMeritFrontierSha256: room.referenceMeritFrontier?.sha256 ?? null,
     referenceDensityDiagnosticSha256: room.referenceDensity?.sha256 ?? null,
     referenceMeritFrontier: room.referenceMeritFrontier?.document ?? null,
+    requireColdListenerComprehension: Boolean(room.architecture.document?.mechanic_comprehension_contract),
   });
   if (acceptance.document.status !== "accepted") throw new Error("Final semantic acceptance is not accepted.");
   const finalApproval = await validatedJson(FILES.finalApproval, validateSourceStageApproval, { stageId: "final_script", sourceSha256: room.revisedSha256, selectedId: null });

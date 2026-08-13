@@ -15,6 +15,7 @@ import {
   bindReferenceDensityAnchors,
   bindReferenceMeritFrontierAnchors,
   bindSourceSemanticAcceptanceAnchors,
+  COLD_LISTENER_ACCEPTANCE_REQUIREMENT_IDS,
   SEMANTIC_ACCEPTANCE_REQUIREMENT_IDS,
   SOURCE_DIAGNOSTIC_V2_SCHEMA,
   SOURCE_EVIDENCE_REGISTRY_SCHEMA,
@@ -261,6 +262,12 @@ function architecture() {
       relationship_opposition_or_learning_change: "History accumulates.",
       promise_or_viewer_question_movement: "One question closes and another opens.",
       continuity_constraints: [],
+      listener_orientation: {
+        current_goal: "Joey must answer the current threat.",
+        immediate_obstacle: "The opponent blocks his next move.",
+        what_changed_from_previous_movement: index === 0 ? "The story begins under pressure." : "The previous choice changed the conflict.",
+        active_concepts: [],
+      },
     })),
   };
 }
@@ -284,6 +291,24 @@ function dramaticArchitecture() {
     by_approximately_3_minutes: { required_state: "The stolen talent produces visible proof." },
     by_approximately_5_minutes: { required_state: "The first larger conflict closes." },
     exposition_release_point: { after_result: "After the stolen crest visibly changes hands." },
+  };
+  return value;
+}
+
+function comprehensionArchitecture() {
+  const value = dramaticArchitecture();
+  value.mechanic_comprehension_contract = {
+    current_objective_plain_language: "Joey must rescue Sera before the bell.",
+    concepts: [{
+      spoken_name: "Hundredfold Assimilation",
+      category: "learning multiplier",
+      input_or_trigger: "Joey observes a skill or receives experience through Theft.",
+      observable_output: "He learns the demonstrated skill at extreme speed.",
+      limit_or_cost: "It cannot supply missing facts and overloads his senses.",
+      why_it_matters_now: "It lets him master the stolen combat talent quickly enough to rescue Sera.",
+      first_clear_movement_id: "movement_01",
+      distinct_from: ["Theft", "sensory blackout"],
+    }],
   };
   return value;
 }
@@ -566,6 +591,16 @@ export async function runWinnerSourceRoomV2ContractTests() {
     selectedTreatmentSha256: "treatment_hash",
     requireDramaticOpeningContract: true,
   }).done, true);
+  assert.equal(validateStoryArchitecture(dramaticArchitecture(), {
+    packageSha256: "package_hash",
+    selectedTreatmentSha256: "treatment_hash",
+    requireMechanicComprehensionContract: true,
+  }).done, false);
+  assert.equal(validateStoryArchitecture(comprehensionArchitecture(), {
+    packageSha256: "package_hash",
+    selectedTreatmentSha256: "treatment_hash",
+    requireMechanicComprehensionContract: true,
+  }).done, true);
   const frontierArchitecture = dramaticArchitecture();
   frontierArchitecture.reference_merit_frontier_sha256 = HASHES.d;
   frontierArchitecture.merit_dominance_contract = {
@@ -683,6 +718,40 @@ export async function runWinnerSourceRoomV2ContractTests() {
     scriptText,
     scriptSha256: "script_hash",
     requireDramaticOpeningAcceptance: true,
+  }).done, true);
+  assert.equal(validateSourceSemanticAcceptance(dramaticAcceptance, {
+    scriptText,
+    scriptSha256: "script_hash",
+    requireColdListenerComprehension: true,
+  }).done, false);
+  const comprehensionAcceptance = structuredClone(dramaticAcceptance);
+  comprehensionAcceptance.requirements.push(...COLD_LISTENER_ACCEPTANCE_REQUIREMENT_IDS.map((id) => ({ id, decision: "pass" })));
+  comprehensionAcceptance.cold_listener_comprehension = {
+    decision: "pass",
+    current_objective_plain_language: "Joey must refuse the throne and free the city.",
+    central_concepts: [{
+      spoken_name: "Refusal",
+      input_or_trigger: "Joey is offered the throne.",
+      observable_output: "He rejects centralized worship.",
+      limit_or_cost: "He gives up direct power.",
+      why_it_matters_now: "The city can choose for itself.",
+      first_clear_anchor: exactAnchor(scriptText, exactText),
+      distinct_from: ["cold rejection"],
+    }],
+    orientation_checkpoints: ["opening", "early_story", "middle", "ending"].map((section_label) => ({
+      section_label,
+      current_goal: "Joey must refuse the throne.",
+      immediate_obstacle: "The city wants to worship him.",
+      current_location_or_context: "He stands before the throne.",
+      what_changed: "The offer made his private rule public.",
+      anchor: exactAnchor(scriptText, exactText),
+    })),
+    confusion_points: [],
+  };
+  assert.equal(validateSourceSemanticAcceptance(comprehensionAcceptance, {
+    scriptText,
+    scriptSha256: "script_hash",
+    requireColdListenerComprehension: true,
   }).done, true);
   const frontierAcceptance = structuredClone(dramaticAcceptance);
   frontierAcceptance.reference_sha256 = HASHES.b;

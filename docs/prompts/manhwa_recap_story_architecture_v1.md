@@ -11,6 +11,7 @@ The architecture must preserve:
 - literal early, repeated, and final title payments
 - protagonist contradiction, human desire, value, vulnerability, and owned-choice pattern
 - mechanic/world constraints and facts the story must never contradict
+- a `mechanic_comprehension_contract` for every recurring power, system, timed technique, institutional rule, or coined story term a listener must understand. Each row states its spoken name, what activates or supplies it, its observable output, its stable limit/cost, why it matters now, the first movement where action makes the rule legible, and any adjacent term it must not be confused with. A mechanic may evolve, but later applications must visibly follow or explicitly update this same rule.
 - one accumulating central relationship
 - an opposition ladder that remembers and changes tactics
 - a learning ledger connecting discovery, cost, and later changed behavior
@@ -46,6 +47,8 @@ important, reveal them after the viewer has watched the protagonist suffer, choo
 
 Return JSON only using schema goldflow_story_architecture_v1. Include package_sha256, selected_treatment_sha256, name_familiarity_ledger_sha256, target_word_range, opening_semantic_contract, protagonist_contract, character_name_plan, mechanic_and_world_constraints, relationship_ladder, opposition_ladder, learning_ledger, continuity_ledger, climax_proof_obligations, closure_contract, and movements. When a reference frontier is supplied, also include `reference_merit_frontier_sha256` and `merit_dominance_contract` with the exact normalization policy, one `dimension_obligations` row per required frontier dimension, and one `edge_obligations` row per supplied material edge. Dimension rows contain `id`, `candidate_strategy`, `proof_shape`, and valid `movement_ids`; edge rows use `edge_id` with those same fields.
 
+Also include `mechanic_comprehension_contract` with `current_objective_plain_language` and `concepts`. Each concept contains `spoken_name`, `category`, `input_or_trigger`, `observable_output`, `limit_or_cost`, `why_it_matters_now`, `first_clear_movement_id`, and `distinct_from`. Use plain listener language rather than circular labels. The writer must dramatize these facts through consequence and action; do not paste this planning structure into narration.
+
 `character_name_plan` contains every recurring named character with `name`, `role`, `voice_or_behavior_distinction`, `reuse_disposition` (`new`, `intentional_reuse`, or `series_recurring`), and `selection_rationale`. A recent familiar name may still be selected, but `intentional_reuse` must explain why it fits better than a natural alternative. Do not include unnamed crowds or one-line functionaries.
 
 Every movement has exactly these creative fields:
@@ -57,6 +60,7 @@ Every movement has exactly these creative fields:
 - relationship_opposition_or_learning_change
 - promise_or_viewer_question_movement
 - continuity_constraints
+- listener_orientation: `current_goal`, `immediate_obstacle`, `what_changed_from_previous_movement`, and `active_concepts`. These are backstage checks that keep a one-pass listener oriented; they are not sentences to paste into narration.
 
 Do not duplicate the architecture into a second retention map.
 ```

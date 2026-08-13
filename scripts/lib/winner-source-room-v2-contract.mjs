@@ -96,6 +96,12 @@ export const DRAMATIC_OPENING_ACCEPTANCE_REQUIREMENT_IDS = [
   "opening_engine_deadline_met",
 ];
 
+export const COLD_LISTENER_ACCEPTANCE_REQUIREMENT_IDS = [
+  "cold_listener_comprehension",
+  "terminology_unambiguous_by_ear",
+  "story_orientation_continuous",
+];
+
 export const DRAMATIC_COLD_OPEN_VERSION = "dramatic_cold_open_v2";
 
 function sha256(value) {
@@ -229,6 +235,26 @@ export function bindSourceSemanticAcceptanceAnchors(document, {
 } = {}) {
   return {
     ...document,
+    cold_listener_comprehension: document?.cold_listener_comprehension && typeof document.cold_listener_comprehension === "object"
+      ? {
+        ...document.cold_listener_comprehension,
+        central_concepts: (Array.isArray(document.cold_listener_comprehension.central_concepts)
+          ? document.cold_listener_comprehension.central_concepts
+          : []).map((concept) => ({
+          ...concept,
+          first_clear_anchor: bindUniqueExactAnchor(concept?.first_clear_anchor, scriptText),
+        })),
+        orientation_checkpoints: (Array.isArray(document.cold_listener_comprehension.orientation_checkpoints)
+          ? document.cold_listener_comprehension.orientation_checkpoints
+          : []).map((checkpoint) => ({
+          ...checkpoint,
+          anchor: bindUniqueExactAnchor(checkpoint?.anchor, scriptText),
+        })),
+        confusion_points: (Array.isArray(document.cold_listener_comprehension.confusion_points)
+          ? document.cold_listener_comprehension.confusion_points
+          : []).map((point) => bindUniqueExactAnchor(point, scriptText)),
+      }
+      : document?.cold_listener_comprehension,
     reference_density_verdicts: (Array.isArray(document?.reference_density_verdicts)
       ? document.reference_density_verdicts
       : []).map((row) => ({
@@ -810,6 +836,7 @@ export function validateStoryArchitecture(document, {
   requireMeritDominanceContract = false,
   referenceMeritFrontierSha256 = null,
   referenceMeritFrontier = null,
+  requireMechanicComprehensionContract = false,
 } = {}) {
   const blockers = [];
   pushIf(blockers, document?.schema !== STORY_ARCHITECTURE_SCHEMA, "story_architecture_schema_invalid");
@@ -839,6 +866,20 @@ export function validateStoryArchitecture(document, {
     "relationship_ladder", "opposition_ladder", "learning_ledger", "continuity_ledger",
     "climax_proof_obligations", "closure_contract",
   ]) pushIf(blockers, !document?.[field] || typeof document[field] !== "object", `story_architecture_${field}_missing`);
+  const comprehension = document?.mechanic_comprehension_contract;
+  if (requireMechanicComprehensionContract || comprehension != null) {
+    pushIf(blockers, !comprehension || typeof comprehension !== "object" || Array.isArray(comprehension), "story_architecture_mechanic_comprehension_contract_missing");
+    pushIf(blockers, !nonEmpty(comprehension?.current_objective_plain_language), "story_architecture_mechanic_comprehension_current_objective_missing");
+    const concepts = Array.isArray(comprehension?.concepts) ? comprehension.concepts : [];
+    pushIf(blockers, concepts.length < 1, "story_architecture_mechanic_comprehension_concepts_missing");
+    for (const [index, concept] of concepts.entries()) {
+      for (const field of [
+        "spoken_name", "category", "input_or_trigger", "observable_output", "limit_or_cost",
+        "why_it_matters_now", "first_clear_movement_id",
+      ]) pushIf(blockers, !nonEmpty(concept?.[field]), `story_architecture_mechanic_comprehension_${index}_${field}_missing`);
+      pushIf(blockers, !Array.isArray(concept?.distinct_from), `story_architecture_mechanic_comprehension_${index}_distinct_from_missing`);
+    }
+  }
   const opening = document?.opening_semantic_contract ?? {};
   if (requireDramaticOpeningContract || hasDramaticColdOpenContract(document)) {
     pushIf(blockers, opening?.version !== DRAMATIC_COLD_OPEN_VERSION, "story_architecture_dramatic_cold_open_version_missing");
@@ -864,12 +905,20 @@ export function validateStoryArchitecture(document, {
   pushIf(blockers, movements.length < 10 || movements.length > 14, `story_architecture_movement_count_${movements.length}_outside_10_14`);
   const ids = movements.map((movement) => String(movement?.id ?? "").trim());
   pushIf(blockers, !unique(ids), "story_architecture_movement_ids_duplicate");
-  for (const [index, movement] of movements.entries()) {
+    for (const [index, movement] of movements.entries()) {
     for (const field of [
       "id", "entering_state", "protagonist_choice", "consequence_and_changed_state",
       "relationship_opposition_or_learning_change", "promise_or_viewer_question_movement",
     ]) pushIf(blockers, !nonEmpty(movement?.[field]), `story_architecture_movement_${index}_${field}_missing`);
     pushIf(blockers, !Array.isArray(movement?.continuity_constraints), `story_architecture_movement_${index}_continuity_constraints_missing`);
+    if (requireMechanicComprehensionContract || comprehension != null) {
+      const orientation = movement?.listener_orientation;
+      pushIf(blockers, !orientation || typeof orientation !== "object" || Array.isArray(orientation), `story_architecture_movement_${index}_listener_orientation_missing`);
+      for (const field of ["current_goal", "immediate_obstacle", "what_changed_from_previous_movement"]) {
+        pushIf(blockers, !nonEmpty(orientation?.[field]), `story_architecture_movement_${index}_listener_orientation_${field}_missing`);
+      }
+      pushIf(blockers, !Array.isArray(orientation?.active_concepts), `story_architecture_movement_${index}_listener_orientation_active_concepts_missing`);
+    }
   }
   if (requireMeritDominanceContract || referenceMeritFrontierSha256) {
     const contract = document?.merit_dominance_contract;
@@ -1174,6 +1223,7 @@ export function validateSourceSemanticAcceptance(document, {
   referenceMeritFrontierSha256 = null,
   referenceDensityDiagnosticSha256 = null,
   referenceMeritFrontier = null,
+  requireColdListenerComprehension = false,
 } = {}) {
   const blockers = [];
   pushIf(blockers, document?.schema !== SOURCE_SEMANTIC_ACCEPTANCE_SCHEMA, "source_semantic_acceptance_schema_invalid");
@@ -1192,6 +1242,47 @@ export function validateSourceSemanticAcceptance(document, {
     for (const id of DRAMATIC_OPENING_ACCEPTANCE_REQUIREMENT_IDS) {
       pushIf(blockers, !ids.includes(id), `source_semantic_acceptance_requirement_${id}_missing`);
     }
+  }
+  if (requireColdListenerComprehension || document?.cold_listener_comprehension != null) {
+    for (const id of COLD_LISTENER_ACCEPTANCE_REQUIREMENT_IDS) {
+      pushIf(blockers, !ids.includes(id), `source_semantic_acceptance_requirement_${id}_missing`);
+    }
+    const comprehension = document?.cold_listener_comprehension;
+    pushIf(blockers, !comprehension || typeof comprehension !== "object" || Array.isArray(comprehension), "source_semantic_acceptance_cold_listener_comprehension_missing");
+    pushIf(blockers, !["pass", "fail"].includes(comprehension?.decision), "source_semantic_acceptance_cold_listener_decision_invalid");
+    pushIf(blockers, !nonEmpty(comprehension?.current_objective_plain_language), "source_semantic_acceptance_cold_listener_objective_missing");
+    const concepts = Array.isArray(comprehension?.central_concepts) ? comprehension.central_concepts : [];
+    pushIf(blockers, concepts.length < 1, "source_semantic_acceptance_cold_listener_concepts_missing");
+    for (const [index, concept] of concepts.entries()) {
+      for (const field of ["spoken_name", "input_or_trigger", "observable_output", "limit_or_cost", "why_it_matters_now"]) {
+        pushIf(blockers, !nonEmpty(concept?.[field]), `source_semantic_acceptance_cold_listener_concept_${index}_${field}_missing`);
+      }
+      pushIf(blockers, !Array.isArray(concept?.distinct_from), `source_semantic_acceptance_cold_listener_concept_${index}_distinct_from_missing`);
+      validateExactAnchor(concept?.first_clear_anchor, scriptText, `source_semantic_acceptance_cold_listener_concept_${index}_anchor`, blockers);
+    }
+    const checkpoints = Array.isArray(comprehension?.orientation_checkpoints) ? comprehension.orientation_checkpoints : [];
+    const checkpointLabels = checkpoints.map((row) => String(row?.section_label ?? "").trim());
+    for (const requiredLabel of ["opening", "early_story", "middle", "ending"]) {
+      pushIf(blockers, !checkpointLabels.includes(requiredLabel), `source_semantic_acceptance_cold_listener_checkpoint_${requiredLabel}_missing`);
+    }
+    pushIf(blockers, !unique(checkpointLabels), "source_semantic_acceptance_cold_listener_checkpoint_labels_duplicate");
+    for (const [index, checkpoint] of checkpoints.entries()) {
+      for (const field of ["section_label", "current_goal", "immediate_obstacle", "current_location_or_context", "what_changed"]) {
+        pushIf(blockers, !nonEmpty(checkpoint?.[field]), `source_semantic_acceptance_cold_listener_checkpoint_${index}_${field}_missing`);
+      }
+      validateExactAnchor(checkpoint?.anchor, scriptText, `source_semantic_acceptance_cold_listener_checkpoint_${index}_anchor`, blockers);
+    }
+    const confusionPoints = Array.isArray(comprehension?.confusion_points) ? comprehension.confusion_points : [];
+    for (const [index, point] of confusionPoints.entries()) {
+      validateExactAnchor(point, scriptText, `source_semantic_acceptance_cold_listener_confusion_${index}`, blockers);
+      pushIf(blockers, !nonEmpty(point?.reason), `source_semantic_acceptance_cold_listener_confusion_${index}_reason_missing`);
+    }
+    const requirementById = new Map(requirements.map((row) => [row?.id, row?.decision]));
+    const expected = comprehension?.decision === "pass" && confusionPoints.length === 0 ? "pass" : "fail";
+    for (const id of COLD_LISTENER_ACCEPTANCE_REQUIREMENT_IDS) {
+      pushIf(blockers, requirementById.get(id) !== expected, `source_semantic_acceptance_requirement_${id}_comprehension_mismatch`);
+    }
+    pushIf(blockers, document?.status === "accepted" && expected !== "pass", "source_semantic_acceptance_accepted_without_cold_listener_comprehension");
   }
   if (requireReferenceDensityDominance) {
     for (const id of FRONTIER_SEMANTIC_ACCEPTANCE_REQUIREMENT_IDS) {

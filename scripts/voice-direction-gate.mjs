@@ -4242,13 +4242,20 @@ function gateExcerpt(text, pattern) {
   return text.slice(start, end).replace(/\s+/g, " ").trim();
 }
 
-function voiceArtifactContaminationGate(artifacts, currentSourceText, { seriesPackage = {} } = {}) {
+function voiceArtifactContaminationGate(artifacts, currentSourceText, {
+  seriesPackage = {},
+  trustedReferenceTexts = [],
+} = {}) {
   const allowedContext = String(currentSourceText ?? "");
   const foreignTerms = foreignSeriesTermSpecs({ channel, series: seriesSlug, seriesPackage });
   const protectedTerms = protectedIpTermSpecs();
   const blockers = [];
   for (const [artifact, value] of Object.entries(artifacts ?? {})) {
-    const text = stringifyForGate(value);
+    let text = stringifyForGate(value);
+    for (const trustedReferenceText of trustedReferenceTexts) {
+      const exact = String(trustedReferenceText ?? "").trim();
+      if (exact) text = text.split(exact).join("[RIGHTS_CLEARED_REFERENCE_TRANSCRIPT]");
+    }
     for (const term of foreignTerms) {
       const appearsInArtifact = resetAndTest(term.pattern, text);
       const allowedForCurrentSeries = resetAndTest(term.pattern, allowedContext);
@@ -5026,7 +5033,13 @@ async function main() {
     dialogue_map: dialogueMap,
     narration_fish_performance: performanceText,
     narration_fish_stripped: strippedText,
-  }, currentSourceText, { seriesPackage: dialogueContext.seriesPackage });
+  }, currentSourceText, {
+    seriesPackage: dialogueContext.seriesPackage,
+    trustedReferenceTexts: [
+      providerContext.qwen3.reference_text,
+      providerContext.kokoro.reference_text,
+    ],
+  });
   if (voiceContaminationReport.status !== "passed") {
     const contaminationFailure = {
       code: "voice_artifact_contamination",

@@ -456,9 +456,9 @@ function testNarrationTtsProviderLocksAndLegacyRouting() {
   assert.equal(policy.primary.model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(policy.primary.voice_id, "joel_owned_narrator_clone");
   assert.equal(policy.primary.native_speed, null);
-  assert.equal(policy.primary.reference_audio_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_audio_sha256);
+  assert.equal(policy.primary.reference_audio_sha256, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256);
   assert.equal(policy.primary.reference_manifest_sha256, QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256);
-  assert.equal(policy.primary.voice_continuity_contract, "qwen_icl_clone_of_joel_owned_reference");
+  assert.equal(policy.primary.voice_continuity_contract, "qwen_icl_clone_of_joel_owned_dry_deadpan_reference");
   assert.equal(policy.primary.repetition_penalty, 1.2);
   assert.equal(policy.fallback, null);
   assert.deepEqual(policy.unit_contract, QWEN_LIAM_UNIT_CONTRACT);

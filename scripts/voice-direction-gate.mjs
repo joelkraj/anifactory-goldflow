@@ -29,6 +29,7 @@ import {
   narrationSourceRefKey,
   validateActionableNarrationDirection,
 } from "./lib/narration-performance-contract.mjs";
+import { authorNarrationPerformanceDirection } from "./lib/narration-performance-author.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -3831,6 +3832,9 @@ function buildQwenGenerationPlan(
       qwen_generation_units: generationUnits,
     });
   }
+  const performanceAuthoringAtomicUnits = providerContext.primary_provider === "qwen_local"
+    ? unitRows.map((unit) => structuredClone(unit))
+    : [];
   if (providerContext.primary_provider === "qwen_local") {
     const directed = applyActionableNarrationDirection(
       unitRows,
@@ -3970,6 +3974,7 @@ function buildQwenGenerationPlan(
       },
     },
     performance_contract: performanceContract,
+    _performance_authoring_atomic_units: performanceAuthoringAtomicUnits,
     provider_controls: {
       kokoro: providerContext.kokoro,
       qwen3: providerContext.qwen3,
@@ -4645,16 +4650,53 @@ async function main() {
     : applyFishReferenceIds(voiceQualityAdjustedSegments, fishAudioConfig, dialogueContext);
   const baseSegments = applied.segments ?? applied;
   const missingRefRoles = applied.missingRefRoles ?? [];
-  const narrationGenerationPlan = buildQwenGenerationPlan(
+  const narrationPlanDraft = buildQwenGenerationPlan(
     baseSegments,
     qwenConfig,
     dialogueContext,
     ttsProvider,
     ttsSpokenOverrides,
     providerContext,
-    actionableDirectionArtifact,
+    null,
     sourceScriptHash,
   );
+  let effectiveActionableDirection = actionableDirectionArtifact;
+  if (qwenLocal) {
+    const atomicUnits = narrationPlanDraft._performance_authoring_atomic_units ?? [];
+    const existingValidation = validateActionableNarrationDirection({
+      artifact: effectiveActionableDirection,
+      atomicUnits,
+      sourceScriptSha256: sourceScriptHash,
+      hardWordMax: 60,
+    });
+    if (existingValidation.status !== "passed") {
+      const authored = await authorNarrationPerformanceDirection({
+        atomicUnits,
+        sourceScriptSha256: sourceScriptHash,
+        episodeDir,
+        repoRoot,
+        provider: flags["performance-planner-provider"] ?? null,
+        model: flags["performance-planner-model"] ?? flags.model ?? flags["llm-model"] ?? null,
+        reasoningEffort: flags["performance-reasoning-effort"] ?? "medium",
+        concurrency: Number(flags["performance-concurrency"] ?? 3),
+      });
+      effectiveActionableDirection = authored.artifact;
+      effectiveActionableDirection.artifact_path = authored.artifactPath;
+    }
+  }
+  const narrationGenerationPlan = qwenLocal
+    ? buildQwenGenerationPlan(
+        baseSegments,
+        qwenConfig,
+        dialogueContext,
+        ttsProvider,
+        ttsSpokenOverrides,
+        providerContext,
+        effectiveActionableDirection,
+        sourceScriptHash,
+      )
+    : narrationPlanDraft;
+  delete narrationGenerationPlan._performance_authoring_atomic_units;
   const speakabilityReportPath = path.join(episodeDir, "script_speakability_report.json");
   const ttsSpokenOverridesPath = path.join(episodeDir, "tts_spoken_overrides.json");
   narrationGenerationPlan.source_script_hash = sourceScriptHash;

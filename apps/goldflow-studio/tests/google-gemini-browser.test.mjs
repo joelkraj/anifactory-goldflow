@@ -7,6 +7,7 @@ import {
   createGeminiLlmPromptDelivery,
   GEMINI_INLINE_PROMPT_MAX_CHARS,
   GoogleGeminiBrowser,
+  isGeminiImageSurfaceUrl,
   normalizeGeminiPromptText,
   verifyGeminiComposerPrompt,
   verifyGeminiTextAttachmentRetained,
@@ -236,6 +237,12 @@ async function opensEveryTextJobOnAnIndependentAppTab() {
   assert.deepEqual(second.navigations, ["https://gemini.google.com/app"]);
 }
 
+function recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel() {
+  assert.equal(isGeminiImageSurfaceUrl("https://gemini.google.com/images"), true);
+  assert.equal(isGeminiImageSurfaceUrl("https://gemini.google.com/images?hl=en"), true);
+  assert.equal(isGeminiImageSurfaceUrl("https://gemini.google.com/app"), false);
+}
+
 await acceptsEditorNormalizationWithoutWeakeningContentBinding();
 await acceptsCompleteLongContenteditablePrompt();
 await stagesCompleteLongPromptAsAuditedUtf8Attachment();
@@ -246,5 +253,6 @@ await rejectsIncompleteOrChangedPrompt();
 await rejectsEmptyPrompt();
 await acceptsOnlyVerifiedGemini36FlashWithoutExtendedThinking();
 await opensEveryTextJobOnAnIndependentAppTab();
+recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 
 console.log("google-gemini-browser tests passed");

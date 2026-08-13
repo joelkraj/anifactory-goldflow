@@ -190,6 +190,10 @@ export function geminiBlockingCode(text) {
   return null;
 }
 
+export function isGeminiImageSurfaceUrl(value) {
+  return /^https:\/\/gemini\.google\.com\/images(?:[/?#]|$)/i.test(String(value ?? ""));
+}
+
 export class GoogleGeminiBrowser {
   constructor({
     profileDir,
@@ -348,18 +352,17 @@ export class GoogleGeminiBrowser {
   }
 
   async verifyUiContract(page) {
-    const body = (await page.locator("body").innerText()).replace(/\s+/g, " ");
-    // The compact sidebar can omit the plan badge on newly opened job tabs;
-    // authentication is verified once on the persistent Images landing page.
-    // Nano Banana 2 is verified on the persistent Images landing page. Fresh
-    // job tabs sometimes omit the explanatory model label while retaining mode.
+    // Gemini's dedicated /images surface is itself the stable image-mode
+    // contract. The optional Images chip has changed its accessible label more
+    // than once and may be absent entirely on fresh /images job tabs.
+    const imageSurface = isGeminiImageSurfaceUrl(page.url());
     let imageMode = await visibleLocator(page.getByRole("button", { name: /Deselect Images/i }));
-    if (!imageMode) {
+    if (!imageSurface && !imageMode) {
       const imageToggle = await visibleLocator(page.getByRole("button", { name: "Images", exact: true }));
       if (imageToggle) await imageToggle.click();
       imageMode = await waitForVisible(page.getByRole("button", { name: /Deselect Images/i }), 15_000);
     }
-    if (!imageMode) throw codedError("ui_contract_mismatch", "Gemini Images mode could not be selected.");
+    if (!imageSurface && !imageMode) throw codedError("ui_contract_mismatch", "Gemini Images mode could not be selected.");
     return {
       provider: "google-gemini",
       account_plan: this.geminiPlanLabel,

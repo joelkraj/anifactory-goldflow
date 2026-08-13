@@ -3125,11 +3125,14 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
   if (!units.length) return { done: false, evidence: `${label} contains no narration units` };
   if (policy.primary.provider === "qwen_local") {
     const qwenGrouping = plan?.qwen_liam_unit_grouping ?? {};
+    const nullableNumberMatches = (actual, expected) => (
+      expected == null ? actual == null : Number(actual) === Number(expected)
+    );
     const groupingMismatches = [
       qwenGrouping.enabled !== true ? "enabled" : null,
       qwenGrouping.sentence_complete !== QWEN_LIAM_UNIT_CONTRACT.sentence_complete ? "sentence_complete" : null,
-      Number(qwenGrouping.target_spoken_words_min) !== QWEN_LIAM_UNIT_CONTRACT.target_words_min ? "target_spoken_words_min" : null,
-      Number(qwenGrouping.target_spoken_words_max) !== QWEN_LIAM_UNIT_CONTRACT.target_words_max ? "target_spoken_words_max" : null,
+      !nullableNumberMatches(qwenGrouping.target_spoken_words_min, QWEN_LIAM_UNIT_CONTRACT.target_words_min) ? "target_spoken_words_min" : null,
+      !nullableNumberMatches(qwenGrouping.target_spoken_words_max, QWEN_LIAM_UNIT_CONTRACT.target_words_max) ? "target_spoken_words_max" : null,
       Number(qwenGrouping.hard_spoken_words_max) !== QWEN_LIAM_UNIT_CONTRACT.hard_words_max ? "hard_spoken_words_max" : null,
       qwenGrouping.continuous_requests_allowed !== QWEN_LIAM_UNIT_CONTRACT.continuous_requests ? "continuous_requests_allowed" : null,
       plan?.sentence_unit_boundary_integrity?.status !== "passed" ? "sentence_unit_boundary_integrity.status" : null,

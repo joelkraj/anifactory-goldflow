@@ -3990,7 +3990,7 @@ function buildQwenGenerationPlan(
       enabled: providerContext.primary_provider === "qwen_local",
       sentence_complete: true,
       target_spoken_words_min: null,
-      target_spoken_words_max: null,
+      target_spoken_words_max: 60,
       hard_spoken_words_max: 60,
       continuous_requests_allowed: false,
       policy: "LLM-authored actionable boundaries are used when a valid hash-bound direction artifact exists; otherwise deterministic sentence-complete grouping is the fallback. There is no minimum word target. Voice-segment boundaries, system/UI, dialogue, performance, speaker changes, sound design, and explicit merge barriers remain atomic. Never split a sentence or exceed 60 spoken words.",

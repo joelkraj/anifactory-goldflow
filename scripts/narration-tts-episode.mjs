@@ -22,6 +22,7 @@ import {
 import {
   NARRATION_TTS_QA_POLICY_VERSION,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  QWEN_LIAM_UNIT_CONTRACT,
   QWEN_JOEL_PRIMARY_LOCK,
   qwenPrimaryLockForVoice,
   QWEN_LIAM_PRIMARY_LOCK,
@@ -961,19 +962,19 @@ export function validateNarrationPlanPolicyForTests(plan, policy) {
   }
   requiredExact(
     plan?.qwen_liam_unit_grouping?.target_spoken_words_min,
-    null,
+    QWEN_LIAM_UNIT_CONTRACT.target_words_min,
     "plan.qwen_liam_unit_grouping.target_spoken_words_min",
     findings,
   );
   requiredExact(
     plan?.qwen_liam_unit_grouping?.target_spoken_words_max,
-    null,
+    QWEN_LIAM_UNIT_CONTRACT.target_words_max,
     "plan.qwen_liam_unit_grouping.target_spoken_words_max",
     findings,
   );
   requiredExact(
     plan?.qwen_liam_unit_grouping?.hard_spoken_words_max,
-    60,
+    QWEN_LIAM_UNIT_CONTRACT.hard_words_max,
     "plan.qwen_liam_unit_grouping.hard_spoken_words_max",
     findings,
   );

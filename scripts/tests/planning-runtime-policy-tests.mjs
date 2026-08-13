@@ -112,7 +112,7 @@ assert.deepEqual(
     "--mode", "plan",
     "--sandbox",
     "--output-format", "json",
-    "--effort", "high",
+    "--effort", "medium",
     "--print-timeout", "90s",
     "--model", "gemini-3.6-flash-medium",
   ],

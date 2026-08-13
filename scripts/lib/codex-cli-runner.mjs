@@ -394,13 +394,22 @@ function normalizedAntigravityEffort(value) {
   return "high";
 }
 
+function antigravityEffortForModel(model, effort) {
+  const normalized = normalizedAntigravityEffort(effort);
+  const modelName = String(model ?? "").trim().toLowerCase();
+  // Antigravity's medium model rejects high effort before submission. Keep the
+  // locked model and use its highest compatible effort instead.
+  if (modelName.endsWith("-medium") && normalized === "high") return "medium";
+  return normalized;
+}
+
 export function antigravityNativeArgsForTests({ prompt, model, effort, timeoutMs = 600_000 }) {
   const args = [
     "--print", String(prompt ?? ""),
     "--mode", "plan",
     "--sandbox",
     "--output-format", "json",
-    "--effort", normalizedAntigravityEffort(effort),
+    "--effort", antigravityEffortForModel(model, effort),
     "--print-timeout", `${Math.max(30, Math.ceil(Number(timeoutMs) / 1000))}s`,
   ];
   if (String(model ?? "").trim() && String(model).trim().toLowerCase() !== "auto") {

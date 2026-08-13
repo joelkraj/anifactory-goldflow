@@ -15,6 +15,7 @@ import {
   QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK,
   QWEN_LIAM_UNIT_CONTRACT,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
+  defaultNarrationVoiceProviderOptions,
   narrationTtsPolicyForIdentity,
 } from "../lib/narration-tts-policy.mjs";
 import {
@@ -71,6 +72,10 @@ const dryDeadpanPolicy = narrationTtsPolicyForIdentity({
     synthesis_contract: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   },
 });
+assert.equal(
+  defaultNarrationVoiceProviderOptions().primary.reference_variant_id,
+  "joel_ref_03_dry_deadpan",
+);
 assert.equal(
   dryDeadpanPolicy.primary.reference_audio_sha256,
   QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256,

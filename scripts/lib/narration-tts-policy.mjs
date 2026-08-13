@@ -179,7 +179,8 @@ export const QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK = Object.freeze({
 export function qwenPrimaryLockForVoice(voiceId, referenceVariantId = null) {
   return voiceId === QWEN_LIAM_PRIMARY_LOCK.voice_id
     ? QWEN_LIAM_PRIMARY_LOCK
-    : referenceVariantId === QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id
+    : referenceVariantId == null
+      || referenceVariantId === QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_variant_id
       ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK
     : QWEN_JOEL_PRIMARY_LOCK;
 }

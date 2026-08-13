@@ -1317,6 +1317,9 @@ function editorialAtomChunks(atoms, maxAtoms = 40) {
 }
 
 async function callEditorialLlm(prompt, stageName, options = {}) {
+  const repairProvider = /_recovery_\d+$/i.test(stageName)
+    ? flags["editorial-repair-provider"] ?? null
+    : null;
   if (isLocalLLMRoute(stageName)) {
     const response = await fetch(localLLMChatCompletionURL(stageName), {
       method: "POST",
@@ -1353,6 +1356,8 @@ async function callEditorialLlm(prompt, stageName, options = {}) {
     model: flags.model ?? flags["llm-model"] ?? null,
     reasoningEffort: flags["reasoning-effort"] ?? null,
     promptHash: sha256(prompt),
+    provider: repairProvider,
+    stageName,
   })) {
     return { parsed: extractJson(cached), provider: `${metadata.provider ?? "codex_cli"}_cache`, model: metadata.model, reasoning_effort: metadata.reasoning_effort, output_path: outputPath, reused: true };
   }
@@ -1363,6 +1368,7 @@ async function callEditorialLlm(prompt, stageName, options = {}) {
     outputPath,
     model: flags.model ?? flags["llm-model"] ?? null,
     reasoningEffort: flags["reasoning-effort"] ?? null,
+    provider: repairProvider,
     timeoutMs: Number(process.env.ANIFACTORY_VISUAL_BEAT_LLM_TIMEOUT_MS ?? 1_200_000),
   });
   return { parsed: extractJson(call.content), provider: call.provider ?? "codex_cli", model: call.model, reasoning_effort: call.reasoning_effort, output_path: outputPath, reused: false };

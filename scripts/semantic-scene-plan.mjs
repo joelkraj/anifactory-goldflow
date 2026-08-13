@@ -1113,6 +1113,9 @@ async function callCodex(prompt, stageName) {
     outputPath,
     model: flags.model ?? flags["llm-model"] ?? null,
     reasoningEffort: semanticReasoningEffortForStage(stageName, flags),
+    provider: /_exact_repair$/i.test(stageName)
+      ? flags["semantic-repair-provider"] ?? null
+      : null,
     timeoutMs: Number(process.env.ANIFACTORY_SEMANTIC_PLAN_TIMEOUT_MS ?? 1_200_000),
   });
   let extracted;
@@ -1165,6 +1168,9 @@ async function reusableCodexCall(stageName, prompt, validateParsed = null) {
       reasoningEffort: semanticReasoningEffortForStage(stageName, flags),
       promptHash: sha256(prompt),
       stageName,
+      provider: /_exact_repair$/i.test(stageName)
+        ? flags["semantic-repair-provider"] ?? null
+        : null,
     })) continue;
     const content = await fs.readFile(outputPath, "utf8");
     let extracted;

@@ -895,18 +895,45 @@ export class GoogleFlowBrowser {
   }
 
   async imageBytes(page, sourceUrl) {
-    if (sourceUrl.startsWith("blob:")) {
+    const renderedImageBytes = async (url) => {
+      const candidate = page.locator("img");
+      for (let index = 0; index < await candidate.count(); index += 1) {
+        const image = candidate.nth(index);
+        const matches = await image.evaluate((node, wanted) => node instanceof HTMLImageElement
+          && (node.currentSrc === wanted || node.src === wanted)
+          && node.complete
+          && node.naturalWidth >= 512
+          && node.naturalHeight >= 288, url).catch(() => false);
+        if (matches) return Buffer.from(await image.screenshot({ type: "png" }));
+      }
+      throw new Error("rendered image element is unavailable");
+    };
+    const fetchThroughPage = async (url) => {
       const base64 = await page.evaluate(async (url) => {
-        const response = await fetch(url);
+        const response = await fetch(url, { credentials: "include" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
         let binary = "";
         for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
         return btoa(binary);
-      }, sourceUrl);
+      }, url);
       return Buffer.from(base64, "base64");
+    };
+    if (sourceUrl.startsWith("blob:")) {
+      return fetchThroughPage(sourceUrl);
     }
     const response = await page.request.get(sourceUrl, { timeout: 120_000 });
-    if (!response.ok()) throw new Error(`Google Flow image download returned HTTP ${response.status()}.`);
+    if (!response.ok()) {
+      try {
+        return await fetchThroughPage(sourceUrl);
+      } catch (error) {
+        try {
+          return await renderedImageBytes(sourceUrl);
+        } catch (renderError) {
+          throw new Error(`Google Flow image download returned HTTP ${response.status()}, page-session fetch failed (${error.message}), and rendered-image capture failed (${renderError.message})`);
+        }
+      }
+    }
     return Buffer.from(await response.body());
   }
 
@@ -990,18 +1017,28 @@ export class GoogleFlowBrowser {
   }
 
   async mediaBytes(page, sourceUrl) {
-    if (sourceUrl.startsWith("blob:")) {
+    const fetchThroughPage = async (url) => {
       const base64 = await page.evaluate(async (url) => {
-        const response = await fetch(url);
+        const response = await fetch(url, { credentials: "include" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
         let binary = "";
         for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
         return btoa(binary);
-      }, sourceUrl);
+      }, url);
       return Buffer.from(base64, "base64");
+    };
+    if (sourceUrl.startsWith("blob:")) {
+      return fetchThroughPage(sourceUrl);
     }
     const response = await page.request.get(sourceUrl, { timeout: 180_000 });
-    if (!response.ok()) throw new Error(`Google Flow video download returned HTTP ${response.status()}.`);
+    if (!response.ok()) {
+      try {
+        return await fetchThroughPage(sourceUrl);
+      } catch (error) {
+        throw new Error(`Google Flow video download returned HTTP ${response.status()}, and page-session fetch failed: ${error.message}`);
+      }
+    }
     return Buffer.from(await response.body());
   }
 

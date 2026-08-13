@@ -456,6 +456,8 @@ export async function runRelockTtsTests() {
   );
 
   const beforePlannerFix = structuredClone(after);
+  beforePlannerFix.voice_provider_options.unit_contract.target_words_min = 45;
+  beforePlannerFix.provider_locks.tts_unit_target_words_min = 45;
   beforePlannerFix.git = {
     commit: "qwen-before-planner-fix",
     branch: "main",
@@ -513,6 +515,8 @@ export async function runRelockTtsTests() {
   assert.equal(afterPlannerFix.tts_provider, "qwen_local");
   assert.equal(afterPlannerFix.narrator_voice_id, "joel_owned_narrator_clone");
   assert.equal(afterPlannerFix.tts_fallback_provider, null);
+  assert.equal(afterPlannerFix.voice_provider_options.unit_contract.target_words_min, null);
+  assert.equal(afterPlannerFix.provider_locks.tts_unit_target_words_min, null);
   assert.deepEqual(afterPlannerFix.voice_provider_options, options);
   assert.equal(afterPlannerFix.git.commit, "qwen-after-planner-fix");
   assert.equal(

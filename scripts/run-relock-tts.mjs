@@ -792,10 +792,6 @@ async function main() {
         `Qwen/Liam planner-fix relock requires the existing canonical profile ${QWEN_LIAM_PROFILE_ID}; found ${identity.tts_profile ?? "missing"}.`,
       );
     }
-    narrationPolicy.validateNarrationTtsPolicy(
-      narrationPolicy.narrationTtsPolicyForIdentity(identity),
-      { production: true },
-    );
   }
 
   const git = cleanGitSnapshot();

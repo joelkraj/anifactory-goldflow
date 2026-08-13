@@ -1601,6 +1601,8 @@ async function existingGroupingLock() {
 
 async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, options = {}) {
   const locked = await existingGroupingLock();
+  const currentPlan = await readJson(outputPath, null);
+  const currentApproval = await readJson(visualBeatApprovalPath, null);
   const reprojectActiveStateOnly = flags["reproject-active-state-only"] === "true";
   const retimeLockedGrouping = flags["retime-locked-grouping"] === "true";
   const regroupLockedTailFromSec = flags["regroup-locked-tail-from-sec"] == null
@@ -1611,7 +1613,15 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, 
     console.error(`visual beats: grouping lock current; reusing ${outputPath}`);
     return { reused: true, report: locked.plan };
   }
-  if (await readJson(visualBeatApprovalPath, null) && flags["approve-regrouping"] !== "true" && !reprojectActiveStateOnly && !retimeLockedGrouping && !regroupLockedTail) {
+  if (
+    currentApproval
+    && currentPlan?.status === "passed"
+    && currentPlan?.source_script_hash === await hashFile(scriptPath)
+    && flags["approve-regrouping"] !== "true"
+    && !reprojectActiveStateOnly
+    && !retimeLockedGrouping
+    && !regroupLockedTail
+  ) {
     throw new Error("Visual beat grouping was previously locked. Pass --approve-regrouping true only with explicit operator approval.");
   }
   if (retimeLockedGrouping && !locked) {

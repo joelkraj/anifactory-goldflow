@@ -17,6 +17,21 @@ function normalizeError(error, fallbackCode = "browser_worker_failure") {
   return normalized;
 }
 
+export function browserFailureDisposition(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  const message = String(error?.message ?? error ?? "").toLowerCase();
+  if (code === "rate_limited" || /rate.?limit|too many requests|requesting generations too quickly|cooldown/.test(message)) {
+    return { kind: "rate_limit", pausesDispatch: true };
+  }
+  if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(code)) {
+    return { kind: code, pausesDispatch: true };
+  }
+  if (/timeout|timed out|transport|connection|socket|fetch failed|upload files.*not enabled|element is not enabled/.test(message)) {
+    return { kind: "transport", pausesDispatch: true };
+  }
+  return { kind: "asset", pausesDispatch: false };
+}
+
 export class GoldflowDesktopHost {
   constructor({ config, browser = null, log = null } = {}) {
     this.config = assertDesktopConfig(config);
@@ -38,6 +53,9 @@ export class GoldflowDesktopHost {
     this.schedulerTimer = null;
     this.lastPauseMessage = null;
     this.lastPauseLoggedAt = 0;
+    this.nextLeaseAt = 0;
+    this.dispatchCooldownUntil = 0;
+    this.consecutiveTransportFailures = 0;
     this.stopPromise = new Promise((resolve) => { this.resolveStopped = resolve; });
   }
 
@@ -65,6 +83,14 @@ export class GoldflowDesktopHost {
         phase: active.phase,
         startedAt: active.startedAt,
       })),
+      dispatch_policy: {
+        mode: "staggered_top_off_v1",
+        submission_stagger_ms: this.config.submissionStaggerMs,
+        next_lease_at: this.nextLeaseAt ? new Date(this.nextLeaseAt).toISOString() : null,
+        cooldown_until: this.dispatchCooldownUntil ? new Date(this.dispatchCooldownUntil).toISOString() : null,
+        consecutive_transport_failures: this.consecutiveTransportFailures,
+        transport_failure_threshold: this.config.transportFailureThreshold,
+      },
       events: this.events,
       updated_at: nowIso(),
     };
@@ -145,6 +171,15 @@ export class GoldflowDesktopHost {
     this.schedulerBusy = true;
     let nextDelayMs = 700;
     try {
+      const now = Date.now();
+      if (now < this.dispatchCooldownUntil) {
+        nextDelayMs = Math.min(5_000, this.dispatchCooldownUntil - now);
+        return;
+      }
+      if (now < this.nextLeaseAt) {
+        nextDelayMs = Math.min(1_000, this.nextLeaseAt - now);
+        return;
+      }
       for (let slot = 0; slot < this.config.concurrency; slot += 1) {
         if (!this.running || this.activeJobs.has(slot)) continue;
         let lease;
@@ -172,7 +207,10 @@ export class GoldflowDesktopHost {
           await this.client.fail(lease.job, slot, error);
           continue;
         }
+        this.nextLeaseAt = Date.now() + this.config.submissionStaggerMs;
         this.runSlot(slot, lease).catch((error) => this.log(`Slot ${slot} crashed: ${error.message}`, "error"));
+        nextDelayMs = this.config.submissionStaggerMs;
+        break;
       }
     } finally {
       this.schedulerBusy = false;
@@ -209,13 +247,26 @@ export class GoldflowDesktopHost {
         onPhase: (phase) => this.setPhase(slot, phase),
       });
       await this.client.complete(lease.job, slot, result);
+      this.consecutiveTransportFailures = 0;
       this.log(`Completed ${lease.job.job_id}.`);
     } catch (caught) {
       const error = normalizeError(caught);
+      const disposition = browserFailureDisposition(error);
+      if (disposition.kind === "transport") this.consecutiveTransportFailures += 1;
+      if (disposition.kind === "rate_limit") {
+        this.dispatchCooldownUntil = Date.now() + this.config.rateLimitCooldownMs;
+      } else if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(disposition.kind)) {
+        this.dispatchCooldownUntil = Date.now() + this.config.transportCooldownMs;
+      } else if (disposition.kind === "transport" && this.consecutiveTransportFailures >= this.config.transportFailureThreshold) {
+        this.dispatchCooldownUntil = Date.now() + this.config.transportCooldownMs;
+      }
       await this.client.fail(lease.job, slot, error).catch((reportError) => {
         this.log(`Could not record failure for ${lease.job.job_id}: ${reportError.message}`, "error");
       });
       this.log(`${lease.job.job_id} failed: ${error.message}`, "error");
+      if (this.dispatchCooldownUntil > Date.now()) {
+        this.log(`Browser dispatch cooling down until ${new Date(this.dispatchCooldownUntil).toISOString()} after ${disposition.kind} failure.`, "warn");
+      }
     } finally {
       clearInterval(heartbeat);
       this.activeJobs.delete(slot);

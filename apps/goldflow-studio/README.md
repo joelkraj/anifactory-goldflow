@@ -32,7 +32,7 @@ For the complete production planning and media pool, launch all three signed-in 
 npm run studio:hybrid
 ```
 
-This starts ChatGPT planning plus idle-image capacity on `127.0.0.1:4317` with three slots, five shared Google Flow image/video slots on `127.0.0.1:4318`, and Gemini planning plus idle-image capacity on `127.0.0.1:4319` with three slots. LLM leases take priority over image leases on ChatGPT and Gemini. Flow slots four and five prefer queued video work, while every idle Flow slot may help the image queue. The launcher keeps separate persistent profiles, bootstraps missing sign-ins one at a time, publishes the live planning routes to a local process-owned registry, and drains active work before shutdown. Production manifests still control exact eligible assets.
+This starts ChatGPT planning plus idle-image capacity on `127.0.0.1:4317`, shared Google Flow image/video work on `127.0.0.1:4318`, and Gemini planning plus idle-image capacity on `127.0.0.1:4319`. Each web provider is hard-capped at three active browser workers. New submissions are staggered by 20 seconds and each completed slot is topped off individually; the launcher never opens a simultaneous submission burst. Repeated transport failures pause that provider for five minutes, while a rate limit pauses it for ten. LLM leases take priority over image leases on ChatGPT and Gemini. The launcher keeps separate persistent profiles, bootstraps missing sign-ins one at a time, publishes the live planning routes to a local process-owned registry, and drains active work before shutdown. Production manifests still control exact eligible assets.
 
 For the initial bounded Google Flow proof, start one image slot and sign in once in its separate profile:
 

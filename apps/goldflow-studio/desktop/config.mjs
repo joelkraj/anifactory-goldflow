@@ -34,10 +34,20 @@ export function defaultChromeExecutable(platform = process.platform) {
   return "/usr/bin/google-chrome";
 }
 
+export const PRODUCTION_BROWSER_CONCURRENCY_CEILING = 3;
+export const DEFAULT_BROWSER_SUBMISSION_STAGGER_MS = 20_000;
+export const MIN_BROWSER_SUBMISSION_STAGGER_MS = 15_000;
+export const MAX_BROWSER_SUBMISSION_STAGGER_MS = 25_000;
+
+function boundedNumber(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  return Math.min(maximum, Math.max(minimum, Number.isFinite(parsed) ? parsed : fallback));
+}
+
 export function desktopConfig(flags = {}, environment = process.env) {
   const stateDir = path.resolve(flags["state-dir"] ?? environment.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"));
   const browserProvider = normalizeBrowserProvider(flags.provider ?? environment.GOLDFLOW_DESKTOP_PROVIDER ?? "chatgpt");
-  const browserConcurrencyCeiling = browserProvider === "google-flow" ? 20 : 5;
+  const browserConcurrencyCeiling = PRODUCTION_BROWSER_CONCURRENCY_CEILING;
   const concurrency = Math.min(browserConcurrencyCeiling, Math.max(1, Number(flags.concurrency ?? environment.GOLDFLOW_DESKTOP_CONCURRENCY ?? 3)));
   return {
     serverUrl: String(flags["server-url"] ?? environment.GOLDFLOW_STUDIO_URL ?? "http://127.0.0.1:4317").replace(/\/+$/, ""),
@@ -47,6 +57,15 @@ export function desktopConfig(flags = {}, environment = process.env) {
     chromeExecutable: path.resolve(flags["chrome-executable"] ?? environment.GOLDFLOW_DESKTOP_CHROME_EXECUTABLE ?? defaultChromeExecutable()),
     pairingCode: flags["pairing-code"] ?? environment.GOLDFLOW_STUDIO_PAIRING_CODE ?? null,
     concurrency,
+    submissionStaggerMs: boundedNumber(
+      flags["submission-stagger-ms"] ?? environment.GOLDFLOW_BROWSER_SUBMISSION_STAGGER_MS,
+      DEFAULT_BROWSER_SUBMISSION_STAGGER_MS,
+      MIN_BROWSER_SUBMISSION_STAGGER_MS,
+      MAX_BROWSER_SUBMISSION_STAGGER_MS,
+    ),
+    transportFailureThreshold: 2,
+    transportCooldownMs: 5 * 60_000,
+    rateLimitCooldownMs: 10 * 60_000,
     types: parseWorkerTypes(flags.types ?? environment.GOLDFLOW_DESKTOP_TYPES ?? (
       browserProvider === "chatgpt" ? "llm,image"
         : browserProvider === "google-gemini" ? "llm,image"
@@ -67,7 +86,7 @@ export function desktopConfig(flags = {}, environment = process.env) {
 
 export function assertDesktopConfig(config) {
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(config.serverUrl)) throw new Error("Desktop host server URL must use http://127.0.0.1 with an explicit port.");
-  const concurrencyCeiling = config.browserProvider === "google-flow" ? 20 : 5;
+  const concurrencyCeiling = PRODUCTION_BROWSER_CONCURRENCY_CEILING;
   if (!Number.isInteger(config.concurrency) || config.concurrency < 1 || config.concurrency > concurrencyCeiling) {
     throw new Error(`Desktop host concurrency must be 1 through ${concurrencyCeiling} for ${config.browserProvider}.`);
   }

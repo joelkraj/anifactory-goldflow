@@ -39,7 +39,14 @@ import {
 } from "../../../scripts/hybrid-browser-image-pool.mjs";
 import { loginMarkerExists, loginVerificationMarkerPath, markLoginVerified } from "../desktop/browser-login.mjs";
 import { ChatGptBrowser } from "../desktop/chatgpt-browser.mjs";
-import { assertDesktopConfig, desktopConfig, normalizeBrowserProvider, parseDesktopFlags } from "../desktop/config.mjs";
+import {
+  assertDesktopConfig,
+  desktopConfig,
+  normalizeBrowserProvider,
+  parseDesktopFlags,
+  PRODUCTION_BROWSER_CONCURRENCY_CEILING,
+} from "../desktop/config.mjs";
+import { browserFailureDisposition } from "../desktop/worker-host.mjs";
 import { flowBlockingCode, GoogleFlowBrowser, normalizeFlowPromptText, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
 import { DesktopRuntimeState } from "../desktop/runtime-state.mjs";
 import { validReferenceRoute } from "../desktop/worker-client.mjs";
@@ -55,6 +62,9 @@ const originalEnvironment = { ...process.env };
 
 assert.equal(providerFailurePausesDispatch("content_policy_rejected"), false, "one asset rejection must not pause its provider queue");
 assert.equal(providerFailurePausesDispatch("ui_contract_mismatch"), true, "a provider UI-contract break must pause dispatch");
+assert.deepEqual(browserFailureDisposition(Object.assign(new Error("requesting generations too quickly"), { code: "rate_limited" })), { kind: "rate_limit", pausesDispatch: true });
+assert.deepEqual(browserFailureDisposition(new Error("Upload files element is not enabled")), { kind: "transport", pausesDispatch: true });
+assert.deepEqual(browserFailureDisposition(new Error("one malformed image")), { kind: "asset", pausesDispatch: false });
 
 async function jsonRequest(url, { method = "GET", token = null, body = null } = {}) {
   const response = await fetch(url, {
@@ -826,7 +836,8 @@ async function testDesktopHostContract() {
     "profile-dir": path.join(temporaryRoot, "desktop-profile"),
     "downloads-root": path.join(temporaryRoot, "desktop-downloads"),
   }, {}));
-  assert.equal(config.concurrency, 5);
+  assert.equal(config.concurrency, PRODUCTION_BROWSER_CONCURRENCY_CEILING);
+  assert.equal(config.submissionStaggerMs, 20_000);
   assert.deepEqual(config.types, ["llm", "image"]);
   assert.throws(() => assertDesktopConfig({ ...config, serverUrl: "https://example.com" }), /127\.0\.0\.1/);
   assert.equal(normalizeBrowserProvider("nano banana pro"), "google-flow");
@@ -839,9 +850,11 @@ async function testDesktopHostContract() {
   assert.equal(flowConfig.browserProvider, "google-flow");
   assert.deepEqual(flowConfig.types, ["image"]);
   assert.match(flowConfig.profileDir, /google-flow-browser-profile$/);
-  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "20" }, {}).concurrency, 20);
-  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "21" }, {}).concurrency, 20);
-  assert.equal(desktopConfig({ ...config, provider: "chatgpt", concurrency: "20" }, {}).concurrency, 5);
+  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "20" }, {}).concurrency, 3);
+  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "21" }, {}).concurrency, 3);
+  assert.equal(desktopConfig({ ...config, provider: "chatgpt", concurrency: "20" }, {}).concurrency, 3);
+  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "1" }, {}).submissionStaggerMs, 15_000);
+  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 25_000);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, types: ["llm", "image"] }), /image or video work/);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, concurrency: 2, flowProjectUrl: "https://labs.google/fx/tools/flow/project/example" }), /fresh project per job/);
   assert.equal(flowBlockingCode("Requesting generations too quickly. Try again later."), "rate_limited");
@@ -960,7 +973,9 @@ async function testDesktopHostContract() {
   assert.match(hostSource, /lease_ambiguous/, "desktop restart recovery must fail closed rather than resubmit");
   assert.match(hostSource, /this\.persistQueue\.then/, "desktop runtime snapshots must preserve call order so completed jobs cannot remain falsely active");
   assert.match(hostSource, /this\.stopStarted/, "desktop host must close browser resources even when startup fails");
-  assert.match(configSource, /browserProvider === "google-flow" \? 20 : 5/, "Flow may test twenty slots while ChatGPT retains its five-slot ceiling");
+  assert.match(configSource, /PRODUCTION_BROWSER_CONCURRENCY_CEILING = 3/, "every production web provider must retain the three-slot ceiling");
+  assert.match(hostSource, /submissionStaggerMs/, "the desktop host must stagger creative browser submissions");
+  assert.match(hostSource, /consecutiveTransportFailures/, "the desktop host must open a circuit after repeated transport failures");
   assert.match(launcher, /desktop\/main\.mjs/, "Finder launcher must start the supervised desktop host");
 }
 

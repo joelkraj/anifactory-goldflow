@@ -254,17 +254,27 @@ export function inspectedParallaxCandidateOverrides(prompts, payload, options = 
 export function noticeableParallaxTreatment({ intent, assetReport, candidate, disposition = "approved" }) {
   if (assetReport?.status !== "passed" || intent?.behavior === "static_hold") return null;
   const priority = Number(candidate?.priority ?? 0);
-  const anchor = intent?.end_anchor ?? intent?.start_anchor ?? { x: 0.5, y: 0.5 };
+  const evidenceAnchor = assetReport?.local_separation_evidence?.foreground_centroid;
+  const anchor = Number.isFinite(Number(evidenceAnchor?.x)) && Number.isFinite(Number(evidenceAnchor?.y))
+    ? {
+        x: Math.max(0, Math.min(1, Number(evidenceAnchor.x))),
+        y: Math.max(0, Math.min(1, Number(evidenceAnchor.y))),
+      }
+    : intent?.end_anchor ?? intent?.start_anchor ?? { x: 0.5, y: 0.5 };
   const lowMotion = disposition === "approved_low_motion";
   const backgroundStart = lowMotion ? 1.012 : priority >= 90 ? 1.025 : priority >= 75 ? 1.02 : 1.015;
   const foregroundEnd = lowMotion ? 1.032 : priority >= 90 ? 1.075 : priority >= 75 ? 1.065 : 1.055;
   const backgroundEnd = lowMotion ? 1.006 : 1.005;
+  // Keep the donor silhouette covered from frame one while the cutout expands
+  // around its own centroid. Equal starting scales can expose a blurred ghost
+  // as soon as the rear plate and foreground begin moving apart.
+  const foregroundStart = backgroundStart + (lowMotion ? 0.008 : 0.012);
   const backgroundKeyframes = [
     { at: 0, anchor, scale: backgroundStart, easing_to_next: "ease_in_out" },
     { at: 1, anchor, scale: backgroundEnd, easing_to_next: "linear" },
   ];
   const foregroundKeyframes = [
-    { at: 0, anchor, scale: backgroundStart, easing_to_next: "ease_in_out" },
+    { at: 0, anchor, scale: foregroundStart, easing_to_next: "ease_in_out" },
     { at: 1, anchor, scale: foregroundEnd, easing_to_next: "linear" },
   ];
   return sanitizeLayeredParallaxTreatment({

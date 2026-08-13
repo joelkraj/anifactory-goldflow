@@ -1,14 +1,24 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import {
+  PLANNING_ROOM_PROVIDER,
+  normalizePlannerProviderId,
+  plannerModelForProvider,
+  planningProviderForStage,
+  planningRoomContract,
+} from "./planner-provider-registry.mjs";
 
-export const DEFAULT_PLANNING_PROVIDER = "chatgpt_web";
+export const DEFAULT_PLANNING_PROVIDER = PLANNING_ROOM_PROVIDER;
 export const LEGACY_PLANNING_PROVIDER = "codex_cli";
 export const DEFAULT_WEB_PLANNING_EFFORT_POLICY = "web_pro_adaptive_v1";
 export const DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY = "uniform_v1";
+export const DEFAULT_PLANNING_ROOM_EFFORT_POLICY = "planning_room_stage_routed_v1";
 export const DEFAULT_WEB_PLANNING_REASONING_EFFORT = "high";
 export const CHATGPT_WEB_PLANNING_MODEL = "gpt-5.6-sol";
 export const CHATGPT_WEB_PLANNER_MAX_CONCURRENCY = 10;
 export const CHATGPT_WEB_WAVEFRONT_PLANNER_CONCURRENCY = 10;
+export const OPERATOR_PLANNING_ROUTE_OVERRIDE_SCHEMA = "goldflow_operator_planning_route_override_v1";
 
 const supportedEfforts = new Set(["low", "medium", "high", "xhigh", "max"]);
 
@@ -30,11 +40,7 @@ function cliFlags(argv = process.argv.slice(2)) {
 }
 
 export function normalizePlanningProvider(value, fallback = DEFAULT_PLANNING_PROVIDER) {
-  const normalized = String(value ?? fallback).trim().toLowerCase().replace(/[_\s]+/g, "-");
-  if (["chatgpt-web", "chatgpt", "web", "web-pro"].includes(normalized)) return "chatgpt_web";
-  if (["codex", "codex-cli", "native-codex"].includes(normalized)) return "codex_cli";
-  if (["local", "qwen", "local-qwen"].includes(normalized)) return "local_qwen";
-  throw new Error(`Unsupported planning provider: ${value}`);
+  return normalizePlannerProviderId(value, fallback);
 }
 
 export function normalizePlanningEffort(value, fallback = DEFAULT_WEB_PLANNING_REASONING_EFFORT) {
@@ -47,7 +53,11 @@ export function normalizePlanningEffort(value, fallback = DEFAULT_WEB_PLANNING_R
 
 export function normalizePlanningEffortPolicy(value, fallback = DEFAULT_WEB_PLANNING_EFFORT_POLICY) {
   const normalized = String(value ?? fallback).trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if ([DEFAULT_WEB_PLANNING_EFFORT_POLICY, DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY].includes(normalized)) {
+  if ([
+    DEFAULT_WEB_PLANNING_EFFORT_POLICY,
+    DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY,
+    DEFAULT_PLANNING_ROOM_EFFORT_POLICY,
+  ].includes(normalized)) {
     return normalized;
   }
   throw new Error(`Unsupported planning effort policy: ${value}`);
@@ -91,9 +101,44 @@ export function planningProviderForIdentity(identity, { missingIsLegacy = true }
   return missingIsLegacy ? LEGACY_PLANNING_PROVIDER : DEFAULT_PLANNING_PROVIDER;
 }
 
+function sha256FileSync(filePath) {
+  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+export function approvedPlanningRouteOverride(context, overrideStage, requestedProvider) {
+  if (!context?.episodeDir || !context?.identityPath || !context?.identity || !overrideStage || !requestedProvider) return null;
+  const episode = String(context.identity.episode ?? path.basename(context.episodeDir));
+  const overridePath = path.join(context.episodeDir, `operator_planning_route_override_${episode}.json`);
+  if (!existsSync(overridePath)) return null;
+  let artifact;
+  try {
+    artifact = JSON.parse(readFileSync(overridePath, "utf8"));
+  } catch (error) {
+    throw new Error(`Invalid operator planning route override at ${overridePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const findings = [];
+  if (artifact.schema !== OPERATOR_PLANNING_ROUTE_OVERRIDE_SCHEMA) findings.push("schema_mismatch");
+  if (artifact.status !== "approved") findings.push("status_not_approved");
+  if (artifact.episode !== episode) findings.push("episode_mismatch");
+  if (artifact.run_identity_sha256 !== sha256FileSync(context.identityPath)) findings.push("run_identity_hash_mismatch");
+  if (normalizePlanningProvider(artifact.from_planning_provider) !== planningProviderForIdentity(context.identity, { missingIsLegacy: true })) findings.push("source_provider_mismatch");
+  if (normalizePlanningProvider(artifact.to_planning_provider) !== requestedProvider) findings.push("target_provider_mismatch");
+  if (!Array.isArray(artifact.allowed_stages) || !artifact.allowed_stages.includes(String(overrideStage))) findings.push("stage_not_allowed");
+  if (artifact.preserve_existing_accepted_outputs !== true) findings.push("preserve_existing_outputs_not_locked");
+  if (artifact.exact_id_recovery_only !== true) findings.push("exact_id_recovery_not_locked");
+  if (findings.length) throw new Error(`Operator planning route override is invalid for ${overrideStage}: ${findings.join(", ")}`);
+  return {
+    path: overridePath,
+    sha256: sha256FileSync(overridePath),
+    stage: String(overrideStage),
+    artifact,
+  };
+}
+
 export function planningEffortPolicyForIdentity(identity, provider = planningProviderForIdentity(identity)) {
   const explicit = identity?.provider_locks?.planning_effort_policy ?? identity?.planning_effort_policy ?? null;
   if (explicit) return normalizePlanningEffortPolicy(explicit);
+  if (provider === PLANNING_ROOM_PROVIDER) return DEFAULT_PLANNING_ROOM_EFFORT_POLICY;
   return provider === "chatgpt_web"
     ? DEFAULT_WEB_PLANNING_EFFORT_POLICY
     : DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY;
@@ -108,30 +153,45 @@ function providerFromEnvironment(env = process.env) {
 export function planningRuntimeFromProcessContext({
   explicitProvider = null,
   explicitModel = null,
+  overrideStage = null,
   argv = process.argv.slice(2),
   env = process.env,
 } = {}) {
   const context = planningIdentityFromProcessContext({ argv, env });
-  const identityProvider = context.identity
+  const identityProviderLock = context.identity
     ? planningProviderForIdentity(context.identity, { missingIsLegacy: true })
     : null;
   const requestedProvider = explicitProvider ? normalizePlanningProvider(explicitProvider) : null;
-  if (identityProvider && requestedProvider && identityProvider !== requestedProvider) {
-    throw new Error(`Planning provider ${requestedProvider} does not match the run identity lock ${identityProvider}.`);
+  const planningRoomLocked = identityProviderLock === PLANNING_ROOM_PROVIDER
+    || (!identityProviderLock && (requestedProvider ?? providerFromEnvironment(env) ?? DEFAULT_PLANNING_PROVIDER) === PLANNING_ROOM_PROVIDER);
+  const approvedOverride = !planningRoomLocked && identityProviderLock && requestedProvider && identityProviderLock !== requestedProvider
+    ? approvedPlanningRouteOverride(context, overrideStage, requestedProvider)
+    : null;
+  if (!planningRoomLocked && identityProviderLock && requestedProvider && identityProviderLock !== requestedProvider && !approvedOverride) {
+    throw new Error(`Planning provider ${requestedProvider} does not match the run identity lock ${identityProviderLock}.`);
   }
-  const provider = identityProvider
-    ?? requestedProvider
-    ?? providerFromEnvironment(env)
-    ?? DEFAULT_PLANNING_PROVIDER;
+  const provider = planningRoomLocked
+    ? planningProviderForStage(context.identity ?? { planning_provider: PLANNING_ROOM_PROVIDER }, overrideStage ?? "local_reconciliation", {
+        env,
+        explicitProvider: requestedProvider && requestedProvider !== PLANNING_ROOM_PROVIDER ? requestedProvider : null,
+      })
+    : approvedOverride?.artifact
+      ? requestedProvider
+      : identityProviderLock
+        ?? requestedProvider
+        ?? providerFromEnvironment(env)
+        ?? LEGACY_PLANNING_PROVIDER;
   const identityModel = context.identity?.model_versions?.planning_model
     ?? context.identity?.provider_locks?.planning_model
     ?? null;
-  if (identityModel && explicitModel && String(identityModel) !== String(explicitModel)) {
+  if (!planningRoomLocked && identityModel && explicitModel && String(identityModel) !== String(explicitModel)) {
     throw new Error(`Planning model ${explicitModel} does not match the run identity lock ${identityModel}.`);
   }
-  const model = String(identityModel
-    ?? explicitModel
-    ?? (provider === "chatgpt_web" ? CHATGPT_WEB_PLANNING_MODEL : env.ANIFACTORY_CODEX_MODEL ?? CHATGPT_WEB_PLANNING_MODEL)).trim();
+  const model = String((planningRoomLocked
+    ? explicitModel ?? plannerModelForProvider(provider, context.identity ?? {}, env)
+    : identityModel
+      ?? explicitModel
+      ?? plannerModelForProvider(provider, context.identity ?? {}, env))).trim();
   if (provider === "chatgpt_web" && model !== CHATGPT_WEB_PLANNING_MODEL) {
     throw new Error(`Authenticated ChatGPT Web planning is locked to ${CHATGPT_WEB_PLANNING_MODEL}; received ${model}.`);
   }
@@ -151,9 +211,12 @@ export function planningRuntimeFromProcessContext({
   return {
     ...context,
     provider,
+    providerLock: identityProviderLock,
+    planningRoom: planningRoomLocked ? planningRoomContract(context.identity ?? {}) : null,
     model,
     effortPolicy,
     defaultEffort,
+    operatorPlanningRouteOverride: approvedOverride,
     legacyIdentityAdapter: Boolean(context.identity && !(
       context.identity?.provider_locks?.planning_provider ?? context.identity?.planning_provider
     )),
@@ -196,9 +259,14 @@ export function planningEffortForStage(stageName, {
 
 export function plannerConcurrencyForIdentity(identity, configuredConcurrency, {
   visualPromptWavefront = false,
+  stageName = "structured_planning",
 } = {}) {
   const configured = Math.max(1, Number(configuredConcurrency) || 1);
-  if (planningProviderForIdentity(identity, { missingIsLegacy: true }) !== "chatgpt_web") return configured;
+  const lockedProvider = planningProviderForIdentity(identity, { missingIsLegacy: true });
+  const activeProvider = lockedProvider === PLANNING_ROOM_PROVIDER
+    ? planningProviderForStage(identity, stageName)
+    : lockedProvider;
+  if (activeProvider !== "chatgpt_web") return configured;
   const cap = visualPromptWavefront && identity?.image_provider === "chatgpt_web_gpt_image"
     ? CHATGPT_WEB_WAVEFRONT_PLANNER_CONCURRENCY
     : CHATGPT_WEB_PLANNER_MAX_CONCURRENCY;

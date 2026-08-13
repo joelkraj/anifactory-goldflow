@@ -1,0 +1,21 @@
+{
+  "schema": "goldflow_codex_call_metadata_v1",
+  "status": "passed",
+  "stage_name": "winner_source_room_chatgpt_long_context_proof_v1_attempt2",
+  "provider": "chatgpt_web",
+  "transport": "goldflow_studio_local_api",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "max",
+  "planning_effort_policy": "web_pro_adaptive_v1",
+  "run_identity_path": null,
+  "legacy_identity_adapter": false,
+  "verbosity": "medium",
+  "codex_cli_path": null,
+  "codex_cli_version": null,
+  "bridge_duration_ms": null,
+  "studio_job_id": "eb2455e818adda319da4834535821b134ccd3fc587b16f175e8e4f59fa05dd93",
+  "prompt_sha256": "9db0683c85e0c49210c80418836c62f64642540ee6e23d4430f2ee85a92248d1",
+  "output_path": "/Users/joel/anifactory-goldflow/docs/proofs/chatgpt_web_long_context_text_v1.json",
+  "started_at": "2026-08-11T19:43:09.848Z",
+  "completed_at": "2026-08-11T19:45:10.121Z"
+}

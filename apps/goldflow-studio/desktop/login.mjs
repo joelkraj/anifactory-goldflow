@@ -5,9 +5,9 @@ import { desktopConfig, parseDesktopFlags } from "./config.mjs";
 
 async function main() {
   const config = desktopConfig(parseDesktopFlags(process.argv.slice(2)));
-  await clearLoginMarker(config.profileDir);
+  await clearLoginMarker(config.profileDir, config.browserProvider);
   await launchNormalChromeLogin(config);
-  process.stdout.write("ChatGPT login window closed. Start Goldflow Studio to verify and store the session.\n");
+  process.stdout.write(`${config.browserProvider} login window closed. Start Goldflow Studio to verify and store the session.\n`);
 }
 
 main().catch((error) => {

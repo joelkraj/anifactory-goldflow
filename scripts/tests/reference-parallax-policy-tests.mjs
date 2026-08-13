@@ -17,13 +17,217 @@ import {
 import { plannerInvocationScope } from "../lib/planner-rerun-policy.mjs";
 import {
   characterReferenceContentFindingsForTests,
+  compactLocationContractLedgerForPromptForTests,
+  compactLocationContractLedgerForDirectorCardsForTests,
+  compactPromptDictionaryTableForTests,
+  compactPromptJsonForTests,
+  compactPromptTableForTests,
+  compactReferenceEvidenceLedgerForDirectorCardsForTests,
+  compactStoryFactLedgerForPromptForTests,
+  buildReferenceDirectorCandidateCardsForTests,
   dropUnknownReferenceSceneScopesForTests,
   mergeReferencePartialRepairForTests,
+  expandPromptDictionaryTableForTests,
+  materializeReferenceDirectorSelectionForTests,
   nonCharacterReferenceContentFindingsForTests,
   recurringReferenceCoverageFindingsForTests,
   referenceDirectorSelectionFindingsForTests,
   selectReferencePartialRepairScopeForTests,
 } from "../visual-reference-plan.mjs";
+
+const compactPromptFixture = {
+  rows: Array.from({ length: 100 }, (_, index) => ({
+    ref_id: `ref_${index}`,
+    scene_ids: [`scene_${index}`, `scene_${index + 1}`],
+    prompt_anchor: "A complete evidence-backed reference anchor with no omitted fields.",
+  })),
+};
+const compactPromptJson = compactPromptJsonForTests(compactPromptFixture);
+assert.deepEqual(JSON.parse(compactPromptJson), compactPromptFixture);
+assert(compactPromptJson.length < JSON.stringify(compactPromptFixture, null, 2).length);
+const compactPromptFields = ["ref_id", "scene_ids", "prompt_anchor"];
+const compactPromptTable = compactPromptTableForTests(compactPromptFixture.rows, compactPromptFields);
+const restoredPromptRows = compactPromptTable.rows.map((values) => ({
+  ...compactPromptTable.constants,
+  ...Object.fromEntries(compactPromptTable.fields.map((field, index) => [field, values[index]])),
+}));
+assert.deepEqual(restoredPromptRows, compactPromptFixture.rows);
+assert(JSON.stringify(compactPromptTable).length < JSON.stringify(compactPromptFixture.rows).length);
+const dictionaryPromptRows = Array.from({ length: 100 }, (_, index) => ({
+  ref_id: `ref_${index % 5}`,
+  scene_ids: [`scene_${index % 10}`, `scene_${(index + 1) % 10}`],
+  prompt_anchor: `Repeated evidence-backed anchor family ${index % 4} with detailed construction language.`,
+}));
+const compactPromptDictionaryTable = compactPromptDictionaryTableForTests(dictionaryPromptRows, compactPromptFields);
+assert.deepEqual(expandPromptDictionaryTableForTests(compactPromptDictionaryTable), dictionaryPromptRows);
+assert(JSON.stringify(compactPromptDictionaryTable).length < JSON.stringify(dictionaryPromptRows).length);
+
+const readableCandidateCards = buildReferenceDirectorCandidateCardsForTests([{
+  referenceTargets: [
+    {
+      candidate_id: "rt_0001",
+      ref_id: "kael_chunk_1",
+      kind: "character_state",
+      subject: "Kael",
+      scene_ids: ["scene_001"],
+      planned_beat_ids: ["beat_001", "beat_002"],
+      inventory_asset_id: "char_kael",
+      canonical_subject_id: "kael",
+      prompt_anchor: "Kael in his base identity state.",
+    },
+    {
+      candidate_id: "rt_0002",
+      ref_id: "kael_chunk_2",
+      kind: "character_state",
+      subject: "Kael",
+      scene_ids: ["scene_002"],
+      planned_beat_ids: ["beat_003"],
+      inventory_asset_id: "char_kael",
+      canonical_subject_id: "kael",
+      prompt_anchor: "Kael in his later field state.",
+    },
+    {
+      candidate_id: "rt_0003",
+      ref_id: "kael_attack_effect",
+      kind: "action",
+      subject: "Kael's attack effect",
+      scene_ids: ["scene_002"],
+      planned_beat_ids: ["beat_004"],
+      inventory_asset_id: "char_kael",
+      prompt_anchor: "A clean effect study for Kael's attack.",
+    },
+  ],
+  characterStateRefs: [{
+    candidate_id: "cs_0001",
+    state_ref_id: "kael_chunk_1",
+    character: "Kael",
+    source_ref_id: "kael_chunk_1",
+    source_target_candidate_id: "rt_0001",
+    scene_prompt_anchor: "Kael in his base state",
+  }],
+}]);
+assert.equal(readableCandidateCards.reference_target_proposal_count, 3);
+assert.equal(readableCandidateCards.character_state_proposal_count, 1);
+assert.equal(readableCandidateCards.card_count, 2);
+assert.deepEqual(readableCandidateCards.cards.flatMap((card) => (
+  card.target_candidate_lines.flatMap((line) => line.split(" | ")[0].split(","))
+)), ["rt_0001", "rt_0002", "rt_0003"]);
+assert.equal(readableCandidateCards.cards[0].union_scene_scope, "scene_001,scene_002");
+assert.deepEqual(
+  readableCandidateCards.cards[0].character_state_candidate_lines[0].split(" | ")[0].split(","),
+  ["cs_0001"],
+);
+assert.equal(readableCandidateCards.unlinked_character_state_candidates.length, 0);
+
+const compactDirectorEvidence = compactReferenceEvidenceLedgerForDirectorCardsForTests({
+  schema: "goldflow_reference_evidence_ledger_v1",
+  summary: { asset_count: 1 },
+  assets: [{
+    asset_id: "char_kael",
+    kind: "character_state",
+    subject: "Kael",
+    entity_type: "named_or_distinct_character",
+    scene_ids: ["scene_001", "scene_002"],
+    distinct_scene_count: 2,
+    beat_count: 5,
+    reuse_span_sec: 90,
+    canonical_subject_key: "kael",
+  }],
+});
+assert.equal(compactDirectorEvidence.asset_count, 1);
+assert.match(compactDirectorEvidence.asset_lines[0], /char_kael \| kind=character_state/);
+
+const materializedDirectorSelection = materializeReferenceDirectorSelectionForTests({
+  selection_contract: "goldflow_reference_director_selection_rows_v2",
+  reference_selection_rows: [
+    ["kael_base_identity", ["rt_0001", "rt_0002"], "required", "standalone_ref", 1],
+  ],
+  character_state_selection_rows: [
+    ["kael_base_identity", ["cs_0001"], "kael_base_identity", "full_identity", null],
+  ],
+  reference_overrides: {},
+  character_state_overrides: {},
+  warnings: [],
+}, {
+  referenceTargetCatalog: new Map([
+    ["rt_0001", {
+      ref_id: "kael_identity_chunk_1",
+      kind: "character_state",
+      subject: "Kael",
+      scene_ids: ["scene_001"],
+      planned_beat_ids: ["beat_001"],
+      evidence_asset_ids: ["character_kael"],
+      prompt_anchor: "Kael base identity anchor",
+      appearance_count: 2,
+    }],
+    ["rt_0002", {
+      ref_id: "kael_identity_chunk_2",
+      kind: "character_state",
+      subject: "Kael",
+      scene_ids: ["scene_002"],
+      planned_beat_ids: ["beat_002"],
+      evidence_asset_ids: ["character_kael"],
+      prompt_anchor: "Kael base identity anchor",
+      appearance_count: 3,
+    }],
+  ]),
+  characterStateRefCatalog: new Map([["cs_0001", {
+    state_ref_id: "kael_identity_chunk_1",
+    character: "Kael",
+    scene_ids: ["scene_001"],
+    prompt_anchor: "Kael base identity anchor",
+    scene_prompt_anchor: "Kael in his base state",
+    source_ref_id: "kael_identity_chunk_1",
+    identity_usage: "full_identity",
+  }]]),
+});
+assert.equal(materializedDirectorSelection.reference_targets.length, 1);
+assert.deepEqual(materializedDirectorSelection.reference_targets[0].scene_ids, ["scene_001", "scene_002"]);
+assert.deepEqual(materializedDirectorSelection.reference_targets[0].evidence_asset_ids, ["character_kael"]);
+assert.equal(materializedDirectorSelection.reference_targets[0].appearance_count, 3);
+assert.equal(materializedDirectorSelection.character_state_refs[0].source_ref_id, "kael_base_identity");
+
+const compactLocationContracts = compactLocationContractLedgerForPromptForTests({
+  schema: "goldflow_location_contract_ledger_v1",
+  status: "passed",
+  contracts: [{
+    location_contract_id: "guild_hall",
+    description: "Guild hall",
+    scene_ids: ["scene_001"],
+    beat_ids: ["beat_001", "beat_002"],
+    local_location_labels: ["main floor"],
+    reasons: ["semantic location scope"],
+  }],
+});
+assert.equal(compactLocationContracts.contracts[0].beat_count, 2);
+assert.equal(Object.hasOwn(compactLocationContracts.contracts[0], "beat_ids"), false);
+const compactDirectorLocationContracts = compactLocationContractLedgerForDirectorCardsForTests({
+  schema: "goldflow_location_contract_ledger_v1",
+  status: "passed",
+  contracts: [{
+    location_contract_id: "guild_hall",
+    description: "Guild hall",
+    scene_ids: ["scene_001"],
+    beat_ids: ["beat_001", "beat_002"],
+    local_location_labels: ["main floor"],
+  }],
+});
+assert.equal(compactDirectorLocationContracts.contract_count, 1);
+assert.match(compactDirectorLocationContracts.contract_lines[0], /guild_hall \| description=Guild hall/);
+
+const compactStoryFacts = compactStoryFactLedgerForPromptForTests({
+  canonical_entities: [{ entity_id: "kael", display_name: "Kael", kind: "person", aliases: ["Kael"], evidence: [{ exact_excerpt: "unused" }] }],
+  state_transitions: [{
+    entity_id: "kael",
+    state_kind: "location",
+    from_state: "gate",
+    to_state: "guild",
+    transition_evidence_excerpt: "Kael left the gate and entered the guild.",
+    evidence: [{ exact_excerpt: "unused" }],
+  }],
+});
+assert.equal(Object.hasOwn(compactStoryFacts.canonical_entities[0], "evidence"), false);
+assert.equal(Object.hasOwn(compactStoryFacts.state_transitions[0], "evidence"), false);
 
 const references = Array.from({ length: 96 }, (_, index) => ({
   ref_id: `ref_${String(index + 1).padStart(3, "0")}`,
@@ -200,11 +404,17 @@ const assetReport = {
   background_sha256: hash,
   foreground_path: "/tmp/foreground.png",
   foreground_sha256: hash,
+  local_separation_evidence: {
+    foreground_centroid: { x: 0.64, y: 0.42 },
+  },
 };
 const intent = { behavior: "slow_push_in", start_anchor: { x: 0.5, y: 0.5 }, end_anchor: { x: 0.5, y: 0.5 } };
 const fullMotion = noticeableParallaxTreatment({ intent, assetReport, candidate: { priority: 90 }, disposition: "approved" });
 const lowMotion = noticeableParallaxTreatment({ intent, assetReport, candidate: { priority: 90 }, disposition: "approved_low_motion" });
 assert(fullMotion && lowMotion);
 assert(lowMotion.foreground_keyframes.at(-1).scale < fullMotion.foreground_keyframes.at(-1).scale);
+assert.deepEqual(fullMotion.background_keyframes[0].anchor, { x: 0.64, y: 0.42 });
+assert.deepEqual(fullMotion.foreground_keyframes[0].anchor, { x: 0.64, y: 0.42 });
+assert(fullMotion.foreground_keyframes[0].scale > fullMotion.background_keyframes[0].scale);
 
 console.log("reference/parallax policy tests passed");

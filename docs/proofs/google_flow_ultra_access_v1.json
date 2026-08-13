@@ -1,0 +1,55 @@
+{
+  "schema": "goldflow_google_flow_health_proof_v1",
+  "status": "passed",
+  "proof_id": "google_flow_ultra_access_v1",
+  "provider": "google-flow",
+  "account_plan": "ULTRA",
+  "model_label": "Nano Banana Pro",
+  "safe_concurrency": 5,
+  "routing_decision": "speed_first_web_flow_v1",
+  "source_execution_report_path": "/Users/joel/Downloads/GoldflowStudio/_flow-ultra-access-proof-2026-08-10/report.json",
+  "source_execution_report_sha256": "64fa0eeab9a44c66d66df9a13bdbc1d86bd48c53dae8571b7143c96103d683b4",
+  "accepted_output_sha256": "2118257c7f8dc6721f4c22669ba956207b59176606ba8ccf0f6e62443c0d79eb",
+  "result_latency_sec": 20.985,
+  "reference_binding": {
+    "status": "verified",
+    "expected_count": 1,
+    "observed_count": 1,
+    "prompt_text_verified": true,
+    "no_pending_uploads": true,
+    "receipt_sha256": "220f6c93365ab85fe4f903fb892cece6703db27e70d99a45427c602cf7fb89b7"
+  },
+  "reference_binding_evidence": {
+    "schema": "goldflow_google_flow_ultra_transition_reference_proof_v1",
+    "status": "passed",
+    "binding_schema": "goldflow_google_flow_reference_binding_v1",
+    "require_verified_reference_binding": true,
+    "live_verified_reference_counts": [1, 2, 4],
+    "zero_reference_contract_tested": true,
+    "prior_full_matrix_proof_path": "/Users/joel/anifactory-goldflow/docs/proofs/google_flow_speed_pool_v1.json",
+    "prior_full_matrix_proof_sha256": "f289ff688223f813aad446fbf66a9bd953683c3252f3cf463f565470ec7de97d",
+    "ultra_live_reference_receipt_path": "/Users/joel/Downloads/GoldflowStudio/_flow-ultra-access-proof-2026-08-10/flow-ultra-access-proof-20260810/reference-binding-evidence/flow-ultra-ref-proof-002-ultra-proof-/reference-binding-receipt.json",
+    "ultra_live_reference_receipt_sha256": "220f6c93365ab85fe4f903fb892cece6703db27e70d99a45427c602cf7fb89b7",
+    "ultra_zero_reference_receipt_path": "/Users/joel/Downloads/GoldflowStudio/codex-work-14e901b1825c309e1d60a9c6/reference-binding-evidence/ep_01-w004358-w004399-8f312424-be7/reference-binding-receipt.json",
+    "ultra_zero_reference_receipt_sha256": "2998abc82e2111e342d2bce7c27e50af78374aab53244896924063feef15100b"
+  },
+  "ui_contract": {
+    "aspect_ratio": "16:9",
+    "output_count": 1,
+    "account_plan": "ULTRA",
+    "model_label": "Nano Banana Pro"
+  },
+  "policy": {
+    "fresh_project_per_job": true,
+    "one_creative_submission_per_item": true,
+    "automatic_retry_policy": "none",
+    "require_verified_reference_binding": true,
+    "reference_echo_rejection_required": true,
+    "style_reference_provider": "chatgpt_web_gpt_image",
+    "shared_pool_providers": [
+      "chatgpt_web_gpt_image",
+      "google_flow"
+    ]
+  },
+  "recorded_at": "2026-08-10T15:32:18Z"
+}

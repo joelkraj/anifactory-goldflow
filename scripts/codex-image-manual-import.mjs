@@ -22,6 +22,9 @@ const sourcePath = flags.source ?? flags["source-path"];
 const forceDuplicate = flags["force-duplicate"] === "true";
 const importRoute = flags["import-route"] ?? "codex_imagegen_manual_import";
 const workManifestPath = flags["work-manifest"] ?? null;
+const browserProvider = flags["browser-provider"] ?? null;
+const providerReceiptPath = flags["provider-receipt"] ? path.resolve(flags["provider-receipt"]) : null;
+const providerReceiptSha256 = flags["provider-receipt-sha256"] ?? null;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -76,6 +79,25 @@ async function verifyRasterImage(filePath) {
   return { stat, metadata };
 }
 
+async function validateProviderReceipt({ sourceHash }) {
+  if (!providerReceiptPath && !providerReceiptSha256 && !browserProvider) return null;
+  if (!providerReceiptPath || !providerReceiptSha256 || !browserProvider) {
+    throw new Error("Browser-provider import requires --browser-provider, --provider-receipt, and --provider-receipt-sha256 together.");
+  }
+  if (!(await exists(providerReceiptPath))) throw new Error(`Missing provider receipt: ${providerReceiptPath}`);
+  const currentReceiptHash = await hashFile(providerReceiptPath);
+  if (currentReceiptHash !== providerReceiptSha256) throw new Error(`Provider receipt SHA-256 mismatch: ${providerReceiptPath}`);
+  const receipt = await readJson(providerReceiptPath, null);
+  if (!receipt || receipt.asset_id !== imageId) throw new Error(`Provider receipt is not bound to ${imageId}.`);
+  if (receipt.browser_provider && receipt.browser_provider !== browserProvider) {
+    throw new Error(`Provider receipt browser mismatch: expected ${browserProvider}, found ${receipt.browser_provider}.`);
+  }
+  if (receipt.accepted_png_sha256 && receipt.accepted_png_sha256 !== sourceHash) {
+    throw new Error(`Provider receipt output SHA-256 does not match the staged source for ${imageId}.`);
+  }
+  return { path: providerReceiptPath, sha256: currentReceiptHash, receipt };
+}
+
 function slotWord(value) {
   return ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"][Number(value)] ?? String(value);
 }
@@ -114,8 +136,14 @@ function referenceSlotsFromPrompt(prompt) {
     .slice(0, paths.length);
 }
 
+function imageProviderSlug(provider) {
+  if (provider === "google_flow") return "google-flow-nano-banana-pro";
+  if (provider === "chatgpt_web_gpt_image") return "chatgpt-web-gpt-image";
+  return "codex-imagegen";
+}
+
 function imagePathFor(prompt) {
-  return path.join(imageDir, `${prompt.image_id}-codex-imagegen-image.png`);
+  return path.join(imageDir, `${prompt.image_id}-${imageProviderSlug(importRoute)}-image.png`);
 }
 
 async function updateCutExecutionLedger({ prompt, outputPath, outputHash, promptHash, referenceInputs }) {
@@ -205,7 +233,11 @@ async function updateCutExecutionLedger({ prompt, outputPath, outputHash, prompt
       submitted_prompt_hash: promptHash,
       references: referenceInputs,
       image_provider: importRoute,
+      image_provider_route: browserProvider ? "hybrid_browser_pool" : importRoute,
+      browser_provider: browserProvider,
       image_model: flags.model ?? "codex_builtin_imagegen_manual",
+      provider_receipt_path: providerReceiptPath,
+      provider_receipt_sha256: providerReceiptSha256,
       editorial_reuse_approved: false,
       reuse_source_image_id: null,
       image_path: outputPath,
@@ -253,6 +285,7 @@ async function main() {
   const promptPlanHash = await hashFile(promptPath);
   const promptHash = sha256(JSON.stringify({ prompt: modelPrompt, reference_inputs: referenceInputs, prompt_plan_sha256: promptPlanHash }));
   const sourceHash = await hashFile(sourcePath);
+  const providerReceipt = await validateProviderReceipt({ sourceHash });
   const allPromptIds = new Set(plan.prompts.filter((row) => row.image_generation_required !== false).map((row) => row.image_id));
   const priorReport = await readJson(reportPath, null);
   const mergedById = new Map();
@@ -283,16 +316,20 @@ async function main() {
     prompt_hash: promptHash,
     source_prompt_path: promptPath,
     source_prompt_sha256: promptPlanHash,
-    source_manual_codex_image_path: sourcePath,
-    source_manual_codex_image_sha256: sourceHash,
+    source_staged_image_path: sourcePath,
+    source_staged_image_sha256: sourceHash,
     reference_image_paths: referenceImagePaths,
     reference_inputs: referenceInputs,
     reference_slots: promptForHash.reference_slots ?? [],
     image_prompt: modelPrompt,
     codex_prompt: modelPrompt,
     image_provider: importRoute,
+    image_provider_route: browserProvider ? "hybrid_browser_pool" : importRoute,
+    browser_provider: browserProvider,
     work_manifest_path: workManifestPath,
     model: flags.model ?? "codex_builtin_imagegen_manual",
+    provider_receipt_path: providerReceipt?.path ?? null,
+    provider_receipt_sha256: providerReceipt?.sha256 ?? null,
     generated: {
       downloaded_path: outputPath,
       manual_source_path: sourcePath,
@@ -307,6 +344,11 @@ async function main() {
     image_path: outputPath,
     prompt_hash: promptHash,
     image_provider: importRoute,
+    image_provider_route: browserProvider ? "hybrid_browser_pool" : importRoute,
+    browser_provider: browserProvider,
+    model: flags.model ?? "codex_builtin_imagegen_manual",
+    provider_receipt_path: providerReceipt?.path ?? null,
+    provider_receipt_sha256: providerReceipt?.sha256 ?? null,
     generated: {
       downloaded_path: outputPath,
       manual_source_path: sourcePath,
@@ -326,7 +368,9 @@ async function main() {
     episode,
     prompt_plan_path: promptPath,
     prompt_plan_hash: promptPlanHash,
-    image_provider: importRoute,
+    image_provider: browserProvider && workManifestPath
+      ? "hybrid_chatgpt_web_style_google_flow_pool"
+      : importRoute,
     work_manifest_path: workManifestPath,
     image_dir: imageDir,
     image_count: results.length,

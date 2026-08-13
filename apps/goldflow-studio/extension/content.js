@@ -115,8 +115,9 @@
   }
 
   async function selectEffort(menu, effortLabel) {
-    const targetKeys = effortLabel === "Pro" ? ["End"] : effortLabel === "Medium" ? ["Home", "ArrowRight"] : null;
-    if (!targetKeys) throw errorWithCode("ui_contract_mismatch", `Goldflow cannot select unsupported effort ${effortLabel}.`);
+    const effortIndex = ["Instant", "Medium", "High", "Extra High", "Pro"].indexOf(effortLabel);
+    if (effortIndex < 0) throw errorWithCode("ui_contract_mismatch", `Goldflow cannot select unsupported effort ${effortLabel}.`);
+    const targetKeys = ["Home", ...Array.from({ length: effortIndex }, () => "ArrowRight")];
     const slider = menu.querySelector('[role="slider"]');
     if (!slider) throw errorWithCode("ui_contract_mismatch", "ChatGPT power menu did not expose its effort slider.");
     slider.focus();

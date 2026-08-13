@@ -1,0 +1,1 @@
+Return JSON only: {"schema":"goldflow_antigravity_concurrency_smoke_v1","status":"passed","task_id":"beat_001","items":[{"beat_id":"beat_001","atom_ids":["atom_001","atom_002"],"visual_job":"establish hidden journey"},{"beat_id":"beat_002","atom_ids":["atom_003"],"visual_job":"reveal final disposition"}]}. Preserve exact IDs and order; add nothing.

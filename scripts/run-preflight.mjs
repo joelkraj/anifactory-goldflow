@@ -7,6 +7,26 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
+  DEFAULT_GOOGLE_GEMINI_MODEL,
+  DEFAULT_GOOGLE_GEMINI_PLAN,
+  DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH,
+  DEFAULT_GOOGLE_FLOW_MODEL,
+  DEFAULT_GOOGLE_FLOW_PLAN,
+  GOOGLE_FLOW_IMAGE_PROVIDER,
+  federatedWebImageIdentityOptions,
+  federatedWebImageProviderLocks,
+  federatedWebImageProviderModels,
+  googleFlowPrimaryIdentityOptions,
+  googleFlowPrimaryProviderLocks,
+  hybridWebFlowIdentityOptions,
+  hybridWebFlowProviderLocks,
+  hybridWebFlowProviderModels,
+  isFederatedWebImageProvider,
+  isHybridWebFlowProvider,
+  isGoogleFlowPrimaryProvider,
+  loadGoogleFlowHealthProof,
+} from "./lib/image-provider-policy.mjs";
+import {
   MODELSLAB_CREDIT_EXHAUSTED,
   normalizeImageFallbackCondition,
 } from "./lib/image-fallback-policy.mjs";
@@ -20,6 +40,7 @@ import {
 } from "./lib/codex-cli-runner.mjs";
 import {
   DEFAULT_PLANNING_PROVIDER,
+  DEFAULT_PLANNING_ROOM_EFFORT_POLICY,
   DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY,
   DEFAULT_WEB_PLANNING_EFFORT_POLICY,
   DEFAULT_WEB_PLANNING_REASONING_EFFORT,
@@ -28,6 +49,12 @@ import {
   normalizePlanningEffortPolicy,
   normalizePlanningProvider,
 } from "./lib/planning-runtime-policy.mjs";
+import {
+  PLANNING_ROOM_PROVIDER,
+  PLANNER_PROVIDER_REGISTRY,
+  plannerModelForProvider,
+  planningRoomContract,
+} from "./lib/planner-provider-registry.mjs";
 import {
   DEFAULT_PRODUCTION_PROFILE,
   normalizeProductionProfile,
@@ -60,14 +87,26 @@ import {
 import {
   LTX_VIDEO_MODEL_ID,
   LTX_VIDEO_PROVIDER,
-  normalizeLtxVideoPolicy,
 } from "./lib/ltx-video-contract.mjs";
+import {
+  DEFAULT_GENERATED_MOTION_MODEL,
+  DEFAULT_GENERATED_MOTION_POLICY,
+  GENERATED_MOTION_PROVIDER_FLOW,
+  GENERATED_MOTION_PROVIDER_LTX,
+  normalizeGeneratedMotionPolicy,
+  normalizeGeneratedMotionProvider,
+} from "./lib/generated-motion-contract.mjs";
 import {
   normalizeWinnerNarration,
   sha256Text,
   validateWinnerPackageContract,
+  validateWinnerStoryBlueprintApproval,
   validateWinnerSourceRelease,
 } from "./lib/winner-source-contract.mjs";
+import { validateWinnerBlueprintForPackage } from "./lib/winner-source-room-contract.mjs";
+import { loadWinnerSourceRoomLineage } from "./lib/winner-source-room-lineage.mjs";
+import { loadSourceRoomReleaseV2Binding } from "./lib/winner-source-room-v2-lineage.mjs";
+import { SOURCE_ROOM_RELEASE_V2_SCHEMA } from "./lib/winner-source-room-v2-contract.mjs";
 import {
   CHATGPT_WEB_PROJECT_CLEANUP_POLICY,
   normalizeChatGptWebProjectUrl,
@@ -87,44 +126,53 @@ const sourcePath = flags.source ? path.resolve(flags.source) : null;
 const winnerReleasePath = flags["winner-release"] ? path.resolve(flags["winner-release"]) : null;
 const allowPartInWeek = flags["allow-part-in-week"] === "true";
 const confirmEpisodeIdentity = flags["confirm-episode-identity"] === "true";
-const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? "chatgpt_web_gpt_image");
-const imageFallbackProvider = flags["image-fallback-provider"]
-  ? normalizeImageProvider(flags["image-fallback-provider"])
-  : null;
-const imageFallbackCondition = normalizeImageFallbackCondition(
-  flags["image-fallback-condition"] ?? (imageFallbackProvider ? MODELSLAB_CREDIT_EXHAUSTED : null),
-);
 const audioTarget = normalizeAudioTarget(flags["audio-target"] ?? flags.audio ?? "narrator_only");
 const runIntent = normalizeRunIntent(flags.intent ?? flags["run-intent"] ?? "production");
 const productionProfile = normalizeProductionProfile(
   flags["production-profile"] ?? flags.profile ?? DEFAULT_PRODUCTION_PROFILE,
 );
 const productionProfileConfig = productionProfileSummary(productionProfile);
+const imageProvider = normalizeImageProvider(
+  flags["image-provider"]
+    ?? flags.provider
+    ?? productionProfileConfig.media.default_image_provider
+    ?? "chatgpt_web_gpt_image",
+);
+const imageFallbackProvider = flags["image-fallback-provider"]
+  ? normalizeImageProvider(flags["image-fallback-provider"])
+  : null;
+const imageFallbackCondition = normalizeImageFallbackCondition(
+  flags["image-fallback-condition"] ?? (imageFallbackProvider ? MODELSLAB_CREDIT_EXHAUSTED : null),
+);
 const planningProvider = normalizePlanningProvider(
   flags["planning-provider"] ?? DEFAULT_PLANNING_PROVIDER,
 );
 const explicitPlanningReasoningEffort = flags["planning-reasoning-effort"] ?? null;
 const planningEffortPolicy = normalizePlanningEffortPolicy(
   flags["planning-effort-policy"]
-    ?? (explicitPlanningReasoningEffort != null || planningProvider !== "chatgpt_web"
+    ?? (planningProvider === PLANNING_ROOM_PROVIDER
+      ? DEFAULT_PLANNING_ROOM_EFFORT_POLICY
+      : explicitPlanningReasoningEffort != null || planningProvider !== "chatgpt_web"
       ? DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY
       : DEFAULT_WEB_PLANNING_EFFORT_POLICY),
 );
 const planningDefaultReasoningEffort = normalizePlanningEffort(
   explicitPlanningReasoningEffort
-    ?? (planningProvider === "chatgpt_web"
+    ?? (planningProvider === "chatgpt_web" || planningProvider === PLANNING_ROOM_PROVIDER
       ? DEFAULT_WEB_PLANNING_REASONING_EFFORT
       : DEFAULT_CODEX_REASONING_EFFORT),
 );
 const planningModel = String(flags["planning-model"]
-  ?? (planningProvider === "chatgpt_web" ? CHATGPT_WEB_PLANNING_MODEL : DEFAULT_CODEX_MODEL)).trim();
+  ?? (planningProvider === PLANNING_ROOM_PROVIDER
+    ? "stage_routed"
+    : planningProvider === "chatgpt_web" ? CHATGPT_WEB_PLANNING_MODEL : DEFAULT_CODEX_MODEL)).trim();
 if (planningProvider !== "chatgpt_web" && planningEffortPolicy === DEFAULT_WEB_PLANNING_EFFORT_POLICY) {
   throw new Error(`${DEFAULT_WEB_PLANNING_EFFORT_POLICY} requires --planning-provider chatgpt_web.`);
 }
 if (planningProvider === "chatgpt_web" && planningModel !== CHATGPT_WEB_PLANNING_MODEL) {
   throw new Error(`Authenticated ChatGPT Web planning is locked to ${CHATGPT_WEB_PLANNING_MODEL}; received ${planningModel}.`);
 }
-if (planningProvider !== "chatgpt_web" && planningDefaultReasoningEffort === "max") {
+if (!["chatgpt_web", PLANNING_ROOM_PROVIDER].includes(planningProvider) && planningDefaultReasoningEffort === "max") {
   throw new Error("Pro/max reasoning is available only through --planning-provider chatgpt_web.");
 }
 const contentProfileDefinitionValue = contentProfileDefinition(
@@ -143,14 +191,39 @@ const dirtyReason = String(flags["dirty-reason"] ?? "").trim();
 const codexOpeningSecRaw = flags["codex-opening-sec"] ?? flags["codex-opening-duration-sec"] ?? process.env.ANIFACTORY_CODEX_OPENING_SEC ?? null;
 const chatGptProjectUrlRaw = flags["chatgpt-project-url"] ?? process.env.GOLDFLOW_CHATGPT_PROJECT_URL ?? null;
 const chatGptProjectUrl = normalizeChatGptWebProjectUrl(chatGptProjectUrlRaw);
+const googleFlowPlan = String(flags["google-flow-plan"] ?? process.env.GOLDFLOW_FLOW_PLAN ?? DEFAULT_GOOGLE_FLOW_PLAN);
+const googleFlowModel = String(flags["google-flow-model"] ?? process.env.GOLDFLOW_FLOW_MODEL ?? DEFAULT_GOOGLE_FLOW_MODEL);
+const googleGeminiPlan = String(flags["google-gemini-plan"] ?? process.env.GOLDFLOW_GEMINI_PLAN ?? DEFAULT_GOOGLE_GEMINI_PLAN);
+const googleGeminiModel = String(flags["google-gemini-model"] ?? process.env.GOLDFLOW_GEMINI_MODEL ?? DEFAULT_GOOGLE_GEMINI_MODEL);
+const googleFlowHealthProofPath = (isHybridWebFlowProvider(imageProvider) || isGoogleFlowPrimaryProvider(imageProvider) || isFederatedWebImageProvider(imageProvider))
+  ? path.resolve(flags["google-flow-health-proof"] ?? process.env.GOLDFLOW_FLOW_HEALTH_PROOF ?? DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH)
+  : null;
+const googleFlowHealthProof = (isHybridWebFlowProvider(imageProvider) || isGoogleFlowPrimaryProvider(imageProvider) || isFederatedWebImageProvider(imageProvider))
+  ? await loadGoogleFlowHealthProof(googleFlowHealthProofPath, {
+      expectedSha256: flags["google-flow-health-proof-sha256"] ?? null,
+      expectedPlan: googleFlowPlan,
+      expectedModel: googleFlowModel,
+    })
+  : null;
 const pacePolicy = normalizePacePolicy(flags["pace-policy"] ?? flags["wpm-policy"] ?? "diagnostic");
 const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] ?? null, 180);
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 195);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
-const ltxVideoPolicy = normalizeLtxVideoPolicy(
-  flags["animation-policy"] ?? flags["ltx-video-policy"] ?? "selective_ltx23",
+const generatedMotionPolicy = normalizeGeneratedMotionPolicy(
+  flags["generated-motion-policy"] ?? flags["animation-policy"] ?? flags["ltx-video-policy"] ?? DEFAULT_GENERATED_MOTION_POLICY,
 );
+const generatedMotionProvider = generatedMotionPolicy === "disabled"
+  ? null
+  : normalizeGeneratedMotionProvider(flags["generated-motion-provider"] ?? flags["video-provider"] ?? GENERATED_MOTION_PROVIDER_FLOW);
+const generatedMotionModel = generatedMotionPolicy === "disabled"
+  ? null
+  : String(flags["generated-motion-model"] ?? flags["video-model"] ?? (
+      generatedMotionProvider === GENERATED_MOTION_PROVIDER_FLOW ? DEFAULT_GENERATED_MOTION_MODEL : LTX_VIDEO_MODEL_ID
+    )).trim();
+const ltxVideoPolicy = generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX
+  ? generatedMotionPolicy === "full_generated_video" ? "full_ltx23" : "selective_ltx23"
+  : "disabled";
 const parallaxPolicy = normalizeParallaxPolicy(flags["parallax-policy"] ?? "selective_inspected");
 const parallaxTargetMax = boundedInteger(flags["parallax-target-max"], 15, 0, 20);
 const parallaxMinSpacingSec = boundedNumber(flags["parallax-min-spacing-sec"], 3, 0, 120);
@@ -373,6 +446,13 @@ function lockedModelVersions() {
     ? QWEN_JOEL_PRIMARY_LOCK
     : ttsProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : null;
   const fallbackLock = ttsProvider === "kokoro_local" ? QWEN_LOCAL_FALLBACK_LOCK : null;
+  const defaultBrowserImageModel = isGoogleFlowPrimaryProvider(imageProvider)
+    ? googleFlowModel
+    : isFederatedWebImageProvider(imageProvider)
+      ? "federated_google_web_image_pool"
+    : imageProvider === "chatgpt_web_gpt_image" || isHybridWebFlowProvider(imageProvider)
+      ? "chatgpt_web_gpt_image"
+    : "flux-klein";
   return {
     planning_model: planningModel,
     planning_reasoning_effort: planningDefaultReasoningEffort,
@@ -385,8 +465,15 @@ function lockedModelVersions() {
       ? `${fallbackLock.runtime}@${fallbackLock.runtime_version}`
       : null,
     local_whisper_model: localWhisperTimingContract.model,
-    image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? (imageProvider === "chatgpt_web_gpt_image" ? "chatgpt_web_gpt_image" : "flux-klein"),
-    reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? (imageProvider === "chatgpt_web_gpt_image" ? "chatgpt_web_gpt_image" : "flux-klein"),
+    image_model: flags["image-model"] ?? process.env.ANIFACTORY_IMAGE_MODEL ?? defaultBrowserImageModel,
+    reference_model: flags["reference-model"] ?? process.env.ANIFACTORY_REFERENCE_MODEL ?? process.env.ANIFACTORY_IMAGE_MODEL ?? defaultBrowserImageModel,
+    image_provider_models: isFederatedWebImageProvider(imageProvider)
+      ? federatedWebImageProviderModels({ flowModel: googleFlowModel, geminiModel: googleGeminiModel })
+      : isHybridWebFlowProvider(imageProvider)
+      ? hybridWebFlowProviderModels({ flowModel: googleFlowModel })
+      : isGoogleFlowPrimaryProvider(imageProvider)
+        ? googleFlowPrimaryProviderLocks(null, { flowModel: googleFlowModel }).image_provider_models
+        : null,
     render_profile: renderProfile,
   };
 }
@@ -401,6 +488,31 @@ function validateDirtyWorktreePolicy({ dirty, intent, allowDirty, reason }) {
 }
 
 function imageProviderOptions(provider) {
+  if (isFederatedWebImageProvider(provider)) {
+    return federatedWebImageIdentityOptions({
+      chatGptProjectUrl,
+      flowPlan: googleFlowPlan,
+      flowModel: googleFlowModel,
+      geminiPlan: googleGeminiPlan,
+      geminiModel: googleGeminiModel,
+      healthProof: googleFlowHealthProof,
+    });
+  }
+  if (isGoogleFlowPrimaryProvider(provider)) {
+    return googleFlowPrimaryIdentityOptions({
+      flowPlan: googleFlowPlan,
+      flowModel: googleFlowModel,
+      healthProof: googleFlowHealthProof,
+    });
+  }
+  if (isHybridWebFlowProvider(provider)) {
+    return hybridWebFlowIdentityOptions({
+      chatGptProjectUrl,
+      flowPlan: googleFlowPlan,
+      flowModel: googleFlowModel,
+      healthProof: googleFlowHealthProof,
+    });
+  }
   const options = {};
   if (
     provider !== "hybrid_codex_opening_modelslab_rest"
@@ -546,6 +658,48 @@ async function loadWinnerSourceReleaseBinding(releaseFilePath, {
   if (release.winner_package_sha256 !== actualPackageSha256) {
     throw new Error(`Winner package hash mismatch: release records ${release.winner_package_sha256}, current file is ${actualPackageSha256}.`);
   }
+  let winnerStoryBlueprintPath = null;
+  let winnerStoryBlueprintSha256 = null;
+  let winnerStoryBlueprintApprovalPath = null;
+  let winnerStoryBlueprintDocument = null;
+  if (release.winner_story_blueprint_sha256) {
+    winnerStoryBlueprintPath = resolveReleaseArtifactPath(
+      resolvedReleasePath,
+      release.winner_story_blueprint_path,
+      "winner_story_blueprint_path",
+    );
+    winnerStoryBlueprintApprovalPath = resolveReleaseArtifactPath(
+      resolvedReleasePath,
+      release.winner_story_blueprint_approval_path,
+      "winner_story_blueprint_approval_path",
+    );
+    const { bytes: blueprintBytes, value: blueprintDocument } = await readJsonWithBytes(
+      winnerStoryBlueprintPath,
+      "winner story blueprint",
+    );
+    winnerStoryBlueprintSha256 = sha256(blueprintBytes);
+    winnerStoryBlueprintDocument = blueprintDocument;
+    if (winnerStoryBlueprintSha256 !== release.winner_story_blueprint_sha256) {
+      throw new Error(`Winner story blueprint hash mismatch: release records ${release.winner_story_blueprint_sha256}, current file is ${winnerStoryBlueprintSha256}.`);
+    }
+    const blueprintValidation = validateWinnerBlueprintForPackage(blueprintDocument, {
+      packageContract,
+      packageSha256: actualPackageSha256,
+    });
+    if (!blueprintValidation.done) {
+      throw new Error(`Invalid winner story blueprint: ${blueprintValidation.blockers.join(", ")}`);
+    }
+    const { value: blueprintApproval } = await readJsonWithBytes(
+      winnerStoryBlueprintApprovalPath,
+      "winner story blueprint approval",
+    );
+    const blueprintApprovalValidation = validateWinnerStoryBlueprintApproval(blueprintApproval, {
+      blueprintSha256: winnerStoryBlueprintSha256,
+    });
+    if (!blueprintApprovalValidation.done || blueprintApproval.winner_package_sha256 !== actualPackageSha256) {
+      throw new Error(`Invalid winner story blueprint approval: ${blueprintApprovalValidation.blockers.join(", ") || "winner_blueprint_approval_package_hash_mismatch"}`);
+    }
+  }
   const requestedSourceScriptSha256 = sha256Text(normalizeWinnerNarration(requestedSourceBytes.toString("utf8")));
   if (requestedSourceScriptSha256 !== release.source_script_sha256) {
     throw new Error(`--source does not match the released narration: expected ${release.source_script_sha256}, found ${requestedSourceScriptSha256}.`);
@@ -568,6 +722,16 @@ async function loadWinnerSourceReleaseBinding(releaseFilePath, {
   if (release.formula_sha256 && release.formula_sha256 !== packageContract.formula_sha256) {
     throw new Error("Winner release formula_sha256 does not match the current winner package.");
   }
+  const sourceRoomLineage = await loadWinnerSourceRoomLineage({
+    release,
+    releasePath: resolvedReleasePath,
+    packageContract,
+    packageSha256: actualPackageSha256,
+    blueprintDocument: winnerStoryBlueprintDocument,
+    blueprintPath: winnerStoryBlueprintPath,
+    blueprintSha256: winnerStoryBlueprintSha256,
+    releasedSourceScriptSha256: release.source_script_sha256,
+  });
   return {
     schema: "goldflow_run_identity_winner_source_release_binding_v1",
     release_path: resolvedReleasePath,
@@ -583,6 +747,10 @@ async function loadWinnerSourceReleaseBinding(releaseFilePath, {
     preflight_source_file_sha256: sha256(requestedSourceBytes),
     winner_package_path: winnerPackagePath,
     winner_package_sha256: actualPackageSha256,
+    winner_story_blueprint_path: winnerStoryBlueprintPath,
+    winner_story_blueprint_sha256: winnerStoryBlueprintSha256,
+    winner_story_blueprint_approval_path: winnerStoryBlueprintApprovalPath,
+    ...(sourceRoomLineage ?? {}),
     winner_gate_sha256: release.winner_gate_sha256,
     formula_version: packageContract.formula_version,
     formula_sha256: packageContract.formula_sha256,
@@ -657,18 +825,49 @@ async function main() {
       throw new Error(`Factual evidence title mismatch: preflight title is "${title}", ledger title is "${factualEvidence.title}".`);
     }
   }
-  const winnerSourceRelease = winnerReleasePath
-    ? await loadWinnerSourceReleaseBinding(winnerReleasePath, {
-        expectedChannel: channel,
-        expectedTitle: title,
-        expectedSourcePath: sourcePath,
-      })
-    : null;
+  let winnerSourceRelease = null;
+  if (winnerReleasePath) {
+    const { value: releaseDocument } = await readJsonWithBytes(winnerReleasePath, "winner source release");
+    winnerSourceRelease = releaseDocument?.schema === SOURCE_ROOM_RELEASE_V2_SCHEMA
+      ? await loadSourceRoomReleaseV2Binding(winnerReleasePath, {
+          expectedChannel: channel,
+          expectedTitle: title,
+          expectedSourcePath: sourcePath,
+        })
+      : await loadWinnerSourceReleaseBinding(winnerReleasePath, {
+          expectedChannel: channel,
+          expectedTitle: title,
+          expectedSourcePath: sourcePath,
+        });
+  }
   validateImageFallbackPolicy();
   const git = await gitSnapshot();
   validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
   const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
   const now = new Date().toISOString();
+  const resolvedImageProviderOptions = imageProviderOptions(imageProvider);
+  const planningRoom = planningProvider === PLANNING_ROOM_PROVIDER
+    ? planningRoomContract({
+        planning_provider: planningProvider,
+        production_profile_config: productionProfileConfig,
+        planning_room: {
+          provider_models: Object.fromEntries(
+            Object.keys(PLANNER_PROVIDER_REGISTRY).map((provider) => [
+              provider,
+              plannerModelForProvider(provider, {}, process.env),
+            ]),
+          ),
+        },
+      })
+    : null;
+  if (planningRoom) {
+    planningRoom.provider_models = Object.fromEntries(
+      Object.keys(PLANNER_PROVIDER_REGISTRY).map((provider) => [
+        provider,
+        plannerModelForProvider(provider, { planning_room: planningRoom }, process.env),
+      ]),
+    );
+  }
   const manifest = {
     schema: "goldflow_run_identity_v2",
     stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
@@ -681,13 +880,14 @@ async function main() {
     title,
     planning_provider: planningProvider,
     planning_effort_policy: planningEffortPolicy,
+    planning_room: planningRoom,
     chatgpt_web_project: chatGptProjectUrl ? {
       url: chatGptProjectUrl,
       scope: "planning_and_images",
       cleanup_policy: CHATGPT_WEB_PROJECT_CLEANUP_POLICY,
     } : null,
     image_provider: imageProvider,
-    image_provider_options: imageProviderOptions(imageProvider),
+    image_provider_options: resolvedImageProviderOptions,
     voice_provider_options: voiceProviderOptions(),
     ...(ttsProvider !== "modelslab_qwen" ? {
       tts_provider: ttsProvider,
@@ -720,10 +920,13 @@ async function main() {
     },
     render_profile: renderProfile,
     motion_policy: motionPolicy,
-    animation_policy: ltxVideoPolicy,
+    animation_policy: generatedMotionPolicy,
+    generated_motion_policy: generatedMotionPolicy,
+    generated_motion_provider: generatedMotionProvider,
+    generated_motion_model: generatedMotionModel,
     ltx_video_policy: ltxVideoPolicy,
-    ltx_video_provider: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_PROVIDER,
-    ltx_video_model: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_MODEL_ID,
+    ltx_video_provider: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_PROVIDER : null,
+    ltx_video_model: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_MODEL_ID : null,
     parallax_policy: parallaxPolicy,
     parallax_target_max: parallaxTargetMax,
     parallax_min_spacing_sec: parallaxMinSpacingSec,
@@ -747,6 +950,8 @@ async function main() {
     provider_locks: {
       planning_provider: planningProvider,
       planning_model: planningModel,
+      planning_provider_models: planningRoom?.provider_models ?? null,
+      planning_room: planningRoom,
       planning_effort_policy: planningEffortPolicy,
       planning_default_reasoning_effort: planningDefaultReasoningEffort,
       chatgpt_web_project_url: chatGptProjectUrl,
@@ -756,11 +961,26 @@ async function main() {
       image_provider: imageProvider,
       image_model: lockedModelVersions().image_model,
       reference_model: lockedModelVersions().reference_model,
+      ...(isFederatedWebImageProvider(imageProvider)
+        ? federatedWebImageProviderLocks(resolvedImageProviderOptions, {
+            flowModel: googleFlowModel,
+            geminiModel: googleGeminiModel,
+          })
+        : isHybridWebFlowProvider(imageProvider)
+        ? hybridWebFlowProviderLocks(resolvedImageProviderOptions, { flowModel: googleFlowModel })
+        : isGoogleFlowPrimaryProvider(imageProvider)
+          ? googleFlowPrimaryProviderLocks(resolvedImageProviderOptions, { flowModel: googleFlowModel })
+        : {}),
       image_fallback_provider: imageFallbackProvider,
       image_fallback_condition: imageFallbackCondition,
       parallax_background_provider: parallaxBackgroundProvider,
-      ltx_video_provider: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_PROVIDER,
-      ltx_video_model: ltxVideoPolicy === "disabled" ? null : LTX_VIDEO_MODEL_ID,
+      generated_motion_provider: generatedMotionProvider,
+      generated_motion_model: generatedMotionModel,
+      generated_motion_candidates_per_moment: generatedMotionPolicy === "disabled" ? 0 : 1,
+      generated_motion_automatic_retries: 0,
+      generated_motion_failure_disposition: "accepted_still_fallback",
+      ltx_video_provider: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_PROVIDER : null,
+      ltx_video_model: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_MODEL_ID : null,
       audio_target: audioTarget,
       local_whisper_timing: structuredClone(localWhisperTimingContract),
       tts_provider: ttsProvider,
@@ -848,7 +1068,7 @@ async function main() {
       planning_provider_identity_lock_required: true,
       planning_effort_policy_identity_lock_required: true,
       chatgpt_web_local_tools_required: false,
-      deterministic_local_validation_after_web_planning_required: planningProvider === "chatgpt_web",
+      deterministic_local_validation_after_web_planning_required: ["chatgpt_web", PLANNING_ROOM_PROVIDER].includes(planningProvider),
       script_hash_approval_required_before_downstream: true,
       factual_evidence_required: contentProfileRequiresEvidenceLedger(contentProfile),
       whisper_timing_required_before_sfx_score_visual_beats_and_render: true,
@@ -861,6 +1081,7 @@ async function main() {
       single_narrator_identity_required: ttsProvider !== "modelslab_qwen",
       fallback_must_clone_primary_voice_identity: ttsProvider === "kokoro_local",
       sentence_complete_tts_units_required: ttsProvider === "qwen_local",
+      tts_spoken_text_audit_required: ttsProvider === "qwen_local",
       tts_unit_hard_words_max: ttsProvider === "qwen_local"
         ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.hard_words_max
         : null,
@@ -879,13 +1100,13 @@ async function main() {
       image_output_qa_required_before_render: true,
       directed_motion_plan_required_before_render: true,
       inspected_parallax_decision_required_before_motion: parallaxPolicy === "selective_inspected",
-      animation_direction_required_after_image_qa: ltxVideoPolicy !== "disabled",
-      generated_video_approval_required_before_motion: ltxVideoPolicy !== "disabled",
+      animation_direction_required_after_image_qa: generatedMotionPolicy !== "disabled",
+      generated_video_approval_required_before_motion: generatedMotionPolicy !== "disabled",
       automatic_stage_spend_authorized_by_profile: productionProfileConfig.advance.authorize_planner_spend
         && productionProfileConfig.advance.authorize_media_spend
         && productionProfileConfig.advance.authorize_render,
     },
-    stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy, ltx_video_policy: ltxVideoPolicy }),
+    stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy, generated_motion_policy: generatedMotionPolicy, generated_motion_provider: generatedMotionProvider }),
     episode_dir: episodeDir,
     updated_at: now,
   };

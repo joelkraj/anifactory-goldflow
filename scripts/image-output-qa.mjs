@@ -10,6 +10,9 @@ import {
   promptHasEquipmentGeometryRisk,
   promptHasImmutableAnatomyRisk,
 } from "./lib/shot-manifest-risk-contracts.mjs";
+import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
+import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -420,6 +423,11 @@ function isCodexRoute(value) {
 }
 
 export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, runIdentity) {
+  const provider = String(runIdentity?.image_provider ?? imagegenReport.image_provider ?? "modelslab");
+  const base = `--channel ${runIdentity?.channel ?? channel} --series ${runIdentity?.series_slug ?? series} --week ${runIdentity?.week ?? week} --episode ${runIdentity?.episode ?? episode}`;
+  if (isBrowserPoolImageProvider(normalizeImageProvider(provider))) {
+    return `node bin/goldflow.mjs imagegen browser-pool ${base} --image-ids ${imageIds.join(",")} --qa-recovery true --repair-reason "<reviewed structural image-QA blocker evidence>"`;
+  }
   const promptById = new Map((promptPlan.prompts ?? []).map((prompt) => [String(prompt.image_id ?? ""), prompt]));
   const resultById = new Map((imagegenReport.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const codexIds = [];
@@ -432,8 +440,6 @@ export function scopedQaRecoveryCommand(imageIds, promptPlan, imagegenReport, ru
       ?? "modelslab";
     (isCodexRoute(route) ? codexIds : modelslabIds).push(imageId);
   }
-  const provider = String(runIdentity?.image_provider ?? imagegenReport.image_provider ?? "modelslab");
-  const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const commands = [];
   if (codexIds.length) {
     commands.push(`node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids ${codexIds.join(",")} --qa-recovery true --max-attempts 1 --lease-sec 900`);
@@ -460,12 +466,14 @@ export function acceptedImageHashesForRows(rows = [], structuralBlockerIds = new
 }
 
 async function main() {
-  const [promptPlan, imagegenReport, runIdentity, focalAnalysis] = await Promise.all([
+  const [promptPlan, imagegenReport, lockedRunIdentity, focalAnalysis] = await Promise.all([
     readJson(promptPath, null),
     readJson(imagegenReportPath, null),
     readJson(runIdentityPath, {}),
     readJson(focalAnalysisPath, null),
   ]);
+  const effectiveImageRoute = await effectiveImageIdentityForEpisode(episodeDir, runIdentityPath, lockedRunIdentity);
+  const runIdentity = effectiveImageRoute.identity;
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed prompt plan: ${promptPath}`);
   if (imagegenReport?.status !== "passed" || !Array.isArray(imagegenReport.results)) throw new Error(`Missing passed imagegen report: ${imagegenReportPath}`);
   const isV2 = runIdentity?.schema === "goldflow_run_identity_v2" || runIdentity?.run_identity_schema === "goldflow_run_identity_v2";

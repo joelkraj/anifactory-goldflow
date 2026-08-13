@@ -9,19 +9,40 @@ Your task is to invent original long-form manhwa recap concepts that transfer me
 
 Treat the supplied channel formula as binding. Treat the supplied performance evidence as demand evidence, not permission to reproduce a premise.
 
+Use this evidence hierarchy:
+
+1. measured own-channel analytics for click and viewing behavior;
+2. measured public outlier metadata and timed-transcript patterns;
+3. operator stockpile decisions and recent-upload saturation;
+4. synthetic premise lists for duplicate/reskin detection only.
+
+Never cite a synthetic concept's AI editorial score as audience demand. Keep package demand and longform watch potential as separate hypotheses.
+
 Before returning anything, privately generate the full raw idea count required by the formula. Every raw idea must begin with a concrete betrayal or humiliation and discover one clear reversal engine that launches Joey's new path. The mechanic does not need to counter or mirror the betrayal. Search freely across familiar and unfamiliar mechanics, reject weak or repetitive concepts, compare the survivors head to head, and return only the requested finalists. Do not expose the discarded working set or chain of thought.
 
-When the operator supplies premise seeds, preserve each seed as a genuine finalist unless it is literally impossible to fulfill or collides with a recorded rejection. AI-generated ideas are challengers. Do not replace a simple operator idea merely because an AI idea contains more machinery.
+Only a premise explicitly named in the current OPERATOR CREATIVE BRIEF is a supplied operator seed. Preserve each such seed as a genuine finalist unless it is literally impossible to fulfill or collides with a recorded rejection. Entries in the durable stockpile, pending research, prior candidate boards, and synthetic research pool are historical priority and duplicate-detection context; they are not mandatory finalists unless the current creative brief explicitly promotes them. AI-generated ideas are challengers. Do not replace a simple current operator seed merely because an AI idea contains more machinery.
+
+When the creative brief requests proven-demand twists, begin from the measured package grammar of a specific high-performing YouTube example, never its plot. Change one or two meaningful axes such as the betrayer relationship, visible institution, reversal mechanic, or public proof while preserving the cold-viewer contradiction that carried demand. Record the source package pattern and the new twist explicitly in `evidence_hypothesis.click_transfer` and `differentiation.fresh_elements`. A title with many novel nouns but weaker one-breath clarity is not an improvement.
 
 PACKAGE FIRST
 
 Invent the click before inventing the plot.
 
-Each candidate must begin with one instantly legible relationship or status wound, one concrete betrayal action, one clear transformation or takeback, and one additive thumbnail proof. The title and thumbnail must explain why a cold viewer should click before the viewer knows any lore.
+Each candidate must begin with one instantly legible relationship or status wound, one concrete betrayal action, one clear transformation or takeback, and one additive thumbnail proof. The title and thumbnail must explain why a cold viewer should click before the viewer knows any lore. Treat them as one package: the title explains the causal movie, while the thumbnail supplies a concrete receipt. They must sell the same fantasy with different information.
 
 The title must be a complete causal sentence. It must identify the betrayer or institution, state what they did, and state what Joey did or became in response. It must end with the required suffix and remain under the supplied character maximum.
 
-The thumbnail must be one scene with one to three subjects. Prefer Joey and one antagonist or replacement figure. Use one dominant relationship, object, gesture, number, or status proof. Main text must be one to four words. All overlay text together must remain within the supplied limit. The thumbnail must add a fact, judgment, or proof that the title does not already say.
+The thumbnail must be one scene with one to three subjects. Prefer Joey and one antagonist or replacement figure. Use one dominant relationship, object, gesture, number, rank change, system screen, physical action, role substitution, or before/after proof. Main text must be one to four words. All overlay text together must remain within the supplied limit. The thumbnail must add a fact, judgment, or proof that the title does not already say.
+
+For every candidate, explicitly define:
+
+- `title_supplies`: the facts and causal transformation stated by the title;
+- `thumbnail_adds`: the different visible receipt supplied by the image;
+- `package_open_loop`: the compelling how or why question created only when both are seen together;
+- `proof_device`: the number, rank, UI, object, action, role change, or transformation that makes the thumbnail specific;
+- `literal_payment_scene`: where the eventual story will visibly fulfill that receipt.
+
+Reject a candidate when its best thumbnail is merely attractive characters, an arrow, and a broad verdict such as best revenge, big mistake, wrong man, or she chose him. Reject it when the title and thumbnail repeat one clause, sell different fantasies, or create no specific open loop.
 
 Author the thumbnail as one complete final 16:9 Codex Imagen raster generated from scratch. Use zero image references: no episode stills, character or scene references, contact sheets, old thumbnails, or channel art. Codex Imagen must render the exact text, labels, and arrows within the image. Local processing is limited to resize, format conversion, and compression; never plan local text, arrow, compositing, inpainting, or content repair.
 
@@ -63,9 +84,13 @@ STORY BEFORE SPECTACLE
 
 Only propose a package when it can sustain a complete causal story.
 
+The candidate must also sustain genuine K-drama/manhwa-style human drama without copying an existing work. Before approving a package, identify the emotional promise, Joey's behavior-producing wound or false belief, one central relationship question, the antagonist's understandable human logic, one supporting character who can materially change the plan, a midpoint human transformation, a recurring object or gesture that can gain meaning, and a source of warmth or relief. Romance is optional. Emotional architecture is mandatory.
+
+Reject packages whose only moving parts are money, ranks, contracts, hearings, interface upgrades, acquisitions, or repeated demonstrations. Those may provide leverage, but people must desire, hide, choose, misunderstand, help, betray, sacrifice, tempt, forgive, or refuse in ways that alter the plot. A technically coherent power ladder with inert relationships is not longform runway.
+
 The opening must visibly prove the title contradiction in thirty seconds. Joey must make an irreversible refusal, escape, or boundary by minutes three to five. Establish the reversal engine's acquisition or activation, core capability, scaling direction, and unmistakable first proof by approximately minutes six to eight. Joey does not need to earn or suffer for the inciting power. His agency appears in how he applies it and what he chooses to build, target, protect, or conquer.
 
-After the opening, move into a premise-native objective. Do not replay the same humiliation with new names. The middle must support eight to ten distinct movements in which consequences change the next objective, pressure, relationship, resource, status, information, or environment.
+After the opening, move into a premise-native objective. Do not replay the same humiliation with new names. The middle must support enough distinct movements for the requested runtime, with consequences changing the next objective, pressure, relationship, resource, status, information, or environment. Longer scripts need more true movements, not the same eight demonstrations stretched with procedure.
 
 Keep the antagonist competent and bound to evidence. Create pressure through larger goals, intelligent opposition, implementation, relationships, timing, responsibility, infrastructure, or the speed of Joey's growth. A setback is optional; do not require defeat or weaken the mechanic to manufacture tension. Let at least one supporting character materially change the plan. Resolve the title promise through an active physical or social consequence, not paperwork or a speech.
 
@@ -88,6 +113,8 @@ SCORING
 Score every supplied dimension from one to ten. Be severe. A score of eight means the requirement is already strong enough to approve before scripting. A score of ten should be rare.
 
 Use the negative evidence as a veto anchor. A rank-heavy, technically complete, or formally structured idea is weak when its human wound, first choice, and literal reversal are less legible than the negative example. Do not award points for merely containing the requested fields.
+
+For every finalist, state one positive transfer hypothesis and one plausible failure analogue. Compare the complete title-thumbnail pair, not just the premise or title. The failure analogue should explain how an apparently complete package could still miss: redundant title and image, weak human clarity, no specific thumbnail receipt, a replaceable fantasy noun, lore dependence, a crowded thumbnail, a premise that cannot sustain varied conflict, or another evidence-grounded risk.
 
 Add a hard-reject code whenever the candidate violates one of the supplied hard rejects. Do not hide a fatal weakness behind a high total.
 
@@ -127,6 +154,11 @@ Use this shape:
         "betrayal_signal": "what makes the betrayal readable",
         "reversal_signal": "what makes the reversal readable",
         "additive_fact": "what this adds beyond the title",
+        "title_supplies": "the causal facts explained by the title",
+        "thumbnail_adds": "the different visible receipt supplied by the image",
+        "package_open_loop": "the specific unresolved how or why question created by the pair",
+        "proof_device": "the number, rank, UI, object, action, role change, or transformation visible at phone size",
+        "literal_payment_scene": "the exact eventual story event that fulfills the thumbnail receipt",
         "image_prompt": "single-scene 16:9 complete Codex Imagen thumbnail generated from scratch with zero image references, including exact in-image text, labels, and any arrow"
       },
       "premise": "One hundred fifty to three hundred words explaining the original story premise without an outline dump.",
@@ -174,11 +206,28 @@ Use this shape:
         "climax": "active seeded payoff",
         "final_boundary": "concise emotional closure"
       },
+      "dramatic_contract": {
+        "emotional_promise": "the human feeling the complete story must pay off",
+        "central_relationship_question": "the unresolved relationship question that can evolve across the story",
+        "joey_wound_or_misbelief": "the belief or wound that shapes Joey's choices before he changes",
+        "antagonist_human_logic": "what the antagonist wants and why their choices make sense to them",
+        "supporting_character_agency": "one ally, rival, family member, or love interest with a useful skill and a choice that can materially change Joey's plan",
+        "midpoint_human_transformation": "an identity, responsibility, relationship, or goal change larger than a number increase",
+        "warmth_or_relief_source": "the recurring person, bond, or situation that supplies earned warmth without pausing the plot",
+        "recurring_emotional_object": "an object, place, promise, line, or gesture that can gain meaning through setup and payoff",
+        "procedural_risk": "the part of this premise most likely to turn into logistics, and the human conflict that should replace or compress it"
+      },
       "differentiation": {
         "fresh_elements": ["specific differences"],
         "recent_titles_avoided": ["titles or signatures this does not duplicate"]
       },
       "evidence_ids": ["at least one own-channel evidence id", "at least one niche-outlier evidence id"],
+      "evidence_hypothesis": {
+        "click_transfer": "the measured package pattern this candidate transfers without copying plot skin",
+        "watch_transfer": "the measured opening or causal-story pattern that could sustain viewing",
+        "failure_analogue": "the closest negative pattern or plausible reason this complete-looking package could still miss",
+        "disconfirming_signal": "the upload result that would prove this hypothesis wrong"
+      },
       "score_inputs": {
         "own_channel_demand_fit": 1,
         "niche_outlier_support": 1,

@@ -1,0 +1,47 @@
+{
+  "schema": "goldflow_google_flow_health_proof_v1",
+  "status": "passed",
+  "proof_id": "google_flow_speed_pool_v1",
+  "provider": "google-flow",
+  "account_plan": "PLUS",
+  "model_label": "Nano Banana Pro",
+  "safe_concurrency": 5,
+  "next_tested_concurrency": 10,
+  "routing_decision": "speed_first_web_flow_v1",
+  "operator_quality_decision": "provider_difference_not_discernible_for_remaining_references_and_scene_images",
+  "concurrency_evidence": {
+    "schema": "goldflow_google_flow_concurrency_proof_report_v1",
+    "path": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W28-shadow-trains-1000-years-v1/episodes/ep_01/review_samples/google_flow_concurrency_gpt_image2_quality_proof_2026-08-09/execution-report.json",
+    "sha256": "cb1fb5d473adb107ff2dba7cb31ed98696dc8be02ce7593ff99679d85b314e31",
+    "passed_wave_concurrency": 5,
+    "passed_wave_max_observed_active_jobs": 5,
+    "passed_wave_duration_sec": 74.682,
+    "stop_on_first_failure_observed_at_concurrency": 10
+  },
+  "reference_binding_evidence": {
+    "schema": "goldflow_google_flow_verified_reference_reproof_report_v1",
+    "path": "/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W28-shadow-trains-1000-years-v1/episodes/ep_01/review_samples/google_flow_verified_refs_reproof_2026-08-09/execution-report.json",
+    "sha256": "114810e93a50f4c28ced3566169cd5632f465a2234a4ed7011d806025b532728",
+    "status": "passed",
+    "live_verified_reference_counts": [
+      1,
+      2,
+      4
+    ],
+    "zero_reference_contract_tested": true,
+    "binding_schema": "goldflow_google_flow_reference_binding_v1",
+    "require_verified_reference_binding": true
+  },
+  "policy": {
+    "fresh_project_per_job": true,
+    "one_creative_submission_per_item": true,
+    "automatic_retry_policy": "none",
+    "reference_echo_rejection_required": true,
+    "style_reference_provider": "chatgpt_web_gpt_image",
+    "shared_pool_providers": [
+      "chatgpt_web_gpt_image",
+      "google_flow"
+    ]
+  },
+  "recorded_at": "2026-08-09T22:05:22.424Z"
+}

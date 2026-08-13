@@ -3,6 +3,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import { sha256File } from "./file-hash.mjs";
+import {
+  validateYoutubeNativeAbPlan,
+  validateYoutubeNativeAbReceipt,
+} from "./youtube-ab-test-contract.mjs";
 
 export const YOUTUBE_PUBLISH_CONTRACT_VERSION = "2026-07-29.3";
 export const YOUTUBE_PACKAGING_SPEC_SCHEMA = "goldflow_youtube_packaging_spec_v2";
@@ -12,7 +16,13 @@ export const YOUTUBE_UPLOAD_RECEIPT_SCHEMA = "goldflow_youtube_upload_receipt_v1
 export const YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA = "goldflow_youtube_pinned_comment_receipt_v1";
 
 export const YOUTUBE_THUMBNAIL_GENERATION_CONTRACT = Object.freeze({
-  provider: "codex_imagen",
+  provider: "google_flow_imagen",
+  allowed_providers: Object.freeze([
+    "google_flow_imagen",
+    "google_gemini_imagen",
+    "chatgpt_web_gpt_image",
+  ]),
+  fallback_provider: "chatgpt_web_gpt_image",
   generation_mode: "full_raster_from_scratch",
   reference_count: 0,
   text_rendered_by_model: true,
@@ -241,8 +251,8 @@ function validateThumbnail(spec, blockers, validEvidenceIds, options = {}) {
     if (options.enforceGenerationContract !== false) {
       push(
         blockers,
-        clean(selected?.provider) !== YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.provider,
-        "selected_thumbnail_provider_must_be_codex_imagen",
+        !YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.allowed_providers.includes(clean(selected?.provider)),
+        "selected_thumbnail_provider_must_be_approved_imagen_route",
       );
       push(
         blockers,
@@ -518,6 +528,46 @@ export async function youtubeUploadReceiptComplete(episodeDir, episode) {
   if (validation.status !== "passed") {
     return { done: false, state: "blocked", evidence: validation.blockers.join(", ") };
   }
+  let nativeAbEvidence = "";
+  if (manifest?.native_ab_test?.required === true) {
+    const planPath = manifest.native_ab_test.plan_path
+      ?? path.join(episodeDir, `youtube_native_ab_plan_${episode}.json`);
+    const abReceiptPath = path.join(episodeDir, `youtube_native_ab_receipt_${episode}.json`);
+    const [plan, abReceipt, planFileSha256, uploadReceiptSha256] = await Promise.all([
+      readJson(planPath),
+      readJson(abReceiptPath),
+      sha256File(planPath).catch(() => null),
+      sha256File(receiptPath).catch(() => null),
+    ]);
+    const planValidation = validateYoutubeNativeAbPlan(plan, {
+      packagingSpecSha256: manifest.packaging_spec_sha256,
+      baselineTitle: manifest.title,
+      baselineThumbnailSha256: manifest.thumbnail?.sha256,
+    });
+    if (planValidation.status !== "passed") {
+      return { done: false, state: "blocked", evidence: `native A/B plan invalid: ${planValidation.blockers.join(", ")}` };
+    }
+    const abValidation = validateYoutubeNativeAbReceipt(abReceipt, {
+      plan,
+      planSha256: planFileSha256,
+      uploadReceipt: receipt,
+      uploadReceiptSha256,
+    });
+    if (abValidation.status !== "passed") {
+      const onlyMissing = !abReceipt;
+      return {
+        done: false,
+        ...(onlyMissing ? {} : { state: "blocked" }),
+        evidence: onlyMissing
+          ? `approved native A/B test still needs Studio verification: ${abReceiptPath}`
+          : `native A/B receipt invalid: ${abValidation.blockers.join(", ")}`,
+        ...(onlyMissing ? {
+          next_command_shape: `Use the youtube-studio-publish browser skill to configure the approved native test, then run node bin/goldflow.mjs youtube record-ab-test --episode-dir ${episodeDir} --studio-url <url> --configured-variant-ids <ids> --channel-verified true --test-verified true --recorded-by <name>`,
+        } : {}),
+      };
+    }
+    nativeAbEvidence = `; native ${plan.test_type} test ${abReceipt.experiment_state}`;
+  }
   const effectiveThumbnail = await youtubeEffectiveThumbnailState(episodeDir, episode, {
     manifest,
     uploadReceipt: receipt,
@@ -531,7 +581,7 @@ export async function youtubeUploadReceiptComplete(episodeDir, episode) {
     : "";
   return {
     done: true,
-    evidence: `YouTube video ${receipt.video_id} recorded as ${receipt.visibility}${thumbnailEvidence}${warning}`,
+    evidence: `YouTube video ${receipt.video_id} recorded as ${receipt.visibility}${nativeAbEvidence}${thumbnailEvidence}${warning}`,
   };
 }
 

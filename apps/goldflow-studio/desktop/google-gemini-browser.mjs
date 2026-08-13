@@ -1,0 +1,707 @@
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
+import { chromium } from "playwright-core";
+
+import { findReferenceEcho, normalizedImagePixels } from "../lib/image-pixel-contract.mjs";
+import { clearLoginMarker, markLoginVerified } from "./browser-login.mjs";
+
+const GEMINI_IMAGES_URL = "https://gemini.google.com/images";
+const GEMINI_APP_URL = "https://gemini.google.com/app";
+const PROMPT_SELECTOR = '[contenteditable="true"][aria-label="Enter a prompt for Gemini"]';
+const SIGNED_OUT_SELECTOR = 'a:has-text("Sign in"), button:has-text("Sign in")';
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const GEMINI_UPLOAD_PENDING_SELECTOR = '[aria-label*="upload" i][aria-busy="true"], [data-test-id*="upload" i][aria-busy="true"], [class*="uploading" i], [role="progressbar"]';
+export const GEMINI_INLINE_PROMPT_MAX_CHARS = 24_000;
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function safeName(value) {
+  return String(value ?? "asset").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
+}
+
+function sha256Bytes(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function sha256File(filePath) {
+  return sha256Bytes(await fs.readFile(filePath));
+}
+
+async function sleep(milliseconds) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function visibleLocator(locator) {
+  for (let index = 0; index < await locator.count(); index += 1) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible().catch(() => false)) return candidate;
+  }
+  return null;
+}
+
+async function waitForVisible(locator, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const candidate = await visibleLocator(locator);
+    if (candidate) return candidate;
+    await sleep(200);
+  }
+  return null;
+}
+
+function exactSha256(value, label) {
+  const normalized = String(value ?? "").trim();
+  if (!SHA256_PATTERN.test(normalized)) throw codedError("ui_contract_mismatch", `${label} must be an exact lowercase SHA-256.`);
+  return normalized;
+}
+
+const GEMINI_EDITOR_FORMATTING_MARKS = /[\u200B\u2060\uFEFF]/g;
+
+export function normalizeGeminiPromptText(value) {
+  return String(value ?? "")
+    .normalize("NFC")
+    .replace(GEMINI_EDITOR_FORMATTING_MARKS, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00A0/g, " ")
+    .replace(/[ \t\f\v]+\n/g, "\n")
+    .replace(/\n[ \t\f\v]+/g, "\n")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
+export async function verifyGeminiComposerPrompt(composer, expectedPrompt) {
+  const expected = String(expectedPrompt ?? "");
+  const observed = String(await composer.innerText());
+  const normalizedExpected = normalizeGeminiPromptText(expected);
+  const normalizedObserved = normalizeGeminiPromptText(observed);
+  if (!normalizedExpected || normalizedObserved !== normalizedExpected) {
+    throw codedError(
+      "ui_contract_mismatch",
+      `Gemini text prompt changed before submission (expected ${expected.length} chars/${sha256Bytes(Buffer.from(expected, "utf8"))}, observed ${observed.length} chars/${sha256Bytes(Buffer.from(observed, "utf8"))}).`,
+    );
+  }
+  return {
+    expected_sha256: sha256Bytes(Buffer.from(expected, "utf8")),
+    observed_sha256: sha256Bytes(Buffer.from(observed, "utf8")),
+    canonical_sha256: sha256Bytes(Buffer.from(normalizedExpected, "utf8")),
+  };
+}
+
+export function createGeminiLlmPromptDelivery(prompt) {
+  const source = String(prompt ?? "");
+  const sourceBytes = Buffer.from(source, "utf8");
+  const sourceSha256 = sha256Bytes(sourceBytes);
+  const byteCount = sourceBytes.length;
+  if (source.length <= GEMINI_INLINE_PROMPT_MAX_CHARS) {
+    return {
+      mode: "inline",
+      source,
+      source_sha256: sourceSha256,
+      source_utf8_bytes: byteCount,
+      composer_text: source,
+      attachment: null,
+    };
+  }
+  const filename = `goldflow-prompt-${sourceSha256}-${byteCount}b.txt`;
+  const composerText = [
+    `Read the complete attached UTF-8 text file "${filename}" from beginning to end.`,
+    "Treat the entire file contents as the user prompt and follow every instruction in it exactly.",
+    `The attached file contains exactly ${byteCount} bytes and has SHA-256 ${sourceSha256}.`,
+    "Do not summarize, omit, shorten, or reinterpret the attached prompt before executing it.",
+  ].join(" ");
+  return {
+    mode: "utf8_text_attachment",
+    source,
+    source_sha256: sourceSha256,
+    source_utf8_bytes: byteCount,
+    composer_text: composerText,
+    attachment: {
+      name: filename,
+      mimeType: "text/plain;charset=utf-8",
+      buffer: sourceBytes,
+      source_sha256: sourceSha256,
+      byte_count: byteCount,
+    },
+  };
+}
+
+export async function verifyGeminiTextAttachmentRetained(page, attachment, {
+  timeoutMs = 90_000,
+  pollMs = 250,
+  stablePollsRequired = 2,
+} = {}) {
+  const sourceSha256 = exactSha256(attachment?.source_sha256, "Gemini text prompt attachment");
+  const filename = String(attachment?.name ?? "");
+  const byteCount = Number(attachment?.byte_count);
+  if (!filename || !filename.includes(sourceSha256) || !filename.includes(`${byteCount}b`) || !filename.endsWith(".txt")) {
+    throw codedError("ui_contract_mismatch", "Gemini text prompt attachment filename is not bound to its SHA-256 and byte count.");
+  }
+  const deadline = Date.now() + timeoutMs;
+  let stablePolls = 0;
+  while (Date.now() <= deadline) {
+    const attachmentTiles = page.locator("gem-attachment");
+    const visibleTiles = [];
+    for (let index = 0; index < await attachmentTiles.count(); index += 1) {
+      const tile = attachmentTiles.nth(index);
+      if (await tile.isVisible().catch(() => false)) visibleTiles.push(tile);
+    }
+    if (visibleTiles.length > 1) {
+      throw codedError("ui_contract_mismatch", `Gemini retained ${visibleTiles.length} text attachments; expected exactly one hash-bound prompt file.`);
+    }
+    let filenameChip = await visibleLocator(page.getByText(filename, { exact: true }));
+    if (!filenameChip && visibleTiles.length === 1) {
+      await visibleTiles[0].click();
+      filenameChip = await waitForVisible(page.getByText(filename, { exact: true }), 2_000);
+    }
+    const pendingUpload = await visibleLocator(page.locator(GEMINI_UPLOAD_PENDING_SELECTOR));
+    const tileText = visibleTiles.length === 1 ? String(await visibleTiles[0].innerText().catch(() => "")) : "";
+    if (filenameChip && /\bTXT\b/i.test(tileText) && !pendingUpload) {
+      stablePolls += 1;
+      if (stablePolls >= stablePollsRequired) {
+        return {
+          status: "verified",
+          upload_filename: filename,
+          source_sha256: sourceSha256,
+          utf8_byte_count: byteCount,
+          visible_filename_retained: true,
+          no_pending_uploads: true,
+        };
+      }
+    } else {
+      stablePolls = 0;
+    }
+    await sleep(pollMs);
+  }
+  throw codedError("ui_contract_mismatch", `Gemini did not visibly retain complete text prompt attachment ${filename} before submission.`);
+}
+
+export function geminiBlockingCode(text) {
+  const value = String(text ?? "");
+  if (/daily limit|limit resets|generation limit/i.test(value)) return "usage_limited";
+  if (/too many requests|rate limit|try again later/i.test(value)) return "rate_limited";
+  if (/can.t help with that|violat(?:e|es|ed|ion).*polic/i.test(value)) return "content_policy_rejected";
+  if (/something went wrong|failed to generate|couldn.t generate|encountered an error doing what you asked/i.test(value)) return "google_gemini_generation_error";
+  return null;
+}
+
+export class GoogleGeminiBrowser {
+  constructor({
+    profileDir,
+    downloadsRoot,
+    chromeExecutable,
+    headless = false,
+    concurrency = 1,
+    geminiPlanLabel = "Ultra",
+    geminiModelLabel = "Nano Banana 2",
+    log = () => {},
+  } = {}) {
+    this.profileDir = profileDir;
+    this.downloadsRoot = downloadsRoot;
+    this.chromeExecutable = chromeExecutable;
+    this.headless = headless;
+    this.concurrency = concurrency;
+    this.geminiPlanLabel = geminiPlanLabel;
+    this.geminiModelLabel = geminiModelLabel;
+    this.log = log;
+    this.context = null;
+    this.loginPage = null;
+    this.llmJobsStarted = 0;
+  }
+
+  async start() {
+    await Promise.all([
+      fs.mkdir(this.profileDir, { recursive: true }),
+      fs.mkdir(this.downloadsRoot, { recursive: true }),
+      fs.access(this.chromeExecutable),
+    ]);
+    this.context = await chromium.launchPersistentContext(this.profileDir, {
+      executablePath: this.chromeExecutable,
+      headless: this.headless,
+      acceptDownloads: true,
+      downloadsPath: this.downloadsRoot,
+      viewport: null,
+      ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain"],
+      args: ["--start-maximized", "--disable-features=Translate"],
+    });
+    this.loginPage = this.context.pages()[0] ?? await this.context.newPage();
+    // Keep the persistent authentication tab in ordinary Gemini chat. Image
+    // jobs open their own /images tab and verify image mode independently.
+    await this.loginPage.goto(GEMINI_APP_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    return this;
+  }
+
+  async waitForAuthentication() {
+    const signedOut = await visibleLocator(this.loginPage.locator(SIGNED_OUT_SELECTOR));
+    const composer = await waitForVisible(this.loginPage.locator(PROMPT_SELECTOR), 30_000);
+    if (composer && !signedOut) {
+      await markLoginVerified(this.profileDir, { url: this.loginPage.url() }, "google-gemini");
+      this.log("Google Gemini authentication verified.");
+      return;
+    }
+    await clearLoginMarker(this.profileDir, "google-gemini");
+    throw codedError("auth_required", "The dedicated Goldflow Google profile is not authenticated in Gemini.");
+  }
+
+  async close() {
+    const context = this.context;
+    this.context = null;
+    if (context) await context.close().catch(() => {});
+  }
+
+  async newJobPage(type = "image") {
+    const page = await this.context.newPage();
+    await page.goto(type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    if (type === "llm") this.llmJobsStarted += 1;
+    if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
+      throw codedError("ui_contract_mismatch", "Gemini did not expose its prompt composer.");
+    }
+    return page;
+  }
+
+  async visibleModelResponses(page) {
+    const selectors = [
+      "message-content",
+      "model-response message-content",
+      ".model-response-text",
+      '[data-test-id="model-response"]',
+      '[data-message-author-role="model"]',
+    ];
+    for (const selector of selectors) {
+      const rows = page.locator(selector);
+      if (await rows.count()) return rows;
+    }
+    return page.locator("message-content");
+  }
+
+  async runLlmJob({ job, onPhase = async () => {} }) {
+    const page = await this.newJobPage("llm");
+    try {
+      await onPhase("verifying_ui_contract");
+      const textModel = await this.selectTextModel(page);
+      const composer = await this.composer(page);
+      const baselineCount = await (await this.visibleModelResponses(page)).count();
+      await onPhase("entering_prompt");
+      const prompt = String(job.prompt ?? "");
+      const promptPreparation = await this.prepareLlmPromptSubmission(page, composer, prompt, onPhase);
+      const send = await waitForVisible(page.getByRole("button", { name: /Send message/i }), 30_000);
+      if (!send) throw codedError("ui_contract_mismatch", "Gemini Send message control is missing for text planning.");
+      const sendDeadline = Date.now() + 90_000;
+      while (Date.now() < sendDeadline && await send.isDisabled().catch(() => true)) await sleep(250);
+      if (await send.isDisabled().catch(() => true)) throw codedError("ui_contract_mismatch", "Gemini Send message remained disabled after text prompt preparation.");
+      await onPhase("submitting");
+      await send.click();
+      await onPhase("waiting_for_completion");
+      const deadline = Date.now() + 60 * 60_000;
+      let previous = "";
+      let stableSince = 0;
+      while (Date.now() < deadline) {
+        const body = await page.locator("body").innerText();
+        const blockingCode = geminiBlockingCode(body);
+        if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
+        const responses = await this.visibleModelResponses(page);
+        if (await responses.count() > baselineCount) {
+          const content = String(await responses.last().innerText().catch(() => "")).trim();
+          if (content && content === previous) {
+            if (!stableSince) stableSince = Date.now();
+            if (Date.now() - stableSince >= 2_000) {
+              return {
+                content,
+                conversationUrl: page.url(),
+                uiContract: {
+                  provider: "google-gemini",
+                  account_plan: this.geminiPlanLabel,
+                  model_label: textModel.model_label,
+                  extended_thinking: textModel.extended_thinking,
+                  task_type: "llm",
+                  prompt_sha256: promptPreparation.delivery.source_sha256,
+                  prompt_utf8_bytes: promptPreparation.delivery.source_utf8_bytes,
+                  prompt_delivery: promptPreparation.delivery.mode,
+                  composer_instruction_sha256: promptPreparation.verification.expected_sha256,
+                  composer_observed_sha256: promptPreparation.verification.observed_sha256,
+                  composer_canonical_sha256: promptPreparation.verification.canonical_sha256,
+                  prompt_attachment: promptPreparation.attachment_receipt,
+                  creative_submission_count: 1,
+                  verified_at: new Date().toISOString(),
+                },
+              };
+            }
+          } else {
+            previous = content;
+            stableSince = content ? Date.now() : 0;
+          }
+        }
+        await sleep(500);
+      }
+      throw codedError("ui_contract_mismatch", "Timed out waiting for a complete Gemini text response.");
+    } finally {
+      if (page !== this.loginPage) await page.close().catch(() => {});
+    }
+  }
+
+  async verifyUiContract(page) {
+    const body = (await page.locator("body").innerText()).replace(/\s+/g, " ");
+    // The compact sidebar can omit the plan badge on newly opened job tabs;
+    // authentication is verified once on the persistent Images landing page.
+    // Nano Banana 2 is verified on the persistent Images landing page. Fresh
+    // job tabs sometimes omit the explanatory model label while retaining mode.
+    let imageMode = await visibleLocator(page.getByRole("button", { name: /Deselect Images/i }));
+    if (!imageMode) {
+      const imageToggle = await visibleLocator(page.getByRole("button", { name: "Images", exact: true }));
+      if (imageToggle) await imageToggle.click();
+      imageMode = await waitForVisible(page.getByRole("button", { name: /Deselect Images/i }), 15_000);
+    }
+    if (!imageMode) throw codedError("ui_contract_mismatch", "Gemini Images mode could not be selected.");
+    return {
+      provider: "google-gemini",
+      account_plan: this.geminiPlanLabel,
+      model_label: this.geminiModelLabel,
+      aspect_ratio: "16:9",
+      output_count: 1,
+      verified_at: new Date().toISOString(),
+    };
+  }
+
+  async composer(page) {
+    const composer = await visibleLocator(page.locator(PROMPT_SELECTOR));
+    if (!composer) throw codedError("ui_contract_mismatch", "Gemini prompt composer is not visible.");
+    return composer;
+  }
+
+  async selectTextModel(page, { freshChatRetry = true } = {}) {
+    const imageMode = await visibleLocator(page.getByRole("button", { name: /Deselect Images/i }));
+    if (imageMode) {
+      await imageMode.click();
+      await imageMode.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+    }
+    let plainFlash = await waitForVisible(page.getByRole("button", { name: /Open mode picker, currently Flash$/i }), 5_000);
+    if (plainFlash) {
+      return { model_label: "Gemini 3.6 Flash", extended_thinking: false, verified_picker_label: "Open mode picker, currently Flash" };
+    }
+    let picker = await waitForVisible(page.getByRole("button", { name: /Open mode picker/i }), 30_000);
+    if (!picker) throw codedError("ui_contract_mismatch", "Gemini text model picker is missing.");
+    const extendedPicker = await visibleLocator(page.getByRole("button", { name: /Open mode picker, currently Flash Extended$/i }));
+    if (!extendedPicker) {
+      await picker.click();
+      const flash = await waitForVisible(page.getByText("3.6 Flash", { exact: true }), 15_000);
+      if (!flash) throw codedError("ui_contract_mismatch", "Gemini 3.6 Flash is not available in the authenticated account.");
+      const flashRow = flash.locator("xpath=ancestor::gem-menu-item[1]");
+      const flashDeadline = Date.now() + 60_000;
+      while (Date.now() < flashDeadline && await flashRow.getAttribute("aria-disabled").catch(() => "true") === "true") await sleep(250);
+      if (await flashRow.getAttribute("aria-disabled").catch(() => "true") === "true") {
+        if (freshChatRetry) {
+          await page.keyboard.press("Escape").catch(() => {});
+          await page.goto(GEMINI_APP_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
+          if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
+            throw codedError("ui_contract_mismatch", "Gemini fresh text chat did not expose its prompt composer.");
+          }
+          return this.selectTextModel(page, { freshChatRetry: false });
+        }
+        throw codedError("ui_contract_mismatch", "Gemini 3.6 Flash is visible but disabled in the authenticated chat.");
+      }
+      await flashRow.click();
+      picker = await waitForVisible(page.getByRole("button", { name: /Open mode picker/i }), 15_000);
+    }
+    if (await visibleLocator(page.getByRole("button", { name: /Open mode picker, currently Flash Extended$/i }))) {
+      await picker.click();
+      const extended = await waitForVisible(page.getByText("Extended thinking", { exact: true }), 15_000);
+      if (!extended) throw codedError("ui_contract_mismatch", "Gemini Extended thinking toggle is missing.");
+      await extended.locator("xpath=ancestor::gem-menu-item[1]").click();
+    }
+    plainFlash = await waitForVisible(page.getByRole("button", { name: /Open mode picker, currently Flash$/i }), 15_000);
+    if (!plainFlash) throw codedError("ui_contract_mismatch", "Gemini 3.6 Flash selection was not retained.");
+    return { model_label: "Gemini 3.6 Flash", extended_thinking: false, verified_picker_label: "Open mode picker, currently Flash" };
+  }
+
+  async openGeminiFileChooser(page) {
+    const uploadTools = await visibleLocator(page.getByRole("button", { name: "Upload & tools", exact: true }));
+    if (!uploadTools) throw codedError("ui_contract_mismatch", "Gemini Upload & tools control is missing for long text planning.");
+    await uploadTools.click();
+    let uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 15_000);
+    if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini Upload files action did not become visible for long text planning.");
+    let chooserPromise = page.waitForEvent("filechooser", { timeout: 2_000 }).catch(() => null);
+    await uploadButton.click({ force: true });
+    let chooser = await chooserPromise;
+    if (chooser) return chooser;
+    const agree = await waitForVisible(page.getByRole("button", { name: /^Agree\b/i }), 10_000);
+    if (!agree) throw codedError("ui_contract_mismatch", "Gemini text attachment upload did not open a file chooser or the one-time rights notice.");
+    await agree.click();
+    await agree.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+    await uploadTools.click();
+    uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 10_000);
+    if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini Upload files action did not return after accepting the rights notice.");
+    chooserPromise = page.waitForEvent("filechooser", { timeout: 10_000 });
+    await uploadButton.click({ force: true });
+    return chooserPromise;
+  }
+
+  async attachLlmPromptFile(page, attachment) {
+    if (!Buffer.isBuffer(attachment?.buffer)
+      || attachment.buffer.length !== Number(attachment.byte_count)
+      || sha256Bytes(attachment.buffer) !== exactSha256(attachment.source_sha256, "Gemini text prompt attachment")) {
+      throw codedError("ui_contract_mismatch", "Gemini text prompt attachment bytes changed before upload.");
+    }
+    const chooser = await this.openGeminiFileChooser(page);
+    await chooser.setFiles([{ name: attachment.name, mimeType: attachment.mimeType, buffer: attachment.buffer }]);
+    return verifyGeminiTextAttachmentRetained(page, attachment);
+  }
+
+  async prepareLlmPromptSubmission(page, composer, prompt, onPhase = async () => {}) {
+    const delivery = createGeminiLlmPromptDelivery(prompt);
+    let attachmentReceipt = null;
+    if (delivery.attachment) {
+      await onPhase("attaching_prompt_file");
+      attachmentReceipt = await this.attachLlmPromptFile(page, delivery.attachment);
+      await onPhase("prompt_file_attached");
+    }
+    await composer.fill(delivery.composer_text);
+    const verification = await verifyGeminiComposerPrompt(composer, delivery.composer_text);
+    if (delivery.attachment) {
+      attachmentReceipt = await verifyGeminiTextAttachmentRetained(page, delivery.attachment);
+    }
+    return { delivery, verification, attachment_receipt: attachmentReceipt };
+  }
+
+  async attachReferences(page, job, client, onPhase) {
+    const references = Array.isArray(job.references) ? job.references : [];
+    if (references.length > 4) throw codedError("ui_contract_mismatch", "Gemini accepts at most four ordered references in Goldflow.");
+    await onPhase("attaching_references");
+    const files = [];
+    const referenceInputs = [];
+    const orderedReferences = [];
+    for (let index = 0; index < references.length; index += 1) {
+      const reference = references[index];
+      const slot = index + 1;
+      if (Number(reference.slot) !== slot) throw codedError("ui_contract_mismatch", `Gemini reference ${reference.ref_id} is not in contiguous slot ${slot}.`);
+      const sourceSha256 = exactSha256(reference.sha256, `Gemini reference ${reference.ref_id}`);
+      const downloaded = await client.fetchReference(reference.url);
+      if (sha256Bytes(downloaded.bytes) !== sourceSha256) throw codedError("ui_contract_mismatch", `Gemini reference ${reference.ref_id} hash changed before upload.`);
+      const extension = downloaded.mimeType.includes("png") ? "png" : downloaded.mimeType.includes("webp") ? "webp" : "jpg";
+      const filename = `${String(slot).padStart(2, "0")}-${safeName(reference.ref_id)}-${sourceSha256.slice(0, 12)}.${extension}`;
+      files.push({ name: filename, mimeType: downloaded.mimeType, buffer: downloaded.bytes });
+      referenceInputs.push({ slot, ref_id: reference.ref_id, normalized_pixels: await normalizedImagePixels(downloaded.bytes) });
+      orderedReferences.push({ slot, ref_id: reference.ref_id, source_sha256: sourceSha256, upload_filename: filename });
+    }
+    if (!files.length) return { referenceInputs, orderedReferences };
+    const uploadTools = await visibleLocator(page.getByRole("button", { name: "Upload & tools", exact: true }));
+    if (!uploadTools) throw codedError("ui_contract_mismatch", "Gemini Upload & tools control is missing.");
+    const verifiedReferenceIds = new Set();
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      const baselineImageUrls = new Set(await this.visibleImageUrls(page));
+      let uploadButton = await visibleLocator(page.getByText("Upload files", { exact: true }));
+      if (!uploadButton) {
+        await uploadTools.click();
+        uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 15_000);
+      }
+      if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini Upload files action is missing.");
+      let chooserPromise = page.waitForEvent("filechooser", { timeout: 2_000 }).catch(() => null);
+      await uploadButton.click();
+      let chooser = await chooserPromise;
+      if (!chooser) {
+        const agree = await waitForVisible(page.getByRole("button", { name: /^Agree\b/i }), 10_000);
+        if (!agree) throw codedError("ui_contract_mismatch", "Gemini upload did not open a file chooser or the one-time rights notice.");
+        await agree.click();
+        await agree.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+        uploadButton = await visibleLocator(page.getByText("Upload files", { exact: true }));
+        if (!uploadButton) {
+          await uploadTools.click();
+          uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 10_000);
+        }
+        if (!uploadButton) throw codedError("ui_contract_mismatch", "Gemini Upload files action did not return after accepting the rights notice.");
+        chooserPromise = page.waitForEvent("filechooser", { timeout: 10_000 });
+        await uploadButton.click();
+        chooser = await chooserPromise;
+      }
+      await chooser.setFiles([file]);
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline && !verifiedReferenceIds.has(orderedReferences[index].ref_id)) {
+        const body = await page.locator("body").innerText();
+        if (body.includes(file.name)) {
+          verifiedReferenceIds.add(orderedReferences[index].ref_id);
+          break;
+        }
+        for (const sourceUrl of (await this.visibleImageUrls(page)).filter((url) => !baselineImageUrls.has(url))) {
+          try {
+            const bytes = await this.imageBytes(page, sourceUrl);
+            if (await findReferenceEcho(bytes, [referenceInputs[index]])) {
+              verifiedReferenceIds.add(orderedReferences[index].ref_id);
+              break;
+            }
+          } catch {
+            // The attachment preview can exist before its rendered pixels are readable.
+          }
+        }
+        if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) await sleep(250);
+      }
+      if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) {
+        throw codedError("ui_contract_mismatch", `Gemini did not visibly retain ordered reference ${file.name} before submission.`);
+      }
+    }
+    if (!orderedReferences.every((row) => verifiedReferenceIds.has(row.ref_id))) {
+      throw codedError("ui_contract_mismatch", "Gemini did not visibly retain every ordered reference filename before submission.");
+    }
+    await onPhase("references_attached");
+    return { referenceInputs, orderedReferences };
+  }
+
+  async pastePrompt(page, prompt) {
+    const composer = await this.composer(page);
+    await composer.fill(prompt);
+    const observed = String(await composer.innerText()).replace(/\s+/g, " ").trim();
+    if (observed !== String(prompt).replace(/\s+/g, " ").trim()) {
+      throw codedError("ui_contract_mismatch", "Gemini prompt text changed before submission.");
+    }
+  }
+
+  async visibleImageUrls(page) {
+    return page.locator("img").evaluateAll((images) => images
+      .filter((image) => {
+        const ratio = image.naturalHeight ? image.naturalWidth / image.naturalHeight : 0;
+        return image.offsetParent !== null
+          && image.naturalWidth >= 512
+          && image.naturalHeight >= 288
+          && ratio >= 1.6
+          && ratio <= 1.95;
+      })
+      .map((image) => image.currentSrc || image.src)
+      .filter(Boolean));
+  }
+
+  async imageBytes(page, sourceUrl) {
+    if (sourceUrl.startsWith("blob:")) {
+      const dataUrl = await page.locator("img").evaluateAll((images, url) => {
+        const image = images.find((candidate) => (candidate.currentSrc || candidate.src) === url);
+        if (!image || !image.complete || !image.naturalWidth || !image.naturalHeight) return null;
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        canvas.getContext("2d").drawImage(image, 0, 0);
+        return canvas.toDataURL("image/png");
+      }, sourceUrl);
+      if (!dataUrl?.startsWith("data:image/png;base64,")) throw new Error("Gemini blob image is not fully rendered yet.");
+      return Buffer.from(dataUrl.slice("data:image/png;base64,".length), "base64");
+    }
+    const response = await page.request.get(sourceUrl, { timeout: 120_000 });
+    if (!response.ok()) throw new Error(`Gemini image download returned HTTP ${response.status()}.`);
+    return Buffer.from(await response.body());
+  }
+
+  async waitForGeneratedImage(page, baseline, referenceInputs) {
+    const deadline = Date.now() + 15 * 60_000;
+    while (Date.now() < deadline) {
+      const body = await page.locator("body").innerText();
+      const blockingCode = geminiBlockingCode(body);
+      if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
+      for (const sourceUrl of (await this.visibleImageUrls(page)).filter((url) => !baseline.has(url))) {
+        try {
+          const bytes = await this.imageBytes(page, sourceUrl);
+          const echo = await findReferenceEcho(bytes, referenceInputs);
+          if (echo) {
+            baseline.add(sourceUrl);
+            continue;
+          }
+          return { sourceUrl, bytes };
+        } catch (error) {
+          this.log(`Gemini image candidate is not downloadable yet: ${error.message}`, "warn");
+        }
+      }
+      await sleep(750);
+    }
+    throw codedError("ui_contract_mismatch", "Timed out waiting for a generated Gemini image.");
+  }
+
+  async saveGeneratedImage(job, bytes) {
+    const directory = path.join(this.downloadsRoot, safeName(job.manifest_id));
+    await fs.mkdir(directory, { recursive: true });
+    const outputPath = path.join(directory, `${safeName(job.asset_id)}-${safeName(job.lease_token).slice(0, 12)}.img`);
+    await fs.writeFile(outputPath, bytes);
+    return outputPath;
+  }
+
+  async recordEvidence(page, job, prompt, orderedReferences) {
+    const directory = path.join(this.downloadsRoot, safeName(job.manifest_id), "reference-binding-evidence", `${safeName(job.asset_id)}-${safeName(job.lease_token).slice(0, 12)}`);
+    await fs.mkdir(directory, { recursive: true });
+    const screenshotPath = path.join(directory, "pre-submit-full.png");
+    const receiptPath = path.join(directory, "reference-binding-receipt.json");
+    await page.screenshot({ path: screenshotPath, fullPage: false });
+    const receipt = {
+      schema: "goldflow_google_gemini_reference_binding_receipt_v1",
+      status: "verified",
+      browser_provider: "google-gemini",
+      manifest_id: job.manifest_id,
+      asset_id: job.asset_id,
+      conversation_url: page.url(),
+      submitted_prompt_sha256: sha256Bytes(Buffer.from(prompt, "utf8")),
+      reference_binding: {
+        status: "verified",
+        expected_count: orderedReferences.length,
+        observed_count: orderedReferences.length,
+        no_pending_uploads: true,
+        prompt_text_verified: true,
+        ordered_references: orderedReferences,
+      },
+      screenshot_path: screenshotPath,
+      screenshot_sha256: await sha256File(screenshotPath),
+      recorded_at: new Date().toISOString(),
+    };
+    await fs.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    return { ...receipt.reference_binding, evidence: { receipt_path: receiptPath, receipt_sha256: await sha256File(receiptPath), screenshot_path: screenshotPath, screenshot_sha256: receipt.screenshot_sha256 } };
+  }
+
+  async runJob({ job, client, onPhase = async () => {} }) {
+    if (job.type === "llm") return this.runLlmJob({ job, onPhase });
+    if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
+    const page = await this.newJobPage("image");
+    try {
+      await onPhase("verifying_ui_contract");
+      const uiContract = await this.verifyUiContract(page);
+      const baseline = new Set(await this.visibleImageUrls(page));
+      const { referenceInputs, orderedReferences } = await this.attachReferences(page, job, client, onPhase);
+      await onPhase("entering_prompt");
+      const referenceMap = orderedReferences.length
+        ? orderedReferences.map((row) => {
+            const source = (Array.isArray(job.references) ? job.references : [])
+              .find((reference) => Number(reference.slot) === row.slot);
+            const purpose = String(source?.purpose ?? "visual identity and continuity").trim();
+            return `Attachment ${row.slot} (${row.upload_filename}) = ${row.ref_id}. Purpose: ${purpose}.`;
+          }).join("\n")
+        : "No reference images are attached.";
+      const prompt = `Create exactly one original landscape still image in a 16:9 frame.\n\nUse the attached images only as ordered visual references. Do not create a collage, contact sheet, explanation, border, or multiple variants.\n\nREFERENCE MAP:\n${referenceMap}\nMatch each named subject or element in the scene prompt to its explicitly mapped attachment. Do not swap identities between attachments.\n\n${job.prompt}`;
+      await this.pastePrompt(page, prompt);
+      const send = await waitForVisible(page.getByRole("button", { name: /Send message/i }), 30_000);
+      if (!send) throw codedError("ui_contract_mismatch", "Gemini Send message control is missing.");
+      const sendDeadline = Date.now() + 90_000;
+      while (Date.now() < sendDeadline && await send.isDisabled().catch(() => true)) await sleep(250);
+      if (await send.isDisabled().catch(() => true)) throw codedError("ui_contract_mismatch", "Gemini Send message remained disabled after reference processing.");
+      // Gemini's Images landing page lazy-loads prior gallery cards. Refresh the
+      // baseline immediately before submission so an old card cannot be mistaken
+      // for the new response merely because its blob URL appeared late.
+      await sleep(1_500);
+      for (const sourceUrl of await this.visibleImageUrls(page)) baseline.add(sourceUrl);
+      const referenceBinding = await this.recordEvidence(page, job, prompt, orderedReferences);
+      await onPhase("submitting");
+      await send.click();
+      await onPhase("waiting_for_image");
+      const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs);
+      const downloadPath = await this.saveGeneratedImage(job, generated.bytes);
+      return {
+        downloadPath,
+        sourceUrl: generated.sourceUrl,
+        conversationUrl: page.url(),
+        uiContract: { ...uiContract, reference_binding: referenceBinding },
+        browserProvider: "google-gemini",
+      };
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+}

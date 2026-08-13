@@ -1,0 +1,29 @@
+{
+  "schema": "goldflow_codex_call_metadata_v1",
+  "status": "passed",
+  "stage_name": "ep_proof_visual_beat_plan_chunk_001",
+  "provider": "antigravity_cli",
+  "transport": "antigravity_cli",
+  "model": "gemini-3.6-flash-medium",
+  "reasoning_effort": "medium",
+  "planning_effort_policy": "uniform_v1",
+  "planning_room_provider_lock": null,
+  "run_identity_path": null,
+  "verbosity": "medium",
+  "executable": "/Users/joel/.local/bin/agy",
+  "antigravity_cli_version": "1.1.12",
+  "provider_duration_seconds": 2.4409520000000002,
+  "provider_usage": {
+    "input_tokens": 11132,
+    "output_tokens": 806,
+    "thinking_tokens": 705,
+    "cache_read_tokens": 8147,
+    "total_tokens": 11938
+  },
+  "provider_conversation_id": "9a3bdfb0-f38e-43ca-80f5-61a7e7b23b71",
+  "prompt_path": "/Users/joel/anifactory-goldflow/docs/proofs/antigravity_cli_concurrency_smoke_v1/beat_001.json.prompt.txt",
+  "prompt_sha256": "18f2ddefcc018a213da895ea0c3d4e086b8ee59c18993b1898bbeeff28d79eec",
+  "output_path": "/Users/joel/anifactory-goldflow/docs/proofs/antigravity_cli_concurrency_smoke_v1/beat_001.json",
+  "started_at": "2026-08-11T14:18:15.820Z",
+  "completed_at": "2026-08-11T14:18:22.570Z"
+}

@@ -9,11 +9,68 @@ import {
   validateFactualEvidenceLedger,
 } from "../lib/factual-evidence-contract.mjs";
 import { buildStageCommand } from "../lib/pipeline-stage-registry.mjs";
-import { scenePromptProductionContractFindingsForTests } from "../imagegen.mjs";
+import {
+  CHATGPT_WEB_IMAGE_START_INTERVAL_MS,
+  rollingWindowReadyMsForTests,
+} from "../lib/chatgpt-web-worker-pool.mjs";
+import {
+  chatGptWebProjectUrlForIdentity,
+  failedReferenceDependencyRootIdForTests,
+  providerInfrastructureFailureForTests,
+  scenePromptProductionContractFindingsForTests,
+} from "../imagegen.mjs";
 import { contentStatusIdentityFields } from "../run-status.mjs";
 import { minimumPauseEventsForProfile } from "../voice-direction-gate.mjs";
 
 export async function runContentProfileTests() {
+  assert.equal(
+    chatGptWebProjectUrlForIdentity({ chatgpt_web_project: { url: "https://chatgpt.com/g/g-p-test/project" } }),
+    "https://chatgpt.com/g/g-p-test/project",
+  );
+  assert.equal(
+    chatGptWebProjectUrlForIdentity({ image_provider_options: { chatgpt_project_url: "https://chatgpt.com/g/g-p-fallback/project" } }),
+    "https://chatgpt.com/g/g-p-fallback/project",
+  );
+  assert.equal(chatGptWebProjectUrlForIdentity(null), null);
+  assert.equal(providerInfrastructureFailureForTests(new Error("ChatGPT Web cooldown active for 878 more seconds")), true);
+  assert.equal(providerInfrastructureFailureForTests(new Error("ChatGPT rate limit: too many requests are being made too quickly")), true);
+  assert.equal(providerInfrastructureFailureForTests(new Error("Prompt contract is missing a subject")), false);
+  assert.equal(CHATGPT_WEB_IMAGE_START_INTERVAL_MS, 45_000);
+  const imageWindow = rollingWindowReadyMsForTests(
+    Array.from({ length: 12 }, (_row, index) => 1_000 + (index * 20_000)),
+    241_000,
+    12,
+    300_000,
+  );
+  assert.equal(imageWindow.recentStarts.length, 12);
+  assert.equal(imageWindow.readyMs, 301_000);
+  const expiredImageWindow = rollingWindowReadyMsForTests(imageWindow.recentStarts, 301_001, 12, 300_000);
+  assert.equal(expiredImageWindow.recentStarts.length, 11);
+  assert.equal(expiredImageWindow.readyMs, 0);
+
+  const rootFailureTargets = [
+    { ref_id: "joey_ref" },
+    { ref_id: "joey_field_ref" },
+    { ref_id: "joey_final_ref" },
+  ];
+  const rootFailureStates = [
+    { source_ref_id: "joey_ref", base_identity_ref_id: null },
+    { source_ref_id: "joey_field_ref", base_identity_ref_id: "joey_ref" },
+    { source_ref_id: "joey_final_ref", base_identity_ref_id: "joey_field_ref" },
+  ];
+  assert.equal(failedReferenceDependencyRootIdForTests({
+    target: rootFailureTargets[1],
+    pendingTargets: rootFailureTargets.slice(1),
+    characterStateRows: rootFailureStates,
+    failedRefIds: ["joey_ref"],
+  }), "joey_ref");
+  assert.equal(failedReferenceDependencyRootIdForTests({
+    target: rootFailureTargets[2],
+    pendingTargets: rootFailureTargets.slice(1),
+    characterStateRows: rootFailureStates,
+    failedRefIds: ["joey_ref"],
+  }), "joey_ref");
+
   const manhwa = contentProfileDefinition("manhwa");
   const documentary = contentProfileDefinition("asset-afterlife");
 

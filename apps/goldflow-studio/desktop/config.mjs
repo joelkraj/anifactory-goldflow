@@ -15,9 +15,17 @@ export function parseDesktopFlags(parts) {
 
 export function parseWorkerTypes(value) {
   const values = String(value ?? "llm,image").split(",").map((entry) => entry.trim()).filter(Boolean);
-  const types = [...new Set(values.filter((entry) => ["llm", "image"].includes(entry)))];
-  if (!types.length) throw new Error("At least one desktop worker type is required: llm or image.");
+  const types = [...new Set(values.filter((entry) => ["llm", "image", "video"].includes(entry)))];
+  if (!types.length) throw new Error("At least one desktop worker type is required: llm, image, or video.");
   return types;
+}
+
+export function normalizeBrowserProvider(value) {
+  const normalized = String(value ?? "chatgpt").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (["chatgpt", "chatgpt-web", "openai"].includes(normalized)) return "chatgpt";
+  if (["flow", "google-flow", "google", "nano-banana", "nano-banana-pro"].includes(normalized)) return "google-flow";
+  if (["gemini", "google-gemini", "gemini-images", "nano-banana-2"].includes(normalized)) return "google-gemini";
+  throw new Error(`Unsupported desktop browser provider: ${value}. Use chatgpt, google-flow, or google-gemini.`);
 }
 
 export function defaultChromeExecutable(platform = process.platform) {
@@ -28,23 +36,51 @@ export function defaultChromeExecutable(platform = process.platform) {
 
 export function desktopConfig(flags = {}, environment = process.env) {
   const stateDir = path.resolve(flags["state-dir"] ?? environment.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"));
-  const concurrency = Math.min(5, Math.max(1, Number(flags.concurrency ?? environment.GOLDFLOW_DESKTOP_CONCURRENCY ?? 3)));
+  const browserProvider = normalizeBrowserProvider(flags.provider ?? environment.GOLDFLOW_DESKTOP_PROVIDER ?? "chatgpt");
+  const browserConcurrencyCeiling = browserProvider === "google-flow" ? 20 : 5;
+  const concurrency = Math.min(browserConcurrencyCeiling, Math.max(1, Number(flags.concurrency ?? environment.GOLDFLOW_DESKTOP_CONCURRENCY ?? 3)));
   return {
     serverUrl: String(flags["server-url"] ?? environment.GOLDFLOW_STUDIO_URL ?? "http://127.0.0.1:4317").replace(/\/+$/, ""),
     stateDir,
-    profileDir: path.resolve(flags["profile-dir"] ?? environment.GOLDFLOW_DESKTOP_PROFILE_DIR ?? path.join(stateDir, "chatgpt-browser-profile")),
+    profileDir: path.resolve(flags["profile-dir"] ?? environment.GOLDFLOW_DESKTOP_PROFILE_DIR ?? path.join(stateDir, `${browserProvider}-browser-profile`)),
     downloadsRoot: path.resolve(flags["downloads-root"] ?? environment.GOLDFLOW_STUDIO_DOWNLOADS_ROOT ?? path.join(os.homedir(), "Downloads", "GoldflowStudio")),
     chromeExecutable: path.resolve(flags["chrome-executable"] ?? environment.GOLDFLOW_DESKTOP_CHROME_EXECUTABLE ?? defaultChromeExecutable()),
     pairingCode: flags["pairing-code"] ?? environment.GOLDFLOW_STUDIO_PAIRING_CODE ?? null,
     concurrency,
-    types: parseWorkerTypes(flags.types ?? environment.GOLDFLOW_DESKTOP_TYPES),
+    types: parseWorkerTypes(flags.types ?? environment.GOLDFLOW_DESKTOP_TYPES ?? (
+      browserProvider === "chatgpt" ? "llm,image"
+        : browserProvider === "google-gemini" ? "llm,image"
+          : "image"
+    )),
     headless: String(flags.headless ?? environment.GOLDFLOW_DESKTOP_HEADLESS ?? "false") === "true",
     label: String(flags.label ?? environment.GOLDFLOW_DESKTOP_LABEL ?? `${os.hostname()} Playwright`),
+    browserProvider,
+    browserConcurrencyCeiling,
+    flowProjectUrl: flags["flow-project-url"] ?? environment.GOLDFLOW_FLOW_PROJECT_URL ?? null,
+    flowPlanLabel: String(flags["flow-plan"] ?? environment.GOLDFLOW_FLOW_PLAN ?? "ULTRA"),
+    flowModelLabel: String(flags["flow-model"] ?? environment.GOLDFLOW_FLOW_MODEL ?? "Nano Banana Pro"),
+    flowVideoModelLabel: String(flags["flow-video-model"] ?? environment.GOLDFLOW_FLOW_VIDEO_MODEL ?? "Veo 3.1 Fast"),
+    geminiPlanLabel: String(flags["gemini-plan"] ?? environment.GOLDFLOW_GEMINI_PLAN ?? "Ultra"),
+    geminiModelLabel: String(flags["gemini-model"] ?? environment.GOLDFLOW_GEMINI_MODEL ?? "Nano Banana 2"),
   };
 }
 
 export function assertDesktopConfig(config) {
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(config.serverUrl)) throw new Error("Desktop host server URL must use http://127.0.0.1 with an explicit port.");
-  if (!Number.isInteger(config.concurrency) || config.concurrency < 1 || config.concurrency > 5) throw new Error("Desktop host concurrency must be 1 through 5.");
+  const concurrencyCeiling = config.browserProvider === "google-flow" ? 20 : 5;
+  if (!Number.isInteger(config.concurrency) || config.concurrency < 1 || config.concurrency > concurrencyCeiling) {
+    throw new Error(`Desktop host concurrency must be 1 through ${concurrencyCeiling} for ${config.browserProvider}.`);
+  }
+  const allowedTypes = config.browserProvider === "chatgpt"
+    ? new Set(["llm", "image"])
+    : config.browserProvider === "google-gemini"
+      ? new Set(["llm", "image"])
+      : new Set(["image", "video"]);
+  if (config.types.some((type) => !allowedTypes.has(type))) {
+    throw new Error(`${config.browserProvider} accepts only ${[...allowedTypes].join(" or ")} work.`);
+  }
+  if (config.browserProvider === "google-flow" && config.concurrency > 1 && config.flowProjectUrl) {
+    throw new Error("Concurrent Google Flow work requires one fresh project per job; omit --flow-project-url when concurrency is above one.");
+  }
   return config;
 }

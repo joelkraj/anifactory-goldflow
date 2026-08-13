@@ -1,7 +1,31 @@
+import {
+  CHATGPT_WEB_IMAGE_PROVIDER,
+  FEDERATED_WEB_IMAGE_PROVIDER,
+  GOOGLE_FLOW_IMAGE_PROVIDER,
+  HYBRID_WEB_FLOW_PROVIDER,
+  isBrowserPoolImageProvider,
+  isHybridWebFlowProvider,
+  isStyleReferenceTarget,
+} from "./image-provider-policy.mjs";
+
 export function normalizeImageProvider(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (["codex", "codex_imagen", "codex_imagegen", "openai", "openai_imagegen", "gpt_image"].includes(normalized)) return "codex_imagegen";
   if (["chatgpt_web", "chatgpt_web_image", "chatgpt_web_gpt_image", "web_gpt_image"].includes(normalized)) return "chatgpt_web_gpt_image";
+  if (["google_flow", "flow", "nano_banana", "nano_banana_pro", "google_flow_nano_banana_pro"].includes(normalized)) return GOOGLE_FLOW_IMAGE_PROVIDER;
+  if ([
+    "federated_google_web_image_pool",
+    "federated_web_image_pool",
+    "flow_gemini_gpt_pool",
+    "all_web_images",
+  ].includes(normalized)) return FEDERATED_WEB_IMAGE_PROVIDER;
+  if ([
+    "hybrid_chatgpt_web_style_google_flow_pool",
+    "hybrid_chatgpt_flow",
+    "hybrid_web_flow",
+    "web_flow_speed",
+    "speed_first_web_flow_v1",
+  ].includes(normalized)) return HYBRID_WEB_FLOW_PROVIDER;
   if ([
     "hybrid",
     "hybrid_codex_refs_multichar",
@@ -40,6 +64,9 @@ export function providerSlug(provider) {
   const normalized = normalizeImageProvider(provider);
   if (normalized === "codex_imagegen") return "codex-imagegen";
   if (normalized === "chatgpt_web_gpt_image") return "chatgpt-web-gpt-image";
+  if (normalized === GOOGLE_FLOW_IMAGE_PROVIDER) return "google-flow-imagen";
+  if (normalized === FEDERATED_WEB_IMAGE_PROVIDER) return "federated-google-web-images";
+  if (normalized === HYBRID_WEB_FLOW_PROVIDER) return "hybrid-web-flow";
   if (normalized === "hybrid_codex_refs_multichar") return "hybrid";
   if (normalized === "hybrid_codex_opening_modelslab_rest") return "hybrid-opening";
   if (normalized === "hybrid_codex_refs_opening_risky_modelslab_rest") return "hybrid-codex-refs-opening-risky";
@@ -57,6 +84,9 @@ export function isHybridImageProvider(provider) {
 
 export function routedProviderForReference(globalProvider, target = null) {
   const normalized = normalizeImageProvider(globalProvider);
+  if (isHybridWebFlowProvider(normalized)) {
+    return isStyleReferenceTarget(target) ? CHATGPT_WEB_IMAGE_PROVIDER : HYBRID_WEB_FLOW_PROVIDER;
+  }
   if (normalized === "hybrid_codex_refs_multichar") return "codex_imagegen";
   if (normalized === "hybrid_codex_opening_modelslab_rest") return "codex_imagegen";
   if (normalized === "hybrid_codex_refs_opening_risky_modelslab_rest") return "codex_imagegen";
@@ -101,6 +131,7 @@ export function isRiskyMultiCharacterPrompt(prompt) {
 
 export function routedProviderForPrompt(prompt, globalProvider, options = {}) {
   const normalized = normalizeImageProvider(globalProvider);
+  if (isHybridWebFlowProvider(normalized)) return HYBRID_WEB_FLOW_PROVIDER;
   if (!normalized.startsWith("hybrid_")) return normalized;
   const requested = normalizeImageProvider(prompt?.image_provider_route ?? "");
   if (requested === "codex_imagegen") return "codex_imagegen";
@@ -121,3 +152,21 @@ export function routedProviderForPrompt(prompt, globalProvider, options = {}) {
   }
   return "modelslab";
 }
+
+export function eligibleProvidersForReference(globalProvider, target = null) {
+  const normalized = normalizeImageProvider(globalProvider);
+  if (normalized === GOOGLE_FLOW_IMAGE_PROVIDER) return [GOOGLE_FLOW_IMAGE_PROVIDER];
+  if (!isHybridWebFlowProvider(normalized)) return [routedProviderForReference(normalized, target)];
+  return isStyleReferenceTarget(target)
+    ? [CHATGPT_WEB_IMAGE_PROVIDER]
+    : [CHATGPT_WEB_IMAGE_PROVIDER, GOOGLE_FLOW_IMAGE_PROVIDER];
+}
+
+export function eligibleProvidersForPrompt(prompt, globalProvider) {
+  const normalized = normalizeImageProvider(globalProvider);
+  if (normalized === GOOGLE_FLOW_IMAGE_PROVIDER) return [GOOGLE_FLOW_IMAGE_PROVIDER];
+  if (!isHybridWebFlowProvider(normalized)) return [routedProviderForPrompt(prompt, normalized)];
+  return [CHATGPT_WEB_IMAGE_PROVIDER, GOOGLE_FLOW_IMAGE_PROVIDER];
+}
+
+export { isBrowserPoolImageProvider };

@@ -10,6 +10,10 @@ export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export async function sha256File(filePath) {
+  return sha256(await fs.readFile(filePath));
+}
+
 export function randomToken(bytes = 32) {
   return randomBytes(bytes).toString("base64url");
 }

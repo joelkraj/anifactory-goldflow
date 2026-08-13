@@ -1376,7 +1376,7 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
         chunkId: `editorial_${String(index + 1).padStart(3, "0")}`,
         ordinal: index + 1,
       }));
-  const concurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 8)));
+  const concurrency = Math.max(1, Math.min(11, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 11)));
   const results = await runPool(descriptors, concurrency, async (descriptor, index) => {
     const chunk = descriptor.chunk;
     const basePrompt = buildEditorialDirectorPrompt(chunk, factLedger, timedScenes, options);

@@ -46,7 +46,9 @@ export async function hashFile(filePath) {
 }
 
 export function normalizeLtxVideoPolicy(value = "disabled") {
-  const normalized = String(value ?? "disabled").trim().toLowerCase().replaceAll("-", "_");
+  let normalized = String(value ?? "disabled").trim().toLowerCase().replaceAll("-", "_");
+  if (normalized === "selective_generated_video" || normalized === "selective_generated_motion") normalized = "selective_ltx23";
+  if (normalized === "full_generated_video" || normalized === "full_generated_motion") normalized = "full_ltx23";
   if (!LTX_VIDEO_POLICIES.includes(normalized)) {
     throw new Error(`Unsupported LTX video policy ${value}. Use ${LTX_VIDEO_POLICIES.join(", ")}.`);
   }

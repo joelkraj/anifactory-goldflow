@@ -13,6 +13,8 @@ export const DEFAULT_ASPECT_RATIO = 16 / 9;
 export const DEFAULT_ASPECT_TOLERANCE = 0.08;
 export const DEFAULT_RECOMMENDED_CONCURRENCY = 8;
 export const DEFAULT_MAX_CONCURRENCY = 12;
+const LEASE_DISPATCH_LOCK_TIMEOUT_MS = 30_000;
+const LEASE_DISPATCH_LOCK_STALE_MS = 60_000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -29,6 +31,34 @@ function cleanText(value) {
   return String(value ?? "").trim();
 }
 
+function normalizeBrowserProvider(value) {
+  const normalized = cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!normalized) return null;
+  if (["chatgpt", "chatgpt-web", "openai"].includes(normalized)) return "chatgpt";
+  if (["google-flow", "flow", "google", "nano-banana", "nano-banana-pro"].includes(normalized)) return "google-flow";
+  if (["google-gemini", "gemini", "gemini-images", "nano-banana-2"].includes(normalized)) return "google-gemini";
+  throw new Error(`Unsupported manifest browser provider: ${value}.`);
+}
+
+function browserProviderList(values) {
+  const providers = [];
+  for (const value of Array.isArray(values) ? values : String(values ?? "").split(",")) {
+    const provider = normalizeBrowserProvider(value);
+    if (provider && !providers.includes(provider)) providers.push(provider);
+  }
+  return providers;
+}
+
+function browserProviderConcurrency(value, allowedProviders) {
+  if (!allowedProviders.length) return null;
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const result = {};
+  for (const provider of allowedProviders) {
+    result[provider] = asPositiveInteger(source[provider], provider === "google-flow" ? 5 : 3, `${provider} concurrency`);
+  }
+  return result;
+}
+
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (!value || typeof value !== "object") return value;
@@ -41,6 +71,10 @@ export function stableStringify(value) {
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function codexWorkSourceRowSha256(row) {
+  return sha256(stableStringify(row));
 }
 
 export async function sha256File(filePath) {
@@ -253,22 +287,28 @@ function referenceDependencyIds(target) {
   return ids;
 }
 
-async function bindReferenceTargetInputs(target, lookup, sourceDir) {
+async function bindReferenceTargetInputs(target, lookup, sourceDir, sharedReferenceIds = []) {
   const slots = [];
-  for (const [index, dependencyId] of referenceDependencyIds(target).entries()) {
+  const dependencyIds = [...new Set([...referenceDependencyIds(target), ...sharedReferenceIds].map(cleanText).filter(Boolean))];
+  for (const dependencyId of dependencyIds) {
     const dependency = lookup.get(dependencyId);
     if (!dependency) continue;
     if (cleanText(dependency.ref_id ?? dependency.state_ref_id) === cleanText(target.ref_id)) continue;
     const referencePath = normalizeAbsolute(dependency.reference_image_path ?? dependency.conditioning_image_path, sourceDir);
     if (!referencePath || !(await pathExists(referencePath))) continue;
     slots.push({
-      slot: index + 1,
+      slot: slots.length + 1,
       ref_id: cleanText(dependency.ref_id ?? dependency.state_ref_id ?? dependencyId),
       kind: cleanText(dependency.kind) || null,
-      purpose: `identity or state dependency for ${cleanText(target.ref_id)}`,
+      purpose: sharedReferenceIds.includes(dependencyId)
+        ? `episode style conditioning for ${cleanText(target.ref_id)}`
+        : `identity or state dependency for ${cleanText(target.ref_id)}`,
       path: referencePath,
       sha256: await sha256File(referencePath),
     });
+  }
+  if (slots.length > 4) {
+    throw new Error(`Reference ${cleanText(target.ref_id)} requires ${slots.length} conditioning inputs after the shared style reference; provider limit is four.`);
   }
   return slots;
 }
@@ -320,12 +360,90 @@ async function sourceRecord(filePath) {
   return { path: resolved, sha256: await sha256File(resolved) };
 }
 
+async function verificationGateBypassRecord(value) {
+  if (value === undefined || value === null || value === false) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Verification-gate bypass must be an evidence object; a boolean bypass is forbidden.");
+  }
+  const kind = cleanText(value.kind).toLowerCase();
+  if (kind !== "prior_health_proof") {
+    throw new Error("Verification-gate bypass kind must be prior_health_proof.");
+  }
+  const evidencePath = normalizeAbsolute(value.evidencePath ?? value.evidence_path ?? value.path);
+  if (!evidencePath) throw new Error("Verification-gate bypass requires a prior health-proof evidence path.");
+  const expectedSha256 = cleanText(value.evidenceSha256 ?? value.evidence_sha256 ?? value.sha256);
+  if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
+    throw new Error("Verification-gate bypass requires the exact lowercase SHA-256 of its prior health-proof evidence.");
+  }
+  const evidence = await sourceRecord(evidencePath);
+  if (evidence.sha256 !== expectedSha256) {
+    throw new Error(`Verification-gate bypass evidence hash mismatch for ${evidence.path}.`);
+  }
+  return {
+    kind,
+    evidence_path: evidence.path,
+    evidence_sha256: evidence.sha256,
+  };
+}
+
+async function repairEvidenceRecord(value, requestedAssetIds) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Provider-attributed repair requires structured hash-bound evidence.");
+  }
+  if (value.schema !== "goldflow_hybrid_image_repair_evidence_v1") {
+    throw new Error("Unsupported hybrid image repair-evidence schema.");
+  }
+  const kind = cleanText(value.kind);
+  if (!new Set([
+    "provider_deadletters",
+    "image_output_qa_blockers",
+    "duplicate_output_hashes",
+    "provider_deadletters_and_duplicate_output_hashes",
+  ]).has(kind)) {
+    throw new Error(`Unsupported hybrid image repair-evidence kind: ${kind || "missing"}.`);
+  }
+  const authorizedAssetIds = parseIdScope(value.authorized_asset_ids);
+  const unauthorized = requestedAssetIds.filter((assetId) => !authorizedAssetIds.includes(assetId));
+  if (unauthorized.length) throw new Error(`Repair evidence does not authorize: ${unauthorized.join(", ")}.`);
+  const records = [];
+  for (const [index, row] of (Array.isArray(value.records) ? value.records : []).entries()) {
+    const evidencePath = normalizeAbsolute(row?.path);
+    const expectedSha256 = cleanText(row?.sha256);
+    if (!evidencePath || !/^[a-f0-9]{64}$/.test(expectedSha256)) {
+      throw new Error(`Repair evidence record ${index + 1} requires an absolute path and exact lowercase SHA-256.`);
+    }
+    const source = await sourceRecord(evidencePath);
+    if (source.sha256 !== expectedSha256) throw new Error(`Repair evidence hash mismatch: ${evidencePath}.`);
+    records.push(source);
+  }
+  if (!records.length) throw new Error("Repair evidence requires at least one hash-bound source record.");
+  return {
+    schema: value.schema,
+    kind,
+    authorized_asset_ids: authorizedAssetIds,
+    requested_asset_ids: requestedAssetIds,
+    records,
+  };
+}
+
 export async function createCodexWorkManifest(options) {
   const mode = cleanText(options.mode || (options.referencesOnly ? "reference" : "scene")).toLowerCase();
   if (!new Set(["scene", "reference"]).has(mode)) throw new Error(`Unsupported Codex work mode: ${mode}.`);
   const maxAttempts = asPositiveInteger(options.maxAttempts, DEFAULT_MAX_ATTEMPTS, "max attempts");
   const leaseSeconds = asPositiveInteger(options.leaseSeconds, DEFAULT_LEASE_SECONDS, "lease seconds");
   const explicitScope = parseIdScope(options.assetIds, options.imageIds, options.cutIds, options.referenceIds);
+  const sharedReferenceIds = parseIdScope(options.sharedReferenceIds);
+  const allowedBrowserProviders = browserProviderList(options.allowedBrowserProviders);
+  const providerConcurrency = browserProviderConcurrency(options.browserProviderConcurrency, allowedBrowserProviders);
+  const browserProviderReceiptRequired = options.browserProviderReceiptRequired === true;
+  const repairReason = cleanText(options.repairReason);
+  if (repairReason && !explicitScope.length) throw new Error("A repair manifest requires an exact asset/image/reference ID scope.");
+  if (browserProviderReceiptRequired && !allowedBrowserProviders.length) {
+    throw new Error("A provider-attributed browser manifest requires at least one allowed browser provider.");
+  }
+  const repairEvidence = repairReason && browserProviderReceiptRequired
+    ? await repairEvidenceRecord(options.repairEvidence, explicitScope)
+    : null;
   let episodeDir;
   let sources;
   let items;
@@ -357,7 +475,7 @@ export async function createCodexWorkManifest(options) {
         asset_kind: "scene_cut",
         prompt,
         prompt_sha256: sha256(prompt),
-        source_row_sha256: sha256(stableStringify(row)),
+        source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: promptsPath,
         source_plan_sha256: promptSource.sha256,
         ordered_references: orderedReferences,
@@ -404,6 +522,14 @@ export async function createCodexWorkManifest(options) {
     };
     if (runIdentity) sources.run_identity = await sourceRecord(runIdentityPath);
     const lookup = buildReferenceLookup(referencePlan, characterStateRefs);
+    for (const sharedReferenceId of sharedReferenceIds) {
+      const shared = lookup.get(sharedReferenceId);
+      if (!shared) throw new Error(`Shared reference ${sharedReferenceId} is not present in the approved reference artifacts.`);
+      const sharedPath = normalizeAbsolute(shared.reference_image_path ?? shared.conditioning_image_path, path.dirname(referencePlanPath));
+      if (!sharedPath || !(await pathExists(sharedPath))) {
+        throw new Error(`Shared reference ${sharedReferenceId} has not been materialized before this manifest.`);
+      }
+    }
     const selectedIds = new Set(selected.ids);
     items = [];
     for (const row of selected.rows) {
@@ -415,13 +541,13 @@ export async function createCodexWorkManifest(options) {
         asset_kind: cleanText(row.kind) || "reference",
         prompt,
         prompt_sha256: sha256(prompt),
-        source_row_sha256: sha256(stableStringify(row)),
+        source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: referencePlanPath,
         source_plan_sha256: referenceSource.sha256,
         character_state_refs_path: characterStateRefsPath,
         character_state_refs_sha256: characterSource.sha256,
         dependency_asset_ids: referenceDependencyIds(row).filter((id) => selectedIds.has(id)),
-        ordered_references: await bindReferenceTargetInputs(row, lookup, path.dirname(referencePlanPath)),
+        ordered_references: await bindReferenceTargetInputs(row, lookup, path.dirname(referencePlanPath), sharedReferenceIds),
         expected_output: expectedOutput(assetId),
         prior_accepted_sha256: await priorReferenceHash(row, episodeDir),
       });
@@ -430,11 +556,29 @@ export async function createCodexWorkManifest(options) {
 
   items.sort((left, right) => left.asset_id.localeCompare(right.asset_id, undefined, { numeric: true }));
   const verificationAssetIds = representativeVerificationAssetIds(items);
+  const verificationGateBypass = await verificationGateBypassRecord(options.verificationGateBypass);
+  if (verificationGateBypass) {
+    sources = {
+      ...sources,
+      verification_health_proof: {
+        path: verificationGateBypass.evidence_path,
+        sha256: verificationGateBypass.evidence_sha256,
+      },
+    };
+  }
+  if (repairEvidence) {
+    for (const [index, record] of repairEvidence.records.entries()) {
+      sources = {
+        ...sources,
+        [`repair_evidence_${String(index + 1).padStart(2, "0")}`]: record,
+      };
+    }
+  }
   const skeleton = {
     schema: CODEX_WORK_SCHEMA,
     status: "ready",
     mode,
-    provider: "codex_imagegen",
+    provider: cleanText(options.workProvider) || "codex_imagegen",
     episode_dir: episodeDir,
     sources,
     scope: {
@@ -452,9 +596,24 @@ export async function createCodexWorkManifest(options) {
       explicit_source_required: true,
       duplicate_sha256_forbidden: true,
       verification_asset_ids: verificationAssetIds,
-      verification_required_before_full_queue: items.length > verificationAssetIds.length,
+      verification_required_before_full_queue: items.length > verificationAssetIds.length && !verificationGateBypass,
+      verification_gate_bypass: verificationGateBypass,
       recommended_concurrency: asPositiveInteger(options.recommendedConcurrency, DEFAULT_RECOMMENDED_CONCURRENCY, "recommended concurrency"),
       max_concurrency: asPositiveInteger(options.maxConcurrency, DEFAULT_MAX_CONCURRENCY, "max concurrency"),
+      ...(allowedBrowserProviders.length ? {
+        dispatch_policy: cleanText(options.dispatchPolicy) || "first_available_top_off_v1",
+        allowed_browser_providers: allowedBrowserProviders,
+        browser_provider_concurrency: providerConcurrency,
+        browser_provider_receipt_required: browserProviderReceiptRequired,
+      } : {}),
+      ...(sharedReferenceIds.length ? { shared_reference_ids: sharedReferenceIds } : {}),
+      ...(repairReason ? {
+        repair_authorization: {
+          scope: "exact_ids_only",
+          reason: repairReason,
+          evidence: repairEvidence,
+        },
+      } : {}),
     },
     item_count: items.length,
     items,
@@ -532,6 +691,54 @@ async function ensureRuntimeDirectories(manifestDir) {
   ].map((name) => fs.mkdir(path.join(manifestDir, name), { recursive: true })));
 }
 
+async function wait(milliseconds) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function withLeaseDispatchLock(manifestDir, callback) {
+  const lockPath = path.join(manifestDir, ".lease-dispatch.lock");
+  const token = randomUUID();
+  const deadline = Date.now() + LEASE_DISPATCH_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      await fs.mkdir(lockPath);
+      try {
+        await writeJsonExclusive(path.join(lockPath, "owner.json"), {
+          schema: "goldflow_codex_image_lease_dispatch_lock_v1",
+          token,
+          process_id: process.pid,
+          acquired_at: nowIso(),
+        });
+      } catch (error) {
+        await fs.rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const stat = await fs.stat(lockPath).catch(() => null);
+      if (stat && Date.now() - stat.mtimeMs >= LEASE_DISPATCH_LOCK_STALE_MS) {
+        const stalePath = `${lockPath}.stale-${randomUUID()}`;
+        try {
+          await fs.rename(lockPath, stalePath);
+          await fs.rm(stalePath, { recursive: true, force: true });
+          continue;
+        } catch (staleError) {
+          if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes(staleError?.code)) throw staleError;
+        }
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for the manifest lease-dispatch lock: ${manifestDir}.`);
+      await wait(10);
+    }
+  }
+  try {
+    return await callback();
+  } finally {
+    const owner = await readJson(path.join(lockPath, "owner.json")).catch(() => null);
+    if (owner?.token === token) await fs.rm(lockPath, { recursive: true, force: true });
+  }
+}
+
 function itemById(manifest, assetId) {
   const safeId = assertAssetId(assetId);
   const item = manifest.items.find((row) => row.asset_id === safeId);
@@ -575,6 +782,11 @@ async function closeLease(manifestDir, lease, reason) {
 async function writeDeadletter(manifest, manifestDir, item, attempts, reason, details = null) {
   const filePath = deadletterPath(manifestDir, item.asset_id);
   if (await pathExists(filePath)) return readJson(filePath);
+  const attemptDirs = await attemptDirectories(manifestDir, item.asset_id);
+  const latestAssignment = attemptDirs.length
+    ? await readJson(path.join(attemptDirs.at(-1), "assignment.json")).catch(() => null)
+    : null;
+  const boundItem = latestAssignment?.item?.asset_id === item.asset_id ? latestAssignment.item : item;
   const deadletter = {
     schema: "goldflow_codex_image_deadletter_v1",
     status: "deadlettered",
@@ -585,6 +797,14 @@ async function writeDeadletter(manifest, manifestDir, item, attempts, reason, de
     max_attempts: manifest.policy.max_attempts,
     reason,
     details,
+    creative_contract: {
+      source_row_sha256: boundItem.source_row_sha256,
+      prompt_sha256: boundItem.prompt_sha256,
+      ordered_reference_hashes: (boundItem.ordered_references ?? []).map((reference) => ({
+        ref_id: reference.ref_id,
+        sha256: reference.sha256,
+      })),
+    },
     created_at: nowIso(),
   };
   await writeJsonExclusive(filePath, deadletter).catch(async (error) => {
@@ -637,6 +857,19 @@ async function resolvedDependencyReferences(manifestDir, item) {
 }
 
 async function verificationWaveComplete(manifest, manifestDir) {
+  if (manifest.policy?.verification_required_before_full_queue !== true) {
+    const bypass = manifest.policy?.verification_gate_bypass;
+    if (bypass) {
+      const evidence = manifest.sources?.verification_health_proof;
+      if (!evidence?.path || evidence.path !== bypass.evidence_path || evidence.sha256 !== bypass.evidence_sha256) {
+        throw new Error("Verification-gate bypass evidence binding is missing or inconsistent in the manifest.");
+      }
+      if (!(await pathExists(evidence.path)) || await sha256File(evidence.path) !== evidence.sha256) {
+        throw new Error(`Verification-gate bypass evidence changed or disappeared: ${evidence.path}.`);
+      }
+    }
+    return true;
+  }
   for (const assetId of manifest.policy?.verification_asset_ids ?? []) {
     if (!(await pathExists(completionPath(manifestDir, assetId)))) return false;
   }
@@ -692,99 +925,158 @@ export async function reconcileExpiredLeases(manifestOrDirectory) {
 
 export async function leaseNextWorkItem(options) {
   const { manifest, manifestDir, manifestPath } = await loadWorkManifest(options.manifestPath);
-  await reconcileExpiredLeases(manifestPath);
   const workerId = cleanText(options.workerId);
   if (!workerId) throw new Error("Lease requires --worker-id.");
-  const liveLeaseEntries = await fs.readdir(path.join(manifestDir, "leases"), { withFileTypes: true });
-  for (const entry of liveLeaseEntries) {
-    if (!entry.isDirectory() || !entry.name.endsWith(".lock")) continue;
-    const lease = await readJson(path.join(manifestDir, "leases", entry.name, "lease.json")).catch(() => null);
-    if (!lease || lease.worker_id !== workerId || Date.parse(lease.expires_at) <= Date.now()) continue;
-    const assignment = await readJson(path.join(lease.attempt_dir, "assignment.json")).catch(() => null);
-    if (!assignment) throw new Error(`Worker ${workerId} has a live lease without an assignment for ${lease.asset_id}.`);
-    return { status: "leased", assignment, reused_existing_lease: true };
+  const browserProvider = normalizeBrowserProvider(options.browserProvider);
+  const allowedBrowserProviders = browserProviderList(manifest.policy?.allowed_browser_providers);
+  if (manifest.policy?.browser_provider_receipt_required === true && !browserProvider) {
+    throw new Error("This manifest requires a browser-provider identity for every lease.");
   }
-  const leaseSeconds = asPositiveInteger(options.leaseSeconds, manifest.policy.lease_seconds ?? DEFAULT_LEASE_SECONDS, "lease seconds");
-  const verificationComplete = await verificationWaveComplete(manifest, manifestDir);
-  const verificationIds = new Set(manifest.policy?.verification_asset_ids ?? []);
-  const eligibleItems = verificationComplete ? manifest.items : manifest.items.filter((item) => verificationIds.has(item.asset_id));
-  for (const item of eligibleItems) {
-    if (await pathExists(completionPath(manifestDir, item.asset_id))) continue;
-    if (await pathExists(deadletterPath(manifestDir, item.asset_id))) continue;
-    if (await pathExists(leasePath(manifestDir, item.asset_id))) continue;
-    const attempts = await attemptDirectories(manifestDir, item.asset_id);
-    if (attempts.length >= manifest.policy.max_attempts) {
-      await writeDeadletter(manifest, manifestDir, item, attempts.length, "max_attempts_exhausted_before_lease");
-      continue;
+  if (allowedBrowserProviders.length && !allowedBrowserProviders.includes(browserProvider)) {
+    return {
+      status: "no_work",
+      no_work_reason: "browser_provider_not_allowed",
+      browser_provider: browserProvider,
+      allowed_browser_providers: allowedBrowserProviders,
+    };
+  }
+  return withLeaseDispatchLock(manifestDir, async () => {
+    await reconcileExpiredLeases(manifestPath);
+    const liveLeaseEntries = await fs.readdir(path.join(manifestDir, "leases"), { withFileTypes: true });
+    const liveLeases = [];
+    for (const entry of liveLeaseEntries) {
+      if (!entry.isDirectory() || !entry.name.endsWith(".lock")) continue;
+      const lease = await readJson(path.join(manifestDir, "leases", entry.name, "lease.json")).catch(() => null);
+      if (!lease || Date.parse(lease.expires_at) <= Date.now()) continue;
+      liveLeases.push(lease);
+      if (lease.worker_id !== workerId) continue;
+      if (browserProvider && lease.browser_provider && lease.browser_provider !== browserProvider) {
+        throw new Error(`Worker ${workerId} already owns a ${lease.browser_provider} lease and cannot resume it as ${browserProvider}.`);
+      }
+      const assignment = await readJson(path.join(lease.attempt_dir, "assignment.json")).catch(() => null);
+      if (!assignment) throw new Error(`Worker ${workerId} has a live lease without an assignment for ${lease.asset_id}.`);
+      return { status: "leased", assignment, reused_existing_lease: true };
     }
-    const dependencyReferences = await resolvedDependencyReferences(manifestDir, item);
-    if (dependencyReferences === null) continue;
-    const token = randomUUID();
-    const attemptNumber = attempts.length + 1;
-    const attemptDir = path.join(attemptAssetDir(manifestDir, item.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
-    const temporaryLeaseDir = path.join(manifestDir, "leases", `.${item.asset_id}.${token}.tmp`);
-    const liveLeaseDir = leasePath(manifestDir, item.asset_id);
-    await fs.mkdir(temporaryLeaseDir);
-    const startedAt = nowIso();
-    const expiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const lease = {
-      schema: "goldflow_codex_image_lease_v1",
-      status: "leased",
-      manifest_id: manifest.manifest_id,
-      manifest_path: manifestPath,
-      asset_id: item.asset_id,
-      asset_kind: item.asset_kind,
-      attempt_number: attemptNumber,
-      attempt_dir: attemptDir,
-      lease_token: token,
-      worker_id: workerId,
-      leased_at: startedAt,
-      expires_at: expiresAt,
-      lease_seconds: leaseSeconds,
-    };
-    await writeJsonExclusive(path.join(temporaryLeaseDir, "lease.json"), lease);
-    try {
-      await fs.rename(temporaryLeaseDir, liveLeaseDir);
-    } catch (error) {
-      await fs.rm(temporaryLeaseDir, { recursive: true, force: true });
-      if (["EEXIST", "ENOTEMPTY"].includes(error?.code)) continue;
-      throw error;
+
+    const maxConcurrency = asPositiveInteger(manifest.policy?.max_concurrency, DEFAULT_MAX_CONCURRENCY, "max concurrency");
+    if (liveLeases.length >= maxConcurrency) {
+      const queue = await getCodexWorkStatus({ manifestPath, reconcile: false });
+      return {
+        ...queue,
+        queue_status: queue.status,
+        status: "no_work",
+        no_work_reason: "max_concurrency_reached",
+        live_lease_count: liveLeases.length,
+        max_concurrency: maxConcurrency,
+      };
     }
-    const assignmentItem = {
-      ...item,
-      ordered_references: [...(item.ordered_references ?? []), ...dependencyReferences]
-        .map((reference, index) => ({ ...reference, slot: index + 1 }))
-        .slice(0, 4),
-    };
-    const assignment = {
-      schema: "goldflow_codex_image_assignment_v1",
-      status: "assigned",
-      ...lease,
-      item: assignmentItem,
-      expected_output_path: path.join(attemptDir, item.expected_output.filename),
-    };
-    try {
-      await fs.mkdir(path.dirname(attemptDir), { recursive: true });
-      await fs.mkdir(attemptDir);
-      await writeJsonExclusive(path.join(attemptDir, "assignment.json"), assignment);
-      await writeJsonExclusive(path.join(attemptDir, "heartbeat.json"), {
-        schema: "goldflow_codex_image_heartbeat_v1",
-        status: "live",
+    const providerCaps = manifest.policy?.browser_provider_concurrency ?? null;
+    const providerCap = browserProvider && providerCaps ? Number(providerCaps[browserProvider] ?? 0) : 0;
+    const providerLiveLeaseCount = browserProvider
+      ? liveLeases.filter((lease) => lease.browser_provider === browserProvider).length
+      : 0;
+    if (providerCap > 0 && providerLiveLeaseCount >= providerCap) {
+      return {
+        status: "no_work",
+        no_work_reason: "browser_provider_concurrency_reached",
+        browser_provider: browserProvider,
+        live_lease_count: liveLeases.length,
+        provider_live_lease_count: providerLiveLeaseCount,
+        provider_max_concurrency: providerCap,
+        max_concurrency: maxConcurrency,
+      };
+    }
+
+    const leaseSeconds = asPositiveInteger(options.leaseSeconds, manifest.policy.lease_seconds ?? DEFAULT_LEASE_SECONDS, "lease seconds");
+    const verificationComplete = await verificationWaveComplete(manifest, manifestDir);
+    const verificationIds = new Set(manifest.policy?.verification_asset_ids ?? []);
+    const eligibleItems = verificationComplete ? manifest.items : manifest.items.filter((item) => verificationIds.has(item.asset_id));
+    for (const item of eligibleItems) {
+      if (await pathExists(completionPath(manifestDir, item.asset_id))) continue;
+      if (await pathExists(deadletterPath(manifestDir, item.asset_id))) continue;
+      if (await pathExists(leasePath(manifestDir, item.asset_id))) continue;
+      const attempts = await attemptDirectories(manifestDir, item.asset_id);
+      if (attempts.length >= manifest.policy.max_attempts) {
+        await writeDeadletter(manifest, manifestDir, item, attempts.length, "max_attempts_exhausted_before_lease");
+        continue;
+      }
+      const dependencyReferences = await resolvedDependencyReferences(manifestDir, item);
+      if (dependencyReferences === null) continue;
+      const token = randomUUID();
+      const attemptNumber = attempts.length + 1;
+      const attemptDir = path.join(attemptAssetDir(manifestDir, item.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
+      const temporaryLeaseDir = path.join(manifestDir, "leases", `.${item.asset_id}.${token}.tmp`);
+      const liveLeaseDir = leasePath(manifestDir, item.asset_id);
+      await fs.mkdir(temporaryLeaseDir);
+      const startedAt = nowIso();
+      const expiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+      const lease = {
+        schema: "goldflow_codex_image_lease_v1",
+        status: "leased",
         manifest_id: manifest.manifest_id,
+        manifest_path: manifestPath,
         asset_id: item.asset_id,
+        asset_kind: item.asset_kind,
+        attempt_number: attemptNumber,
+        attempt_dir: attemptDir,
         lease_token: token,
         worker_id: workerId,
-        heartbeat_at: startedAt,
+        browser_provider: browserProvider,
+        leased_at: startedAt,
         expires_at: expiresAt,
-      });
-    } catch (error) {
-      await closeLease(manifestDir, lease, "assignment-error");
-      throw error;
+        lease_seconds: leaseSeconds,
+      };
+      await writeJsonExclusive(path.join(temporaryLeaseDir, "lease.json"), lease);
+      try {
+        await fs.rename(temporaryLeaseDir, liveLeaseDir);
+      } catch (error) {
+        await fs.rm(temporaryLeaseDir, { recursive: true, force: true });
+        if (["EEXIST", "ENOTEMPTY"].includes(error?.code)) continue;
+        throw error;
+      }
+      const combinedReferences = [];
+      for (const reference of [...(item.ordered_references ?? []), ...dependencyReferences]) {
+        if (combinedReferences.some((row) => row.ref_id === reference.ref_id)) continue;
+        combinedReferences.push({ ...reference, slot: combinedReferences.length + 1 });
+      }
+      if (combinedReferences.length > 4) {
+        await closeLease(manifestDir, lease, "assignment-reference-overflow");
+        throw new Error(`Asset ${item.asset_id} requires ${combinedReferences.length} ordered references; provider limit is four.`);
+      }
+      const assignmentItem = {
+        ...item,
+        ordered_references: combinedReferences,
+      };
+      const assignment = {
+        schema: "goldflow_codex_image_assignment_v1",
+        status: "assigned",
+        ...lease,
+        item: assignmentItem,
+        expected_output_path: path.join(attemptDir, item.expected_output.filename),
+      };
+      try {
+        await fs.mkdir(path.dirname(attemptDir), { recursive: true });
+        await fs.mkdir(attemptDir);
+        await writeJsonExclusive(path.join(attemptDir, "assignment.json"), assignment);
+        await writeJsonExclusive(path.join(attemptDir, "heartbeat.json"), {
+          schema: "goldflow_codex_image_heartbeat_v1",
+          status: "live",
+          manifest_id: manifest.manifest_id,
+          asset_id: item.asset_id,
+          lease_token: token,
+          worker_id: workerId,
+          heartbeat_at: startedAt,
+          expires_at: expiresAt,
+        });
+      } catch (error) {
+        await closeLease(manifestDir, lease, "assignment-error");
+        throw error;
+      }
+      return { status: "leased", assignment };
     }
-    return { status: "leased", assignment };
-  }
-  const queue = await getCodexWorkStatus({ manifestPath });
-  return { ...queue, queue_status: queue.status, status: "no_work" };
+    const queue = await getCodexWorkStatus({ manifestPath, reconcile: false });
+    return { ...queue, queue_status: queue.status, status: "no_work" };
+  });
 }
 
 export async function heartbeatWorkItem(options) {
@@ -887,6 +1179,13 @@ export async function completeWorkItem(options) {
   const item = itemById(manifest, options.assetId);
   const { lease } = await readLiveLease(manifestDir, item.asset_id, options.leaseToken);
   if (options.workerId && lease.worker_id !== cleanText(options.workerId)) throw new Error(`Worker ${options.workerId} does not own ${item.asset_id}.`);
+  const browserProvider = normalizeBrowserProvider(options.browserProvider);
+  if (manifest.policy?.browser_provider_receipt_required === true && !browserProvider) {
+    throw new Error(`Completion for ${item.asset_id} requires the leased browser provider.`);
+  }
+  if (browserProvider && lease.browser_provider !== browserProvider) {
+    throw new Error(`Completion provider ${browserProvider} does not own ${item.asset_id}; lease belongs to ${lease.browser_provider ?? "an unattributed worker"}.`);
+  }
   if (!cleanText(options.sourcePath)) throw new Error("Completion requires explicit --source.");
   const assignment = await readJson(path.join(lease.attempt_dir, "assignment.json"));
   const assignedItem = assignment?.item;
@@ -895,6 +1194,9 @@ export async function completeWorkItem(options) {
   }
   await validateCurrentItemBindings(assignedItem);
   const output = await validateAttemptOutput(assignedItem, lease, options.sourcePath, options.reportedSha256);
+  if (item.prior_accepted_sha256 && output.sha256 === item.prior_accepted_sha256) {
+    throw new Error(`Replacement output for ${item.asset_id} is byte-identical to its prior accepted image.`);
+  }
   for (const existing of await completionRows(manifestDir)) {
     if (existing.asset_id !== item.asset_id && existing.sha256 === output.sha256) {
       throw new Error(`Duplicate output SHA-256 for ${item.asset_id}; already accepted for ${existing.asset_id}.`);
@@ -911,6 +1213,7 @@ export async function completeWorkItem(options) {
     attempt_dir: lease.attempt_dir,
     lease_token: lease.lease_token,
     worker_id: lease.worker_id,
+    browser_provider: lease.browser_provider ?? browserProvider,
     source_path: output.source,
     sha256: output.sha256,
     image: output.image,
@@ -938,6 +1241,9 @@ export async function reuseExactWorkCompletions(options) {
   const source = await loadWorkManifest(options.sourceManifestPath);
   const target = await loadWorkManifest(options.targetManifestPath);
   if (source.manifest.mode !== target.manifest.mode) throw new Error("Exact completion reuse requires matching manifest modes.");
+  if (target.manifest.policy?.browser_provider_receipt_required === true) {
+    throw new Error("Provider-attributed browser manifests must be materialized from their own provider receipt; generic completion reuse is disabled.");
+  }
   const scope = new Set(parseIdScope(options.assetIds, options.imageIds, options.cutIds, options.referenceIds));
   const sourceItems = new Map(source.manifest.items.map((item) => [item.asset_id, item]));
   const workerId = cleanText(options.workerId) || `exact-cache-reuse-${source.manifest.manifest_id}`;
@@ -1057,6 +1363,10 @@ export async function failWorkItem(options) {
   const item = itemById(manifest, options.assetId);
   const { lease } = await readLiveLease(manifestDir, item.asset_id, options.leaseToken);
   if (options.workerId && lease.worker_id !== cleanText(options.workerId)) throw new Error(`Worker ${options.workerId} does not own ${item.asset_id}.`);
+  const browserProvider = normalizeBrowserProvider(options.browserProvider);
+  if (browserProvider && lease.browser_provider !== browserProvider) {
+    throw new Error(`Failure provider ${browserProvider} does not own ${item.asset_id}; lease belongs to ${lease.browser_provider ?? "an unattributed worker"}.`);
+  }
   const failure = {
     schema: "goldflow_codex_image_attempt_failure_v1",
     status: "failed",
@@ -1065,6 +1375,7 @@ export async function failWorkItem(options) {
     attempt_number: lease.attempt_number,
     lease_token: lease.lease_token,
     worker_id: lease.worker_id,
+    browser_provider: lease.browser_provider ?? browserProvider,
     error: cleanText(options.error) || "worker_reported_failure",
     failed_at: nowIso(),
   };
@@ -1076,6 +1387,40 @@ export async function failWorkItem(options) {
     deadletter = await writeDeadletter(manifest, manifestDir, item, attempts, "worker_failure_max_attempts", failure.error);
   }
   return { status: deadletter ? "deadlettered" : "retryable", failure, deadletter };
+}
+
+export async function deferWorkItem(options) {
+  const { manifest, manifestDir } = await loadWorkManifest(options.manifestPath);
+  const item = itemById(manifest, options.assetId);
+  const { lease } = await readLiveLease(manifestDir, item.asset_id, options.leaseToken);
+  if (options.workerId && lease.worker_id !== cleanText(options.workerId)) throw new Error(`Worker ${options.workerId} does not own ${item.asset_id}.`);
+  const browserProvider = normalizeBrowserProvider(options.browserProvider);
+  if (browserProvider && lease.browser_provider !== browserProvider) {
+    throw new Error(`Deferral provider ${browserProvider} does not own ${item.asset_id}; lease belongs to ${lease.browser_provider ?? "an unattributed worker"}.`);
+  }
+  const deferral = {
+    schema: "goldflow_codex_image_presubmission_deferral_v1",
+    status: "deferred_before_submission",
+    manifest_id: manifest.manifest_id,
+    asset_id: item.asset_id,
+    attempt_number: lease.attempt_number,
+    lease_token: lease.lease_token,
+    worker_id: lease.worker_id,
+    browser_provider: lease.browser_provider ?? browserProvider,
+    reason: cleanText(options.reason) || "provider_cooldown_before_submission",
+    deferred_at: nowIso(),
+  };
+  await writeJsonExclusive(path.join(lease.attempt_dir, "presubmission_deferral.json"), deferral);
+  await closeLease(manifestDir, lease, "deferred-before-submission");
+  const deferredDir = path.join(
+    manifestDir,
+    "deferred-attempts",
+    item.asset_id,
+    path.basename(lease.attempt_dir),
+  );
+  await fs.mkdir(path.dirname(deferredDir), { recursive: true });
+  await fs.rename(lease.attempt_dir, deferredDir);
+  return { status: "deferred_before_submission", deferral, deferred_attempt_dir: deferredDir };
 }
 
 export async function getCodexWorkStatus(options) {
@@ -1093,6 +1438,7 @@ export async function getCodexWorkStatus(options) {
       status: completion ? "completed" : deadletter ? "deadlettered" : lease ? "leased" : "pending",
       attempt_count: attempts.length,
       worker_id: lease?.worker_id ?? null,
+      browser_provider: completion?.browser_provider ?? lease?.browser_provider ?? null,
       lease_expires_at: lease?.expires_at ?? null,
       completion_sha256: completion?.sha256 ?? null,
       deadletter_reason: deadletter?.reason ?? null,
@@ -1102,6 +1448,7 @@ export async function getCodexWorkStatus(options) {
   const verificationIds = new Set(manifest.policy?.verification_asset_ids ?? []);
   const verificationRows = rows.filter((row) => verificationIds.has(row.asset_id));
   const verificationCompleted = verificationRows.filter((row) => row.status === "completed").length;
+  const verificationBypass = manifest.policy?.verification_gate_bypass ?? null;
   return {
     manifest_id: manifest.manifest_id,
     manifest_path: manifestPath,
@@ -1111,12 +1458,25 @@ export async function getCodexWorkStatus(options) {
     counts,
     recommended_concurrency: manifest.policy?.recommended_concurrency ?? DEFAULT_RECOMMENDED_CONCURRENCY,
     max_concurrency: manifest.policy?.max_concurrency ?? DEFAULT_MAX_CONCURRENCY,
+    dispatch_policy: manifest.policy?.dispatch_policy ?? null,
+    allowed_browser_providers: manifest.policy?.allowed_browser_providers ?? [],
+    browser_provider_concurrency: manifest.policy?.browser_provider_concurrency ?? null,
+    completed_by_browser_provider: Object.fromEntries(
+      (manifest.policy?.allowed_browser_providers ?? []).map((provider) => [
+        provider,
+        rows.filter((row) => row.status === "completed" && row.browser_provider === provider).length,
+      ]),
+    ),
     verification_wave: {
       required: manifest.policy?.verification_required_before_full_queue === true,
+      bypassed: Boolean(verificationBypass),
+      bypass: verificationBypass,
       asset_ids: [...verificationIds],
       completed_count: verificationCompleted,
       item_count: verificationRows.length,
-      status: verificationCompleted === verificationRows.length ? "passed" : "in_progress",
+      status: verificationBypass
+        ? "bypassed_with_prior_health_proof"
+        : verificationCompleted === verificationRows.length ? "passed" : "in_progress",
     },
     reconciliation,
     items: rows,
@@ -1138,15 +1498,31 @@ export async function validateCodexWorkManifest(options) {
   const { manifest, manifestDir, manifestPath } = await loadWorkManifest(options.manifestPath);
   await reconcileExpiredLeases(manifestPath);
   const findings = [];
-  await validateSourceHashes(manifest, findings);
   const knownIds = new Set(manifest.items.map((item) => item.asset_id));
+  const requestedIds = new Set(parseIdScope(options.assetIds, options.imageIds, options.cutIds, options.referenceIds));
+  const allowIncomplete = options.allowIncomplete === true;
+  const allowSourceArtifactDrift = options.allowSourceArtifactDrift === true;
+  if (allowIncomplete && !requestedIds.size) {
+    throw new Error("Partial manifest validation requires an exact completed asset/image/reference ID scope.");
+  }
+  if (allowSourceArtifactDrift && (!allowIncomplete || !requestedIds.size)) {
+    throw new Error("Source-artifact drift may be tolerated only for exact-scope partial materialization after current-row validation.");
+  }
+  if (!allowSourceArtifactDrift) await validateSourceHashes(manifest, findings);
+  for (const assetId of requestedIds) {
+    if (!knownIds.has(assetId)) findings.push({ code: "validation_scope_asset_unknown", asset_id: assetId });
+  }
+  const requiredIds = requestedIds.size ? requestedIds : knownIds;
   const completionFiles = await fs.readdir(path.join(manifestDir, "completions"), { withFileTypes: true }).catch(() => []);
   const completionJsonFiles = completionFiles.filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
-  if (completionJsonFiles.length !== manifest.items.length) {
+  if (!allowIncomplete && completionJsonFiles.length !== manifest.items.length) {
     findings.push({ code: "completion_file_count_mismatch", expected: manifest.items.length, actual: completionJsonFiles.length });
   }
+  const completionFilesToValidate = allowIncomplete
+    ? completionJsonFiles.filter((entry) => requiredIds.has(entry.name.slice(0, -".json".length)))
+    : completionJsonFiles;
   const hashOwners = new Map();
-  for (const entry of completionJsonFiles) {
+  for (const entry of completionFilesToValidate) {
     const filePath = path.join(manifestDir, "completions", entry.name);
     const completion = await readJson(filePath).catch((error) => {
       findings.push({ code: "completion_json_invalid", path: filePath, error: error.message });
@@ -1164,6 +1540,23 @@ export async function validateCodexWorkManifest(options) {
     const assignment = await readJson(path.join(completion.attempt_dir, "assignment.json")).catch(() => null);
     if (!assignment?.item || assignment.item.asset_id !== item.asset_id || assignment.item.source_row_sha256 !== item.source_row_sha256) {
       findings.push({ code: "completion_assignment_binding_invalid", asset_id: item.asset_id });
+    }
+    if (manifest.policy?.browser_provider_receipt_required === true) {
+      const allowedProviders = browserProviderList(manifest.policy?.allowed_browser_providers);
+      if (!allowedProviders.includes(completion.browser_provider)) {
+        findings.push({ code: "completion_browser_provider_invalid", asset_id: item.asset_id, browser_provider: completion.browser_provider ?? null });
+      }
+      if (assignment?.browser_provider !== completion.browser_provider) {
+        findings.push({ code: "completion_browser_provider_lease_mismatch", asset_id: item.asset_id });
+      }
+      const receiptName = completion.browser_provider === "google-flow"
+        ? "google_flow_receipt.json"
+        : completion.browser_provider === "google-gemini" ? "google_gemini_receipt.json" : "chatgpt_web_receipt.json";
+      const receiptPath = path.join(completion.attempt_dir, receiptName);
+      const receipt = await readJson(receiptPath).catch(() => null);
+      if (!receipt || receipt.browser_provider !== completion.browser_provider || receipt.asset_id !== item.asset_id) {
+        findings.push({ code: "completion_browser_provider_receipt_missing_or_invalid", asset_id: item.asset_id, path: receiptPath });
+      }
     }
     const expectedRefRows = assignment?.item?.ordered_references ?? item.ordered_references;
     const expectedRefHashes = stableStringify(expectedRefRows.map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })));
@@ -1192,7 +1585,12 @@ export async function validateCodexWorkManifest(options) {
     else hashOwners.set(completion.sha256, item.asset_id);
   }
   const hashClaimEntries = await fs.readdir(path.join(manifestDir, "hash-claims"), { withFileTypes: true }).catch(() => []);
-  const hashClaims = hashClaimEntries.filter((entry) => entry.isDirectory() && entry.name.endsWith(".lock"));
+  const allHashClaims = hashClaimEntries.filter((entry) => entry.isDirectory() && entry.name.endsWith(".lock"));
+  const hashClaims = [];
+  for (const entry of allHashClaims) {
+    const claim = await readJson(path.join(manifestDir, "hash-claims", entry.name, "claim.json")).catch(() => null);
+    if (!allowIncomplete || requiredIds.has(claim?.asset_id)) hashClaims.push(entry);
+  }
   for (const entry of hashClaims) {
     const claimPath = path.join(manifestDir, "hash-claims", entry.name, "claim.json");
     const claim = await readJson(claimPath).catch(() => null);
@@ -1201,12 +1599,14 @@ export async function validateCodexWorkManifest(options) {
       findings.push({ code: "orphan_or_invalid_hash_claim", path: claimPath, asset_id: claim?.asset_id ?? null });
     }
   }
-  if (hashClaims.length !== completionJsonFiles.length) {
-    findings.push({ code: "hash_claim_count_mismatch", expected: completionJsonFiles.length, actual: hashClaims.length });
+  if (hashClaims.length !== completionFilesToValidate.length) {
+    findings.push({ code: "hash_claim_count_mismatch", expected: completionFilesToValidate.length, actual: hashClaims.length });
   }
   for (const item of manifest.items) {
-    if (!(await pathExists(completionPath(manifestDir, item.asset_id)))) findings.push({ code: "item_not_completed", asset_id: item.asset_id });
-    if (await pathExists(deadletterPath(manifestDir, item.asset_id))) {
+    if (requiredIds.has(item.asset_id) && !(await pathExists(completionPath(manifestDir, item.asset_id)))) {
+      findings.push({ code: "item_not_completed", asset_id: item.asset_id });
+    }
+    if (requiredIds.has(item.asset_id) && await pathExists(deadletterPath(manifestDir, item.asset_id))) {
       const deadletter = await readJson(deadletterPath(manifestDir, item.asset_id)).catch(() => null);
       findings.push({
         code: "item_deadlettered",
@@ -1215,6 +1615,7 @@ export async function validateCodexWorkManifest(options) {
         attempt_count: deadletter?.attempt_count ?? null,
       });
     }
+    if (allowIncomplete && !requiredIds.has(item.asset_id)) continue;
     for (const reference of item.ordered_references) {
       if (!(await pathExists(reference.path))) {
         findings.push({ code: "reference_input_missing", asset_id: item.asset_id, ref_id: reference.ref_id, path: reference.path });
@@ -1230,8 +1631,10 @@ export async function validateCodexWorkManifest(options) {
     status,
     manifest_id: manifest.manifest_id,
     manifest_path: manifestPath,
-    item_count: manifest.items.length,
-    completed_count: manifest.items.length - findings.filter((row) => row.code === "item_not_completed").length,
+    validation_scope: requestedIds.size ? "exact_completed_ids" : "full_manifest",
+    manifest_item_count: manifest.items.length,
+    item_count: requiredIds.size,
+    completed_count: requiredIds.size - findings.filter((row) => row.code === "item_not_completed").length,
     unique_sha256_count: hashOwners.size,
     finding_count: findings.length,
     findings,

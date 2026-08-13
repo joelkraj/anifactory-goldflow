@@ -7,8 +7,13 @@ import {
   normalizeWinnerNarration,
   sha256Text,
   validateWinnerPackageContract,
+  validateWinnerStoryBlueprintApproval,
   validateWinnerSourceRelease,
 } from "./lib/winner-source-contract.mjs";
+import { validateWinnerBlueprintForPackage } from "./lib/winner-source-room-contract.mjs";
+import { loadWinnerSourceRoomLineage } from "./lib/winner-source-room-lineage.mjs";
+import { loadSourceRoomReleaseV2Binding } from "./lib/winner-source-room-v2-lineage.mjs";
+import { SOURCE_ROOM_RELEASE_V2_SCHEMA } from "./lib/winner-source-room-v2-contract.mjs";
 import {
   contentProfileForIdentity,
   contentProfileRequiresEvidenceLedger,
@@ -120,6 +125,48 @@ async function loadWinnerSourceReleaseContext(releaseFilePath, {
   if (release.winner_package_sha256 !== actualPackageSha256) {
     throw new Error(`Winner package hash mismatch: release records ${release.winner_package_sha256}, current file is ${actualPackageSha256}.`);
   }
+  let winnerStoryBlueprintPath = null;
+  let winnerStoryBlueprintSha256 = null;
+  let winnerStoryBlueprintApprovalPath = null;
+  let winnerStoryBlueprintDocument = null;
+  if (release.winner_story_blueprint_sha256) {
+    winnerStoryBlueprintPath = resolveReleaseArtifactPath(
+      resolvedReleasePath,
+      release.winner_story_blueprint_path,
+      "winner_story_blueprint_path",
+    );
+    winnerStoryBlueprintApprovalPath = resolveReleaseArtifactPath(
+      resolvedReleasePath,
+      release.winner_story_blueprint_approval_path,
+      "winner_story_blueprint_approval_path",
+    );
+    const { bytes: blueprintBytes, value: blueprintDocument } = await readJsonWithBytes(
+      winnerStoryBlueprintPath,
+      "winner story blueprint",
+    );
+    winnerStoryBlueprintSha256 = sha256(blueprintBytes);
+    winnerStoryBlueprintDocument = blueprintDocument;
+    if (winnerStoryBlueprintSha256 !== release.winner_story_blueprint_sha256) {
+      throw new Error(`Winner story blueprint hash mismatch: release records ${release.winner_story_blueprint_sha256}, current file is ${winnerStoryBlueprintSha256}.`);
+    }
+    const blueprintValidation = validateWinnerBlueprintForPackage(blueprintDocument, {
+      packageContract,
+      packageSha256: actualPackageSha256,
+    });
+    if (!blueprintValidation.done) {
+      throw new Error(`Invalid winner story blueprint: ${blueprintValidation.blockers.join(", ")}`);
+    }
+    const { value: blueprintApproval } = await readJsonWithBytes(
+      winnerStoryBlueprintApprovalPath,
+      "winner story blueprint approval",
+    );
+    const blueprintApprovalValidation = validateWinnerStoryBlueprintApproval(blueprintApproval, {
+      blueprintSha256: winnerStoryBlueprintSha256,
+    });
+    if (!blueprintApprovalValidation.done || blueprintApproval.winner_package_sha256 !== actualPackageSha256) {
+      throw new Error(`Invalid winner story blueprint approval: ${blueprintApprovalValidation.blockers.join(", ") || "winner_blueprint_approval_package_hash_mismatch"}`);
+    }
+  }
   const currentSourceScriptSha256 = sha256Text(normalizeWinnerNarration(sourceText));
   if (currentSourceScriptSha256 !== release.source_script_sha256) {
     throw new Error(`Ingest source does not match the released narration: expected ${release.source_script_sha256}, found ${currentSourceScriptSha256}.`);
@@ -145,12 +192,31 @@ async function loadWinnerSourceReleaseContext(releaseFilePath, {
   if (release.formula_sha256 && release.formula_sha256 !== packageContract.formula_sha256) {
     throw new Error("Winner release formula_sha256 does not match the current winner package.");
   }
+  const sourceRoomLineage = await loadWinnerSourceRoomLineage({
+    release,
+    releasePath: resolvedReleasePath,
+    packageContract,
+    packageSha256: actualPackageSha256,
+    blueprintDocument: winnerStoryBlueprintDocument,
+    blueprintPath: winnerStoryBlueprintPath,
+    blueprintSha256: winnerStoryBlueprintSha256,
+    releasedSourceScriptSha256: release.source_script_sha256,
+  });
   if (identityBinding) {
     const exactChecks = [
       ["release_sha256", identityBinding.release_sha256, actualReleaseSha256],
       ["source_file_sha256", identityBinding.source_file_sha256, sha256(releaseSourceBytes)],
       ["source_script_sha256", identityBinding.source_script_sha256, release.source_script_sha256],
       ["winner_package_sha256", identityBinding.winner_package_sha256, actualPackageSha256],
+      ["winner_story_blueprint_sha256", identityBinding.winner_story_blueprint_sha256 ?? null, winnerStoryBlueprintSha256],
+      ["audience_feedback_contract_version", identityBinding.audience_feedback_contract_version ?? null, sourceRoomLineage?.audience_feedback_contract_version ?? null],
+      ["winner_blueprint_audience_audit_sha256", identityBinding.winner_blueprint_audience_audit_sha256 ?? null, sourceRoomLineage?.winner_blueprint_audience_audit_sha256 ?? null],
+      ["winner_blueprint_audience_audit_decision", identityBinding.winner_blueprint_audience_audit_decision ?? null, sourceRoomLineage?.winner_blueprint_audience_audit_decision ?? null],
+      ["winner_retention_map_sha256", identityBinding.winner_retention_map_sha256 ?? null, sourceRoomLineage?.winner_retention_map_sha256 ?? null],
+      ["winner_opening_sha256", identityBinding.winner_opening_sha256 ?? null, sourceRoomLineage?.winner_opening_sha256 ?? null],
+      ["winner_development_diagnostics_manifest_sha256", identityBinding.winner_development_diagnostics_manifest_sha256 ?? null, sourceRoomLineage?.winner_development_diagnostics_manifest_sha256 ?? null],
+      ["winner_integrated_revision_report_sha256", identityBinding.winner_integrated_revision_report_sha256 ?? null, sourceRoomLineage?.winner_integrated_revision_report_sha256 ?? null],
+      ["winner_line_flow_polish_report_sha256", identityBinding.winner_line_flow_polish_report_sha256 ?? null, sourceRoomLineage?.winner_line_flow_polish_report_sha256 ?? null],
       ["winner_gate_sha256", identityBinding.winner_gate_sha256, release.winner_gate_sha256],
       ["channel", identityBinding.channel, release.channel],
       ["development_slug", identityBinding.development_slug, release.development_slug],
@@ -179,6 +245,10 @@ async function loadWinnerSourceReleaseContext(releaseFilePath, {
     source_script_sha256: release.source_script_sha256,
     winner_package_path: winnerPackagePath,
     winner_package_sha256: actualPackageSha256,
+    winner_story_blueprint_path: winnerStoryBlueprintPath,
+    winner_story_blueprint_sha256: winnerStoryBlueprintSha256,
+    winner_story_blueprint_approval_path: winnerStoryBlueprintApprovalPath,
+    ...(sourceRoomLineage ?? {}),
     winner_gate_sha256: release.winner_gate_sha256,
     formula_version: packageContract.formula_version,
     formula_sha256: packageContract.formula_sha256,
@@ -279,15 +349,29 @@ async function main() {
     }
   }
   const effectiveWinnerReleasePath = explicitWinnerReleasePath ?? identityWinnerReleasePath;
-  const winnerSourceLineage = effectiveWinnerReleasePath
-    ? await loadWinnerSourceReleaseContext(effectiveWinnerReleasePath, {
-        sourceText: source,
-        expectedChannel: channel,
-        expectedTitle: runIdentity?.title ?? null,
-        identityBinding: identityWinnerRelease,
-        expectedRawSourceSha256: identityWinnerRelease ? runIdentity?.source_sha256 ?? null : null,
-      })
-    : null;
+  let winnerSourceLineage = null;
+  if (effectiveWinnerReleasePath) {
+    const { value: releaseDocument } = await readJsonWithBytes(effectiveWinnerReleasePath, "winner source release");
+    winnerSourceLineage = releaseDocument?.schema === SOURCE_ROOM_RELEASE_V2_SCHEMA
+      ? {
+          ...await loadSourceRoomReleaseV2Binding(effectiveWinnerReleasePath, {
+            expectedChannel: channel,
+            expectedTitle: runIdentity?.title ?? null,
+            expectedSourceText: source,
+            expectedRawSourceSha256: identityWinnerRelease ? runIdentity?.source_sha256 ?? null : null,
+            identityBinding: identityWinnerRelease,
+          }),
+          binding_source: identityWinnerRelease ? "run_identity" : "explicit_ingest_flag",
+          validated_at: new Date().toISOString(),
+        }
+      : await loadWinnerSourceReleaseContext(effectiveWinnerReleasePath, {
+          sourceText: source,
+          expectedChannel: channel,
+          expectedTitle: runIdentity?.title ?? null,
+          identityBinding: identityWinnerRelease,
+          expectedRawSourceSha256: identityWinnerRelease ? runIdentity?.source_sha256 ?? null : null,
+        });
+  }
   if (winnerSourceLineage && stripAnnotations) {
     throw new Error("--strip-annotations is forbidden for a released winner source; ingest must preserve the exact approved narration hash.");
   }

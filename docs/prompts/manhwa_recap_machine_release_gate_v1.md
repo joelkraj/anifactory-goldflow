@@ -59,7 +59,7 @@ Record unclear applications as evidence under `plot_logic_and_payoff` and/or `jo
 
 RETENTION ARCHITECTURE
 
-Create one exhaustive movement ledger covering every script word exactly once and in order. Use eight to ten movements. A movement is not a chapter label; it is a causal story phase with one immediate objective and a result that changes what must happen next.
+Create one exhaustive movement ledger covering every script word exactly once and in order. Use the movement count locked by the supplied blueprint and retention policy. A movement is not a chapter label; it is a causal story phase with one immediate objective and a result that changes what must happen next.
 
 Every movement must:
 
@@ -72,6 +72,8 @@ Every movement must:
 - identify any substantial duplication honestly.
 
 Do not pass a sequence merely because names, locations, or opponents changed. Two sequences are duplicative when they prove the same capability, teach the same lesson, repeat the same humiliation, or end with the same state.
+
+For retention-drama-room scripts, also judge whether every movement changes a relationship, belief, or emotional obligation alongside the external plot. Money, ranks, contracts, systems, acquisitions, hearings, and logistics are not dramatic movement by themselves. Flag recurring characters who only praise, hate, explain, or react; antagonist behavior without human logic; procedural sections whose removal would leave the story unchanged; and K-drama/manhwa emotion stated in aphorisms rather than earned through choices, secrets, useful gestures, sacrifice, temptation, or refusal.
 
 Audit these exact checkpoints:
 

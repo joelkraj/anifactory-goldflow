@@ -1,12 +1,23 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildStageCommand } from "./lib/pipeline-stage-registry.mjs";
 import { motionIntentForPrompt, rebalanceEditorialMotionStreaks } from "./lib/motion-plan-utils.mjs";
 import { productionProfileForIdentity } from "./lib/production-profiles.mjs";
+import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import {
+  FEDERATED_TOTAL_IMAGE_CONCURRENCY,
+  HYBRID_TOTAL_IMAGE_CONCURRENCY,
+  HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+  isBrowserPoolImageProvider,
+  isFederatedWebImageProvider,
+  isGoogleFlowPrimaryProvider,
+} from "./lib/image-provider-policy.mjs";
+import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -71,6 +82,52 @@ function quoteAwareTokens(command) {
   return tokens;
 }
 
+function removeTokenFlag(tokens, flagName) {
+  const index = tokens.indexOf(`--${flagName}`);
+  if (index >= 0) tokens.splice(index, 2);
+}
+
+function plannerTokensWithWavefrontOverrides(tokens, inputFlags = {}) {
+  const output = [...tokens];
+  if (inputFlags["beat-ids"] !== undefined) removeTokenFlag(output, "cut-ids");
+  if (inputFlags["cut-ids"] !== undefined) removeTokenFlag(output, "beat-ids");
+  const forwarded = [
+    "beat-ids",
+    "cut-ids",
+    "planning-provider",
+    "reasoning-effort",
+    "visual-chunk-concurrency",
+    "visual-high-risk-chunk-size",
+    "visual-medium-risk-chunk-size",
+    "visual-simple-chunk-size",
+    "visual-json-attempts",
+    "codex-call-attempts",
+    "visual-chunk-validation-attempts",
+    "workflow-bypass",
+  ];
+  for (const name of forwarded) {
+    if (inputFlags[name] === undefined) continue;
+    removeTokenFlag(output, name);
+    output.push(`--${name}`, String(inputFlags[name]));
+  }
+  return output;
+}
+
+export function plannerTokensWithWavefrontOverridesForTests(tokens, inputFlags = {}) {
+  return plannerTokensWithWavefrontOverrides(tokens, inputFlags);
+}
+
+function exactPromptRecoveryAllowed(initial = {}, inputFlags = {}) {
+  return initial.current_stage === "visual_prompt_plan"
+    && initial.current_stage_state === "blocked"
+    && isTrue(inputFlags["workflow-bypass"])
+    && Boolean(String(inputFlags["beat-ids"] ?? inputFlags["cut-ids"] ?? "").trim());
+}
+
+export function exactPromptRecoveryAllowedForTests(initial = {}, inputFlags = {}) {
+  return exactPromptRecoveryAllowed(initial, inputFlags);
+}
+
 function runNode(args, { capture = false } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, {
@@ -119,6 +176,10 @@ async function writeJsonAtomic(filePath, value) {
   const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporary, filePath);
+}
+
+async function sha256File(filePath) {
+  return createHash("sha256").update(await fs.readFile(filePath)).digest("hex");
 }
 
 function identityFlags(identity) {
@@ -199,6 +260,20 @@ export function dedupeIncrementalAcceptedImagesForTests(batches = []) {
       || String(left.image_id).localeCompare(String(right.image_id))
     )),
     duplicate_hashes: duplicateHashes,
+  };
+}
+
+export function wavefrontCompletionPartitionForTests(prompts = [], report = {}) {
+  const completedCutIds = [...new Set((report?.results ?? [])
+    .filter((row) => row?.image_id && row?.image_path)
+    .map((row) => String(row.image_id)))];
+  const completedCutIdSet = new Set(completedCutIds);
+  return {
+    completed_cut_ids: completedCutIds,
+    deferred_cut_ids: prompts
+      .map((prompt) => String(prompt?.image_id ?? ""))
+      .filter(Boolean)
+      .filter((imageId) => !completedCutIdSet.has(imageId)),
   };
 }
 
@@ -313,22 +388,82 @@ async function processPrefetchBatch({
   const imageModel = identity?.model_versions?.image_model
     ?? identity?.provider_locks?.image_model
     ?? "flux-klein";
-  const imagegen = await runNode([
-    path.join(repoRoot, "scripts", "imagegen.mjs"),
-    ...common,
-    "--image-provider", "modelslab",
-    "--image-model", imageModel,
-    "--prompts", hardenedPlanPath,
-    "--skip-reference-generation", "true",
-    "--concurrency", String(profile.media.image_concurrency),
-    "--reference-concurrency", String(profile.media.reference_concurrency),
-    "--provider-health-probe", firstProviderProbe ? "true" : "false",
-    "--provider-health-report", providerHealthPath,
-    "--output", imagegenReportPath,
-    "--cut-execution-ledger", cutLedgerPath,
-    "--batch-kind", "wavefront_prefetch",
-  ]);
+  const hybridProvider = isBrowserPoolImageProvider(normalizeImageProvider(identity.image_provider));
+  const hybridPoolReportPath = path.join(batchDir, `${batchId}.hybrid-pool.json`);
+  let imagegen;
+  if (hybridProvider) {
+    await writeJsonAtomic(providerHealthPath, {
+      schema: "goldflow_wavefront_provider_health_binding_v1",
+      status: "passed_by_identity_health_proof",
+      image_provider: identity.image_provider,
+      google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
+      google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
+      provider_concurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
+      updated_at: new Date().toISOString(),
+    });
+    imagegen = await runNode([
+      path.join(repoRoot, "scripts", "hybrid-browser-image-pool.mjs"),
+      ...common,
+      "--prompts", hardenedPlanPath,
+      "--image-ids", combined.prompts.map((prompt) => prompt.image_id).join(","),
+      "--output", imagegenReportPath,
+      "--pool-report-output", hybridPoolReportPath,
+      "--cut-execution-ledger", cutLedgerPath,
+      "--wavefront-prefetch", "true",
+    ]);
+  } else {
+    imagegen = await runNode([
+      path.join(repoRoot, "scripts", "imagegen.mjs"),
+      ...common,
+      "--image-provider", "modelslab",
+      "--image-model", imageModel,
+      "--prompts", hardenedPlanPath,
+      "--skip-reference-generation", "true",
+      "--concurrency", String(profile.media.image_concurrency),
+      "--reference-concurrency", String(profile.media.reference_concurrency),
+      "--provider-health-probe", firstProviderProbe ? "true" : "false",
+      "--provider-health-report", providerHealthPath,
+      "--output", imagegenReportPath,
+      "--cut-execution-ledger", cutLedgerPath,
+      "--batch-kind", "wavefront_prefetch",
+    ]);
+  }
   const report = await readJson(imagegenReportPath, null);
+  const completionPartition = wavefrontCompletionPartitionForTests(combined.prompts, report);
+  const completedCutIds = completionPartition.completed_cut_ids;
+  const completedCutIdSet = new Set(completedCutIds);
+  const deferredCutIds = completionPartition.deferred_cut_ids;
+  let qaPromptPath = hardenedPlanPath;
+  let qaImagegenReportPath = imagegenReportPath;
+  if (imagegen.code !== 0 && completedCutIds.length) {
+    qaPromptPath = path.join(batchDir, `${batchId}.qa-subset.hardened.json`);
+    qaImagegenReportPath = path.join(batchDir, `${batchId}.qa-subset.imagegen.json`);
+    const hardened = await readJson(hardenedPlanPath, null);
+    const qaPlan = {
+      ...hardened,
+      status: "passed",
+      prompts: (hardened?.prompts ?? []).filter((prompt) => completedCutIdSet.has(String(prompt.image_id))),
+      wavefront_partial_qa_source_prompt_path: hardenedPlanPath,
+      wavefront_partial_qa_completed_cut_ids: completedCutIds,
+      updated_at: new Date().toISOString(),
+    };
+    await writeJsonAtomic(qaPromptPath, qaPlan);
+    const qaPromptSha256 = await sha256File(qaPromptPath);
+    const qaResults = (report?.results ?? []).filter((row) => completedCutIdSet.has(String(row.image_id)));
+    await writeJsonAtomic(qaImagegenReportPath, {
+      ...report,
+      status: "passed",
+      prompt_plan_path: qaPromptPath,
+      prompt_plan_hash: qaPromptSha256,
+      image_count: qaResults.length,
+      expected_image_count: qaResults.length,
+      missing_image_count: 0,
+      results: qaResults,
+      wavefront_partial_qa_source_report_path: imagegenReportPath,
+      wavefront_partial_qa_source_report_status: report?.status ?? null,
+      updated_at: new Date().toISOString(),
+    });
+  }
   return {
     batch_id: batchId,
     status: imagegen.code === 0 ? "prefetched" : "prefetch_partial_or_failed",
@@ -336,9 +471,17 @@ async function processPrefetchBatch({
     source_chunk_files: rows.map((row) => row.filePath),
     hardened_plan_path: hardenedPlanPath,
     imagegen_report_path: imagegenReportPath,
+    qa_prompt_path: qaPromptPath,
+    qa_imagegen_report_path: qaImagegenReportPath,
+    hybrid_pool_report_path: hybridProvider ? hybridPoolReportPath : null,
     cut_ledger_path: cutLedgerPath,
     current_batch_status: report?.current_batch_status ?? null,
-    generated_or_reused_count: Number(report?.current_batch_image_count ?? 0),
+    generated_or_reused_count: Number(hybridProvider
+      ? report?.image_count ?? 0
+      : report?.current_batch_image_count ?? report?.image_count ?? 0),
+    completed_cut_ids: completedCutIds,
+    deferred_cut_ids: deferredCutIds,
+    incremental_qa_eligible: imagegen.code === 0 || completedCutIds.length > 0,
     incremental_qa_enabled: incrementalQaEnabled,
     focal_analysis_path: focalAnalysisPath,
     incremental_qa_path: incrementalQaPath,
@@ -352,7 +495,7 @@ async function processIncrementalQaForBatch({
   profile,
   cumulativeDecisionsPath,
 }) {
-  if (!batch?.incremental_qa_enabled || batch.status !== "prefetched") {
+  if (!batch?.incremental_qa_enabled || batch.incremental_qa_eligible !== true) {
     Object.assign(batch, {
       focal_analysis_status: "not_run",
       incremental_qa_status: "not_run",
@@ -367,8 +510,8 @@ async function processIncrementalQaForBatch({
   const focal = await runNode([
     path.join(repoRoot, "scripts", "image-focal-analysis.mjs"),
     ...common,
-    "--prompts", batch.hardened_plan_path,
-    "--imagegen-report", batch.imagegen_report_path,
+    "--prompts", batch.qa_prompt_path ?? batch.hardened_plan_path,
+    "--imagegen-report", batch.qa_imagegen_report_path ?? batch.imagegen_report_path,
     "--output", batch.focal_analysis_path,
     "--concurrency", String(profile.media.focal_analysis_concurrency),
   ]);
@@ -386,8 +529,8 @@ async function processIncrementalQaForBatch({
   const qa = await runNode([
     path.join(repoRoot, "scripts", "image-output-qa.mjs"),
     ...common,
-    "--prompts", batch.hardened_plan_path,
-    "--imagegen-report", batch.imagegen_report_path,
+    "--prompts", batch.qa_prompt_path ?? batch.hardened_plan_path,
+    "--imagegen-report", batch.qa_imagegen_report_path ?? batch.imagegen_report_path,
     "--focal-analysis", batch.focal_analysis_path,
     "--output", batch.incremental_qa_path,
     "--decisions", cumulativeDecisionsPath,
@@ -552,12 +695,28 @@ async function prebuildStableMotionClips({
 
 async function main() {
   const initial = await readStatus();
-  const identity = initial.identity;
-  if (!identity) throw new Error("run visual-wavefront requires a valid run_identity.json.");
-  if (String(identity.image_provider ?? "modelslab") !== "modelslab") {
-    throw new Error(`Visual wavefront prefetch currently supports the ModelsLab lane only; run identity locks ${identity.image_provider}.`);
+  const identityPath = path.join(initial.episode_dir, "run_identity.json");
+  // run-status exposes the effective identity after operator overrides. Validate
+  // the override against the immutable source identity instead of applying it twice.
+  const baseIdentity = await readJson(identityPath, null);
+  if (!baseIdentity) throw new Error("run visual-wavefront requires a valid run_identity.json.");
+  const effectiveImageIdentity = await effectiveImageIdentityForEpisode(
+    initial.episode_dir,
+    identityPath,
+    baseIdentity,
+  );
+  if (effectiveImageIdentity.override && effectiveImageIdentity.status?.done !== true) {
+    throw new Error(`Visual wavefront image route override is invalid: ${effectiveImageIdentity.status?.evidence ?? "unknown override failure"}`);
   }
-  if (!(initial.allowed_command_stages ?? []).includes("visual_prompt_plan")) {
+  const identity = effectiveImageIdentity.status?.done === true
+    ? effectiveImageIdentity.identity
+    : baseIdentity;
+  const imageProvider = normalizeImageProvider(identity.image_provider ?? "modelslab");
+  if (imageProvider !== "modelslab" && !isBrowserPoolImageProvider(imageProvider)) {
+    throw new Error(`Visual wavefront prefetch supports ModelsLab and verified browser-backed Flow lanes; run identity locks ${identity.image_provider}.`);
+  }
+  const exactPromptRecovery = exactPromptRecoveryAllowed(initial, flags);
+  if (!(initial.allowed_command_stages ?? []).includes("visual_prompt_plan") && !exactPromptRecovery) {
     throw new Error(`Visual prompt planning is not ready. Current stage: ${initial.current_stage}; allowed: ${(initial.allowed_command_stages ?? []).join(", ")}.`);
   }
   const profile = productionProfileForIdentity(identity);
@@ -578,17 +737,11 @@ async function main() {
   await fs.mkdir(waveDir, { recursive: true });
 
   const plannerCommand = buildStageCommand("visual_prompt_plan", identity);
-  const plannerTokens = quoteAwareTokens(plannerCommand);
+  let plannerTokens = quoteAwareTokens(plannerCommand);
   if (plannerTokens[0] !== "node" || plannerTokens[1] !== "bin/goldflow.mjs") {
     throw new Error(`Cannot materialize visual prompt command: ${plannerCommand}`);
   }
-  const visualChunkValidationAttempts = flags["visual-chunk-validation-attempts"];
-  if (visualChunkValidationAttempts !== undefined) {
-    const attempts = Math.max(1, Number(visualChunkValidationAttempts) || 1);
-    const attemptsFlagIndex = plannerTokens.indexOf("--visual-chunk-validation-attempts");
-    if (attemptsFlagIndex >= 0) plannerTokens[attemptsFlagIndex + 1] = String(attempts);
-    else plannerTokens.push("--visual-chunk-validation-attempts", String(attempts));
-  }
+  plannerTokens = plannerTokensWithWavefrontOverrides(plannerTokens, flags);
   const plannerPromise = runNode([
     path.join(repoRoot, plannerTokens[1]),
     ...plannerTokens.slice(2),
@@ -691,9 +844,7 @@ async function main() {
     planner_wave_count: discovered.size,
     processed_wave_count: processed.size,
     batch_count: batches.length,
-    prefetched_cut_count: [...new Set(batches
-      .filter((batch) => batch.status === "prefetched")
-      .flatMap((batch) => batch.cut_ids))].length,
+    prefetched_cut_count: [...new Set(batches.flatMap((batch) => batch.completed_cut_ids ?? []))].length,
     incremental_qa_accepted_cut_count: acceptedSummary.accepted_images.length,
     incremental_qa_duplicate_hashes: acceptedSummary.duplicate_hashes,
     incremental_qa_risk_sheet_paths: [...new Set(batches.flatMap((batch) => batch.incremental_risk_sheet_paths ?? []))],
@@ -702,14 +853,18 @@ async function main() {
     official_visual_finalize: officialFinalize,
     motion_prefetches: motionPrefetches,
     motion_prefetched_cut_count: motionPrefetchedIds.size,
-    deferred_cut_ids: [...new Set(batches
-      .filter((batch) => batch.status !== "prefetched")
-      .flatMap((batch) => batch.cut_ids))],
+    deferred_cut_ids: [...new Set(batches.flatMap((batch) => batch.deferred_cut_ids ?? []))],
     policy: {
       min_cuts: minCuts,
       max_wait_ms: maxWaitMs,
       max_batch_cuts: maxBatchCuts,
-      provider_concurrency: profile.media.image_concurrency,
+      provider_concurrency: isBrowserPoolImageProvider(imageProvider)
+        ? isFederatedWebImageProvider(imageProvider)
+          ? FEDERATED_TOTAL_IMAGE_CONCURRENCY
+          : isGoogleFlowPrimaryProvider(imageProvider)
+          ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
+          : HYBRID_TOTAL_IMAGE_CONCURRENCY
+        : profile.media.image_concurrency,
       official_full_harden_and_image_materialization_still_required: true,
       incremental_image_qa_enabled: profile.orchestration?.incremental_image_qa === true,
       incremental_motion_clip_prefetch_enabled: profile.orchestration?.incremental_motion_clip_prefetch === true,

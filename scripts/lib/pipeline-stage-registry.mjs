@@ -7,13 +7,14 @@ import {
   localWhisperCommandFlags,
   localWhisperContractForIdentity,
 } from "./local-whisper-policy.mjs";
-import { ltxVideoEnabled } from "./ltx-video-contract.mjs";
+import { generatedMotionEnabled } from "./generated-motion-contract.mjs";
+import { isBrowserPoolImageProvider } from "./image-provider-policy.mjs";
 import {
   plannerConcurrencyForIdentity,
   planningProviderForIdentity,
 } from "./planning-runtime-policy.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-08-08.2";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-08-11.2";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -208,7 +209,7 @@ const stages = [
     output_artifact: "immutable reference batch reports + assets/images/references/*",
     approval: "automatic",
     validator: "reference_batch_completeness",
-    commands: ["imagegen start:references", "imagegen codex-work:references", "imagegen import-staged-codex:references"],
+    commands: ["imagegen browser-pool:references", "imagegen start:references", "imagegen codex-work:references", "imagegen import-staged-codex:references"],
   },
   {
     id: "reference_image_approval",
@@ -275,7 +276,7 @@ const stages = [
     output_artifact: "immutable image batches + cut_execution_ledger.json",
     approval: "automatic",
     validator: "episode_image_manifest",
-    commands: ["imagegen start", "imagegen codex-work", "imagegen import-codex", "imagegen import-staged-codex"],
+    commands: ["imagegen browser-pool", "imagegen start", "imagegen codex-work", "imagegen import-codex", "imagegen import-staged-codex"],
   },
   {
     id: "image_focal_analysis",
@@ -307,23 +308,23 @@ const stages = [
   },
   {
     id: "generated_video_motion",
-    title: "Hash-bound LTX generated motion",
+    title: "Hash-bound generated motion",
     required_input: "accepted image hashes + hardened prompts",
-    output_artifact: "assets/motion/ltx23/ltx_video_report_<episode>.json + normalized clips",
+    output_artifact: "assets/motion/generated/generated_motion_report_<episode>.json + normalized clips (legacy LTX adapter accepted)",
     approval: "automatic",
-    validator: "ltx_video_clip_hashes_and_source_images",
-    skip: "ltx_video_policy_disabled",
-    commands: ["visual ltx-video"],
+    validator: "generated_motion_clip_hashes_provider_receipts_and_source_images",
+    skip: "generated_motion_policy_disabled",
+    commands: ["visual generated-motion", "visual ltx-video"],
   },
   {
     id: "generated_video_motion_approval",
-    title: "Generated LTX motion approval",
-    required_input: "hash-bound LTX clips + contact sheet",
-    output_artifact: "assets/motion/ltx23/ltx_video_approval_<episode>.json",
+    title: "Generated motion approval",
+    required_input: "hash-bound generated clips + contact sheet",
+    output_artifact: "assets/motion/generated/generated_motion_approval_<episode>.json (legacy LTX adapter accepted)",
     approval: "operator_or_agent",
-    validator: "ltx_video_per_clip_decisions",
-    skip: "ltx_video_policy_disabled",
-    commands: ["visual approve-ltx-video"],
+    validator: "generated_motion_per_clip_decisions",
+    skip: "generated_motion_policy_disabled",
+    commands: ["visual approve-generated-motion", "visual approve-ltx-video"],
   },
   {
     id: "parallax_asset_generation",
@@ -394,10 +395,10 @@ const stages = [
     id: "youtube_studio_upload",
     title: "YouTube Studio upload",
     required_input: "current YouTube publish manifest + authenticated Studio session",
-    output_artifact: "youtube_upload_receipt_<episode>.json",
+    output_artifact: "youtube_upload_receipt_<episode>.json + optional required youtube_native_ab_receipt_<episode>.json",
     approval: "operator",
     validator: "youtube_upload_receipt_and_field_verification",
-    commands: ["youtube record-upload"],
+    commands: ["youtube record-upload", "youtube record-ab-test"],
   },
   {
     id: "youtube_pinned_comment",
@@ -438,7 +439,7 @@ export function stageIsSatisfied(state) {
 
 export function commandStageFor(commandName, subcommandName, flags = {}) {
   const key = `${commandName} ${subcommandName}`.trim();
-  if (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen import-staged-codex") {
+  if (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex") {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
   }
@@ -452,7 +453,7 @@ export function commandStageFor(commandName, subcommandName, flags = {}) {
 export function stageChecklistFor(identity = {}) {
   const narratorOnly = String(identity.audio_target ?? "narrator_only") === "narrator_only";
   const parallaxDisabled = String(identity.parallax_policy ?? "selective_inspected") !== "selective_inspected";
-  const ltxDisabled = !ltxVideoEnabled(identity);
+  const ltxDisabled = !generatedMotionEnabled(identity);
   return PIPELINE_STAGE_REGISTRY.map((entry) => ({
     stage: entry.id,
     status: entry.id === "sfx_score_plan" && narratorOnly
@@ -564,6 +565,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   const base = identityBase(identity);
   const episode = identity.episode ?? "<episode>";
   const provider = identity.image_provider ?? "modelslab";
+  const hybridBrowserPool = isBrowserPoolImageProvider(provider);
   const imageModel = identity?.model_versions?.image_model ?? identity?.provider_locks?.image_model ?? "flux-klein";
   const referenceModel = identity?.model_versions?.reference_model ?? identity?.provider_locks?.reference_model ?? imageModel;
   const renderProfile = identity.render_profile ?? "smooth_subpixel_ken_burns";
@@ -612,7 +614,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     localWhisperContractForIdentity(identity),
   );
   const commands = {
-    run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --planning-provider chatgpt_web --planning-effort-policy web_pro_adaptive_v1 --audio-target narrator_only`,
+    run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --planning-provider planning_room --planning-effort-policy planning_room_stage_routed_v1 --image-provider federated_google_web_image_pool --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,
@@ -639,7 +641,9 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${editorialConcurrency} --editorial-attempts 1${boundedProofScopeFlag(identity)}`,
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${referenceConcurrency} --visual-ref-json-attempts 1 --visual-ref-merge-validation-attempts 1`,
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
-    reference_generation: codexReferences(identity)
+    reference_generation: hybridBrowserPool
+      ? `node bin/goldflow.mjs imagegen browser-pool ${base} --references-only true`
+      : codexReferences(identity)
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --references-only true --reference-ids <ref_ids> --max-attempts 1 --lease-sec 900`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --reference-image-model ${referenceModel} --references-only true --reference-concurrency ${referenceMediaConcurrency}`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --cleanliness-reviewed true --note "<generated reference review notes>"`,
@@ -647,14 +651,16 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     visual_prompt_harden: `node bin/goldflow.mjs visual harden ${base} --prompts <episode-dir>/section_image_prompts.json`,
     visual_prompt_blocker_repair: `node bin/goldflow.mjs visual review ${base} --blockers-only true --auto-resolve true --max-resolve-iterations 1 --visual-review-chunk-attempts 1 --visual-chunk-concurrency ${visualPromptConcurrency}`,
     transition_edit_plan: `node bin/goldflow.mjs visual transitions ${base} --prompts <episode-dir>/section_image_prompts_hardened.json${narratorOnly(identity) ? " --transition-sfx false" : ""}`,
-    image_generation: codexSceneCuts(identity)
+    image_generation: hybridBrowserPool
+      ? `node bin/goldflow.mjs imagegen browser-pool ${base}`
+      : codexSceneCuts(identity)
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 1 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency ${media.image_concurrency} --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${imageConcurrency} --reference-concurrency ${referenceMediaConcurrency}`,
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
     animation_direction_plan: `node bin/goldflow.mjs visual animation-plan ${base}`,
-    generated_video_motion: `node bin/goldflow.mjs visual ltx-video ${base} --concurrency ${media.image_concurrency}`,
-    generated_video_motion_approval: `node bin/goldflow.mjs visual approve-ltx-video ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
+    generated_video_motion: `node bin/goldflow.mjs visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}`,
+    generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,

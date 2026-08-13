@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 
 import { ChatGptBrowser } from "./chatgpt-browser.mjs";
+import { GoogleFlowBrowser } from "./google-flow-browser.mjs";
+import { GoogleGeminiBrowser } from "./google-gemini-browser.mjs";
 import { assertDesktopConfig } from "./config.mjs";
 import { DesktopRuntimeState } from "./runtime-state.mjs";
 import { GoldflowWorkerClient } from "./worker-client.mjs";
@@ -18,13 +20,18 @@ function normalizeError(error, fallbackCode = "browser_worker_failure") {
 export class GoldflowDesktopHost {
   constructor({ config, browser = null, log = null } = {}) {
     this.config = assertDesktopConfig(config);
-    this.state = new DesktopRuntimeState({ stateDir: config.stateDir });
+    this.state = new DesktopRuntimeState({ stateDir: config.stateDir, namespace: config.browserProvider });
     this.client = new GoldflowWorkerClient({ serverUrl: config.serverUrl });
     this.logSink = log ?? ((message, level = "info") => process.stdout.write(`[${nowIso()}] ${level.toUpperCase()} ${message}\n`));
-    this.browser = browser ?? new ChatGptBrowser({ ...config, log: (message, level) => this.log(message, level) });
+    this.browser = browser ?? (config.browserProvider === "google-flow"
+      ? new GoogleFlowBrowser({ ...config, log: (message, level) => this.log(message, level) })
+      : config.browserProvider === "google-gemini"
+        ? new GoogleGeminiBrowser({ ...config, log: (message, level) => this.log(message, level) })
+        : new ChatGptBrowser({ ...config, log: (message, level) => this.log(message, level) }));
     this.workerId = null;
     this.activeJobs = new Map();
     this.events = [];
+    this.persistQueue = Promise.resolve();
     this.running = false;
     this.stopStarted = false;
     this.schedulerBusy = false;
@@ -50,6 +57,7 @@ export class GoldflowDesktopHost {
       concurrency: this.config.concurrency,
       types: this.config.types,
       profile_dir: this.config.profileDir,
+      browser_provider: this.config.browserProvider,
       active_jobs: [...this.activeJobs.values()].map((active) => ({
         slot: active.slot,
         job: active.job,
@@ -63,21 +71,33 @@ export class GoldflowDesktopHost {
   }
 
   persistRuntime() {
-    return this.state.saveRuntime(this.runtimeRecord());
+    const snapshot = this.runtimeRecord();
+    const save = this.persistQueue.then(() => this.state.saveRuntime(snapshot));
+    this.persistQueue = save.catch(() => {});
+    return save;
   }
 
   async ensureCredentials() {
+    const health = await this.client.health();
+    if (health.browser_provider !== this.config.browserProvider) {
+      throw new Error(`Desktop provider ${this.config.browserProvider} cannot attach to a ${health.browser_provider ?? "provider-unbound"} Goldflow server.`);
+    }
     const saved = await this.state.credentials();
-    if (saved?.server_url === this.config.serverUrl && saved.worker_token && saved.worker_id) {
+    const savedProvider = saved?.browser_provider ?? "chatgpt";
+    if (saved?.server_url === this.config.serverUrl && savedProvider === this.config.browserProvider && saved.worker_token && saved.worker_id) {
       this.workerId = saved.worker_id;
       this.client.workerToken = saved.worker_token;
       return;
     }
     if (!this.config.pairingCode) throw new Error("Desktop worker is not paired. Start through desktop/main.mjs or pass --pairing-code.");
-    const paired = await this.client.pair(this.config.pairingCode, this.config.label);
+    const paired = await this.client.pair(this.config.pairingCode, this.config.label, this.config.browserProvider);
+    if (paired.browser_provider !== this.config.browserProvider) {
+      throw new Error(`Goldflow paired a ${paired.browser_provider ?? "provider-unbound"} worker instead of ${this.config.browserProvider}.`);
+    }
     this.workerId = paired.worker.worker_id;
     await this.state.saveCredentials({
       server_url: this.config.serverUrl,
+      browser_provider: this.config.browserProvider,
       worker_id: this.workerId,
       worker_token: paired.token,
       paired_at: nowIso(),

@@ -5,15 +5,19 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  animationPolicyForIdentity,
-  clampLtxDuration,
   hashFile,
-  ltxMotionPromptForSequence,
-  ltxNegativePrompt,
   ltxSingleShotIntentFindings,
-  ltxVideoEnabled,
   sanitizeAnimationIntent,
 } from "./lib/ltx-video-contract.mjs";
+import {
+  clampGeneratedMotionDuration,
+  generatedMotionEnabled,
+  generatedMotionIdentityContract,
+  generatedMotionNegativePrompt,
+  generatedMotionPromptForSequence,
+  generatedMotionPolicyForIdentity,
+  generatedMotionProviderImageInputs,
+} from "./lib/generated-motion-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -70,12 +74,14 @@ async function main() {
     readJson(imagegenPath),
     readJson(imageQaPath),
   ]);
-  if (!ltxVideoEnabled(identity)) throw new Error("Animation direction is disabled in run_identity.json.");
+  if (!generatedMotionEnabled(identity)) throw new Error("Generated-motion direction is disabled in run_identity.json.");
   if (beatPlan?.status !== "passed" || !Array.isArray(beatPlan.beats)) throw new Error(`Missing passed visual beat plan: ${beatPath}`);
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts)) throw new Error(`Missing passed hardened prompt plan: ${promptPath}`);
   if (imagegen?.status !== "passed" || !Array.isArray(imagegen.results)) throw new Error(`Missing passed image generation report: ${imagegenPath}`);
   if (imageQa?.status !== "passed") throw new Error(`Missing passed image QA: ${imageQaPath}`);
-  const policy = animationPolicyForIdentity(identity);
+  const policy = generatedMotionPolicyForIdentity(identity);
+  const motionIdentity = generatedMotionIdentityContract(identity);
+  const providerImageInputs = generatedMotionProviderImageInputs(motionIdentity.provider);
   const beatById = new Map(beatPlan.beats.map((row) => [String(row.visual_beat_id ?? ""), row]));
   const imageById = new Map(imagegen.results.map((row) => [String(row.image_id ?? ""), row]));
   const accepted = imageQa.accepted_image_hashes ?? {};
@@ -86,7 +92,7 @@ async function main() {
     const beat = beatById.get(String(prompt.visual_beat_id ?? ""));
     const rawIntent = prompt.shot_manifest?.animation_intent ?? beat?.animation_intent;
     const intent = sanitizeAnimationIntent(rawIntent);
-    if (policy === "selective_ltx23" && intent?.eligibility !== "animate") {
+    if (policy === "selective_generated_video" && intent?.eligibility !== "animate") {
       stillFallbacks.push({
         image_id: prompt.image_id,
         visual_beat_id: prompt.visual_beat_id ?? null,
@@ -138,7 +144,7 @@ async function main() {
         source_end_offset_sec: row.source_end_offset_sec,
       })),
     };
-    const animationSequenceId = `ltx-shot-${String(directionIndex + 1).padStart(4, "0")}-${sha256(JSON.stringify(sequenceIdentity)).slice(0, 12)}`;
+    const animationSequenceId = `motion-shot-${String(directionIndex + 1).padStart(4, "0")}-${sha256(JSON.stringify(sequenceIdentity)).slice(0, 12)}`;
     const prior = eligiblePrompts[first.index - 1];
     const next = eligiblePrompts[first.index + 1];
     const directedPrompt = {
@@ -156,7 +162,7 @@ async function main() {
       start_sec: Number(first.prompt.start_sec ?? 0),
       cut_duration_sec: cutDurationSec,
       sequence_timeline_duration_sec: Number(cutDurationSec.toFixed(3)),
-      requested_generation_duration_sec: clampLtxDuration(preferredDuration),
+      requested_generation_duration_sec: clampGeneratedMotionDuration(preferredDuration, motionIdentity.provider),
       source_image_path: first.imagePath,
       source_image_sha256: first.imageHash,
       source_prompt_sha256: sha256(JSON.stringify(first.prompt)),
@@ -176,7 +182,7 @@ async function main() {
         continuity_bridge: first.intent.continuity_bridge,
         next_start_image_id: next?.scene_id === first.prompt.scene_id ? next.image_id : null,
       },
-      provider_image_inputs: ["init_image"],
+      provider_image_inputs: providerImageInputs,
       risk_class: first.risk,
       candidate_count: 1,
       scene_continuity: {
@@ -186,9 +192,9 @@ async function main() {
         next_action: next?.scene_id === first.prompt.scene_id ? next.visual_beat_action ?? null : null,
       },
       directed_prompt: directedPrompt,
-      negative_prompt: ltxNegativePrompt(),
+      negative_prompt: generatedMotionNegativePrompt(),
     };
-    direction.motion_prompt = ltxMotionPromptForSequence(direction);
+    direction.motion_prompt = generatedMotionPromptForSequence(direction);
     return direction;
   });
   const sourcePaths = [identityPath, beatPath, promptPath, imagegenPath, imageQaPath];
@@ -200,14 +206,14 @@ async function main() {
     week,
     episode,
     animation_policy: policy,
-    provider: "modelslab",
-    model_id: "ltx-2.3",
+    provider: motionIdentity.provider,
+    model_id: motionIdentity.model,
     source_paths: sourcePaths,
     source_hashes: Object.fromEntries(await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))),
     direction_count: directions.length,
     candidate_generation_count: directions.length,
     selection_policy: "one_accepted_init_image_to_one_reachable_single_shot_v1",
-    provider_image_inputs: ["init_image"],
+    provider_image_inputs: providerImageInputs,
     automatic_generation_retries: 0,
     still_fallback_count: stillFallbacks.length,
     still_fallbacks: stillFallbacks,

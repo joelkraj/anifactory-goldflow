@@ -89,14 +89,29 @@ async function maskSeparationEvidence(maskPath) {
   const height = Number(info.height ?? 0);
   const threshold = 32;
   let foregroundPixels = 0;
+  let foregroundWeight = 0;
+  let weightedX = 0;
+  let weightedY = 0;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
   let left = 0;
   let right = 0;
   let top = 0;
   let bottom = 0;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      if (data[(y * width) + x] <= threshold) continue;
+      const value = data[(y * width) + x];
+      if (value <= threshold) continue;
       foregroundPixels += 1;
+      foregroundWeight += value;
+      weightedX += x * value;
+      weightedY += y * value;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
       if (x === 0) left += 1;
       if (x === width - 1) right += 1;
       if (y === 0) top += 1;
@@ -114,6 +129,16 @@ async function maskSeparationEvidence(maskPath) {
     width,
     height,
     foreground_coverage_ratio: Number((foregroundPixels / pixelCount).toFixed(4)),
+    foreground_centroid: foregroundWeight > 0 ? {
+      x: Number((weightedX / foregroundWeight / Math.max(1, width - 1)).toFixed(6)),
+      y: Number((weightedY / foregroundWeight / Math.max(1, height - 1)).toFixed(6)),
+    } : { x: 0.5, y: 0.5 },
+    foreground_bounds: maxX >= minX && maxY >= minY ? {
+      left: Number((minX / Math.max(1, width - 1)).toFixed(6)),
+      top: Number((minY / Math.max(1, height - 1)).toFixed(6)),
+      right: Number((maxX / Math.max(1, width - 1)).toFixed(6)),
+      bottom: Number((maxY / Math.max(1, height - 1)).toFixed(6)),
+    } : null,
     edge_contact_ratios: ratios,
     contacted_edges: Object.entries(ratios).filter(([, ratio]) => ratio >= 0.02).map(([edge]) => edge),
   };

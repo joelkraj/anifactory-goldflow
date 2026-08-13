@@ -111,7 +111,7 @@ function validSpec(now = new Date()) {
         no_collage: true,
         simple_read_order: true,
         mobile_reviewed: true,
-        provider: "codex_imagen",
+        provider: "google_flow_imagen",
         generation_mode: "full_raster_from_scratch",
         reference_count: 0,
         text_rendered_by_model: true,
@@ -242,7 +242,7 @@ export async function runYoutubePublishContractTests() {
     now,
   });
   for (const blocker of [
-    "selected_thumbnail_provider_must_be_codex_imagen",
+    "selected_thumbnail_provider_must_be_approved_imagen_route",
     "selected_thumbnail_generation_mode_must_be_full_raster_from_scratch",
     "selected_thumbnail_reference_count_must_be_zero",
     "selected_thumbnail_text_must_be_rendered_by_model",
@@ -531,7 +531,7 @@ export async function runYoutubePublishContractTests() {
       locally_composited_text: preparedManifest.thumbnail.locally_composited_text,
       locally_composited_arrows: preparedManifest.thumbnail.locally_composited_arrows,
     }, {
-      provider: "codex_imagen",
+      provider: "google_flow_imagen",
       generation_mode: "full_raster_from_scratch",
       reference_count: 0,
       text_rendered_by_model: true,

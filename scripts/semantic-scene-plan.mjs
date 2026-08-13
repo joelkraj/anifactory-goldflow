@@ -1583,7 +1583,7 @@ function semanticRecoveryCommand(unitIds) {
     ? ` --proof-baseline-word-timing ${proofBaselineTimingPath} --scope-start-sec ${scopeStartSec} --scope-end-sec ${scopeEndSec}`
     : "";
   return `node bin/goldflow.mjs semantic plan --channel ${channel} --series ${series} --week ${week} --episode ${episode}`
-    + ` --concurrency ${Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 8)))}`
+    + ` --concurrency ${Math.max(1, Math.min(11, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 11)))}`
     + " --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1"
     + ` --semantic-chunk-ids ${unitIds.join(",")}${proofFlags}`;
 }
@@ -1637,7 +1637,7 @@ async function main() {
     chunk_index: 1,
     chunk_count: 1,
   }];
-  const semanticConcurrency = Math.max(1, Math.min(8, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 8)));
+  const semanticConcurrency = Math.max(1, Math.min(11, Number(flags.concurrency ?? flags["semantic-concurrency"] ?? 11)));
   const expectedChunkIds = chunks.map((chunk) => semanticChunkId(chunk.chunk_index));
   const expectedUnitIds = [...expectedChunkIds, "global_reconciliation"];
   const requestedUnitIds = semanticRequestedUnitIds(flags);

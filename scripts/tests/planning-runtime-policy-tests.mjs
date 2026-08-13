@@ -5,6 +5,7 @@ import {
   CHATGPT_WEB_PLANNER_MAX_CONCURRENCY,
   CHATGPT_WEB_PLANNING_MODEL,
   CHATGPT_WEB_WAVEFRONT_PLANNER_CONCURRENCY,
+  DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY,
   DEFAULT_WEB_PLANNING_EFFORT_POLICY,
   plannerConcurrencyForIdentity,
   planningEffortForStage,
@@ -15,7 +16,13 @@ import {
   chatGptWebConversationScope,
   normalizeChatGptWebProjectUrl,
 } from "../lib/chatgpt-web-project.mjs";
-import { isCodexCacheCompatible } from "../lib/codex-cli-runner.mjs";
+import {
+  ANTIGRAVITY_CLI_MAX_CONCURRENCY,
+  antigravityContentFromStdoutForTests,
+  antigravityNativeArgsForTests,
+  isCodexCacheCompatible,
+  withAntigravitySlotForTests,
+} from "../lib/codex-cli-runner.mjs";
 import { normalizedDoctorProbeResponse } from "../codex-runtime-doctor.mjs";
 import {
   chatGptWebPlannerStartWindowOptionsForTests,
@@ -23,6 +30,8 @@ import {
 } from "../chatgpt-web-planner-helper.mjs";
 import {
   escapeUnescapedJsonStringQuotes,
+  removeInvalidMarkdownJsonEscapes,
+  removeStrayNumericValueQuotes,
   parseJsonObjectFromPlannerOutput,
 } from "../lib/json-output-repair.mjs";
 import {
@@ -31,8 +40,15 @@ import {
   CHATGPT_WEB_GLOBAL_START_INTERVAL_MS,
   CHATGPT_WEB_IMAGE_WORKER_LIMIT,
   CHATGPT_WEB_IMAGE_START_INTERVAL_MS,
+  CHATGPT_WEB_MEDIUM_REASONING_START_INTERVAL_MS,
+  CHATGPT_WEB_MEDIUM_REASONING_STARTS_PER_WINDOW,
+  CHATGPT_WEB_MEDIUM_REASONING_WINDOW_MS,
   CHATGPT_WEB_REASONING_STARTS_PER_WINDOW,
   CHATGPT_WEB_REASONING_WINDOW_MS,
+  CHATGPT_WEB_SOURCE_ROOM_STARTS_PER_WINDOW,
+  CHATGPT_WEB_SOURCE_ROOM_WINDOW_MS,
+  CHATGPT_WEB_STAGGERED_AUDIENCE_STARTS_PER_WINDOW,
+  CHATGPT_WEB_STAGGERED_AUDIENCE_WINDOW_MS,
   CHATGPT_WEB_TEXT_WORKER_LIMIT,
   CHATGPT_WEB_TEXT_START_INTERVAL_MS,
   chatGptWebWorkerPoolForKind,
@@ -43,6 +59,14 @@ import {
 } from "../lib/chatgpt-web-throttle-state.mjs";
 import { runIdentityPlanningCompleteForTests } from "../run-status.mjs";
 import { productionProfileById } from "../lib/production-profiles.mjs";
+import {
+  SOURCE_MODEL_MODEL,
+  SOURCE_MODEL_PROVIDER,
+  SOURCE_MODEL_REASONING_EFFORT,
+  SOURCE_MODEL_VISIBLE_EFFORT,
+  sourceModelContract,
+  validateSourceModelReceipt,
+} from "../lib/source-model-policy.mjs";
 
 const webIdentity = {
   planning_provider: "chatgpt_web",
@@ -61,11 +85,47 @@ const webIdentity = {
 };
 
 const standaloneRuntime = planningRuntimeFromProcessContext({ argv: [], env: {} });
-assert.equal(standaloneRuntime.provider, "chatgpt_web");
+assert.equal(ANTIGRAVITY_CLI_MAX_CONCURRENCY, 3);
+let activeAntigravityFixtureCalls = 0;
+let maximumAntigravityFixtureCalls = 0;
+await Promise.all(Array.from({ length: 8 }, () => withAntigravitySlotForTests(async () => {
+  activeAntigravityFixtureCalls += 1;
+  maximumAntigravityFixtureCalls = Math.max(maximumAntigravityFixtureCalls, activeAntigravityFixtureCalls);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  activeAntigravityFixtureCalls -= 1;
+})));
+assert.equal(maximumAntigravityFixtureCalls, ANTIGRAVITY_CLI_MAX_CONCURRENCY);
+assert.equal(standaloneRuntime.provider, "codex_cli");
 assert.equal(standaloneRuntime.model, CHATGPT_WEB_PLANNING_MODEL);
-assert.equal(standaloneRuntime.effortPolicy, DEFAULT_WEB_PLANNING_EFFORT_POLICY);
+assert.equal(standaloneRuntime.effortPolicy, DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY);
 assert.equal(normalizedDoctorProbeResponse("MODEL\\_OK"), "MODEL_OK");
 assert.equal(normalizedDoctorProbeResponse("```text\nMODEL_OK\n```"), "MODEL_OK");
+assert.deepEqual(
+  antigravityNativeArgsForTests({
+    prompt: "Return the requested JSON only.",
+    model: "gemini-3.6-flash-medium",
+    effort: "xhigh",
+    timeoutMs: 90_000,
+  }),
+  [
+    "--print", "Return the requested JSON only.",
+    "--mode", "plan",
+    "--sandbox",
+    "--output-format", "json",
+    "--effort", "high",
+    "--print-timeout", "90s",
+    "--model", "gemini-3.6-flash-medium",
+  ],
+);
+assert.deepEqual(
+  antigravityContentFromStdoutForTests(JSON.stringify({
+    status: "SUCCESS",
+    response: "ignored",
+    structured_output: { status: "passed", ids: ["cut_001"] },
+    duration_seconds: 2.5,
+  })).content,
+  '{\n  "status": "passed",\n  "ids": [\n    "cut_001"\n  ]\n}\n',
+);
 assert.equal(
   JSON.parse(normalizeChatGptWebPlannerText('{"visual\\_job":"establish\\_context"}')).visual_job,
   "establish_context",
@@ -92,24 +152,107 @@ assert.deepEqual(
 );
 assert.equal(escapeUnescapedJsonStringQuotes('{"value":"plain"}').repair_count, 0);
 assert.deepEqual(
+  parseJsonObjectFromPlannerOutput('{"at":0.7", "scale":1}'),
+  {
+    value: { at: 0.7, scale: 1 },
+    syntax_repair: {
+      schema: "goldflow_json_syntax_repair_v1",
+      kind: "remove_stray_numeric_value_quotes",
+      repair_count: 1,
+    },
+  },
+);
+assert.equal(removeStrayNumericValueQuotes('{"value":"version 2"}').repair_count, 0);
+assert.deepEqual(
+  parseJsonObjectFromPlannerOutput('{"schema":"goldflow\\_viewer","items":\\["one"\\]}'),
+  {
+    value: { schema: "goldflow_viewer", items: ["one"] },
+    syntax_repair: {
+      schema: "goldflow_json_syntax_repair_v1",
+      kind: "remove_invalid_markdown_json_escapes",
+      repair_count: 3,
+    },
+  },
+);
+assert.equal(removeInvalidMarkdownJsonEscapes('{"path":"C:\\\\frames"}').repair_count, 0);
+assert.deepEqual(
   chatGptWebPlannerStartWindowOptionsForTests({ prompt: "short", effort: "medium", timeoutMs: 300_000 }),
   { kind: "planner", rateClass: "ordinary", timeoutMs: 300_000 },
 );
 assert.deepEqual(
   chatGptWebPlannerStartWindowOptionsForTests({ prompt: "x".repeat(1_500), effort: "medium", timeoutMs: 1_200_000 }),
-  { kind: "planner", rateClass: "reasoning", timeoutMs: 1_200_000 },
+  { kind: "planner", rateClass: "medium_reasoning", minimumIntervalMs: 45_000, timeoutMs: 1_200_000 },
 );
 assert.deepEqual(
   chatGptWebPlannerStartWindowOptionsForTests({ prompt: "short", effort: "high", timeoutMs: 60_000 }),
   { kind: "planner", rateClass: "reasoning", timeoutMs: 120_000 },
 );
+assert.deepEqual(
+  chatGptWebPlannerStartWindowOptionsForTests({
+    prompt: "x".repeat(1_500),
+    effort: "low",
+    timeoutMs: 300_000,
+    rateClass: "ordinary",
+  }),
+  { kind: "planner", rateClass: "ordinary", timeoutMs: 300_000 },
+);
+assert.deepEqual(
+  chatGptWebPlannerStartWindowOptionsForTests({
+    prompt: "x".repeat(1_500),
+    effort: "low",
+    timeoutMs: 300_000,
+    rateClass: "audience_staggered",
+    minimumStartIntervalMs: 15_000,
+  }),
+  { kind: "planner", rateClass: "audience_staggered", minimumIntervalMs: 15_000, timeoutMs: 300_000 },
+);
 
-assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_chunk_001", { runtime: standaloneRuntime }), "xhigh");
-assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_global_reconciliation", { runtime: standaloneRuntime }), "max");
-assert.equal(planningEffortForStage("ep_01_visual_reference_plan_merge", { runtime: standaloneRuntime }), "max");
-assert.equal(planningEffortForStage("winner_script_generation", { runtime: standaloneRuntime }), "max");
-assert.equal(planningEffortForStage("ep_01_visual_plan_chunk_001", { runtime: standaloneRuntime }), "high");
-assert.equal(planningEffortForStage("ep_01_score_drop_plan", { runtime: standaloneRuntime }), "medium");
+const webAdaptiveRuntime = {
+  ...standaloneRuntime,
+  provider: "chatgpt_web",
+  effortPolicy: DEFAULT_WEB_PLANNING_EFFORT_POLICY,
+  defaultEffort: "high",
+};
+assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_chunk_001", { runtime: webAdaptiveRuntime }), "xhigh");
+assert.equal(planningEffortForStage("ep_01_semantic_scene_plan_global_reconciliation", { runtime: webAdaptiveRuntime }), "max");
+assert.equal(planningEffortForStage("ep_01_visual_reference_plan_merge", { runtime: webAdaptiveRuntime }), "max");
+assert.equal(planningEffortForStage("winner_script_generation", { runtime: webAdaptiveRuntime }), "max");
+assert.equal(planningEffortForStage("ep_01_visual_plan_chunk_001", { runtime: webAdaptiveRuntime }), "high");
+assert.equal(planningEffortForStage("ep_01_score_drop_plan", { runtime: webAdaptiveRuntime }), "medium");
+
+const sourceContract = sourceModelContract({});
+assert.equal(sourceContract.provider, SOURCE_MODEL_PROVIDER);
+assert.equal(sourceContract.model, SOURCE_MODEL_MODEL);
+assert.equal(sourceContract.reasoning_effort, SOURCE_MODEL_REASONING_EFFORT);
+assert.equal(sourceContract.visible_effort, SOURCE_MODEL_VISIBLE_EFFORT);
+const priorGeminiUrl = process.env.ANIFACTORY_GEMINI_WEB_URL;
+const priorGeminiToken = process.env.ANIFACTORY_GEMINI_WEB_TOKEN;
+process.env.ANIFACTORY_GEMINI_WEB_URL = "http://127.0.0.1:19999";
+process.env.ANIFACTORY_GEMINI_WEB_TOKEN = "fixture-token";
+const sourceResearchContract = sourceModelContract({}, { stageName: "winner_source_deep_research" });
+const sourceAuditContract = sourceModelContract({}, { stageName: "winner_blueprint_audience_audit" });
+assert.equal(sourceResearchContract.provider, "gemini_web");
+assert.equal(sourceResearchContract.stage_class, "source_research");
+assert.equal(sourceAuditContract.provider, "gemini_web");
+assert.equal(sourceAuditContract.stage_class, "global_reasoning");
+if (priorGeminiUrl == null) delete process.env.ANIFACTORY_GEMINI_WEB_URL;
+else process.env.ANIFACTORY_GEMINI_WEB_URL = priorGeminiUrl;
+if (priorGeminiToken == null) delete process.env.ANIFACTORY_GEMINI_WEB_TOKEN;
+else process.env.ANIFACTORY_GEMINI_WEB_TOKEN = priorGeminiToken;
+const sourceCodexContract = sourceModelContract({ provider: "codex_cli" });
+assert.equal(sourceCodexContract.provider, "codex_cli");
+assert.equal(sourceCodexContract.stage_class, "premium_creative");
+assert.throws(() => sourceModelContract({ "reasoning-effort": "high" }), /requires --reasoning-effort max/);
+assert.deepEqual(validateSourceModelReceipt({
+  provider: "chatgpt_web",
+  model: CHATGPT_WEB_PLANNING_MODEL,
+  reasoning_effort: "max",
+}), { done: true, blockers: [] });
+assert.equal(validateSourceModelReceipt({
+  provider: "codex_cli",
+  model: CHATGPT_WEB_PLANNING_MODEL,
+  reasoning_effort: "high",
+}).done, false);
 
 assert.equal(planningProviderForIdentity(webIdentity), "chatgpt_web");
 assert.equal(CHATGPT_WEB_TEXT_WORKER_LIMIT, 10);
@@ -118,9 +261,16 @@ assert.equal(CHATGPT_WEB_DEEP_TEXT_WORKER_LIMIT, 1);
 assert.equal(CHATGPT_WEB_BROWSER_WORKER_LIMIT, 10);
 assert.equal(CHATGPT_WEB_GLOBAL_START_INTERVAL_MS, 1_250);
 assert.equal(CHATGPT_WEB_TEXT_START_INTERVAL_MS, 1_250);
-assert.equal(CHATGPT_WEB_IMAGE_START_INTERVAL_MS, 1_250);
+assert.equal(CHATGPT_WEB_IMAGE_START_INTERVAL_MS, 45_000);
 assert.equal(CHATGPT_WEB_REASONING_STARTS_PER_WINDOW, 2);
 assert.equal(CHATGPT_WEB_REASONING_WINDOW_MS, 900_000);
+assert.equal(CHATGPT_WEB_STAGGERED_AUDIENCE_STARTS_PER_WINDOW, 3);
+assert.equal(CHATGPT_WEB_STAGGERED_AUDIENCE_WINDOW_MS, 900_000);
+assert.equal(CHATGPT_WEB_SOURCE_ROOM_STARTS_PER_WINDOW, 3);
+assert.equal(CHATGPT_WEB_SOURCE_ROOM_WINDOW_MS, 900_000);
+assert.equal(CHATGPT_WEB_MEDIUM_REASONING_START_INTERVAL_MS, 45_000);
+assert.equal(CHATGPT_WEB_MEDIUM_REASONING_STARTS_PER_WINDOW, 1);
+assert.equal(CHATGPT_WEB_MEDIUM_REASONING_WINDOW_MS, 360_000);
 assert.deepEqual(chatGptWebWorkerPoolForKind("planner"), { id: "text", limit: 10 });
 assert.deepEqual(chatGptWebWorkerPoolForKind("image"), { id: "image", limit: 3 });
 assert.deepEqual(chatGptWebWorkerPoolForKind("reference"), { id: "image", limit: 3 });

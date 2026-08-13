@@ -44,6 +44,9 @@ import {
   contentProfileSceneStylePhrase,
   contentProfileShotJobs,
 } from "./lib/content-profiles.mjs";
+import { isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs";
+import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
+import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -129,16 +132,62 @@ async function writeJsonAtomic(filePath, value) {
 }
 
 function extractJson(text) {
-  const raw = String(text ?? "").trim();
-  try {
-    return JSON.parse(raw);
-  } catch {}
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced) return JSON.parse(fenced[1]);
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
-  throw new Error(`LLM output did not contain JSON: ${raw.slice(0, 600)}`);
+  return parseJsonObjectFromPlannerOutput(text).value;
+}
+
+function extractCompletePromptPrefix(text) {
+  const raw = String(text ?? "");
+  const styleMatch = raw.match(/"style_summary"\s*:\s*("(?:\\.|[^"\\])*")/);
+  const promptsKeyIndex = raw.indexOf('"prompts"');
+  const arrayIndex = promptsKeyIndex >= 0 ? raw.indexOf("[", promptsKeyIndex) : -1;
+  if (arrayIndex < 0) return { style_summary: "", prompts: [] };
+
+  const prompts = [];
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let objectStart = -1;
+  for (let index = arrayIndex + 1; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{") {
+      if (depth === 0) objectStart = index;
+      depth += 1;
+      continue;
+    }
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        try {
+          prompts.push(JSON.parse(raw.slice(objectStart, index + 1)));
+        } catch {
+          break;
+        }
+        objectStart = -1;
+      }
+      continue;
+    }
+    if (character === "]" && depth === 0) break;
+  }
+
+  let styleSummary = "";
+  if (styleMatch) {
+    try { styleSummary = JSON.parse(styleMatch[1]); } catch {}
+  }
+  return { style_summary: styleSummary, prompts };
+}
+
+export function extractCompletePromptPrefixForTests(text) {
+  return extractCompletePromptPrefix(text);
 }
 
 function providerExclusionPayloadSyntaxMatches(value) {
@@ -666,8 +715,12 @@ Core contract:
 - Vary behavior and direction across the local chunk. Do not repeat the same motion pattern more than twice in succession unless the repeated hold is an intentional continuity choice.
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete animation_intent into shot_manifest.animation_intent and make provider_prompt an animation-ready first keyframe: clear silhouettes, visible limbs, unambiguous contact, movement room, and separable depth when supported. Do not invent new action. UI/screen beats remain eligible and exact generated text legibility is not required.
 - The still is the exact starting frame, not the whole performance. Pose subjects at animation_intent.start_state with space to complete subject_motion and reach end_state. For physical_contact, keep the contact point explicit and anatomically readable. For locomotion_action, preserve a visible path and screen direction.
-- Treat every animated beat as one standalone shot from this one accepted first frame. Preserve the lens language, screen direction, wardrobe, prop state, and spatial layout named by continuity_bridge so the separately generated next shot can cut cleanly. The authored end_state, camera_end_state, and end_frame_composition must be physically reachable in one uninterrupted 5-12 second action without a scene reset.` : "- ANIMATION MODE IS DISABLED. Do not author shot_manifest.animation_intent or alter compositions for generated video."}
+- Treat every animated beat as one standalone shot from this one accepted first frame. Preserve the lens language, screen direction, wardrobe, prop state, and spatial layout named by continuity_bridge so the separately generated next shot can cut cleanly. The authored end_state, camera_end_state, and end_frame_composition must be physically reachable in one uninterrupted 5-12 second action without a scene reset.` : `- ANIMATION MODE IS DISABLED. Do not author shot_manifest.animation_intent or alter compositions for generated video.
+- The provider image is the finished story still, not a pre-action keyframe. Depict the strongest evidenced present-tense instant in the local excerpt. When the narration completes a handoff, contact, opening, drop, reveal, or consequence, show the decisive contact or completed result instead of leaving a gap for motion that will never be generated.
+- shot_manifest.motion_intent controls only restrained Ken Burns or inspected parallax. It must not weaken the depicted story payoff or move characters laterally across the frame.`}
 - Keep prompts concise and concrete. Normal ModelsLab prompts should usually be about 90-180 words; difficult action may use more. Include the short phrase "${sceneStylePhrase}" once.
+- RESPONSE SIZE IS A HARD PRODUCTION CONSTRAINT. Return minified JSON with no indentation or formatting whitespace. Keep style_summary under 20 words; continuity_notes, foreground_action, each slot purpose/reason, each contract reason, each staging pose, motion reason, and depth editorial reason under 18 words. Do not repeat the provider prompt, identity anchors, or reference rationale in metadata prose.
+- Keep motion_keyframes as [] for ordinary static holds and smooth single moves represented by start/end anchors and scales. Add only 2-4 compact keyframes when the beat genuinely needs a timed hold, impact, reveal, or focus change; never copy the four-row example mechanically into every cut.
 - Background extras are neither preferred nor forbidden. Copy the beat's background_population contract into shot_manifest. Preserve explicit groups, and preserve implied population when the editorial beat says an active social situation needs anonymous people to read correctly. Describe those people and their subordinate staging in provider prose. Never infer extras from a public location alone, and keep presence=none for private, lonely, abandoned, isolated, after-hours, or object/UI-only beats.
 - Author only provider_prompt for the supplied target_provider_route. The pipeline derives legacy image_prompt/modelslab_image_prompt/codex_image_prompt fields after validation.
 - Keep image_strategy as fresh unless editorial_reuse.eligible is true and one listed candidate image genuinely depicts the same stable location, cast, state, and emotional purpose. For deliberate reuse, set image_strategy to reuse_prior_approved and copy one exact candidate id into reuse_source_image_id. Still author the full current-beat provider_prompt and motion_intent so the cut can safely fall back to fresh generation and receive its own edit movement.
@@ -716,13 +769,14 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
       "forbidden_ref_ids": [],
       "reference_slots": [{"ref_id":"id","kind":"character_state|location|prop|ui|action|style","conditioning_asset_role":"identity_state|creature_identity|environment|prop|ui_motif|action_effect|style_language","identity_subtype":"human|creature|construct|creature_group","reference_priority":"decisive_subject|contact_counterpart|readable_identity|location_geometry|supporting_reference","slot_order":1,"slot_purpose":"role","reason":"why this visible ref matters"}],
       "continuity_notes": "current-beat continuity",
-      "motion_intent": {"behavior":"static_hold|slow_push_in|reveal_zoom_out|lateral_follow|diagonal_follow|focus_shift|impact_push|reaction_hold|ui_focus|aftermath_reveal","focal_subject":"visible focal subject","start_anchor":{"x":0.5,"y":0.5},"end_anchor":{"x":0.5,"y":0.5},"start_scale":1.0,"end_scale":1.05,"easing":"linear|ease_in|ease_out|ease_in_out","motion_keyframes":[{"at":0,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"linear"},{"at":0.15,"anchor":{"x":0.5,"y":0.5},"scale":1.0,"easing_to_next":"ease_in_out"},{"at":0.7,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"},{"at":1,"anchor":{"x":0.5,"y":0.5},"scale":1.05,"easing_to_next":"linear"}],"reason":"what this movement reveals, tracks, or emphasizes","depth_candidate":{"eligible":false,"priority":0,"separation_confidence":"low","foreground_subject":null,"background_plane":null,"editorial_reason":"ordinary single-plane cut"}},
+      "motion_intent": {"behavior":"static_hold|slow_push_in|reveal_zoom_out|lateral_follow|diagonal_follow|focus_shift|impact_push|reaction_hold|ui_focus|aftermath_reveal","focal_subject":"visible focal subject","start_anchor":{"x":0.5,"y":0.5},"end_anchor":{"x":0.5,"y":0.5},"start_scale":1.0,"end_scale":1.05,"easing":"linear|ease_in|ease_out|ease_in_out","motion_keyframes":[],"reason":"what this movement reveals","depth_candidate":{"eligible":false,"priority":0,"separation_confidence":"low","foreground_subject":null,"background_plane":null,"editorial_reason":"single-plane cut"}},
       ${animationEnabled ? `"animation_intent": "copy the complete animation_intent object from this visual beat",` : ""}
       "character_staging": [{"name":"Name","ref_id":"state_ref","screen_position":"frame-left","wardrobe_from":"character_state_ref:state_ref","pose":"current pose/action"}]
     }
   }],
   "warnings": []
-}`;
+}
+Return that object as one minified JSON line. Do not use markdown fences or commentary.`;
 }
 
 function locationContractsForUnit(unit, locationContractLedger) {
@@ -1239,6 +1293,8 @@ async function callCodex(prompt, stageName, expectedBeatIds = null, validatePars
         outputPath,
         model: flags.model ?? flags["llm-model"] ?? null,
         reasoningEffort: flags["reasoning-effort"] ?? null,
+        provider: flags["planning-provider"] ?? null,
+        planningOverrideStage: "visual_prompt_plan",
         timeoutMs,
       });
       const parsed = extractJson(call.content);
@@ -1254,7 +1310,9 @@ async function callCodex(prompt, stageName, expectedBeatIds = null, validatePars
         parsed,
       };
     } catch (error) {
-      lastError = error;
+      lastError = error instanceof Error ? error : new Error(String(error));
+      lastError.planner_output_path = outputPath;
+      lastError.planner_raw_content = await fs.readFile(outputPath, "utf8").catch(() => null);
       if (attempt < attempts) console.error(`visual ${stageName}: retrying after ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -1295,6 +1353,9 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null,
         model: flags.model ?? flags["llm-model"] ?? null,
         reasoningEffort: flags["reasoning-effort"] ?? null,
         promptHash: sha256(prompt),
+        provider: flags["planning-provider"] ?? null,
+        stageName,
+        planningOverrideStage: "visual_prompt_plan",
       })) continue;
       const content = await fs.readFile(candidate.outputPath, "utf8");
       const parsed = extractJson(content);
@@ -2052,12 +2113,47 @@ export function visualUnitRiskAssessmentForTests(unit, options = {}) {
   return visualUnitRiskAssessment(unit, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map());
 }
 
-function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex) {
-  const limits = {
-    high: Math.max(1, Number(flags["visual-high-risk-chunk-size"] ?? 4)),
-    medium: Math.max(1, Number(flags["visual-medium-risk-chunk-size"] ?? 6)),
-    simple: Math.max(1, Number(flags["visual-simple-chunk-size"] ?? 10)),
+function isNativeCodexPlanner(planningProvider = null) {
+  return /^(?:codex|codex[_-]cli|native[_-]codex)$/i.test(String(planningProvider ?? "").trim());
+}
+
+function adaptivePromptChunkLimits({ reasoningEffort = null, planningProvider = null, overrides = {} } = {}) {
+  const mediumWebPacket = String(reasoningEffort ?? "").trim().toLowerCase() === "medium"
+    && !isNativeCodexPlanner(planningProvider);
+  return {
+    high: Math.max(1, Number(overrides.high ?? (mediumWebPacket ? 2 : 4))),
+    medium: Math.max(1, Number(overrides.medium ?? (mediumWebPacket ? 3 : 6))),
+    simple: Math.max(1, Number(overrides.simple ?? (mediumWebPacket ? 4 : 10))),
   };
+}
+
+export function adaptivePromptChunkLimitsForTests(options = {}) {
+  return adaptivePromptChunkLimits(options);
+}
+
+function visualPromptConcurrencyForEffort(requestedConcurrency, reasoningEffort = null, planningProvider = null) {
+  const requested = Math.max(1, Number(requestedConcurrency) || 1);
+  return String(reasoningEffort ?? "").trim().toLowerCase() === "medium"
+    && !isNativeCodexPlanner(planningProvider)
+    ? 1
+    : requested;
+}
+
+export function visualPromptConcurrencyForEffortForTests(requestedConcurrency, reasoningEffort = null, planningProvider = null) {
+  return visualPromptConcurrencyForEffort(requestedConcurrency, reasoningEffort, planningProvider);
+}
+
+function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex, options = {}) {
+  const limits = adaptivePromptChunkLimits({
+    reasoningEffort: options.reasoningEffort ?? flags["reasoning-effort"] ?? null,
+    planningProvider: options.planningProvider ?? flags["planning-provider"] ?? null,
+    overrides: {
+      high: flags["visual-high-risk-chunk-size"],
+      medium: flags["visual-medium-risk-chunk-size"],
+      simple: flags["visual-simple-chunk-size"],
+      ...(options.overrides ?? {}),
+    },
+  });
   const priority = { simple: 1, medium: 2, high: 3 };
   const chunks = [];
   let index = 0;
@@ -2082,7 +2178,7 @@ function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex) {
 }
 
 export function adaptivePromptChunksForTests(items, options = {}) {
-  return adaptivePromptChunks(items, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map())
+  return adaptivePromptChunks(items, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map(), options)
     .map((chunk) => ({
       risk_class: chunk.risk_class,
       target_chunk_size: chunk.target_chunk_size,
@@ -2095,19 +2191,38 @@ export function adaptivePromptChunksForTests(items, options = {}) {
     }));
 }
 
-async function mapWithConcurrency(items, concurrency, mapper) {
+async function mapWithConcurrency(items, concurrency, mapper, options = {}) {
   const results = new Array(items.length);
   let nextIndex = 0;
   const workerCount = Math.max(1, Math.min(items.length, Number(concurrency) || 1));
   async function worker() {
     while (nextIndex < items.length) {
+      if (options.shouldStop?.()) break;
       const index = nextIndex;
       nextIndex += 1;
       results[index] = await mapper(items[index], index);
     }
   }
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (options.stoppedResult) {
+    for (let index = 0; index < items.length; index += 1) {
+      if (results[index] === undefined) results[index] = options.stoppedResult(items[index], index);
+    }
+  }
   return results;
+}
+
+export async function mapWithConcurrencyForTests(items, concurrency, mapper, options = {}) {
+  return mapWithConcurrency(items, concurrency, mapper, options);
+}
+
+function isSharedPlannerCooldownError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return isChatGptWebRateLimitError(message) || /ChatGPT Web cooldown active/i.test(message);
+}
+
+export function isSharedPlannerCooldownErrorForTests(error) {
+  return isSharedPlannerCooldownError(error);
 }
 
 function parseListFlag(value) {
@@ -2487,6 +2602,21 @@ async function main() {
   if (runIdentity?.schema === "goldflow_run_identity_v2" && (storyFactLedger?.status !== "passed" || storyFactLedger.source_script_hash !== timedPlan.source_script_hash)) {
     throw new Error(`Visual prompt authoring requires current story_fact_ledger.json: ${storyFactLedgerPath}`);
   }
+  const noLtxOverride = await noLtxOverrideStatus(episodeDir, episode, runIdentityPath, runIdentity ?? {});
+  if (noLtxOverride.artifact && !noLtxOverride.done) {
+    throw new Error(`Visual prompt authoring found an invalid no-LTX operator override: ${noLtxOverride.findings.join(", ")}`);
+  }
+  const promptRunIdentity = noLtxOverride.done
+    ? {
+        ...runIdentity,
+        animation_policy: "disabled",
+        ltx_video_policy: "disabled",
+        operator_motion_route_override: {
+          path: noLtxOverride.path,
+          run_identity_sha256: noLtxOverride.run_identity_sha256,
+        },
+      }
+    : runIdentity;
   if (!visualReferencePlan || visualReferencePlan.status !== "passed") throw new Error(`Missing passed visual reference plan: ${visualReferencePlanPath}`);
   if (runIdentity?.schema === "goldflow_run_identity_v2") {
     const referencePlanHash = await hashFile(visualReferencePlanPath);
@@ -2571,7 +2701,7 @@ async function main() {
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
-        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
+        const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, promptRunIdentity);
         promptSizes.push({
           chunk_index: index + 1,
           risk_class: sceneChunks[index].risk_class,
@@ -2585,7 +2715,7 @@ async function main() {
         });
       }
     } else {
-      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
+      const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, promptRunIdentity);
       promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
     }
     await writeJson(outputPath, {
@@ -2630,7 +2760,7 @@ async function main() {
     const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
     const activeStateBlockers = activeStateFindings.filter((finding) => finding.severity === "blocker");
     const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
-      ? [...motionContractFindings(prompts, runIdentity), ...editorialMotionDistributionFindings(prompts)]
+      ? [...motionContractFindings(prompts, promptRunIdentity), ...editorialMotionDistributionFindings(prompts)]
       : [];
     const motionEditorialAdvisories = motionEditorialFindings.map((finding) => ({
       ...finding,
@@ -2642,6 +2772,7 @@ async function main() {
     if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
     if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
     if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
+    if (noLtxOverride.done) sourcePaths.push(noLtxOverride.path);
     const refreshed = {
       ...existingPlan,
       prompts,
@@ -2772,12 +2903,17 @@ async function main() {
       visual_unit_count: chunk.length,
       beat_ids: chunk.map((row) => row.visual_beat_id ?? null).filter(Boolean),
     }));
-    const chunkConcurrency = Math.max(1, Number(flags["visual-chunk-concurrency"] ?? 8));
+    const chunkConcurrency = visualPromptConcurrencyForEffort(
+      flags["visual-chunk-concurrency"] ?? 8,
+      flags["reasoning-effort"] ?? null,
+      flags["planning-provider"] ?? null,
+    );
+    let sharedPlannerCooldownError = null;
     const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units, risk=${sceneChunk.risk_class}`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
-      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
+      const chunkPrompt = buildPrompt(chunkTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, chunkVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, promptRunIdentity);
       const chunkId = `chunk_${String(index + 1).padStart(3, "0")}`;
       const inputHash = sha256(chunkPrompt);
       const expectedBeatIds = sceneChunk.map((unit) => String(unit.visual_beat_id ?? "")).filter(Boolean);
@@ -2844,6 +2980,7 @@ async function main() {
           };
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error));
+          if (isSharedPlannerCooldownError(lastError)) sharedPlannerCooldownError ??= lastError;
           lastFindings = Array.isArray(error?.findings)
             ? error.findings
             : [{ code: "visual_prompt_chunk_call_failed", message: lastError.message }];
@@ -2865,8 +3002,48 @@ async function main() {
         chunkIndex: index,
         chunkId,
         sourceRows: sceneChunk,
+        ...(() => {
+          const prefix = extractCompletePromptPrefix(lastError?.planner_raw_content);
+          const sourceRowsByBeat = new Map(sceneChunk.map((row) => [String(row.visual_beat_id ?? ""), row]));
+          const acceptedPrompts = [];
+          const acceptedSourceRows = [];
+          for (const prompt of prefix.prompts) {
+            const sourceRow = sourceRowsByBeat.get(String(prompt?.visual_beat_id ?? ""));
+            if (!sourceRow || acceptedSourceRows.includes(sourceRow)) break;
+            const checked = visualPromptChunkValidation(
+              { style_summary: prefix.style_summary, prompts: [prompt], warnings: [] },
+              [sourceRow],
+              validationOptions,
+            );
+            if (checked.findings.length || checked.rawPrompts.length !== 1) break;
+            acceptedPrompts.push(checked.rawPrompts[0]);
+            acceptedSourceRows.push(sourceRow);
+          }
+          const acceptedBeatIds = new Set(acceptedSourceRows.map((row) => String(row.visual_beat_id ?? "")));
+          const failedSourceRows = sceneChunk.filter((row) => !acceptedBeatIds.has(String(row.visual_beat_id ?? "")));
+          if (acceptedPrompts.length) {
+            console.error(`visual chunk ${index + 1}/${sceneChunks.length}: salvaged ${acceptedPrompts.length} complete prompt(s); ${failedSourceRows.length} exact beat(s) remain`);
+          }
+          return {
+            partialPrompts: acceptedPrompts,
+            partialSourceRows: acceptedSourceRows,
+            failedSourceRows,
+          };
+        })(),
         findings: lastFindings,
       };
+    }, {
+      shouldStop: () => Boolean(sharedPlannerCooldownError),
+      stoppedResult: (sceneChunk, index) => ({
+        chunkError: new Error(`Visual chunk ${index + 1}/${sceneChunks.length} was not submitted because the shared ChatGPT Web cooldown opened.`),
+        chunkIndex: index,
+        chunkId: `chunk_${String(index + 1).padStart(3, "0")}`,
+        sourceRows: sceneChunk,
+        findings: [{
+          code: "visual_prompt_batch_stopped_shared_cooldown",
+          message: sharedPlannerCooldownError?.message ?? "Shared ChatGPT Web cooldown opened.",
+        }],
+      }),
     });
     const failedChunkResults = chunkResults.filter((result) => result?.chunkError);
     if (failedChunkResults.length) {
@@ -2882,7 +3059,16 @@ async function main() {
         const sceneChunk = sceneChunks[chunkIndex];
         const result = chunkResults[chunkIndex];
         if (result?.chunkError) {
-          partialScopedPrompts.push(...sceneChunk.map((sourceRow) => plannerRecoveryPlaceholder(
+          const normalizedPartialPrompts = (result.partialPrompts ?? []).map((row, promptIndex) => normalizePrompt(
+            row,
+            Number(result.partialSourceRows?.[promptIndex]?.__visual_plan_absolute_index ?? promptIndex),
+            episode,
+            result.partialSourceRows?.[promptIndex] ?? null,
+            normalizationScope,
+          ));
+          successfulScopedPrompts.push(...normalizedPartialPrompts);
+          partialScopedPrompts.push(...normalizedPartialPrompts);
+          partialScopedPrompts.push(...(result.failedSourceRows ?? sceneChunk).map((sourceRow) => plannerRecoveryPlaceholder(
             sourceRow,
             episode,
             normalizationScope,
@@ -2899,7 +3085,7 @@ async function main() {
         successfulScopedPrompts.push(...normalizedChunkPrompts);
         partialScopedPrompts.push(...normalizedChunkPrompts);
       }
-      const failedSourceRows = failedChunkResults.flatMap((result) => result.sourceRows ?? []);
+      const failedSourceRows = failedChunkResults.flatMap((result) => result.failedSourceRows ?? result.sourceRows ?? []);
       const failedCutIds = failedSourceRows.map((row) => targetImageIdForRow(
         row,
         episode,
@@ -2916,6 +3102,7 @@ async function main() {
       if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
       if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
       if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
+      if (noLtxOverride.done) sourcePaths.push(noLtxOverride.path);
       const partialReport = {
         schema: "goldflow_section_image_prompts_v1",
         status: "blocked",
@@ -3012,7 +3199,7 @@ async function main() {
       },
     };
   } else {
-    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, runIdentity);
+    const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, promptRunIdentity);
     llm = isLocalLLMRoute(stageName) ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
     parsedPrompts = Array.isArray(llm.parsed.prompts) ? llm.parsed.prompts : [];
     styleSummary = llm.parsed.style_summary ?? "";
@@ -3068,7 +3255,7 @@ async function main() {
   const activeStateFindings = activeStateConstraintFindings(prompts, allVisualSourceRows);
   const activeStateBlockers = activeStateFindings.filter((finding) => finding.severity === "blocker");
   const motionEditorialFindings = runIdentity?.motion_policy === "selective_editorial_v1"
-    ? [...motionContractFindings(prompts, runIdentity), ...editorialMotionDistributionFindings(prompts)]
+    ? [...motionContractFindings(prompts, promptRunIdentity), ...editorialMotionDistributionFindings(prompts)]
     : [];
   const motionEditorialAdvisories = motionEditorialFindings.map((finding) => ({
     ...finding,
@@ -3095,6 +3282,7 @@ async function main() {
   if (storyFactLedger?.status === "passed") sourcePaths.push(storyFactLedgerPath);
   if (visualBeatPlan?.status === "passed") sourcePaths.push(visualBeatPlanPath);
   if (locationContractLedger?.status === "passed") sourcePaths.push(locationContractLedgerPath);
+  if (noLtxOverride.done) sourcePaths.push(noLtxOverride.path);
   sourcePaths.push(...manualRecoveryOutputFiles);
   const report = {
     schema: "goldflow_section_image_prompts_v1",

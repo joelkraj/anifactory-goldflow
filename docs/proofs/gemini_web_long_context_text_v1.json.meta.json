@@ -1,0 +1,18 @@
+{
+  "schema": "goldflow_codex_call_metadata_v1",
+  "status": "failed",
+  "stage_name": "winner_source_room_gemini_long_context_proof_v1_attempt2",
+  "provider": "gemini_web",
+  "transport": "goldflow_studio_local_api",
+  "model": "gemini-web-pro",
+  "reasoning_effort": "high",
+  "planning_effort_policy": "uniform_v1",
+  "planning_room_provider_lock": null,
+  "run_identity_path": null,
+  "verbosity": "medium",
+  "prompt_sha256": "9a4b11c8e7d71b215271be8a4bc95f4805580f27186e49501c6d18b9abeffaff",
+  "output_path": "/Users/joel/anifactory-goldflow/docs/proofs/gemini_web_long_context_text_v1.json",
+  "started_at": "2026-08-11T19:49:59.491Z",
+  "failed_at": "2026-08-11T19:50:31.082Z",
+  "error": "Local Gemini Web Studio request failed (500): unknown error"
+}

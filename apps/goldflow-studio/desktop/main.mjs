@@ -12,7 +12,7 @@ async function main() {
   const preliminaryConfig = desktopConfig(flags);
   const forceLogin = String(flags.login ?? "false") === "true";
   const loginBootstrap = String(flags["login-bootstrap"] ?? "true") === "true";
-  if (loginBootstrap && (forceLogin || !await loginMarkerExists(preliminaryConfig.profileDir))) {
+  if (loginBootstrap && (forceLogin || !await loginMarkerExists(preliminaryConfig.profileDir, preliminaryConfig.browserProvider))) {
     await launchNormalChromeLogin(preliminaryConfig);
   }
   const studio = await createStudioServer({
@@ -20,6 +20,9 @@ async function main() {
     stateDir: flags["state-dir"],
     dataRoot: flags["data-root"],
     downloadsRoot: flags["downloads-root"],
+    browserProvider: preliminaryConfig.browserProvider,
+    flowPlanLabel: preliminaryConfig.flowPlanLabel,
+    flowModelLabel: preliminaryConfig.flowModelLabel,
   });
   const config = desktopConfig({
     ...flags,
@@ -32,6 +35,7 @@ async function main() {
     "Goldflow Studio desktop host is starting.",
     `Dashboard: ${studio.url}`,
     `Profile: ${config.profileDir}`,
+    `Browser provider: ${config.browserProvider}`,
     `Browser slots: ${config.concurrency}`,
     "Sign in inside the dedicated Goldflow Chrome window if prompted.",
     "Press Ctrl+C to drain active work and stop.",

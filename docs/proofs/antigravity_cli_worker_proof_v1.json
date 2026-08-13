@@ -1,0 +1,62 @@
+{
+  "schema": "goldflow_antigravity_cli_worker_proof_v1",
+  "status": "passed",
+  "measured_at": "2026-08-11T14:19:25Z",
+  "installation": {
+    "source": "https://antigravity.google/cli/install.sh",
+    "executable": "/Users/joel/.local/bin/agy",
+    "version": "1.1.12",
+    "authenticated_plan_tier": "Google AI Ultra"
+  },
+  "production_contract": {
+    "transport": "agy_noninteractive_print",
+    "mode": "plan",
+    "sandbox": true,
+    "model": "gemini-3.6-flash-medium",
+    "reasoning_effort": "medium",
+    "writes_local_artifacts_through_codex_runner": true,
+    "antigravity_file_modification_allowed": false,
+    "safe_concurrency_proven": 3
+  },
+  "single_worker": {
+    "status": "passed",
+    "provider_duration_seconds": 5.25119,
+    "result_path": "docs/proofs/antigravity_cli_structured_planning_smoke_v1.json",
+    "result_sha256": "c7b310bcd1c76c0c067e70d5d864e5d642df7b72746b61853c4160d64b0f59e5",
+    "metadata_path": "docs/proofs/antigravity_cli_structured_planning_smoke_v1.json.meta.json",
+    "metadata_sha256": "5eb6740bbcfcc64a7c31ea8740fdea0a791e07d4df209981b85a2445a71121e8",
+    "validation_findings": []
+  },
+  "concurrency_three": {
+    "status": "passed",
+    "wall_seconds": 9.17,
+    "jobs": [
+      {
+        "task_id": "semantic_001",
+        "provider_duration_seconds": 3.079757,
+        "result_sha256": "8f7181fa374a7ff0064a398602d7054d872d7e16beba9cb8ae991ea4122c1837",
+        "metadata_sha256": "5b615d78ccb04525c1fbd75d3b92269ae78aa77452e121f19927f68a31b75600",
+        "validation_findings": []
+      },
+      {
+        "task_id": "beat_001",
+        "provider_duration_seconds": 2.440952,
+        "result_sha256": "1684f1f67c348348c89475b0540949ef14e7fd706f48b54d8c5f83fadd1a5a5c",
+        "metadata_sha256": "9769fedde5fcbf51191a7220068839e27734cba2860cf90c372601fb900ba861",
+        "validation_findings": []
+      },
+      {
+        "task_id": "prompt_001",
+        "provider_duration_seconds": 2.570324,
+        "result_sha256": "d2f2de7fddf2379500898a33f70eb96f85922c3c912422d4de503382044bfcc5",
+        "metadata_sha256": "d4ecd5f0e229b037868cae4f050a450c24b9617c2f3f644832b7a66ef60106aa",
+        "validation_findings": []
+      }
+    ]
+  },
+  "promotion": {
+    "auxiliary_structured_worker": "approved_at_concurrency_3",
+    "preferred_structured_provider": "blocked_pending_full_task_class_benchmark",
+    "global_reconciliation_provider": "codex_cli"
+  }
+}

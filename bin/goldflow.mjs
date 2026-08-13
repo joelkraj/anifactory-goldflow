@@ -181,22 +181,68 @@ ${registryCommands}
   goldflow run codex-doctor        Inspect the identity-locked Web/Codex planning runtime
   goldflow run status              Print the artifact-backed stage ledger
   goldflow run advance             Advance automatic stages continuously using the locked production profile
+  goldflow run director            Show or advance the eight-phase agent-led production view
   goldflow run audio-semantic-fork Run semantic planning and the voice/TTS/Whisper branch concurrently
-  goldflow run visual-wavefront    Prefetch hardened ModelsLab cuts while prompt chunks are authored
+  goldflow run visual-wavefront    Prefetch hardened provider-bound cuts while prompt chunks are authored
   goldflow run web-archive-cleanup Archive legacy unscoped GPT Image chats through one throttled maintenance lane
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
   goldflow visual motion-proof-plan Build isolated image-aware motion/transition proof plans
   goldflow visual motion-promote-proof Promote an approved bounded motion proof into a full-timeline variant
+  goldflow visual generated-motion Generate identity-locked Flow video (or dispatch the legacy LTX adapter)
+  goldflow visual approve-generated-motion Review every generated clip before motion planning
   goldflow render finalize-report  Stream-hash and finalize an existing passed render report
+  goldflow youtube approve-ab-test Approve two or three native title/thumbnail package variants
+  goldflow youtube record-ab-test  Record the verified native YouTube experiment
   goldflow analytics ingest        Attribute a YouTube retention export to exact Goldflow cuts
   goldflow analytics aggregate     Aggregate multiple episode feedback reports
+  goldflow analytics plan-followups Schedule non-blocking 24h, 72h, and 7d upload reviews
+  goldflow analytics record-followup Record one hash-bound YouTube analytics checkpoint
+  goldflow analytics followup-status Show due and captured post-publish checkpoints
+  goldflow benchmark quota          Record isolated Gemini, Flow, and Antigravity quota evidence
+  goldflow benchmark planners       Compare task-specific Codex, Antigravity, Gemini, and ChatGPT planning
+  goldflow source research         Produce a cited ChatGPT Web Pro research dossier for source development
   goldflow source ideate           Generate and independently rank package-first story candidates before run preflight
   goldflow source approve-package  Operator-approve one exact title/thumbnail/story package
-  goldflow source script           Generate one conversational narration from the approved package
+  goldflow source blueprint        Author the package-bound dramatic engine, canon, causal movements, climax, and ending
+  goldflow source blueprint-audit  Audit audience trust, package payment, agency, and continuity before blueprint approval
+  goldflow source approve-blueprint Hash-approve the exact dramatic blueprint before prose spend
+  goldflow source retention-map    Turn the blueprint into question/payoff/change and anti-repetition direction
+  goldflow source opening          Write the exact first five minutes as a separately reviewable cold open
+  goldflow source approve-opening  Hash-approve the cold open and its endpoint before long-form continuation
+  goldflow source script           Continue the approved opening through the complete standalone ending
+  goldflow source diagnose         Run causal, emotional-drama, and retention specialist review passes
+  goldflow source revise           Integrate grounded specialist findings in one canon-preserving pass
+  goldflow source polish           Apply the final narration line-and-flow polish without changing plot
   goldflow source audit            Write an optional non-blocking script/retention review log
   goldflow source release          Operator-release the exact source hash for preflight and ingest
+  goldflow source evidence-registry Import the measured evidence registry for Evidence Story Room V2
+  goldflow source package-outliers Import exact measured own-channel and niche-outlier title packages
+  goldflow source ideate-v2        Author a six-package slate with GPT Web and select it independently with Gemini Web
+  goldflow source package-tournament Independently compare every strong package with GPT Web and Gemini Web
+  goldflow source adjudicate-package Record an operator's hash-bound package choice after tournament disagreement
+  goldflow source approve-package-v2 Hash-approve the exact selected V2 package
+  goldflow source reference-frontier Bind and chart the complete measured outlier transcript the story must beat per minute
+  goldflow source reference-density-audit Audit any exact candidate against a measured reference using the same density frontier contract
+  goldflow source reference-density-revise Apply one integrated, hash-bound repair from a validated density audit
+  goldflow source reference-density-patch Apply exact-anchor patches for a small validated density finding set
+  goldflow source treatments       Author three competing treatments concurrently across GPT Web and Gemini Web
+  goldflow source select-treatment Select the treatment independently with Gemini Web
+  goldflow source approve-treatment Hash-approve the exact selected treatment
+  goldflow source architecture     Author the unified 10K-word story architecture with GPT Web
+  goldflow source architecture-audit Red-team the exact architecture with Gemini Web
+  goldflow source approve-architecture Hash-approve the audited architecture
+  goldflow source script-v2        Draft complete 10K-word GPT Web and Gemini Web scripts concurrently, then select with Gemini Web
+  goldflow source diagnose-v2      Run exact-anchor GPT Web and Gemini Web diagnostics concurrently
+  goldflow source revise-v2        Apply one scoped GPT Web developmental revision
+  goldflow source accept-v2        Run Gemini Web semantic acceptance and approve the exact final script
+  goldflow source release-v2       Release the complete hash-bound Evidence Story Room V2 lineage
+  goldflow source viewer-tournament Run ten fixed-panel blinded ChatGPT Web audience simulations against an exact outlier
+  goldflow source viewer-opening-repair Repair only the losing first-minute span while preserving the accepted tail byte-for-byte
+  goldflow source viewer-patch     Apply one to three exact bounded patches for isolated fixed-panel losses
+  goldflow source viewer-revise    Revise the candidate with GPT Web from ten hash-bound fixed-panel viewer reports
+  goldflow source viewer-accept    Require unanimous candidate wins from all ten fixed-panel viewers
   goldflow script speakability     Run optional broad speakability review
   goldflow imagegen promote-derived-refs Promote explicitly approved legacy derived refs
   goldflow audio modelslab-stt-candidate Run an opt-in, spend-confirmed ModelsLab STT timing candidate without replacing local Whisper
@@ -262,6 +308,8 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("run-status.mjs", flags);
 } else if (command === "run" && subcommand === "advance") {
   run("run-advance.mjs", flags);
+} else if (command === "run" && subcommand === "director") {
+  run("run-agent-director.mjs", flags);
 } else if (command === "run" && subcommand === "audio-semantic-fork") {
   run("run-audio-semantic-fork.mjs", flags);
 } else if (command === "run" && subcommand === "visual-wavefront") {
@@ -272,7 +320,61 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("proof-baseline-import.mjs", flags);
 } else if (command === "run" && subcommand === "cleanup") {
   run("run-cleanup.mjs", flags);
-} else if (command === "source" && ["ideate", "approve-package", "script", "audit", "gate", "release"].includes(subcommand)) {
+} else if (command === "source" && [
+  "evidence-registry",
+  "package-outliers",
+  "ideate-v2",
+  "package-tournament",
+  "adjudicate-package",
+  "approve-package-v2",
+  "reference-frontier",
+  "treatments",
+  "select-treatment",
+  "approve-treatment",
+  "architecture",
+  "architecture-audit",
+  "approve-architecture",
+  "script-v2",
+  "diagnose-v2",
+  "revise-v2",
+  "accept-v2",
+  "release-v2",
+].includes(subcommand)) {
+  run("winner-source-room-v2.mjs", [subcommand, ...flags]);
+} else if (command === "source" && subcommand === "reference-density-audit") {
+  run("source-reference-density-audit.mjs", flags);
+} else if (command === "source" && subcommand === "reference-density-revise") {
+  run("source-reference-density-revise.mjs", flags);
+} else if (command === "source" && subcommand === "reference-density-patch") {
+  run("source-reference-density-patch.mjs", flags);
+} else if (command === "source" && subcommand === "viewer-tournament") {
+  run("source-opening-viewer-tournament.mjs", flags);
+} else if (command === "source" && subcommand === "viewer-opening-repair") {
+  run("source-opening-scoped-repair.mjs", flags);
+} else if (command === "source" && subcommand === "viewer-patch") {
+  run("source-viewer-tournament-patch.mjs", flags);
+} else if (command === "source" && subcommand === "viewer-revise") {
+  run("source-viewer-tournament-revise.mjs", flags);
+} else if (command === "source" && subcommand === "viewer-accept") {
+  run("source-viewer-tournament-accept.mjs", flags);
+} else if (command === "source" && [
+  "research",
+  "ideate",
+  "approve-package",
+  "blueprint",
+  "blueprint-audit",
+  "approve-blueprint",
+  "retention-map",
+  "opening",
+  "approve-opening",
+  "script",
+  "diagnose",
+  "revise",
+  "polish",
+  "audit",
+  "gate",
+  "release",
+].includes(subcommand)) {
   run("winner-source.mjs", [subcommand, ...flags]);
 } else if (command === "ingest" && subcommand === "source") {
   run("source-ingest.mjs", flags);
@@ -332,6 +434,10 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("parallax-asset-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "animation-plan") {
   run("visual-animation-plan.mjs", flags);
+} else if (command === "visual" && subcommand === "generated-motion") {
+  run("generated-motion-generate.mjs", flags);
+} else if (command === "visual" && subcommand === "approve-generated-motion") {
+  run("generated-motion-approve.mjs", flags);
 } else if (command === "visual" && subcommand === "ltx-video") {
   run("ltx-video-generate.mjs", flags);
 } else if (command === "visual" && subcommand === "approve-ltx-video") {
@@ -348,6 +454,8 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("imagegen.mjs", flags);
 } else if (command === "imagegen" && subcommand === "codex-work") {
   run("codex-image-work.mjs", flags);
+} else if (command === "imagegen" && subcommand === "browser-pool") {
+  run("hybrid-browser-image-pool.mjs", flags);
 } else if (command === "imagegen" && subcommand === "promote-derived-refs") {
   run("imagegen.mjs", ["--promote-derived-refs", "true", ...flags]);
 } else if (command === "imagegen" && subcommand === "import-codex") {
@@ -366,10 +474,14 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("final-qa.mjs", flags);
 } else if (command === "youtube" && subcommand === "approve-packaging") {
   run("youtube-publish.mjs", ["approve-packaging", ...flags]);
+} else if (command === "youtube" && subcommand === "approve-ab-test") {
+  run("youtube-publish.mjs", ["approve-ab-test", ...flags]);
 } else if (command === "youtube" && subcommand === "prepare") {
   run("youtube-publish.mjs", ["prepare", ...flags]);
 } else if (command === "youtube" && subcommand === "record-upload") {
   run("youtube-publish.mjs", ["record-upload", ...flags]);
+} else if (command === "youtube" && subcommand === "record-ab-test") {
+  run("youtube-publish.mjs", ["record-ab-test", ...flags]);
 } else if (command === "youtube" && subcommand === "record-thumbnail-update") {
   run("youtube-publish.mjs", ["record-thumbnail-update", ...flags]);
 } else if (command === "youtube" && subcommand === "record-comment") {
@@ -378,6 +490,18 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("youtube-analytics-feedback.mjs", ["ingest", ...flags]);
 } else if (command === "analytics" && subcommand === "aggregate") {
   run("youtube-analytics-feedback.mjs", ["aggregate", ...flags]);
+} else if (command === "analytics" && subcommand === "plan-followups") {
+  run("youtube-analytics-followup.mjs", ["plan", ...flags]);
+} else if (command === "analytics" && subcommand === "record-followup") {
+  run("youtube-analytics-followup.mjs", ["record", ...flags]);
+} else if (command === "analytics" && subcommand === "followup-status") {
+  run("youtube-analytics-followup.mjs", ["status", ...flags]);
+} else if (command === "analytics" && subcommand === "aggregate-followups") {
+  run("youtube-analytics-followup.mjs", ["aggregate", ...flags]);
+} else if (command === "benchmark" && subcommand === "quota") {
+  run("provider-quota-proof.mjs", flags);
+} else if (command === "benchmark" && subcommand === "planners") {
+  run("planner-benchmark.mjs", flags);
 } else if (command === "audio" && subcommand === "enrich-sfx-score") {
   run("audio-sfx-score-enrichment.mjs", flags);
 } else if (command === "audio" && subcommand === "score-drops-chunked") {

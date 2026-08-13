@@ -20,9 +20,12 @@ async function writePrivateJson(filePath, value) {
 }
 
 export class DesktopRuntimeState {
-  constructor({ stateDir } = {}) {
-    this.credentialsPath = path.join(stateDir, "desktop-worker-credentials.json");
-    this.runtimePath = path.join(stateDir, "desktop-worker-runtime.json");
+  constructor({ stateDir, namespace = "chatgpt" } = {}) {
+    const normalizedNamespace = String(namespace ?? "chatgpt").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "chatgpt";
+    const prefix = normalizedNamespace === "chatgpt" ? "" : `${normalizedNamespace}-`;
+    this.namespace = normalizedNamespace;
+    this.credentialsPath = path.join(stateDir, `${prefix}desktop-worker-credentials.json`);
+    this.runtimePath = path.join(stateDir, `${prefix}desktop-worker-runtime.json`);
   }
 
   credentials() {

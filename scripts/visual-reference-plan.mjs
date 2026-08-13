@@ -174,19 +174,52 @@ function compactScene(scene) {
   };
 }
 
+export function compactStoryFactLedgerForPromptForTests(storyFactLedger) {
+  if (!storyFactLedger || typeof storyFactLedger !== "object") return null;
+  const compactNamedRows = (rows, idField) => (Array.isArray(rows) ? rows : []).map((row) => ({
+    [idField]: row?.[idField] ?? null,
+    display_name: row?.display_name ?? null,
+    kind: row?.kind ?? null,
+    aliases: row?.aliases ?? [],
+  }));
+  return {
+    canonical_entities: compactNamedRows(storyFactLedger.canonical_entities, "entity_id"),
+    canonical_locations: compactNamedRows(storyFactLedger.canonical_locations, "location_id"),
+    canonical_props: compactNamedRows(storyFactLedger.canonical_props, "prop_id"),
+    canonical_ui_motifs: compactNamedRows(storyFactLedger.canonical_ui_motifs, "ui_id"),
+    state_transitions: (Array.isArray(storyFactLedger.state_transitions) ? storyFactLedger.state_transitions : []).map((row) => ({
+      entity_id: row?.entity_id ?? null,
+      state_kind: row?.state_kind ?? null,
+      from_state: row?.from_state ?? null,
+      to_state: row?.to_state ?? null,
+      transition_evidence_excerpt: String(row?.transition_evidence_excerpt ?? "").slice(0, 180),
+    })),
+  };
+}
+
 function visualGuidanceBlock(guidance = {}) {
   return JSON.stringify({
     visual_style_bible: guidance.visualStyleBible ?? null,
     character_bible: guidance.characterBible ?? null,
     episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 5000),
-    story_fact_ledger: guidance.storyFactLedger ? {
-      canonical_entities: guidance.storyFactLedger.canonical_entities ?? [],
-      canonical_locations: guidance.storyFactLedger.canonical_locations ?? [],
-      canonical_props: guidance.storyFactLedger.canonical_props ?? [],
-      canonical_ui_motifs: guidance.storyFactLedger.canonical_ui_motifs ?? [],
-      state_transitions: guidance.storyFactLedger.state_transitions ?? [],
-    } : null,
+    story_fact_ledger: compactStoryFactLedgerForPromptForTests(guidance.storyFactLedger),
   }, null, 2);
+}
+
+function visualMergeGuidanceBlock(guidance = {}) {
+  const facts = compactStoryFactLedgerForPromptForTests(guidance.storyFactLedger);
+  return JSON.stringify({
+    visual_style_bible: guidance.visualStyleBible ?? null,
+    character_bible: guidance.characterBible ?? null,
+    episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 5000),
+    canonical_story_entities: facts ? {
+      canonical_entities: facts.canonical_entities,
+      canonical_locations: facts.canonical_locations,
+      canonical_props: facts.canonical_props,
+      canonical_ui_motifs: facts.canonical_ui_motifs,
+      state_transition_count: facts.state_transitions.length,
+    } : null,
+  });
 }
 
 function normalizeKind(kind) {
@@ -1029,6 +1062,77 @@ function compactInventoryForPrompt(inventoryLedger, sceneIds = null, options = {
   };
 }
 
+export function compactInventoryForPromptForTests(inventoryLedger, sceneIds = null, options = {}) {
+  return compactInventoryForPrompt(inventoryLedger, sceneIds, options);
+}
+
+export function compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, options = {}) {
+  const compact = compactInventoryForPrompt(inventoryLedger, null, {
+    referenceValueOnly: true,
+    maxAssets: Number(options.maxAssets ?? 320),
+    evidenceLimit: 0,
+    sceneIdLimit: 0,
+  });
+  return {
+    schema: compact.schema,
+    summary: compact.summary,
+    asset_count: compact.assets.length,
+    asset_lines: compact.assets.map((asset) => [
+      asset.asset_id,
+      `kind=${asset.kind}`,
+      `subject=${readableCardValue(asset.subject, 100)}`,
+      `entity=${asset.entity_type ?? asset.entity_kind ?? "unspecified"}`,
+      `scenes=${asset.distinct_scene_count ?? 0}`,
+      `beats=${asset.beat_count ?? 0}`,
+      `span_sec=${Math.round(Number(asset.reuse_span_sec ?? 0))}`,
+      asset.canonical_subject_key ? `canonical=${readableCardValue(asset.canonical_subject_key, 70)}` : null,
+    ].filter(Boolean).join(" | ")),
+  };
+}
+
+export function compactLocationContractLedgerForPromptForTests(locationContractLedger) {
+  if (!locationContractLedger || typeof locationContractLedger !== "object") return locationContractLedger;
+  const contracts = Array.isArray(locationContractLedger.contracts)
+    ? locationContractLedger.contracts
+    : Array.isArray(locationContractLedger.locations)
+      ? locationContractLedger.locations
+      : [];
+  return {
+    schema: locationContractLedger.schema ?? "goldflow_location_contract_ledger_v1",
+    status: locationContractLedger.status ?? null,
+    contracts: contracts.map((contract) => ({
+      location_contract_id: contract.location_contract_id,
+      semantic_ref_id: contract.semantic_ref_id ?? null,
+      description: contract.description ?? null,
+      prompt_anchor: contract.prompt_anchor ?? null,
+      scene_ids: contract.scene_ids ?? [],
+      beat_count: Array.isArray(contract.beat_ids) ? contract.beat_ids.length : Number(contract.beat_count ?? 0),
+      local_location_labels: contract.local_location_labels ?? [],
+      reasons: contract.reasons ?? [],
+    })),
+  };
+}
+
+export function compactLocationContractLedgerForDirectorCardsForTests(locationContractLedger) {
+  const compact = compactLocationContractLedgerForPromptForTests(locationContractLedger);
+  if (!compact || typeof compact !== "object") return compact;
+  return {
+    schema: compact.schema,
+    status: compact.status,
+    contract_count: compact.contracts.length,
+    contract_lines: compact.contracts.map((contract) => [
+      contract.location_contract_id,
+      contract.semantic_ref_id ? `semantic=${contract.semantic_ref_id}` : null,
+      `description=${readableCardValue(contract.description, 120)}`,
+      `scenes=${readableScopeSummary(contract.scene_ids ?? [])}`,
+      `beats=${contract.beat_count ?? 0}`,
+      contract.local_location_labels?.length
+        ? `sublocations=${readableCardValue(readableCardList(contract.local_location_labels), 140)}`
+        : null,
+    ].filter(Boolean).join(" | ")),
+  };
+}
+
 function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventoryLedger = null, locationContractLedger = null } = {}) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
@@ -1188,6 +1292,287 @@ Return:
 	}`;
 }
 
+export function compactPromptJsonForTests(value) {
+  return JSON.stringify(value);
+}
+
+export function compactPromptTableForTests(rows, fields) {
+  const constants = {};
+  const variableFields = fields.filter((field) => {
+    if (!rows.length) return true;
+    const first = JSON.stringify(rows[0]?.[field] ?? null);
+    const constant = rows.every((row) => JSON.stringify(row?.[field] ?? null) === first);
+    if (constant) constants[field] = rows[0]?.[field] ?? null;
+    return !constant;
+  });
+  return {
+    fields: variableFields,
+    constants,
+    rows: rows.map((row) => variableFields.map((field) => row[field] ?? null)),
+  };
+}
+
+export function compactPromptDictionaryTableForTests(rows, fields) {
+  const constants = {};
+  const dictionaries = {};
+  const dictionaryIndexes = {};
+  const variableFields = fields.filter((field) => {
+    if (!rows.length) return true;
+    const values = [];
+    const indexes = new Map();
+    for (const row of rows) {
+      const value = row?.[field] ?? null;
+      const key = JSON.stringify(value);
+      if (indexes.has(key)) continue;
+      indexes.set(key, values.length);
+      values.push(value);
+    }
+    if (values.length === 1) {
+      constants[field] = values[0];
+      return false;
+    }
+    dictionaries[field] = values;
+    dictionaryIndexes[field] = indexes;
+    return true;
+  });
+  return {
+    fields: variableFields,
+    constants,
+    dictionaries,
+    rows: rows.map((row) => variableFields.map((field) => {
+      const key = JSON.stringify(row?.[field] ?? null);
+      return dictionaryIndexes[field].get(key);
+    })),
+  };
+}
+
+export function expandPromptDictionaryTableForTests(table) {
+  const fields = Array.isArray(table?.fields) ? table.fields : [];
+  const constants = table?.constants && typeof table.constants === "object" ? table.constants : {};
+  const dictionaries = table?.dictionaries && typeof table.dictionaries === "object" ? table.dictionaries : {};
+  return (Array.isArray(table?.rows) ? table.rows : []).map((encodedRow) => ({
+    ...constants,
+    ...Object.fromEntries(fields.map((field, index) => {
+      const dictionary = Array.isArray(dictionaries[field]) ? dictionaries[field] : [];
+      return [field, dictionary[encodedRow?.[index]]];
+    })),
+  }));
+}
+
+function stableStringList(values = []) {
+  const seen = new Set();
+  const output = [];
+  for (const value of values.flat(Infinity)) {
+    const normalized = String(value ?? "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
+function compactCandidateBeatScope(beatIds = []) {
+  const ids = stableStringList(beatIds);
+  return {
+    count: ids.length,
+    first: ids[0] ?? null,
+    last: ids.at(-1) ?? null,
+    sample: ids.length <= 8 ? ids : [...ids.slice(0, 4), ...ids.slice(-4)],
+  };
+}
+
+function referenceCandidateCardKey(target) {
+  const familyId = String(
+    target?.inventory_asset_id
+      ?? target?.canonical_subject_id
+      ?? target?.base_asset_id
+      ?? target?.ref_id
+      ?? target?.candidate_id
+      ?? "unknown_reference_family",
+  ).trim();
+  return `${normalizeKind(target?.kind)}|${familyId}`;
+}
+
+function readableCardValue(value, maxLength = 180) {
+  const normalized = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/\|/g, "/")
+    .trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
+}
+
+function readableCardList(values = []) {
+  return stableStringList(values).join(",");
+}
+
+function distinctivePromptAnchorForCard(value) {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const clauses = normalized.split(/;\s*/);
+  while (
+    clauses.length > 1
+    && /(?:16:9|landscape|anime|manhwa|clean linework|cel-shaded|webtoon lighting|one coherent frame)/i.test(clauses[0])
+  ) {
+    clauses.shift();
+  }
+  return clauses.join("; ");
+}
+
+function readableScopeSummary(values = []) {
+  const ids = stableStringList(values);
+  if (!ids.length) return "none";
+  if (ids.length <= 12) return ids.join(",");
+  return `${ids.length}:${ids.slice(0, 4).join(",")}...${ids.slice(-4).join(",")}`;
+}
+
+function stableGroups(rows, keyForRow) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = keyForRow(row);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+function readableTargetCandidateLine(targets) {
+  const primary = targets[0];
+  const beats = compactCandidateBeatScope(targets.flatMap((target) => target.planned_beat_ids ?? []));
+  const visibleStates = stableStringList(targets.map((target) => target.state_delta)).slice(0, 3);
+  const anchors = stableStringList(
+    targets.map((target) => distinctivePromptAnchorForCard(target.prompt_anchor)),
+  ).slice(0, 2);
+  const parts = [
+    readableCardList(targets.map((target) => target.candidate_id)),
+    `ref=${readableCardValue(primary.ref_id, 80)}`,
+    `scenes=${readableScopeSummary(targets.flatMap((target) => target.scene_ids ?? []))}`,
+    `beats=${beats.count}${beats.count ? `:${beats.first}->${beats.last}` : ""}`,
+    `uses=${Math.max(...targets.map((target) => targetNumber(target.estimated_use_count ?? target.appearance_count)))}`,
+    `priority=${readableCardValue(readableCardList(targets.map((target) => target.priority)), 40) || "unspecified"}`,
+    `mode=${readableCardValue(readableCardList(targets.map((target) => target.generation_mode)), 50) || "unspecified"}`,
+    `required=${targets.some((target) => target.required_before_imagegen) ? 1 : 0}`,
+  ];
+  if (visibleStates.length) parts.push(`states=${readableCardValue(visibleStates.join(" / "), 130)}`);
+  const bases = stableStringList(targets.map((target) => target.base_asset_id));
+  if (bases.length) parts.push(`bases=${readableCardValue(bases.join(","), 110)}`);
+  if (!visibleStates.length && anchors.length) {
+    parts.push(`construction=${readableCardValue(anchors.join(" / "), 120)}`);
+  }
+  return parts.join(" | ");
+}
+
+function readableCharacterStateCandidateLine(states, targetByCandidateId) {
+  const primary = states[0];
+  const sourceTargets = states.map((state) => targetByCandidateId.get(state.source_target_candidate_id)).filter(Boolean);
+  const identityUsages = stableStringList(states.map((state) => (
+    state.identity_usage_override ?? targetByCandidateId.get(state.source_target_candidate_id)?.identity_usage
+  )));
+  const parts = [
+    readableCardList(states.map((state) => state.candidate_id)),
+    `state_ref=${readableCardValue(primary.state_ref_id, 80)}`,
+    `source_targets=${readableCardValue(readableCardList(states.map((state) => state.source_target_candidate_id)), 180) || "unlinked"}`,
+  ];
+  const bases = stableStringList(states.map((state) => state.base_identity_ref_id));
+  if (bases.length) parts.push(`bases=${readableCardValue(bases.join(","), 120)}`);
+  if (identityUsages.length) parts.push(`usage=${readableCardValue(identityUsages.join(","), 50)}`);
+  const overrideScenes = states.flatMap((state) => state.scene_ids_override ?? []);
+  if (overrideScenes.length) parts.push(`scene_overrides=${readableScopeSummary(overrideScenes)}`);
+  if (!overrideScenes.length && sourceTargets.length) parts.push("scenes=inherit_source_targets");
+  return parts.join(" | ");
+}
+
+export function buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlans = []) {
+  const targets = normalizedChunkPlans.flatMap((plan) => plan?.referenceTargets ?? []);
+  const stateCandidates = normalizedChunkPlans.flatMap((plan) => plan?.characterStateRefs ?? []);
+  const targetByCandidateId = new Map();
+  const targetCandidateIds = new Set();
+  for (const target of targets) {
+    const candidateId = String(target?.candidate_id ?? "").trim();
+    if (!candidateId) throw new Error("reference candidate card input contains a target without candidate_id");
+    if (targetCandidateIds.has(candidateId)) throw new Error(`duplicate reference candidate_id ${candidateId}`);
+    targetCandidateIds.add(candidateId);
+    targetByCandidateId.set(candidateId, target);
+  }
+
+  const statesByTargetCandidateId = new Map();
+  const unlinkedStates = [];
+  const stateCandidateIds = new Set();
+  for (const state of stateCandidates) {
+    const candidateId = String(state?.candidate_id ?? "").trim();
+    if (!candidateId) throw new Error("reference candidate card input contains a character state without candidate_id");
+    if (stateCandidateIds.has(candidateId)) throw new Error(`duplicate character-state candidate_id ${candidateId}`);
+    stateCandidateIds.add(candidateId);
+    const sourceTargetCandidateId = String(state?.source_target_candidate_id ?? "").trim();
+    if (!sourceTargetCandidateId || !targetByCandidateId.has(sourceTargetCandidateId)) {
+      unlinkedStates.push(readableCharacterStateCandidateLine([state], targetByCandidateId));
+      continue;
+    }
+    const rows = statesByTargetCandidateId.get(sourceTargetCandidateId) ?? [];
+    rows.push(state);
+    statesByTargetCandidateId.set(sourceTargetCandidateId, rows);
+  }
+
+  const cardsByKey = new Map();
+  for (const target of targets) {
+    const key = referenceCandidateCardKey(target);
+    let card = cardsByKey.get(key);
+    if (!card) {
+      card = {
+        card_id: `card_${String(cardsByKey.size + 1).padStart(3, "0")}`,
+        family_id: key.slice(key.indexOf("|") + 1),
+        kind: normalizeKind(target.kind),
+        candidate_options: [],
+      };
+      cardsByKey.set(key, card);
+    }
+    card.candidate_options.push(target);
+  }
+
+  const cards = [...cardsByKey.values()].map((card) => {
+    const options = card.candidate_options;
+    return {
+      card_id: card.card_id,
+      family_id: card.family_id,
+      kind: card.kind,
+      target_proposal_count: options.length,
+      character_state_proposal_count: options.reduce(
+        (count, option) => count + (statesByTargetCandidateId.get(option.candidate_id)?.length ?? 0),
+        0,
+      ),
+      subjects: readableCardValue(readableCardList(options.map((option) => option.subject)), 150),
+      roles: readableCardList(options.map((option) => option.conditioning_asset_role)),
+      union_scene_scope: readableScopeSummary(options.flatMap((option) => option.scene_ids ?? [])),
+      union_beat_scope: (() => {
+        const scope = compactCandidateBeatScope(
+          options.flatMap((option) => targetByCandidateId.get(option.candidate_id)?.planned_beat_ids ?? []),
+        );
+        return `${scope.count}${scope.count ? `:${scope.first}->${scope.last}` : ""}`;
+      })(),
+      target_candidate_lines: stableGroups(options, (option) => String(option.ref_id ?? option.candidate_id))
+        .map(readableTargetCandidateLine),
+      character_state_candidate_lines: stableGroups(
+        options.flatMap((option) => statesByTargetCandidateId.get(option.candidate_id) ?? []),
+        (state) => String(state.state_ref_id ?? state.candidate_id),
+      ).map((states) => readableCharacterStateCandidateLine(states, targetByCandidateId)),
+    };
+  });
+
+  return {
+    schema: "goldflow_reference_director_candidate_cards_v1",
+    reference_target_proposal_count: targets.length,
+    character_state_proposal_count: stateCandidates.length,
+    card_count: cards.length,
+    rules: {
+      card_meaning: "Each card groups duplicate or state-related proposals for one reusable family and one strict reference kind.",
+      candidate_traceability: "Every target and character-state proposal appears once in a labeled human-readable line by stable candidate_id; complete local objects remain authoritative.",
+      director_choice: "Select, merge, rename, or omit candidate IDs. Cards organize evidence but make no creative selection.",
+    },
+    cards,
+    unlinked_character_state_candidates: unlinkedStates,
+  };
+}
+
 function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
@@ -1198,9 +1583,17 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
     scene_count: semanticPlan.scenes?.length ?? 0,
     scene_ids: (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
   };
-  const compactChunkPlans = chunkPlans.map((plan, index) => ({
-    chunk: index + 1,
-    reference_targets: (plan.reference_targets ?? []).map((target) => ({
+  let referenceTargetOrdinal = 0;
+  let characterStateRefOrdinal = 0;
+  const referenceTargetCatalog = new Map();
+  const characterStateRefCatalog = new Map();
+  const normalizedChunkPlans = chunkPlans.map((plan, index) => {
+    const referenceTargets = (plan.reference_targets ?? []).map((target) => {
+      const candidateId = `rt_${String(referenceTargetOrdinal + 1).padStart(4, "0")}`;
+      referenceTargetOrdinal += 1;
+      referenceTargetCatalog.set(candidateId, target);
+      return {
+      candidate_id: candidateId,
       ref_id: target.ref_id,
       kind: target.kind,
       subject: target.subject,
@@ -1208,21 +1601,21 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
       priority: target.priority,
       generation_mode: target.generation_mode,
       required_before_imagegen: target.required_before_imagegen,
-      prompt_anchor: String(target.prompt_anchor ?? "").slice(0, 280),
+      prompt_anchor: String(target.prompt_anchor ?? "").slice(0, 500),
       anchor_cut_policy: target.anchor_cut_policy,
       appearance_count: target.appearance_count,
-      risk_notes: (target.risk_notes ?? []).slice(0, 2).map((note) => String(note).slice(0, 120)),
+      risk_notes: (target.risk_notes ?? []).slice(0, 1).map((note) => String(note).slice(0, 50)),
       manual_review_required: target.manual_review_required,
       inventory_asset_id: target.inventory_asset_id ?? null,
       evidence_asset_ids: target.evidence_asset_ids ?? [],
       canonical_subject_id: target.canonical_subject_id ?? null,
       base_asset_id: target.base_asset_id ?? null,
-      state_delta: target.state_delta ?? null,
+      state_delta: target.state_delta == null ? null : String(target.state_delta).slice(0, 100),
       location_contract_ids: target.location_contract_ids ?? [],
       planned_beat_ids: target.planned_beat_ids ?? [],
       estimated_use_count: target.estimated_use_count ?? target.appearance_count ?? 0,
-      reference_value_reason: target.reference_value_reason ?? null,
-      why_text_is_insufficient: target.why_text_is_insufficient ?? null,
+      reference_value_reason: target.reference_value_reason == null ? null : String(target.reference_value_reason).slice(0, 70),
+      why_text_is_insufficient: target.why_text_is_insufficient == null ? null : String(target.why_text_is_insufficient).slice(0, 70),
       conditioning_asset_role: target.conditioning_asset_role ?? null,
       identity_subtype: target.identity_subtype ?? null,
       reference_pose: target.reference_pose ?? null,
@@ -1241,21 +1634,57 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
       source_image_qa_status: target.source_image_qa_status ?? null,
       source_image_qa_receipt_path: target.source_image_qa_receipt_path ?? null,
       source_cut_id: target.source_cut_id ?? null,
-    })),
-    character_state_refs: (plan.character_state_refs ?? []).map((ref) => ({
-      state_ref_id: ref.state_ref_id,
-      character: ref.character,
-      scene_ids: ref.scene_ids ?? [],
-      prompt_anchor: String(ref.prompt_anchor ?? "").slice(0, 280),
-      scene_prompt_anchor: String(ref.scene_prompt_anchor ?? "").slice(0, 280),
-      source_ref_id: ref.source_ref_id,
-      base_identity_ref_id: ref.base_identity_ref_id,
-      identity_usage: ref.identity_usage,
-      identity_subtype: ref.identity_subtype ?? null,
-    })),
-    warnings: (plan.warnings ?? []).slice(0, 5),
-  }));
-  return `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
+      };
+    });
+    const targetById = new Map(referenceTargets.map((target) => [String(target.ref_id ?? ""), target]));
+    const characterStateRefs = (plan.character_state_refs ?? []).map((ref) => {
+      const candidateId = `cs_${String(characterStateRefOrdinal + 1).padStart(4, "0")}`;
+      characterStateRefOrdinal += 1;
+      const sourceTarget = targetById.get(String(ref.source_ref_id ?? ""));
+      const sourceSceneIds = sourceTarget?.scene_ids ?? [];
+      const sourcePromptAnchor = String(sourceTarget?.prompt_anchor ?? "");
+      const sourceIdentityUsage = sourceTarget?.identity_usage ?? null;
+      const refSceneIds = ref.scene_ids ?? [];
+      const refPromptAnchor = String(ref.prompt_anchor ?? "").slice(0, 140);
+      const refIdentityUsage = ref.identity_usage ?? null;
+      characterStateRefCatalog.set(candidateId, ref);
+      return {
+        candidate_id: candidateId,
+        state_ref_id: ref.state_ref_id,
+        character: ref.character,
+        scene_prompt_anchor: String(ref.scene_prompt_anchor ?? "").slice(0, 120),
+        source_ref_id: ref.source_ref_id,
+        source_target_candidate_id: sourceTarget?.candidate_id ?? null,
+        base_identity_ref_id: ref.base_identity_ref_id,
+        identity_subtype: ref.identity_subtype ?? null,
+        scene_ids_override: JSON.stringify(refSceneIds) === JSON.stringify(sourceSceneIds) ? null : refSceneIds,
+        prompt_anchor_override: refPromptAnchor === sourcePromptAnchor ? null : refPromptAnchor,
+        identity_usage_override: refIdentityUsage === sourceIdentityUsage ? null : refIdentityUsage,
+      };
+    });
+    return {
+      chunk: index + 1,
+      referenceTargets,
+      characterStateRefs,
+      warnings: (plan.warnings ?? []).slice(0, 5),
+    };
+  });
+  const warningSummaryByCode = new Map();
+  for (const warning of normalizedChunkPlans.flatMap((plan) => plan.warnings)) {
+    const code = String(warning?.code ?? "uncoded_chunk_warning");
+    const current = warningSummaryByCode.get(code) ?? {
+      code,
+      count: 0,
+      example: String(warning?.message ?? warning?.severity ?? "").slice(0, 160),
+    };
+    current.count += 1;
+    warningSummaryByCode.set(code, current);
+  }
+  const candidateCardPayload = {
+    ...buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlans),
+    chunk_warning_summary: [...warningSummaryByCode.values()],
+  };
+  const prompt = `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
 
 CONTENT PROFILE: ${contentProfile.id}
 ${plannerDirective || "- Preserve recurring visual identity and physical continuity from the locked narration."}
@@ -1315,87 +1744,203 @@ Rules:
 - Long same-venue arcs need enough scoped location refs for editorial variety. A single location ref should not be expected to carry many minutes of visually distinct beats after the retention runway when the semantic scene locations name different physical areas.
 - Rank recurring locations from the supplied evidence: beat reuse, scene reuse, opening value, and reuse span. A location used across many cuts can be a key standalone anchor even when those cuts live under one broad semantic scene. Do not let several one-off props displace a high-value recurring environment.
 - Return only valid JSON.
+- CANDIDATE CARDS are plain-language evidence, not encoded dictionaries. Every proposal appears exactly once by stable candidate_id. Cards group one reusable family and one strict reference kind, but they do not preselect the winner.
+- Return an ultra-compact final selection-row manifest, not repeated full reference objects. Every retained target must name its exact candidate_ids; the first candidate is the primary authored object. Deterministic code will materialize only those selected candidate fields, the union of their exact scopes, and your explicit overrides. It will not make creative selections.
+- candidate_ids may merge only proposals for the same reusable concept. Omit low-value candidates by leaving them out of the selection manifest.
+- Do not reconstruct or repeat the full production reference schema, scene_ids, planned_beat_ids, evidence IDs, prompt anchors, or rationale prose. The local catalog already retains every complete authored object and unions the exact scope of candidate_ids you select.
+- It is valid and expected for many input candidates to be omitted. The response should be only a few thousand tokens.
 
 VISUAL BIBLES AND OPERATOR DIRECTION:
-${visualGuidanceBlock(guidance)}
+${visualMergeGuidanceBlock(guidance)}
 
 REFERENCE EVIDENCE LEDGER:
-${JSON.stringify(compactInventoryForPrompt(inventoryLedger, null, { referenceValueOnly: true, maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320), evidenceLimit: 0, sceneIdLimit: 18 }), null, 2)}
+${compactPromptJsonForTests(compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, { maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320) }))}
 
 LOCATION CONTRACT LEDGER:
-${JSON.stringify(locationContractLedger, null, 2)}
+${compactPromptJsonForTests(compactLocationContractLedgerForDirectorCardsForTests(locationContractLedger))}
 
 EPISODE SUMMARY:
 ${JSON.stringify(compact, null, 2)}
 
-CHUNK PLANS:
-${JSON.stringify(compactChunkPlans, null, 2)}
+CANDIDATE CARDS:
+${compactPromptJsonForTests(candidateCardPayload)}
 
 Return:
 {
-  "reference_targets": [
-    {
-      "ref_id": "stable_snake_case_id",
-      "kind": "style|character_state|location|prop|ui|action",
-      "subject": "human readable subject",
-      "scene_ids": ["scene_001"],
-      "priority": "required|high|medium|low",
-      "generation_mode": "standalone_ref|manual_review|source_only",
-      "required_before_imagegen": true,
-      "reference_image_path": null,
-      "prompt_anchor": "draft reference prompt anchor",
-      "anchor_cut_policy": "none",
-      "appearance_count": 1,
-      "risk_notes": ["identity blend risk, wardrobe ambiguity, scale ambiguity, etc."],
-      "manual_review_required": true,
-      "inventory_asset_id": "primary matching evidence asset id",
-      "evidence_asset_ids": ["all supporting evidence ids"],
-      "canonical_subject_id": "stable canonical identity/location/prop/ui family id",
-      "base_asset_id": "base identity/environment id or null",
-      "state_delta": "specific visible state change or null",
-      "location_contract_ids": ["covered contract ids for location refs"],
-      "planned_beat_ids": ["beats expected to attach this ref"],
-      "estimated_use_count": 4,
-      "reference_value_reason": "specific continuity value",
-      "why_text_is_insufficient": "specific generation risk",
-      "clean_plate_contract": "clean reusable plate with no unrelated story-scene contamination",
-      "conditioning_subject_count": 1,
-      "conditioning_asset_role": "identity_state|creature_identity|environment|prop|ui_motif|faction_language|action_effect|style_language",
-      "reference_pose": "neutral_single|neutral_separated_lineup|not_applicable",
-      "visible_subject_count": 1,
-      "expected_visible_hands": 2,
-      "hands_policy": "relaxed_empty|empty_or_unoccupied|not_applicable",
-      "detachable_props": [],
-      "integrated_anatomy_features": [],
-      "identity_usage": "full_identity|face_only",
-      "reference_cleanliness_contract_version": "empty_hands_no_detachable_props_v1",
-      "source_origin": "owned_source|accepted_production_cut|null",
-      "source_review_status": "approved_clean|needs_manual_review|null",
-      "source_review_receipt_path": null,
-      "source_image_id": null,
-      "source_image_sha256": null,
-      "source_image_qa_status": "passed|null",
-      "source_image_qa_receipt_path": null,
-      "source_cut_id": null
-    }
+  "selection_contract": "goldflow_reference_director_selection_rows_v2",
+  "reference_selection_fields": ["ref_id", "candidate_ids", "priority", "generation_mode", "required_before_imagegen_1_or_0"],
+  "reference_selection_rows": [
+    ["stable_snake_case_id", ["rt_0001", "rt_0042"], "required", "standalone_ref", 1]
   ],
-  "character_state_refs": [
-    {
-      "state_ref_id": "stable_snake_case_id",
-      "character": "character name",
-      "scene_ids": ["scene_001"],
-      "prompt_anchor": "definitive draft character/state reference-generation anchor for manual review",
-      "scene_prompt_anchor": "concise character identity, wardrobe, and state wording for use inside scene image prompts; no reference-sheet, camera, pose, location, or action-direction wording",
-      "definitive": false,
-      "reference_image_path": null,
-      "source_ref_id": "matching reference_targets ref_id",
-      "base_identity_ref_id": "optional base face identity reference id for progressive same-character states",
-      "identity_usage": "full_identity|face_only"
-      ,"identity_subtype": "human|creature|construct|creature_group"
-    }
+  "character_state_selection_fields": ["state_ref_id", "candidate_ids", "source_ref_id", "identity_usage", "base_identity_ref_id_or_null"],
+  "character_state_selection_rows": [
+    ["stable_snake_case_id", ["cs_0001"], "matching selected reference ref_id", "full_identity", null]
   ],
+  "reference_overrides": {},
+  "character_state_overrides": {},
   "warnings": []
 }`;
+  return {
+    prompt,
+    candidateCatalog: {
+      referenceTargetCatalog,
+      characterStateRefCatalog,
+    },
+  };
+}
+
+export function buildMergePromptForTests(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
+  return buildMergePrompt(semanticPlan, chunkPlans, guidance, inventoryLedger, locationContractLedger);
+}
+
+function catalogValue(catalog, candidateId) {
+  if (catalog instanceof Map) return catalog.get(candidateId);
+  return catalog?.[candidateId];
+}
+
+function selectedStringArray(value, fallbackRows, field) {
+  const direct = Array.isArray(value) ? value : null;
+  const source = direct ?? fallbackRows.flatMap((row) => Array.isArray(row?.[field]) ? row[field] : []);
+  return [...new Set(source.map((item) => String(item ?? "").trim()).filter(Boolean))];
+}
+
+function applySelectionOverride(target, selection, outputField, overrideField) {
+  if (!Object.prototype.hasOwnProperty.call(selection, overrideField)) return;
+  target[outputField] = selection[overrideField];
+}
+
+function targetNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+export function materializeReferenceDirectorSelectionForTests(parsed, candidateCatalog) {
+  if (Array.isArray(parsed?.reference_targets)) return parsed;
+  if (String(parsed?.selection_contract ?? "") === "goldflow_reference_director_selection_rows_v2") {
+    const referenceOverrides = parsed.reference_overrides && typeof parsed.reference_overrides === "object"
+      ? parsed.reference_overrides
+      : {};
+    const characterStateOverrides = parsed.character_state_overrides && typeof parsed.character_state_overrides === "object"
+      ? parsed.character_state_overrides
+      : {};
+    parsed = {
+      selection_contract: "goldflow_reference_director_selection_v1",
+      reference_selections: (Array.isArray(parsed.reference_selection_rows) ? parsed.reference_selection_rows : []).map((row) => {
+        if (!Array.isArray(row) || row.length < 5) throw new Error("global director returned a malformed reference selection row");
+        const [refId, candidateIds, priority, generationMode, requiredBeforeImagegen] = row;
+        const override = referenceOverrides?.[refId] ?? {};
+        return {
+          ref_id: refId,
+          candidate_ids: candidateIds,
+          priority,
+          generation_mode: generationMode,
+          required_before_imagegen: requiredBeforeImagegen === true || requiredBeforeImagegen === 1,
+          ...override,
+        };
+      }),
+      character_state_selections: (Array.isArray(parsed.character_state_selection_rows) ? parsed.character_state_selection_rows : []).map((row) => {
+        if (!Array.isArray(row) || row.length < 5) throw new Error("global director returned a malformed character-state selection row");
+        const [stateRefId, candidateIds, sourceRefId, identityUsage, baseIdentityRefId] = row;
+        const override = characterStateOverrides?.[stateRefId] ?? {};
+        return {
+          state_ref_id: stateRefId,
+          candidate_ids: candidateIds,
+          source_ref_id: sourceRefId,
+          identity_usage: identityUsage,
+          base_identity_ref_id: baseIdentityRefId,
+          ...override,
+        };
+      }),
+      warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+    };
+  }
+  if (String(parsed?.selection_contract ?? "") !== "goldflow_reference_director_selection_v1") {
+    throw new Error("global director did not return the compact reference selection contract");
+  }
+  const referenceSelections = Array.isArray(parsed.reference_selections) ? parsed.reference_selections : [];
+  if (!referenceSelections.length) throw new Error("global director returned no reference selections");
+
+  const referenceTargets = referenceSelections.map((selection, index) => {
+    const candidateIds = selectedStringArray(selection?.candidate_ids, [], "candidate_ids");
+    if (!candidateIds.length) throw new Error(`reference selection ${index + 1} has no candidate_ids`);
+    const candidates = candidateIds.map((candidateId) => {
+      const candidate = catalogValue(candidateCatalog?.referenceTargetCatalog, candidateId);
+      if (!candidate) throw new Error(`reference selection ${index + 1} names unknown candidate ${candidateId}`);
+      return candidate;
+    });
+    const kinds = new Set(candidates.map((candidate) => normalizeKind(candidate?.kind)));
+    if (kinds.size !== 1) {
+      throw new Error(`reference selection ${index + 1} merges incompatible candidate kinds: ${[...kinds].join(", ")}`);
+    }
+    const primary = candidates[0];
+    const target = {
+      ...primary,
+      ref_id: String(selection.ref_id ?? primary.ref_id ?? "").trim(),
+      scene_ids: selectedStringArray(selection.scene_ids, candidates, "scene_ids"),
+      planned_beat_ids: selectedStringArray(selection.planned_beat_ids, candidates, "planned_beat_ids"),
+      evidence_asset_ids: selectedStringArray(null, candidates, "evidence_asset_ids"),
+      location_contract_ids: selectedStringArray(null, candidates, "location_contract_ids"),
+      risk_notes: selectedStringArray(null, candidates, "risk_notes"),
+      priority: selection.priority ?? primary.priority,
+      generation_mode: selection.generation_mode ?? primary.generation_mode,
+      required_before_imagegen: selection.required_before_imagegen ?? primary.required_before_imagegen,
+      appearance_count: Math.max(
+        targetNumber(primary.appearance_count),
+        ...candidates.map((candidate) => targetNumber(candidate?.appearance_count)),
+      ),
+      estimated_use_count: Math.max(
+        targetNumber(primary.estimated_use_count ?? primary.appearance_count),
+        ...candidates.map((candidate) => targetNumber(candidate?.estimated_use_count ?? candidate?.appearance_count)),
+      ),
+    };
+    if (!target.ref_id) throw new Error(`reference selection ${index + 1} has no ref_id`);
+    applySelectionOverride(target, selection, "prompt_anchor", "prompt_anchor_override");
+    applySelectionOverride(target, selection, "subject", "subject_override");
+    applySelectionOverride(target, selection, "canonical_subject_id", "canonical_subject_id_override");
+    applySelectionOverride(target, selection, "inventory_asset_id", "inventory_asset_id_override");
+    applySelectionOverride(target, selection, "base_asset_id", "base_asset_id_override");
+    applySelectionOverride(target, selection, "state_delta", "state_delta_override");
+    return target;
+  });
+
+  const selectedRefIds = new Set(referenceTargets.map((target) => String(target.ref_id ?? "")));
+  const characterStateSelections = Array.isArray(parsed.character_state_selections)
+    ? parsed.character_state_selections
+    : [];
+  const characterStateRefs = characterStateSelections.map((selection, index) => {
+    const candidateIds = selectedStringArray(selection?.candidate_ids, [], "candidate_ids");
+    if (!candidateIds.length) throw new Error(`character-state selection ${index + 1} has no candidate_ids`);
+    const candidates = candidateIds.map((candidateId) => {
+      const candidate = catalogValue(candidateCatalog?.characterStateRefCatalog, candidateId);
+      if (!candidate) throw new Error(`character-state selection ${index + 1} names unknown candidate ${candidateId}`);
+      return candidate;
+    });
+    const primary = candidates[0];
+    const sourceRefId = String(selection.source_ref_id ?? primary.source_ref_id ?? "").trim();
+    if (!selectedRefIds.has(sourceRefId)) {
+      throw new Error(`character-state selection ${index + 1} points to unselected source_ref_id ${sourceRefId || "<empty>"}`);
+    }
+    const stateRef = {
+      ...primary,
+      state_ref_id: String(selection.state_ref_id ?? primary.state_ref_id ?? "").trim(),
+      source_ref_id: sourceRefId,
+      scene_ids: selectedStringArray(selection.scene_ids, candidates, "scene_ids"),
+      identity_usage: selection.identity_usage ?? primary.identity_usage,
+    };
+    if (!stateRef.state_ref_id) throw new Error(`character-state selection ${index + 1} has no state_ref_id`);
+    applySelectionOverride(stateRef, selection, "prompt_anchor", "prompt_anchor_override");
+    applySelectionOverride(stateRef, selection, "scene_prompt_anchor", "scene_prompt_anchor_override");
+    if (Object.prototype.hasOwnProperty.call(selection, "base_identity_ref_id")) {
+      stateRef.base_identity_ref_id = selection.base_identity_ref_id;
+    }
+    return stateRef;
+  });
+
+  return {
+    reference_targets: referenceTargets,
+    character_state_refs: characterStateRefs,
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+  };
 }
 
 async function callLocal(prompt, stageName, maxTokens = null) {
@@ -2928,7 +3473,11 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
   if (String(flags["visual-ref-merge-mode"] ?? "").toLowerCase() === "deterministic") {
     throw new Error("Deterministic visual-reference merge is disabled in director v2. The global LLM director must make the final creative selection.");
   }
-  const mergePrompt = buildMergePrompt(semanticPlan, chunkPlans, guidance, evidenceLedger, locationContractLedger);
+  const {
+    prompt: mergePrompt,
+    candidateCatalog,
+  } = buildMergePrompt(semanticPlan, chunkPlans, guidance, evidenceLedger, locationContractLedger);
+  console.error(`visual refs merge prompt: ${mergePrompt.length} chars`);
   const mergeInputHash = sha256(mergePrompt);
   const globalExpectedSceneIds = (semanticPlan.scenes ?? []).map((scene) => String(scene.scene_id ?? "")).filter(Boolean);
   const maxMergeAttempts = 1;
@@ -2943,10 +3492,15 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
       const candidate = useLocalRoute
         ? await callLocal(attemptPrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
         : await callCodex(attemptPrompt, mergeStageName);
-      if (!Array.isArray(candidate.parsed?.reference_targets) || !candidate.parsed.reference_targets.length) {
+      const materializedParsed = materializeReferenceDirectorSelectionForTests(candidate.parsed, candidateCatalog);
+      if (!Array.isArray(materializedParsed?.reference_targets) || !materializedParsed.reference_targets.length) {
         throw new Error("global director returned no reference targets");
       }
-      merged = candidate;
+      merged = {
+        ...candidate,
+        parsed: materializedParsed,
+        director_selection_contract: candidate.parsed?.selection_contract ?? "legacy_full_objects",
+      };
       await recordPlannerChunkCheckpoint({
         episodeDir,
         plannerStage: "visual_reference_plan",
@@ -2957,7 +3511,10 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
         attempt,
         reused: Boolean(candidate.reused_cached_output),
         outputPath: candidate.output_path,
-        metadata: { selected_target_count: candidate.parsed.reference_targets.length },
+        metadata: {
+          selected_target_count: materializedParsed.reference_targets.length,
+          director_selection_contract: candidate.parsed?.selection_contract ?? "legacy_full_objects",
+        },
       });
       break;
     } catch (error) {

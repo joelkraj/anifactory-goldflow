@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   acquireChatGptWebWorkerLease,
+  CHATGPT_WEB_MEDIUM_REASONING_START_INTERVAL_MS,
   waitForChatGptWebStartWindow,
 } from "./lib/chatgpt-web-worker-pool.mjs";
 import {
@@ -34,14 +35,30 @@ export function normalizeChatGptWebPlannerText(value) {
   return String(value ?? "").replace(/\\([_*`{}\[\]()#+.!>|~-])/g, "$1");
 }
 
-export function chatGptWebPlannerStartWindowOptionsForTests({ prompt, effort, timeoutMs }) {
-  const productionSizedReasoning = String(prompt ?? "").length >= 1_500
+export function chatGptWebPlannerStartWindowOptionsForTests({
+  prompt,
+  effort,
+  timeoutMs,
+  rateClass = null,
+  minimumStartIntervalMs = null,
+}) {
+  const productionSizedPrompt = String(prompt ?? "").length >= 1_500;
+  const productionSizedReasoning = productionSizedPrompt
     || effort === "high"
     || effort === "xhigh"
     || effort === "max";
+  const mediumReasoning = productionSizedPrompt && effort === "medium";
   return {
     kind: "planner",
-    rateClass: productionSizedReasoning ? "reasoning" : "ordinary",
+    rateClass: rateClass ?? (mediumReasoning ? "medium_reasoning" : productionSizedReasoning ? "reasoning" : "ordinary"),
+    ...(minimumStartIntervalMs !== null
+      && minimumStartIntervalMs !== undefined
+      && Number.isFinite(Number(minimumStartIntervalMs))
+      && Number(minimumStartIntervalMs) >= 0
+      ? { minimumIntervalMs: Number(minimumStartIntervalMs) }
+      : rateClass == null && mediumReasoning
+        ? { minimumIntervalMs: CHATGPT_WEB_MEDIUM_REASONING_START_INTERVAL_MS }
+        : {}),
     timeoutMs: Math.max(120_000, Number(timeoutMs) || 1_200_000),
   };
 }
@@ -60,6 +77,8 @@ export async function runChatGptWebPlanner({
   effort,
   projectUrl = null,
   timeoutMs = 1_200_000,
+  rateClass = null,
+  minimumStartIntervalMs = null,
 }) {
   await fs.access(runtimePath);
   await fs.access(descriptorPath);
@@ -98,7 +117,13 @@ export async function runChatGptWebPlanner({
     if (effort === "xhigh" || effort === "max") {
       reasoningLease = await acquireChatGptWebWorkerLease({ kind: "deep_text", workId: id, timeoutMs });
     }
-    const startWindowOptions = chatGptWebPlannerStartWindowOptionsForTests({ prompt, effort, timeoutMs });
+    const startWindowOptions = chatGptWebPlannerStartWindowOptionsForTests({
+      prompt,
+      effort,
+      timeoutMs,
+      rateClass,
+      minimumStartIntervalMs,
+    });
     startGate = await waitForChatGptWebStartWindow({
       ...startWindowOptions,
       workId: id,

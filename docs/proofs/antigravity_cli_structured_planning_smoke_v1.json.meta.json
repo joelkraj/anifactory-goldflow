@@ -1,0 +1,29 @@
+{
+  "schema": "goldflow_codex_call_metadata_v1",
+  "status": "passed",
+  "stage_name": "ep_proof_visual_prompt_chunk_001",
+  "provider": "antigravity_cli",
+  "transport": "antigravity_cli",
+  "model": "gemini-3.6-flash-medium",
+  "reasoning_effort": "medium",
+  "planning_effort_policy": "uniform_v1",
+  "planning_room_provider_lock": null,
+  "run_identity_path": null,
+  "verbosity": "medium",
+  "executable": "/Users/joel/.local/bin/agy",
+  "antigravity_cli_version": "1.1.12",
+  "provider_duration_seconds": 5.25119,
+  "provider_usage": {
+    "input_tokens": 11369,
+    "output_tokens": 2847,
+    "thinking_tokens": 2629,
+    "cache_read_tokens": 8147,
+    "total_tokens": 14216
+  },
+  "provider_conversation_id": "a9a1db93-1745-402b-8d01-3c81314491e3",
+  "prompt_path": "/Users/joel/anifactory-goldflow/docs/proofs/antigravity_cli_structured_planning_smoke_v1.json.prompt.txt",
+  "prompt_sha256": "c474ca603972a00e43368d436f9f3652a0694c9d9ba5791a84cffc050560f9df",
+  "output_path": "/Users/joel/anifactory-goldflow/docs/proofs/antigravity_cli_structured_planning_smoke_v1.json",
+  "started_at": "2026-08-11T14:17:06.343Z",
+  "completed_at": "2026-08-11T14:17:16.159Z"
+}

@@ -5,6 +5,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildStageCommand, stageDefinition, stageIsSatisfied } from "./lib/pipeline-stage-registry.mjs";
+import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
+import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import { productionProfileById, productionProfileForIdentity } from "./lib/production-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,7 +25,7 @@ const ignoreProfileAuthorizations = isTrue(flags["ignore-profile-authorizations"
 const untilStage = String(flags.until ?? "").trim() || null;
 
 const PLANNER_SPEND_STAGES = new Set(["semantic_scene_plan", "visual_beat_plan", "visual_reference_plan", "visual_prompt_plan", "visual_prompt_blocker_repair"]);
-const MEDIA_SPEND_STAGES = new Set(["qwen_tts_stitch", "reference_generation", "image_generation"]);
+const MEDIA_SPEND_STAGES = new Set(["qwen_tts_stitch", "reference_generation", "image_generation", "generated_video_motion", "parallax_asset_generation"]);
 const RENDER_STAGES = new Set(["premium_render"]);
 
 function parseFlags(parts) {
@@ -118,6 +120,9 @@ export function autoAdvanceDecisionForTests(stageId, stageState, options = {}) {
   if (PLANNER_SPEND_STAGES.has(stageId) && ["blocked", "failed", "stale"].includes(String(stageState ?? ""))) {
     return { executable: false, reason: "planner_triage_and_scoped_recovery_required" };
   }
+  if (["blocked", "failed", "stale"].includes(String(stageState ?? ""))) {
+    return { executable: false, reason: "stage_blocker_triage_and_scoped_recovery_required" };
+  }
   if (definition.approval === "operator") return { executable: false, reason: "approval_required" };
   if (definition.approval === "operator_or_agent") {
     const agentValidatedStages = new Set(options.agentValidatedStages ?? []);
@@ -173,8 +178,10 @@ async function main() {
     }
     const useParallelAudioSemantic = stageId === "semantic_scene_plan"
       && profile.orchestration?.parallel_audio_semantic === true;
+    const normalizedImageProvider = normalizeImageProvider(status.identity?.image_provider);
     const useVisualWavefront = stageId === "visual_prompt_plan"
-      && profile.orchestration?.visual_wavefront_prefetch === true;
+      && profile.orchestration?.visual_wavefront_prefetch === true
+      && (normalizedImageProvider === "modelslab" || isBrowserPoolImageProvider(normalizedImageProvider));
     const decision = autoAdvanceDecisionForTests(stageId, stageState, {
       untilStage,
       allowPlannerSpend,
@@ -182,7 +189,7 @@ async function main() {
       allowRender,
       agentValidatedStages,
     });
-    let command = buildStageCommand(stageId, commandIdentity);
+    let command = status.next_command_shape ?? buildStageCommand(stageId, commandIdentity);
     if ((useParallelAudioSemantic || useVisualWavefront) && !allowMediaSpend) {
       await writeAdvanceState(episodeDir, {
         status: "held",

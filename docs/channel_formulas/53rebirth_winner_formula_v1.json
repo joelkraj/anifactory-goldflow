@@ -3,7 +3,7 @@
   "status": "active",
   "channel": "53rebirth",
   "channel_name": "Manhwa Joey",
-  "version": "2026-08-01.7",
+  "version": "2026-08-11.1",
   "observed_at": "2026-08-01T12:00:00-04:00",
   "research_basis": {
     "path": "/Users/joel/AniFactoryData/channels/53rebirth/source_development/research/2026-08-01-winner-concepts-v1/ranked_premise_research_pool.json",
@@ -161,6 +161,13 @@
     "rule": "This is a post-generation review log, not a source-release gate. It may identify likely slow, repetitive, or overlong spans for optional human review, but it never triggers automatic rewriting, regeneration, or ingest blocking. Upload retention—not an LLM checklist—decides whether the formula works."
   },
   "package_contract": {
+    "pairing": [
+      "Score the title and thumbnail as one package, not as independent assets.",
+      "The title explains the causal movie; the thumbnail either hard-proves its strongest hook with a concrete receipt or adds a consequential payoff.",
+      "The pair must sell the same fantasy, avoid empty verbal repetition, and create one compelling unresolved how or why question.",
+      "Every package must name title_supplies, thumbnail_adds, package_open_loop, proof_device, and literal_payment_scene before scripting.",
+      "Reject attractive-character-plus-arrow packages whose only overlay is a broad verdict without a visible number, rank, UI, object, action, role change, or transformation."
+    ],
     "title": [
       "Use one plain causal sentence.",
       "Name the relationship or institution that betrayed Joey.",
@@ -174,13 +181,17 @@
       "Use one scene, not a collage.",
       "Prefer Joey and one antagonist or contrast figure.",
       "Use one dominant prop, gesture, relationship, or status proof.",
+      "Prefer a specific receipt: a number, rank change, system screen, physical action, status object, role substitution, or before-after consequence.",
       "Use one to four main words and at most eight overlay words total.",
-      "Use at most one primary arrow; a second is allowed only when it clarifies the transfer or replacement.",
-      "Add information the title does not already say.",
+      "Use zero arrows by default; use one only when evidence supports the same transfer, identity, or direction job. A second requires separate evidence.",
+      "Either reinforce the title with a visible receipt or add a truthful consequence; never repeat title wording over decorative art.",
       "Generate the complete final sixteen-by-nine thumbnail from scratch with Codex Imagen; supply zero image references of any kind.",
       "Require Codex Imagen to render the exact text, labels, and arrows inside the finished raster; local work is limited to resize, format conversion, and compression, never content compositing or repair."
     ],
     "opening": [
+      "Choose linear_title_event, direct_premise, or outcome_choice_rewind before drafting. Use outcome_choice_rewind only when one concrete later result and one Joey refusal make the package easier to understand than the opening lore.",
+      "For outcome_choice_rewind, show one result, one satisfying decision, and one clean rewind that adds cause rather than replaying the preview. The cold open may use first person and shift once into third person after the rewind.",
+      "During the first thirty seconds, introduce at most one new proper name and two unexplained story terms. Prefer concrete people, objects, status, wounds, and choices over lore density.",
       "Show the title contradiction through a physical or social event in the first thirty seconds.",
       "Give three to five non-redundant receipts of exploitation when the betrayal needs accumulation.",
       "Cross the irreversible line and give Joey a meaningful refusal, escape, or boundary by minutes three to five.",

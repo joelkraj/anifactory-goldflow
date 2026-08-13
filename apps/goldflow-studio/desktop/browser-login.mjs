@@ -3,25 +3,36 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const CHATGPT_LOGIN_URL = "https://chatgpt.com/?temporary-chat=true";
+const GOOGLE_FLOW_LOGIN_URL = "https://labs.google/fx/tools/flow";
+const GOOGLE_GEMINI_LOGIN_URL = "https://gemini.google.com/images";
 
-export function loginVerificationMarkerPath(profileDir) {
-  return path.join(profileDir, ".goldflow-chatgpt-login-verified.json");
+function providerName(provider) {
+  return provider === "google-flow" ? "Google Flow" : provider === "google-gemini" ? "Google Gemini" : "ChatGPT";
 }
 
-export async function loginMarkerExists(profileDir) {
+function loginUrl(provider) {
+  return provider === "google-flow" ? GOOGLE_FLOW_LOGIN_URL : provider === "google-gemini" ? GOOGLE_GEMINI_LOGIN_URL : CHATGPT_LOGIN_URL;
+}
+
+export function loginVerificationMarkerPath(profileDir, provider = "chatgpt") {
+  return path.join(profileDir, `.goldflow-${provider}-login-verified.json`);
+}
+
+export async function loginMarkerExists(profileDir, provider = "chatgpt") {
   try {
-    const marker = JSON.parse(await fs.readFile(loginVerificationMarkerPath(profileDir), "utf8"));
-    return marker?.schema === "goldflow_chatgpt_login_v1" && marker?.authenticated === true;
+    const marker = JSON.parse(await fs.readFile(loginVerificationMarkerPath(profileDir, provider), "utf8"));
+    return ["goldflow_browser_login_v1", "goldflow_chatgpt_login_v1"].includes(marker?.schema) && marker?.authenticated === true;
   } catch {
     return false;
   }
 }
 
-export async function markLoginVerified(profileDir, details = {}) {
+export async function markLoginVerified(profileDir, details = {}, provider = "chatgpt") {
   await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
-  const markerPath = loginVerificationMarkerPath(profileDir);
+  const markerPath = loginVerificationMarkerPath(profileDir, provider);
   await fs.writeFile(markerPath, `${JSON.stringify({
-    schema: "goldflow_chatgpt_login_v1",
+    schema: "goldflow_browser_login_v1",
+    provider,
     authenticated: true,
     verified_at: new Date().toISOString(),
     ...details,
@@ -30,24 +41,25 @@ export async function markLoginVerified(profileDir, details = {}) {
   return markerPath;
 }
 
-export async function clearLoginMarker(profileDir) {
-  await fs.rm(loginVerificationMarkerPath(profileDir), { force: true });
+export async function clearLoginMarker(profileDir, provider = "chatgpt") {
+  await fs.rm(loginVerificationMarkerPath(profileDir, provider), { force: true });
 }
 
-export async function launchNormalChromeLogin({ chromeExecutable, profileDir, log = console.log } = {}) {
+export async function launchNormalChromeLogin({ chromeExecutable, profileDir, browserProvider = "chatgpt", log = console.log } = {}) {
   await Promise.all([
     fs.access(chromeExecutable),
     fs.mkdir(profileDir, { recursive: true, mode: 0o700 }),
   ]);
-  log("A normal dedicated Chrome window is opening for ChatGPT sign-in.");
-  log("Sign in, confirm your normal ChatGPT home screen appears, then quit that dedicated Chrome window completely.");
+  const displayName = providerName(browserProvider);
+  log(`A normal dedicated Chrome window is opening for ${displayName} sign-in.`);
+  log(`Sign in, confirm the normal ${displayName} screen appears, then quit that dedicated Chrome window completely.`);
   const child = spawn(chromeExecutable, [
     `--user-data-dir=${profileDir}`,
     "--new-window",
     "--disable-background-mode",
     "--no-first-run",
     "--no-default-browser-check",
-    CHATGPT_LOGIN_URL,
+    loginUrl(browserProvider),
   ], { env: process.env, stdio: "ignore" });
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
@@ -59,4 +71,4 @@ export async function launchNormalChromeLogin({ chromeExecutable, profileDir, lo
   if (exitCode !== 0) throw new Error(`Normal Chrome login window exited with status ${exitCode}.`);
 }
 
-export { CHATGPT_LOGIN_URL };
+export { CHATGPT_LOGIN_URL, GOOGLE_FLOW_LOGIN_URL };

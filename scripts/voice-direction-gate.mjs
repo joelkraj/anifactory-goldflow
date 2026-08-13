@@ -21,6 +21,7 @@ import {
   qwenBatchBindingByUnit,
 } from "./lib/qwen-liam-batch-contract.mjs";
 import { contentProfileForIdentity } from "./lib/content-profiles.mjs";
+import { buildTtsSpokenTextAudit } from "./lib/tts-spoken-text-audit.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
@@ -2684,7 +2685,8 @@ function qwenPronunciationText(value) {
     .replace(/\bNDA\b/g, "N D A")
     .replace(/\bLLC\b/g, "L L C")
     .replace(/\bIPO\b/g, "I P O")
-    .replace(/\bIT\b/g, "I T")
+    .replace(/\bIT(?=\s+(?:DEPARTMENT|TEAM|STAFF|SUPPORT|INFRASTRUCTURE|SYSTEMS?|NETWORK|SECURITY|OPERATIONS?|ADMIN(?:ISTRATOR)?|TECHNICIAN|DIRECTOR|MANAGER|SPECIALIST|SERVICES?)\b)/g, "I T")
+    .replace(/\b(?:WORKS?|WORKED|CAREER|JOB)\s+(?:IN|WITH)\s+IT\b/g, (match) => match.replace(/\bIT\b/, "I T"))
     .replace(/\bDNA\b/g, "D N A")
     .replace(/\bGPS\b/g, "G P S")
     .replace(/\bUSB\b/g, "U S B")
@@ -4441,6 +4443,7 @@ async function main() {
   const unitBasedNarrator = isUnitBasedNarratorProvider(ttsProvider);
   const providerContext = providerPlanContext(runIdentity, providerRouting, ttsProvider);
   const narrationGenerationPlanPath = path.join(episodeDir, "narration_generation_plan.json");
+  const spokenTextAuditPath = path.join(episodeDir, `tts_spoken_text_audit_${episode}.json`);
   const qwenGenerationPlanPath = path.join(episodeDir, "qwen_generation_plan.json");
   const qwenConfig = await readJsonIfExists(path.join(process.cwd(), "config", "qwen-tts.json"), {});
   const fishAudioConfig = await readJsonIfExists(path.join(process.cwd(), "config", "fish-audio.json"), {});
@@ -4484,6 +4487,23 @@ async function main() {
   narrationGenerationPlan.text_integrity_coverage = narrationTextIntegrityCoverage;
   const systemUiCoverage = systemUiSpeechCoverage(script, narrationGenerationPlan, dialogueContext);
   narrationGenerationPlan.system_ui_speech_coverage = systemUiCoverage;
+  const spokenTextAudit = buildTtsSpokenTextAudit({
+    plan: narrationGenerationPlan,
+    sourceScriptSha256: sourceScriptHash,
+    sourceScriptPath: scriptPath,
+    overridesSha256: narrationGenerationPlan.source_hashes.tts_spoken_overrides_sha256,
+    planPath: narrationGenerationPlanPath,
+    provider: providerContext.primary_provider,
+    voiceId: narrationGenerationPlan.narrator_voice_id,
+  });
+  narrationGenerationPlan.tts_spoken_text_audit = {
+    status: spokenTextAudit.status,
+    path: spokenTextAuditPath,
+    audit_sha256: spokenTextAudit.audit_sha256,
+    unit_contract_sha256: spokenTextAudit.unit_contract_sha256,
+    blocker_count: spokenTextAudit.blocker_count,
+    warning_count: spokenTextAudit.warning_count,
+  };
   const generationUnitsBySegment = new Map((narrationGenerationPlan.segments ?? []).map((segment) => [segment.segment_id, segment.generation_units ?? []]));
   const segments = baseSegments.map((segment) => ({
     ...segment,
@@ -4599,6 +4619,17 @@ async function main() {
     report.status = "failed_repairable";
     report.failures.push(systemUiFailure);
     report.blockers.push(systemUiFailure);
+  }
+  if (spokenTextAudit.status !== "passed") {
+    const spokenTextFailure = {
+      code: "tts_spoken_text_audit_failed",
+      severity: "blocker",
+      audit_path: spokenTextAuditPath,
+      blockers: spokenTextAudit.blockers,
+    };
+    report.status = "failed_repairable";
+    report.failures.push(spokenTextFailure);
+    report.blockers.push(spokenTextFailure);
   }
   if (narrationGenerationPlan.kokoro_unit_boundary_integrity?.status === "blocked") {
     const boundaryFailure = {
@@ -4783,6 +4814,7 @@ async function main() {
   narrationGenerationPlan.plan_sha256 = canonicalPlanHash(narrationGenerationPlan);
   report.voice_artifact_contamination = voiceContaminationReport;
   await writeJson(narrationGenerationPlanPath, narrationGenerationPlan);
+  await writeJson(spokenTextAuditPath, spokenTextAudit);
   if (qwenLocal) {
     await writeJson(qwenGenerationPlanPath, {
       ...narrationGenerationPlan,

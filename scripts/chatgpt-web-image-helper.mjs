@@ -35,46 +35,54 @@ export async function generateChatGptWebImage({
   await fs.access(runtimePath);
   await fs.access(descriptorPath);
   const id = safeId(workId || path.basename(outputPath, path.extname(outputPath)));
-  const runId = `goldflow_prod_${id}_${Date.now()}`;
-  const runDir = path.join(path.dirname(outputPath), ".chatgpt-web-jobs", runId);
-  const manifestPath = path.join(runDir, "manifest.json");
-  await fs.mkdir(runDir, { recursive: true });
-  await fs.writeFile(manifestPath, `${JSON.stringify({
-    schema: "goldflow_chatgpt_jobs_v1",
-    runId,
-    descriptorPath,
-    ...(projectUrl ? { projectUrl } : {}),
-    outputDir: "./run",
-    concurrency: 1,
-    startIntervalMs: 0,
-    rateLimitCooldownMs: 0,
-    // Conversation mutation has a much lower throttle than image generation.
-    // Queue successful chats for one serialized cleanup lane instead.
-    archiveSuccessfulImageChats: false,
-    jobs: [{
-      id: `image_${id}`,
-      kind: "image",
-      prompt,
-      effort: "medium",
-      references: referenceImagePaths.map((referencePath, index) => ({
-        path: referencePath,
-        name: `reference_${String(index + 1).padStart(2, "0")}${path.extname(referencePath).toLowerCase() || ".png"}`,
-      })),
-      expectedImageCount: 1,
-      expectedAspectRatio: "16:9",
-      timeoutMs: 1_200_000,
-    }],
-  }, null, 2)}\n`, "utf8");
   await assertChatGptWebCooldownClear({ operation: `image ${id}` });
   const lease = await acquireChatGptWebWorkerLease({ kind: "image", workId: id, timeoutMs: 1_200_000 });
   let browserLease = null;
   let startGate = null;
   let processResult = null;
   let processError = null;
+  let reportPath = null;
   try {
-    startGate = await waitForChatGptWebStartWindow({ kind: "image", workId: id });
+    startGate = await waitForChatGptWebStartWindow({
+      kind: "image",
+      workId: id,
+      timeoutMs: 1_200_000,
+    });
     browserLease = await acquireChatGptWebWorkerLease({ kind: "browser", workId: id, timeoutMs: 1_200_000 });
     await assertChatGptWebCooldownClear({ operation: `image ${id}` });
+    // Persist a bridge job only after both worker gates are held. Cooldowns and
+    // contention must not leave hundreds of empty production job directories.
+    const runId = `goldflow_prod_${id}_${Date.now()}`;
+    const runDir = path.join(path.dirname(outputPath), ".chatgpt-web-jobs", runId);
+    const manifestPath = path.join(runDir, "manifest.json");
+    reportPath = path.join(runDir, "run", "run_report.json");
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(manifestPath, `${JSON.stringify({
+      schema: "goldflow_chatgpt_jobs_v1",
+      runId,
+      descriptorPath,
+      ...(projectUrl ? { projectUrl } : {}),
+      outputDir: "./run",
+      concurrency: 1,
+      startIntervalMs: 0,
+      rateLimitCooldownMs: 0,
+      // Conversation mutation has a much lower throttle than image generation.
+      // Queue successful chats for one serialized cleanup lane instead.
+      archiveSuccessfulImageChats: false,
+      jobs: [{
+        id: `image_${id}`,
+        kind: "image",
+        prompt,
+        effort: "medium",
+        references: referenceImagePaths.map((referencePath, index) => ({
+          path: referencePath,
+          name: `reference_${String(index + 1).padStart(2, "0")}${path.extname(referencePath).toLowerCase() || ".png"}`,
+        })),
+        expectedImageCount: 1,
+        expectedAspectRatio: "16:9",
+        timeoutMs: 1_200_000,
+      }],
+    }, null, 2)}\n`, "utf8");
     try {
       processResult = await execFileAsync(process.execPath, [runtimePath, "--manifest", manifestPath], {
         cwd: bridgeRoot,
@@ -85,7 +93,6 @@ export async function generateChatGptWebImage({
     } catch (error) {
       processError = error;
     }
-    const reportPath = path.join(runDir, "run", "run_report.json");
     const report = await fs.readFile(reportPath, "utf8").then(JSON.parse).catch(() => null);
     const receipt = report?.receipts?.[0] ?? null;
     const artifact = receipt?.artifacts?.find((row) => row?.kind === "image") ?? null;

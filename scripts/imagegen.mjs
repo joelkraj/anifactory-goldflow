@@ -16,6 +16,7 @@ import { generateCodexImage } from "./codex-image-helper.mjs";
 import { generateModelslabImage, modelslabRequestSettings } from "./modelslab-image-helper.mjs";
 import { generateChatGptWebImage } from "./chatgpt-web-image-helper.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
+import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import {
   sanitizeAnatomyContracts,
   sanitizeEquipmentContracts,
@@ -48,6 +49,7 @@ const referenceDir = path.join(imageDir, "references");
 const reportPath = flags.output ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const existingRunIdentity = await fs.readFile(runIdentityPath, "utf8").then(JSON.parse).catch(() => null);
+let activeRunIdentity = existingRunIdentity;
 const imageProvider = normalizeImageProvider(flags["image-provider"] ?? flags.provider ?? process.env.ANIFACTORY_IMAGE_PROVIDER ?? existingRunIdentity?.image_provider ?? "chatgpt_web_gpt_image");
 const defaultProviderConcurrency = imageProvider === "chatgpt_web_gpt_image" ? 3 : 15;
 const concurrency = Math.max(1, Math.min(15, Number(flags.concurrency ?? process.env.ANIFACTORY_IMAGEGEN_CONCURRENCY ?? defaultProviderConcurrency)));
@@ -166,6 +168,7 @@ async function assertRunIdentityImageProvider() {
   if (referenceImageModelOverride && runIdentityReferenceModel && referenceImageModelOverride !== runIdentityReferenceModel && !confirmImageProvider) {
     throw new Error(`Reference model mismatch: run_identity.json locks ${runIdentityReferenceModel}, command requested ${referenceImageModelOverride}. Update preflight or pass --confirm-image-provider true only with operator approval.`);
   }
+  activeRunIdentity = runIdentity;
   return runIdentity;
 }
 
@@ -1213,7 +1216,11 @@ async function runPool(items, worker, limit) {
 
 function providerInfrastructureFailure(error) {
   const message = String(error?.message ?? error ?? "");
-  return /\b(?:429|500|502|503|504|520|522|524)\b|gateway|rate.?limit|queue|timed?\s*out|timeout|service unavailable|temporarily unavailable|fetch failed|socket hang up/i.test(message);
+  return /\b(?:429|500|502|503|504|520|522|524)\b|gateway|rate.?limit|too many requests|cooldown(?:\s+active)?|queue|timed?\s*out|timeout|service unavailable|temporarily unavailable|fetch failed|socket hang up/i.test(message);
+}
+
+export function providerInfrastructureFailureForTests(error) {
+  return providerInfrastructureFailure(error);
 }
 
 async function runPoolWithCircuitBreaker(items, worker, limit) {
@@ -1503,9 +1510,7 @@ async function generateProviderImage({
       outputPath,
       referenceImagePaths,
       workId: path.basename(outputPath, path.extname(outputPath)),
-      projectUrl: runIdentity?.chatgpt_web_project?.url
-        ?? runIdentity?.image_provider_options?.chatgpt_project_url
-        ?? null,
+      projectUrl: chatGptWebProjectUrlForIdentity(activeRunIdentity),
     });
   }
   if (isCodexImageProvider(routedProvider)) {
@@ -1533,6 +1538,12 @@ async function generateProviderImage({
     height,
     account: modelslabAccount,
   });
+}
+
+export function chatGptWebProjectUrlForIdentity(identity) {
+  return identity?.chatgpt_web_project?.url
+    ?? identity?.image_provider_options?.chatgpt_project_url
+    ?? null;
 }
 
 function modelslabSceneGeometry() {
@@ -1805,6 +1816,45 @@ export function referenceTargetNeedsGenerationForTests(target, referenceScope = 
   return referenceTargetNeedsGeneration(target, referenceScope);
 }
 
+function referenceBaseIdentityRefId(target, stateBySourceRefId) {
+  const stateRef = stateBySourceRefId.get(String(target?.ref_id ?? ""));
+  return String(
+    stateRef?.base_identity_ref_id
+      ?? target?.identity_ref_id
+      ?? target?.source_identity_ref_id
+      ?? "",
+  ).trim();
+}
+
+function failedReferenceDependencyRootId(target, pendingById, stateBySourceRefId, failedById) {
+  let baseRefId = referenceBaseIdentityRefId(target, stateBySourceRefId);
+  const visited = new Set([String(target?.ref_id ?? "")]);
+  while (baseRefId && !visited.has(baseRefId)) {
+    if (failedById.has(baseRefId)) return baseRefId;
+    visited.add(baseRefId);
+    const pendingBase = pendingById.get(baseRefId);
+    if (!pendingBase) return null;
+    baseRefId = referenceBaseIdentityRefId(pendingBase, stateBySourceRefId);
+  }
+  return null;
+}
+
+export function failedReferenceDependencyRootIdForTests({
+  target,
+  pendingTargets = [],
+  characterStateRows = [],
+  failedRefIds = [],
+}) {
+  const pendingById = new Map(pendingTargets.map((row) => [String(row.ref_id), row]));
+  const stateBySourceRefId = new Map(
+    characterStateRows
+      .filter((row) => row?.source_ref_id)
+      .map((row) => [String(row.source_ref_id), row]),
+  );
+  const failedById = new Map(failedRefIds.map((refId) => [String(refId), true]));
+  return failedReferenceDependencyRootId(target, pendingById, stateBySourceRefId, failedById);
+}
+
 async function generateReferences() {
   const referencePlan = await readJson(visualReferencePlanPath, null);
   const characterRefs = await readJson(characterStateRefsPath, null);
@@ -1871,31 +1921,38 @@ async function generateReferences() {
   const remaining = targets.filter((target) => target.ref_id !== styleTarget?.ref_id);
   const requestedTargetIds = new Set(remaining.map((target) => String(target.ref_id)));
   const pendingById = new Map(remaining.map((target) => [String(target.ref_id), target]));
+  const failedById = new Map();
   const referencePoolSummaries = [];
 
   while (pendingById.size) {
     const ready = [...pendingById.values()].filter((target) => {
-      const stateRef = stateBySourceRefId.get(String(target.ref_id));
-      const baseRefId = String(
-        stateRef?.base_identity_ref_id
-          ?? target.identity_ref_id
-          ?? target.source_identity_ref_id
-          ?? "",
-      ).trim();
+      const baseRefId = referenceBaseIdentityRefId(target, stateBySourceRefId);
       return !baseRefId
         || baseRefId === String(target.ref_id)
         || referenceById.has(baseRefId)
         || !requestedTargetIds.has(baseRefId);
     });
     if (!ready.length) {
+      const dependencyBlocked = [...pendingById.values()].flatMap((target) => {
+        const failedBaseRefId = failedReferenceDependencyRootId(target, pendingById, stateBySourceRefId, failedById);
+        if (!failedBaseRefId) return [];
+        return [{
+          ref_id: target.ref_id,
+          status: "skipped_dependency_failed",
+          base_identity_ref_id: referenceBaseIdentityRefId(target, stateBySourceRefId) || null,
+          failed_dependency_ref_id: failedBaseRefId,
+          error: `Required base reference ${failedBaseRefId} failed its single creative submission.`,
+        }];
+      });
+      if (dependencyBlocked.length) {
+        results.push(...dependencyBlocked);
+        for (const row of dependencyBlocked) pendingById.delete(String(row.ref_id));
+        continue;
+      }
       const unresolved = [...pendingById.values()].map((target) => {
-        const stateRef = stateBySourceRefId.get(String(target.ref_id));
         return {
           ref_id: target.ref_id,
-          base_identity_ref_id: stateRef?.base_identity_ref_id
-            ?? target.identity_ref_id
-            ?? target.source_identity_ref_id
-            ?? null,
+          base_identity_ref_id: referenceBaseIdentityRefId(target, stateBySourceRefId) || null,
         };
       });
       throw new Error(`Reference dependency cycle or unresolved base identities: ${JSON.stringify(unresolved)}`);
@@ -1916,7 +1973,12 @@ async function generateReferences() {
     results.push(...wave.results);
     for (const target of ready) pendingById.delete(String(target.ref_id));
     for (const row of wave.results) {
-      if (row?.ref_id && row?.image_path && imageResultPassed(row)) referenceById.set(row.ref_id, row.image_path);
+      if (!row?.ref_id) continue;
+      if (row.image_path && imageResultPassed(row)) {
+        referenceById.set(row.ref_id, row.image_path);
+      } else {
+        failedById.set(String(row.ref_id), row);
+      }
     }
     if (wave.circuit_open) break;
   }
@@ -2349,6 +2411,9 @@ async function main() {
   if (promoteDerivedRefs) {
     await promoteDerivedReferences();
     return;
+  }
+  if (isBrowserPoolImageProvider(imageProvider)) {
+    throw new Error("Browser-backed Flow/ChatGPT image routes must run through goldflow imagegen browser-pool so durable leases and provider receipts cannot be bypassed.");
   }
   if (runIdentity.schema === "goldflow_run_identity_v2") {
     const approval = await readJson(referencePlanApprovalPath, null);

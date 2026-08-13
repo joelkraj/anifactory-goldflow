@@ -357,7 +357,10 @@ function buildIndexes(visualReferencePlan, characterStateRefs, referenceInventor
   for (const target of [...inventoryTargets, ...(visualReferencePlan?.reference_targets ?? [])]) {
     byRefId.set(String(target.ref_id), { ...(byRefId.get(String(target.ref_id)) ?? {}), ...target });
   }
-  const referenceTargets = [...byRefId.values()];
+  const referenceTargets = [...byRefId.values()].map((target) => ({
+    ...target,
+    base_identity_anchor: targetIsRecurringBaseIdentity(target),
+  }));
   const referenceById = new Map(referenceTargets.map((target) => [target.ref_id, target]));
   const visualCharacterRefs = referenceTargets
     .filter((target) => String(target.kind ?? "") === "character_state" && target.ref_id)
@@ -472,7 +475,20 @@ function targetGenerationMode(target) {
   return String(target?.generation_mode ?? "").trim().toLowerCase();
 }
 
+function targetIsRecurringBaseIdentity(target) {
+  if (target?.base_identity_anchor === true) return true;
+  if (String(target?.conditioning_asset_role ?? "").toLowerCase() !== "identity_state") return false;
+  const subject = String(target?.subject ?? target?.character ?? "");
+  const rationale = String(target?.reference_value_reason ?? "");
+  return /\bbase facial identity\b/i.test(subject)
+    || /\brecurring core[- ]team member\b/i.test(rationale);
+}
+
 function targetScopedToPrompt(target, prompt) {
+  if (targetIsRecurringBaseIdentity(target)) return true;
+  const plannedBeatIds = Array.isArray(target?.planned_beat_ids) ? target.planned_beat_ids.map(String).filter(Boolean) : [];
+  const visualBeatId = String(prompt?.visual_beat_id ?? "");
+  if (visualBeatId && (plannedBeatIds.includes(visualBeatId) || plannedBeatIds.includes("*"))) return true;
   const sceneIds = Array.isArray(target?.scene_ids) ? target.scene_ids.map(String).filter(Boolean) : [];
   if (!sceneIds.length) return true;
   const sceneId = String(prompt?.scene_id ?? "");
@@ -739,7 +755,8 @@ function requirementRefIdForPrompt(rawRefId, req, prompt, indexes) {
 function genericVisibleGroupName(value) {
   const text = normalize(value);
   if (!text) return true;
-  if (/\b(?:men|women|clerks?|priests?|guards?|students?|citizens?|crowds?|witnesses?|workers?|staff|audience|spectators?|officials?|deans?|councils?|soldiers?|nobles?|reporters?|followers?|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?)\b/.test(text)) return true;
+  if (/\b(?:men|women|clerks?|priests?|guards?|students?|citizens?|crowds?|witnesses?|workers?|staff|audience|spectators?|officials?|deans?|councils?|soldiers?|nobles?|reporters?|followers?|teams?|merchants?|employees?|members?|representatives?|managers?|executives?|founders?|investors?|clients?|customers?|users?|survivors?|patients?|victims?)\b/.test(text)) return true;
+  if (/\binjured\s+(?:boy|girl|man|woman|person|child)\b/.test(text)) return true;
   if (/\b[a-z]+\s+s\b/.test(text)) return true;
   return false;
 }

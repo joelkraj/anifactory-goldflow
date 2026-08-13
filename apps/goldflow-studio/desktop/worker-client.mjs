@@ -24,12 +24,21 @@ export class GoldflowWorkerClient {
       };
     }
     const value = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-    if (!response.ok) throw new Error(value.error || `Goldflow request ${route} failed with HTTP ${response.status}.`);
+    if (!response.ok) {
+      const error = new Error(value.error || `Goldflow request ${route} failed with HTTP ${response.status}.`);
+      error.code = value.code ?? "goldflow_request_failed";
+      error.statusCode = response.status;
+      throw error;
+    }
     return value;
   }
 
-  async pair(code, label) {
-    const value = await this.request("/v1/pair", { method: "POST", body: { code, label }, auth: false });
+  health() {
+    return this.request("/v1/health", { auth: false });
+  }
+
+  async pair(code, label, browserProvider = "chatgpt") {
+    const value = await this.request("/v1/pair", { method: "POST", body: { code, label, browserProvider }, auth: false });
     this.workerToken = value.token;
     return value;
   }
@@ -66,8 +75,20 @@ export class GoldflowWorkerClient {
             sourceUrl: result.sourceUrl,
             conversationUrl: result.conversationUrl,
             uiContract: result.uiContract,
+            browserProvider: result.browserProvider,
           }
-        : {
+        : job.type === "video"
+          ? {
+              type: "video",
+              jobId: job.job_id,
+              leaseToken: job.lease_token,
+              slot,
+              downloadPath: result.downloadPath,
+              sourceUrl: result.sourceUrl,
+              conversationUrl: result.conversationUrl,
+              uiContract: result.uiContract,
+            }
+          : {
             type: "llm",
             jobId: job.job_id,
             leaseToken: job.lease_token,

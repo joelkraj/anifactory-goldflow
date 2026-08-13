@@ -1,0 +1,218 @@
+{
+  "schema": "goldflow_source_evidence_snapshot_v1",
+  "status": "active",
+  "channel": "53rebirth",
+  "channel_name": "Manhwa Joey",
+  "version": "2026-08-11.1",
+  "observed_through": "2026-08-11",
+  "research_scope": {
+    "curated_channels": 51,
+    "recent_uploads_after_search": 817,
+    "eligible_longform_candidates": 208,
+    "primary_english_timed_transcripts": 33,
+    "primary_corpus_views_at_collection": 12856262,
+    "own_channel_comments_reviewed": 375,
+    "own_channel_uploads_scanned_for_comments": 61,
+    "own_channel_uploads_with_comments": 34,
+    "warning": "External views measure public demand and distribution, not private retention. Own-channel analytics measure viewing after the click. Comments are self-selected qualitative evidence and the counts below are conservative lower bounds, not audience prevalence estimates. Keep those evidence classes separate."
+  },
+  "source_paths": [
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reverse_analysis/ultimate_winner_reverse_engineering_2026_07_27.md",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reverse_analysis/ultimate_winners_2026_07_27_data/combined_aggregate.json",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reverse_analysis/ultimate_winners_2026_07_27_data/combined_primary_metrics.json",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/exports/chatbot_handoff_2026_07_27/ultimate_winner_research_handoff.md",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/channel_audit/manhwa_joey_2026_07_27/analytics_api/video_summary_20260518_to_20260726.json",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/channel_audit/manhwa_joey_2026_07_27/analytics_api/retention_checkpoints_20260518_to_20260726.json",
+    "/Users/joel/AniFactoryData/channels/53rebirth/source_development/research/2026-08-03-yoink-twist-v1/yoink_twist_research_board.md",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reports/own_channel_comment_audit_2026_08_09/comments.json",
+    "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reports/own_channel_comment_audit_2026_08_09/comment_corpus_for_pro.md",
+    "/Users/joel/AniFactoryData/channels/53rebirth/source_development/2026-08-09-own-comment-audit-v1/source_web_research_report.md"
+  ],
+  "market_delivery": {
+    "spoken_wpm_median": 222.95,
+    "words_by_30_seconds_median": 113,
+    "words_by_60_seconds_median": 225,
+    "words_by_90_seconds_median": 336,
+    "words_by_3_minutes_median": 672,
+    "words_by_5_minutes_median": 1121,
+    "mean_sentence_words_median": 14.06,
+    "sentences_8_words_or_less_percent_median": 21.52,
+    "causal_markers_per_1000_words_median": 7.3,
+    "opening_turn_gap_seconds_median": 8.84,
+    "interpretation": [
+      "Fast winning recaps are causally dense rather than a chain of tiny dramatic fragments.",
+      "Meaningful turns and connected action-response-result sentences matter more than raw TTS speed.",
+      "Pacing stays broadly stable through all four runtime quarters in the primary corpus."
+    ]
+  },
+  "market_opening_modes": [
+    {
+      "id": "visible_proof_or_payoff",
+      "count": 15,
+      "share_percent": 45.45,
+      "use_when": "The package promises impossible competence, hidden rank, a transformed body, ownership, or public proof."
+    },
+    {
+      "id": "wound_or_identity_contradiction",
+      "count": 8,
+      "share_percent": 24.24,
+      "use_when": "The package promises betrayal, rejection, exploitation, false weakness, abandonment, or humiliation."
+    },
+    {
+      "id": "direct_premise_or_mechanic",
+      "count": 10,
+      "share_percent": 30.3,
+      "use_when": "The strange condition or singular rule is itself the click reason."
+    }
+  ],
+  "own_channel_opening_delivery_evidence": [
+    {
+      "id": "uber_outcome_choice_rewind",
+      "video_id": "FMoV93bMKBc",
+      "click_through_rate_percent": 7.1,
+      "thirty_second_retention_percent": 62,
+      "average_view_duration_sec": 566,
+      "average_percentage_viewed": 15.8,
+      "opening_pattern": "First-person later outcome, one concrete numerical reversal, one satisfying refusal, then a clean third-person rewind.",
+      "lesson": "The cold open is easy to repeat from memory because it uses one person at a window, one number, and one choice before backstory. The pattern is useful when the later consequence is easier to understand than the setup."
+    },
+    {
+      "id": "bride_linear_title_event",
+      "video_id": "W94xrqnsLlY",
+      "click_through_rate_percent": 9.8,
+      "thirty_second_retention_percent": 66,
+      "average_view_duration_sec": 412,
+      "average_percentage_viewed": 11.6,
+      "opening_pattern": "Third-person linear title event, immediate public betrayal, then the replacement relationship enters before the scene loses momentum.",
+      "lesson": "A linear opening can outperform a flash-forward when the title event is already concrete, socially legible, and visually dramatic. Outcome-choice-rewind is an option, not a universal gimmick."
+    }
+  ],
+  "market_package_findings": {
+    "core_title_words_median": 13,
+    "core_title_characters_median": 72,
+    "feature_counts": {
+      "number_or_rank_shorthand": 19,
+      "rank_or_status": 18,
+      "explicit_mechanic": 16,
+      "explicit_contrast": 16,
+      "underdog_language": 12,
+      "institutional_proof": 10
+    },
+    "reusable_grammar": "low or unusual status + one singular unfair advantage + one visible proof or outcome",
+    "thumbnail_rule": "Let the title explain the premise and let one simple thumbnail prove or extend one part of it."
+  },
+  "own_channel_evidence": [
+    {
+      "id": "anti_simp_breakout",
+      "video_id": "BbIfCKlbc-M",
+      "title": "Reincarnated as the World's Biggest Simp, He Unlocks the Anti-Simp System | Manhwa Recap",
+      "views": 28981,
+      "average_view_duration_sec": 711,
+      "average_percentage_viewed": 18.97,
+      "lesson": "Extremely legible humiliation identity plus one corrective mechanic can win broad demand even when longform satisfaction is not the channel maximum."
+    },
+    {
+      "id": "death_goddess",
+      "video_id": "aLRmk50_Hqg",
+      "title": "My Wife Poisoned Me, Then I Married the Goddess of Death | Manhwa Recap",
+      "views": 22300,
+      "average_view_duration_sec": 1473,
+      "average_percentage_viewed": 27.47,
+      "lesson": "An intimate betrayal plus a visually obvious replacement relationship can combine click clarity with strong viewing."
+    },
+    {
+      "id": "boss_one_dollar",
+      "video_id": "aPqf5EwZTsk",
+      "title": "My Boss Stole My Fiancee And Fired Me, Then My $1 System Bought His Company | Manhwa Recap",
+      "views": 17523,
+      "average_view_duration_sec": 2041,
+      "average_percentage_viewed": 24.28,
+      "lesson": "A complete causal title with a numerical mechanic and literal takeback produced the strongest watch minutes per viewer among the established winners."
+    },
+    {
+      "id": "learning_system",
+      "video_id": "qI46llUgLxQ",
+      "title": "He Stole My GF and Humiliated Me, Then I Unlocked The 100X Learning System | Manhwa Recap",
+      "views": 15252,
+      "average_view_duration_sec": 1324,
+      "average_percentage_viewed": 23.37,
+      "lesson": "A personal rival and one-line multiplier remain easy to understand and scale."
+    },
+    {
+      "id": "spend_exposure",
+      "video_id": "76HyNofMk5E",
+      "title": "I Spent $184,730 on Her, Then My 10X System Exposed Her | Manhwa Recap",
+      "views": 12714,
+      "average_view_duration_sec": 1210,
+      "average_percentage_viewed": 26.81,
+      "lesson": "A precise receipt makes exploitation tangible; the simple exposure engine keeps the promise legible."
+    }
+  ],
+  "own_channel_negative_evidence": [
+    {
+      "id": "ninety_nine_gates_false_positive",
+      "video_id": "Gc9yUNVIwLc",
+      "click_through_rate_percent": 3.2,
+      "average_view_duration_sec": 368,
+      "lesson": "Lore, ranks, gates, and checklist completeness cannot replace an emotionally legible contradiction, an early choice, and causal movement."
+    },
+    {
+      "id": "goblin_queen_package_miss",
+      "video_id": "GE2z2MseN90",
+      "public_views_at_last_snapshot": 314,
+      "lesson": "A fantasy spouse noun and sexualized visual promise are not demand by themselves. The supernatural relationship must materially generate the progression, choices, and payoff."
+    }
+  ],
+  "own_channel_comment_findings": {
+    "method": "All available comments and replies were pulled across 61 uploads, then reviewed with a cited ChatGPT Web Pro dossier. Counts are conservative examples that met the coded pattern, not estimates of how common an opinion is among all viewers.",
+    "audience_trust": {
+      "minimum_comment_rows": 35,
+      "minimum_distinct_videos": 6,
+      "finding": "Viewers accept an initially wounded, loyal, or naive Joey, but strongly reject him learning the betrayal and then casually remaining passive, submissive, or repeatedly self-defeating.",
+      "source_rule": "Define decisive evidence, the required behavior update, an irreversible boundary, and a strategic-contact rule before prose. Do not erase Joey's human wound; make knowledge change conduct."
+    },
+    "causal_and_continuity": {
+      "minimum_specific_comment_rows": 12,
+      "minimum_distinct_videos": 8,
+      "finding": "Viewers notice domain-irrelevant conflicts, unexplained capabilities, inconsistent knowledge, broken prop or ownership state, and other causal discontinuities.",
+      "source_rule": "Track critical state changes and require every major movement to alter the established stakes, relationships, knowledge, resources, choices, or route to payoff. Spectacle alone does not earn a movement."
+    },
+    "repetition_and_payoff_delay": {
+      "minimum_comment_rows": 14,
+      "minimum_distinct_videos": 7,
+      "finding": "The complaint is repeated story function, filler, and delayed promised events rather than long runtime by itself.",
+      "source_rule": "Track questions through real answers, pay literal title promises at named movements, and judge long scenes by state change rather than duration alone."
+    },
+    "agency": {
+      "finding": "Systems remain part of the click appeal, but satisfaction depends on Joey applying leverage through judgment, receipts, tactics, and boundaries rather than obeying a system-authored life.",
+      "source_rule": "The system supplies leverage, information, options, or constraints. Joey owns goals, morality, tactics, and decisive action."
+    },
+    "supporting_character_balance": {
+      "finding": "Capable allies add drama and credibility, but can weaken the fantasy if they solve the central problem or eclipse Joey's decisions.",
+      "source_rule": "Give allies wants and useful skills while preserving Joey's decisive story ownership."
+    },
+    "closure": {
+      "minimum_severe_examples": 2,
+      "finding": "A small number of comments identify severe missing payoff or closure; these are low-frequency but high-cost satisfaction failures.",
+      "source_rule": "Bind every title promise, central viewer question, antagonist loss, final boundary, and emotional afterimage before drafting."
+    },
+    "production_context": {
+      "historical_audio_or_sfx_complaints": 15,
+      "tts_complaints": 7,
+      "visual_complaints": 8,
+      "interpretation": "These remain production QA evidence. Narrator-only audio and current TTS/visual contracts already address much of this class, so source development should not add redundant creative passes for it."
+    }
+  },
+  "decision_policy": {
+    "core_channel_lane": "Betrayal, rejection, or humiliation followed by one plain reversal engine remains the strongest own-channel prior.",
+    "challenger_lanes": [
+      "visible proof or status contradiction without romantic betrayal",
+      "direct singular mechanic with immediate proof",
+      "found-family, academy, craft, rescue, or profession-native progression"
+    ],
+    "portfolio_rule": "Do not call betrayal a universal niche law. Keep it as the core channel prior and test adjacent package modes deliberately, one controlled challenger at a time.",
+    "selection_rule": "Judge package demand and expected viewing separately. A high-click hypothesis is not automatically a strong longform script, and a high-AVD video that earned few impressions is not automatically a strong package.",
+    "failure_analogue_rule": "Every finalist must name one positive transfer hypothesis and one plausible failure analogue before approval.",
+    "learning_rule": "Do not rewrite the channel formula from one upload. Compare cohorts at 24 hours, 72 hours, 7 days, and 28 days, then update a versioned evidence snapshot."
+  }
+}

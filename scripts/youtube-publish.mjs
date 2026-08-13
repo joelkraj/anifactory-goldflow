@@ -11,6 +11,7 @@ import {
   YOUTUBE_PINNED_COMMENT_RECEIPT_SCHEMA,
   YOUTUBE_PUBLISH_MANIFEST_SCHEMA,
   YOUTUBE_THUMBNAIL_UPDATE_RECEIPT_SCHEMA,
+  YOUTUBE_THUMBNAIL_GENERATION_CONTRACT,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   listYoutubeThumbnailUpdateReceipts,
   validateYoutubeThumbnailUpdateReceipt,
@@ -20,6 +21,15 @@ import {
   youtubeEffectiveThumbnailState,
   youtubeTextSha256,
 } from "./lib/youtube-publish-contract.mjs";
+import {
+  YOUTUBE_NATIVE_AB_PLAN_SCHEMA,
+  YOUTUBE_NATIVE_AB_RECEIPT_SCHEMA,
+  validateYoutubeAbCandidates,
+  validateYoutubeNativeAbPlan,
+  validateYoutubeNativeAbReceipt,
+  youtubeAbPlanSha256,
+} from "./lib/youtube-ab-test-contract.mjs";
+import { createAnalyticsFollowupPlanForUpload } from "./youtube-analytics-followup.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const action = process.argv[2] ?? "";
@@ -183,6 +193,85 @@ async function approvePackaging() {
   }, null, 2));
 }
 
+async function approveNativeAbTest() {
+  const { episodeDir, episode } = await episodeContext();
+  if (!isTrue(flags.approve)) throw new Error("Native A/B approval requires --approve true.");
+  requiredFlag("candidate-file", flags["candidate-file"]);
+  requiredFlag("approved-by", flags["approved-by"]);
+  const inputs = await packagingInputs(episodeDir, episode);
+  const packageValidation = packagingValidation(inputs, { allowLegacyAdapter: true });
+  if (packageValidation.status !== "passed") {
+    throw new Error(`Approved packaging required before A/B approval: ${packageValidation.blockers.join(", ")}`);
+  }
+  const candidatePath = path.resolve(episodeDir, clean(flags["candidate-file"]));
+  const candidates = await readJson(candidatePath);
+  const candidateValidation = validateYoutubeAbCandidates(candidates);
+  if (candidateValidation.status !== "passed") {
+    console.log(JSON.stringify({ status: "blocked", blockers: candidateValidation.blockers }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  const variants = [];
+  for (const row of candidates.candidates) {
+    const thumbnailPath = path.resolve(episodeDir, clean(row.thumbnail_path));
+    if (!(await exists(thumbnailPath))) throw new Error(`A/B thumbnail missing: ${thumbnailPath}`);
+    const thumbnail = await thumbnailFileEvidence(thumbnailPath);
+    const provider = clean(row.provider) || YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.provider;
+    if (!YOUTUBE_THUMBNAIL_GENERATION_CONTRACT.allowed_providers.includes(provider)) {
+      throw new Error(`A/B variant ${row.id} uses unapproved thumbnail provider: ${provider}`);
+    }
+    variants.push({
+      id: clean(row.id),
+      title: clean(row.title),
+      title_sha256: youtubeTextSha256(row.title),
+      thumbnail_path: thumbnail.path,
+      thumbnail_sha256: thumbnail.sha256,
+      thumbnail_bytes: thumbnail.bytes,
+      thumbnail_width: thumbnail.width,
+      thumbnail_height: thumbnail.height,
+      thumbnail_format: thumbnail.format,
+      thumbnail_candidate_id: clean(row.thumbnail_candidate_id) || null,
+      provider,
+      hypothesis: clean(row.hypothesis),
+    });
+  }
+  const planPath = path.join(episodeDir, `youtube_native_ab_plan_${episode}.json`);
+  const packagingSpecSha256 = await sha256File(inputs.specPath);
+  const plan = {
+    schema: YOUTUBE_NATIVE_AB_PLAN_SCHEMA,
+    status: "approved",
+    episode,
+    test_type: clean(candidates.test_type),
+    baseline_variant_id: clean(candidates.baseline_variant_id),
+    variants,
+    candidate_source_path: candidatePath,
+    candidate_source_sha256: await sha256File(candidatePath),
+    packaging_spec_path: inputs.specPath,
+    packaging_spec_sha256: packagingSpecSha256,
+    approved_by: clean(flags["approved-by"]),
+    approved_at: new Date().toISOString(),
+    approval_note: clean(flags.note) || "Native YouTube package test variants approved.",
+  };
+  plan.plan_sha256 = youtubeAbPlanSha256(plan);
+  const validation = validateYoutubeNativeAbPlan(plan, {
+    packagingSpecSha256,
+    baselineTitle: inputs.spec.selected_title,
+    baselineThumbnailSha256: await sha256File(inputs.thumbnailPath),
+  });
+  if (validation.status !== "passed") {
+    console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  await writeJson(planPath, plan);
+  console.log(JSON.stringify({
+    status: "passed",
+    plan_path: planPath,
+    test_type: plan.test_type,
+    variant_ids: variants.map((row) => row.id),
+  }, null, 2));
+}
+
 async function prepareManifest() {
   const { episodeDir, identity, identityPath, episode } = await episodeContext();
   const inputs = await packagingInputs(episodeDir, episode);
@@ -209,12 +298,31 @@ async function prepareManifest() {
   }
 
   const selectedThumbnail = validation.selected_thumbnail_candidate;
+  const abPlanPath = path.join(episodeDir, `youtube_native_ab_plan_${episode}.json`);
+  const abPlan = await readJson(abPlanPath);
+  if (abPlan) {
+    const abValidation = validateYoutubeNativeAbPlan(abPlan, {
+      packagingSpecSha256: await sha256File(inputs.specPath),
+      baselineTitle: inputs.spec.selected_title,
+      baselineThumbnailSha256: await sha256File(inputs.thumbnailPath),
+    });
+    if (abValidation.status !== "passed") {
+      throw new Error(`Native A/B plan is stale or invalid: ${abValidation.blockers.join(", ")}`);
+    }
+    for (const row of abPlan.variants ?? []) {
+      const current = await sha256File(row.thumbnail_path).catch(() => null);
+      if (!current || current !== row.thumbnail_sha256) {
+        throw new Error(`Native A/B thumbnail is stale: ${row.thumbnail_path}`);
+      }
+    }
+  }
   const sourcePaths = [
     identityPath,
     finalQaPath,
     inputs.packagePath,
     inputs.specPath,
     inputs.thumbnailPath,
+    ...(abPlan ? [abPlanPath, ...abPlan.variants.map((row) => row.thumbnail_path)] : []),
   ];
   const sourceHashes = Object.fromEntries(await Promise.all(
     sourcePaths.map(async (sourcePath) => [sourcePath, await sha256File(sourcePath)]),
@@ -269,6 +377,17 @@ async function prepareManifest() {
       betrayal_choice: clean(inputs.spec.pinned_comment?.betrayal_choice),
     },
     publish_settings: inputs.spec.publish_settings,
+    native_ab_test: abPlan ? {
+      required: true,
+      plan_path: abPlanPath,
+      plan_sha256: sourceHashes[abPlanPath],
+      test_type: abPlan.test_type,
+      baseline_variant_id: abPlan.baseline_variant_id,
+      variants: abPlan.variants,
+    } : {
+      required: false,
+      reason: "No approved native A/B plan existed when the publish manifest was prepared.",
+    },
     studio_handoff: {
       url: "https://studio.youtube.com/",
       upload_private_first: true,
@@ -288,6 +407,56 @@ async function prepareManifest() {
     packaging_validation_warnings: validation.warnings,
     next_action: "Use the youtube-studio-publish skill to upload privately and record the verified result.",
   }, null, 2));
+}
+
+async function recordNativeAbTest() {
+  const { episodeDir, episode } = await episodeContext();
+  const planPath = path.join(episodeDir, `youtube_native_ab_plan_${episode}.json`);
+  const uploadReceiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
+  const [plan, uploadReceipt, planSha256, uploadReceiptSha256] = await Promise.all([
+    readJson(planPath),
+    readJson(uploadReceiptPath),
+    sha256File(planPath).catch(() => null),
+    sha256File(uploadReceiptPath).catch(() => null),
+  ]);
+  if (!plan || plan.schema !== YOUTUBE_NATIVE_AB_PLAN_SCHEMA) throw new Error(`Approved native A/B plan required: ${planPath}`);
+  if (!uploadReceipt || uploadReceipt.schema !== YOUTUBE_UPLOAD_RECEIPT_SCHEMA) throw new Error(`Passed upload receipt required: ${uploadReceiptPath}`);
+  for (const name of ["studio-url", "configured-variant-ids", "recorded-by"]) requiredFlag(name, flags[name]);
+  const receiptPath = path.join(episodeDir, `youtube_native_ab_receipt_${episode}.json`);
+  const receipt = {
+    schema: YOUTUBE_NATIVE_AB_RECEIPT_SCHEMA,
+    status: "passed",
+    episode,
+    plan_path: planPath,
+    plan_sha256: planSha256,
+    upload_receipt_path: uploadReceiptPath,
+    upload_receipt_sha256: uploadReceiptSha256,
+    video_id: uploadReceipt.video_id,
+    studio_url: clean(flags["studio-url"]),
+    native_experiment_id: clean(flags["experiment-id"]) || null,
+    experiment_state: clean(flags.state || "active").toLowerCase(),
+    configured_variant_ids: clean(flags["configured-variant-ids"]).split(",").map(clean).filter(Boolean),
+    field_verification: {
+      active_channel: isTrue(flags["channel-verified"]),
+      native_test: isTrue(flags["test-verified"]),
+    },
+    recorded_by: clean(flags["recorded-by"]),
+    recorded_at: new Date().toISOString(),
+    note: clean(flags.note) || null,
+  };
+  const validation = validateYoutubeNativeAbReceipt(receipt, {
+    plan,
+    planSha256,
+    uploadReceipt,
+    uploadReceiptSha256,
+  });
+  if (validation.status !== "passed") {
+    console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  await writeJsonExclusive(receiptPath, receipt);
+  console.log(JSON.stringify({ status: "passed", receipt_path: receiptPath, video_id: receipt.video_id }, null, 2));
 }
 
 async function recordUpload() {
@@ -354,12 +523,19 @@ async function recordUpload() {
   }
   receipt.blockers = [];
   await writeJson(receiptPath, receipt);
+  const analyticsFollowup = await createAnalyticsFollowupPlanForUpload({
+    episodeDir,
+    episode,
+    anchorAt: clean(flags["analytics-anchor-at"]) || null,
+  });
   console.log(JSON.stringify({
     status: receipt.status,
     receipt_path: receiptPath,
     video_id: receipt.video_id,
     visibility: receipt.visibility,
     blockers: receipt.blockers,
+    analytics_followup_plan_path: analyticsFollowup.planPath,
+    analytics_followup_status: analyticsFollowup.plan.status,
   }, null, 2));
 }
 
@@ -558,8 +734,10 @@ async function recordThumbnailUpdate() {
 
 async function main() {
   if (action === "approve-packaging") return approvePackaging();
+  if (action === "approve-ab-test") return approveNativeAbTest();
   if (action === "prepare") return prepareManifest();
   if (action === "record-upload") return recordUpload();
+  if (action === "record-ab-test") return recordNativeAbTest();
   if (action === "record-thumbnail-update") return recordThumbnailUpdate();
   if (action === "record-comment") return recordComment();
   throw new Error(`Unknown YouTube publishing action: ${action || "missing"}.`);

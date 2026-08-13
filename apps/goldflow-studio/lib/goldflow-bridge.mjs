@@ -7,6 +7,7 @@ import sharp from "sharp";
 import {
   completeWorkItem,
   createCodexWorkManifest,
+  deferWorkItem,
   failWorkItem,
   getCodexWorkStatus,
   heartbeatWorkItem,
@@ -24,6 +25,7 @@ import {
   safeSegment,
   writeJsonAtomic,
 } from "./util.mjs";
+import { findReferenceEcho } from "./image-pixel-contract.mjs";
 
 function runProcess(command, args, { cwd, env = {}, timeoutMs = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -52,12 +54,156 @@ function runProcess(command, args, { cwd, env = {}, timeoutMs = 60_000 } = {}) {
   });
 }
 
+const GOOGLE_FLOW_REFERENCE_BINDING_SCHEMA = "goldflow_google_flow_reference_binding_v1";
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+
+function googleFlowReferenceBindingError(message) {
+  return Object.assign(new Error(`Google Flow reference-binding receipt is invalid: ${message}`), {
+    code: "ui_contract_mismatch",
+    statusCode: 422,
+  });
+}
+
+function requireExactSha256(value, label) {
+  const sha256 = String(value ?? "");
+  if (!SHA256_PATTERN.test(sha256)) throw googleFlowReferenceBindingError(`${label} must be a lowercase SHA-256.`);
+  return sha256;
+}
+
+async function validateGoogleFlowEvidenceFile({ filePath, reportedSha256, downloadsRoot, label, kind }) {
+  if (typeof filePath !== "string" || !path.isAbsolute(filePath)) {
+    throw googleFlowReferenceBindingError(`${label} must be an absolute path under the worker downloads root.`);
+  }
+  let resolved;
+  try {
+    resolved = ensureInside(filePath, downloadsRoot, label);
+  } catch (error) {
+    throw googleFlowReferenceBindingError(error.message);
+  }
+  const stat = await fs.stat(resolved).catch(() => null);
+  if (!stat?.isFile()) throw googleFlowReferenceBindingError(`${label} does not identify an existing file.`);
+  try {
+    const [realRoot, realFile] = await Promise.all([fs.realpath(downloadsRoot), fs.realpath(resolved)]);
+    ensureInside(realFile, realRoot, label);
+  } catch (error) {
+    throw googleFlowReferenceBindingError(`${label} does not resolve to a file under the worker downloads root: ${error.message}`);
+  }
+  const expectedSha256 = requireExactSha256(reportedSha256, `${label} SHA-256`);
+  const currentSha256 = await sha256File(resolved);
+  if (currentSha256 !== expectedSha256) {
+    throw googleFlowReferenceBindingError(`${label} SHA-256 does not match the evidence file.`);
+  }
+  if (kind === "json") {
+    try {
+      JSON.parse(await fs.readFile(resolved, "utf8"));
+    } catch {
+      throw googleFlowReferenceBindingError(`${label} must contain valid JSON.`);
+    }
+  } else if (kind === "image") {
+    try {
+      const metadata = await sharp(resolved, { failOn: "error" }).metadata();
+      if (!metadata.width || !metadata.height) throw new Error("missing dimensions");
+    } catch {
+      throw googleFlowReferenceBindingError(`${label} must contain a readable screenshot image.`);
+    }
+  }
+  return { path: resolved, sha256: currentSha256 };
+}
+
+export async function validateGoogleFlowReferenceBinding({ uiContract, orderedReferences = [], downloadsRoot }) {
+  const binding = uiContract?.reference_binding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+    throw googleFlowReferenceBindingError("uiContract.reference_binding is required.");
+  }
+  if (binding.schema !== GOOGLE_FLOW_REFERENCE_BINDING_SCHEMA) {
+    throw googleFlowReferenceBindingError(`schema must be ${GOOGLE_FLOW_REFERENCE_BINDING_SCHEMA}.`);
+  }
+  if (binding.status !== "verified") throw googleFlowReferenceBindingError('status must be "verified".');
+  if (binding.add_to_prompt_clicked !== true) throw googleFlowReferenceBindingError("add_to_prompt_clicked must be true.");
+  if (binding.no_pending_uploads !== true) throw googleFlowReferenceBindingError("no_pending_uploads must be true.");
+  if (binding.prompt_text_verified !== true) throw googleFlowReferenceBindingError("prompt_text_verified must be true.");
+  if (typeof binding.verified_at !== "string" || !Number.isFinite(Date.parse(binding.verified_at))) {
+    throw googleFlowReferenceBindingError("verified_at must be an ISO-compatible timestamp.");
+  }
+
+  const expected = Array.isArray(orderedReferences) ? orderedReferences : [];
+  if (!Number.isInteger(binding.expected_count) || binding.expected_count !== expected.length) {
+    throw googleFlowReferenceBindingError(`expected_count must equal assignment count ${expected.length}.`);
+  }
+  if (!Number.isInteger(binding.observed_count) || binding.observed_count !== expected.length) {
+    throw googleFlowReferenceBindingError(`observed_count must equal assignment count ${expected.length}.`);
+  }
+  if (!Array.isArray(binding.ordered_references) || binding.ordered_references.length !== expected.length) {
+    throw googleFlowReferenceBindingError(`ordered_references must contain exactly ${expected.length} row(s).`);
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    const assigned = expected[index];
+    const observed = binding.ordered_references[index];
+    if (!observed || typeof observed !== "object" || Array.isArray(observed)) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}] must be an object.`);
+    }
+    const expectedSlot = Number(assigned.slot ?? index + 1);
+    if (observed.slot !== expectedSlot) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}].slot must equal assignment slot ${expectedSlot}.`);
+    }
+    if (observed.ref_id !== assigned.ref_id) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}].ref_id does not match assignment order.`);
+    }
+    const sourceSha256 = requireExactSha256(observed.source_sha256, `ordered_references[${index}].source_sha256`);
+    if (sourceSha256 !== assigned.sha256) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}].source_sha256 does not match the assigned reference.`);
+    }
+    if (typeof observed.upload_filename !== "string" || !observed.upload_filename.trim()) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}].upload_filename is required.`);
+    }
+    if (typeof observed.media_id !== "string" || !observed.media_id.trim()) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}].media_id is required.`);
+    }
+    if (typeof observed.media_url !== "string" || !observed.media_url.trim()) {
+      throw googleFlowReferenceBindingError(`ordered_references[${index}].media_url is required.`);
+    }
+  }
+
+  const evidence = binding.evidence;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    throw googleFlowReferenceBindingError("evidence is required.");
+  }
+  const files = await Promise.all([
+    validateGoogleFlowEvidenceFile({
+      filePath: evidence.receipt_path,
+      reportedSha256: evidence.receipt_sha256,
+      downloadsRoot,
+      label: "evidence.receipt_path",
+      kind: "json",
+    }),
+    validateGoogleFlowEvidenceFile({
+      filePath: evidence.full_screenshot_path,
+      reportedSha256: evidence.full_screenshot_sha256,
+      downloadsRoot,
+      label: "evidence.full_screenshot_path",
+      kind: "image",
+    }),
+    validateGoogleFlowEvidenceFile({
+      filePath: evidence.composer_screenshot_path,
+      reportedSha256: evidence.composer_screenshot_sha256,
+      downloadsRoot,
+      label: "evidence.composer_screenshot_path",
+      kind: "image",
+    }),
+  ]);
+  if (new Set(files.map((row) => row.path)).size !== files.length) {
+    throw googleFlowReferenceBindingError("receipt, full screenshot, and composer screenshot evidence must be distinct files.");
+  }
+  return binding;
+}
+
 export class GoldflowBridge {
-  constructor({ repoRoot, dataRoot, stateDir, downloadsRoot } = {}) {
+  constructor({ repoRoot, dataRoot, stateDir, downloadsRoot, browserProvider = "chatgpt" } = {}) {
     this.repoRoot = path.resolve(repoRoot);
     this.dataRoot = path.resolve(dataRoot);
     this.stateDir = path.resolve(stateDir);
     this.downloadsRoot = path.resolve(downloadsRoot);
+    this.browserProvider = String(browserProvider);
     this.manifestsPath = path.join(this.stateDir, "active-image-manifests.json");
     this.queueLock = Promise.resolve();
   }
@@ -68,7 +214,7 @@ export class GoldflowBridge {
       fs.mkdir(this.downloadsRoot, { recursive: true }),
     ]);
     if (!(await pathExists(this.manifestsPath))) {
-      await writeJsonAtomic(this.manifestsPath, { schema: "goldflow_studio_active_manifests_v1", manifests: [] });
+      await writeJsonAtomic(this.manifestsPath, { schema: "goldflow_studio_active_manifests_v2", manifests: [] });
     }
     return this;
   }
@@ -85,6 +231,31 @@ export class GoldflowBridge {
     }
   }
 
+  async withActiveManifestLock(callback) {
+    const lockPath = `${this.manifestsPath}.lock`;
+    const deadline = Date.now() + 10_000;
+    while (true) {
+      try {
+        await fs.mkdir(lockPath);
+        break;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const stat = await fs.stat(lockPath).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > 30_000) {
+          await fs.rm(lockPath, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() >= deadline) throw new Error("Timed out waiting for the active-manifest registry lock.");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    try {
+      return await callback();
+    } finally {
+      await fs.rm(lockPath, { recursive: true, force: true });
+    }
+  }
+
   episodePath(value) {
     if (!value) throw new Error("episodeDir is required.");
     return ensureInside(value, this.dataRoot, "episodeDir");
@@ -95,31 +266,58 @@ export class GoldflowBridge {
     return ensureInside(value, this.dataRoot, "manifestPath");
   }
 
-  async activeManifestPaths() {
+  async allActiveManifestEntries() {
     const state = await readJson(this.manifestsPath, { manifests: [] });
-    return [...new Set((state?.manifests ?? []).map((value) => this.manifestPath(value)))];
+    const entries = (state?.manifests ?? []).map((value) => typeof value === "string"
+      ? { manifest_path: value, browser_provider: "chatgpt" }
+      : value);
+    const unique = new Map();
+    for (const entry of entries) {
+      if (!entry?.manifest_path) continue;
+      const browserProvider = String(entry.browser_provider ?? "chatgpt");
+      const resolved = this.manifestPath(entry.manifest_path);
+      unique.set(`${browserProvider}:${resolved}`, { manifest_path: resolved, browser_provider: browserProvider });
+    }
+    return [...unique.values()];
+  }
+
+  async activeManifestEntries() {
+    return (await this.allActiveManifestEntries())
+      .filter((entry) => entry.browser_provider === this.browserProvider);
+  }
+
+  async activeManifestPaths() {
+    return (await this.activeManifestEntries()).map((entry) => entry.manifest_path);
   }
 
   async activateManifest(manifestPath) {
     const resolved = this.manifestPath(manifestPath);
     await loadWorkManifest(resolved);
-    const manifests = await this.activeManifestPaths();
-    if (!manifests.includes(resolved)) manifests.push(resolved);
-    await writeJsonAtomic(this.manifestsPath, {
-      schema: "goldflow_studio_active_manifests_v1",
-      manifests,
-      updated_at: nowIso(),
+    await this.withActiveManifestLock(async () => {
+      const manifests = await this.allActiveManifestEntries();
+      if (!manifests.some((entry) => entry.manifest_path === resolved && entry.browser_provider === this.browserProvider)) {
+        manifests.push({ manifest_path: resolved, browser_provider: this.browserProvider });
+      }
+      await writeJsonAtomic(this.manifestsPath, {
+        schema: "goldflow_studio_active_manifests_v2",
+        manifests,
+        updated_at: nowIso(),
+      });
     });
     return this.imageManifestSummary(resolved);
   }
 
   async deactivateManifest(manifestPath) {
     const resolved = this.manifestPath(manifestPath);
-    const manifests = (await this.activeManifestPaths()).filter((value) => value !== resolved);
-    await writeJsonAtomic(this.manifestsPath, {
-      schema: "goldflow_studio_active_manifests_v1",
-      manifests,
-      updated_at: nowIso(),
+    await this.withActiveManifestLock(async () => {
+      const manifests = (await this.allActiveManifestEntries()).filter((entry) => !(
+        entry.manifest_path === resolved && entry.browser_provider === this.browserProvider
+      ));
+      await writeJsonAtomic(this.manifestsPath, {
+        schema: "goldflow_studio_active_manifests_v2",
+        manifests,
+        updated_at: nowIso(),
+      });
     });
     return { status: "deactivated", manifest_path: resolved };
   }
@@ -130,6 +328,18 @@ export class GoldflowBridge {
     const promptsPath = ensureInside(input.promptsPath ?? path.join(episodeDir, "section_image_prompts_hardened.json"), episodeDir, "promptsPath");
     const referencePlanPath = ensureInside(input.referencePlanPath ?? path.join(episodeDir, "visual_reference_plan.json"), episodeDir, "referencePlanPath");
     const characterStateRefsPath = ensureInside(input.characterStateRefsPath ?? path.join(episodeDir, "character_state_refs.json"), episodeDir, "characterStateRefsPath");
+    const concurrencyCeiling = this.browserProvider === "google-flow" ? 20 : 5;
+    const maxConcurrency = Math.min(concurrencyCeiling, Math.max(1, Number(input.maxConcurrency ?? input.concurrency ?? 5)));
+    if (input.concurrencyProof === true && this.browserProvider !== "google-flow") {
+      throw new Error("The verification-wave bypass is restricted to explicit Google Flow concurrency proofs.");
+    }
+    const verificationGateBypass = input.concurrencyProof === true
+      ? {
+          kind: "prior_health_proof",
+          evidencePath: ensureInside(input.priorHealthProofPath, this.dataRoot, "priorHealthProofPath"),
+          evidenceSha256: String(input.priorHealthProofSha256 ?? ""),
+        }
+      : null;
     const result = await createCodexWorkManifest({
       mode,
       episodeDir,
@@ -140,8 +350,9 @@ export class GoldflowBridge {
       referenceIds: parseIdScope(input.referenceIds),
       maxAttempts: 1,
       leaseSeconds: Number(input.leaseSeconds ?? 1800),
-      recommendedConcurrency: Math.min(5, Math.max(1, Number(input.concurrency ?? 3))),
-      maxConcurrency: 5,
+      recommendedConcurrency: Math.min(maxConcurrency, Math.max(1, Number(input.concurrency ?? 3))),
+      maxConcurrency,
+      verificationGateBypass,
     });
     await this.activateManifest(result.manifest.manifest_path);
     return {
@@ -183,7 +394,12 @@ export class GoldflowBridge {
   async leaseImage(workerId) {
     return this.withQueueLock(async () => {
       for (const manifestPath of await this.activeManifestPaths()) {
-        const result = await leaseNextWorkItem({ manifestPath, workerId, leaseSeconds: 1800 });
+        const result = await leaseNextWorkItem({
+          manifestPath,
+          workerId,
+          leaseSeconds: 1800,
+          browserProvider: this.browserProvider,
+        });
         if (result.status !== "leased") continue;
         const assignment = result.assignment;
         return {
@@ -241,15 +457,58 @@ export class GoldflowBridge {
     return heartbeatWorkItem({ manifestPath, assetId, leaseToken, workerId, leaseSeconds: 1800 });
   }
 
-  async completeImage({ manifestId, assetId, leaseToken, workerId, downloadPath, sourceUrl = null, conversationUrl = null, uiContract = null }) {
+  async completeImage({ manifestId, assetId, leaseToken, workerId, downloadPath, sourceUrl = null, conversationUrl = null, uiContract = null, browserProvider = null }) {
+    if (browserProvider && browserProvider !== this.browserProvider) {
+      throw new Error(`Worker reported ${browserProvider}, but this manifest queue is bound to ${this.browserProvider}.`);
+    }
+    const receiptProvider = this.browserProvider;
     const { manifestPath } = await this.manifestById(manifestId);
     const { assignment } = await this.assignmentFor({ manifestId, assetId, leaseToken, workerId });
+    if (receiptProvider === "google-flow") {
+      await validateGoogleFlowReferenceBinding({
+        uiContract,
+        orderedReferences: assignment.item.ordered_references ?? [],
+        downloadsRoot: this.downloadsRoot,
+      });
+    }
     const sourcePath = ensureInside(downloadPath, this.downloadsRoot, "downloadPath");
     if (!(await pathExists(sourcePath))) throw new Error(`Downloaded image does not exist: ${sourcePath}.`);
+    const referenceEcho = await findReferenceEcho(sourcePath, (assignment.item.ordered_references ?? []).map((reference) => ({
+      slot: reference.slot,
+      ref_id: reference.ref_id,
+      path: reference.path,
+    })));
+    if (referenceEcho) {
+      const rejection = {
+        schema: "goldflow_provider_reference_echo_rejection_v1",
+        status: "rejected",
+        code: "provider_reference_echo",
+        browser_provider: receiptProvider,
+        manifest_id: manifestId,
+        asset_id: assetId,
+        prompt_sha256: assignment.item.prompt_sha256,
+        downloaded_source_path: sourcePath,
+        downloaded_source_sha256: await sha256File(sourcePath),
+        matched_reference: referenceEcho,
+        rejected_at: nowIso(),
+      };
+      await writeJsonAtomic(path.join(assignment.attempt_dir, "provider_reference_echo_rejection.json"), rejection);
+      const error = new Error(`Provider output for ${assetId} matches ordered reference ${referenceEcho.ref_id ?? referenceEcho.slot} (pixel MAE ${referenceEcho.mean_absolute_difference.toFixed(4)}).`);
+      error.code = "provider_reference_echo";
+      error.statusCode = 422;
+      throw error;
+    }
     await sharp(sourcePath, { failOn: "error" }).png().toFile(assignment.expected_output_path);
     const outputSha = await sha256File(assignment.expected_output_path);
-    await writeJsonAtomic(path.join(assignment.attempt_dir, "chatgpt_web_receipt.json"), {
-      schema: "goldflow_chatgpt_web_image_receipt_v1",
+    const receiptSlug = receiptProvider === "google-flow"
+      ? "google_flow"
+      : receiptProvider === "google-gemini" ? "google_gemini" : "chatgpt_web";
+    const receiptSchema = receiptProvider === "google-flow"
+      ? "goldflow_google_flow_image_receipt_v1"
+      : receiptProvider === "google-gemini" ? "goldflow_google_gemini_image_receipt_v1" : "goldflow_chatgpt_web_image_receipt_v1";
+    await writeJsonAtomic(path.join(assignment.attempt_dir, `${receiptSlug}_receipt.json`), {
+      schema: receiptSchema,
+      browser_provider: receiptProvider,
       status: "downloaded",
       manifest_id: manifestId,
       asset_id: assetId,
@@ -268,6 +527,7 @@ export class GoldflowBridge {
       assetId,
       leaseToken,
       workerId,
+      browserProvider: receiptProvider,
       sourcePath: assignment.expected_output_path,
       reportedSha256: outputSha,
     });
@@ -275,7 +535,19 @@ export class GoldflowBridge {
 
   async failImage({ manifestId, assetId, leaseToken, workerId, error }) {
     const { manifestPath } = await this.manifestById(manifestId);
-    return failWorkItem({ manifestPath, assetId, leaseToken, workerId, error });
+    return failWorkItem({ manifestPath, assetId, leaseToken, workerId, browserProvider: this.browserProvider, error });
+  }
+
+  async deferImage({ manifestId, assetId, leaseToken, workerId, reason }) {
+    const { manifestPath } = await this.manifestById(manifestId);
+    return deferWorkItem({
+      manifestPath,
+      assetId,
+      leaseToken,
+      workerId,
+      browserProvider: this.browserProvider,
+      reason,
+    });
   }
 
   async runStatus(episodeDir) {

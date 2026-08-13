@@ -30,6 +30,7 @@ import {
   routedProviderForPrompt,
   routedProviderForReference,
 } from "./lib/image-provider-routing.mjs";
+import { HYBRID_WEB_FLOW_PROVIDER } from "./lib/image-provider-policy.mjs";
 import { stripEmbeddedProviderExclusionPayloadSyntax } from "./lib/prompt-payload-sanitize.mjs";
 import { namedCharacterDuplicationFindings } from "./lib/prompt-prose-findings.mjs";
 import {
@@ -41,6 +42,7 @@ import {
   parseCodexVersion,
 } from "./lib/codex-cli-runner.mjs";
 import {
+  DEFAULT_PLANNING_ROOM_EFFORT_POLICY,
   DEFAULT_WEB_PLANNING_EFFORT_POLICY,
   plannerConcurrencyForIdentity,
   planningProviderForIdentity,
@@ -160,15 +162,20 @@ import {
 } from "./modelslab-image-helper.mjs";
 import {
   activeStateConstraintFindingsForTests,
+  adaptivePromptChunkLimitsForTests,
   adaptivePromptChunksForTests,
   editorialReuseCandidatesForTests,
   enforceEditorialReusePolicyForTests,
+  extractCompletePromptPrefixForTests,
+  isSharedPlannerCooldownErrorForTests,
   localBeatFidelityFindingsForTests,
+  mapWithConcurrencyForTests,
   normalizePromptPacketForTests,
   relevantReferenceTargetsForTests,
   retimeExistingPromptsForTests,
   visualUnitRiskAssessmentForTests,
   visualPromptCodexCacheEnabledForTests,
+  visualPromptConcurrencyForEffortForTests,
 } from "./visual-plan.mjs";
 import {
   dropUnknownReferenceSceneScopesForTests,
@@ -253,6 +260,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "./narration-tts-episode.mjs";
 import {
+  hybridDeadletteredAssetIdsForTests,
   qwenLiamBoundaryContractFindingsForTests,
   runIdentityPlanningCompleteForTests,
   runIdentityTtsCompleteForTests,
@@ -268,10 +276,19 @@ import {
 import {
   combineWavefrontPlansForTests,
   dedupeIncrementalAcceptedImagesForTests,
+  exactPromptRecoveryAllowedForTests,
+  plannerTokensWithWavefrontOverridesForTests,
   stableMotionPrefetchCandidatesForTests,
   shouldFlushWavefrontBatchForTests,
+  wavefrontCompletionPartitionForTests,
 } from "./run-visual-wavefront.mjs";
+import { buildStagedSceneImportInvocation } from "./codex-image-import-staged.mjs";
 import {
+  findSourceCompatibleHybridCompletions,
+  findSourceCompatibleHybridDeadletters,
+} from "./hybrid-browser-image-pool.mjs";
+import {
+  codexWorkSourceRowSha256,
   completeWorkItem,
   createCodexWorkManifest,
   getCodexWorkStatus,
@@ -368,8 +385,10 @@ function testAuthoritativeStageRegistry() {
   assert.equal(commandStageFor("imagegen", "codex-work", { "references-only": "true" }), "reference_generation");
   assert.equal(commandStageFor("imagegen", "codex-work", { "qa-recovery": "true" }), "image_output_qa");
   assert.equal(commandStageFor("visual", "approve-parallax"), "parallax_asset_approval");
+  assert.equal(commandStageFor("visual", "generated-motion"), "generated_video_motion");
   assert.equal(commandStageFor("visual", "ltx-video"), "generated_video_motion");
   assert.equal(commandStageFor("visual", "animation-plan"), "animation_direction_plan");
+  assert.equal(commandStageFor("visual", "approve-generated-motion"), "generated_video_motion_approval");
   assert.equal(commandStageFor("visual", "approve-ltx-video"), "generated_video_motion_approval");
   assert.equal(stageChecklistFor({ ltx_video_policy: "disabled" }).find((row) => row.stage === "generated_video_motion")?.status, "skipped_with_waiver");
   assert.equal(stageChecklistFor({ animation_policy: "disabled" }).find((row) => row.stage === "animation_direction_plan")?.status, "skipped_with_waiver");
@@ -1333,6 +1352,32 @@ function testScopedOnlyPlannerRerunPolicy() {
 }
 
 function testVisualWavefrontBatchPolicy() {
+  assert.equal(exactPromptRecoveryAllowedForTests({
+    current_stage: "visual_prompt_plan",
+    current_stage_state: "blocked",
+  }, {
+    "workflow-bypass": "true",
+    "beat-ids": "beat_1,beat_2",
+  }), true);
+  assert.equal(exactPromptRecoveryAllowedForTests({
+    current_stage: "visual_prompt_plan",
+    current_stage_state: "blocked",
+  }, {
+    "workflow-bypass": "true",
+  }), false);
+  assert.equal(exactPromptRecoveryAllowedForTests({
+    current_stage: "visual_prompt_plan",
+    current_stage_state: "blocked",
+  }, {
+    "beat-ids": "beat_1,beat_2",
+  }), false);
+  assert.deepEqual(
+    plannerTokensWithWavefrontOverridesForTests(
+      ["node", "bin/goldflow.mjs", "visual", "plan", "--cut-ids", "old", "--visual-chunk-concurrency", "10"],
+      { "beat-ids": "beat_1,beat_2", "visual-chunk-concurrency": "1", "reasoning-effort": "medium", "workflow-bypass": "true" },
+    ),
+    ["node", "bin/goldflow.mjs", "visual", "plan", "--beat-ids", "beat_1,beat_2", "--reasoning-effort", "medium", "--visual-chunk-concurrency", "1", "--workflow-bypass", "true"],
+  );
   assert.equal(shouldFlushWavefrontBatchForTests({
     pendingCutCount: 14,
     minCuts: 15,
@@ -1366,6 +1411,64 @@ function testVisualWavefrontBatchPolicy() {
     },
   });
   assert.deepEqual(combined.prompts.map((prompt) => prompt.image_id), ["cut_001", "cut_002"]);
+  const hybridCombined = combineWavefrontPlansForTests([
+    { source_script_hash: "hash", prompts: [{ image_id: "hybrid_cut_001" }], wavefront: { chunk_id: "hybrid_chunk_001" } },
+  ], {
+    identity: {
+      channel: "test",
+      series_slug: "series",
+      week: "week",
+      episode: "ep_01",
+      image_provider: HYBRID_WEB_FLOW_PROVIDER,
+    },
+  });
+  assert.equal(hybridCombined.image_provider, HYBRID_WEB_FLOW_PROVIDER, "wavefront batches must retain the hybrid provider lock for provider-bound hardening and dispatch");
+  assert.equal(normalizeImageProvider(hybridCombined.image_provider), HYBRID_WEB_FLOW_PROVIDER);
+  const importInvocation = {
+    channel: "test",
+    series: "series",
+    week: "week",
+    episode: "ep_01",
+    promptPath: "/tmp/wavefront/prompts.json",
+    imageId: "hybrid_cut_001",
+    sourcePath: "/tmp/wavefront/hybrid_cut_001.png",
+    reportPath: "/tmp/wavefront/imagegen.json",
+    cutExecutionLedgerPath: "/tmp/wavefront/cut_execution_ledger.json",
+  };
+  const normalImportArgs = buildStagedSceneImportInvocation({
+    ...importInvocation,
+    wavefrontPrefetch: false,
+  });
+  assert.equal(normalImportArgs[0], path.resolve("bin/goldflow.mjs"));
+  assert.deepEqual(normalImportArgs.slice(1, 3), ["imagegen", "import-codex"]);
+  const prefetchImportArgs = buildStagedSceneImportInvocation({
+    ...importInvocation,
+    wavefrontPrefetch: true,
+  });
+  assert.equal(prefetchImportArgs[0], path.resolve("scripts/codex-image-manual-import.mjs"));
+  assert.equal(prefetchImportArgs.includes("imagegen"), false);
+  assert.equal(prefetchImportArgs.includes("import-codex"), false, "wavefront prefetch must not enter the stage-recording Goldflow wrapper");
+  const providerBatchImportArgs = buildStagedSceneImportInvocation({
+    ...importInvocation,
+    wavefrontPrefetch: false,
+    providerBatchImport: true,
+  });
+  assert.equal(providerBatchImportArgs[0], path.resolve("scripts/codex-image-manual-import.mjs"));
+  assert.equal(providerBatchImportArgs.includes("imagegen"), false);
+  assert.equal(providerBatchImportArgs.includes("import-codex"), false, "an outer provider batch must own the only image-generation stage event");
+  assert.deepEqual(wavefrontCompletionPartitionForTests(
+    [{ image_id: "hybrid_cut_001" }, { image_id: "hybrid_cut_002" }, { image_id: "hybrid_cut_003" }],
+    {
+      status: "partial",
+      results: [
+        { image_id: "hybrid_cut_001", image_path: "/tmp/one.png" },
+        { image_id: "hybrid_cut_003", image_path: "/tmp/three.png" },
+      ],
+    },
+  ), {
+    completed_cut_ids: ["hybrid_cut_001", "hybrid_cut_003"],
+    deferred_cut_ids: ["hybrid_cut_002"],
+  }, "partial hybrid batches must preserve completed cuts for incremental QA and defer only failed IDs");
   assert.throws(() => combineWavefrontPlansForTests([
     { prompts: [{ image_id: "cut_001" }] },
     { prompts: [{ image_id: "cut_001" }] },
@@ -1444,7 +1547,7 @@ function testRunIdentityV2Policies() {
   assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
   assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v1");
   assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v1");
-  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 8);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 11);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.parallel_audio_semantic, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.visual_wavefront_prefetch, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_image_qa, true);
@@ -1625,6 +1728,10 @@ function testGuardedRunAdvancePolicies() {
   );
   assert.deepEqual(autoAdvanceDecisionForTests("image_generation", "missing", { allowPlannerSpend: true }), { executable: false, reason: "media_spend_not_approved" });
   assert.equal(autoAdvanceDecisionForTests("image_generation", "missing", { allowMediaSpend: true }).executable, true);
+  assert.deepEqual(
+    autoAdvanceDecisionForTests("image_generation", "failed", { allowMediaSpend: true }),
+    { executable: false, reason: "stage_blocker_triage_and_scoped_recovery_required" },
+  );
   assert.deepEqual(autoAdvanceDecisionForTests("image_output_qa", "needs_manual_review", {}), { executable: false, reason: "risk_decisions_required" });
   assert.equal(autoAdvanceDecisionForTests("image_output_qa", "missing", {}).executable, true);
   assert.deepEqual(autoAdvanceDecisionForTests("visual_beat_plan", "missing", { allowPlannerSpend: true }), { executable: false, reason: "approval_required" });
@@ -1637,6 +1744,11 @@ function testGuardedRunAdvancePolicies() {
     "/tmp/episode",
   );
   assert.deepEqual(tokens?.slice(1), ["visual", "harden", "--episode-dir", "/tmp/episode", "--prompts", "/tmp/episode/section_image_prompts.json"]);
+  const wavefrontTokens = advanceCommandTokensForTests(
+    "node bin/goldflow.mjs run visual-wavefront --episode-dir <episode-dir> --min-cuts 15 --max-wait-ms 5000",
+    "/tmp/episode",
+  );
+  assert.deepEqual(wavefrontTokens?.slice(1), ["run", "visual-wavefront", "--episode-dir", "/tmp/episode", "--min-cuts", "15", "--max-wait-ms", "5000"]);
   assert.equal(advanceCommandTokensForTests("Stage images; then run something", "/tmp/episode"), null);
 }
 
@@ -4208,9 +4320,14 @@ function testDirectedMotionAndFullTimelineTransitions() {
       background_sha256: depthAssetHash,
       foreground_path: "/tmp/depth-foreground.png",
       foreground_sha256: depthAssetHash,
+      local_separation_evidence: {
+        foreground_centroid: { x: 0.61, y: 0.44 },
+      },
     },
   });
   assert.equal(noticeable.occlusion_contract, "foreground_cover");
+  assert.deepEqual(noticeable.foreground_keyframes[0].anchor, { x: 0.61, y: 0.44 });
+  assert.equal(noticeable.foreground_keyframes[0].scale > noticeable.background_keyframes[0].scale, true);
   const finalDepthSeparation = noticeable.foreground_keyframes.at(-1).scale - noticeable.background_keyframes.at(-1).scale;
   const backgroundTravel = noticeable.background_keyframes[0].scale - noticeable.background_keyframes.at(-1).scale;
   assert.equal(finalDepthSeparation >= 0.05 && finalDepthSeparation <= 0.08, true);
@@ -4601,11 +4718,18 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   );
   assert.equal(identity.production_profile, "fast_premium_v1");
-  assert.equal(identity.planning_provider, "chatgpt_web");
-  assert.equal(identity.planning_effort_policy, DEFAULT_WEB_PLANNING_EFFORT_POLICY);
-  assert.equal(identity.provider_locks.planning_provider, "chatgpt_web");
-  assert.equal(identity.provider_locks.planning_model, "gpt-5.6-sol");
-  assert.equal(identity.provider_locks.planning_effort_policy, DEFAULT_WEB_PLANNING_EFFORT_POLICY);
+  assert.equal(identity.planning_provider, "planning_room");
+  assert.equal(identity.planning_effort_policy, DEFAULT_PLANNING_ROOM_EFFORT_POLICY);
+  assert.equal(identity.provider_locks.planning_provider, "planning_room");
+  assert.equal(identity.provider_locks.planning_model, "stage_routed");
+  assert.equal(identity.provider_locks.planning_effort_policy, DEFAULT_PLANNING_ROOM_EFFORT_POLICY);
+  assert.equal(identity.planning_room.schema, "goldflow_planning_room_v2");
+  assert.equal(identity.planning_room.deterministic_local_reconciliation_provider, "codex_cli");
+  assert.equal(identity.planning_room.stage_routes.structured_planning[0], "codex_cli");
+  assert.deepEqual(identity.planning_room.structured_pool.providers, {
+    codex_cli: { concurrency: 8 },
+    antigravity_cli: { concurrency: 3 },
+  });
   assert.equal(identity.provider_locks.planning_default_reasoning_effort, "high");
   assert.equal(identity.model_versions.planning_reasoning_effort, "high");
   assert.equal(runIdentityPlanningCompleteForTests(identity).done, true);
@@ -4616,12 +4740,14 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     runIdentityPlanningCompleteForTests(incompleteWebPlanningIdentity).evidence,
     /provider_locks\.planning_default_reasoning_effort/,
   );
-  assert.equal(planningProviderForIdentity(identity), "chatgpt_web");
+  assert.equal(planningProviderForIdentity(identity), "planning_room");
   assert.equal(identity.production_profile_config.target_wall_clock_minutes, 180);
-  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 11);
+  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 11);
+  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 11);
+  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 11);
+  assert.equal(identity.production_profile_config.planner.codex_cli_structured_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.antigravity_cli_structured_concurrency, 3);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_semantic_concurrency, 10);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_visual_chunk_concurrency, 10);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_deep_text_concurrency, 1);
@@ -4632,6 +4758,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_profile_config.media.qwen_tts_batch_size, 4);
   assert.equal(identity.production_profile_config.media.chatgpt_web_reference_concurrency, 3);
   assert.equal(identity.production_profile_config.media.chatgpt_web_image_concurrency, 3);
+  assert.equal(identity.production_profile_config.media.google_flow_image_concurrency, 5);
+  assert.equal(identity.production_profile_config.media.google_gemini_image_concurrency, 3);
+  assert.equal(identity.production_profile_config.media.federated_web_image_concurrency, 11);
   assert.equal(identity.production_profile_config.orchestration.chatgpt_web_browser_host_concurrency, 10);
   assert.deepEqual(
     identity.production_profile_config.audio.local_whisper_timing,
@@ -4728,7 +4857,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(typeof identity.git.commit, "string");
   assert.equal(identity.git.commit.length, 40);
   assert.equal(identity.stage_registry_version.length > 0, true);
-  assert.equal(identity.model_versions.planning_model, "gpt-5.6-sol");
+  assert.equal(identity.model_versions.planning_model, "stage_routed");
+  assert.equal(identity.provider_locks.planning_provider_models.chatgpt_web, "gpt-5.6-sol");
+  assert.equal(identity.provider_locks.planning_provider_models.codex_cli, "gpt-5.6-sol");
   assert.equal(identity.model_versions.tts_model, QWEN_JOEL_PRIMARY_LOCK.model_id);
   assert.equal(identity.model_versions.tts_model_revision, QWEN_JOEL_PRIMARY_LOCK.model_revision);
   assert.equal(identity.model_versions.fallback_tts_model, null);
@@ -4749,15 +4880,15 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     buildStageCommand("local_whisper_word_timing", identity),
     /--engine faster_whisper --model small\.en --device cpu --compute-type int8_float32 --omp-num-threads 12 --cpu-threads 0/,
   );
-  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 10\b/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 10\b/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 11\b/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 11\b/);
   const chatGptWebImageIdentity = structuredClone(identity);
   chatGptWebImageIdentity.image_provider = "chatgpt_web_gpt_image";
-  assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 10\b/);
+  assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 11\b/);
   assert.match(buildStageCommand("reference_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--concurrency 3\b/);
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
-  assert.equal(plannerConcurrencyForIdentity(chatGptWebImageIdentity, 15, { visualPromptWavefront: true }), 10);
+  assert.equal(plannerConcurrencyForIdentity(chatGptWebImageIdentity, 15, { visualPromptWavefront: true }), 15);
   const legacyPlanningIdentity = structuredClone(identity);
   delete legacyPlanningIdentity.planning_provider;
   delete legacyPlanningIdentity.planning_effort_policy;
@@ -4767,7 +4898,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   delete legacyPlanningIdentity.provider_locks.planning_default_reasoning_effort;
   assert.equal(planningProviderForIdentity(legacyPlanningIdentity), "codex_cli");
   assert.equal(runIdentityPlanningCompleteForTests(legacyPlanningIdentity).done, true);
-  assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 8\b/);
+  assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 11\b/);
   const legacySerialQwenIdentity = structuredClone(identity);
   legacySerialQwenIdentity.stage_registry_version = "2026-07-27.1";
   delete legacySerialQwenIdentity.voice_provider_options.synthesis_contract;
@@ -4803,10 +4934,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--batch-size 4/);
   assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
-  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 10/);
-  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 10/);
-  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 10/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 10 .*--visual-chunk-validation-attempts 1/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 11/);
+  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 11/);
+  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 11/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 11 .*--visual-chunk-validation-attempts 1/);
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
@@ -5618,7 +5749,7 @@ function testActiveStateValidationSkipsTextOnlyUiMentions() {
   assert.equal(findings[0].field, "wardrobe");
 }
 
-function testAdaptiveProviderPromptPackets() {
+async function testAdaptiveProviderPromptPackets() {
   const highRows = Array.from({ length: 5 }, (_value, index) => ({
     visual_beat_id: `high_${index}`,
     scene_id: "scene_001",
@@ -5644,6 +5775,54 @@ function testAdaptiveProviderPromptPackets() {
   assert.deepEqual(chunks.slice(0, 2).map((chunk) => [chunk.risk_class, chunk.ids.length]), [["high", 4], ["high", 4]]);
   assert.equal(chunks.some((chunk) => chunk.risk_class === "medium" && chunk.ids.length === 6), true);
   assert.equal(chunks.some((chunk) => chunk.risk_class === "simple" && chunk.ids.length === 10), true);
+  assert.deepEqual(adaptivePromptChunkLimitsForTests({ reasoningEffort: "medium" }), {
+    high: 2,
+    medium: 3,
+    simple: 4,
+  });
+  assert.deepEqual(adaptivePromptChunkLimitsForTests({
+    reasoningEffort: "medium",
+    planningProvider: "codex_cli",
+  }), {
+    high: 4,
+    medium: 6,
+    simple: 10,
+  });
+  const mediumWebChunks = adaptivePromptChunksForTests([...highRows, ...mediumRows, ...simpleRows], {
+    reasoningEffort: "medium",
+  });
+  assert.equal(mediumWebChunks.every((chunk) => chunk.ids.length <= 4), true);
+  assert.equal(mediumWebChunks.filter((chunk) => chunk.risk_class === "high").every((chunk) => chunk.ids.length <= 2), true);
+  assert.equal(mediumWebChunks.filter((chunk) => chunk.risk_class === "medium").every((chunk) => chunk.ids.length <= 3), true);
+  assert.equal(visualPromptConcurrencyForEffortForTests(10, "medium"), 1);
+  assert.equal(visualPromptConcurrencyForEffortForTests(8, "medium", "codex_cli"), 8);
+  assert.equal(visualPromptConcurrencyForEffortForTests(10, "high"), 10);
+  assert.equal(isSharedPlannerCooldownErrorForTests("ChatGPT Web cooldown active for 888 more seconds"), true);
+  assert.equal(isSharedPlannerCooldownErrorForTests("ChatGPT rate limit: too many requests are being made too quickly"), true);
+  assert.equal(isSharedPlannerCooldownErrorForTests("ChatGPT browser stage timed out: browser_page"), false);
+  let stopBatch = false;
+  const assigned = [];
+  const stoppedResults = await mapWithConcurrencyForTests(
+    [0, 1, 2, 3, 4],
+    3,
+    async (item) => {
+      assigned.push(item);
+      stopBatch = true;
+      return { item };
+    },
+    {
+      shouldStop: () => stopBatch,
+      stoppedResult: (item) => ({ item, stopped: true }),
+    },
+  );
+  assert.deepEqual(assigned, [0]);
+  assert.deepEqual(stoppedResults, [
+    { item: 0 },
+    { item: 1, stopped: true },
+    { item: 2, stopped: true },
+    { item: 3, stopped: true },
+    { item: 4, stopped: true },
+  ]);
 
   const source = {
     image_id_hint: "ep_01-w000000-w000010",
@@ -5708,6 +5887,14 @@ function testAdaptiveProviderPromptPackets() {
   assert.equal(retimed[0].prompt_hash, normalized.prompt_hash);
   assert.deepEqual(retimed[0].shot_manifest, normalized.shot_manifest);
   assert.equal(retimed[0].active_state_constraints.applied_through_source_word_index, 11);
+}
+
+function testTruncatedVisualPromptPrefixExtraction() {
+  const truncated = '{"style_summary":"dark manhwa","prompts":[{"image_id":"cut_1","visual_beat_id":"beat_1","provider_prompt":"complete"},{"image_id":"cut_2","visual_beat_id":"beat_2","provider_prompt":"truncated';
+  assert.deepEqual(extractCompletePromptPrefixForTests(truncated), {
+    style_summary: "dark manhwa",
+    prompts: [{ image_id: "cut_1", visual_beat_id: "beat_1", provider_prompt: "complete" }],
+  });
 }
 
 function testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse() {
@@ -7246,6 +7433,13 @@ function testVoiceDirectionCharacterization() {
 
   const initialisms = voiceDirectionTransformForTests("The CEO told HR to send the NDA as a PDF through the API, but the SYSTEM stayed active.");
   assert.equal(initialisms.qwen_spoken_text, "The C E O told H R to send the N D A as a P D F through the A P I, but the System stayed active.");
+
+  const uppercasePronoun = voiceDirectionTransformForTests('"IF YOU DID SOMETHING, FIX IT."');
+  assert.equal(uppercasePronoun.qwen_spoken_text, "If You Did Something, Fix It.");
+  const uppercaseSystemPronoun = voiceDirectionTransformForTests("ABILITY: NO ROAD IS DESTINED UNTIL SOMEONE CHOOSES TO WALK IT.", { speaker: "SYSTEM" });
+  assert.equal(uppercaseSystemPronoun.qwen_spoken_text, "Ability: No Road Is Destined Until Someone Chooses To Walk It.");
+  const contextualItInitialism = voiceDirectionTransformForTests("THE IT TEAM FIXED IT. SHE WORKED IN IT.");
+  assert.equal(contextualItInitialism.qwen_spoken_text, "The I T Team Fixed It. She Worked In I T.");
 
   const ranksDepartmentsTimesAndDecimals = voiceDirectionTransformForTests("SSS called NYPD at 10:53 PM, logged 1053 PM, checked again at 1:08 a.m., and recorded 1.08.");
   assert.equal(
@@ -9061,7 +9255,7 @@ function testPassedReviewClearsDeadletterPayload() {
   );
 }
 
-async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraInventoryAssets = [], extraCharacterStateRefs = [], manualTriage = null, includeDefaultLocationRef = true, includeDefaultCharacterRef = true, locationContracts = null, referenceDirectorContractVersion = null, depictionMode = "current_reality", physicallyVisibleEntityIds = ["joey"] }) {
+async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = null, shotManifest = {}, referenceRequirements = [], referenceUsage = [], extraReferenceTargets = [], extraInventoryAssets = [], extraCharacterStateRefs = [], manualTriage = null, includeDefaultLocationRef = true, includeDefaultCharacterRef = true, locationContracts = null, referenceDirectorContractVersion = null, depictionMode = "current_reality", physicallyVisibleEntityIds = ["joey"], visualBeatId = "beat_001" }) {
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   const hash = "fixture_hash";
   await writeJson(path.join(episodeDir, "timed_scene_plan.json"), {
@@ -9114,6 +9308,7 @@ async function runVisualHardenFixture({ dataRoot, promptText, codexPromptText = 
     prompts: [{
       image_id: "ep_01-cut-001",
       scene_id: "scene_001",
+      visual_beat_id: visualBeatId,
       image_prompt: promptText,
       modelslab_image_prompt: promptText,
       codex_image_prompt: codexPromptText,
@@ -9323,6 +9518,74 @@ async function testVisualHardenBlocksOnlyUnusablePromptText() {
   )), true);
 }
 
+async function testVisualHardenAcceptsExactApprovedBeatScopeAcrossSceneBoundary() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText: "Joey stands at the apartment window in quiet morning light.",
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [{
+      ref_id: "char_joey_exact_beat_ref",
+      kind: "character_state",
+      subject: "Joey",
+      scene_ids: ["scene_elsewhere"],
+      planned_beat_ids: ["beat_exact_scope"],
+      reference_image_path: "/tmp/char_joey_exact_beat_ref.png",
+    }],
+    extraCharacterStateRefs: [{
+      state_ref_id: "char_joey_exact_beat_state",
+      source_ref_id: "char_joey_exact_beat_ref",
+      character: "Joey",
+      scene_ids: ["scene_elsewhere"],
+      planned_beat_ids: ["beat_exact_scope"],
+      reference_image_path: "/tmp/char_joey_exact_beat_ref.png",
+    }],
+    visualBeatId: "beat_exact_scope",
+    shotManifest: {
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+    },
+    referenceRequirements: [],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(plan.prompts[0].reference_requirements.some((row) => row.ref_id === "char_joey_exact_beat_state"), true);
+  assert.equal(report.findings.some((finding) => finding.code === "visible_character_ref_scope_missing"), false);
+}
+
+async function testVisualHardenAcceptsRecurringBaseIdentityAcrossSceneBoundary() {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const { plan, report, error } = await runVisualHardenFixture({
+    dataRoot,
+    promptText: "Joey stands at the apartment window in quiet morning light.",
+    includeDefaultCharacterRef: false,
+    extraReferenceTargets: [{
+      ref_id: "char_joey_base_ref",
+      kind: "character_state",
+      subject: "Joey - base facial identity",
+      conditioning_asset_role: "identity_state",
+      scene_ids: ["scene_elsewhere"],
+      reference_image_path: "/tmp/char_joey_base_ref.png",
+    }],
+    extraCharacterStateRefs: [{
+      state_ref_id: "char_joey_base_state",
+      source_ref_id: "char_joey_base_ref",
+      character: "Joey",
+      scene_ids: ["scene_elsewhere"],
+      reference_image_path: "/tmp/char_joey_base_ref.png",
+    }],
+    shotManifest: {
+      character_state_ref_ids: [],
+      protagonist_state_ref_id: null,
+    },
+    referenceRequirements: [],
+  });
+  assert.equal(error, null);
+  assert.equal(plan.status, "passed");
+  assert.equal(plan.prompts[0].reference_requirements.some((row) => ["char_joey_base_ref", "char_joey_base_state"].includes(row.ref_id)), true);
+  assert.equal(report.findings.some((finding) => finding.code === "visible_character_ref_scope_missing"), false);
+}
+
 async function testVisualHardenNormalizesReferenceCapWithoutBlocking() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   const extraReferenceTargets = [
@@ -9481,7 +9744,7 @@ async function testVisualHardenBlocksVisibleCharacterWhenOnlyOutOfScopeRefExists
 
 async function testVisualHardenTreatsCollectiveSubjectsAsGeneric() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
-  const promptText = "A Crown Academy dean, an academy official, and the Goddess Council occupy the institutional chamber.";
+  const promptText = "A Crown Academy dean, an academy official, the Goddess Council, raid survivors, and an injured woman occupy the institutional chamber.";
   const { plan, report, error } = await runVisualHardenFixture({
     dataRoot,
     promptText,
@@ -9504,7 +9767,7 @@ async function testVisualHardenTreatsCollectiveSubjectsAsGeneric() {
     ],
     referenceRequirements: [{ ref_id: "loc_apartment", kind: "location", slot_order: 1 }],
     shotManifest: {
-      visible_characters: ["Crown Academy dean", "academy official frame-left", "Goddess Council"],
+      visible_characters: ["Crown Academy dean", "academy official frame-left", "Goddess Council", "Weeping Chapel Raid Survivors", "injured woman"],
       character_state_ref_ids: [],
       protagonist_state_ref_id: null,
     },
@@ -11924,6 +12187,135 @@ async function testCodexImageWorkQueueContracts() {
   const initialValidation = await validateCodexWorkManifest({ manifestPath: created.manifest.manifest_path });
   assert.equal(initialValidation.status, "passed", JSON.stringify(initialValidation.findings, null, 2));
 
+  async function createConcurrencyQueue({ slug, itemCount, maxConcurrency, verificationGateBypass = undefined }) {
+    const queueEpisodeDir = path.join(root, slug);
+    await fs.mkdir(queueEpisodeDir, { recursive: true });
+    const queuePromptsPath = path.join(queueEpisodeDir, "section_image_prompts_hardened.json");
+    const queueImageIds = Array.from({ length: itemCount }, (_value, index) => `${slug}-${String(index + 1).padStart(3, "0")}`);
+    await writeJson(queuePromptsPath, {
+      status: "passed",
+      image_provider: "codex_imagegen",
+      prompts: queueImageIds.map((imageId, index) => ({
+        image_id: imageId,
+        image_provider_route: "codex_imagegen",
+        codex_image_prompt: `${slug} concurrency frame ${index + 1}, anime/manhwa, 16:9 landscape.`,
+        reference_slots: [],
+      })),
+    });
+    const queue = await createCodexWorkManifest({
+      mode: "scene",
+      episodeDir: queueEpisodeDir,
+      promptsPath: queuePromptsPath,
+      imageIds: queueImageIds,
+      leaseSeconds: 300,
+      maxAttempts: 1,
+      recommendedConcurrency: maxConcurrency,
+      maxConcurrency,
+      verificationGateBypass,
+    });
+    return { ...queue, imageIds: queueImageIds, promptsPath: queuePromptsPath };
+  }
+
+  const defaultGate = await createConcurrencyQueue({
+    slug: "default-verification-gate",
+    itemCount: 6,
+    maxConcurrency: 20,
+  });
+  assert.equal(defaultGate.manifest.policy.verification_asset_ids.length, 4);
+  assert.equal(defaultGate.manifest.policy.verification_required_before_full_queue, true);
+  assert.equal(defaultGate.manifest.policy.verification_gate_bypass, null);
+  const defaultGateLeases = await Promise.all(defaultGate.imageIds.map((_imageId, index) => leaseNextWorkItem({
+    manifestPath: defaultGate.manifest.manifest_path,
+    workerId: `default-gate-worker-${index}`,
+  })));
+  assert.equal(defaultGateLeases.filter((row) => row.status === "leased").length, 4);
+  assert.equal(defaultGateLeases.filter((row) => row.status === "no_work").length, 2);
+  assert.equal((await getCodexWorkStatus({ manifestPath: defaultGate.manifest.manifest_path, reconcile: false })).verification_wave.status, "in_progress");
+
+  const healthProofPath = path.join(root, "prior-flow-health-proof.json");
+  await writeJson(healthProofPath, {
+    schema: "goldflow_google_flow_health_proof_v1",
+    status: "passed",
+    verified_reference_counts: [0, 1, 2, 4],
+  });
+  const healthProofSha256 = await sha256File(healthProofPath);
+  await assert.rejects(() => createConcurrencyQueue({
+    slug: "boolean-bypass-forbidden",
+    itemCount: 6,
+    maxConcurrency: 5,
+    verificationGateBypass: true,
+  }), /evidence object/);
+  await assert.rejects(() => createConcurrencyQueue({
+    slug: "unbound-bypass-forbidden",
+    itemCount: 6,
+    maxConcurrency: 5,
+    verificationGateBypass: { kind: "prior_health_proof", path: healthProofPath },
+  }), /exact lowercase SHA-256/);
+  await assert.rejects(() => createConcurrencyQueue({
+    slug: "stale-bypass-forbidden",
+    itemCount: 6,
+    maxConcurrency: 5,
+    verificationGateBypass: { kind: "prior_health_proof", path: healthProofPath, sha256: "0".repeat(64) },
+  }), /evidence hash mismatch/);
+
+  const verificationGateBypass = {
+    kind: "prior_health_proof",
+    path: healthProofPath,
+    sha256: healthProofSha256,
+  };
+  const maxFiveQueue = await createConcurrencyQueue({
+    slug: "max-five-concurrency",
+    itemCount: 6,
+    maxConcurrency: 5,
+    verificationGateBypass,
+  });
+  assert.equal(maxFiveQueue.manifest.policy.verification_required_before_full_queue, false);
+  assert.deepEqual(maxFiveQueue.manifest.policy.verification_gate_bypass, {
+    kind: "prior_health_proof",
+    evidence_path: healthProofPath,
+    evidence_sha256: healthProofSha256,
+  });
+  assert.deepEqual(maxFiveQueue.manifest.sources.verification_health_proof, {
+    path: healthProofPath,
+    sha256: healthProofSha256,
+  });
+  const maxFiveAttempts = await Promise.all(maxFiveQueue.imageIds.map((_imageId, index) => leaseNextWorkItem({
+    manifestPath: maxFiveQueue.manifest.manifest_path,
+    workerId: `max-five-worker-${index}`,
+  })));
+  const fiveLeases = maxFiveAttempts.filter((row) => row.status === "leased");
+  const deniedSixthLease = maxFiveAttempts.find((row) => row.status === "no_work");
+  assert.equal(fiveLeases.length, 5);
+  assert.equal(new Set(fiveLeases.map((row) => row.assignment.asset_id)).size, 5);
+  assert.equal(deniedSixthLease?.no_work_reason, "max_concurrency_reached");
+  assert.equal(deniedSixthLease?.live_lease_count, 5);
+  const sameWorkerAtCapacity = await leaseNextWorkItem({
+    manifestPath: maxFiveQueue.manifest.manifest_path,
+    workerId: fiveLeases[0].assignment.worker_id,
+  });
+  assert.equal(sameWorkerAtCapacity.status, "leased");
+  assert.equal(sameWorkerAtCapacity.reused_existing_lease, true);
+  assert.equal(sameWorkerAtCapacity.assignment.lease_token, fiveLeases[0].assignment.lease_token);
+  assert.equal((await getCodexWorkStatus({ manifestPath: maxFiveQueue.manifest.manifest_path, reconcile: false })).verification_wave.status, "bypassed_with_prior_health_proof");
+
+  const maxTwentyQueue = await createConcurrencyQueue({
+    slug: "max-twenty-concurrency",
+    itemCount: 21,
+    maxConcurrency: 20,
+    verificationGateBypass,
+  });
+  const maxTwentyAttempts = await Promise.all(maxTwentyQueue.imageIds.map((_imageId, index) => leaseNextWorkItem({
+    manifestPath: maxTwentyQueue.manifest.manifest_path,
+    workerId: `max-twenty-worker-${index}`,
+  })));
+  const twentyLeases = maxTwentyAttempts.filter((row) => row.status === "leased");
+  const deniedTwentyFirstLease = maxTwentyAttempts.find((row) => row.status === "no_work");
+  assert.equal(twentyLeases.length, 20);
+  assert.equal(new Set(twentyLeases.map((row) => row.assignment.asset_id)).size, 20);
+  assert.equal(deniedTwentyFirstLease?.no_work_reason, "max_concurrency_reached");
+  assert.equal(deniedTwentyFirstLease?.live_lease_count, 20);
+  assert.equal(deniedTwentyFirstLease?.max_concurrency, 20);
+
   const duplicateWorkerEpisodeDir = path.join(root, "duplicate-worker-episode");
   await fs.mkdir(duplicateWorkerEpisodeDir, { recursive: true });
   const duplicateWorkerPromptsPath = path.join(duplicateWorkerEpisodeDir, "section_image_prompts_hardened.json");
@@ -12000,6 +12392,233 @@ async function testCodexImageWorkQueueContracts() {
   assert.equal(stateLease.assignment.item.ordered_references.some((row) => row.ref_id === "joey_base"), true);
 }
 
+async function testHybridDeadletterSourceCompatibility() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-hybrid-deadletter-"));
+  const episodeDir = path.join(root, "episode");
+  const manifestDir = path.join(episodeDir, "assets", "images", "codex_worker_staging", "wavefront-deadletter-manifest");
+  const manifestPath = path.join(manifestDir, "work_manifest.json");
+  const deadletterPath = path.join(manifestDir, "deadletters", "ep_01-cut-001.json");
+  const referencePath = path.join(episodeDir, "style-ref.bin");
+  await fs.mkdir(path.dirname(deadletterPath), { recursive: true });
+  await fs.writeFile(referencePath, "reference-v1", "utf8");
+  const referenceSha256 = await sha256File(referencePath);
+  const currentRow = {
+    image_id: "ep_01-cut-001",
+    image_generation_required: true,
+    codex_image_prompt: "Current exact prompt",
+    reference_slots: [{ ref_id: "style", reference_image_path: referencePath }],
+  };
+  const manifest = {
+    schema: "goldflow_codex_image_work_manifest_v1",
+    manifest_id: "wavefront-deadletter-manifest",
+    manifest_path: manifestPath,
+    episode_dir: episodeDir,
+    mode: "scene",
+    provider: HYBRID_WEB_FLOW_PROVIDER,
+    items: [{
+      asset_id: currentRow.image_id,
+      source_row_sha256: codexWorkSourceRowSha256(currentRow),
+      ordered_references: [{ ref_id: "style", path: referencePath, sha256: referenceSha256 }],
+    }],
+  };
+  await writeJson(manifestPath, manifest);
+  await writeJson(deadletterPath, {
+    schema: "goldflow_codex_image_deadletter_v1",
+    status: "deadlettered",
+    manifest_id: manifest.manifest_id,
+    asset_id: currentRow.image_id,
+  });
+
+  const compatible = await findSourceCompatibleHybridDeadletters({
+    episodeDir,
+    mode: "scene",
+    currentRows: [currentRow],
+    requestedIds: new Set([currentRow.image_id]),
+  });
+  assert.equal(compatible.has(currentRow.image_id), true, "wavefront manifests must contribute compatible deadletters to the official pool");
+  assert.equal(compatible.get(currentRow.image_id).records.some((row) => row.path === manifestPath), true);
+  assert.equal(compatible.get(currentRow.image_id).records.some((row) => row.path === referencePath), true);
+  assert.equal(
+    (await hybridDeadletteredAssetIdsForTests(episodeDir, "scene", [currentRow])).has(currentRow.image_id),
+    true,
+    "run status must authorize exact repair only from a source-compatible deadletter",
+  );
+
+  await writeJson(deadletterPath, {
+    schema: "goldflow_codex_image_deadletter_v1",
+    status: "deadlettered",
+    manifest_id: "wrong-manifest",
+    asset_id: currentRow.image_id,
+  });
+  assert.equal((await findSourceCompatibleHybridDeadletters({
+    episodeDir,
+    mode: "scene",
+    currentRows: [currentRow],
+  })).size, 0, "a copied or mismatched deadletter must not authorize repair");
+
+  await writeJson(deadletterPath, {
+    schema: "goldflow_codex_image_deadletter_v1",
+    status: "deadlettered",
+    manifest_id: manifest.manifest_id,
+    asset_id: currentRow.image_id,
+  });
+  assert.equal((await findSourceCompatibleHybridDeadletters({
+    episodeDir,
+    mode: "scene",
+    currentRows: [{ ...currentRow, codex_image_prompt: "Changed prompt" }],
+  })).size, 0, "a stale same-ID creative contract must not authorize repair");
+  assert.equal(
+    (await hybridDeadletteredAssetIdsForTests(episodeDir, "scene", [{ ...currentRow, codex_image_prompt: "Changed prompt" }])).size,
+    0,
+    "run status must ignore a stale same-ID deadletter after prompt drift",
+  );
+
+  await fs.writeFile(referencePath, "reference-v2", "utf8");
+  assert.equal((await findSourceCompatibleHybridDeadletters({
+    episodeDir,
+    mode: "scene",
+    currentRows: [currentRow],
+  })).size, 0, "changed conditioning bytes must invalidate prior deadletter evidence");
+}
+
+async function testHybridRepairCompletionReconciliationSelection() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-hybrid-repair-completion-"));
+  const episodeDir = path.join(root, "episode");
+  const currentRows = [
+    { image_id: "ep_01-cut-001", image_generation_required: true, codex_image_prompt: "Repair cut one" },
+    { image_id: "ep_01-cut-002", image_generation_required: true, codex_image_prompt: "Repair cut two" },
+  ];
+  const acceptedPath = path.join(episodeDir, "accepted.png");
+  const downloadsRoot = path.join(root, "downloads");
+  await fs.mkdir(episodeDir, { recursive: true });
+  await fs.mkdir(downloadsRoot, { recursive: true });
+  await sharp({ create: { width: 320, height: 180, channels: 3, background: "#15243d" } }).png().toFile(acceptedPath);
+  const acceptedHash = await sha256File(acceptedPath);
+
+  async function writeCompletedManifest({
+    slug,
+    color,
+    completedAt,
+    validReceipt = true,
+    reuseAccepted = false,
+    browserProvider = "chatgpt",
+    assetIndex = 0,
+    flowReferenceBinding = null,
+  }) {
+    const sourceRow = currentRows[assetIndex];
+    const assetId = sourceRow.image_id;
+    const manifestId = `repair-completion-${slug}`;
+    const manifestDir = path.join(episodeDir, "assets", "images", "codex_worker_staging", manifestId);
+    const manifestPath = path.join(manifestDir, "work_manifest.json");
+    const attemptDir = path.join(manifestDir, "attempts", assetId, `attempt-001-${slug}`);
+    const outputPath = path.join(attemptDir, `${assetId}.png`);
+    await fs.mkdir(path.join(manifestDir, "completions"), { recursive: true });
+    await fs.mkdir(attemptDir, { recursive: true });
+    if (reuseAccepted) await fs.copyFile(acceptedPath, outputPath);
+    else await sharp({ create: { width: 320, height: 180, channels: 3, background: color } }).png().toFile(outputPath);
+    const outputSha256 = await sha256File(outputPath);
+    const promptSha256 = createHash("sha256").update(sourceRow.codex_image_prompt).digest("hex");
+    const item = {
+      asset_id: assetId,
+      source_row_sha256: codexWorkSourceRowSha256(sourceRow),
+      prompt_sha256: promptSha256,
+      ordered_references: [],
+      expected_output: { filename: `${assetId}.png` },
+    };
+    await writeJson(manifestPath, {
+      schema: "goldflow_codex_image_work_manifest_v1",
+      manifest_id: manifestId,
+      manifest_path: manifestPath,
+      episode_dir: episodeDir,
+      mode: "scene",
+      provider: HYBRID_WEB_FLOW_PROVIDER,
+      policy: {
+        browser_provider_receipt_required: true,
+        allowed_browser_providers: ["chatgpt", "google-flow"],
+      },
+      items: [item],
+    });
+    await writeJson(path.join(attemptDir, "assignment.json"), {
+      schema: "goldflow_codex_image_assignment_v1",
+      manifest_id: manifestId,
+      asset_id: assetId,
+      browser_provider: browserProvider,
+      item,
+    });
+    await writeJson(path.join(attemptDir, browserProvider === "google-flow" ? "google_flow_receipt.json" : "chatgpt_web_receipt.json"), {
+      schema: browserProvider === "google-flow"
+        ? "goldflow_google_flow_image_receipt_v1"
+        : "goldflow_chatgpt_web_image_receipt_v1",
+      status: "downloaded",
+      manifest_id: manifestId,
+      asset_id: assetId,
+      browser_provider: browserProvider,
+      prompt_sha256: promptSha256,
+      ordered_reference_hashes: [],
+      accepted_png_sha256: validReceipt ? outputSha256 : "0".repeat(64),
+      ...(browserProvider === "google-flow" ? { ui_contract: { reference_binding: flowReferenceBinding } } : {}),
+      completed_at: completedAt,
+    });
+    await writeJson(path.join(manifestDir, "completions", `${assetId}.json`), {
+      schema: "goldflow_codex_image_completion_v1",
+      status: "completed",
+      manifest_id: manifestId,
+      asset_id: assetId,
+      attempt_dir: attemptDir,
+      browser_provider: browserProvider,
+      source_path: outputPath,
+      sha256: outputSha256,
+      prompt_sha256: promptSha256,
+      ordered_reference_hashes: [],
+      completed_at: completedAt,
+    });
+    return { manifestPath, outputSha256 };
+  }
+
+  const reusable = await writeCompletedManifest({ slug: "valid-new", color: "#a33f4b", completedAt: "2026-01-02T00:00:00.000Z" });
+  await writeCompletedManifest({ slug: "invalid-newer", color: "#42a36c", completedAt: "2026-01-03T00:00:00.000Z", validReceipt: false });
+  await writeCompletedManifest({ slug: "same-as-current", color: "#000000", completedAt: "2026-01-04T00:00:00.000Z", reuseAccepted: true });
+  await writeCompletedManifest({
+    slug: "malformed-flow-binding",
+    color: "#8751a8",
+    completedAt: "2026-01-05T00:00:00.000Z",
+    browserProvider: "google-flow",
+    assetIndex: 1,
+    flowReferenceBinding: {
+      schema: "goldflow_google_flow_reference_binding_v1",
+      status: "verified",
+      expected_count: 0,
+      observed_count: 0,
+      ordered_references: [],
+    },
+  });
+  const requestedIds = new Set(currentRows.map((row) => row.image_id));
+  const selected = await findSourceCompatibleHybridCompletions({
+    episodeDir,
+    mode: "scene",
+    currentRows,
+    requestedIds,
+    currentAcceptedHashesById: new Map([[currentRows[0].image_id, acceptedHash]]),
+    currentAcceptedAtById: new Map([[currentRows[0].image_id, "2026-01-01T00:00:00.000Z"]]),
+    downloadsRoot,
+  });
+  assert.equal(selected.size, 1);
+  assert.equal(selected.get(currentRows[0].image_id).manifestPath, reusable.manifestPath, "newest receipt-valid different completion must be reconciled");
+  assert.equal(selected.has(currentRows[1].image_id), false, "a top-level-valid Flow receipt with a malformed full reference binding must not be reconciled");
+  assert.deepEqual([...requestedIds].filter((assetId) => !selected.has(assetId)), [currentRows[1].image_id], "only IDs without a reusable completion should remain for generation");
+
+  const noHistoricalRollback = await findSourceCompatibleHybridCompletions({
+    episodeDir,
+    mode: "scene",
+    currentRows,
+    requestedIds,
+    currentAcceptedHashesById: new Map([[currentRows[0].image_id, acceptedHash]]),
+    currentAcceptedAtById: new Map([[currentRows[0].image_id, "2026-01-03T12:00:00.000Z"]]),
+    downloadsRoot,
+  });
+  assert.equal(noHistoricalRollback.size, 0, "repair reconciliation must not roll back to a completion older than the current materialization");
+}
+
 const FIXTURE_SUITES = {
   "stage-contract": [
     testAuthoritativeStageRegistry,
@@ -12074,6 +12693,7 @@ const FIXTURE_SUITES = {
     testCleanReferenceApprovalChainIsHashBound,
     testActiveStateValidationSkipsTextOnlyUiMentions,
     testAdaptiveProviderPromptPackets,
+    testTruncatedVisualPromptPrefixExtraction,
     testRiskClassificationUsesLikelyAttachmentsAndSafeEditorialReuse,
     testSelectedReferenceInventoryContainsOnlyDirectorSelections,
     testReferenceDirectorV2BlocksDanglingAndGroupCharacterStates,
@@ -12115,6 +12735,8 @@ const FIXTURE_SUITES = {
     testVisualHardenLeavesCleanPromptByteIdenticalAndNormalizesRefs,
     testVisualHardenCanonicalizesStateRefRequirements,
     testVisualHardenBlocksOnlyUnusablePromptText,
+    testVisualHardenAcceptsExactApprovedBeatScopeAcrossSceneBoundary,
+    testVisualHardenAcceptsRecurringBaseIdentityAcrossSceneBoundary,
     testVisualHardenNormalizesReferenceCapWithoutBlocking,
     testVisualPlannerKeepsCanonicalIdentityTargetsForVisibleCharacters,
     testVisualHardenBlocksVisibleCharacterWhenScopedRefOmitted,
@@ -12169,6 +12791,8 @@ const FIXTURE_SUITES = {
     testDerivedReferencePromotionFromSeedCut,
     testImagegenReusesImportedCodexOpeningCut,
     testCodexImageWorkQueueContracts,
+    testHybridDeadletterSourceCompatibility,
+    testHybridRepairCompletionReconciliationSelection,
     testSilentTransitionsWithoutSfxBank,
     testTransitionRevalidationUsesAllAdjacentCuts,
   ],

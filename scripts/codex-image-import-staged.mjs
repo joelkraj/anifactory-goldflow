@@ -12,7 +12,7 @@ import {
   loadWorkManifest,
   validateCodexWorkManifest,
 } from "./lib/codex-image-work-contract.mjs";
-import { HYBRID_WEB_FLOW_PROVIDER } from "./lib/image-provider-policy.mjs";
+import { FEDERATED_WEB_IMAGE_PROVIDER, HYBRID_WEB_FLOW_PROVIDER } from "./lib/image-provider-policy.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,6 +41,11 @@ const allowPartialManifest = flags["allow-partial-manifest"] === "true";
 const allowSourceArtifactDrift = flags["allow-source-artifact-drift"] === "true";
 const manifestPath = flags.manifest ? path.resolve(flags.manifest) : null;
 const referenceDir = path.join(episodeDir, "assets", "images", "references");
+
+export function providerBatchManifestEligible(manifest) {
+  return [HYBRID_WEB_FLOW_PROVIDER, FEDERATED_WEB_IMAGE_PROVIDER].includes(String(manifest?.provider ?? ""))
+    && manifest?.policy?.browser_provider_receipt_required === true;
+}
 
 function parseFlags(parts) {
   const parsed = {};
@@ -486,9 +491,8 @@ async function main() {
   if (providerBatchImport || wavefrontPrefetch) {
     if (!manifestPath) throw new Error("Provider-batch materialization requires a provider-attributed work manifest.");
     const loaded = await loadWorkManifest(manifestPath);
-    if (loaded.manifest.provider !== HYBRID_WEB_FLOW_PROVIDER
-      || loaded.manifest.policy?.browser_provider_receipt_required !== true) {
-      throw new Error("Direct provider-batch materialization is restricted to receipt-required hybrid Web/Flow manifests.");
+    if (!providerBatchManifestEligible(loaded.manifest)) {
+      throw new Error("Direct provider-batch materialization is restricted to receipt-required hybrid or federated Web/Flow manifests.");
     }
   }
   if (providerBatchImport) {

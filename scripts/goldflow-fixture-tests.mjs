@@ -110,6 +110,7 @@ import { validateAmbienceSpecForTests } from "./audio-ambience-repair.mjs";
 import { scaledSegmentsForTests } from "./narration-tempo-normalize.mjs";
 import { finalizeRenderReport } from "./render-report-finalize.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
+import { providerBatchManifestEligible } from "./codex-image-import-staged.mjs";
 import {
   normalizeRunIntentForTests,
   parseProofScopeForTests,
@@ -7100,6 +7101,18 @@ function testLocalBeatFidelityEditorialCases() {
 }
 
 function testHybridImageProviderRouting() {
+  assert.equal(providerBatchManifestEligible({
+    provider: "federated_google_web_image_pool",
+    policy: { browser_provider_receipt_required: true },
+  }), true);
+  assert.equal(providerBatchManifestEligible({
+    provider: "hybrid_web_flow",
+    policy: { browser_provider_receipt_required: true },
+  }), true);
+  assert.equal(providerBatchManifestEligible({
+    provider: "federated_google_web_image_pool",
+    policy: { browser_provider_receipt_required: false },
+  }), false);
   assert.equal(normalizeImageProvider("chatgpt web gpt image"), "chatgpt_web_gpt_image");
   assert.equal(routedProviderForReference("chatgpt_web_gpt_image"), "chatgpt_web_gpt_image");
   assert.equal(routedProviderForPrompt({}, "chatgpt_web_gpt_image"), "chatgpt_web_gpt_image");

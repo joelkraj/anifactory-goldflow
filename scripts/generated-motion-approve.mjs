@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   GENERATED_MOTION_APPROVAL_SCHEMA,
   GENERATED_MOTION_REPORT_SCHEMA,
+  requiredGeneratedMotionCoverageFindings,
 } from "./lib/generated-motion-contract.mjs";
 import { hashFile } from "./lib/ltx-video-contract.mjs";
 
@@ -78,6 +79,17 @@ async function main() {
   for (const id of approve) if (reject.has(id)) throw new Error(`${id} cannot be accepted and rejected.`);
   const missing = [...known].filter((id) => !approve.has(id) && !reject.has(id));
   if (missing.length) throw new Error(`Every generated clip requires a decision. Missing: ${missing.join(", ")}`);
+  const requiredGenerationFindings = requiredGeneratedMotionCoverageFindings(report);
+  if (requiredGenerationFindings.length) {
+    throw new Error(`Required opening Flow clips are missing: ${requiredGenerationFindings.map((row) => row.image_id).join(", ")}`);
+  }
+  const requiredImages = new Set((report.required_image_ids ?? []).map(String));
+  const rejectedRequired = (report.clips ?? [])
+    .filter((clip) => requiredImages.has(String(clip.image_id)) && reject.has(clipId(clip)))
+    .map((clip) => String(clip.image_id));
+  if (rejectedRequired.length) {
+    throw new Error(`Required opening Flow clips cannot fall back to stills; repair these cuts instead: ${rejectedRequired.join(", ")}`);
+  }
   const reviewer = String(flags.reviewer ?? "").trim();
   const note = String(flags.note ?? "").trim();
   if (!reviewer || !note) throw new Error("--reviewer and --note are required.");

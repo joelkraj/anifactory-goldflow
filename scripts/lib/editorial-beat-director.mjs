@@ -472,6 +472,7 @@ function canonicalAssetId(value, rows, idField) {
 
 export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = [], options = {}) {
   const animationEnabled = Boolean(options.animationEnabled);
+  const requiredMotionThroughSec = Math.max(0, Number(options.requiredMotionThroughSec ?? 0));
   const contentProfile = options.contentProfile ?? {};
   const plannerRole = contentProfile.planner_roles?.editorial
     ?? "editorial beat director for timed manhwa recap narration";
@@ -521,6 +522,7 @@ Structural requirements:
 - For dense physical action, choose one intelligible decisive instant. You decide how many supported participants are individually readable and how they are distributed across foreground and background; preserve exact story identities, counts, contact, and action without forcing one frame to perform incompatible moments.
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED FOR THIS PRODUCTION. Author animation_intent for every beat. This is pre-image direction: choose an animation-ready starting composition, one coherent subject action, one camera move, restrained environmental motion, a readable end state, continuity into the next shot, and immutable elements. UI/screen shots remain eligible; exact generated text legibility is not required.
+- Every beat beginning before ${requiredMotionThroughSec}s is REQUIRED GENERATED MOTION: set eligibility=animate and provide every animation_intent field completely. still_preferred is forbidden before that boundary. After ${requiredMotionThroughSec}s, selection returns to normal editorial judgment.
 - Set eligibility=animate when generated motion adds story value. Use still_preferred only when motion would undermine a decisive frozen tableau. Never invent an action beyond local evidence.
 - Choose preferred_generation_duration_sec from 5 through 12 based on this beat's one complete reachable action, not the still-cut length. Set sequence_eligible_with_next=false: the production provider accepts one starting image and every selected motion moment is one standalone shot.
 - Author the terminal frame deliberately. camera_end_state and end_frame_composition must describe a stable state physically reachable from start_state within one uninterrupted action; continuity_bridge must say what remains spatially unchanged for the separate following shot.
@@ -691,6 +693,7 @@ function groupingFindings(rows, atoms, factLedger) {
 
 export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, options = {}) {
   const animationEnabled = Boolean(options.animationEnabled);
+  const requiredMotionThroughSec = Math.max(0, Number(options.requiredMotionThroughSec ?? 0));
   const rows = Array.isArray(raw?.beats) ? raw.beats.map((row) => ({
     ...row,
     location_id: canonicalId(row.location_id),
@@ -703,6 +706,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
     background_population: sanitizeBackgroundPopulation(row.background_population),
   })) : [];
   if (!rows.length) throw new Error("Editorial beat director returned no beats.");
+  const atomMap = new Map(atoms.map((atom) => [atom.atom_id, atom]));
   const findings = groupingFindings(rows, atoms, factLedger);
   if (animationEnabled) {
     rows.forEach((row, rowIndex) => {
@@ -717,18 +721,28 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
         && String(intent.camera_motion ?? "").trim()
         && String(intent.end_state ?? "").trim();
       if (!valid) {
+        const requiredOpeningBeat = Number(atomMap.get(String(row.source_atom_ids?.[0]))?.start_sec ?? Infinity) < requiredMotionThroughSec;
         findings.push({
-          severity: "warning",
+          severity: requiredOpeningBeat ? "blocker" : "warning",
           code: "editorial_animation_intent_missing_or_invalid",
           row_index: rowIndex,
           message: "Animation intent is optional; this beat will keep its accepted still-image motion treatment.",
+        });
+      } else if (
+        Number(atomMap.get(String(row.source_atom_ids?.[0]))?.start_sec ?? Infinity) < requiredMotionThroughSec
+        && String(intent.eligibility) !== "animate"
+      ) {
+        findings.push({
+          severity: "blocker",
+          code: "editorial_required_opening_motion_marked_still",
+          row_index: rowIndex,
+          message: `Every beat beginning before ${requiredMotionThroughSec}s must be authored for generated motion.`,
         });
       }
     });
   }
   const blockers = findings.filter((finding) => finding.severity === "blocker");
   if (blockers.length) throw new Error(`Editorial beat contract failed: ${blockers.slice(0, 12).map((finding) => `${finding.code}[row=${finding.row_index ?? "?"}${finding.entity_id ? `,entity=${finding.entity_id}` : ""}]`).join(", ")}`);
-  const atomMap = new Map(atoms.map((atom) => [atom.atom_id, atom]));
   const dictionaries = canonicalDictionaries(factLedger);
   const entityMap = new Map(dictionaries.entities.map((row) => [row.entity_id, row]));
   const locationMap = new Map(dictionaries.locations.map((row) => [row.location_id, row]));

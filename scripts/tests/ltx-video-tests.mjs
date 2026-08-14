@@ -240,7 +240,10 @@ promptFixtureRows.push({
   },
 });
 await Promise.all([
-  fs.writeFile(identityFixturePath, `${JSON.stringify({ animation_policy: "selective_ltx23" })}\n`),
+  fs.writeFile(identityFixturePath, `${JSON.stringify({
+    animation_policy: "selective_ltx23",
+    generated_motion_required_through_sec: 8,
+  })}\n`),
   fs.writeFile(beatFixturePath, `${JSON.stringify({
     status: "passed",
     beats: promptFixtureRows.map((row) => ({
@@ -272,6 +275,8 @@ const directionFixture = JSON.parse(await fs.readFile(directionFixturePath, "utf
 assert.equal(directionFixture.status, "passed");
 assert.equal(directionFixture.direction_count, 2);
 assert.equal(directionFixture.candidate_generation_count, 2);
+assert.equal(directionFixture.required_motion_through_sec, 8);
+assert.equal(directionFixture.required_motion_direction_count, 2);
 assert.equal(directionFixture.still_fallback_count, 1);
 assert.equal(directionFixture.still_fallbacks[0].image_id, "cut_003");
 assert.equal(directionFixture.still_fallbacks[0].disposition, "accepted_still_fallback");
@@ -287,6 +292,31 @@ for (const direction of directionFixture.directions) {
   assert.ok(direction.end_frame_contract.composition);
   assert.ok(direction.end_frame_contract.continuity_bridge);
 }
+const blockedOpeningPromptPath = path.join(tempDir, "section_image_prompts_blocked_opening.json");
+const blockedOpeningOutputPath = path.join(tempDir, "animation_direction_plan_blocked_opening.json");
+await fs.writeFile(blockedOpeningPromptPath, `${JSON.stringify({
+  status: "passed",
+  prompts: promptFixtureRows.map((row, index) => index === 1 ? {
+    ...row,
+    shot_manifest: {
+      ...row.shot_manifest,
+      animation_intent: { ...row.shot_manifest.animation_intent, eligibility: "still_preferred" },
+    },
+  } : row),
+})}\n`);
+await assert.rejects(
+  execFile(process.execPath, [
+    path.resolve("scripts/visual-animation-plan.mjs"),
+    "--episode-dir", tempDir,
+    "--run-identity", identityFixturePath,
+    "--beats", beatFixturePath,
+    "--prompts", blockedOpeningPromptPath,
+    "--imagegen-report", imagegenFixturePath,
+    "--image-output-qa", imageQaFixturePath,
+    "--output", blockedOpeningOutputPath,
+  ]),
+  /Required generated-motion opening coverage is incomplete/u,
+);
 const report = {
   schema: "goldflow_ltx23_video_report_v1",
   status: "passed",

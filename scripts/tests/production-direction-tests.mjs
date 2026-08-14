@@ -28,6 +28,7 @@ import {
 import {
   GENERATED_MOTION_PROVIDER_FLOW,
   generatedMotionIdentityContract,
+  requiredGeneratedMotionCoverageFindings,
 } from "../lib/generated-motion-contract.mjs";
 import {
   FEDERATED_PLANNING_ROOM_SCHEMA,
@@ -201,9 +202,21 @@ assert.deepEqual(proofApprovedDirector.checkpoint_hold, []);
 const motion = generatedMotionIdentityContract({
   animation_policy: "selective_generated_video",
   generated_motion_provider: "google_flow",
+  generated_motion_required_through_sec: 180,
 });
 assert.equal(motion.provider, GENERATED_MOTION_PROVIDER_FLOW);
 assert.equal(motion.automatic_generation_retries, 0);
+assert.equal(motion.required_through_sec, 180);
+assert.deepEqual(requiredGeneratedMotionCoverageFindings({
+  required_image_ids: ["cut_001", "cut_002"],
+  clips: [{ image_id: "cut_001" }],
+}), [{ code: "required_generated_motion_missing", image_id: "cut_002" }]);
+assert.deepEqual(requiredGeneratedMotionCoverageFindings({
+  required_image_ids: ["cut_001"],
+  clips: [{ image_id: "cut_001" }],
+}, {
+  decisions: [{ image_id: "cut_001", decision: "rejected" }],
+}), [{ code: "required_generated_motion_not_accepted", image_id: "cut_001" }]);
 
 const room = planningRoomContract({ planning_provider: PLANNING_ROOM_PROVIDER });
 assert.equal(room.deterministic_local_reconciliation_provider, "codex_cli");

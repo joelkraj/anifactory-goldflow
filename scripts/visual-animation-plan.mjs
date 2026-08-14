@@ -81,6 +81,7 @@ async function main() {
   if (imageQa?.status !== "passed") throw new Error(`Missing passed image QA: ${imageQaPath}`);
   const policy = generatedMotionPolicyForIdentity(identity);
   const motionIdentity = generatedMotionIdentityContract(identity);
+  const requiredThroughSec = Number(motionIdentity.required_through_sec ?? 0);
   const providerImageInputs = generatedMotionProviderImageInputs(motionIdentity.provider);
   const beatById = new Map(beatPlan.beats.map((row) => [String(row.visual_beat_id ?? ""), row]));
   const imageById = new Map(imagegen.results.map((row) => [String(row.image_id ?? ""), row]));
@@ -88,10 +89,22 @@ async function main() {
   const eligiblePrompts = promptPlan.prompts.filter((row) => row.image_generation_required !== false);
   const candidates = [];
   const stillFallbacks = [];
+  const requiredMotionBlockers = [];
   for (const [index, prompt] of eligiblePrompts.entries()) {
     const beat = beatById.get(String(prompt.visual_beat_id ?? ""));
     const rawIntent = prompt.shot_manifest?.animation_intent ?? beat?.animation_intent;
     const intent = sanitizeAnimationIntent(rawIntent);
+    const requiredOpeningCut = requiredThroughSec > 0
+      && Number(prompt.start_sec ?? 0) < requiredThroughSec;
+    if (requiredOpeningCut && intent?.eligibility !== "animate") {
+      requiredMotionBlockers.push({
+        image_id: prompt.image_id,
+        visual_beat_id: prompt.visual_beat_id ?? null,
+        start_sec: Number(prompt.start_sec ?? 0),
+        reason_codes: [intent ? "required_motion_marked_still_preferred" : "required_motion_invalid_animation_intent"],
+      });
+      continue;
+    }
     if (policy === "selective_generated_video" && intent?.eligibility !== "animate") {
       stillFallbacks.push({
         image_id: prompt.image_id,
@@ -103,6 +116,15 @@ async function main() {
     }
     const intentFindings = ltxSingleShotIntentFindings(rawIntent);
     if (intentFindings.length) {
+      if (requiredOpeningCut) {
+        requiredMotionBlockers.push({
+          image_id: prompt.image_id,
+          visual_beat_id: prompt.visual_beat_id ?? null,
+          start_sec: Number(prompt.start_sec ?? 0),
+          reason_codes: intentFindings,
+        });
+        continue;
+      }
       stillFallbacks.push({
         image_id: prompt.image_id,
         visual_beat_id: prompt.visual_beat_id ?? null,
@@ -118,6 +140,9 @@ async function main() {
       throw new Error(`Animation direction requires the current accepted image hash for ${prompt.image_id}.`);
     }
     candidates.push({ index, prompt, beat, intent, imagePath, imageHash, risk: riskClass(intent, prompt) });
+  }
+  if (requiredMotionBlockers.length) {
+    throw new Error(`Required generated-motion opening coverage is incomplete before ${requiredThroughSec}s: ${requiredMotionBlockers.map((row) => `${row.image_id}[${row.reason_codes.join(",")}]`).join("; ")}`);
   }
   const directions = candidates.map((first, directionIndex) => {
     const cutDurationSec = Math.max(0.001, Number(first.prompt.duration_sec ?? 0));
@@ -208,6 +233,8 @@ async function main() {
     animation_policy: policy,
     provider: motionIdentity.provider,
     model_id: motionIdentity.model,
+    required_motion_through_sec: requiredThroughSec,
+    required_motion_direction_count: directions.filter((row) => row.start_sec < requiredThroughSec).length,
     source_paths: sourcePaths,
     source_hashes: Object.fromEntries(await Promise.all(sourcePaths.map(async (filePath) => [filePath, await hashFile(filePath)]))),
     direction_count: directions.length,

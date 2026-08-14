@@ -421,6 +421,10 @@ async function main() {
     provider: GENERATED_MOTION_PROVIDER_FLOW,
     model_id: identityContract.model,
     policy: identityContract.policy,
+    required_motion_through_sec: identityContract.required_through_sec,
+    required_image_ids: (directionPlan.directions ?? [])
+      .filter((row) => Number(row.start_sec ?? 0) < Number(identityContract.required_through_sec ?? 0))
+      .map((row) => String(row.image_id)),
     plan_path: planPath,
     plan_sha256: await hashFile(planPath),
     plan_contract_sha256: plan.plan_sha256,

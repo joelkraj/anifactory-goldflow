@@ -71,6 +71,7 @@ import {
   generatedMotionArtifactPaths,
   generatedMotionEnabled,
   generatedMotionProviderForIdentity,
+  requiredGeneratedMotionCoverageFindings,
 } from "./lib/generated-motion-contract.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
@@ -1466,6 +1467,14 @@ async function generatedMotionGenerationComplete(episodeDir, episode, identity) 
       || await fileSha256(clip.normalized_video_path) !== clip.normalized_video_sha256) {
       return { done: false, state: "stale", evidence: `${path.basename(reportPath)} stale clip/source for ${clip.image_id}` };
     }
+  }
+  const requiredFindings = requiredGeneratedMotionCoverageFindings(report);
+  if (requiredFindings.length) {
+    return {
+      done: false,
+      state: "blocked",
+      evidence: `${path.basename(reportPath)} required opening Flow clips missing: ${requiredFindings.map((row) => row.image_id).join(", ")}`,
+    };
   }
   return {
     done: true,

@@ -1749,6 +1749,7 @@ async function main() {
     }
     editorialResult = await editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, {
       animationEnabled: ltxVideoEnabled(runIdentity),
+      requiredMotionThroughSec: Number(runIdentity.generated_motion_required_through_sec ?? runIdentity.provider_locks?.generated_motion_required_through_sec ?? 0),
       contentProfile,
     });
     if (editorialResult.reused) {

@@ -71,6 +71,14 @@ export function generatedMotionEnabled(identity = {}) {
   return generatedMotionPolicyForIdentity(identity) !== "disabled";
 }
 
+export function generatedMotionRequiredThroughSec(identity = {}) {
+  const value = identity.provider_locks?.generated_motion_required_through_sec
+    ?? identity.generated_motion_required_through_sec
+    ?? 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 export function generatedMotionProviderForIdentity(identity = {}) {
   const explicit = identity.provider_locks?.generated_motion_provider
     ?? identity.generated_motion_provider
@@ -94,11 +102,30 @@ export function generatedMotionIdentityContract(identity = {}) {
     policy: generatedMotionPolicyForIdentity(identity),
     provider,
     model,
+    required_through_sec: enabled ? generatedMotionRequiredThroughSec(identity) : 0,
     candidates_per_motion_moment: 1,
     automatic_generation_retries: 0,
     unavailable_or_rejected_disposition: "accepted_still_fallback",
     accepted_clip_hash_required: true,
   };
+}
+
+export function requiredGeneratedMotionCoverageFindings(report, approval = null) {
+  const required = new Set((report?.required_image_ids ?? []).map(String).filter(Boolean));
+  if (!required.size) return [];
+  const generated = new Set((report?.clips ?? []).map((row) => String(row.image_id ?? "")).filter(Boolean));
+  const findings = [...required]
+    .filter((imageId) => !generated.has(imageId))
+    .map((imageId) => ({ code: "required_generated_motion_missing", image_id: imageId }));
+  if (!approval) return findings;
+  const accepted = new Set((approval.decisions ?? [])
+    .filter((row) => row.decision === "accepted")
+    .map((row) => String(row.image_id ?? ""))
+    .filter(Boolean));
+  findings.push(...[...required]
+    .filter((imageId) => !accepted.has(imageId))
+    .map((imageId) => ({ code: "required_generated_motion_not_accepted", image_id: imageId })));
+  return findings;
 }
 
 export function clampGeneratedMotionDuration(value, provider = GENERATED_MOTION_PROVIDER_FLOW) {
@@ -129,6 +156,7 @@ export async function generatedMotionApprovalMatches(report, approval, { reportP
     if (decision.source_image_sha256 !== clip.source_image_sha256) return false;
     if (decision.video_sha256 !== clip.normalized_video_sha256) return false;
   }
+  if (requiredGeneratedMotionCoverageFindings(report, approval).length) return false;
   return true;
 }
 

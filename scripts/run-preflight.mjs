@@ -222,6 +222,15 @@ const generatedMotionModel = generatedMotionPolicy === "disabled"
   : String(flags["generated-motion-model"] ?? flags["video-model"] ?? (
       generatedMotionProvider === GENERATED_MOTION_PROVIDER_FLOW ? DEFAULT_GENERATED_MOTION_MODEL : LTX_VIDEO_MODEL_ID
     )).trim();
+const generatedMotionRequiredThroughSec = boundedNumber(
+  flags["generated-motion-required-through-sec"],
+  0,
+  0,
+  3600,
+);
+if (generatedMotionPolicy === "disabled" && generatedMotionRequiredThroughSec > 0) {
+  throw new Error("--generated-motion-required-through-sec requires generated motion to be enabled.");
+}
 const ltxVideoPolicy = generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX
   ? generatedMotionPolicy === "full_generated_video" ? "full_ltx23" : "selective_ltx23"
   : "disabled";
@@ -942,6 +951,7 @@ async function main() {
     generated_motion_policy: generatedMotionPolicy,
     generated_motion_provider: generatedMotionProvider,
     generated_motion_model: generatedMotionModel,
+    generated_motion_required_through_sec: generatedMotionRequiredThroughSec,
     ltx_video_policy: ltxVideoPolicy,
     ltx_video_provider: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_PROVIDER : null,
     ltx_video_model: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_MODEL_ID : null,
@@ -994,6 +1004,7 @@ async function main() {
       parallax_background_provider: parallaxBackgroundProvider,
       generated_motion_provider: generatedMotionProvider,
       generated_motion_model: generatedMotionModel,
+      generated_motion_required_through_sec: generatedMotionRequiredThroughSec,
       generated_motion_candidates_per_moment: generatedMotionPolicy === "disabled" ? 0 : 1,
       generated_motion_automatic_retries: 0,
       generated_motion_failure_disposition: "accepted_still_fallback",

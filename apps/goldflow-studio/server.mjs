@@ -188,7 +188,7 @@ export async function createStudioServer(options = {}) {
         ANIFACTORY_LLM_ROUTE: "gemini-web",
         ANIFACTORY_GEMINI_WEB_URL: `http://${host}:${actualPort}/v1`,
         ANIFACTORY_GEMINI_WEB_TOKEN: adminToken,
-        ANIFACTORY_GEMINI_WEB_MODEL: String(options.geminiTextModelLabel ?? process.env.GOLDFLOW_GEMINI_TEXT_MODEL ?? "gemini-3.6-flash-web"),
+        ANIFACTORY_GEMINI_WEB_MODEL: String(options.geminiTextModelLabel ?? process.env.GOLDFLOW_GEMINI_TEXT_MODEL ?? "gemini-3.7-flash-web"),
       };
     }
     return {

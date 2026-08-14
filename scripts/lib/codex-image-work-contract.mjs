@@ -407,6 +407,7 @@ async function repairEvidenceRecord(value, requestedAssetIds) {
     "image_output_qa_blockers",
     "duplicate_output_hashes",
     "provider_deadletters_and_duplicate_output_hashes",
+    "operator_provider_migration_from_modelslab",
   ]).has(kind)) {
     throw new Error(`Unsupported hybrid image repair-evidence kind: ${kind || "missing"}.`);
   }

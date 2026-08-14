@@ -12,7 +12,7 @@ const GEMINI_APP_URL = "https://gemini.google.com/app";
 const PROMPT_SELECTOR = '[contenteditable="true"][aria-label="Enter a prompt for Gemini"]';
 const SIGNED_OUT_SELECTOR = 'a:has-text("Sign in"), button:has-text("Sign in")';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const GEMINI_UPLOAD_PENDING_SELECTOR = '[aria-label*="upload" i][aria-busy="true"], [data-test-id*="upload" i][aria-busy="true"], [class*="uploading" i], [role="progressbar"]';
+const GEMINI_UPLOAD_PENDING_SELECTOR = 'gem-attachment[aria-busy="true"], gem-attachment [aria-busy="true"], gem-attachment [class*="uploading" i], gem-attachment [role="progressbar"]';
 export const GEMINI_INLINE_PROMPT_MAX_CHARS = 24_000;
 
 function codedError(code, message) {
@@ -66,6 +66,18 @@ async function waitForVisibleEnabled(locator, timeoutMs = 60_000) {
     await sleep(200);
   }
   return null;
+}
+
+async function waitForGeminiUploadTools(page, timeoutMs = 30_000) {
+  const exact = await waitForVisible(
+    page.getByRole("button", { name: "Upload & tools", exact: true }),
+    timeoutMs,
+  );
+  if (exact) return exact;
+  return waitForVisible(
+    page.getByRole("button", { name: /Upload\s*&\s*tools/i }),
+    2_000,
+  );
 }
 
 function exactSha256(value, label) {
@@ -173,8 +185,9 @@ export async function verifyGeminiTextAttachmentRetained(page, attachment, {
       filenameChip = await waitForVisible(page.getByText(filename, { exact: true }), 2_000);
     }
     const pendingUpload = await visibleLocator(page.locator(GEMINI_UPLOAD_PENDING_SELECTOR));
-    const tileText = visibleTiles.length === 1 ? String(await visibleTiles[0].innerText().catch(() => "")) : "";
-    if (filenameChip && /\bTXT\b/i.test(tileText) && !pendingUpload) {
+    const oneExactAttachment = visibleTiles.length === 1;
+    const exactFilenameVisible = Boolean(filenameChip);
+    if ((oneExactAttachment || exactFilenameVisible) && visibleTiles.length <= 1 && !pendingUpload) {
       stablePolls += 1;
       if (stablePolls >= stablePollsRequired) {
         return {
@@ -344,7 +357,10 @@ export class GoogleGeminiBrowser {
           const content = String(await responses.last().innerText().catch(() => "")).trim();
           if (content && content === previous) {
             if (!stableSince) stableSince = Date.now();
-            if (Date.now() - stableSince >= 2_000) {
+            const stopControl = await visibleLocator(page.getByRole("button", {
+              name: /(?:Stop|Cancel)(?: response| generating| generation)?/i,
+            }));
+            if (!stopControl && Date.now() - stableSince >= 5_000) {
               return {
                 content,
                 conversationUrl: page.url(),
@@ -413,17 +429,23 @@ export class GoogleGeminiBrowser {
       await imageMode.click();
       await imageMode.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
     }
-    let plainFlash = await waitForVisible(page.getByRole("button", { name: /Open mode picker, currently Flash$/i }), 5_000);
+    let plainFlash = await waitForVisible(page.getByRole("button", { name: /Open mode picker, currently (?:Flash|Fast)$/i }), 5_000);
     if (plainFlash) {
-      return { model_label: "Gemini 3.6 Flash", extended_thinking: false, verified_picker_label: "Open mode picker, currently Flash" };
+      return { model_label: "Gemini 3.7 Flash", extended_thinking: false, verified_picker_label: "Open mode picker, currently Flash or Fast" };
     }
     let picker = await waitForVisible(page.getByRole("button", { name: /Open mode picker/i }), 30_000);
     if (!picker) throw codedError("ui_contract_mismatch", "Gemini text model picker is missing.");
     const extendedPicker = await visibleLocator(page.getByRole("button", { name: /Open mode picker, currently Flash Extended$/i }));
     if (!extendedPicker) {
       await picker.click();
-      const flash = await waitForVisible(page.getByText("3.6 Flash", { exact: true }), 15_000);
-      if (!flash) throw codedError("ui_contract_mismatch", "Gemini 3.6 Flash is not available in the authenticated account.");
+      const flash = await waitForVisible(page.getByText("3.7 Flash", { exact: true }), 15_000);
+      if (!flash) {
+        const visibleModeOptions = await page.locator("gem-menu-item").allInnerTexts().catch(() => []);
+        throw codedError(
+          "ui_contract_mismatch",
+          `Gemini 3.7 Flash is not available in the authenticated account. Visible mode options: ${visibleModeOptions.map((value) => value.trim()).filter(Boolean).join(" | ") || "none"}.`,
+        );
+      }
       const flashRow = flash.locator("xpath=ancestor::gem-menu-item[1]");
       const flashDeadline = Date.now() + 60_000;
       while (Date.now() < flashDeadline && await flashRow.getAttribute("aria-disabled").catch(() => "true") === "true") await sleep(250);
@@ -436,7 +458,7 @@ export class GoogleGeminiBrowser {
           }
           return this.selectTextModel(page, { freshChatRetry: false });
         }
-        throw codedError("ui_contract_mismatch", "Gemini 3.6 Flash is visible but disabled in the authenticated chat.");
+        throw codedError("ui_contract_mismatch", "Gemini 3.7 Flash is visible but disabled in the authenticated chat.");
       }
       await flashRow.click();
       picker = await waitForVisible(page.getByRole("button", { name: /Open mode picker/i }), 15_000);
@@ -447,13 +469,13 @@ export class GoogleGeminiBrowser {
       if (!extended) throw codedError("ui_contract_mismatch", "Gemini Extended thinking toggle is missing.");
       await extended.locator("xpath=ancestor::gem-menu-item[1]").click();
     }
-    plainFlash = await waitForVisible(page.getByRole("button", { name: /Open mode picker, currently Flash$/i }), 15_000);
-    if (!plainFlash) throw codedError("ui_contract_mismatch", "Gemini 3.6 Flash selection was not retained.");
-    return { model_label: "Gemini 3.6 Flash", extended_thinking: false, verified_picker_label: "Open mode picker, currently Flash" };
+    plainFlash = await waitForVisible(page.getByRole("button", { name: /Open mode picker, currently (?:Flash|Fast)$/i }), 15_000);
+    if (!plainFlash) throw codedError("ui_contract_mismatch", "Gemini 3.7 Flash selection was not retained.");
+    return { model_label: "Gemini 3.7 Flash", extended_thinking: false, verified_picker_label: "Open mode picker, currently Flash or Fast" };
   }
 
   async openGeminiFileChooser(page) {
-    const uploadTools = await visibleLocator(page.getByRole("button", { name: "Upload & tools", exact: true }));
+    const uploadTools = await waitForGeminiUploadTools(page);
     if (!uploadTools) throw codedError("ui_contract_mismatch", "Gemini Upload & tools control is missing for long text planning.");
     await uploadTools.click();
     let uploadButton = await waitForVisible(page.getByText("Upload files", { exact: true }), 15_000);
@@ -522,7 +544,7 @@ export class GoogleGeminiBrowser {
       orderedReferences.push({ slot, ref_id: reference.ref_id, source_sha256: sourceSha256, upload_filename: filename });
     }
     if (!files.length) return { referenceInputs, orderedReferences };
-    const uploadTools = await visibleLocator(page.getByRole("button", { name: "Upload & tools", exact: true }));
+    const uploadTools = await waitForGeminiUploadTools(page);
     if (!uploadTools) throw codedError("ui_contract_mismatch", "Gemini Upload & tools control is missing.");
     const verifiedReferenceIds = new Set();
     for (let index = 0; index < files.length; index += 1) {
@@ -603,12 +625,10 @@ export class GoogleGeminiBrowser {
   async visibleImageUrls(page) {
     return page.locator("img").evaluateAll((images) => images
       .filter((image) => {
-        const ratio = image.naturalHeight ? image.naturalWidth / image.naturalHeight : 0;
         return image.offsetParent !== null
-          && image.naturalWidth >= 512
-          && image.naturalHeight >= 288
-          && ratio >= 1.6
-          && ratio <= 1.95;
+          && image.complete
+          && image.naturalWidth >= 256
+          && image.naturalHeight >= 256;
       })
       .map((image) => image.currentSrc || image.src)
       .filter(Boolean));
@@ -716,11 +736,14 @@ export class GoogleGeminiBrowser {
         : "No reference images are attached.";
       const prompt = `Create exactly one original landscape still image in a 16:9 frame.\n\nUse the attached images only as ordered visual references. Do not create a collage, contact sheet, explanation, border, or multiple variants.\n\nREFERENCE MAP:\n${referenceMap}\nMatch each named subject or element in the scene prompt to its explicitly mapped attachment. Do not swap identities between attachments.\n\n${job.prompt}`;
       await this.pastePrompt(page, prompt);
-      const send = await waitForVisible(page.getByRole("button", { name: /Send message/i }), 30_000);
-      if (!send) throw codedError("ui_contract_mismatch", "Gemini Send message control is missing.");
-      const sendDeadline = Date.now() + 90_000;
-      while (Date.now() < sendDeadline && await send.isDisabled().catch(() => true)) await sleep(250);
-      if (await send.isDisabled().catch(() => true)) throw codedError("ui_contract_mismatch", "Gemini Send message remained disabled after reference processing.");
+      const sendButtons = page.getByRole("button", { name: /Send message/i });
+      if (!await waitForVisible(sendButtons, 30_000)) {
+        throw codedError("ui_contract_mismatch", "Gemini Send message control is missing.");
+      }
+      // Gemini replaces the composer controls as attachments finish processing.
+      // Reacquire the enabled control instead of polling a stale disabled node.
+      const send = await waitForVisibleEnabled(sendButtons, 90_000);
+      if (!send) throw codedError("ui_contract_mismatch", "Gemini Send message remained disabled after reference processing.");
       // Gemini's Images landing page lazy-loads prior gallery cards. Refresh the
       // baseline immediately before submission so an old card cannot be mistaken
       // for the new response merely because its blob URL appeared late.

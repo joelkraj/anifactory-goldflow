@@ -41,6 +41,10 @@ function wordCount(value) {
   return String(value ?? "").trim().split(/\s+/).filter(Boolean).length;
 }
 
+function isTrue(value) {
+  return ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
 function embedded(label, value) {
   return `\n\n===== ${label} =====\n${typeof value === "string" ? value : JSON.stringify(value, null, 2)}`;
 }
@@ -139,7 +143,18 @@ const outputPath = path.resolve(required(flags.output, "--output <path>"));
 const ledgerPath = path.resolve(required(flags["ledger-output"], "--ledger-output <path>"));
 const rawPath = path.resolve(flags["raw-output"] ?? `${outputPath}.raw.txt`);
 const provider = String(flags.provider ?? "chatgpt_web").trim();
+const productionShapeRevision = isTrue(flags["production-shape-revision"]);
+const productionShapeAnchor = productionShapeRevision
+  ? required(flags["production-shape-anchor"], "--production-shape-anchor <exact text>")
+  : null;
+const productionShapeMaxPayoffPercent = Number(flags["production-shape-max-payoff-percent"] ?? 35);
+const productionShapeRepairIntent = productionShapeRevision
+  ? required(flags["production-shape-repair-intent"], "--production-shape-repair-intent <text>")
+  : null;
 if (provider !== "chatgpt_web") throw new Error("Reference-density revision is locked to chatgpt_web.");
+if (productionShapeRevision && (!Number.isFinite(productionShapeMaxPayoffPercent) || productionShapeMaxPayoffPercent <= 0 || productionShapeMaxPayoffPercent >= 100)) {
+  throw new Error("--production-shape-max-payoff-percent must be between 0 and 100.");
+}
 
 const [candidateText, referenceText, frontierBytes, diagnosticBytes] = await Promise.all([
   fs.readFile(candidatePath, "utf8"),
@@ -172,9 +187,25 @@ const diagnosticValidation = validateReferenceDensityDominance(diagnostic, {
   referenceMeritFrontier: frontier,
 });
 if (!diagnosticValidation.done) throw new Error(`Diagnostic is blocked: ${diagnosticValidation.blockers.join(", ")}`);
-if (diagnostic.status !== "findings" || diagnosticValidation.accepted_findings.length < 1) {
+if (!productionShapeRevision && (diagnostic.status !== "findings" || diagnosticValidation.accepted_findings.length < 1)) {
   throw new Error("Reference-density revision requires a validated diagnostic with material findings.");
 }
+
+const productionShapeOffset = productionShapeRevision ? candidateText.indexOf(productionShapeAnchor) : -1;
+const revisionFindings = productionShapeRevision
+  ? [{
+    id: "production_shape_runtime_and_late_title_payoff",
+    dimension_id: "title_fantasy_delivery",
+    severity: "material",
+    start_offset: productionShapeOffset,
+    end_offset: productionShapeOffset + productionShapeAnchor.length,
+    exact_text: productionShapeAnchor,
+    defect: `The ${wordCount(candidateText)}-word candidate delays its explicit title-fantasy decision until approximately ${Math.round((wordCount(candidateText.slice(0, productionShapeOffset)) / wordCount(candidateText)) * 100)} percent, beyond the binding first-${productionShapeMaxPayoffPercent}-percent payoff obligation and the 9,500-10,500-word production target.`,
+    audience_effect: "The title fantasy arrives after too many structurally similar intermediate loops, reducing urgency despite strong individual scenes.",
+    smallest_repair_intent: productionShapeRepairIntent,
+  }]
+  : diagnosticValidation.accepted_findings;
+if (productionShapeRevision && productionShapeOffset < 0) throw new Error("Production-shape revision could not bind its exact acquisition anchor.");
 
 try {
   const [existingScript, existingLedger] = await Promise.all([
@@ -185,7 +216,7 @@ try {
   const validation = validateSourceRevisionLedger(existingLedger, {
     sourceScriptSha256: candidateSha256,
     revisedScriptSha256: existingSha256,
-    acceptedFindingIds: diagnosticValidation.accepted_findings.map((finding) => finding.id),
+    acceptedFindingIds: revisionFindings.map((finding) => finding.id),
   });
   if (!validation.done) throw new Error(`Existing revision is blocked: ${validation.blockers.join(", ")}`);
   console.log(JSON.stringify({ status: "passed", resumed: true, output_path: outputPath, revised_script_sha256: existingSha256, ledger_path: ledgerPath }, null, 2));
@@ -210,7 +241,7 @@ Target 9,500-10,500 spoken words. Do not pad to reach the range. Return the comp
   + embedded("BINDING HASHES", { candidate_sha256: candidateSha256, reference_sha256: referenceSha256, frontier_sha256: frontierSha256, diagnostic_sha256: diagnosticSha256 })
   + embedded("TIED DIMENSION JUDGMENTS", compactDimensionRows(tiedDimensions))
   + embedded("NONWINNING MATERIAL REFERENCE EDGES", compactEdgeRows(nonWinningEdges))
-  + embedded("VALIDATED FINDINGS", diagnosticValidation.accepted_findings)
+  + embedded("VALIDATED FINDINGS", revisionFindings)
   + embedded("PROTECTED CANDIDATE WINS", protectedWinRows(diagnostic))
   + embedded("REVISION LEDGER CONTRACT", {
     schema: "goldflow_source_revision_ledger_v1",
@@ -277,7 +308,7 @@ parsed.ledger.revised_script_sha256 = revisedSha256;
 const ledgerValidation = validateSourceRevisionLedger(parsed.ledger, {
   sourceScriptSha256: candidateSha256,
   revisedScriptSha256: revisedSha256,
-  acceptedFindingIds: diagnosticValidation.accepted_findings.map((finding) => finding.id),
+  acceptedFindingIds: revisionFindings.map((finding) => finding.id),
 });
 if (!ledgerValidation.done) throw new Error(`Revision ledger is blocked: ${ledgerValidation.blockers.join(", ")}`);
 await fs.writeFile(outputPath, scriptBytes, { flag: "wx" });
@@ -288,7 +319,8 @@ console.log(JSON.stringify({
   revised_script_sha256: revisedSha256,
   revised_word_count: words,
   ledger_path: ledgerPath,
-  repaired_finding_count: diagnosticValidation.accepted_findings.length,
+  repaired_finding_count: revisionFindings.length,
+  revision_mode: productionShapeRevision ? "production_shape" : "density_findings",
   protected_dimension_wins: diagnostic.dimensions.filter((row) => row.decision === "candidate_win").length,
   protected_edge_wins: diagnostic.edge_verdicts.filter((row) => row.decision === "candidate_win").length,
   ...(densityTrim ? {

@@ -130,6 +130,7 @@ async function hashFile(filePath) {
 
 function providerSlug(provider) {
   if (provider === "google_flow") return "google-flow-nano-banana-pro";
+  if (provider === "google_gemini_imagen") return "google-gemini-imagen";
   if (provider === "chatgpt_web_gpt_image") return "chatgpt-web-gpt-image";
   return "codex-imagegen";
 }
@@ -159,13 +160,17 @@ async function completionProviderProvenance(completion) {
   if (receipt.accepted_png_sha256 && receipt.accepted_png_sha256 !== completion.sha256) {
     throw new Error(`Provider receipt output hash is stale for ${completion.asset_id}.`);
   }
-  const imageProvider = browserProvider === "google-flow" ? "google_flow" : "chatgpt_web_gpt_image";
+  const imageProvider = browserProvider === "google-flow"
+    ? "google_flow"
+    : browserProvider === "google-gemini" ? "google_gemini_imagen" : "chatgpt_web_gpt_image";
   return {
     browser_provider: browserProvider,
     image_provider: imageProvider,
     model: imageProvider === "google_flow"
       ? receipt.ui_contract?.model_label ?? "Nano Banana Pro"
-      : "chatgpt_web_gpt_image",
+      : imageProvider === "google_gemini_imagen"
+        ? receipt.ui_contract?.model_label ?? "Nano Banana 2"
+        : "chatgpt_web_gpt_image",
     receipt_path: receiptPath,
     receipt_sha256: await hashFile(receiptPath),
   };

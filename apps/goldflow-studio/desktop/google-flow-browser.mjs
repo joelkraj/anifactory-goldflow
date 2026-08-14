@@ -581,14 +581,20 @@ export class GoogleFlowBrowser {
             const mediaId = url.searchParams.get("name") ?? "";
             if (!mediaId || seen.has(mediaId)) continue;
             seen.add(mediaId);
+            const rect = element.getBoundingClientRect();
             rows.push({
               media_id: mediaId,
               media_url: url.href,
               loaded: !(element instanceof HTMLImageElement) || (element.complete && element.naturalWidth > 0 && element.naturalHeight > 0),
+              top: rect.top,
+              left: rect.left,
             });
           } catch {}
         }
       }
+      rows.sort((left, right) => Math.abs(left.top - right.top) > 4
+        ? left.top - right.top
+        : left.left - right.left);
       return { busy, chips: rows };
     }, FLOW_MEDIA_PATH_FRAGMENT);
   }

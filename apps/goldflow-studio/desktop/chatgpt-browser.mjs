@@ -593,22 +593,27 @@ export class ChatGptBrowser {
 
   async prepareLlmPromptSubmission(page, composer, prompt, onPhase = async () => {}) {
     const delivery = createChatGptLlmPromptDelivery(prompt);
+    const composerReceipt = await stabilizeChatGptComposerPrompt(composer, delivery.composer_text);
     let attachmentReceipt = null;
     if (delivery.attachment) {
       await onPhase("attaching_prompt_file");
       attachmentReceipt = await this.attachLlmPromptFile(page, delivery.attachment);
       await onPhase("prompt_file_attached");
     }
-    const composerReceipt = await stabilizeChatGptComposerPrompt(composer, delivery.composer_text);
     if (delivery.attachment) attachmentReceipt = await verifyChatGptTextAttachmentRetained(page, delivery.attachment);
     return { delivery, composer_receipt: composerReceipt, attachment_receipt: attachmentReceipt };
   }
 
   async submitPreparedLlm(page, prepared, { onPhase = async () => {} } = {}) {
     const composer = await this.composer(page);
-    prepared.composer_receipt = await stabilizeChatGptComposerPrompt(composer, prepared.delivery.composer_text);
     if (prepared.delivery.attachment) {
+      const first = await verifyChatGptComposerPrompt(composer, prepared.delivery.composer_text);
+      await sleep(350);
+      const second = await verifyChatGptComposerPrompt(composer, prepared.delivery.composer_text);
+      prepared.composer_receipt = { ...second, stable_polls: 2, stabilization_attempts: 1, initial_observed_sha256: first.observed_sha256 };
       prepared.attachment_receipt = await verifyChatGptTextAttachmentRetained(page, prepared.delivery.attachment);
+    } else {
+      prepared.composer_receipt = await stabilizeChatGptComposerPrompt(composer, prepared.delivery.composer_text);
     }
     const sendCandidates = page.locator('button[data-testid="send-button"], button[aria-label="Send prompt"], #composer-submit-button');
     const deadline = Date.now() + (prepared.delivery.attachment ? 90_000 : 15_000);

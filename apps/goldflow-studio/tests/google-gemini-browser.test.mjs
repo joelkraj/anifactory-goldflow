@@ -209,9 +209,9 @@ async function acceptsOnlyVerifiedGemini36FlashWithoutExtendedThinking() {
     },
   };
   assert.deepEqual(await browser.selectTextModel(page), {
-    model_label: "Gemini 3.6 Flash",
+    model_label: "Gemini 3.7 Flash",
     extended_thinking: false,
-    verified_picker_label: "Open mode picker, currently Flash",
+    verified_picker_label: "Open mode picker, currently Flash or Fast",
   });
 }
 

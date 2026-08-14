@@ -964,6 +964,11 @@ async function testDesktopHostContract() {
   assert.match(browserSource, /profilePlanText/, "desktop host must verify the plan from the opened account menu when the closed profile button omits it");
   assert.match(browserSource, /_ui-contract-diagnostics/, "desktop host must preserve local diagnostics for ChatGPT UI contract drift");
   assert.match(browserSource, /setInputFiles/, "desktop host must upload ordered reference bytes outside the ChatGPT origin");
+  assert.ok(
+    browserSource.indexOf("const composerReceipt = await stabilizeChatGptComposerPrompt")
+      < browserSource.indexOf('await onPhase("attaching_prompt_file")'),
+    "long ChatGPT prompts must stabilize composer text before attaching the hash-bound file because composer.fill clears current attachments",
+  );
   assert.match(browserSource, /Create image/, "desktop host must select the explicit ChatGPT image surface");
   assert.match(flowBrowserSource, /navigator\.clipboard\.writeText/, "Flow prompts must use the real clipboard-paste path that enables Create");
   assert.match(flowBrowserSource, /baseline = new Set/, "Flow completion must distinguish generated output from uploaded references");

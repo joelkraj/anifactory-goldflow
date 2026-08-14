@@ -42,7 +42,7 @@ export const PLANNER_PROVIDER_REGISTRY = Object.freeze({
     id: "gemini_web",
     role: "premium_long_context_planning",
     transport: "goldflow_studio_local_api",
-    default_model: "gemini-3.6-flash-web",
+    default_model: "gemini-3.7-flash-web",
     environment: Object.freeze(["ANIFACTORY_GEMINI_WEB_URL", "ANIFACTORY_GEMINI_WEB_TOKEN"]),
   }),
   chatgpt_web: Object.freeze({

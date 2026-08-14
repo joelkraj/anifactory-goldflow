@@ -504,7 +504,34 @@ export async function findSourceCompatibleHybridCompletions({
   return selectedById;
 }
 
-async function resolveRepairEvidence({ episodeDir, episode, mode, currentRows, requestedIds, qaRecovery }) {
+async function resolveRepairEvidence({ episodeDir, episode, mode, currentRows, requestedIds, qaRecovery, providerMigration }) {
+  if (providerMigration) {
+    if (mode !== "scene") throw new Error("Provider migration is valid only for scene cuts.");
+    const ledgerPath = path.join(episodeDir, "cut_execution_ledger.json");
+    const ledger = await readJson(ledgerPath, null);
+    const cutsById = new Map((ledger?.cuts ?? []).map((cut) => [String(cut?.image_id ?? ""), cut]));
+    const records = [{ path: ledgerPath, sha256: await sha256File(ledgerPath) }];
+    const unauthorized = [];
+    for (const assetId of requestedIds) {
+      const cut = cutsById.get(assetId);
+      if (String(cut?.image_provider ?? "").toLowerCase() !== "modelslab"
+        || !cut?.image_path
+        || !await exists(cut.image_path)) {
+        unauthorized.push(assetId);
+        continue;
+      }
+      records.push({ path: cut.image_path, sha256: await sha256File(cut.image_path) });
+    }
+    if (unauthorized.length) {
+      throw new Error(`Provider migration scope is not backed by active ModelsLab cut artifacts: ${unauthorized.join(", ")}.`);
+    }
+    return {
+      schema: "goldflow_hybrid_image_repair_evidence_v1",
+      kind: "operator_provider_migration_from_modelslab",
+      authorized_asset_ids: [...requestedIds],
+      records,
+    };
+  }
   if (qaRecovery) {
     if (mode !== "scene") throw new Error("Image-QA recovery is valid only for scene cuts.");
     const reportPath = path.join(episodeDir, `image_output_qa_${episode}.json`);
@@ -1047,6 +1074,7 @@ export async function runHybridBrowserImagePool(flags) {
 
   const referencesOnly = boolFlag(flags["references-only"]) || flags.mode === "reference";
   const qaRecovery = boolFlag(flags["qa-recovery"]);
+  const providerMigration = boolFlag(flags["provider-migration"]);
   const wavefrontPrefetch = boolFlag(flags["wavefront-prefetch"]);
   const reconcileOnly = boolFlag(flags["reconcile-only"]);
   const flowOnly = flowPrimary || boolFlag(flags["flow-only"]);
@@ -1072,6 +1100,10 @@ export async function runHybridBrowserImagePool(flags) {
   ));
   if (repairReason && !requestedIds.size) throw new Error("--repair-reason requires exact --image-ids/--reference-ids scope.");
   if (qaRecovery && !repairReason) throw new Error("--qa-recovery true requires an exact repair reason and evidence-bound image IDs.");
+  if (providerMigration && (!repairReason || !requestedIds.size || referencesOnly)) {
+    throw new Error("--provider-migration true requires an exact scene --image-ids scope and --repair-reason.");
+  }
+  if (providerMigration && qaRecovery) throw new Error("--provider-migration and --qa-recovery are mutually exclusive.");
   if (reconcileOnly && (repairReason || qaRecovery || wavefrontPrefetch)) {
     throw new Error("--reconcile-only true cannot be combined with repair, QA-recovery, or wavefront-prefetch flags.");
   }
@@ -1219,6 +1251,7 @@ export async function runHybridBrowserImagePool(flags) {
         currentRows: repairCurrentRows,
         requestedIds,
         qaRecovery,
+        providerMigration,
       })
     : null;
   const reconciledRepairAssetIds = new Set();

@@ -80,6 +80,18 @@ function compactFrontierForJudgment(frontier) {
   };
 }
 
+function normalizeDensityDocument(document) {
+  return {
+    ...document,
+    edge_verdicts: Array.isArray(document?.edge_verdicts)
+      ? document.edge_verdicts.map((row) => ({
+        ...row,
+        density_judgment: row?.density_judgment ?? row?.reference_advantage,
+      }))
+      : document?.edge_verdicts,
+  };
+}
+
 async function writeValidatedJson(outputPath, rawPath, validator, validatorOptions, normalizeDocument = null) {
   const content = await fs.readFile(rawPath, "utf8");
   const parsedDocument = parseJsonObjectFromPlannerOutput(content).value;
@@ -111,6 +123,7 @@ const referenceTitle = required(flags["reference-title"], "--reference-title <ti
 const sourceOutlierId = String(flags["reference-entry-id"] ?? path.basename(referencePath, path.extname(referencePath))).trim();
 const frontierProvider = String(flags["frontier-provider"] ?? "gemini_web").trim();
 const diagnosticProvider = String(flags["diagnostic-provider"] ?? "chatgpt_web").trim();
+const diagnosticRepairReason = String(flags["diagnostic-repair-reason"] ?? "").trim();
 const allowedProviders = new Set(["chatgpt_web", "gemini_web"]);
 if (!allowedProviders.has(frontierProvider)) throw new Error("--frontier-provider must be chatgpt_web or gemini_web.");
 if (!allowedProviders.has(diagnosticProvider)) throw new Error("--diagnostic-provider must be chatgpt_web or gemini_web.");
@@ -146,7 +159,7 @@ if (!frontier) {
     repoRoot,
     outputPath: rawPath,
     provider: frontierProvider,
-    model: frontierProvider === "gemini_web" ? "gemini-3.6-flash-web" : "gpt-5.6-sol",
+    model: frontierProvider === "gemini_web" ? "gemini-3.7-flash-web" : "gpt-5.6-sol",
     reasoningEffort: frontierProvider === "gemini_web" ? "high" : "max",
     timeoutMs: Number(flags["timeout-ms"] ?? 3_600_000),
   });
@@ -178,15 +191,22 @@ if (!diagnostic) {
   const suppliedResponsePath = String(flags["diagnostic-response-path"] ?? "").trim();
   const rawPath = suppliedResponsePath
     ? path.resolve(suppliedResponsePath)
-    : path.join(outputDir, "reference_density_dominance_diagnostic.raw.txt");
+    : path.join(
+      outputDir,
+      diagnosticRepairReason
+        ? "reference_density_dominance_diagnostic.exact_repair.raw.txt"
+        : "reference_density_dominance_diagnostic.raw.txt",
+    );
   if (!suppliedResponsePath) {
     await runCodexCli({
       prompt,
-      stageName: "winner_source_reference_density_dominance_diagnostic_v2",
+      stageName: diagnosticRepairReason
+        ? "winner_source_reference_density_dominance_diagnostic_v2_exact_repair"
+        : "winner_source_reference_density_dominance_diagnostic_v2",
       repoRoot,
       outputPath: rawPath,
       provider: diagnosticProvider,
-      model: diagnosticProvider === "gemini_web" ? "gemini-3.6-flash-web" : "gpt-5.6-sol",
+      model: diagnosticProvider === "gemini_web" ? "gemini-3.7-flash-web" : "gpt-5.6-sol",
       reasoningEffort: diagnosticProvider === "gemini_web" ? "high" : "max",
       timeoutMs: Number(flags["timeout-ms"] ?? 3_600_000),
     });
@@ -196,7 +216,7 @@ if (!diagnostic) {
     rawPath,
     validateReferenceDensityDominance,
     diagnosticOptions,
-    (document) => bindReferenceDensityAnchors(document, { scriptText: candidateText, referenceText }),
+    (document) => bindReferenceDensityAnchors(normalizeDensityDocument(document), { scriptText: candidateText, referenceText }),
   );
 }
 
@@ -219,6 +239,7 @@ const report = {
     frontier_provider: frontierProvider,
     diagnostic_provider: diagnosticProvider,
     independent_provider_judgment: frontierProvider !== diagnosticProvider,
+    diagnostic_exact_repair_reason: diagnosticRepairReason || null,
   },
 };
 await fs.writeFile(path.join(outputDir, "audit_proof_report.json"), `${JSON.stringify(report, null, 2)}\n`);

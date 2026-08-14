@@ -3062,7 +3062,10 @@ function testEditorialBeatDirectorContracts() {
   assert.match(prompt, /CANONICAL PROPS:/);
   assert.match(prompt, /CANONICAL UI MOTIFS:/);
   assert.match(prompt, /exact prop_id or ui_id/i);
-  assert.match(prompt, /at most three individually readable foreground actors/i);
+  assert.match(prompt, /You own background population and its depiction for each beat/i);
+  assert.match(prompt, /You decide how many supported participants are individually readable/i);
+  assert.match(prompt, /There is no default crowd treatment based on location or scene type/i);
+  assert.doesNotMatch(prompt, /at most three individually readable foreground actors/i);
   assert.match(prompt, /Do not expand a collective phrase/i);
   assert.match(prompt, /ANIMATION MODE IS DISABLED/);
   assert.doesNotMatch(prompt, /"animation_intent": \{/);
@@ -7399,6 +7402,7 @@ async function testVisualPlannerDriftContracts() {
     "docs/workflows/video_production_workflow.md",
     "bin/goldflow.mjs",
     "scripts/codex-image-manual-import.mjs",
+    "scripts/lib/editorial-beat-director.mjs",
     "scripts/semantic-scene-plan.mjs",
     "scripts/visual-reference-plan.mjs",
     "scripts/visual-plan.mjs",
@@ -7446,6 +7450,11 @@ async function testVisualPlannerDriftContracts() {
   assert.equal(/Preserve the shot scale, subject count, background population, and composition requested by the prompt/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/Wide 16:9 landscape YouTube frame/i.test(files["scripts/imagegen.mjs"]), false);
   assert.equal(/full-frame composition, keep complete heads/i.test(files["scripts/imagegen.mjs"]), false);
+  assert.match(files["scripts/lib/editorial-beat-director.mjs"], /There is no default crowd treatment based on location or scene type/i);
+  assert.match(files["scripts/visual-plan.mjs"], /without imposing a default crowd, emptiness, detail level, prominence, lighting, or silhouette treatment/i);
+  assert.doesNotMatch(files["scripts/lib/editorial-beat-director.mjs"], /active social situation logically needs anonymous people/i);
+  assert.doesNotMatch(files["scripts/visual-plan.mjs"], /Describe those people and their subordinate staging/i);
+  assert.doesNotMatch(files["scripts/visual-plan.mjs"], /Keep at most three individually readable foreground actors/i);
   assert.match(files["scripts/codex-image-manual-import.mjs"], /promptTextForImageProvider\(prompt, "codex_imagegen"\)/);
   assert.equal(commandStageFor("visual", "approve-refs", {}), "reference_image_approval");
   assert.equal(commandStageFor("imagegen", "start", {}), "image_generation");

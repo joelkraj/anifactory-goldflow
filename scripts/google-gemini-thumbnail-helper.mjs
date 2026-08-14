@@ -67,6 +67,7 @@ export async function generateGoogleGeminiThumbnails({
       const startedAt = new Date().toISOString();
       const result = await browser.runJob({
         job: {
+          type: "image",
           manifest_id: `thumbnail-gemini-${Date.now()}-${index}`,
           asset_id: String(job.workId ?? `thumbnail-${index}`),
           lease_token: `direct-${Date.now()}-${index}`,

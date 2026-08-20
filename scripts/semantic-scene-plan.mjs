@@ -1653,6 +1653,7 @@ async function main() {
   }
   const requestedSet = new Set(requestedUnitIds);
   const chunkResults = await runPool(chunks, async (chunk) => {
+    const chunkStartedMs = Date.now();
     const chunkTargets = chunkSceneCountTargets(chunk.text);
     const chunkPrompt = buildPrompt(chunk.text, bibles, chunkTargets, chunk);
     const chunkId = semanticChunkId(chunk.chunk_index);
@@ -1710,10 +1711,10 @@ async function main() {
       };
     }
     let chunkLlm = null;
+    const attemptStageName = requestedSet.has(chunkId)
+      ? `${stageName}_${chunkId}_exact_repair`
+      : `${stageName}_${chunkId}`;
     try {
-      const attemptStageName = requestedSet.has(chunkId)
-        ? `${stageName}_${chunkId}_exact_repair`
-        : `${stageName}_${chunkId}`;
       const structurallyUsable = (parsed) => Array.isArray(parsed?.scenes) && parsed.scenes.length > 0;
       chunkLlm = isLocalLLMRoute(attemptStageName)
         ? await callLocal(chunkPrompt, attemptStageName, Number(flags["semantic-chunk-max-tokens"] ?? 4500))
@@ -1744,6 +1745,18 @@ async function main() {
           word_end_index_exclusive: chunk.word_end_index_exclusive,
           scene_count: chunkScenes.length,
           scene_count_findings: semanticSceneCountFindings(chunkScenes.length, chunkTargets),
+        },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: chunkLlm.provider ?? "unknown",
+          model: chunkLlm.model ?? null,
+          reasoning_effort: chunkLlm.reasoning_effort ?? semanticReasoningEffortForStage(attemptStageName, flags),
+          risk_class: "medium",
+          item_count: chunk.words,
+          word_count: chunk.words,
+          prompt_chars: chunkPrompt.length,
+          output_chars: String(chunkLlm.content ?? "").length,
+          service_ms: Date.now() - chunkStartedMs,
         },
       });
       console.error(`semantic chunk ${chunk.chunk_index}/${chunk.chunk_count}: accepted ${chunkScenes.length} scenes`);
@@ -1786,6 +1799,18 @@ async function main() {
         metadata: {
           word_start_index: chunk.word_start_index,
           word_end_index_exclusive: chunk.word_end_index_exclusive,
+        },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: chunkLlm?.provider ?? "unknown",
+          model: chunkLlm?.model ?? null,
+          reasoning_effort: chunkLlm?.reasoning_effort ?? semanticReasoningEffortForStage(attemptStageName, flags),
+          risk_class: "medium",
+          item_count: chunk.words,
+          word_count: chunk.words,
+          prompt_chars: chunkPrompt.length,
+          output_chars: String(chunkLlm?.content ?? "").length,
+          service_ms: Date.now() - chunkStartedMs,
         },
       });
       return {

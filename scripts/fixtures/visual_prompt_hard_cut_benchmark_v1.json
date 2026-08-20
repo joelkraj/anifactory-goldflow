@@ -1,0 +1,207 @@
+{
+  "schema": "goldflow_visual_prompt_hard_cut_benchmark_v1",
+  "version": 1,
+  "purpose": "Locked structural benchmark for provider prompt compilation. It intentionally spans reference counts, contact geometry, continuity, crowds, UI, injury state, unusual cameras, and hero moments.",
+  "cases": [
+    {
+      "case_id": "hc_01_emotional_closeup_no_ref",
+      "category": "emotional_closeup",
+      "reference_count": 0,
+      "neutral_prompt": "A restrained close-up of Mara realizing the sealed letter proves her brother betrayed her, eyes wet but jaw steady, the red wax seal sharp in the foreground, rain-soft window light, clean cinematic manhwa rendering.",
+      "required_tokens": ["sealed letter", "red wax seal", "jaw steady"],
+      "shot_manifest": {"shot_job":"reaction_closeup","foreground_action":"Mara reads the broken seal and contains her reaction","visible_characters":["Mara"],"visible_props":["sealed letter","red wax seal"],"character_staging":[{"name":"Mara","screen_position":"frame-center","pose":"letter held below her face"}]}
+    },
+    {
+      "case_id": "hc_02_single_identity_ref",
+      "category": "single_reference_identity",
+      "reference_count": 1,
+      "neutral_prompt": "Kael stands alone at the guild gate after exile, torn black coat fastened at the throat, one hand on the closed iron door, sunrise behind the city wall, determined rather than defeated.",
+      "required_tokens": ["guild gate", "torn black coat", "determined"],
+      "shot_manifest": {"shot_job":"character_wide","foreground_action":"Kael keeps one hand on the closed guild gate before turning away","visible_characters":["Kael"],"visible_props":["closed iron door"],"character_staging":[{"name":"Kael","screen_position":"frame-left","pose":"one palm against the gate"}]}
+    },
+    {
+      "case_id": "hc_03_two_person_confrontation",
+      "category": "two_reference_confrontation",
+      "reference_count": 2,
+      "neutral_prompt": "Elara and Serena face each other across a narrow clinic table, Elara calm at frame-left and Serena leaning forward at frame-right, a signed recall order between them, no physical contact, hard noon light dividing the room.",
+      "required_tokens": ["signed recall order", "frame-left", "frame-right"],
+      "shot_manifest": {"shot_job":"two_shot_confrontation","foreground_action":"Serena challenges Elara across the signed recall order","visible_characters":["Elara","Serena"],"visible_props":["signed recall order"],"character_staging":[{"name":"Elara","screen_position":"frame-left","pose":"seated upright with hands apart"},{"name":"Serena","screen_position":"frame-right","pose":"leaning across the table"}],"spatial_continuity":{"eyeline_axis":"left-right table axis","primary_screen_position":"frame-left","primary_facing":"right","counterparty_or_threat_position":"frame-right"}}
+    },
+    {
+      "case_id": "hc_04_four_reference_team",
+      "category": "four_reference_group",
+      "reference_count": 4,
+      "neutral_prompt": "Four rescue specialists form a readable diamond around a collapsed stairwell: shield lead front-center, medic kneeling left, rigger anchoring right, scout signaling from the rear landing, each silhouette separated, no extra team members.",
+      "required_tokens": ["readable diamond", "front-center", "no extra team members"],
+      "shot_manifest": {"shot_job":"ensemble_rescue_wide","foreground_action":"The four-person crew stabilizes the collapsed stairwell before entry","visible_characters":["shield lead","medic","rigger","scout"],"character_staging":[{"name":"shield lead","screen_position":"frame-center","pose":"shield braced at the opening"},{"name":"medic","screen_position":"frame-left","pose":"kneeling beside the casualty lane"},{"name":"rigger","screen_position":"frame-right","pose":"locking an anchor"},{"name":"scout","screen_position":"background-center","pose":"signaling from the rear landing"}]}
+    },
+    {
+      "case_id": "hc_05_sword_contact",
+      "category": "physical_contact",
+      "reference_count": 2,
+      "neutral_prompt": "A single decisive sword bind at chest height: Kael's right-handed silver blade meets Voss's black saber edge-to-edge, both weapons fully readable, Kael frame-left and Voss frame-right, sparks only at the exact contact point.",
+      "required_tokens": ["edge-to-edge", "right-handed silver blade", "exact contact point"],
+      "shot_manifest": {"shot_job":"physical_action","foreground_action":"Kael and Voss lock blades once at chest height","visible_characters":["Kael","Voss"],"character_staging":[{"name":"Kael","screen_position":"frame-left","pose":"right arm extended into the bind"},{"name":"Voss","screen_position":"frame-right","pose":"saber angled left into contact"}],"equipment_contracts":[{"owner":"Kael","item":"silver blade","visible_count":1,"hand_assignment":"right hand; left hand open","holder_state":"sheath empty","contact_target":"Voss black saber","extras_allowed":false},{"owner":"Voss","item":"black saber","visible_count":1,"hand_assignment":"right hand","holder_state":"scabbard empty","contact_target":"Kael silver blade","extras_allowed":false}]}
+    },
+    {
+      "case_id": "hc_06_shield_impact",
+      "category": "impact_geometry",
+      "reference_count": 2,
+      "neutral_prompt": "Joey catches one stone hammer on the upper-left curve of his shield while his boots skid backward through dust, attacker above frame-right, shield intact but visibly flexing, the protected medic clear behind him.",
+      "required_tokens": ["upper-left curve", "boots skid backward", "protected medic"],
+      "shot_manifest": {"shot_job":"physical_action","foreground_action":"The stone hammer strikes the upper-left shield edge and drives Joey backward","visible_characters":["Joey","stone guardian","medic"],"character_staging":[{"name":"Joey","screen_position":"frame-center","pose":"shield angled up-left"},{"name":"stone guardian","screen_position":"upper-right","pose":"hammer completing one downward strike"},{"name":"medic","screen_position":"background-left","pose":"crouched behind Joey"}]}
+    },
+    {
+      "case_id": "hc_07_ring_handoff",
+      "category": "hand_object_geometry",
+      "reference_count": 2,
+      "neutral_prompt": "A clean close insert of Maya returning one engagement ring into Joey's open left palm, exactly two visible hands total, ring centered between fingertips, their faces soft and out of focus behind the exchange.",
+      "required_tokens": ["exactly two visible hands", "engagement ring", "open left palm"],
+      "shot_manifest": {"shot_job":"object_handoff_insert","foreground_action":"Maya places one engagement ring into Joey's open left palm","visible_characters":["Maya","Joey"],"visible_props":["engagement ring"],"anatomy_contracts":[{"entity":"Maya and Joey","body_invariant":"one hand from each person enters frame","expected_visible_hands":2,"visibility_required":true}],"equipment_contracts":[{"owner":"Maya","item":"engagement ring","visible_count":1,"hand_assignment":"released by right fingertips into Joey's left palm","holder_state":"no box","contact_target":"Joey left palm","extras_allowed":false}]}
+    },
+    {
+      "case_id": "hc_08_amputation_no_prosthetic",
+      "category": "body_state",
+      "reference_count": 1,
+      "neutral_prompt": "Oren operates a waist-mounted rescue control board with his right hand; his left forearm ends below the elbow inside a fitted protective sleeve with no prosthetic hand, three anchor status lights visible.",
+      "required_tokens": ["no prosthetic hand", "waist-mounted", "three anchor status lights"],
+      "shot_manifest": {"shot_job":"medium_action","foreground_action":"Oren presses the center anchor control with his right hand","visible_characters":["Oren"],"visible_props":["waist-mounted rescue control board"],"anatomy_contracts":[{"entity":"Oren","body_invariant":"left forearm amputation below elbow","expected_visible_hands":1,"missing_limb":"left forearm below elbow","prosthetic_allowed":false,"visibility_required":true}]}
+    },
+    {
+      "case_id": "hc_09_prosthetic_allowed",
+      "category": "body_state",
+      "reference_count": 1,
+      "neutral_prompt": "A veteran engineer tightens a bridge clamp with a compact mechanical left-hand prosthetic and a natural right hand steadying the rail, both arms clearly separated, practical daylight documentary composition.",
+      "required_tokens": ["mechanical left-hand prosthetic", "natural right hand", "bridge clamp"],
+      "shot_manifest": {"shot_job":"medium_action","foreground_action":"The engineer tightens one bridge clamp with the left prosthetic","visible_characters":["veteran engineer"],"visible_props":["bridge clamp"],"anatomy_contracts":[{"entity":"veteran engineer","body_invariant":"mechanical prosthetic replaces left hand","expected_visible_hands":2,"missing_limb":"left hand","prosthetic_allowed":true,"visibility_required":true}]}
+    },
+    {
+      "case_id": "hc_10_crowded_evacuation",
+      "category": "crowd_readability",
+      "reference_count": 2,
+      "neutral_prompt": "A rescue captain guides a dense civilian line through one lit tunnel while a shield carrier blocks falling debris in the foreground; the crowd reads as a unified background flow, not individually detailed faces.",
+      "required_tokens": ["unified background flow", "one lit tunnel", "falling debris"],
+      "shot_manifest": {"shot_job":"crowd_rescue_wide","foreground_action":"The captain directs civilians past the shield carrier into the tunnel","visible_characters":["rescue captain","shield carrier"],"background_population":{"presence":"explicit","description":"dense civilian evacuation line","staging":"single directional flow into the tunnel"},"character_staging":[{"name":"shield carrier","screen_position":"foreground-right","pose":"blocking one falling slab"},{"name":"rescue captain","screen_position":"midground-left","pose":"arm directing civilians toward the tunnel"}]}
+    },
+    {
+      "case_id": "hc_11_phone_ui",
+      "category": "ui_screen",
+      "reference_count": 1,
+      "neutral_prompt": "Over-shoulder view of Elara holding a phone with one dominant red emergency alert card and a simple five-slot recall diagram; her thumb stays below the screen, no decorative app grid, clinic corridor reflected in the glass.",
+      "required_tokens": ["five-slot recall diagram", "thumb stays below", "no decorative app grid"],
+      "shot_manifest": {"shot_job":"ui_focus","foreground_action":"Elara reads the red recall alert without touching it","visible_characters":["Elara"],"visible_props":["phone"],"ui_elements":["one red emergency alert card","five-slot recall diagram"],"equipment_contracts":[{"owner":"Elara","item":"phone","visible_count":1,"hand_assignment":"right hand; thumb below screen","holder_state":"screen facing camera","contact_target":null,"extras_allowed":false}]}
+    },
+    {
+      "case_id": "hc_12_scoreboard_ui",
+      "category": "ui_screen",
+      "reference_count": 0,
+      "neutral_prompt": "A clean guild scoreboard fills most of frame with one zero-score row highlighted beside five credited teammates, a small shield icon identifying the ignored defender, viewers blurred at the bottom edge.",
+      "required_tokens": ["zero-score row", "five credited teammates", "shield icon"],
+      "shot_manifest": {"shot_job":"ui_focus","foreground_action":"The scoreboard isolates the defender's zero contribution row","visible_props":["guild scoreboard"],"ui_elements":["one highlighted zero-score row","five credited teammate rows","small shield icon"]}
+    },
+    {
+      "case_id": "hc_13_top_down_geometry",
+      "category": "unusual_camera",
+      "reference_count": 2,
+      "neutral_prompt": "Strict top-down view of a circular quarry shelf: Joey at six o'clock, trapped workers at nine, open crusher channel at three, one safe rope line crossing north to south, geography immediately readable.",
+      "required_tokens": ["six o'clock", "nine", "three", "north to south"],
+      "shot_manifest": {"shot_job":"geography_overhead","foreground_action":"Joey holds the south route while workers move west","visible_characters":["Joey","trapped workers"],"visible_props":["safe rope line","crusher channel"],"shot_size":"extreme wide","camera_angle":"strict top-down","spatial_continuity":{"primary_screen_position":"six o'clock","counterparty_or_threat_position":"three o'clock","travel_direction":"west","object_geography":"workers nine o'clock; rope north-south"}}
+    },
+    {
+      "case_id": "hc_14_dutch_tension",
+      "category": "unusual_camera",
+      "reference_count": 1,
+      "neutral_prompt": "A restrained ten-degree Dutch angle as the courthouse elevator stops between floors, Maya framed against the tilted door seam, emergency light above her, one dropped file sliding toward frame-left.",
+      "required_tokens": ["ten-degree Dutch angle", "tilted door seam", "dropped file"],
+      "shot_manifest": {"shot_job":"tension_medium","foreground_action":"Maya braces as the stalled elevator tilts the file across the floor","visible_characters":["Maya"],"visible_props":["dropped file"],"camera_angle":"ten-degree Dutch angle","spatial_continuity":{"primary_screen_position":"frame-right","travel_direction":"file sliding toward frame-left"}}
+    },
+    {
+      "case_id": "hc_15_rear_tracking_direction",
+      "category": "screen_direction",
+      "reference_count": 1,
+      "neutral_prompt": "Rear three-quarter tracking frame of Tess running left-to-right along an elevated rail, rescue line trailing behind without crossing her legs, destination hatch visible ahead at frame-right.",
+      "required_tokens": ["left-to-right", "destination hatch", "without crossing her legs"],
+      "shot_manifest": {"shot_job":"lateral_follow","foreground_action":"Tess runs left-to-right toward the open maintenance hatch","visible_characters":["Tess"],"visible_props":["rescue line","maintenance hatch"],"vantage":"rear three-quarter","spatial_continuity":{"primary_facing":"right","travel_direction":"left-to-right","object_geography":"hatch ahead at frame-right; line trails frame-left"}}
+    },
+    {
+      "case_id": "hc_16_ambulance_interior",
+      "category": "vehicle_interior",
+      "reference_count": 2,
+      "neutral_prompt": "Inside a tilted ambulance, Lena locks one patient bed to the floor while the patient remains connected to two support lines; window horizon sharply canted, equipment secured, no extra medics.",
+      "required_tokens": ["two support lines", "patient bed", "no extra medics"],
+      "shot_manifest": {"shot_job":"vehicle_interior_action","foreground_action":"Lena locks the patient bed as the ambulance tilts","visible_characters":["Lena","patient"],"visible_props":["patient bed","two support lines"],"character_staging":[{"name":"Lena","screen_position":"frame-left","pose":"one knee down, hand on floor lock"},{"name":"patient","screen_position":"frame-right","pose":"secured on bed"}]}
+    },
+    {
+      "case_id": "hc_17_bus_external_rescue",
+      "category": "vehicle_exterior",
+      "reference_count": 2,
+      "neutral_prompt": "A city bus leans toward a flooded curb while one external tether holds its rear axle; Oren at frame-left operates the anchor board and Joey braces the side panel at frame-right, civilians visible through intact windows.",
+      "required_tokens": ["rear axle", "intact windows", "anchor board"],
+      "shot_manifest": {"shot_job":"vehicle_rescue_wide","foreground_action":"Joey braces the bus while Oren tensions the rear tether","visible_characters":["Oren","Joey"],"visible_props":["city bus","external tether","anchor board"],"character_staging":[{"name":"Oren","screen_position":"frame-left","pose":"right hand on anchor controls"},{"name":"Joey","screen_position":"frame-right","pose":"shield shoulder against side panel"}]}
+    },
+    {
+      "case_id": "hc_18_train_platform_resonance",
+      "category": "environmental_mechanism",
+      "reference_count": 2,
+      "neutral_prompt": "Low platform angle as a crystal pulse travels only along the steel rail, visible as a narrow white vibration line; civilians stand safely on black rubber crossing pads, Joey's shield edge touches concrete but not rail.",
+      "required_tokens": ["only along the steel rail", "rubber crossing pads", "not rail"],
+      "shot_manifest": {"shot_job":"mechanism_wide","foreground_action":"The resonance pulse passes beneath the isolated civilian crossing","visible_characters":["Joey","civilians"],"visible_props":["steel rail","rubber crossing pads","shield"],"spatial_continuity":{"object_geography":"rail foreground; rubber pads cross center; civilians behind Joey"}}
+    },
+    {
+      "case_id": "hc_19_location_continuity",
+      "category": "location_continuity",
+      "reference_count": 1,
+      "neutral_prompt": "Return to the same old fire-station briefing room: red bay doors on the west wall, chalk roster board beside the rigging rack, scarred oak table centered, morning light from the narrow east windows.",
+      "required_tokens": ["red bay doors", "chalk roster board", "scarred oak table"],
+      "shot_manifest": {"shot_job":"location_reestablish","foreground_action":"The empty briefing room re-establishes the crew's unchanged base","location_contract_id":"lantern_fire_station_briefing_room","location_ref_id":"lantern_base_ref","visible_props":["chalk roster board","rigging rack","scarred oak table"],"spatial_continuity":{"object_geography":"bay doors west; board beside rack; windows east"}}
+    },
+    {
+      "case_id": "hc_20_screen_visible_replay",
+      "category": "screen_identity",
+      "reference_count": 2,
+      "neutral_prompt": "Bram watches a wall monitor replaying Serena selecting five glowing recall slots while Joey's sixth slot remains dark; Bram is physical in foreground-left, Serena appears only inside the monitor at frame-right.",
+      "required_tokens": ["five glowing recall slots", "sixth slot remains dark", "only inside the monitor"],
+      "shot_manifest": {"shot_job":"screen_witness","foreground_action":"Bram recognizes the missing sixth recall selection in the replay","visible_characters":["Bram","Serena"],"visible_props":["wall monitor"],"ui_elements":["five glowing recall slots","one dark sixth slot"],"character_staging":[{"name":"Bram","screen_position":"foreground-left","pose":"watching the monitor"},{"name":"Serena","screen_position":"screen-right","pose":"visible only within replay image"}]}
+    },
+    {
+      "case_id": "hc_21_nonhuman_anatomy",
+      "category": "creature_anatomy",
+      "reference_count": 1,
+      "neutral_prompt": "A crystal feeder emerges from one circular floor plate with exactly six jointed legs, no eyes, wedge-shaped jaws, and translucent roots connected to the rail bed; side profile keeps all six legs countable.",
+      "required_tokens": ["exactly six jointed legs", "no eyes", "all six legs countable"],
+      "shot_manifest": {"shot_job":"creature_identity_wide","foreground_action":"The crystal feeder plants all six legs around the floor plate","visible_characters":["crystal feeder"],"anatomy_contracts":[{"entity":"crystal feeder","body_invariant":"exactly six jointed legs, no eyes, wedge-shaped jaws","expected_visible_hands":0,"prosthetic_allowed":false,"visibility_required":true}]}
+    },
+    {
+      "case_id": "hc_22_silhouette_reveal",
+      "category": "lighting_readability",
+      "reference_count": 1,
+      "neutral_prompt": "The unlisted Warden kneels as one readable black-stone silhouette against a white rupture in the sanctuary floor, hollow bell chest clearly separated from both arms, tiny human shield figure at lower-left for scale.",
+      "required_tokens": ["hollow bell chest", "tiny human shield figure", "for scale"],
+      "shot_manifest": {"shot_job":"scale_reveal","foreground_action":"The Warden rises through the white floor rupture","visible_characters":["Warden","shield figure"],"character_staging":[{"name":"Warden","screen_position":"frame-center","pose":"kneeling giant rising"},{"name":"shield figure","screen_position":"lower-left","pose":"shield raised"}]}
+    },
+    {
+      "case_id": "hc_23_injury_state",
+      "category": "injury_continuity",
+      "reference_count": 1,
+      "neutral_prompt": "Elara stands inside the sanctuary dome with one narrow red wound line crossing her white medical coat diagonally from right shoulder to left waist, no gore, both hands intact and lowered apart, protected civilians small behind her.",
+      "required_tokens": ["right shoulder to left waist", "both hands intact", "no gore"],
+      "shot_manifest": {"shot_job":"sacrifice_reveal","foreground_action":"The transferred wound opens across Elara's coat while she remains standing","visible_characters":["Elara","protected civilians"],"anatomy_contracts":[{"entity":"Elara","body_invariant":"both hands intact; one diagonal non-gory wound line","expected_visible_hands":2,"prosthetic_allowed":false,"visibility_required":true}]}
+    },
+    {
+      "case_id": "hc_24_evidence_object",
+      "category": "evidence_insert",
+      "reference_count": 0,
+      "neutral_prompt": "Forensic tabletop insert: one recall crystal, one guild emblem, and one blood-marked shield cartridge arranged in a straight evidence line with small numbered tags 1, 2, and 3, no hands in frame.",
+      "required_tokens": ["one recall crystal", "one guild emblem", "tags 1, 2, and 3"],
+      "shot_manifest": {"shot_job":"evidence_insert","foreground_action":"Three physical objects establish the raid sequence","visible_props":["recall crystal","guild emblem","shield cartridge"],"equipment_contracts":[{"owner":"evidence table","item":"recall crystal","visible_count":1,"hand_assignment":"no hands","holder_state":"tag 1","extras_allowed":false},{"owner":"evidence table","item":"guild emblem","visible_count":1,"hand_assignment":"no hands","holder_state":"tag 2","extras_allowed":false},{"owner":"evidence table","item":"shield cartridge","visible_count":1,"hand_assignment":"no hands","holder_state":"tag 3","extras_allowed":false}]}
+    },
+    {
+      "case_id": "hc_25_climax_hero",
+      "category": "hero_climax",
+      "reference_count": 4,
+      "neutral_prompt": "Climax hero frame: Joey at the maintenance-pit edge turns the curved shield seven degrees as the Crown Ram's plated head slides across it; three taut anchor tethers form a readable triangle, Adrian braces behind the shutter, the exposed core opens toward the attackers.",
+      "required_tokens": ["seven degrees", "three taut anchor tethers", "exposed core"],
+      "shot_manifest": {"shot_job":"physical_action","foreground_action":"Joey deflects the Crown Ram into the maintenance pit at the exact seven-degree turn","visible_characters":["Joey","Crown Ram","Adrian","attackers"],"visible_props":["curved shield","three anchor tethers","maintenance pit","inner shutter"],"character_staging":[{"name":"Joey","screen_position":"frame-center","pose":"shield turning seven degrees at contact"},{"name":"Crown Ram","screen_position":"foreground-right","pose":"plated head sliding toward pit"},{"name":"Adrian","screen_position":"background-left","pose":"bracing behind inner shutter"},{"name":"attackers","screen_position":"upper-background","pose":"aimed toward exposed core"}],"spatial_continuity":{"primary_screen_position":"frame-center","primary_facing":"right","counterparty_or_threat_position":"foreground-right","object_geography":"pit below contact; anchor triangle around Joey; shutter behind left"}}
+    }
+  ]
+}

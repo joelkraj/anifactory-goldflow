@@ -114,6 +114,59 @@
     }
   }
 
+  function normalizedModelIdentity(value) {
+    return String(value ?? "")
+      .toLowerCase()
+      .replace(/\bgpt\b/g, "")
+      .replace(/[^a-z0-9.]+/g, " ")
+      .trim();
+  }
+
+  function modelControlMatches(actualText, expectedLabel) {
+    const actual = normalizedModelIdentity(actualText);
+    const expected = normalizedModelIdentity(expectedLabel);
+    return Boolean(expected) && actual.includes(expected);
+  }
+
+  async function exposeAdvancedControls(menu) {
+    const advanced = [...menu.querySelectorAll('[role="menuitem"]')]
+      .find((element) => visible(element) && /advanced/i.test(textOf(element)));
+    if (advanced && advanced.getAttribute("aria-expanded") !== "true") {
+      advanced.click();
+      await sleep(150);
+    }
+  }
+
+  function modelControl(menu) {
+    return [...menu.querySelectorAll('[role="menuitem"]')]
+      .find((element) => visible(element) && /^model\b/i.test(textOf(element)));
+  }
+
+  async function selectModel(menu, powerButton, modelLabel) {
+    await exposeAdvancedControls(menu);
+    let control = modelControl(menu);
+    if (!control) throw errorWithCode("ui_contract_mismatch", "ChatGPT Advanced options did not expose its model selector.");
+    if (modelControlMatches(textOf(control), modelLabel)) return menu;
+
+    control.click();
+    const target = await waitFor(() => [...document.querySelectorAll('[role="menuitemradio"]')]
+      .find((element) => visible(element) && textOf(element) === modelLabel), { timeoutMs: 10_000, label: `model ${modelLabel}` });
+    target.focus();
+    pressPowerKey(target, "Enter");
+    await waitFor(() => target.getAttribute("aria-checked") === "true", { timeoutMs: 10_000, label: `selected model ${modelLabel}` });
+    pressPowerKey(target, "Escape");
+    await sleep(150);
+
+    menu = [...document.querySelectorAll('[role="menu"]')].find((element) => visible(element) && element.querySelector('[role="slider"]'))
+      ?? await openPowerMenu(powerButton);
+    await exposeAdvancedControls(menu);
+    control = modelControl(menu);
+    if (!control || !modelControlMatches(textOf(control), modelLabel)) {
+      throw errorWithCode("ui_contract_mismatch", `ChatGPT did not retain model ${modelLabel}.`);
+    }
+    return menu;
+  }
+
   async function selectEffort(menu, effortLabel) {
     const effortIndex = ["Instant", "Medium", "High", "Extra High", "Pro"].indexOf(effortLabel);
     if (effortIndex < 0) throw errorWithCode("ui_contract_mismatch", `Goldflow cannot select unsupported effort ${effortLabel}.`);
@@ -150,15 +203,17 @@
     ).catch(() => {
       throw errorWithCode("ui_contract_mismatch", "Expected the ChatGPT power control.");
     });
-    const menu = await openPowerMenu(powerButton);
+    let menu = await openPowerMenu(powerButton);
+    menu = await selectModel(menu, powerButton, contract.model_label);
     let normalizedMenuText = textOf(menu).replace(/\s+/g, " ").trim();
     if (!normalizedMenuText.includes(`Effort ${contract.effort_label}`)) {
       normalizedMenuText = await selectEffort(menu, contract.effort_label);
     }
+    const retainedModelControl = modelControl(menu);
+    if (!retainedModelControl || !modelControlMatches(textOf(retainedModelControl), contract.model_label)) throw errorWithCode("ui_contract_mismatch", `Expected model ${contract.model_label}; visible menu was ${normalizedMenuText.slice(0, 300)}.`);
+    if (!normalizedMenuText.includes(`Effort ${contract.effort_label}`)) throw errorWithCode("ui_contract_mismatch", `Expected effort ${contract.effort_label}; visible menu was ${normalizedMenuText.slice(0, 300)}.`);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     if (powerButton.getAttribute("aria-expanded") === "true") powerButton.click();
-    if (!normalizedMenuText.includes(contract.model_label)) throw errorWithCode("ui_contract_mismatch", `Expected model ${contract.model_label}; visible menu was ${normalizedMenuText.slice(0, 300)}.`);
-    if (!normalizedMenuText.includes(`Effort ${contract.effort_label}`)) throw errorWithCode("ui_contract_mismatch", `Expected effort ${contract.effort_label}; visible menu was ${normalizedMenuText.slice(0, 300)}.`);
     return {
       account_plan: contract.account_plan,
       model_label: contract.model_label,

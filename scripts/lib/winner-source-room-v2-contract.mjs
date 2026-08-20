@@ -1,9 +1,17 @@
 import { createHash } from "node:crypto";
+import {
+  STORY_DIAGNOSTIC_IDS,
+} from "./first-class-story-contract.mjs";
+
+export { FIRST_CLASS_STORY_ROOM_PROFILE_V4 } from "./first-class-story-contract.mjs";
 
 export const EVIDENCE_STORY_ROOM_PROFILE = "evidence_story_room_v2";
 export const SOURCE_EVIDENCE_REGISTRY_SCHEMA = "goldflow_source_evidence_registry_v1";
 export const PACKAGE_OUTLIER_LEDGER_SCHEMA = "goldflow_package_outlier_ledger_v1";
+export const PACKAGE_OUTLIER_LEDGER_SCHEMA_V2 = "goldflow_package_outlier_ledger_v2";
+export const PACKAGE_OUTLIER_LEDGER_SCHEMA_V3 = "goldflow_package_outlier_ledger_v3";
 export const PREMISE_SLATE_V2_SCHEMA = "goldflow_premise_slate_v2";
+export const PREMISE_SLATE_V3_SCHEMA = "goldflow_premise_slate_v3";
 export const PREMISE_SELECTION_V2_SCHEMA = "goldflow_premise_selection_v2";
 export const PACKAGE_TOURNAMENT_SCHEMA = "goldflow_package_tournament_v1";
 export const PACKAGE_TOURNAMENT_CONSENSUS_SCHEMA = "goldflow_package_tournament_consensus_v1";
@@ -65,6 +73,26 @@ export const PREMISE_SLOT_IDS = [
   "challenger_1",
   "challenger_2",
 ];
+
+export const PREMISE_MARKET_DIMENSION_IDS = Object.freeze([
+  "recent_demand",
+  "breakout_multiple",
+  "package_clarity",
+  "emotional_familiarity",
+  "novelty",
+  "longform_runway",
+  "production_feasibility",
+  "saturation",
+]);
+
+export const COMMENT_LANGUAGE_CATEGORY_IDS = Object.freeze([
+  "adjacent_request",
+  "unresolved_question",
+  "anger",
+  "fantasy_desire",
+  "confusion",
+  "viewer_language",
+]);
 
 export const TREATMENT_ENGINE_IDS = [
   "boundary_drama",
@@ -188,6 +216,42 @@ function bindUniqueExactAnchor(anchor, text) {
     exact_text: exactText,
     start_offset: first,
     end_offset: first + exactText.length,
+  };
+}
+
+function normalizeLengthPreservingAnchorText(value) {
+  return String(value ?? "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-");
+}
+
+function bindUniqueInlineAnchor(anchor, text) {
+  const rawAnchor = String(anchor ?? "");
+  const source = String(text ?? "");
+  if (!rawAnchor || !source) return anchor;
+  if (source.includes(rawAnchor)) return rawAnchor;
+  const comparableAnchor = normalizeLengthPreservingAnchorText(rawAnchor);
+  const comparableSource = normalizeLengthPreservingAnchorText(source);
+  const first = comparableSource.indexOf(comparableAnchor);
+  if (first < 0 || comparableSource.indexOf(comparableAnchor, first + 1) >= 0) return anchor;
+  return source.slice(first, first + rawAnchor.length);
+}
+
+export function bindTreatmentSelectionAnchors(document, { treatmentBatch = null } = {}) {
+  const treatmentById = new Map((Array.isArray(treatmentBatch?.treatments) ? treatmentBatch.treatments : [])
+    .map((treatment) => [treatment?.id, String(treatment?.treatment ?? "")]));
+  return {
+    ...document,
+    comparative_findings: (Array.isArray(document?.comparative_findings)
+      ? document.comparative_findings
+      : []).map((finding) => ({
+        ...finding,
+        exact_anchor: bindUniqueInlineAnchor(
+          finding?.exact_anchor,
+          treatmentById.get(finding?.treatment_id) ?? "",
+        ),
+      })),
   };
 }
 
@@ -468,9 +532,16 @@ export function validateSourceEvidenceRegistry(document) {
   return { done: blockers.length === 0, blockers };
 }
 
-export function validatePackageOutlierLedger(document) {
+export function validatePackageOutlierLedger(document, { requireCommentLanguage = false } = {}) {
   const blockers = [];
-  pushIf(blockers, document?.schema !== PACKAGE_OUTLIER_LEDGER_SCHEMA, "package_outlier_ledger_schema_invalid");
+  const structuredV2 = [PACKAGE_OUTLIER_LEDGER_SCHEMA_V2, PACKAGE_OUTLIER_LEDGER_SCHEMA_V3].includes(document?.schema);
+  const commentLanguageV3 = document?.schema === PACKAGE_OUTLIER_LEDGER_SCHEMA_V3;
+  pushIf(
+    blockers,
+    ![PACKAGE_OUTLIER_LEDGER_SCHEMA, PACKAGE_OUTLIER_LEDGER_SCHEMA_V2, PACKAGE_OUTLIER_LEDGER_SCHEMA_V3].includes(document?.schema),
+    "package_outlier_ledger_schema_invalid",
+  );
+  pushIf(blockers, requireCommentLanguage && !commentLanguageV3, "package_outlier_ledger_comment_language_v3_required");
   pushIf(blockers, document?.status !== "compiled", "package_outlier_ledger_not_compiled");
   pushIf(blockers, !nonEmpty(document?.channel), "package_outlier_ledger_channel_missing");
   pushIf(blockers, !nonEmpty(document?.as_of_date), "package_outlier_ledger_as_of_date_missing");
@@ -487,17 +558,133 @@ export function validatePackageOutlierLedger(document) {
       !["public_niche_outlier", "own_channel"].includes(entry?.source_type),
       `package_outlier_ledger_entry_${index}_source_type_invalid`,
     );
+    if (structuredV2) {
+      for (const field of [
+        "video_id", "channel_title", "published_at", "captured_at",
+        "measurement_status", "package_grammar", "thumbnail_reference",
+      ]) pushIf(blockers, !nonEmpty(entry?.[field]), `package_outlier_ledger_entry_${index}_${field}_missing`);
+      pushIf(blockers, Number.isNaN(Date.parse(entry?.published_at)), `package_outlier_ledger_entry_${index}_published_at_invalid`);
+      pushIf(blockers, Number.isNaN(Date.parse(entry?.captured_at)), `package_outlier_ledger_entry_${index}_captured_at_invalid`);
+      pushIf(
+        blockers,
+        !Number.isNaN(Date.parse(entry?.published_at))
+          && !Number.isNaN(Date.parse(entry?.captured_at))
+          && Date.parse(entry.captured_at) < Date.parse(entry.published_at),
+        `package_outlier_ledger_entry_${index}_capture_precedes_publish`,
+      );
+      for (const field of ["views", "views_per_day"]) {
+        pushIf(
+          blockers,
+          !Number.isFinite(Number(entry?.[field])) || Number(entry[field]) < 0,
+          `package_outlier_ledger_entry_${index}_${field}_invalid`,
+        );
+      }
+      for (const field of ["channel_subscribers", "previous_ten_median_views", "breakout_multiple"]) {
+        pushIf(
+          blockers,
+          entry?.[field] !== null
+            && entry?.[field] !== undefined
+            && (!Number.isFinite(Number(entry[field])) || Number(entry[field]) < 0),
+          `package_outlier_ledger_entry_${index}_${field}_invalid`,
+        );
+      }
+      pushIf(
+        blockers,
+        !["verified", "partial"].includes(entry?.measurement_status),
+        `package_outlier_ledger_entry_${index}_measurement_status_invalid`,
+      );
+    }
+  }
+
+  if (commentLanguageV3 || requireCommentLanguage) {
+    const comments = Array.isArray(document?.comment_language_evidence) ? document.comment_language_evidence : [];
+    pushIf(blockers, comments.length < 25, "package_outlier_comment_language_evidence_below_25");
+    const evidenceIds = comments.map((row) => String(row?.evidence_id ?? "").trim());
+    pushIf(blockers, !unique(evidenceIds), "package_outlier_comment_language_evidence_ids_duplicate");
+    const sourceIds = new Set();
+    const categories = new Set();
+    const knownEntries = new Map(entries.map((entry) => [entry.entry_id, entry]));
+    for (const [index, row] of comments.entries()) {
+      for (const field of ["evidence_id", "source_entry_id", "source_video_id", "exact_comment", "source_reference", "captured_at", "production_use"]) {
+        pushIf(blockers, !nonEmpty(row?.[field]), `package_outlier_comment_language_${index}_${field}_missing`);
+      }
+      const source = knownEntries.get(row?.source_entry_id);
+      pushIf(blockers, !source, `package_outlier_comment_language_${index}_source_entry_unknown`);
+      if (source) pushIf(blockers, row?.source_video_id !== source.video_id, `package_outlier_comment_language_${index}_source_video_mismatch`);
+      pushIf(blockers, !COMMENT_LANGUAGE_CATEGORY_IDS.includes(row?.category), `package_outlier_comment_language_${index}_category_invalid`);
+      pushIf(blockers, Number.isNaN(Date.parse(row?.captured_at)), `package_outlier_comment_language_${index}_captured_at_invalid`);
+      pushIf(blockers, String(row?.exact_comment ?? "").length > 500, `package_outlier_comment_language_${index}_exact_comment_too_long`);
+      pushIf(blockers, row?.anonymized !== true, `package_outlier_comment_language_${index}_not_anonymized`);
+      if (source) sourceIds.add(row.source_entry_id);
+      if (COMMENT_LANGUAGE_CATEGORY_IDS.includes(row?.category)) categories.add(row.category);
+    }
+    pushIf(blockers, sourceIds.size < 5, "package_outlier_comment_language_sources_below_5");
+    pushIf(blockers, categories.size < 4, "package_outlier_comment_language_categories_below_4");
   }
   return { done: blockers.length === 0, blockers };
+}
+
+function outlierRankTuple(entry) {
+  const numberOr = (value, fallback = -1) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  return [
+    entry?.measurement_status === "verified" ? 1 : 0,
+    numberOr(entry?.breakout_multiple),
+    numberOr(entry?.views_per_day),
+    numberOr(entry?.views),
+    Date.parse(entry?.published_at ?? "") || 0,
+  ];
+}
+
+function compareOutlierRank(left, right) {
+  const leftTuple = outlierRankTuple(left);
+  const rightTuple = outlierRankTuple(right);
+  for (let index = 0; index < leftTuple.length; index += 1) {
+    if (leftTuple[index] !== rightTuple[index]) return rightTuple[index] - leftTuple[index];
+  }
+  return String(left?.entry_id ?? "").localeCompare(String(right?.entry_id ?? ""));
+}
+
+export function projectPackageOutlierEntries(document, { perSourceLimit = 12, grammarCap = 3 } = {}) {
+  const entries = Array.isArray(document?.entries) ? document.entries : [];
+  const structuredV2 = [PACKAGE_OUTLIER_LEDGER_SCHEMA_V2, PACKAGE_OUTLIER_LEDGER_SCHEMA_V3].includes(document?.schema);
+  const select = (sourceType) => {
+    const sourceEntries = entries.filter((entry) => entry.source_type === sourceType);
+    if (!structuredV2) return sourceEntries.slice(0, perSourceLimit);
+    const ranked = [...sourceEntries].sort(compareOutlierRank);
+    const selected = [];
+    const deferred = [];
+    const grammarCounts = new Map();
+    for (const entry of ranked) {
+      const grammar = String(entry.package_grammar ?? "unclassified").trim().toLowerCase();
+      const count = Number(grammarCounts.get(grammar) ?? 0);
+      if (count >= grammarCap) {
+        deferred.push(entry);
+        continue;
+      }
+      selected.push(entry);
+      grammarCounts.set(grammar, count + 1);
+      if (selected.length === perSourceLimit) break;
+    }
+    if (selected.length < perSourceLimit) {
+      selected.push(...deferred.slice(0, perSourceLimit - selected.length));
+    }
+    return selected;
+  };
+  return [
+    ...select("public_niche_outlier"),
+    ...select("own_channel"),
+  ];
 }
 
 export function validatePremiseSlateV2(document, {
   evidenceRegistry = null,
   evidenceRegistrySha256 = null,
   packageOutlierLedger = null,
+  premiseMovieBindings = null,
 } = {}) {
   const blockers = [];
-  pushIf(blockers, document?.schema !== PREMISE_SLATE_V2_SCHEMA, "premise_slate_v2_schema_invalid");
+  const qualityV3 = document?.schema === PREMISE_SLATE_V3_SCHEMA;
+  pushIf(blockers, ![PREMISE_SLATE_V2_SCHEMA, PREMISE_SLATE_V3_SCHEMA].includes(document?.schema), "premise_slate_v2_schema_invalid");
   pushIf(blockers, document?.status !== "planned", "premise_slate_v2_not_planned");
   pushIf(blockers, !nonEmpty(document?.channel), "premise_slate_v2_channel_missing");
   pushIf(blockers, !nonEmpty(document?.development_slug), "premise_slate_v2_development_slug_missing");
@@ -506,7 +693,15 @@ export function validatePremiseSlateV2(document, {
   }
   const claimIds = new Set((evidenceRegistry?.claims ?? []).map((claim) => claim.claim_id));
   const outlierEntries = new Map((packageOutlierLedger?.entries ?? []).map((entry) => [entry.entry_id, entry]));
+  const commentEvidenceIds = new Set((packageOutlierLedger?.comment_language_evidence ?? []).map((row) => row?.evidence_id).filter(nonEmpty));
+  const allEvidenceIds = new Set([...claimIds, ...outlierEntries.keys(), ...commentEvidenceIds]);
   const candidates = Array.isArray(document?.candidates) ? document.candidates : [];
+  const requiredMovieBindings = premiseMovieBindings instanceof Map
+    ? premiseMovieBindings
+    : premiseMovieBindings && typeof premiseMovieBindings === "object" && !Array.isArray(premiseMovieBindings)
+      ? new Map(Object.entries(premiseMovieBindings))
+      : null;
+  const packagedMovieIds = [];
   pushIf(blockers, candidates.length !== 6, `premise_slate_v2_candidate_count_${candidates.length}_not_6`);
   const candidateIds = candidates.map((candidate) => String(candidate?.id ?? "").trim());
   const slots = candidates.map((candidate) => String(candidate?.slot ?? "").trim());
@@ -518,6 +713,18 @@ export function validatePremiseSlateV2(document, {
       "id", "slot", "title", "thumbnail_receipt", "contradiction", "human_desire",
       "first_owned_choice", "durable_engine", "continuation_cost", "primary_falsification_risk",
     ]) pushIf(blockers, !nonEmpty(candidate?.[field]), `premise_slate_v2_candidate_${index}_${field}_missing`);
+    if (requiredMovieBindings) {
+      const binding = candidate?.source_premise_movie;
+      pushIf(blockers, !binding || typeof binding !== "object" || Array.isArray(binding), `premise_slate_v2_candidate_${index}_source_movie_missing`);
+      const blindId = String(binding?.blind_id ?? "").trim();
+      const expectedSha256 = requiredMovieBindings.get(blindId);
+      pushIf(blockers, !requiredMovieBindings.has(blindId), `premise_slate_v2_candidate_${index}_source_movie_unknown`);
+      pushIf(blockers, !isSha256(binding?.premise_movie_sha256), `premise_slate_v2_candidate_${index}_source_movie_hash_invalid`);
+      if (expectedSha256) {
+        pushIf(blockers, binding?.premise_movie_sha256 !== expectedSha256, `premise_slate_v2_candidate_${index}_source_movie_hash_mismatch`);
+      }
+      if (blindId) packagedMovieIds.push(blindId);
+    }
     for (const field of ["positive_analogue", "failure_analogue", "click_judgment", "runway_judgment", "anti_reskin"]) {
       pushIf(blockers, !candidate?.[field] || typeof candidate[field] !== "object", `premise_slate_v2_candidate_${index}_${field}_missing`);
     }
@@ -548,6 +755,61 @@ export function validatePremiseSlateV2(document, {
       pushIf(blockers, !claimIds.has(candidate?.positive_analogue?.claim_id), `premise_slate_v2_candidate_${index}_positive_claim_unknown`);
       pushIf(blockers, !claimIds.has(candidate?.failure_analogue?.claim_id), `premise_slate_v2_candidate_${index}_failure_claim_unknown`);
     }
+    if (qualityV3) {
+      const validation = candidate?.market_validation;
+      pushIf(blockers, !validation || typeof validation !== "object" || Array.isArray(validation), `premise_slate_v3_candidate_${index}_market_validation_missing`);
+      const dimensions = Array.isArray(validation?.dimensions) ? validation.dimensions : [];
+      const dimensionIds = dimensions.map((row) => String(row?.id ?? "").trim());
+      pushIf(blockers, dimensions.length !== PREMISE_MARKET_DIMENSION_IDS.length, `premise_slate_v3_candidate_${index}_dimension_count_invalid`);
+      pushIf(blockers, !unique(dimensionIds), `premise_slate_v3_candidate_${index}_dimension_ids_duplicate`);
+      for (const id of PREMISE_MARKET_DIMENSION_IDS) {
+        pushIf(blockers, !dimensionIds.includes(id), `premise_slate_v3_candidate_${index}_dimension_${id}_missing`);
+      }
+      for (const [dimensionIndex, row] of dimensions.entries()) {
+        pushIf(blockers, !PREMISE_MARKET_DIMENSION_IDS.includes(row?.id), `premise_slate_v3_candidate_${index}_dimension_${dimensionIndex}_id_invalid`);
+        pushIf(blockers, !["strong", "plausible", "weak", "unknown"].includes(row?.judgment), `premise_slate_v3_candidate_${index}_dimension_${dimensionIndex}_judgment_invalid`);
+        pushIf(blockers, !nonEmpty(row?.rationale), `premise_slate_v3_candidate_${index}_dimension_${dimensionIndex}_rationale_missing`);
+        const evidenceIds = Array.isArray(row?.evidence_ids) ? row.evidence_ids : [];
+        pushIf(blockers, row?.judgment !== "unknown" && evidenceIds.length < 1, `premise_slate_v3_candidate_${index}_dimension_${dimensionIndex}_evidence_missing`);
+        pushIf(blockers, !unique(evidenceIds), `premise_slate_v3_candidate_${index}_dimension_${dimensionIndex}_evidence_duplicate`);
+        for (const evidenceId of evidenceIds) {
+          pushIf(blockers, allEvidenceIds.size > 0 && !allEvidenceIds.has(evidenceId), `premise_slate_v3_candidate_${index}_dimension_${dimensionIndex}_evidence_${evidenceId}_unknown`);
+        }
+      }
+      const fatalWeaknesses = Array.isArray(validation?.fatal_weaknesses) ? validation.fatal_weaknesses : [];
+      pushIf(blockers, !Array.isArray(validation?.fatal_weaknesses), `premise_slate_v3_candidate_${index}_fatal_weaknesses_missing`);
+      for (const [weaknessIndex, row] of fatalWeaknesses.entries()) {
+        for (const field of ["id", "description", "disposition"]) {
+          pushIf(blockers, !nonEmpty(row?.[field]), `premise_slate_v3_candidate_${index}_fatal_weakness_${weaknessIndex}_${field}_missing`);
+        }
+        pushIf(blockers, !["blocking", "unresolved", "mitigated"].includes(row?.disposition), `premise_slate_v3_candidate_${index}_fatal_weakness_${weaknessIndex}_disposition_invalid`);
+      }
+      const neighbors = Array.isArray(candidate?.nearest_neighbors) ? candidate.nearest_neighbors : [];
+      pushIf(blockers, neighbors.length < 2, `premise_slate_v3_candidate_${index}_nearest_neighbors_below_2`);
+      for (const [neighborIndex, row] of neighbors.entries()) {
+        for (const field of [
+          "source_id", "source_title", "title_movie_overlap", "thumbnail_movie_overlap",
+          "betrayal_mechanic_overlap", "meaningful_new_axis", "convergence_risk", "decision",
+        ]) pushIf(blockers, !nonEmpty(row?.[field]), `premise_slate_v3_candidate_${index}_neighbor_${neighborIndex}_${field}_missing`);
+        pushIf(blockers, outlierEntries.size > 0 && !outlierEntries.has(row?.source_id), `premise_slate_v3_candidate_${index}_neighbor_${neighborIndex}_source_unknown`);
+        pushIf(blockers, !["low", "moderate", "high"].includes(row?.convergence_risk), `premise_slate_v3_candidate_${index}_neighbor_${neighborIndex}_risk_invalid`);
+        pushIf(blockers, !["distinct", "convergent"].includes(row?.decision), `premise_slate_v3_candidate_${index}_neighbor_${neighborIndex}_decision_invalid`);
+      }
+      const audienceIds = Array.isArray(candidate?.audience_language_evidence_ids) ? candidate.audience_language_evidence_ids : [];
+      pushIf(blockers, audienceIds.length < 1, `premise_slate_v3_candidate_${index}_audience_language_missing`);
+      pushIf(blockers, !unique(audienceIds), `premise_slate_v3_candidate_${index}_audience_language_duplicate`);
+      for (const evidenceId of audienceIds) {
+        pushIf(blockers, !commentEvidenceIds.has(evidenceId), `premise_slate_v3_candidate_${index}_audience_language_${evidenceId}_unknown`);
+      }
+    }
+  }
+  if (requiredMovieBindings) {
+    pushIf(blockers, !unique(packagedMovieIds), "premise_slate_v2_source_movies_duplicate");
+    pushIf(
+      blockers,
+      JSON.stringify([...packagedMovieIds].sort()) !== JSON.stringify([...requiredMovieBindings.keys()].sort()),
+      "premise_slate_v2_source_movies_incomplete",
+    );
   }
   return { done: blockers.length === 0, blockers };
 }
@@ -614,8 +876,6 @@ export function validatePremiseSelectionV2(document, {
 
 function eligiblePackageCandidateIds(premiseSlate) {
   return (premiseSlate?.candidates ?? [])
-    .filter((candidate) => candidate?.click_judgment?.decision === "strong"
-      && candidate?.runway_judgment?.decision === "strong")
     .map((candidate) => candidate.id);
 }
 
@@ -670,6 +930,51 @@ export function validatePackageTournament(document, {
       "twist_value", "reskin_risk", "runway_veto", "decisive_reason",
     ]) pushIf(blockers, !nonEmpty(finding?.[field]), `package_tournament_finding_${index}_${field}_missing`);
     pushIf(blockers, !["pass", "fail"].includes(finding?.runway_veto), `package_tournament_finding_${index}_runway_veto_invalid`);
+    if (premiseSlate?.schema === PREMISE_SLATE_V3_SCHEMA) {
+      for (const field of ["market_dimension_verdicts", "nearest_neighbor_verdict", "fatal_weakness_verdict"]) {
+        pushIf(blockers, !finding?.[field] || typeof finding[field] !== "object" || Array.isArray(finding[field]), `package_tournament_finding_${index}_${field}_missing`);
+      }
+      const marketRows = Array.isArray(finding?.market_dimension_verdicts?.dimensions)
+        ? finding.market_dimension_verdicts.dimensions
+        : [];
+      const marketIds = marketRows.map((row) => row?.id);
+      pushIf(blockers, marketRows.length !== PREMISE_MARKET_DIMENSION_IDS.length, `package_tournament_finding_${index}_market_dimensions_incomplete`);
+      for (const id of PREMISE_MARKET_DIMENSION_IDS) {
+        pushIf(blockers, !marketIds.includes(id), `package_tournament_finding_${index}_market_dimension_${id}_missing`);
+      }
+      for (const [marketIndex, row] of marketRows.entries()) {
+        pushIf(blockers, !["strong", "plausible", "weak", "unknown"].includes(row?.judgment), `package_tournament_finding_${index}_market_dimension_${marketIndex}_judgment_invalid`);
+        pushIf(blockers, !nonEmpty(row?.reason), `package_tournament_finding_${index}_market_dimension_${marketIndex}_reason_missing`);
+      }
+      pushIf(blockers, !["pass", "fail"].includes(finding?.nearest_neighbor_verdict?.decision), `package_tournament_finding_${index}_nearest_neighbor_decision_invalid`);
+      pushIf(blockers, !nonEmpty(finding?.nearest_neighbor_verdict?.reason), `package_tournament_finding_${index}_nearest_neighbor_reason_missing`);
+      pushIf(blockers, !["pass", "fail"].includes(finding?.fatal_weakness_verdict?.decision), `package_tournament_finding_${index}_fatal_weakness_decision_invalid`);
+      pushIf(blockers, !nonEmpty(finding?.fatal_weakness_verdict?.reason), `package_tournament_finding_${index}_fatal_weakness_reason_missing`);
+    }
+  }
+  if (document?.selected_candidate_id !== null) {
+    const selectedFinding = findings.find((finding) => finding?.candidate_id === document.selected_candidate_id);
+    pushIf(blockers, document?.click_confidence !== "strong", "package_tournament_selected_click_not_strong");
+    pushIf(blockers, document?.runway_screen !== "strong", "package_tournament_selected_runway_not_strong");
+    pushIf(blockers, selectedFinding?.runway_veto !== "pass", "package_tournament_selected_runway_veto_failed");
+    if (premiseSlate?.schema === PREMISE_SLATE_V3_SCHEMA) {
+      pushIf(blockers, selectedFinding?.nearest_neighbor_verdict?.decision !== "pass", "package_tournament_selected_neighbor_verdict_failed");
+      pushIf(blockers, selectedFinding?.fatal_weakness_verdict?.decision !== "pass", "package_tournament_selected_fatal_weakness_verdict_failed");
+      const weakDimension = selectedFinding?.market_dimension_verdicts?.dimensions?.find((row) => {
+        if (row?.judgment === "weak") return true;
+        if (row?.judgment !== "unknown") return false;
+        // A controlled test must not invent a breakout multiple when the
+        // evidence packet lacks a previous-ten channel baseline. Preserve the
+        // unknown verdict, but require the judge to name that exact evidence
+        // gap; every other unknown market dimension remains blocking.
+        const reason = String(row?.reason ?? "");
+        const documentedBaselineGap = row?.id === "breakout_multiple"
+          && /(?:previous[- ]ten|baseline|median)/i.test(reason)
+          && /(?:absent|missing|unavailable|unknown|omitted|not (?:supplied|available|retained|provided|established)|no (?:formal )?(?:baseline|median|breakout))/i.test(reason);
+        return !documentedBaselineGap;
+      });
+      pushIf(blockers, Boolean(weakDimension), `package_tournament_selected_market_dimension_${weakDimension?.id ?? "unknown"}_not_viable`);
+    }
   }
   return { done: blockers.length === 0, blockers };
 }
@@ -982,6 +1287,7 @@ export function validateLongformDraftSelection(document, {
   architectureSha256 = null,
   expectedDrafts = null,
   requireOpeningVerdicts = false,
+  requireRankings = false,
 } = {}) {
   const blockers = [];
   pushIf(blockers, document?.schema !== LONGFORM_DRAFT_SELECTION_SCHEMA, "longform_draft_selection_schema_invalid");
@@ -1058,20 +1364,6 @@ export function validateLongformDraftSelection(document, {
       if (expected && nonEmpty(verdict?.first_event_anchor)) {
         pushIf(blockers, !openingText.includes(String(verdict.first_event_anchor)), `longform_draft_selection_opening_verdict_${index}_first_anchor_not_in_opening`);
       }
-      if (verdict?.decision === "pass") {
-        pushIf(blockers, verdict?.opening_mode !== "dramatized", `longform_draft_selection_opening_verdict_${index}_passed_non_dramatized`);
-        pushIf(blockers, nonEmpty(verdict?.exposition_before_turn_anchor), `longform_draft_selection_opening_verdict_${index}_passed_with_early_exposition`);
-        pushIf(blockers, (verdict?.new_proper_names_first_220 ?? []).length > 1, `longform_draft_selection_opening_verdict_${index}_proper_names_exceed_1`);
-        pushIf(blockers, (verdict?.unexplained_story_terms_first_220 ?? []).length > 2, `longform_draft_selection_opening_verdict_${index}_story_terms_exceed_2`);
-        pushIf(blockers, !nonEmpty(verdict?.dramatic_turn_anchor), `longform_draft_selection_opening_verdict_${index}_turn_anchor_missing`);
-        if (expected && nonEmpty(verdict?.dramatic_turn_anchor)) {
-          pushIf(blockers, !openingText.includes(String(verdict.dramatic_turn_anchor)), `longform_draft_selection_opening_verdict_${index}_turn_anchor_not_in_opening`);
-        }
-      }
-    }
-    if (document?.status === "selected") {
-      const selectedVerdict = openingVerdicts.find((verdict) => verdict?.draft_id === document?.selected_draft_id);
-      pushIf(blockers, selectedVerdict?.decision !== "pass", "longform_draft_selection_selected_opening_not_passed");
     }
   }
 
@@ -1099,6 +1391,59 @@ export function validateLongformDraftSelection(document, {
       !comparedDraftIds.has(document?.selected_draft_id),
       "longform_draft_selection_selected_draft_not_compared",
     );
+  }
+
+  const rankings = Array.isArray(document?.draft_rankings) ? document.draft_rankings : [];
+  if (requireRankings) {
+    pushIf(blockers, rankings.length !== expectedById.size, "longform_draft_selection_ranking_count_mismatch");
+    const rankingIds = rankings.map((row) => String(row?.draft_id ?? "").trim());
+    const ranks = rankings.map((row) => Number(row?.rank));
+    pushIf(blockers, !unique(rankingIds), "longform_draft_selection_ranking_ids_duplicate");
+    pushIf(blockers, !unique(ranks), "longform_draft_selection_ranks_duplicate");
+    for (const expectedId of expectedById.keys()) {
+      pushIf(blockers, !rankingIds.includes(expectedId), `longform_draft_selection_ranking_${expectedId}_missing`);
+    }
+    for (const [index, row] of rankings.entries()) {
+      pushIf(blockers, !expectedById.has(row?.draft_id), `longform_draft_selection_ranking_${index}_draft_unknown`);
+      pushIf(blockers, !Number.isInteger(Number(row?.rank)) || Number(row.rank) < 1 || Number(row.rank) > expectedById.size, `longform_draft_selection_ranking_${index}_rank_invalid`);
+      for (const field of ["opening_strength", "causal_propulsion", "voice_distinction", "spoken_cadence_prediction"]) {
+        pushIf(blockers, !["strong", "plausible", "weak"].includes(row?.[field]), `longform_draft_selection_ranking_${index}_${field}_invalid`);
+      }
+      pushIf(blockers, !["strong", "plausible", "weak"].includes(row?.midroll_resilience), `longform_draft_selection_ranking_${index}_midroll_resilience_invalid`);
+      const viewerSimulation = Array.isArray(row?.viewer_simulation) ? row.viewer_simulation : [];
+      const requiredViewerIds = ["core_binge", "casual_clicker", "slop_skeptic", "mobile_ad_sensitive", "emotional_payoff"];
+      const viewerIds = viewerSimulation.map((viewer) => String(viewer?.viewer_id ?? "").trim());
+      pushIf(blockers, viewerSimulation.length !== requiredViewerIds.length, `longform_draft_selection_ranking_${index}_viewer_count_invalid`);
+      pushIf(blockers, !unique(viewerIds), `longform_draft_selection_ranking_${index}_viewer_ids_duplicate`);
+      for (const viewerId of requiredViewerIds) pushIf(blockers, !viewerIds.includes(viewerId), `longform_draft_selection_ranking_${index}_viewer_${viewerId}_missing`);
+      for (const [viewerIndex, viewer] of viewerSimulation.entries()) {
+        const percentage = Number(viewer?.predicted_percentage_viewed);
+        pushIf(blockers, !Number.isFinite(percentage) || percentage < 0 || percentage > 100, `longform_draft_selection_ranking_${index}_viewer_${viewerIndex}_percentage_invalid`);
+        pushIf(blockers, !nonEmpty(viewer?.exit_or_finish_reason), `longform_draft_selection_ranking_${index}_viewer_${viewerIndex}_reason_missing`);
+      }
+      const predictedAverage = Number(row?.predicted_average_percentage_viewed);
+      pushIf(blockers, !Number.isFinite(predictedAverage) || predictedAverage < 0 || predictedAverage > 100, `longform_draft_selection_ranking_${index}_average_percentage_invalid`);
+      if (viewerSimulation.length === requiredViewerIds.length && viewerSimulation.every((viewer) => Number.isFinite(Number(viewer?.predicted_percentage_viewed)))) {
+        const computedAverage = viewerSimulation.reduce((sum, viewer) => sum + Number(viewer.predicted_percentage_viewed), 0) / viewerSimulation.length;
+        pushIf(blockers, Math.abs(computedAverage - predictedAverage) > 0.11, `longform_draft_selection_ranking_${index}_average_percentage_mismatch`);
+      }
+      for (const field of ["highest_risk_dropoff_anchor", "retention_reason"]) {
+        pushIf(blockers, !nonEmpty(row?.[field]), `longform_draft_selection_ranking_${index}_${field}_missing`);
+      }
+      pushIf(blockers, !nonEmpty(row?.overall_reason), `longform_draft_selection_ranking_${index}_reason_missing`);
+    }
+    const rankingsByRank = [...rankings].sort((left, right) => Number(left?.rank) - Number(right?.rank));
+    for (let index = 1; index < rankingsByRank.length; index += 1) {
+      pushIf(
+        blockers,
+        Number(rankingsByRank[index - 1]?.predicted_average_percentage_viewed) < Number(rankingsByRank[index]?.predicted_average_percentage_viewed),
+        `longform_draft_selection_rank_${index}_average_percentage_order_invalid`,
+      );
+    }
+    if (document?.status === "selected") {
+      const rankOne = rankings.find((row) => Number(row?.rank) === 1);
+      pushIf(blockers, rankOne?.draft_id !== document?.selected_draft_id, "longform_draft_selection_selected_draft_not_rank_one");
+    }
   }
 
   const transplants = Array.isArray(document?.approved_transplants) ? document.approved_transplants : [];
@@ -1181,7 +1526,7 @@ export function validateAnchoredFindings(findings, scriptText) {
 export function validateSourceDiagnosticV2(document, { scriptText = "", scriptSha256 = null } = {}) {
   const blockers = [];
   pushIf(blockers, document?.schema !== SOURCE_DIAGNOSTIC_V2_SCHEMA, "source_diagnostic_v2_schema_invalid");
-  pushIf(blockers, !["causality_learning", "promise_continuity", "narrative_authenticity"].includes(document?.diagnostic_id), "source_diagnostic_v2_id_invalid");
+  pushIf(blockers, !STORY_DIAGNOSTIC_IDS.includes(document?.diagnostic_id), "source_diagnostic_v2_id_invalid");
   pushIf(blockers, !["passed", "findings"].includes(document?.status), "source_diagnostic_v2_status_invalid");
   if (scriptSha256) pushIf(blockers, document?.script_sha256 !== scriptSha256, "source_diagnostic_v2_script_hash_mismatch");
   const { accepted, discarded } = validateAnchoredFindings(document?.findings, scriptText);
@@ -1195,6 +1540,8 @@ export function validateSourceRevisionLedger(document, {
   sourceScriptSha256 = null,
   revisedScriptSha256 = null,
   acceptedFindingIds = [],
+  sourceScriptText = null,
+  revisedScriptText = null,
 } = {}) {
   const blockers = [];
   pushIf(blockers, document?.schema !== SOURCE_REVISION_LEDGER_SCHEMA, "source_revision_ledger_schema_invalid");
@@ -1203,10 +1550,18 @@ export function validateSourceRevisionLedger(document, {
   if (revisedScriptSha256) pushIf(blockers, document?.revised_script_sha256 !== revisedScriptSha256, "source_revision_ledger_revised_hash_mismatch");
   const entries = Array.isArray(document?.entries) ? document.entries : [];
   const ledgerIds = entries.map((entry) => entry?.finding_id).filter(nonEmpty);
+  pushIf(blockers, !unique(ledgerIds), "source_revision_ledger_finding_ids_duplicate");
   for (const findingId of acceptedFindingIds) pushIf(blockers, !ledgerIds.includes(findingId), `source_revision_ledger_finding_${findingId}_unresolved`);
+  for (const ledgerId of ledgerIds) pushIf(blockers, !acceptedFindingIds.includes(ledgerId), `source_revision_ledger_finding_${ledgerId}_unexpected`);
   for (const [index, entry] of entries.entries()) {
     for (const field of ["finding_id", "repair_intent", "source_anchor", "revised_anchor"]) {
       pushIf(blockers, !nonEmpty(entry?.[field]), `source_revision_ledger_entry_${index}_${field}_missing`);
+    }
+    if (sourceScriptText !== null && nonEmpty(entry?.source_anchor)) {
+      pushIf(blockers, !String(sourceScriptText).includes(String(entry.source_anchor)), `source_revision_ledger_entry_${index}_source_anchor_not_found`);
+    }
+    if (revisedScriptText !== null && nonEmpty(entry?.revised_anchor)) {
+      pushIf(blockers, !String(revisedScriptText).includes(String(entry.revised_anchor)), `source_revision_ledger_entry_${index}_revised_anchor_not_found`);
     }
     pushIf(blockers, !Array.isArray(entry?.dependent_spans_changed), `source_revision_ledger_entry_${index}_dependent_spans_missing`);
   }
@@ -1365,9 +1720,17 @@ export function validateSourceRoomReleaseV2(document, {
   viewerTournamentManifestSha256 = null,
   viewerTournamentReportSha256s = null,
   requireViewerTournamentAcceptance = false,
+  openingAudioAuditionManifestSha256 = null,
+  openingAudioAuditionReviewSha256 = null,
+  mixedViewerPanelManifestSha256 = null,
+  mixedViewerPanelAggregateSha256 = null,
+  mixedViewerCalibrationPolicySha256 = null,
+  mixedViewerPanelReportSha256s = null,
+  requireAugustSourceQualityGates = false,
   sourceRoomContractSha256 = null,
   sourceRoomProfile = null,
   requireSourceRoomContract = false,
+  firstClassArtifactSha256s = null,
 } = {}) {
   const blockers = [];
   pushIf(blockers, document?.schema !== SOURCE_ROOM_RELEASE_V2_SCHEMA, "source_room_release_v2_schema_invalid");
@@ -1395,6 +1758,11 @@ export function validateSourceRoomReleaseV2(document, {
     ["reference_sha256", referenceSha256],
     ["viewer_tournament_acceptance_sha256", viewerTournamentAcceptanceSha256],
     ["viewer_tournament_manifest_sha256", viewerTournamentManifestSha256],
+    ["opening_audio_audition_manifest_sha256", openingAudioAuditionManifestSha256],
+    ["opening_audio_audition_review_sha256", openingAudioAuditionReviewSha256],
+    ["mixed_viewer_panel_manifest_sha256", mixedViewerPanelManifestSha256],
+    ["mixed_viewer_panel_aggregate_sha256", mixedViewerPanelAggregateSha256],
+    ["mixed_viewer_calibration_policy_sha256", mixedViewerCalibrationPolicySha256],
   ]) {
     if (!expected) continue;
     pushIf(blockers, !isSha256(document?.[field]), `source_room_release_v2_${field}_invalid`);
@@ -1428,6 +1796,34 @@ export function validateSourceRoomReleaseV2(document, {
         !compareStringMaps(document?.viewer_tournament_report_sha256s, viewerTournamentReportSha256s),
         "source_room_release_v2_viewer_tournament_report_hashes_mismatch",
       );
+    }
+  }
+  if (requireAugustSourceQualityGates) {
+    for (const [field, expected] of [
+      ["opening_audio_audition_manifest_sha256", openingAudioAuditionManifestSha256],
+      ["opening_audio_audition_review_sha256", openingAudioAuditionReviewSha256],
+      ["mixed_viewer_panel_manifest_sha256", mixedViewerPanelManifestSha256],
+      ["mixed_viewer_panel_aggregate_sha256", mixedViewerPanelAggregateSha256],
+      ["mixed_viewer_calibration_policy_sha256", mixedViewerCalibrationPolicySha256],
+    ]) {
+      pushIf(blockers, !isSha256(expected), `source_room_release_v2_expected_${field}_missing`);
+      pushIf(blockers, !isSha256(document?.[field]), `source_room_release_v2_${field}_missing`);
+      if (expected) pushIf(blockers, document?.[field] !== expected, `source_room_release_v2_${field}_mismatch`);
+    }
+    pushIf(blockers, !["mandatory_advisory", "calibrated_decision_support"].includes(document?.mixed_viewer_panel_mode), "source_room_release_v2_mixed_viewer_panel_mode_invalid");
+    pushIf(
+      blockers,
+      !mixedViewerPanelReportSha256s || typeof mixedViewerPanelReportSha256s !== "object" || Array.isArray(mixedViewerPanelReportSha256s),
+      "source_room_release_v2_expected_mixed_viewer_report_hashes_missing",
+    );
+    pushIf(
+      blockers,
+      !document?.mixed_viewer_panel_report_sha256s || typeof document.mixed_viewer_panel_report_sha256s !== "object" || Array.isArray(document.mixed_viewer_panel_report_sha256s),
+      "source_room_release_v2_mixed_viewer_report_hashes_missing",
+    );
+    if (mixedViewerPanelReportSha256s) {
+      pushIf(blockers, Object.keys(mixedViewerPanelReportSha256s).length !== 10, "source_room_release_v2_expected_mixed_viewer_report_count_invalid");
+      pushIf(blockers, !compareStringMaps(document?.mixed_viewer_panel_report_sha256s, mixedViewerPanelReportSha256s), "source_room_release_v2_mixed_viewer_report_hashes_mismatch");
     }
   }
   if (sourceRoomContractSha256 || sourceRoomProfile || requireSourceRoomContract) {
@@ -1478,6 +1874,33 @@ export function validateSourceRoomReleaseV2(document, {
       !compareStringMaps(diagnostics, diagnosticSha256s),
       "source_room_release_v2_diagnostic_hashes_mismatch",
     );
+  }
+  if (firstClassArtifactSha256s) {
+    pushIf(
+      blockers,
+      !document?.first_class_artifact_sha256s
+        || typeof document.first_class_artifact_sha256s !== "object"
+        || Array.isArray(document.first_class_artifact_sha256s),
+      "source_room_release_v2_first_class_artifact_hashes_missing",
+    );
+    pushIf(
+      blockers,
+      !document?.first_class_artifact_paths
+        || typeof document.first_class_artifact_paths !== "object"
+        || Array.isArray(document.first_class_artifact_paths),
+      "source_room_release_v2_first_class_artifact_paths_missing",
+    );
+    pushIf(
+      blockers,
+      !compareStringMaps(document?.first_class_artifact_sha256s, firstClassArtifactSha256s),
+      "source_room_release_v2_first_class_artifact_hashes_mismatch",
+    );
+    for (const [artifactId, artifactSha256] of Object.entries(firstClassArtifactSha256s)) {
+      pushIf(blockers, !nonEmpty(document?.first_class_artifact_paths?.[artifactId]), `source_room_release_v2_first_class_artifact_${artifactId}_path_missing`);
+      pushIf(blockers, !isSha256(artifactSha256), `source_room_release_v2_first_class_artifact_${artifactId}_hash_invalid`);
+    }
+    pushIf(blockers, document?.post_upload_learning_contract?.schema !== "goldflow_post_upload_story_learning_contract_v1", "source_room_release_v2_learning_contract_missing");
+    pushIf(blockers, document?.post_upload_learning_contract?.status !== "pending_observation", "source_room_release_v2_learning_contract_status_invalid");
   }
   return { done: blockers.length === 0, blockers };
 }

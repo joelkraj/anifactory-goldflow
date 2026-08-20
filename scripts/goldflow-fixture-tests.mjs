@@ -210,6 +210,10 @@ import {
   voiceDirectionMetadataForTests,
   voiceDirectionTransformForTests,
 } from "./voice-direction-gate.mjs";
+import {
+  buildNarrationTextIr,
+  validateNarrationTextIr,
+} from "./lib/narration-text-ir.mjs";
 import { scanScriptMetaContamination } from "./lib/script-meta-contamination-scan.mjs";
 import { longLocationSpanFindings, repeatedLocationShotJobFindings } from "./lib/visual-plan-quality-utils.mjs";
 import { alignExcerptRowsToWhisper } from "./lib/transcript-excerpt-alignment.mjs";
@@ -243,7 +247,9 @@ import {
   narrationArtifactVoiceIdentityFindings,
   narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
+  narrationStitchContractForQuality,
   narrationTtsPolicyForIdentity,
+  narrationUnitContractForQuality,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
 import {
@@ -2959,6 +2965,47 @@ function testEditorialBeatDirectorContracts() {
       foreground_action_evidence: atom.text,
       composition_intent: "Keep the named action and spatial relationship readable.",
       continuity_note: "",
+      visual_information_delta: {
+        kind: index === 0 ? "new_location_or_geography" : "new_action_or_contact",
+        statement: `Show new visual information for atom ${index + 1}.`,
+        compared_to_previous: index === 0
+          ? "This is the first establishing image."
+          : "The visible action advances beyond the prior atom.",
+      },
+      sequence_grammar: {
+        shot_size: ["wide", "insert", "medium", "close"][index],
+        camera_angle: "evidence-led level angle",
+        vantage: "camera side preserving the scene axis",
+        sequence_role: ["establish", "reveal", "advance", "react"][index],
+      },
+      spatial_continuity: {
+        eyeline_axis: "Joey toward the visible action",
+        primary_screen_position: "Joey center-left",
+        primary_facing: "screen_right",
+        threat_or_counterparty_position: index === 3 ? "Victor screen-right" : "not_applicable",
+        travel_direction: "stationary",
+        object_geography: index === 0 ? "silver key at Joey's hand" : "not_applicable",
+        intentional_axis_break: false,
+        axis_break_reason: null,
+      },
+      beat_value: {
+        tier: index === 1 ? "priority" : "connective",
+        moment_types: [],
+        reason: index === 1 ? "The system reveal changes understanding." : "Clear causal connective coverage.",
+      },
+      retention_reset: {
+        kind: index === 1 ? "story_earned" : "none",
+        evidence_ids: [],
+        purpose: index === 1 ? "The system reveal creates a new question." : "No additional reset is required.",
+      },
+      audiovisual_intent: {
+        motion_role: index === 1 ? "changes_understanding" : "supports_clarity",
+        sfx_event: null,
+        score_behavior: "no_change",
+        silence_behavior: "not_required",
+        subtitle_emphasis: [],
+        coordination_note: "Keep the narration dominant and reinforce only the visible story change.",
+      },
       editorial_cues: [],
       rail_exception: null,
     })),
@@ -4718,8 +4765,16 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.voice_provider_options.primary.voice_continuity_contract, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract);
   assert.equal(identity.voice_provider_options.primary.repetition_penalty, 1.2);
   assert.equal(identity.voice_provider_options.fallback, null);
-  assert.deepEqual(identity.voice_provider_options.unit_contract, QWEN_LIAM_UNIT_CONTRACT);
-  assert.deepEqual(identity.voice_provider_options.stitch_contract, QWEN_LIAM_STITCH_CONTRACT);
+  const qualityUnitContract = narrationUnitContractForQuality(
+    identity.narration_quality_contract,
+  );
+  const qualityStitchContract = narrationStitchContractForQuality(
+    identity.narration_quality_contract,
+  );
+  assert.deepEqual(identity.voice_provider_options.unit_contract, qualityUnitContract);
+  assert.deepEqual(identity.voice_provider_options.stitch_contract, qualityStitchContract);
+  assert.deepEqual(identity.voice_provider_options.primary.unit_contract, qualityUnitContract);
+  assert.deepEqual(identity.voice_provider_options.primary.stitch_contract, qualityStitchContract);
   assert.deepEqual(identity.voice_provider_options.retry_contract, QWEN_LIAM_RETRY_CONTRACT);
   assert.deepEqual(
     identity.voice_provider_options.synthesis_contract,
@@ -4749,7 +4804,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     /provider_locks\.planning_default_reasoning_effort/,
   );
   assert.equal(planningProviderForIdentity(identity), "planning_room");
-  assert.equal(identity.production_profile_config.target_wall_clock_minutes, 180);
+  assert.equal(identity.production_profile_config.target_wall_clock_minutes, null);
+  assert.equal(identity.production_profile_config.target_wall_clock_policy, "episode_size_aware_p50_p90_v1");
+  assert.equal(identity.production_profile_config.stretch_target_wall_clock_minutes, 180);
   assert.equal(identity.production_profile_config.planner.semantic_concurrency, 11);
   assert.equal(identity.production_profile_config.planner.editorial_concurrency, 11);
   assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 11);
@@ -4764,11 +4821,12 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_profile_config.media.qwen_tts_concurrency, 1);
   assert.equal(identity.production_profile_config.media.local_qwen_tts_concurrency, 1);
   assert.equal(identity.production_profile_config.media.qwen_tts_batch_size, 4);
-  assert.equal(identity.production_profile_config.media.chatgpt_web_reference_concurrency, 3);
-  assert.equal(identity.production_profile_config.media.chatgpt_web_image_concurrency, 3);
+  assert.equal(identity.production_profile_config.media.chatgpt_web_reference_concurrency, 0);
+  assert.equal(identity.production_profile_config.media.chatgpt_web_image_concurrency, 0);
+  assert.equal(identity.production_profile_config.media.chatgpt_web_image_fallback_concurrency, 3);
   assert.equal(identity.production_profile_config.media.google_flow_image_concurrency, 5);
   assert.equal(identity.production_profile_config.media.google_gemini_image_concurrency, 3);
-  assert.equal(identity.production_profile_config.media.federated_web_image_concurrency, 11);
+  assert.equal(identity.production_profile_config.media.federated_web_image_concurrency, 8);
   assert.equal(identity.production_profile_config.orchestration.chatgpt_web_browser_host_concurrency, 10);
   assert.deepEqual(
     identity.production_profile_config.audio.local_whisper_timing,
@@ -4804,13 +4862,25 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.provider_locks.primary_voice_continuity_contract, QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract);
   assert.equal(identity.provider_locks.primary_similarity_model_sha256, QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_sha256);
   assert.equal(identity.provider_locks.primary_similarity_calibration_sha256, QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256);
-  assert.equal(identity.provider_locks.primary_minimum_cosine_similarity, 0.88);
-  assert.equal(identity.provider_locks.primary_warning_below_cosine_similarity, 0.9);
-  assert.equal(identity.provider_locks.tts_unit_target_words_min, null);
-  assert.equal(identity.provider_locks.tts_unit_target_words_max, 60);
+  assert.equal(identity.provider_locks.primary_minimum_cosine_similarity, null);
+  assert.equal(identity.provider_locks.primary_warning_below_cosine_similarity, null);
+  assert.equal(identity.provider_locks.primary_similarity_threshold_source, "owned_reference_leave_one_out_calibration");
+  assert.equal(identity.provider_locks.primary_universal_similarity_threshold_forbidden, true);
+  assert.equal(identity.provider_locks.primary_reference_bank_centroid_required, true);
+  assert.equal(identity.provider_locks.primary_reference_bank_minimum_count, 3);
+  assert.equal(identity.provider_locks.primary_unit_outliers_review_required, true);
+  assert.equal(identity.provider_locks.primary_aggregate_drift_report_required, true);
+  assert.equal(identity.provider_locks.tts_unit_target_words_min, 20);
+  assert.equal(identity.provider_locks.tts_unit_target_words_max, 42);
+  assert.equal(identity.provider_locks.tts_unit_soft_words_max, 48);
   assert.equal(identity.provider_locks.tts_unit_hard_words_max, 60);
   assert.equal(identity.provider_locks.tts_sentence_complete_units, true);
-  assert.equal(identity.provider_locks.tts_join_silence_ms, 80);
+  assert.equal(identity.provider_locks.tts_join_silence_ms, null);
+  assert.equal(identity.provider_locks.tts_stitch_contract_version, "narration_alignment_safe_semantic_stitch_v2");
+  assert.equal(identity.provider_locks.tts_semantic_boundary_classes, true);
+  assert.equal(identity.provider_locks.tts_alignment_required_for_trimming, true);
+  assert.equal(identity.provider_locks.tts_missing_alignment_policy, "preserve_entire_unit");
+  assert.equal(identity.provider_locks.tts_exact_sample_accounting_required, true);
   assert.equal(identity.provider_locks.tts_continuous_requests, false);
   assert.equal(identity.provider_locks.post_tempo_processing, false);
   assert.equal(identity.provider_locks.tts_retry_policy, QWEN_LIAM_RETRY_CONTRACT.retry_policy);
@@ -4847,7 +4917,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.production_gates.tts_speed_control_supported, false);
   assert.equal(identity.production_gates.sentence_complete_tts_units_required, true);
   assert.equal(identity.production_gates.tts_unit_hard_words_max, 60);
-  assert.equal(identity.production_gates.tts_join_silence_ms, 80);
+  assert.equal(identity.production_gates.tts_unit_soft_words_max, 48);
+  assert.equal(identity.production_gates.tts_join_silence_ms, null);
+  assert.equal(identity.production_gates.tts_stitch_contract_version, "narration_alignment_safe_semantic_stitch_v2");
+  assert.equal(identity.production_gates.tts_semantic_boundary_classes_required, true);
+  assert.equal(identity.production_gates.tts_exact_sample_accounting_required, true);
   assert.equal(identity.production_gates.continuous_longform_tts_requests_forbidden, true);
   assert.equal(
     identity.production_gates.deterministic_length_matched_tts_batching_required,
@@ -7645,6 +7719,26 @@ function testQwenTextIntegrityCoverageGate() {
   assert.equal(systemCoverage.expected_count, 2);
   assert.equal(systemCoverage.planned_count, 2);
 
+  const dialogueUnits = voiceDirectionTransformForTests(
+    "MAYA: Get out of my house.",
+  ).paragraph_units;
+  assert.match(dialogueUnits[0].performed_text, /^\[/);
+  const dialoguePlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_no_direction_leak",
+    performance_units: dialogueUnits,
+  }]);
+  assert.equal(dialoguePlan.units[0].spoken_text, "Get out of my house.");
+  assert.doesNotMatch(dialoguePlan.units[0].spoken_text, /\[[^\]]+\]/);
+  assert.equal(
+    dialoguePlan.units[0].spoken_text_lineage.schema,
+    "goldflow_spoken_text_lineage_v1",
+  );
+  const dialogueTextIr = buildNarrationTextIr({ units: dialoguePlan.units });
+  assert.equal(
+    validateNarrationTextIr(dialogueTextIr, dialoguePlan.units).status,
+    "passed",
+  );
+
   const corrupt = structuredClone(plan);
   corrupt.segments[0].qwen_generation_units[0].qwen_spoken_text = "shut like a shackle.";
   const blocked = qwenTextIntegrityCoverageForTests(script, corrupt);
@@ -7671,6 +7765,34 @@ function testQwenTextIntegrityCoverageGate() {
     performance_units: voiceDirectionTransformForTests(overrideScript).paragraph_units,
   }], { ttsOverrides: overrides });
   assert.equal(qwenTextIntegrityCoverageForTests(overrideScript, overridePlan, { ttsOverrides: overrides }).status, "passed");
+
+  const compiledTexts = [
+    "The IT team fixed 41% of it.",
+    "The SSS hero signed the report.",
+    "Then Maya walked away from him.",
+  ];
+  const compiledPlan = qwenGenerationPlanForTests([{
+    segment_id: "seg_compiler_lineage",
+    performance_units: compiledTexts.map((text) => ({
+      kind: "narration",
+      speaker: "NARRATOR",
+      text,
+      performed_text: `[urgent delivery] ${text}`,
+      caption_text: text,
+    })),
+  }]);
+  assert.equal(compiledPlan.units.length, 1);
+  assert.equal(
+    compiledPlan.units[0].spoken_text,
+    "The I T team fixed forty-one percent of it. The S S S hero signed the report. Then Maya walked away from him.",
+  );
+  assert.equal(compiledPlan.units[0].spoken_text_lineage.components.length, 3);
+  assert.equal(compiledPlan.units[0].spoken_text_transformations.length, 2);
+  const compiledTextIr = buildNarrationTextIr({ units: compiledPlan.units });
+  assert.equal(
+    validateNarrationTextIr(compiledTextIr, compiledPlan.units).status,
+    "passed",
+  );
 }
 
 function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
@@ -7706,6 +7828,11 @@ function testKokoroNarrationUnitGroupingAndAtomicBarriers() {
   assert.deepEqual(groupedUnits.map((unit) => unit.order_index), [0, 1]);
   assert.deepEqual(groupedUnits.map((unit) => unit.grouped_source_unit_count), [3, 3]);
   assert.deepEqual(groupedUnits.map((unit) => unit.unit_id), repeatedPlan.units.map((unit) => unit.unit_id));
+  const groupedTextIr = buildNarrationTextIr({ units: groupedPlan.units });
+  assert.equal(
+    validateNarrationTextIr(groupedTextIr, groupedPlan.units).status,
+    "passed",
+  );
   assert.deepEqual(
     groupedUnits.flatMap((unit) => unit.source_unit_refs).map((ref) => ref.source_text),
     narrationTexts,
@@ -7967,7 +8094,7 @@ function testQwenHumanShieldPatternKeepsVoiceSegmentsAtomic() {
   assert.ok(plan.units.every((unit) => unit.word_count <= 60));
   assert.deepEqual(
     plan.units.map((unit) => unit.boundary_after),
-    ["segment", "episode"],
+    ["segment", "episode_end"],
   );
   assert.ok(plan.units.every((unit) => unit.merge_barrier === true));
   assert.deepEqual(
@@ -10475,14 +10602,14 @@ async function testNarratorOnlyStatusAndMixer() {
   await execFileAsync("ffmpeg", [
     "-y",
     "-f", "lavfi",
-    "-i", "anullsrc=r=44100:cl=stereo",
-    "-t", "0.8",
+    "-i", "sine=frequency=220:sample_rate=44100",
+    "-t", "3",
     "-acodec", "pcm_s16le",
     narrationPath,
   ]);
   const narrationHash = sha256(await fs.readFile(narrationPath));
   const wordTimingPath = path.join(episodeDir, "narration_word_timing_ep_01.json");
-  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 3, audio_duration_sec: 0.84 });
+  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 3, audio_duration_sec: 3 });
   await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), {
     status: "passed",
     source_script_hash: scriptHash,
@@ -10498,7 +10625,7 @@ async function testNarratorOnlyStatusAndMixer() {
   await writeJson(path.join(episodeDir, "audio_stitch_report_ep_01-modelslab-qwen.json"), {
     status: "passed",
     output_path: narrationPath,
-    segments: [{ segment_id: "seg_001", duration_sec: 0.8 }],
+    segments: [{ segment_id: "seg_001", duration_sec: 3 }],
   });
 
   const { stdout } = await execFileAsync(process.execPath, [
@@ -10512,7 +10639,7 @@ async function testNarratorOnlyStatusAndMixer() {
   assert.equal(status.stage_ledger.find((row) => row.stage === "audio_pace_check").exists, true);
   assert.equal(status.stage_ledger.find((row) => row.stage === "sfx_score_plan").exists, true);
 
-  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 4, audio_duration_sec: 0.84 });
+  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 4, audio_duration_sec: 3 });
   const staleStatusResult = await execFileAsync(process.execPath, [
     "scripts/run-status.mjs",
     "--episode-dir", episodeDir,
@@ -10522,7 +10649,7 @@ async function testNarratorOnlyStatusAndMixer() {
   assert.equal(staleStatus.current_stage, "audio_pace_check");
   assert.equal(staleAudioPace.exists, false);
   assert.match(staleAudioPace.evidence, /narration_word_timing_ep_01\.json stale/);
-  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 3, audio_duration_sec: 0.84 });
+  await writeJson(wordTimingPath, { status: "passed", source_script_hash: scriptHash, narration_audio_hash: narrationHash, word_count: 3, audio_duration_sec: 3 });
 
   await writeJson(path.join(episodeDir, "narration_pace_report_ep_01.json"), { status: "blocked", source_script_hash: scriptHash, target_wpm_min: 195, target_wpm_max: 220, actual_wpm: 167.54 });
   const blockedStatusResult = await execFileAsync(process.execPath, [
@@ -10557,9 +10684,9 @@ async function testNarratorOnlyStatusAndMixer() {
   assert.equal(report.skip_sfx, true);
   assert.equal(report.transition_sfx_enabled, false);
   assert.equal(await fs.stat(report.mix.m4a_path).then((stat) => stat.isFile()), true);
-  assert.equal(report.mix.wav_path, null);
-  assert.equal(report.mix.intermediate_wav_deleted, true);
-  assert.equal(await fs.stat(report.mix.intermediate_wav_path).then(() => true).catch(() => false), false);
+  assert.equal(report.mix.wav_path, report.mix.intermediate_wav_path);
+  assert.equal(report.mix.intermediate_wav_deleted, false);
+  assert.equal(await fs.stat(report.mix.intermediate_wav_path).then(() => true).catch(() => false), true);
 }
 
 async function testRunCleanupPrunesNarratorOnlyLongformWav() {
@@ -10861,6 +10988,9 @@ async function testRunStatusAcceptsGenericNarrationWithSelectedFallbackRepair() 
   };
   const basePlan = {
     status: "passed",
+    // Legacy TTS artifacts bind the exact file hash even when a newer producer
+    // has also embedded a distinct canonical plan hash.
+    plan_sha256: sha256("canonical-plan-hash-distinct-from-file-hash"),
     source_script_hash: scriptHash,
     primary_provider: "kokoro_local",
     fallback_provider: "qwen_local",
@@ -12463,11 +12593,17 @@ async function testCodexImageWorkQueueContracts() {
     status: "passed",
     image_provider: "codex_imagegen",
     reference_targets: [
-      { ref_id: "joey_base", kind: "character_identity", generation_mode: "standalone_ref", required_before_imagegen: true, codex_image_prompt: "Joey identity reference, anime/manhwa, 16:9 landscape." },
-      { ref_id: "joey_state", kind: "character_state", generation_mode: "standalone_ref", required_before_imagegen: false, base_identity_ref_id: "joey_base", codex_image_prompt: "Joey state reference, anime/manhwa, 16:9 landscape." },
+      { ref_id: "joey_base", inventory_asset_id: "char_joey_identity", kind: "character_identity", generation_mode: "standalone_ref", required_before_imagegen: true, codex_image_prompt: "Joey identity reference, anime/manhwa, 16:9 landscape." },
+      { ref_id: "joey_state", kind: "character_state", generation_mode: "standalone_ref", required_before_imagegen: false, base_asset_id: "joey_state", codex_image_prompt: "Joey state reference, anime/manhwa, 16:9 landscape." },
     ],
   });
-  await writeJson(characterStateRefsPath, { status: "draft_needs_manual_review", character_state_refs: [] });
+  await writeJson(characterStateRefsPath, {
+    status: "draft_needs_manual_review",
+    character_state_refs: [{
+      state_ref_id: "joey_state",
+      base_identity_ref_id: "char_joey_identity",
+    }],
+  });
   const refCreated = await createCodexWorkManifest({
     mode: "reference",
     episodeDir,
@@ -12476,6 +12612,7 @@ async function testCodexImageWorkQueueContracts() {
     referenceIds: ["joey_base", "joey_state"],
     leaseSeconds: 30,
   });
+  assert.deepEqual(refCreated.manifest.items.find((item) => item.asset_id === "joey_state").dependency_asset_ids, ["joey_base"]);
   const baseLease = await leaseNextWorkItem({ manifestPath: refCreated.manifest.manifest_path, workerId: "ref-worker-a" });
   assert.equal(baseLease.assignment.asset_id, "joey_base");
   await sharp({ create: { width: 320, height: 180, channels: 3, background: { r: 120, g: 40, b: 80 } } }).png().toFile(baseLease.assignment.expected_output_path);

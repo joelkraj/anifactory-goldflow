@@ -35,23 +35,25 @@ import {
   chatGptImageFailureDisposition,
   hybridManifestDispatchOptions,
   materializedReferenceState,
+  validateFlowRuntimeConcurrency,
   validateRepairSharedReferenceScope,
 } from "../../../scripts/hybrid-browser-image-pool.mjs";
 import { loginMarkerExists, loginVerificationMarkerPath, markLoginVerified } from "../desktop/browser-login.mjs";
-import { ChatGptBrowser } from "../desktop/chatgpt-browser.mjs";
+import { chatGptModelControlMatches, ChatGptBrowser } from "../desktop/chatgpt-browser.mjs";
 import {
   assertDesktopConfig,
   desktopConfig,
+  GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING,
   normalizeBrowserProvider,
   parseDesktopFlags,
   PRODUCTION_BROWSER_CONCURRENCY_CEILING,
 } from "../desktop/config.mjs";
 import { browserFailureDisposition } from "../desktop/worker-host.mjs";
-import { flowBlockingCode, GoogleFlowBrowser, normalizeFlowPromptText, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
+import { flowBlockingCode, flowModelLabelMatches, flowReferenceUploadOrder, GoogleFlowBrowser, identifyNewFlowComposerChip, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
 import { DesktopRuntimeState } from "../desktop/runtime-state.mjs";
 import { validReferenceRoute } from "../desktop/worker-client.mjs";
 import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldflow-bridge.mjs";
-import { chatGptEffortLabel, chatGptEffortSliderIndex, chatGptUiContractForLlmJob } from "../lib/chatgpt-ui-contract.mjs";
+import { chatGptEffortLabel, chatGptEffortSliderIndex, chatGptModelLabel, chatGptUiContractForLlmJob } from "../lib/chatgpt-ui-contract.mjs";
 import { LlmJobStore } from "../lib/llm-job-store.mjs";
 import { MediaJobStore } from "../lib/media-job-store.mjs";
 import { createStudioServer, providerFailurePausesDispatch, studioServerOptionsFromFlags } from "../server.mjs";
@@ -61,7 +63,40 @@ const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-studio-t
 const originalEnvironment = { ...process.env };
 
 assert.equal(providerFailurePausesDispatch("content_policy_rejected"), false, "one asset rejection must not pause its provider queue");
+assert.equal(providerFailurePausesDispatch("rate_limited"), false, "rate limits use the desktop worker's timed cooldown instead of an indefinite controller pause");
 assert.equal(providerFailurePausesDispatch("ui_contract_mismatch"), true, "a provider UI-contract break must pause dispatch");
+assert.equal(providerFailurePausesDispatch("google_gemini_generation_error"), true, "a Gemini service-generation failure must pause before it can deadletter a batch");
+assert.equal(providerFailurePausesDispatch("chatgpt_generation_error"), true, "a ChatGPT service-generation failure must pause before it can deadletter a batch");
+assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [1, 2, 3, 4], "Flow must upload in canonical order because its composer appends newly added chips");
+assert.equal(identifyNewFlowComposerChip([], [{ media_id: "composer-1" }]).media_id, "composer-1");
+assert.equal(identifyNewFlowComposerChip(["composer-2"], [{ media_id: "composer-1" }, { media_id: "composer-2" }]).media_id, "composer-1");
+assert.throws(() => identifyNewFlowComposerChip(["composer-1"], [{ media_id: "composer-1" }]), /added 0 new reference chips/);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", attempt: 1 }), true);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", attempt: 2 }), false);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", creativeSubmissionStarted: true, attempt: 1 }), false);
+assert.equal(flowModelLabelMatches("Veo 3.1 - Fast arrow_drop_down", "Veo 3.1 Fast"), true);
+assert.equal(flowModelLabelMatches("Veo 3.1 - Lite [Lower Priority]", "Veo 3.1 Lite"), false);
+assert.equal(nearestFlowVideoDuration(5, [4, 6, 8]), 6);
+assert.equal(nearestFlowVideoDuration(9, [4, 6, 8]), 8);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "rate_limited", attempt: 1 }), false);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "TimeoutError", errorMessage: "locator.click: Timeout 30000ms exceeded; element was detached from the DOM", attempt: 1 }), true);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "TimeoutError", errorMessage: "locator.click: Timeout 30000ms exceeded; element was detached from the DOM", creativeSubmissionStarted: true, attempt: 1 }), false);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "Error", errorMessage: "reference asset hash does not match", attempt: 1 }), false);
+const redactedFlowDiagnostic = redactBrowserDiagnostic([
+  "apiRequestContext.get: read ETIMEDOUT",
+  "\u001b[2m    - cookie: __Secure-next-auth.session-token=SECRET; _ga=TRACKING; email=user@example.test\u001b[22m",
+  "authorization: Bearer TOPSECRET",
+  "GET https://example.test/image?X-Goog-Signature=SIGNED&key=PRIVATE",
+].join("\n"));
+assert.match(redactedFlowDiagnostic, /apiRequestContext\.get: read ETIMEDOUT/);
+assert.doesNotMatch(redactedFlowDiagnostic, /SECRET|session-token|TOPSECRET|SIGNED|PRIVATE|TRACKING/);
+const flowDownloadFallbackBrowser = new GoogleFlowBrowser();
+const flowDownloadFallbackPage = {
+  request: { get: async () => { throw new Error("simulated CDN timeout"); } },
+  evaluate: async () => Buffer.from("page-session-fallback").toString("base64"),
+};
+assert.equal((await flowDownloadFallbackBrowser.imageBytes(flowDownloadFallbackPage, "https://example.test/image")).toString(), "page-session-fallback");
+assert.equal((await flowDownloadFallbackBrowser.mediaBytes(flowDownloadFallbackPage, "https://example.test/video")).toString(), "page-session-fallback");
 assert.deepEqual(browserFailureDisposition(Object.assign(new Error("requesting generations too quickly"), { code: "rate_limited" })), { kind: "rate_limit", pausesDispatch: true });
 assert.deepEqual(browserFailureDisposition(new Error("Upload files element is not enabled")), { kind: "transport", pausesDispatch: true });
 assert.deepEqual(browserFailureDisposition(new Error("one malformed image")), { kind: "asset", pausesDispatch: false });
@@ -660,6 +695,10 @@ async function testServerAndRunner() {
     assert.equal(completed.response.status, 200);
     const completion = await completionPromise;
     assert.equal(completion.value.choices[0].message.content, "TEST_OK");
+    assert.equal(typeof completion.value.goldflow_timing.total_ms, "number");
+    assert.ok(completion.value.goldflow_timing.total_ms >= 0);
+    assert.ok(completion.value.goldflow_timing.queue_wait_ms >= 0);
+    assert.ok(completion.value.goldflow_timing.service_ms >= 0);
 
     const concurrentA = jsonRequest(`${studio.url}/v1/chat/completions`, {
       method: "POST",
@@ -699,6 +738,8 @@ async function testServerAndRunner() {
       body: { type: "llm", jobId: runnerLease.job.job_id, leaseToken: runnerLease.job.lease_token, slot: 0, content: "RUNNER_OK" },
     });
     const runner = await runnerPromise;
+    assert.equal(typeof runner.studio_timing.total_ms, "number");
+    assert.equal(runner.bridge_duration_ms, runner.studio_timing.total_ms);
     assert.equal(runner.content, "RUNNER_OK");
     assert.equal(await fs.readFile(outputPath, "utf8"), "RUNNER_OK");
     const metadata = await readCodexCallMetadata(outputPath);
@@ -806,6 +847,8 @@ async function testExtensionPermissions() {
   assert.match(contentWorker, /new PointerEvent\("pointerdown"/, "power-menu verification must use ChatGPT's pointer-trigger contract");
   assert.match(contentWorker, /querySelectorAll\([^\n]+\)\]\s*\.find\(visible\)/, "composer discovery must ignore ChatGPT's hidden fallback textarea");
   assert.match(contentWorker, /\["Instant", "Medium", "High", "Extra High", "Pro"\]/, "worker must select the exact per-job effort contract");
+  assert.match(contentWorker, /menuitemradio/, "worker must select each job's exact Advanced model option");
+  assert.match(contentWorker, /contract\.model_label/, "worker must bind model selection to the leased job contract");
   assert.match(contentWorker, /No reference images are attached\. Generate directly from the text prompt/, "zero-reference image jobs must not ask ChatGPT to use missing attachments");
   assert.match(contentWorker, /chatgpt_image_refusal/, "image workers must stop on upload or clarification refusals");
   assert.match(contentWorker, /image generation failed/, "image workers must stop on ChatGPT's terminal generation-failed state");
@@ -826,8 +869,15 @@ async function testExtensionPermissions() {
 async function testDesktopHostContract() {
   assert.equal(chatGptEffortLabel("max"), "Pro");
   assert.equal(chatGptEffortSliderIndex("Pro"), 4);
+  assert.equal(chatGptModelLabel("gpt-5.5"), "GPT-5.5");
+  assert.equal(chatGptModelLabel("gpt-5.6-sol"), "GPT-5.6 Sol");
+  assert.equal(chatGptModelControlMatches("Model 5.5", "GPT-5.5"), true);
+  assert.equal(chatGptModelControlMatches("Model GPT-5.6 Sol", "GPT-5.5"), false);
   assert.equal(chatGptUiContractForLlmJob({ account_plan: "Pro", model_label: "GPT-5.6 Sol", effort_label: "Medium" }, {
-    request: { reasoning_effort: "max" },
+    request: { model: "gpt-5.5", reasoning_effort: "max" },
+  }).model_label, "GPT-5.5");
+  assert.equal(chatGptUiContractForLlmJob({ account_plan: "Pro", model_label: "GPT-5.6 Sol", effort_label: "Medium" }, {
+    request: { model: "gpt-5.5", reasoning_effort: "max" },
   }).effort_label, "Pro");
   const flags = parseDesktopFlags(["--server-url", "http://127.0.0.1:4317", "--concurrency", "5", "--types", "llm,image"]);
   const config = assertDesktopConfig(desktopConfig({
@@ -850,8 +900,8 @@ async function testDesktopHostContract() {
   assert.equal(flowConfig.browserProvider, "google-flow");
   assert.deepEqual(flowConfig.types, ["image"]);
   assert.match(flowConfig.profileDir, /google-flow-browser-profile$/);
-  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "20" }, {}).concurrency, 3);
-  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "21" }, {}).concurrency, 3);
+  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "20" }, {}).concurrency, GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING);
+  assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "21" }, {}).concurrency, GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING);
   assert.equal(desktopConfig({ ...config, provider: "chatgpt", concurrency: "20" }, {}).concurrency, 3);
   assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "1" }, {}).submissionStaggerMs, 5_000);
   assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 8_000);
@@ -973,12 +1023,14 @@ async function testDesktopHostContract() {
   assert.match(flowBrowserSource, /navigator\.clipboard\.writeText/, "Flow prompts must use the real clipboard-paste path that enables Create");
   assert.match(flowBrowserSource, /baseline = new Set/, "Flow completion must distinguish generated output from uploaded references");
   assert.match(flowBrowserSource, /baselineImageFingerprints/, "Flow completion must detect generated pixels when the provider reuses an existing media URL");
+  assert.match(flowBrowserSource, /waitForComposerChipCount\(page, expectedCount, \{ timeoutMs = 90_000 \}/, "five-way Flow uploads must receive a full reference-thumbnail settle window before failing closed");
   assert.match(flowBrowserSource, /browserProvider: "google-flow"/, "Flow receipts must identify their browser provider");
   assert.match(flowBrowserSource, /project_url: page\.url\(\)/, "Flow receipts must preserve the exact project URL for duplicate-safe recovery");
   assert.match(hostSource, /lease_ambiguous/, "desktop restart recovery must fail closed rather than resubmit");
   assert.match(hostSource, /this\.persistQueue\.then/, "desktop runtime snapshots must preserve call order so completed jobs cannot remain falsely active");
   assert.match(hostSource, /this\.stopStarted/, "desktop host must close browser resources even when startup fails");
-  assert.match(configSource, /PRODUCTION_BROWSER_CONCURRENCY_CEILING = 3/, "every production web provider must retain the three-slot ceiling");
+  assert.match(configSource, /PRODUCTION_BROWSER_CONCURRENCY_CEILING = 3/, "ChatGPT and Gemini must retain the three-slot ceiling");
+  assert.match(configSource, /GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING = 5/, "Flow must expose the five-slot production pool promised by the fast-premium profile");
   assert.match(hostSource, /submissionStaggerMs/, "the desktop host must stagger creative browser submissions");
   assert.match(hostSource, /consecutiveTransportFailures/, "the desktop host must open a circuit after repeated transport failures");
   assert.match(launcher, /desktop\/main\.mjs/, "Finder launcher must start the supervised desktop host");
@@ -1033,6 +1085,14 @@ async function testHybridAcceptedReferencePreservation() {
     [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
   });
   assert.equal(flowOnly.maxConcurrency, HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  assert.equal(validateFlowRuntimeConcurrency(), HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  assert.equal(validateFlowRuntimeConcurrency("4"), 4);
+  assert.throws(() => validateFlowRuntimeConcurrency("0"), /integer from 1 to 5/);
+  assert.throws(() => validateFlowRuntimeConcurrency("6"), /integer from 1 to 5/);
+  assert.throws(() => validateFlowRuntimeConcurrency("2.5"), /integer from 1 to 5/);
+  const cappedFlowOnly = hybridManifestDispatchOptions({ flowOnly: true, flowConcurrency: 4 });
+  assert.deepEqual(cappedFlowOnly.browserProviderConcurrency, { [GOOGLE_FLOW_BROWSER_PROVIDER]: 4 });
+  assert.equal(cappedFlowOnly.maxConcurrency, 4);
   const chatgptOnly = hybridManifestDispatchOptions({ chatgptOnly: true });
   assert.deepEqual(chatgptOnly.allowedBrowserProviders, ["chatgpt"]);
   assert.deepEqual(chatgptOnly.browserProviderConcurrency, {
@@ -1041,13 +1101,26 @@ async function testHybridAcceptedReferencePreservation() {
   assert.equal(chatgptOnly.maxConcurrency, HYBRID_CHATGPT_IMAGE_CONCURRENCY);
   const federated = hybridManifestDispatchOptions({ federated: true });
   assert.equal(federated.workProvider, FEDERATED_WEB_IMAGE_PROVIDER);
-  assert.deepEqual(federated.allowedBrowserProviders, [GOOGLE_FLOW_BROWSER_PROVIDER, GOOGLE_GEMINI_BROWSER_PROVIDER, "chatgpt"]);
+  assert.deepEqual(federated.allowedBrowserProviders, [GOOGLE_FLOW_BROWSER_PROVIDER, GOOGLE_GEMINI_BROWSER_PROVIDER]);
   assert.deepEqual(federated.browserProviderConcurrency, {
     [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
     [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
-    chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
+  });
+  assert.deepEqual(federated.browserProviderMaxOrderedReferences, {
+    [GOOGLE_FLOW_BROWSER_PROVIDER]: 4,
+    [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4,
+  });
+  assert.deepEqual(hybridManifestDispatchOptions({ federated: true, mode: "reference" }).browserProviderMaxOrderedReferences, {
+    [GOOGLE_FLOW_BROWSER_PROVIDER]: 4,
+    [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4,
   });
   assert.equal(federated.maxConcurrency, FEDERATED_TOTAL_IMAGE_CONCURRENCY);
+  const cappedFederated = hybridManifestDispatchOptions({ federated: true, flowConcurrency: 4 });
+  assert.equal(cappedFederated.browserProviderConcurrency[GOOGLE_FLOW_BROWSER_PROVIDER], 4);
+  assert.equal(cappedFederated.maxConcurrency, FEDERATED_TOTAL_IMAGE_CONCURRENCY - 1);
+  const legacyFederated = hybridManifestDispatchOptions({ federated: true, federatedChatGptEnabled: true });
+  assert.deepEqual(legacyFederated.allowedBrowserProviders, [GOOGLE_FLOW_BROWSER_PROVIDER, GOOGLE_GEMINI_BROWSER_PROVIDER, "chatgpt"]);
+  assert.equal(legacyFederated.maxConcurrency, FEDERATED_TOTAL_IMAGE_CONCURRENCY + HYBRID_CHATGPT_IMAGE_CONCURRENCY);
   const federatedStyle = hybridManifestDispatchOptions({ federated: true, styleOnly: true });
   assert.deepEqual(federatedStyle.allowedBrowserProviders, [GOOGLE_GEMINI_BROWSER_PROVIDER]);
   assert.deepEqual(
@@ -1083,12 +1156,15 @@ async function testChatGptSharedVerificationAndPacing() {
     return { account_plan: "Pro", model_label: "GPT-5", effort_label: "Medium" };
   };
   const contract = { account_plan: "Pro", model_label: "GPT-5", effort_label: "Medium" };
+  const firstPage = {};
   const [first, second] = await Promise.all([
-    browser.verifyUiContractOnce({}, contract),
-    browser.verifyUiContractOnce({}, contract),
+    browser.verifyUiContractOnce(firstPage, contract),
+    browser.verifyUiContractOnce(firstPage, contract),
   ]);
   assert.deepEqual(first, second);
-  assert.equal(verificationCalls, 1, "concurrent ChatGPT slots must share one account/model verification");
+  assert.equal(verificationCalls, 1, "one ChatGPT page must share an in-flight verification for the same contract");
+  await browser.verifyUiContractOnce({}, contract);
+  assert.equal(verificationCalls, 2, "each ChatGPT page must independently select and verify its model and effort");
 
   const startedAt = Date.now();
   await Promise.all([

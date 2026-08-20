@@ -2,6 +2,8 @@
 
 Date: 2026-07-28; batch-four synthesis promotion approved 2026-07-29
 
+> Historical contract: superseded for new runs by `docs/workflows/narration_quality_v2.md`. Legacy identities retain this exact fixed-gap adapter; do not copy its 45-60-word or universal 80 ms join settings into a Narration Quality V2 run.
+
 ## Decision
 
 Goldflow's standard narrator is local Qwen3-TTS 1.7B Base conditioned by the

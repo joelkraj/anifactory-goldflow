@@ -30,6 +30,14 @@ const outputDir = path.resolve(flags["output-dir"] ?? "");
 const candidateTitle = String(flags["candidate-title"] ?? "Candidate title");
 const referenceTitle = String(flags["reference-title"] ?? "Reference title");
 const panelSeed = String(flags["panel-seed"] ?? "").trim();
+const channel = String(flags.channel ?? "").trim();
+const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
+const defaultLearningLedgerPath = channel
+  ? path.join(dataRoot, "channels", channel, "analytics", "source_learning_ledger.json")
+  : null;
+const learningLedgerPath = flags["calibration-ledger"]
+  ? path.resolve(flags["calibration-ledger"])
+  : defaultLearningLedgerPath;
 const concurrency = Math.max(1, Math.min(5, Number.parseInt(flags.concurrency ?? "3", 10) || 3));
 const startIntervalMs = Math.max(5_000, Number.parseInt(flags["start-interval-ms"] ?? "15000", 10) || 15_000);
 if (!flags.candidate || !flags.reference || !flags["output-dir"]) {
@@ -37,6 +45,14 @@ if (!flags.candidate || !flags.reference || !flags["output-dir"]) {
 }
 if (!panelSeed) throw new Error("Missing --panel-seed; rotating viewers must be fixed before scoring.");
 const personas = sourceViewerPanel(panelSeed);
+const learningLedgerBytes = learningLedgerPath
+  ? await fs.readFile(learningLedgerPath).catch(() => null)
+  : null;
+const learningLedger = learningLedgerBytes ? JSON.parse(learningLedgerBytes.toString("utf8")) : null;
+if (learningLedger && (learningLedger.schema !== "goldflow_source_learning_ledger_v1" || learningLedger.status !== "observational")) {
+  throw new Error(`Invalid viewer calibration ledger: ${learningLedgerPath}`);
+}
+const learningLedgerSha256 = learningLedgerBytes ? sha256(learningLedgerBytes) : null;
 
 async function mapWithConcurrency(items, limit, worker) {
   const results = new Array(items.length);
@@ -78,6 +94,7 @@ if (existingManifest) {
     || existingManifest.panel_seed !== panelSeed
     || existingManifest.candidate_title !== candidateTitle
     || existingManifest.reference_title !== referenceTitle
+    || (existingManifest.calibration_ledger_sha256 ?? null) !== learningLedgerSha256
   ) throw new Error("Existing viewer-tournament directory is bound to a different candidate, reference, title, or panel seed.");
 } else {
   const staleReportNames = (await fs.readdir(outputDir)).filter((name) => name.endsWith(".json") && name !== "aggregation.json");
@@ -92,7 +109,11 @@ function packet(persona) {
   const first = persona.order === "candidate_first"
     ? `SCRIPT A TITLE: ${candidateTitle}\nSCRIPT A TEXT:\n${candidate}\n\nSCRIPT B TITLE: ${referenceTitle}\nSCRIPT B TEXT:\n${reference}`
     : `SCRIPT A TITLE: ${referenceTitle}\nSCRIPT A TEXT:\n${reference}\n\nSCRIPT B TITLE: ${candidateTitle}\nSCRIPT B TEXT:\n${candidate}`;
-  return `You are one simulated cold YouTube manhwa-recap viewer. Stay inside this viewing psychology:\n${persona.brief}\n\nThis is a blinded comparative audience test, not a writing workshop. Read both scripts as spoken videos at about 190 words per minute. Goldflow's primary viewing objective is average percentage viewed. The scripts differ in total runtime: judge what fraction of each complete video a viewer like you would voluntarily watch. Do not reward raw length, and do not give a shorter script automatic credit; estimate the actual percentage its story would retain. Judge which script is more likely to produce the higher average percentage viewed. Do not use a checklist as a substitute for your felt viewing response.\n\nAt each checkpoint (30 seconds, 60 seconds, 3 minutes, 5 minutes, middle, ending, overall), choose A, B, or tie. Return exactly seven checkpoint rows, once each, in that order. For every choice, quote a short exact excerpt from each script and explain the viewing effect. Identify the earliest exact sentence where you would consider leaving each script. Give no charitable credit for events that happen much later. Separate opening quality, average-percentage-viewed potential, emotional satisfaction, power-fantasy satisfaction, clarity, freshness, and ending payoff. For each dimension, quote one short exact excerpt from A and one from B that support the vote.\n\nNormalize every dimension for runtime and package promise. In particular, power-fantasy satisfaction means payoff density, escalation, ingenuity, desirability, memorable superiority, and fulfillment of the clicked title across the fraction viewed. A longer script does not win merely because it contains more total powers, fights, upgrades, or enemies. A shorter script does not win merely because it is denser. Judge which complete experience uses its runtime better and leaves the viewer more satisfied with the promised fantasy.\n\nEstimate percentage viewed for A and B from zero to one hundred. Your apv_preference must choose the script with the greater estimated percentage viewed. Explain the exact story spans that would retain or lose that percentage.\n\nThen give the weaker APV script a maximum of eight prioritized revision notes. Notes must preserve its premise and strongest material. Each note must identify an exact weak excerpt, what you felt as a viewer, and the smallest story-level change that would increase percentage viewed. Do not write replacement prose.\n\nReturn JSON only using this shape:\n{\n  "schema": "goldflow_simulated_manhwa_viewer_v2",\n  "persona_id": "${persona.id}",\n  "script_label_map": { "candidate": "${candidateLabel}", "reference": "${referenceLabel}" },\n  "checkpoint_preferences": [{ "checkpoint": "30_seconds", "preference": "A|B|tie", "a_anchor": "...", "b_anchor": "...", "viewing_effect": "..." }],\n  "earliest_leave_risk": { "A": { "exact_anchor": "...", "reason": "..." }, "B": { "exact_anchor": "...", "reason": "..." } },\n  "estimated_percentage_viewed": { "A": 0, "B": 0, "rationale": "..." },\n  "apv_preference": "A|B|tie",\n  "dimension_preferences": [{ "dimension": "opening_quality", "preference": "A|B|tie", "a_anchor": "...", "b_anchor": "...", "reason": "..." }],\n  "overall_preference": "A|B|tie",\n  "confidence": "low|medium|high",\n  "weaker_script": "A|B|neither",\n  "revision_notes": [{ "priority": 1, "exact_anchor": "...", "viewer_reaction": "...", "smallest_story_change": "..." }],\n  "one_sentence_verdict": "..."\n}\n\n${first}`;
+  const personaCalibration = learningLedger?.viewer_persona_calibration?.[persona.id] ?? null;
+  const calibrationNote = personaCalibration
+    ? `\n\nPRIOR CALIBRATION FOR THIS SIMULATED PERSONA (observational, not ground truth):\n${JSON.stringify(personaCalibration, null, 2)}\nUse this only to temper confidence and known timing bias. Do not alter your viewing psychology to chase the data.`
+    : "\n\nNo adequate prior calibration exists for this persona. Mark confidence conservatively.";
+  return `You are one simulated cold YouTube manhwa-recap viewer. Stay inside this viewing psychology:\n${persona.brief}${calibrationNote}\n\nThis is a blinded comparative audience test, not a writing workshop. Read both scripts as spoken videos at about 190 words per minute. Goldflow's primary viewing objective is average percentage viewed. The scripts differ in total runtime: judge what fraction of each complete video a viewer like you would voluntarily watch. Do not reward raw length, and do not give a shorter script automatic credit; estimate the actual percentage its story would retain. Judge which script is more likely to produce the higher average percentage viewed. Do not use a checklist as a substitute for your felt viewing response.\n\nAt each checkpoint (30 seconds, 60 seconds, 3 minutes, 5 minutes, middle, ending, overall), choose A, B, or tie. Return exactly seven checkpoint rows, once each, in that order. For every choice, quote a short exact excerpt from each script and explain the viewing effect. Identify the earliest exact sentence where you would consider leaving each script. Give no charitable credit for events that happen much later. Separate opening quality, average-percentage-viewed potential, emotional satisfaction, power-fantasy satisfaction, clarity, freshness, and ending payoff. For each dimension, quote one short exact excerpt from A and one from B that support the vote.\n\nNormalize every dimension for runtime and package promise. In particular, power-fantasy satisfaction means payoff density, escalation, ingenuity, desirability, memorable superiority, and fulfillment of the clicked title across the fraction viewed. A longer script does not win merely because it contains more total powers, fights, upgrades, or enemies. A shorter script does not win merely because it is denser. Judge which complete experience uses its runtime better and leaves the viewer more satisfied with the promised fantasy.\n\nEstimate percentage viewed for A and B from zero to one hundred. Your apv_preference must choose the script with the greater estimated percentage viewed. Explain the exact story spans that would retain or lose that percentage.\n\nThen give the weaker APV script a maximum of eight prioritized revision notes. Notes must preserve its premise and strongest material. Each note must identify an exact weak excerpt, what you felt as a viewer, and the smallest story-level change that would increase percentage viewed. Do not write replacement prose.\n\nReturn JSON only using this shape:\n{\n  "schema": "goldflow_simulated_manhwa_viewer_v2",\n  "persona_id": "${persona.id}",\n  "script_label_map": { "candidate": "${candidateLabel}", "reference": "${referenceLabel}" },\n  "checkpoint_preferences": [{ "checkpoint": "30_seconds", "preference": "A|B|tie", "a_anchor": "...", "b_anchor": "...", "viewing_effect": "..." }],\n  "earliest_leave_risk": { "A": { "exact_anchor": "...", "reason": "..." }, "B": { "exact_anchor": "...", "reason": "..." } },\n  "estimated_percentage_viewed": { "A": 0, "B": 0, "rationale": "..." },\n  "apv_preference": "A|B|tie",\n  "dimension_preferences": [{ "dimension": "opening_quality", "preference": "A|B|tie", "a_anchor": "...", "b_anchor": "...", "reason": "..." }],\n  "overall_preference": "A|B|tie",\n  "confidence": "low|medium|high",\n  "weaker_script": "A|B|neither",\n  "revision_notes": [{ "priority": 1, "exact_anchor": "...", "viewer_reaction": "...", "smallest_story_change": "..." }],\n  "one_sentence_verdict": "..."\n}\n\n${first}`;
 }
 
 function reinforceExactAnchorContract(prompt) {
@@ -157,6 +178,8 @@ const manifest = {
   candidate_title: candidateTitle,
   reference_title: referenceTitle,
   panel_seed: panelSeed,
+  calibration_ledger_path: learningLedgerBytes ? learningLedgerPath : null,
+  calibration_ledger_sha256: learningLedgerSha256,
   panel_profile_ids: personas.map((persona) => persona.id),
   control_viewer_count: personas.filter((persona) => persona.panel_role === "control").length,
   rotating_viewer_count: personas.filter((persona) => persona.panel_role === "rotating_challenger").length,

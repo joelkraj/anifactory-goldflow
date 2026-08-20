@@ -281,6 +281,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jobs", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--events")
     parser.add_argument("--qwen-reference-audio")
     parser.add_argument("--qwen-reference-text")
     parser.add_argument(
@@ -323,6 +324,22 @@ def atomic_json(file_path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, file_path)
+
+
+def append_jsonl(file_path: Path | None, value: Any) -> None:
+    if file_path is None:
+        return
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n"
+    with file_path.open("a", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def package_version(name: str) -> str | None:
@@ -1059,6 +1076,9 @@ def main() -> None:
     jobs_path = Path(args.jobs).resolve()
     output_dir = Path(args.output_dir).resolve()
     report_path = Path(args.report).resolve()
+    events_path = Path(args.events).resolve() if args.events else None
+    if events_path is not None and events_path.exists():
+        events_path.unlink()
     jobs_manifest = json.loads(jobs_path.read_text(encoding="utf-8"))
     jobs = validate_jobs(jobs_manifest)
     synthesis_mode = SERIAL_SYNTHESIS_MODE
@@ -1151,6 +1171,30 @@ def main() -> None:
     load_seconds = time.perf_counter() - load_started
     results_by_id: dict[str, dict[str, Any]] = {}
     cohort_executions: list[dict[str, Any]] = []
+
+    def publish_cohort_complete(
+        cohort: dict[str, Any],
+        execution: dict[str, Any],
+        cohort_jobs: list[dict[str, Any]],
+    ) -> None:
+        append_jsonl(
+            events_path,
+            {
+                "schema": "goldflow_local_tts_cohort_event_v1",
+                "event": "cohort_complete",
+                "recorded_at_unix_ms": int(time.time() * 1000),
+                "jobs_sha256": sha256_file(jobs_path),
+                "batch_plan_sha256": jobs_manifest.get("batch_plan_sha256"),
+                "cohort_id": cohort["cohort_id"],
+                "cohort_sha256": cohort["cohort_sha256"],
+                "cohort_index": cohort["cohort_index"],
+                "execution": execution,
+                "results": [
+                    results_by_id[str(job["unit_id"])]
+                    for job in cohort_jobs
+                ],
+            },
+        )
 
     def output_spec(
         job: dict[str, Any],
@@ -1315,8 +1359,7 @@ def main() -> None:
             if all(spec[-1] is not None for spec in specs):
                 for job, _identity, _identity_hash, _output, _sidecar, cached in specs:
                     results_by_id[str(job["unit_id"])] = cached
-                cohort_executions.append(
-                    {
+                execution = {
                         "cohort_id": cohort["cohort_id"],
                         "cohort_sha256": cohort["cohort_sha256"],
                         "cohort_index": cohort["cohort_index"],
@@ -1333,7 +1376,8 @@ def main() -> None:
                             6,
                         ),
                     }
-                )
+                cohort_executions.append(execution)
+                publish_cohort_complete(cohort, execution, cohort_jobs)
                 continue
             try:
                 mx.random.seed(int(cohort["batch_seed"]))
@@ -1546,8 +1590,7 @@ def main() -> None:
                     }
                     atomic_json(sidecar_path, row)
                     results_by_id[str(job["unit_id"])] = row
-                cohort_executions.append(
-                    {
+                execution = {
                         "cohort_id": cohort["cohort_id"],
                         "cohort_sha256": cohort["cohort_sha256"],
                         "cohort_index": cohort["cohort_index"],
@@ -1568,7 +1611,8 @@ def main() -> None:
                             6,
                         ),
                     }
-                )
+                cohort_executions.append(execution)
+                publish_cohort_complete(cohort, execution, cohort_jobs)
             except Exception as error:
                 for spec in specs:
                     (
@@ -1592,8 +1636,7 @@ def main() -> None:
                                 else "tts_batch_synthesis_failed"
                             ),
                         )
-                cohort_executions.append(
-                    {
+                execution = {
                         "cohort_id": cohort["cohort_id"],
                         "cohort_sha256": cohort["cohort_sha256"],
                         "cohort_index": cohort["cohort_index"],
@@ -1612,7 +1655,8 @@ def main() -> None:
                             6,
                         ),
                     }
-                )
+                cohort_executions.append(execution)
+                publish_cohort_complete(cohort, execution, cohort_jobs)
     else:
         for job in jobs:
             started = time.perf_counter()
@@ -1782,6 +1826,10 @@ def main() -> None:
         ),
         "batch_plan_sha256": jobs_manifest.get("batch_plan_sha256"),
         "cohort_executions": cohort_executions,
+        "cohort_event_path": str(events_path) if events_path else None,
+        "cohort_event_count": (
+            len(cohort_executions) if events_path is not None else 0
+        ),
         "results_restored_to_original_order": True,
         "original_order_unit_ids": [
             str(job["unit_id"]) for job in jobs

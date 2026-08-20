@@ -13,6 +13,7 @@ import {
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
+import { buildImageSemanticAudit } from "./lib/image-semantic-audit.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -27,6 +28,12 @@ const promptPath = flags.prompts ?? path.join(episodeDir, "section_image_prompts
 const imagegenReportPath = flags["imagegen-report"] ?? path.join(episodeDir, `imagegen_report_${episode}.json`);
 const ledgerPath = flags.ledger ?? path.join(episodeDir, "cut_execution_ledger.json");
 const outputPath = flags.output ?? path.join(episodeDir, `image_output_qa_${episode}.json`);
+const semanticAuditPath = flags["semantic-audit-output"] ?? path.join(episodeDir, `image_semantic_audit_${episode}.json`);
+const semanticAuditEnabled = flags["semantic-audit"] !== "false";
+const semanticAuditConcurrency = Math.max(1, Number.parseInt(flags["semantic-audit-concurrency"] ?? "8", 10));
+const semanticAuditOpeningSec = Math.max(0, Number(flags["semantic-audit-opening-sec"] ?? 120));
+const semanticAuditOrdinarySampleRate = Math.max(0, Math.min(1, Number(flags["semantic-audit-sample-rate"] ?? 0.05)));
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reviewDecisionsPath = flags.decisions
   ?? flags["review-decisions"]
   ?? path.join(episodeDir, `image_output_review_decisions_${episode}.json`);
@@ -110,6 +117,9 @@ function visibleCharacterCount(prompt) {
 
 export function imageRiskReasons(prompt, { openingSec = 180 } = {}) {
   const reasons = [];
+  const qualityTier = String(prompt?.quality_budget?.tier ?? prompt?.beat_value?.tier ?? "").toLowerCase();
+  if (qualityTier === "hero" || Number(prompt?.quality_budget?.image_candidate_count ?? 1) > 1) reasons.push("hero_beat");
+  if (qualityTier === "priority") reasons.push("priority_beat");
   if (Number(prompt?.start_sec ?? 0) < openingSec) reasons.push("opening_retention");
   const job = String(prompt?.shot_manifest?.shot_job ?? prompt?.suggested_shot_job ?? "").toLowerCase();
   const action = `${prompt?.shot_manifest?.foreground_action ?? ""} ${prompt?.visual_beat_action ?? ""}`;
@@ -274,9 +284,10 @@ async function writeContactSheet(rows, outputPath, { columns = 4, pageSize = 24 
   return pages;
 }
 
-async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null) {
+async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null, semanticAudit = null) {
   const resultById = new Map((imagegenReport?.results ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const focalById = new Map((focalAnalysis?.analyses ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const semanticById = new Map((semanticAudit?.rows ?? []).map((row) => [String(row.image_id ?? ""), row]));
   const rows = [];
   const findings = [];
   const hashOwners = new Map();
@@ -321,6 +332,16 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null)
       openingSec: openingReviewSec,
       integrationSampleRate,
     });
+    const semantic = semanticById.get(imageId) ?? null;
+    const semanticNeedsReview = semantic?.overall_verdict === "needs_review";
+    const semanticUnavailable = semantic?.status === "unavailable";
+    const heroOrPriority = (semantic?.selection_reasons ?? []).some((reason) => ["hero_beat", "priority_beat"].includes(reason));
+    const requiresSemanticReview = semanticNeedsReview && (!semanticUnavailable || heroOrPriority);
+    const riskReasons = [...new Set([
+      ...reviewPolicy.reasons,
+      ...(semantic ? semantic.selection_reasons.map((reason) => `semantic:${reason}`) : []),
+      ...(requiresSemanticReview ? ["semantic_audit_needs_review"] : []),
+    ])];
     rows.push({
       image_id: imageId,
       scene_id: prompt.scene_id ?? null,
@@ -333,13 +354,14 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null)
       image_sha256: imageHash,
       width,
       height,
-      risk_reasons: reviewPolicy.reasons,
-      qa_tier: reviewPolicy.tier,
+      risk_reasons: riskReasons,
+      qa_tier: requiresSemanticReview ? "semantic_exception_review" : reviewPolicy.tier,
       deterministic_sample: reviewPolicy.sampled,
-      requires_manual_risk_review: reviewPolicy.requires_manual_review,
+      requires_manual_risk_review: reviewPolicy.requires_manual_review || requiresSemanticReview,
       focal_anchor: focal?.focal_anchor ?? null,
       focal_confidence: focal?.confidence ?? null,
       composition_findings: focal?.findings ?? [],
+      semantic_audit: semantic,
     });
   }
   return { rows, findings };
@@ -491,7 +513,24 @@ async function main() {
     throw new Error("Image decisions require --reviewer and --note so output QA has review provenance.");
   }
 
-  const audit = await structuralAudit(promptPlan, imagegenReport, focalAnalysis);
+  const semanticAudit = semanticAuditEnabled
+    ? await buildImageSemanticAudit({
+        promptPlan,
+        imagegenReport,
+        promptPlanPath: promptPath,
+        imagegenReportPath,
+        outputPath: semanticAuditPath,
+        callsDir: path.join(episodeDir, "reports", "image_semantic_audit_calls"),
+        repoRoot,
+        concurrency: semanticAuditConcurrency,
+        openingSec: semanticAuditOpeningSec,
+        ordinarySampleRate: semanticAuditOrdinarySampleRate,
+        model: flags["semantic-audit-model"] ?? null,
+        reasoningEffort: flags["semantic-audit-effort"] ?? "medium",
+        timeoutMs: Math.max(60_000, Number(flags["semantic-audit-timeout-ms"] ?? 600_000)),
+      })
+    : null;
+  const audit = await structuralAudit(promptPlan, imagegenReport, focalAnalysis, semanticAudit);
   const packets = await writeReviewPackets(audit.rows);
   const currentImageIds = new Set(audit.rows.map((row) => row.image_id));
   const unknownCriticalIds = [...criticalRejectedIds].filter((imageId) => !currentImageIds.has(imageId));
@@ -566,6 +605,15 @@ async function main() {
     imagegen_report_sha256: await hashFile(imagegenReportPath),
     focal_analysis_path: focalAnalysis?.status === "passed" ? focalAnalysisPath : null,
     focal_analysis_sha256: focalAnalysis?.status === "passed" ? await hashFile(focalAnalysisPath) : null,
+    semantic_audit_path: semanticAudit ? semanticAuditPath : null,
+    semantic_audit_sha256: semanticAudit ? await hashFile(semanticAuditPath) : null,
+    semantic_audit_summary: semanticAudit ? {
+      selected_count: semanticAudit.selected_count,
+      audited_count: semanticAudit.audited_count,
+      unavailable_count: semanticAudit.unavailable_count,
+      passed_count: semanticAudit.passed_count,
+      needs_review_count: semanticAudit.needs_review_count,
+    } : null,
     image_generation_estimated_cost: imagegenReport.estimated_cost ?? null,
     provider_health_report_path: imagegenReport.provider_health_report_path ?? null,
     provider_circuit_open: imagegenReport.provider_circuit_open ?? false,
@@ -579,11 +627,12 @@ async function main() {
       opening_review_sec: openingReviewSec,
       integration_sample_rate: integrationSampleRate,
       full_contact_sheets_enabled: writeFullContactSheets,
-      manual_review_tiers: [],
+      manual_review_tiers: ["semantic_exception_review"],
       advisory_review_tiers: ["advisory_review_log"],
       structural_auto_pass_count: audit.rows.filter((row) => row.qa_tier === "structural_auto_pass").length,
       advisory_review_log_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,
       mandatory_exception_review_count: 0,
+      semantic_exception_review_count: audit.rows.filter((row) => row.qa_tier === "semantic_exception_review").length,
       deterministic_sample_count: audit.rows.filter((row) => row.deterministic_sample).length,
       review_reason_counts: audit.rows.flatMap((row) => row.risk_reasons ?? []).reduce((counts, reason) => ({ ...counts, [reason]: (counts[reason] ?? 0) + 1 }), {}),
     },

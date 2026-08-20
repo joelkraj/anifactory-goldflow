@@ -133,6 +133,40 @@ async function readAnalyticsFeedbackState(episodeDir, episode) {
   };
 }
 
+async function refreshPerformanceAudit(episodeDir) {
+  const result = await runNode([
+    path.join(repoRoot, "scripts", "run-performance-audit.mjs"),
+    "--episode-dir", episodeDir,
+  ], { capture: true });
+  if (result.code !== 0) {
+    return {
+      status: "unavailable",
+      non_blocking: true,
+      error: String(result.stderr || result.stdout || "performance audit unavailable").trim(),
+    };
+  }
+  try {
+    return { status: "passed", ...JSON.parse(result.stdout) };
+  } catch {
+    return { status: "unavailable", non_blocking: true, error: "performance audit output was not valid JSON" };
+  }
+}
+
+async function persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath }) {
+  const director = agentDirectorStatus(runStatus, checkpoints, { analyticsFeedback });
+  const episodeDir = path.resolve(runStatus.episode_dir);
+  const performanceAudit = await refreshPerformanceAudit(episodeDir);
+  const outputPath = path.join(episodeDir, "agent_director_state.json");
+  await writeJson(outputPath, {
+    ...director,
+    performance_audit: performanceAudit,
+    run_status_stage_registry_version: runStatus.stage_registry_version,
+    checkpoint_path: checkpointPath,
+    updated_at: new Date().toISOString(),
+  });
+  return { director, performanceAudit, outputPath };
+}
+
 async function checkpoint(runStatus) {
   const checkpointId = String(flags.checkpoint ?? "").trim();
   if (!AGENT_DIRECTOR_CHECKPOINTS.includes(checkpointId)) throw new Error(`Unknown --checkpoint ${checkpointId}.`);
@@ -175,7 +209,13 @@ async function main() {
   if (action === "advance") {
     const current = agentDirectorStatus(runStatus, checkpoints, { analyticsFeedback });
     if (current.checkpoint_hold.length) {
-      console.log(JSON.stringify({ ...current, advance_status: "operator_checkpoint_required" }, null, 2));
+      const snapshot = await persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath });
+      console.log(JSON.stringify({
+        ...snapshot.director,
+        performance_audit: snapshot.performanceAudit,
+        advance_status: "operator_checkpoint_required",
+        output_path: snapshot.outputPath,
+      }, null, 2));
       return;
     }
     const requested = flags.phase ? agentDirectorPhase(flags.phase) : agentDirectorPhase(current.current_phase);
@@ -184,7 +224,13 @@ async function main() {
     }
     const next = nextAgentDirectorPhase(requested.id);
     if (requested.nonblocking) {
-      console.log(JSON.stringify({ ...current, advance_status: "nonblocking_analytics_phase" }, null, 2));
+      const snapshot = await persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath });
+      console.log(JSON.stringify({
+        ...snapshot.director,
+        performance_audit: snapshot.performanceAudit,
+        advance_status: "nonblocking_analytics_phase",
+        output_path: snapshot.outputPath,
+      }, null, 2));
       return;
     }
     const args = [path.join(repoRoot, "scripts", "run-advance.mjs"), ...identityArgs(), "--max-steps", String(flags["max-steps"] ?? 50)];
@@ -200,15 +246,12 @@ async function main() {
   } else if (action !== "status") {
     throw new Error("Agent director --action must be status, advance, or checkpoint.");
   }
-  const director = agentDirectorStatus(runStatus, checkpoints, { analyticsFeedback });
-  const outputPath = path.join(episodeDir, "agent_director_state.json");
-  await writeJson(outputPath, {
-    ...director,
-    run_status_stage_registry_version: runStatus.stage_registry_version,
-    checkpoint_path: checkpointPath,
-    updated_at: new Date().toISOString(),
-  });
-  console.log(JSON.stringify({ ...director, output_path: outputPath }, null, 2));
+  const snapshot = await persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath });
+  console.log(JSON.stringify({
+    ...snapshot.director,
+    performance_audit: snapshot.performanceAudit,
+    output_path: snapshot.outputPath,
+  }, null, 2));
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

@@ -68,6 +68,45 @@ function expandedInitialisms(value) {
   }));
 }
 
+const HOMOGRAPH_RISK_PATTERN = /\b(?:live|content|read|lead|wind|tear|close|minute|record|object|present|project|refuse|separate|invalid|entrance)\b/gi;
+
+function pronunciationRisksForUnit(unit, unitId, sourceText, spokenText) {
+  const candidates = [];
+  const add = (category, sourceToken, intendedSpokenText, disposition = "exact_spoken_preview") => {
+    const normalized = `${category}\0${String(sourceToken).toLowerCase()}\0${String(intendedSpokenText).toLowerCase()}`;
+    if (candidates.some((row) => row._key === normalized)) return;
+    candidates.push({
+      _key: normalized,
+      risk_id: `pron_${sha256(`${unitId}\0${normalized}`).slice(0, 16)}`,
+      unit_id: unitId,
+      category,
+      source_token: String(sourceToken),
+      intended_spoken_text: String(intendedSpokenText),
+      source_text_preview: sourceText,
+      final_spoken_text_preview: spokenText,
+      disposition,
+    });
+  };
+  for (const match of sourceText.matchAll(HOMOGRAPH_RISK_PATTERN)) {
+    const token = match[0];
+    const changed = !new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(spokenText);
+    add("homograph", token, spokenText, changed ? "disambiguated_by_spoken_override" : "subjective_listen_required");
+  }
+  for (const match of sourceText.matchAll(/[$£€¥]\s*\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?(?:%|[xX])?\b/g)) {
+    add("currency_or_number", match[0], spokenText);
+  }
+  for (const match of sourceText.matchAll(/\b(?:SSS|SS|XP|HP|MP|DPS|AOE|CEO|CFO|COO|CTO|CIO|CMO|HR|PR|AI|UI|UX|API|FBI|NYPD|IRS|SEC|NDA|LLC|IPO|IT|DNA|GPS|USB|PDF|URL|VIP|ID|MC)(?:\s*[- ]\s*rank)?\b/g)) {
+    add(/rank/i.test(match[0]) ? "rank" : "initialism", match[0], spokenText);
+  }
+  for (const match of sourceText.matchAll(/\b[A-Z][\p{L}'’-]+(?:\s+[A-Z][\p{L}'’-]+){1,2}(?:['’]s)?\b/gu)) {
+    add(/[’']s$/u.test(match[0]) ? "possessive_name" : "proper_name", match[0], spokenText, "subjective_listen_required");
+  }
+  for (const term of unit?.protected_terms ?? []) {
+    if (String(term).trim()) add("protected_term", term, spokenText);
+  }
+  return candidates.map(({ _key, ...row }) => row);
+}
+
 export function buildTtsSpokenTextAudit({
   plan,
   sourceScriptSha256,
@@ -83,6 +122,7 @@ export function buildTtsSpokenTextAudit({
   const warnings = [];
   const seenIds = new Set();
   const unitContracts = [];
+  const pronunciationLedger = [];
 
   for (const unit of units) {
     const unitId = String(unit?.unit_id ?? "").trim();
@@ -122,6 +162,11 @@ export function buildTtsSpokenTextAudit({
       if (/^[A-SS-Z]{1,3}$/.test(initialism.compact) && /\brank\b/i.test(spokenText)) continue;
       unitWarnings.push(`unregistered_spoken_initialism:${initialism.compact}`);
     }
+    const pronunciationRisks = pronunciationRisksForUnit(unit, unitId, sourceText, spokenText);
+    pronunciationLedger.push(...pronunciationRisks);
+    if (pronunciationRisks.some((row) => row.disposition === "subjective_listen_required")) {
+      unitWarnings.push("pronunciation_or_homograph_subjective_listen_required");
+    }
 
     const contract = {
       unit_id: unitId || null,
@@ -131,6 +176,7 @@ export function buildTtsSpokenTextAudit({
       spoken_text_sha256: spokenText ? sha256(spokenText) : null,
       spoken_word_count: spokenWordCount,
       atomic_unit: atomic,
+      pronunciation_risk_ids: pronunciationRisks.map((row) => row.risk_id),
       blockers: unitBlockers,
       warnings: [...new Set(unitWarnings)],
     };
@@ -141,6 +187,7 @@ export function buildTtsSpokenTextAudit({
 
   if (!units.length) blockers.push({ code: "narration_plan_contains_no_units", unit_id: null });
   const unitContractSha256 = sha256(JSON.stringify(unitContracts));
+  const pronunciationLedgerSha256 = sha256(JSON.stringify(pronunciationLedger));
   const audit = {
     schema: TTS_SPOKEN_TEXT_AUDIT_SCHEMA,
     status: blockers.length ? "blocked" : "passed",
@@ -155,10 +202,11 @@ export function buildTtsSpokenTextAudit({
     unit_contract_sha256: unitContractSha256,
     policy: {
       captions_and_spoken_text_are_separate: true,
-      target_spoken_words: "45-60 for ordinary narration; shorter atomic system/dialogue and hard-boundary units are valid",
+      target_spoken_words: "20-42 preferred for ordinary narration; 48 soft maximum, 60 hard maximum; shorter atomic system/dialogue and hard-boundary units are valid",
       hard_spoken_words_max: 60,
       unresolved_digits_allowed: false,
       context_aware_initialisms_required: true,
+      exact_pronunciation_preview_required: true,
       provider_mixing_allowed: false,
     },
     blocker_count: blockers.length,
@@ -166,6 +214,14 @@ export function buildTtsSpokenTextAudit({
     blockers,
     warnings,
     units: unitContracts,
+    pronunciation_homograph_ledger: {
+      schema: "goldflow_tts_pronunciation_homograph_ledger_v1",
+      status: "passed",
+      entry_count: pronunciationLedger.length,
+      subjective_listen_entry_count: pronunciationLedger.filter((row) => row.disposition === "subjective_listen_required").length,
+      ledger_sha256: pronunciationLedgerSha256,
+      entries: pronunciationLedger,
+    },
   };
   audit.audit_sha256 = ttsSpokenTextAuditSha256(audit);
   return audit;

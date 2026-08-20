@@ -11,6 +11,7 @@ import { sha256File } from "./lib/file-hash.mjs";
 import { assertMuxDurationIntegrity } from "./lib/media-duration-integrity.mjs";
 import { motionKeyframesForIntent, motionTraceFindings, motionTraceForIntent, sanitizeLayeredParallaxTreatment } from "./lib/motion-plan-utils.mjs";
 import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
+import { narrationRenderMasterReuseDecision } from "./lib/narration-mastering.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -104,6 +105,17 @@ export function assertLockedRenderProfileForTests({
     throw new Error(`Render profile ${requested} does not match run_identity.render_profile ${locked}. Change the locked run identity through preflight, or use an explicitly approved diagnostic bypass.`);
   }
   return requested;
+}
+
+export function preferredAudioBedRenderPathForTests({
+  explicitAudio = null,
+  audioBedReport = null,
+} = {}) {
+  return explicitAudio
+    ?? audioBedReport?.mix?.render_input_path
+    ?? audioBedReport?.mix?.wav_path
+    ?? audioBedReport?.mix?.m4a_path
+    ?? null;
 }
 
 function sha256(value) {
@@ -1672,6 +1684,48 @@ export function xfadeSegmentTimingForTests(clipDurations, transitionDurations) {
   };
 }
 
+const SUPPORTED_GENERATED_VIDEO_RENDER_MODES = new Set([
+  "generated_video",
+  "generated_video_ltx23",
+]);
+
+function declaredApprovedGeneratedVideoCount(motionEditPlan) {
+  const generic = Number(motionEditPlan?.approved_generated_video_count);
+  const legacy = Number(motionEditPlan?.approved_ltx_video_count);
+  const genericValid = Number.isInteger(generic) && generic >= 0;
+  const legacyValid = Number.isInteger(legacy) && legacy >= 0;
+  if (genericValid && (generic > 0 || !legacyValid)) return generic;
+  if (legacyValid) return legacy;
+  return null;
+}
+
+export function assertGeneratedVideoRenderCoverageForTests(motionEditPlan) {
+  const treatments = (motionEditPlan?.motion_intents ?? [])
+    .filter((intent) => intent?.generated_video_treatment)
+    .map((intent) => ({
+      image_id: String(intent.image_id ?? ""),
+      mode: String(intent.generated_video_treatment.mode ?? ""),
+    }));
+  const unsupported = treatments.filter((row) => !SUPPORTED_GENERATED_VIDEO_RENDER_MODES.has(row.mode));
+  if (unsupported.length) {
+    throw new Error(
+      `Unsupported generated-video render mode(s): ${unsupported.slice(0, 8).map((row) => `${row.image_id}:${row.mode || "missing"}`).join(", ")}.`,
+    );
+  }
+  const declaredCount = declaredApprovedGeneratedVideoCount(motionEditPlan);
+  if (declaredCount !== null && declaredCount !== treatments.length) {
+    throw new Error(
+      `Approved generated-video count mismatch: motion plan declares ${declaredCount}, `
+      + `but contains ${treatments.length} render treatment(s).`,
+    );
+  }
+  return {
+    declared_count: declaredCount,
+    treatment_count: treatments.length,
+    image_ids: treatments.map((row) => row.image_id),
+  };
+}
+
 async function buildMotionClips(
   promptPlan,
   imagegenReport,
@@ -1683,6 +1737,7 @@ async function buildMotionClips(
   const imageById = new Map((imagegenReport.results ?? []).map((row) => [row.image_id, row.image_path]));
   const plannedTransitionByToImage = transitionPlanByToImage(transitionEditPlan);
   const motionIntentByImage = new Map((motionEditPlan?.motion_intents ?? []).map((row) => [String(row.image_id ?? ""), row]));
+  const generatedVideoPlanCoverage = assertGeneratedVideoRenderCoverageForTests(motionEditPlan);
   const directedMotionRequired = motionEditPlan?.status === "passed";
   const onlyImageIds = options.onlyImageIds instanceof Set ? options.onlyImageIds : null;
   const allPrompts = (promptPlan.prompts ?? []).filter((prompt) => prompt.image_generation_required !== false);
@@ -1730,9 +1785,7 @@ async function buildMotionClips(
     }
     const depthTreatment = motionIntent?.depth_treatment ? sanitizeLayeredParallaxTreatment(motionIntent.depth_treatment) : null;
     if (motionIntent?.depth_treatment && !depthTreatment) throw new Error(`Invalid layered parallax contract for ${prompt.image_id}.`);
-    const generatedVideoTreatment = motionIntent?.generated_video_treatment?.mode === "generated_video_ltx23"
-      ? motionIntent.generated_video_treatment
-      : null;
+    const generatedVideoTreatment = motionIntent?.generated_video_treatment ?? null;
     if (depthTreatment) layeredParallaxClipCount += 1;
     const profile = directedMotionProfile(motionIntent) ?? selectMotionProfile(prompt, index, duration, startSec, previousPrompt);
     const transition = transitionProfile(duration, profile, prompt, startSec, previousPrompt, index);
@@ -1743,6 +1796,13 @@ async function buildMotionClips(
     if (transition.name !== "polished_motion") transitionClipIds.push(prompt.image_id);
     const clipPath = path.join(clipDir, `${String(index + 1).padStart(5, "0")}-${prompt.image_id}.mp4`);
     clipRows.push({ index, prompt, imagePath, clipPath, startSec, duration, profile, previousPrompt, motionIntent, depthTreatment, generatedVideoTreatment });
+  }
+  const generatedVideoClipRows = clipRows.filter((row) => row.generatedVideoTreatment);
+  if (!onlyImageIds?.size && generatedVideoClipRows.length !== generatedVideoPlanCoverage.treatment_count) {
+    throw new Error(
+      `Generated-video render coverage mismatch: motion plan contains ${generatedVideoPlanCoverage.treatment_count} treatment(s), `
+      + `but ${generatedVideoClipRows.length} render clip(s) would consume them.`,
+    );
   }
   const selectedXfadeDurations = new Map();
   const selectedBoundaryRows = [];
@@ -1818,14 +1878,14 @@ async function buildMotionClips(
     if (row.generatedVideoTreatment) {
       if ((row.generatedVideoTreatment.covered_image_sha256
         ?? row.generatedVideoTreatment.source_image_sha256) !== imageSha256) {
-        throw new Error(`Generated LTX video coverage image is stale for ${row.prompt.image_id}.`);
+        throw new Error(`Generated video coverage image is stale for ${row.prompt.image_id}.`);
       }
       if (!(await exists(row.generatedVideoTreatment.video_path))) {
-        throw new Error(`Generated LTX video is missing for ${row.prompt.image_id}: ${row.generatedVideoTreatment.video_path}`);
+        throw new Error(`Generated video is missing for ${row.prompt.image_id}: ${row.generatedVideoTreatment.video_path}`);
       }
       generatedVideoSha256 = await hashFile(row.generatedVideoTreatment.video_path);
       if (generatedVideoSha256 !== row.generatedVideoTreatment.video_sha256) {
-        throw new Error(`Generated LTX video hash is stale for ${row.prompt.image_id}.`);
+        throw new Error(`Generated video hash is stale for ${row.prompt.image_id}.`);
       }
     }
     const motionProfileHash = sha256(JSON.stringify({
@@ -1852,7 +1912,7 @@ async function buildMotionClips(
       crf: 20,
     }));
     const cachePath = `${row.clipPath}.cache.json`;
-    Object.assign(row, { renderDuration, frameCount, filter, imageSha256, depthSourceHashes, motionProfileHash, cacheKey, cachePath });
+    Object.assign(row, { renderDuration, frameCount, filter, imageSha256, depthSourceHashes, generatedVideoSha256, motionProfileHash, cacheKey, cachePath });
     clipJobs.push(async () => {
       const cache = await readJson(cachePath, null);
       if (cache?.cache_key === cacheKey && await exists(row.clipPath)) {
@@ -1868,10 +1928,11 @@ async function buildMotionClips(
       if (row.generatedVideoTreatment) {
         const nativeDuration = Number(row.generatedVideoTreatment.native_duration_sec ?? renderDuration);
         const sourceOffset = Math.max(0, Number(row.generatedVideoTreatment.source_offset_sec ?? 0));
-        if (!(nativeDuration > sourceOffset)) {
-          throw new Error(`Generated LTX sequence offset exceeds native duration for ${row.prompt.image_id}.`);
+        const approvedSourceEnd = Math.min(nativeDuration, Number(row.generatedVideoTreatment.source_end_offset_sec ?? nativeDuration));
+        if (!(approvedSourceEnd > sourceOffset)) {
+          throw new Error(`Generated-video sequence offset exceeds native duration for ${row.prompt.image_id}.`);
         }
-        const sourceDuration = Math.min(renderDuration, nativeDuration - sourceOffset);
+        const sourceDuration = Math.min(renderDuration, approvedSourceEnd - sourceOffset);
         const generatedFilter = [
           `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase`,
           `crop=${width}:${height}`,
@@ -1932,6 +1993,9 @@ async function buildMotionClips(
         image_sha256: imageSha256,
         depth_source_hashes: depthSourceHashes,
         generated_video_sha256: generatedVideoSha256,
+        generated_video_path: row.generatedVideoTreatment?.video_path ?? null,
+        generated_video_mode: row.generatedVideoTreatment?.mode ?? null,
+        generated_video_provider: row.generatedVideoTreatment?.provider ?? null,
         motion_profile_hash: motionProfileHash,
         motion_clip_path: row.clipPath,
         motion_clip_sha256: row.motionClipSha256,
@@ -1942,6 +2006,19 @@ async function buildMotionClips(
     });
   }
   await runLimited(clipJobs, renderConcurrency);
+  const consumedGeneratedVideoRows = clipRows.filter((row) => row.generatedVideoTreatment);
+  for (const row of consumedGeneratedVideoRows) {
+    if (!row.generatedVideoSha256 || !row.motionClipSha256) {
+      throw new Error(`Generated-video render consumption was not hash-bound for ${row.prompt.image_id}.`);
+    }
+  }
+  if (!onlyImageIds?.size && generatedVideoPlanCoverage.declared_count !== null
+    && consumedGeneratedVideoRows.length !== generatedVideoPlanCoverage.declared_count) {
+    throw new Error(
+      `Generated-video render consumed ${consumedGeneratedVideoRows.length} clip(s), `
+      + `but the approved motion plan declares ${generatedVideoPlanCoverage.declared_count}.`,
+    );
+  }
   if (options.prebuildOnly) {
     return {
       status: "passed",
@@ -1951,6 +2028,9 @@ async function buildMotionClips(
       image_ids: clipRows.map((row) => row.prompt.image_id),
       motion_clip_cache_reused_count: clipCacheReused,
       motion_clip_cache_generated_count: clipCacheGenerated,
+      planned_approved_generated_video_count: generatedVideoPlanCoverage.declared_count,
+      generated_video_clip_count: consumedGeneratedVideoRows.length,
+      generated_video_clip_ids: consumedGeneratedVideoRows.map((row) => row.prompt.image_id),
       clips: clipRows.map((row) => ({
         image_id: row.prompt.image_id,
         image_sha256: row.imageSha256,
@@ -1959,6 +2039,10 @@ async function buildMotionClips(
         motion_clip_path: row.clipPath,
         motion_clip_sha256: row.motionClipSha256,
         motion_clip_cache_status: row.cacheStatus,
+        generated_video_mode: row.generatedVideoTreatment?.mode ?? null,
+        generated_video_provider: row.generatedVideoTreatment?.provider ?? null,
+        generated_video_path: row.generatedVideoTreatment?.video_path ?? null,
+        generated_video_sha256: row.generatedVideoSha256,
       })),
     };
   }
@@ -2105,6 +2189,10 @@ async function buildMotionClips(
     transition_clip_ids: transitionClipIds,
     motion_clip_cache_reused_count: clipCacheReused,
     motion_clip_cache_generated_count: clipCacheGenerated,
+    planned_approved_generated_video_count: generatedVideoPlanCoverage.declared_count,
+    generated_video_clip_count: consumedGeneratedVideoRows.length,
+    generated_video_clip_ids: consumedGeneratedVideoRows.map((row) => row.prompt.image_id),
+    generated_video_source_hashes: Object.fromEntries(consumedGeneratedVideoRows.map((row) => [row.prompt.image_id, row.generatedVideoSha256])),
   };
 }
 
@@ -2154,7 +2242,7 @@ function withoutTransitionSfx(transitionEditPlan) {
 async function audioWithRenderTransitionSfx(audioPath, transitionEditPlan, audioDuration) {
   const events = renderTransitionSfxEvents(transitionEditPlan, audioDuration);
   if (!events.length) return { audio_path: audioPath, transition_sfx_events: [], transition_sfx_applied: false };
-  const output = path.join(workDir, "audio_with_render_transition_sfx.m4a");
+  const output = path.join(workDir, "audio_with_render_transition_sfx.wav");
   const args = ["-y", "-i", audioPath];
   for (const event of events) args.push("-i", event.asset_path);
   const filters = [];
@@ -2173,8 +2261,7 @@ async function audioWithRenderTransitionSfx(audioPath, transitionEditPlan, audio
     ...args,
     "-filter_complex", filters.join(";"),
     "-map", "[aout]",
-    "-c:a", "aac",
-    "-b:a", "192k",
+    "-c:a", "pcm_s24le",
     output,
   ], { maxBuffer: 1024 * 1024 * 64 });
   return { audio_path: output, transition_sfx_events: events, transition_sfx_applied: true };
@@ -2227,7 +2314,17 @@ function scopedMotionPlan(plan, selectedPrompts, scopeEndSec) {
       duration_sec: Math.max(1 / fps, Math.min(Number(intent.duration_sec ?? prompt.duration_sec), scopeEndSec - Number(prompt.start_sec ?? 0))),
     };
   });
-  return { ...plan, motion_intents: intents, motion_intent_count: intents.length, diagnostic_proof_scope_end_sec: scopeEndSec };
+  const generatedVideoCount = intents.filter((intent) => intent?.generated_video_treatment).length;
+  return {
+    ...plan,
+    motion_intents: intents,
+    motion_intent_count: intents.length,
+    ...(Object.hasOwn(plan, "approved_generated_video_count") ? { approved_generated_video_count: generatedVideoCount } : {}),
+    ...(Object.hasOwn(plan, "approved_ltx_video_count") ? {
+      approved_ltx_video_count: intents.filter((intent) => intent?.generated_video_treatment?.mode === "generated_video_ltx23").length,
+    } : {}),
+    diagnostic_proof_scope_end_sec: scopeEndSec,
+  };
 }
 
 function scopedSubtitleRows(rows, scopeEndSec) {
@@ -2244,8 +2341,8 @@ function scopedSubtitleRows(rows, scopeEndSec) {
 
 async function scopedAudioForProof(audioPath, scopeEndSec) {
   if (!Number.isFinite(scopeEndSec)) return audioPath;
-  const output = path.join(workDir, "proof_scoped_narration.m4a");
-  await execFile(ffmpegBin, ["-y", "-i", audioPath, "-t", scopeEndSec.toFixed(3), "-vn", "-c:a", "aac", "-b:a", "192k", output], { maxBuffer: 1024 * 1024 * 32 });
+  const output = path.join(workDir, "proof_scoped_narration.wav");
+  await execFile(ffmpegBin, ["-y", "-i", audioPath, "-t", scopeEndSec.toFixed(3), "-vn", "-c:a", "pcm_s16le", output], { maxBuffer: 1024 * 1024 * 32 });
   return output;
 }
 
@@ -2254,8 +2351,8 @@ function numericOrNull(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function finalAudioLoudnormSettings(audioBedReport) {
-  if (!finalAudioLoudnormEnabled) return { enabled: false };
+async function finalAudioLoudnormSettings(audioBedReport, inputAudioPath) {
+  if (!finalAudioLoudnormEnabled) return { enabled: false, reason: "disabled_by_operator" };
   // A narrator-only mix may carry zero-valued unset metadata. FFmpeg rejects
   // those values, so accept report settings only within loudnorm's valid range.
   const inRange = (value, min, max) => {
@@ -2271,19 +2368,40 @@ function finalAudioLoudnormSettings(audioBedReport) {
   const lra = inRange(finalAudioLraFlag, 1, 50)
     ?? inRange(audioBedReport?.mix?.loudness_range, 1, 50)
     ?? 11;
+  const audioSha256 = await sha256File(inputAudioPath);
+  const reuseDecision = narrationRenderMasterReuseDecision({
+    audioPath: inputAudioPath,
+    audioSha256,
+    audioBedReport,
+    targetLufs,
+    truePeakDbtp: truePeakDb,
+    loudnessRange: lra,
+  });
+  if (reuseDecision.eligible) {
+    return {
+      enabled: false,
+      reason: "hash_bound_narration_master_already_matches_render_target",
+      source_audio_sha256: audioSha256,
+      target_lufs: targetLufs,
+      true_peak_db: truePeakDb,
+      loudness_range: lra,
+      reuse_decision: reuseDecision,
+    };
+  }
   return {
     enabled: true,
     target_lufs: targetLufs,
     true_peak_db: truePeakDb,
     loudness_range: lra,
+    reuse_decision: reuseDecision,
   };
 }
 
 async function prepareFinalMuxAudio(inputAudioPath, settings) {
   if (!settings.enabled) {
-    return { applied: false, audio_path: inputAudioPath };
+    return { applied: false, audio_path: inputAudioPath, ...settings };
   }
-  const outputAudioPath = path.join(workDir, "final_audio_loudnorm.m4a");
+  const outputAudioPath = path.join(workDir, "final_audio_loudnorm.wav");
   const analysisFilter = `loudnorm=I=${settings.target_lufs}:TP=${settings.true_peak_db}:LRA=${settings.loudness_range}:print_format=json`;
   const analysis = await execFile(ffmpegBin, [
     "-hide_banner",
@@ -2311,8 +2429,7 @@ async function prepareFinalMuxAudio(inputAudioPath, settings) {
     "-y",
     "-i", inputAudioPath,
     "-af", measuredFilter,
-    "-c:a", "aac",
-    "-b:a", "192k",
+    "-c:a", "pcm_s24le",
     outputAudioPath,
   ], { maxBuffer: 1024 * 1024 * 32 });
   return { applied: true, mode: "measured_two_pass", audio_path: outputAudioPath, source_audio_path: inputAudioPath, measurement, ...settings };
@@ -2356,7 +2473,10 @@ async function main() {
   if (prebuildMotionClipsOnly) {
     if (motionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed hash-bound partial motion plan: ${motionEditPlanPath}`);
     if (transitionEditPlan?.status !== "passed") throw new Error(`Motion-clip prebuild requires a passed transition plan: ${transitionEditPlanPath}`);
-    const audioPath = flags.audio ?? audioBedReport?.mix?.m4a_path ?? audioBedReport?.mix?.wav_path;
+    const audioPath = preferredAudioBedRenderPathForTests({
+      explicitAudio: flags.audio,
+      audioBedReport,
+    });
     if (!audioPath || !(await exists(audioPath))) throw new Error(`Motion-clip prebuild requires final mixed audio from ${audioBedReportPath}`);
     const audioDuration = await mediaDuration(audioPath);
     await fs.mkdir(workDir, { recursive: true });
@@ -2409,7 +2529,10 @@ async function main() {
   if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
   if (motionEditPlan?.status === "passed") await assertSourceHashesCurrent(motionEditPlan, "Directed motion plan");
   const imageIntegrity = await assertRenderImageIntegrity(promptPlan, imagegenReport, runIdentity, imageOutputQa, cutExecutionLedger);
-  const audioPath = flags.audio ?? audioBedReport?.mix?.m4a_path ?? audioBedReport?.mix?.wav_path;
+  const audioPath = preferredAudioBedRenderPathForTests({
+    explicitAudio: flags.audio,
+    audioBedReport,
+  });
   if (!audioPath || !(await exists(audioPath))) throw new Error(`Missing final mixed audio from ${audioBedReportPath}`);
   await fs.mkdir(renderDir, { recursive: true });
   await fs.mkdir(workDir, { recursive: true });
@@ -2473,7 +2596,10 @@ async function main() {
   const hasAssFilter = await ffmpegHasFilter("ass");
   let subtitleRenderer = "ffmpeg_ass_filter";
   let subtitleOverlay = null;
-  const finalAudioNormalization = await prepareFinalMuxAudio(renderAudio.audio_path, finalAudioLoudnormSettings(audioBedReport));
+  const finalAudioNormalization = await prepareFinalMuxAudio(
+    renderAudio.audio_path,
+    await finalAudioLoudnormSettings(audioBedReport, renderAudio.audio_path),
+  );
   const finalMuxAudioPath = finalAudioNormalization.audio_path;
   const muxOutputPath = outputPath;
   if (hasAssFilter) {
@@ -2669,6 +2795,10 @@ async function main() {
       motion_trace_frame_count: concat.motion_trace_frame_count,
       motion_trace_blocker_count: concat.motion_trace_blocker_count,
       layered_parallax_clip_count: concat.layered_parallax_clip_count,
+      planned_approved_generated_video_count: concat.planned_approved_generated_video_count,
+      generated_video_clip_count: concat.generated_video_clip_count,
+      generated_video_clip_ids: concat.generated_video_clip_ids,
+      generated_video_source_hashes: concat.generated_video_source_hashes,
       motion_clip_cache_reused_count: concat.motion_clip_cache_reused_count,
       motion_clip_cache_generated_count: concat.motion_clip_cache_generated_count,
     },

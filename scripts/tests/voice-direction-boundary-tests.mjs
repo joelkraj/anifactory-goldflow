@@ -108,7 +108,7 @@ const atomicUnits = [
 ];
 assert.equal(narrationSourceRefKey(atomicUnits[0].source_unit_refs[0]), "voice_seg_01:u001");
 const actionable = {
-  schema: "goldflow_narration_actionable_direction_v1",
+  schema: "goldflow_narration_actionable_direction_v2",
   status: "approved",
   source_script_sha256: sourceScriptSha256,
   authoring: { kind: "llm_authored", provider: "test", model: "test-model" },
@@ -117,11 +117,29 @@ const actionable = {
       source_ref_keys: ["voice_seg_01:u001"],
       spoken_text: "He opened the door!",
       dialogue_separation: "narration",
+      boundary_after: "sentence",
+      performance_intent: {
+        energy: "controlled",
+        tension: "neutral",
+        intimacy: "standard",
+        pace: "steady_forward",
+        pause_strategy: "punctuation_led",
+        emphasis: [],
+      },
     },
     {
       source_ref_keys: ["voice_seg_01:u002"],
       spoken_text: "She said: run now.",
       dialogue_separation: "isolated_dialogue_turn",
+      boundary_after: "episode_end",
+      performance_intent: {
+        energy: "urgent",
+        tension: "high",
+        intimacy: "close",
+        pace: "fast",
+        pause_strategy: "short_precise",
+        emphasis: ["run now"],
+      },
     },
   ],
 };
@@ -144,6 +162,47 @@ assert.equal(validateActionableNarrationDirection({
   atomicUnits,
   sourceScriptSha256,
 }).status, "blocked");
+const invalidBoundary = structuredClone(actionable);
+invalidBoundary.units[0].boundary_after = "fixed_80ms";
+assert.equal(validateActionableNarrationDirection({
+  artifact: invalidBoundary,
+  atomicUnits,
+  sourceScriptSha256,
+}).status, "blocked");
+
+const actionableV3 = {
+  ...structuredClone(actionable),
+  schema: "goldflow_narration_actionable_direction_v3",
+  chapter_prosody_spine: {
+    schema: "goldflow_narration_chapter_prosody_spine_v1",
+    status: "approved",
+    chapters: [{
+      segment_id: "voice_seg_01",
+      dramatic_function: "Turn refusal into immediate forward pressure.",
+      audience_effect: "Relief followed by curiosity.",
+      energy_start: 2,
+      energy_end: 4,
+      tension_peak: 4,
+      intimacy: 3,
+      pace: "steady_forward",
+      reveal_weight: 3,
+      transition_from_previous: "Episode opening; enter without a reset pause.",
+      avoidance: "Avoid trailer-voice melodrama.",
+    }],
+  },
+};
+assert.equal(validateActionableNarrationDirection({
+  artifact: actionableV3,
+  atomicUnits,
+  sourceScriptSha256,
+}).status, "passed");
+const missingSpine = structuredClone(actionableV3);
+missingSpine.chapter_prosody_spine.chapters = [];
+assert.equal(validateActionableNarrationDirection({
+  artifact: missingSpine,
+  atomicUnits,
+  sourceScriptSha256,
+}).status, "blocked");
 
 const performanceContract = buildNarrationPerformanceContract({
   provider: "qwen_local",
@@ -159,6 +218,10 @@ const performanceContract = buildNarrationPerformanceContract({
     artifact_sha256: "e".repeat(64),
   },
 });
+assert.equal(performanceContract.unit_contract.preferred_words_min, 20);
+assert.equal(performanceContract.unit_contract.preferred_words_max, 42);
+assert.equal(performanceContract.unit_contract.soft_words_max, 48);
+assert.equal(performanceContract.unit_contract.hard_words_max, 60);
 const approval = {
   schema: "goldflow_narration_performance_bakeoff_approval_v1",
   status: "approved",

@@ -15,6 +15,15 @@ const REFERENCE_BINDING_RECEIPT_SCHEMA = "goldflow_google_flow_reference_binding
 const FLOW_MEDIA_PATH_FRAGMENT = "media.getMediaUrlRedirect";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const FLOW_COMPOSER_MEDIA_CONTROL_PATTERN = /^(?:(?:🍌\s*)?Nano Banana\b|Veo\b|Video\s*·\s*\d+s\b)/i;
+
+export function redactBrowserDiagnostic(value) {
+  return String(value ?? "")
+    .replace(/(^|[\r\n])(?:\x1b\[[0-9;]*m|[ \t-])*(?:cookie|set-cookie|authorization|proxy-authorization)\s*:[^\r\n]*/gi, "$1[REDACTED REQUEST HEADER]")
+    .replace(/\b(?:__Secure-|__Host-)?[^\s;=]*(?:session|auth)[^\s;=]*=[^\s;,)]+/gi, "[REDACTED SESSION COOKIE]")
+    .replace(/\bBearer\s+[^\s,)]+/gi, "Bearer [REDACTED]")
+    .replace(/([?&](?:X-Goog-Signature|Signature|token|access_token|auth|key)=)[^&\s,)]+/gi, "$1[REDACTED]");
+}
 
 function codedError(code, message) {
   const error = new Error(message);
@@ -84,6 +93,36 @@ export function validateFlowReferenceDock({
   return true;
 }
 
+export function flowReferenceUploadOrder(references = []) {
+  return [...references].sort((left, right) => Number(left.slot) - Number(right.slot));
+}
+
+export function identifyNewFlowComposerChip(previousMediaIds = [], observedChips = []) {
+  const previous = new Set(previousMediaIds.map(String));
+  const added = observedChips.filter((chip) => !previous.has(String(chip?.media_id ?? "")));
+  if (added.length !== 1) {
+    throw codedError("ui_contract_mismatch", `Google Flow composer added ${added.length} new reference chips; expected exactly one.`);
+  }
+  return added[0];
+}
+
+export function shouldRetryFlowPreSubmissionTransport({
+  errorCode,
+  errorName,
+  errorMessage,
+  creativeSubmissionStarted = false,
+  attempt = 1,
+  maxAttempts = 2,
+} = {}) {
+  const code = String(errorCode ?? "");
+  const transientBrowserAction = String(errorName ?? "") === "TimeoutError"
+    || /locator\.(?:click|fill|setInputFiles)|Timeout \d+ms exceeded|element (?:was )?(?:detached|not stable)/i.test(String(errorMessage ?? ""));
+  const terminalCode = ["account_mismatch", "rate_limited", "usage_limited", "content_policy_rejected"].includes(code);
+  return (code === "ui_contract_mismatch" || (!terminalCode && transientBrowserAction))
+    && creativeSubmissionStarted !== true
+    && attempt < maxAttempts;
+}
+
 async function sleep(milliseconds) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -123,6 +162,33 @@ export function flowPromptText(node) {
 
 export function normalizeFlowPromptText(value) {
   return String(value ?? "").replaceAll("\uFEFF", "").replace(/\s+/g, " ").trim();
+}
+
+export function flowModelLabelMatches(actual, expected) {
+  const normalize = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const actualLabel = normalize(actual);
+  const expectedLabel = normalize(expected);
+  return Boolean(expectedLabel)
+    && actualLabel.includes(expectedLabel)
+    && !actualLabel.includes("lowerpriority");
+}
+
+export function nearestFlowVideoDuration(requested, available = [4, 6, 8]) {
+  const options = [...new Set(available.map(Number).filter((value) => Number.isFinite(value) && value > 0))]
+    .sort((left, right) => left - right);
+  if (!options.length) throw new Error("Google Flow exposed no supported video durations.");
+  const target = Number.isFinite(Number(requested)) ? Number(requested) : 8;
+  return options.find((value) => value >= target) ?? options.at(-1);
+}
+
+export function isFlowVideoDetailUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""));
+    return url.origin === "https://labs.google"
+      && /^\/fx\/tools\/flow\/project\/[^/]+\/edit\/[^/]+\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
 }
 
 export class GoogleFlowBrowser {
@@ -180,16 +246,31 @@ export class GoogleFlowBrowser {
 
   async waitForAuthentication({ pollMs = 1200 } = {}) {
     let announced = false;
+    let enteredCreativeStudio = false;
     while (this.context) {
       const signedOut = await visibleLocator(this.loginPage.locator(SIGNED_OUT_SELECTOR));
       const authenticatedSurface = await visibleLocator(this.loginPage.locator([
         PROMPT_SELECTOR,
         'button:has-text("New project")',
+        'a[href*="/fx/tools/flow/project/"]',
+        'button[aria-label*="User profile"]',
       ].join(", ")));
       if (authenticatedSurface && !signedOut) {
         await markLoginVerified(this.profileDir, { url: this.loginPage.url() }, "google-flow");
         this.log("Google Flow authentication verified.");
         return;
+      }
+      if (!enteredCreativeStudio) {
+        const createWithFlow = this.loginPage.locator("button").filter({ hasText: /Create with Google Flow/i }).first();
+        if (await createWithFlow.count()) {
+          enteredCreativeStudio = true;
+          const priorPages = new Set(this.context.pages());
+          await createWithFlow.evaluate((button) => button.click());
+          await sleep(pollMs);
+          const openedPage = this.context.pages().find((page) => !priorPages.has(page));
+          if (openedPage) this.loginPage = openedPage;
+          continue;
+        }
       }
       if (signedOut) {
         await clearLoginMarker(this.profileDir, "google-flow");
@@ -197,7 +278,11 @@ export class GoogleFlowBrowser {
       }
       if (!announced) {
         announced = true;
-        this.log("Sign in to Google Flow in the Goldflow browser window. Dispatch remains stopped until an authenticated Flow surface is visible.", "warn");
+        const diagnosticPath = await this.diagnostics(this.loginPage, {
+          provider: "google-flow",
+          media_type: "authentication",
+        }, codedError("auth_surface_pending", "Google Flow authentication surface is not yet recognizable.")).catch(() => null);
+        this.log(`Sign in to Google Flow in the Goldflow browser window. Dispatch remains stopped until an authenticated Flow surface is visible.${diagnosticPath ? ` Diagnostics: ${diagnosticPath}` : ""}`, "warn");
         if (!this.headless) await this.loginPage.bringToFront();
       }
       await sleep(pollMs);
@@ -214,17 +299,26 @@ export class GoogleFlowBrowser {
   async newJobPage() {
     if (!this.context) throw new Error("Goldflow Google Flow browser is not running.");
     const page = await this.context.newPage();
-    await page.goto(this.flowProjectUrl ?? GOOGLE_FLOW_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
-    if (await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
-    let composer = await waitForVisible(page.locator(PROMPT_SELECTOR), { timeoutMs: 15_000 });
-    if (!composer) {
-      const newProject = await visibleLocator(page.getByRole("button", { name: /new project/i }));
-      if (!newProject) throw codedError("ui_contract_mismatch", "Google Flow did not expose a project composer or New project control.");
-      await newProject.click();
-      composer = await waitForVisible(page.locator(PROMPT_SELECTOR), { timeoutMs: 60_000 });
+    try {
+      await page.goto(this.flowProjectUrl ?? GOOGLE_FLOW_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
+      if (await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
+        throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
+      }
+      let composer = await waitForVisible(page.locator(PROMPT_SELECTOR), { timeoutMs: 15_000 });
+      if (!composer) {
+        const newProject = await visibleLocator(page.getByRole("button", { name: /new project/i }));
+        if (!newProject) {
+          throw codedError("ui_contract_mismatch", "Google Flow did not expose a project composer or New project control.");
+        }
+        await newProject.click();
+        composer = await waitForVisible(page.locator(PROMPT_SELECTOR), { timeoutMs: 60_000 });
+      }
+      if (!composer) throw codedError("ui_contract_mismatch", "Google Flow project did not expose its prompt composer.");
+      return page;
+    } catch (caught) {
+      await page.close().catch(() => {});
+      throw caught;
     }
-    if (!composer) throw codedError("ui_contract_mismatch", "Google Flow project did not expose its prompt composer.");
-    return page;
   }
 
   async blockingAlert(page) {
@@ -258,7 +352,7 @@ export class GoogleFlowBrowser {
       captured_at: new Date().toISOString(),
       url: page.url(),
       expected_contract: contract,
-      failure: { code: error.code ?? "ui_contract_mismatch", message: error.message },
+      failure: { code: error.code ?? "ui_contract_mismatch", message: redactBrowserDiagnostic(error.message) },
       visible_text: visibleText.slice(0, 12_000),
       screenshot_path: screenshotPath,
     }, null, 2)}\n`);
@@ -318,6 +412,7 @@ export class GoogleFlowBrowser {
     } catch (caught) {
       const error = caught instanceof Error ? caught : new Error(String(caught));
       const diagnosticPath = await this.diagnostics(page, contract, error).catch(() => null);
+      error.message = redactBrowserDiagnostic(error.message);
       if (diagnosticPath) error.message = `${error.message} Diagnostics: ${diagnosticPath}`;
       throw error;
     }
@@ -337,8 +432,8 @@ export class GoogleFlowBrowser {
         && getComputedStyle(element).visibility !== "hidden"
         && getComputedStyle(element).display !== "none";
       const buttons = [...document.querySelectorAll('button[aria-haspopup="dialog"][aria-controls]')]
-        .filter((button) => visible(button) && (button.textContent?.trim() === "add_2"
-          || [...button.querySelectorAll("*")].some((element) => element.textContent?.trim() === "add_2")));
+        .filter((button) => visible(button) && (["add", "add_2"].includes(button.textContent?.trim())
+          || [...button.querySelectorAll("*")].some((element) => ["add", "add_2"].includes(element.textContent?.trim()))));
       const ancestry = (element) => {
         const rows = [];
         for (let current = element; current; current = current.parentElement) rows.push(current);
@@ -364,7 +459,7 @@ export class GoogleFlowBrowser {
       };
     });
     if (!result || result.ambiguous || result.popup !== "dialog" || !result.controls) {
-      throw codedError("ui_contract_mismatch", "Google Flow did not expose one unambiguous composer add_2 button controlling a media dialog.");
+      throw codedError("ui_contract_mismatch", "Google Flow did not expose one unambiguous composer add-media button controlling a media dialog.");
     }
     const button = page.locator('[data-goldflow-composer-add="true"]');
     if (await button.count() !== 1 || !await button.isVisible().catch(() => false)) {
@@ -378,14 +473,104 @@ export class GoogleFlowBrowser {
   }
 
   async openMediaDialog(page) {
-    const { button, dialogId } = await this.composerAddButton(page);
-    let dialog = this.controlledDialog(page, dialogId);
-    if (!await dialog.isVisible().catch(() => false)) {
-      await button.click();
-      dialog = await waitForVisible(this.controlledDialog(page, dialogId), { timeoutMs: 10_000 });
+    const visibleMediaDialog = async (timeoutMs = 0) => {
+      const deadline = Date.now() + timeoutMs;
+      do {
+        const dialogs = page.locator('[role="dialog"]');
+        for (let index = 0; index < await dialogs.count(); index += 1) {
+          const candidate = dialogs.nth(index);
+          if (!await candidate.isVisible().catch(() => false)) continue;
+          const hasMediaAction = await candidate.getByRole("button", { name: /upload media|add to prompt/i }).count().catch(() => 0);
+          if (hasMediaAction > 0) return candidate;
+        }
+        if (Date.now() < deadline) await sleep(100);
+      } while (Date.now() < deadline);
+      return null;
+    };
+
+    const alreadyOpen = await visibleMediaDialog();
+    if (alreadyOpen) return { dialog: alreadyOpen, dialogId: await alreadyOpen.getAttribute("id").catch(() => null) };
+
+    try {
+      const { button, dialogId } = await this.composerAddButton(page);
+      let dialog = this.controlledDialog(page, dialogId);
+      if (!await dialog.isVisible().catch(() => false)) {
+        await button.click();
+        dialog = await waitForVisible(this.controlledDialog(page, dialogId), { timeoutMs: 10_000 });
+      }
+      if (!dialog) throw codedError("ui_contract_mismatch", `Google Flow composer add button did not open its controlled dialog ${dialogId}.`);
+      return { dialog, dialogId };
+    } catch (error) {
+      if (error?.code !== "ui_contract_mismatch") throw error;
+      const videoModeControl = await visibleLocator(page.getByRole("button", { name: /^Video\s*·\s*\d+s/i }));
+      const startSlot = videoModeControl
+        ? await visibleLocator(page.locator('[role="button"][aria-label*="Start frame" i], [aria-label*="Start frame" i]'))
+          ?? await visibleLocator(page.getByText("Start", { exact: true }))
+        : null;
+      if (!startSlot) throw error;
+      await startSlot.click();
+      await this.acceptUploadNotice(page);
+      let dialog = await visibleMediaDialog(2_000);
+      if (!dialog && await startSlot.isVisible().catch(() => false)) {
+        await startSlot.click();
+        dialog = await visibleMediaDialog(10_000);
+      }
+      if (!dialog) throw codedError("ui_contract_mismatch", "Google Flow Start frame control did not open a media dialog.");
+      return { dialog, dialogId: await dialog.getAttribute("id").catch(() => null) };
     }
-    if (!dialog) throw codedError("ui_contract_mismatch", `Google Flow composer add button did not open its controlled dialog ${dialogId}.`);
-    return { dialog, dialogId };
+  }
+
+  async addToPromptControl(page) {
+    const result = await page.evaluate(() => {
+      document.querySelectorAll('[data-goldflow-add-to-prompt="true"]').forEach((element) => element.removeAttribute("data-goldflow-add-to-prompt"));
+      const visible = (element) => Boolean(element?.getClientRects().length)
+        && getComputedStyle(element).visibility !== "hidden"
+        && getComputedStyle(element).display !== "none";
+      const controls = [...document.querySelectorAll("*")]
+        .filter((element) => visible(element) && element.textContent?.trim() === "Add to Prompt")
+        .map((element) => element.closest('button, [role="button"]') ?? element)
+        .filter(visible)
+        .filter((element, index, rows) => rows.indexOf(element) === index);
+      if (controls.length !== 1) return { count: controls.length };
+      controls[0].setAttribute("data-goldflow-add-to-prompt", "true");
+      return { count: 1 };
+    }).catch(() => ({ count: 0 }));
+    if (result.count === 1) {
+      const control = page.locator('[data-goldflow-add-to-prompt="true"]');
+      if (await control.count() === 1 && await control.isVisible().catch(() => false)) return control;
+    }
+    // Playwright text selectors pierce Flow's open shadow roots, while a page
+    // evaluate query cannot. In the current picker the action label is exposed
+    // only through that shadow-DOM path.
+    return visibleLocator(page.getByText("Add to Prompt", { exact: true }));
+  }
+
+  async waitForAddToPromptControl(page, { timeoutMs = 30_000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const control = await this.addToPromptControl(page);
+      if (control) return control;
+      await sleep(100);
+    }
+    return null;
+  }
+
+  async uploadedAssetControl(page, filename) {
+    const selectors = [
+      page.getByText(filename, { exact: true }),
+      page.locator(`[alt=${JSON.stringify(filename)}], [aria-label=${JSON.stringify(filename)}], [title=${JSON.stringify(filename)}]`),
+    ];
+    const visible = [];
+    for (const locator of selectors) {
+      for (let index = 0; index < await locator.count(); index += 1) {
+        const candidate = locator.nth(index);
+        if (!await candidate.isVisible().catch(() => false)) continue;
+        const box = await candidate.boundingBox().catch(() => null);
+        if (box) visible.push({ candidate, box });
+      }
+    }
+    visible.sort((left, right) => left.box.y - right.box.y || left.box.x - right.box.x);
+    return visible[0]?.candidate ?? null;
   }
 
   async acceptUploadNotice(page, { mediaDialogId = null } = {}) {
@@ -400,8 +585,8 @@ export class GoogleFlowBrowser {
       const text = await dialog.innerText().catch(() => "");
       if (!/(before you upload|rights? to|terms|policy|responsib|acknowledge|I agree)/i.test(text)) continue;
       const checkbox = dialog.locator('input[type="checkbox"], [role="checkbox"]').first();
-      if (!await checkbox.isVisible().catch(() => false)) continue;
-      if (!await checkbox.isChecked().catch(() => false)) await checkbox.click();
+      if (await checkbox.isVisible().catch(() => false)
+        && !await checkbox.isChecked().catch(() => false)) await checkbox.click();
       const accept = await visibleLocator(dialog.getByRole("button", { name: /accept|agree|continue|confirm/i }));
       if (!accept) throw codedError("ui_contract_mismatch", "Google Flow upload notice has no explicit accept/agree control.");
       await accept.click();
@@ -440,12 +625,39 @@ export class GoogleFlowBrowser {
         }
       }
       return rows;
-    }, FLOW_MEDIA_PATH_FRAGMENT);
+    }, FLOW_MEDIA_PATH_FRAGMENT, { timeout: 1_000 });
   }
 
-  async selectUploadedPreview(dialog, { filename, priorMediaIds, timeoutMs = 90_000 }) {
+  async selectUploadedPreview(page, dialog, { filename, priorMediaIds, timeoutMs = 90_000 }) {
     const deadline = Date.now() + timeoutMs;
+    let lastParsedMedia = null;
+    let lastProbe = null;
     while (Date.now() < deadline) {
+      const pageVisibleLines = (await page.locator("body").innerText().catch(() => ""))
+        .split(/\r?\n/)
+        .map((line) => line.trim());
+      const pageExactNameVisible = pageVisibleLines.includes(filename);
+      const pageAddToPrompt = await this.addToPromptControl(page);
+      const pageAddToPromptDisabled = pageAddToPrompt
+        ? await pageAddToPrompt.isDisabled().catch(() => true)
+        : null;
+      lastProbe = {
+        exact_name_visible: pageExactNameVisible,
+        add_to_prompt_visible: Boolean(pageAddToPrompt),
+        add_to_prompt_disabled: pageAddToPromptDisabled,
+        add_to_prompt_html: pageAddToPrompt
+          ? await pageAddToPrompt.evaluate((element) => element.outerHTML.slice(0, 800)).catch(() => null)
+          : null,
+      };
+      if (pageExactNameVisible && pageAddToPrompt) {
+        if (!pageAddToPromptDisabled) return lastParsedMedia ?? { media_id: null, media_url: null };
+        const uploadedAsset = await this.uploadedAssetControl(page, filename);
+        if (uploadedAsset) {
+          await uploadedAsset.click({ force: true });
+          await sleep(300);
+          continue;
+        }
+      }
       const marked = await dialog.evaluate((root, { filename: wanted, fragment }) => {
         root.querySelectorAll('[data-goldflow-upload-preview="true"]').forEach((element) => element.removeAttribute("data-goldflow-upload-preview"));
         const visible = (element) => Boolean(element?.getClientRects().length)
@@ -504,43 +716,94 @@ export class GoogleFlowBrowser {
           named_count: named.length,
           media: selected.rows.find((row) => row.media_id === mediaIds[0]),
         };
-      }, { filename, fragment: FLOW_MEDIA_PATH_FRAGMENT }).catch(() => null);
+      }, { filename, fragment: FLOW_MEDIA_PATH_FRAGMENT }, { timeout: 1_000 }).catch(() => null);
       if (marked?.ambiguous) throw codedError("ui_contract_mismatch", `Google Flow media dialog matched ${filename} to more than one media item.`);
       if (marked?.media) {
         const parsed = parseFlowMedia(marked.media.media_url);
         if (!parsed) throw codedError("ui_contract_mismatch", `Google Flow selected preview ${filename} has an invalid media URL.`);
+        lastParsedMedia = parsed;
         const target = dialog.locator('[data-goldflow-upload-preview="true"]');
-        if (await target.count() !== 1) throw codedError("ui_contract_mismatch", `Google Flow selected preview ${filename} is not unique.`);
-        const alreadySelected = await visibleLocator(dialog.getByRole("button", { name: /add to prompt/i }));
+        // Flow replaces the upload tile while its percentage indicator settles.
+        // A marker can therefore disappear between evaluate() and locator()
+        // without indicating ambiguity; wait for the stable replacement.
+        if (await target.count() !== 1 || !await target.isVisible().catch(() => false)) {
+          await sleep(250);
+          continue;
+        }
+        const alreadySelected = await this.addToPromptControl(page);
         if (!alreadySelected) await target.click();
         return parsed;
       }
-      const media = await this.dialogMedia(dialog);
+      const media = await this.dialogMedia(dialog).catch(() => []);
       const fresh = media.filter((row) => !priorMediaIds.has(row.media_id));
-      const exactNameVisible = await dialog.getByText(filename, { exact: true }).count().catch(() => 0);
-      if (exactNameVisible > 0 && fresh.length === 1) {
+      // Frames mode exposes the selected upload name on the underlying media
+      // canvas instead of inside the picker dialog. Keep the proof exact and
+      // page-scoped so the opaque preview can still be bound safely.
+      const exactNameVisible = Number(marked?.named_count ?? 0) > 0
+        || await dialog.getByText(filename, { exact: true }).count().catch(() => 0) > 0
+        || await page.getByText(filename, { exact: true }).count().catch(() => 0) > 0
+        || pageVisibleLines.includes(filename);
+      const addToPrompt = await this.addToPromptControl(page);
+      const addToPromptDisabled = addToPrompt
+        ? await addToPrompt.isDisabled().catch(() => true)
+        : null;
+      lastProbe = {
+        exact_name_visible: exactNameVisible,
+        add_to_prompt_visible: Boolean(addToPrompt),
+        add_to_prompt_disabled: addToPromptDisabled,
+        add_to_prompt_html: addToPrompt
+          ? await addToPrompt.evaluate((element) => element.outerHTML.slice(0, 800)).catch(() => null)
+          : null,
+      };
+      if (exactNameVisible && addToPrompt && addToPromptDisabled) {
+        const uploadedAsset = await this.uploadedAssetControl(page, filename);
+        if (uploadedAsset) {
+          await uploadedAsset.click({ force: true });
+          await sleep(300);
+          continue;
+        }
+      }
+      if (exactNameVisible && addToPrompt && !addToPromptDisabled) {
+        // The current Frames picker can render a selected preview through an
+        // opaque canvas with no stable media URL. The exact filename plus the
+        // enabled Add to Prompt action proves selection; the materialized
+        // composer chip supplies the durable media identity immediately after.
+        return lastParsedMedia ?? { media_id: null, media_url: null };
+      }
+      if (exactNameVisible && fresh.length === 1) {
         const parsed = parseFlowMedia(fresh[0].media_url);
         if (!parsed) throw codedError("ui_contract_mismatch", `Google Flow uploaded preview ${filename} has an invalid media URL.`);
-        const alreadySelected = await visibleLocator(dialog.getByRole("button", { name: /add to prompt/i }));
+        const alreadySelected = await this.addToPromptControl(page);
         if (!alreadySelected) await dialog.getByText(filename, { exact: true }).first().click();
         return parsed;
       }
       await sleep(250);
     }
-    throw codedError("ui_contract_mismatch", `Google Flow did not expose an exact selected preview for uploaded file ${filename}.`);
+    throw codedError("ui_contract_mismatch", `Google Flow did not expose an exact selected preview for uploaded file ${filename}. Probe: ${JSON.stringify(lastProbe)}.`);
   }
 
   async markComposerDock(page) {
     const composer = await this.composer(page);
     const marked = await composer.evaluate((node) => {
       document.querySelectorAll('[data-goldflow-composer-dock="true"]').forEach((element) => element.removeAttribute("data-goldflow-composer-dock"));
+      const visible = (element) => Boolean(element?.getClientRects().length)
+        && getComputedStyle(element).visibility !== "hidden"
+        && getComputedStyle(element).display !== "none";
       for (let current = node.parentElement; current && current !== document.body; current = current.parentElement) {
-        const buttons = [...current.querySelectorAll("button")];
-        const hasAdd = buttons.some((button) => button.getAttribute("aria-haspopup") === "dialog"
-          && (button.textContent?.trim() === "add_2"
-            || [...button.querySelectorAll("*")].some((element) => element.textContent?.trim() === "add_2")));
-        const hasCreate = buttons.some((button) => /Create/i.test(button.textContent ?? ""));
-        if (!hasAdd || !hasCreate) continue;
+        const buttons = [...current.querySelectorAll("button")].filter(visible);
+        const hasCreate = buttons.some((button) => {
+          const controlText = [
+            button.textContent,
+            button.getAttribute("aria-label"),
+            button.getAttribute("title"),
+          ].filter(Boolean).join(" ");
+          return button.getAttribute("type") === "submit"
+            || /(?:Create|Generate|Submit|arrow_forward|send)/i.test(controlText);
+        });
+        // Frames mode replaces the add-media control with Start/End slots as
+        // soon as the first frame is attached. The composer itself plus its
+        // unique visible Create control is therefore the stable dock boundary.
+        if (!hasCreate) continue;
         current.setAttribute("data-goldflow-composer-dock", "true");
         return true;
       }
@@ -612,6 +875,20 @@ export class GoogleFlowBrowser {
     throw codedError("ui_contract_mismatch", `Google Flow composer reference chips did not settle in exact order (${latest.chips.map((row) => row.media_id).join(", ") || "none"}).`);
   }
 
+  async waitForComposerChipCount(page, expectedCount, { timeoutMs = 90_000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let latest = { busy: true, chips: [] };
+    while (Date.now() < deadline) {
+      latest = await this.composerDockState(page);
+      if (!latest.busy
+        && latest.chips.length === expectedCount
+        && latest.chips.every((chip) => chip.loaded === true)) return latest;
+      await sleep(200);
+    }
+    const chips = latest.chips.map((row) => `${row.media_id}:${row.loaded === true ? "loaded" : "pending"}`).join(", ") || "none";
+    throw codedError("ui_contract_mismatch", `Google Flow composer reference chip count did not settle at ${expectedCount} (busy=${latest.busy}; ${chips}).`);
+  }
+
   async attachReferences(page, job, client, onPhase) {
     const references = Array.isArray(job.references) ? job.references : [];
     if (job.references?.length > 4) throw codedError("ui_contract_mismatch", "Google Flow supports at most four ordered prompt references.");
@@ -620,11 +897,16 @@ export class GoogleFlowBrowser {
     if (initial.chips.length !== 0) throw codedError("ui_contract_mismatch", "Google Flow composer started with stale reference chips.");
     const referenceInputs = [];
     const boundReferences = [];
+    let composerMediaIds = initial.chips.map((chip) => chip.media_id);
 
-    for (let index = 0; index < references.length; index += 1) {
-      const reference = references[index];
-      const expectedSlot = index + 1;
-      if (Number(reference.slot) !== expectedSlot) throw codedError("ui_contract_mismatch", `Google Flow reference ${reference.ref_id} is not in contiguous slot ${expectedSlot}.`);
+    const expectedSlots = references.map((reference) => Number(reference.slot)).sort((left, right) => left - right);
+    if (expectedSlots.some((slot, index) => slot !== index + 1)) {
+      throw codedError("ui_contract_mismatch", "Google Flow references are not assigned to contiguous ordered slots.");
+    }
+    // Flow appends each newly materialized composer chip, so canonical upload
+    // order is also canonical visible dock order.
+    for (const reference of flowReferenceUploadOrder(references)) {
+      const expectedSlot = Number(reference.slot);
       const sourceSha256 = exactSha256(reference.sha256, `Google Flow reference ${reference.ref_id} assignment hash`);
       const downloaded = reference.path
         ? {
@@ -641,7 +923,7 @@ export class GoogleFlowBrowser {
       const uploadFilename = `${String(expectedSlot).padStart(2, "0")}-${safeName(reference.ref_id)}-${sourceSha256.slice(0, 12)}-${safeName(job.lease_token).slice(0, 8)}.${extension}`;
       const file = { name: uploadFilename, mimeType: downloaded.mimeType, buffer: downloaded.bytes };
       let { dialog, dialogId } = await this.openMediaDialog(page);
-      const priorMediaIds = new Set((await this.dialogMedia(dialog)).map((row) => row.media_id));
+      const priorMediaIds = new Set((await this.dialogMedia(dialog).catch(() => [])).map((row) => row.media_id));
       const upload = await visibleLocator(dialog.getByRole("button", { name: /upload media/i }));
       if (!upload) throw codedError("ui_contract_mismatch", "Google Flow controlled media dialog has no Upload media action.");
       const chooserPromise = page.waitForEvent("filechooser", { timeout: 10_000 }).catch(() => null);
@@ -656,8 +938,8 @@ export class GoogleFlowBrowser {
       }
       await this.acceptUploadNotice(page, { mediaDialogId: dialogId });
       ({ dialog, dialogId } = await this.openMediaDialog(page));
-      const selected = await this.selectUploadedPreview(dialog, { filename: uploadFilename, priorMediaIds });
-      const addToPrompt = await waitForVisible(dialog.getByRole("button", { name: /add to prompt/i }), { timeoutMs: 30_000 });
+      const selected = await this.selectUploadedPreview(page, dialog, { filename: uploadFilename, priorMediaIds });
+      const addToPrompt = await this.waitForAddToPromptControl(page, { timeoutMs: 30_000 });
       if (!addToPrompt) throw codedError("ui_contract_mismatch", `Google Flow selected preview ${uploadFilename} has no Add to Prompt action.`);
       const enabledDeadline = Date.now() + 30_000;
       while (Date.now() < enabledDeadline && await addToPrompt.isDisabled().catch(() => true)) await sleep(200);
@@ -675,11 +957,24 @@ export class GoogleFlowBrowser {
         ref_id: reference.ref_id,
         source_sha256: sourceSha256,
         upload_filename: uploadFilename,
-        media_id: selected.media_id,
-        media_url: selected.media_url,
+        upload_media_id: selected.media_id,
+        upload_media_url: selected.media_url,
       };
+      // Flow materializes a new UUID when a library asset becomes a composer
+      // chip. Bind the exact newly appeared chip, not the library preview UUID.
+      const settled = await this.waitForComposerChipCount(page, boundReferences.length + 1);
+      const composerChip = identifyNewFlowComposerChip(composerMediaIds, settled.chips);
+      row.media_id = composerChip.media_id;
+      row.media_url = composerChip.media_url;
+      row.upload_media_id ??= composerChip.media_id;
+      row.upload_media_url ??= composerChip.media_url;
+      composerMediaIds = settled.chips.map((chip) => chip.media_id);
       boundReferences.push(row);
-      await this.waitForComposerChips(page, boundReferences.map((item) => item.media_id));
+      boundReferences.sort((left, right) => left.slot - right.slot);
+      const expectedComposerOrder = boundReferences.map((item) => item.media_id);
+      if (!settled.chips.every((chip, index) => chip.media_id === expectedComposerOrder[index])) {
+        throw codedError("ui_contract_mismatch", `Google Flow composer reference chips settled out of canonical slot order (${settled.chips.map((chip) => chip.media_id).join(", ")}).`);
+      }
       referenceInputs.push({
         slot: expectedSlot,
         ref_id: reference.ref_id,
@@ -847,7 +1142,7 @@ export class GoogleFlowBrowser {
         const fingerprint = await this.imagePixelFingerprint(page, sourceUrl);
         fingerprints.set(sourceUrl, fingerprint.sha256);
       } catch (error) {
-        this.log(`Google Flow baseline image could not be fingerprinted: ${error.message}`, "warn");
+        this.log(`Google Flow baseline image could not be fingerprinted: ${redactBrowserDiagnostic(error.message)}`, "warn");
       }
     }
     return fingerprints;
@@ -871,7 +1166,7 @@ export class GoogleFlowBrowser {
           }
           return { sourceUrl, bytes };
         } catch (error) {
-          this.log(`Google Flow fresh-image candidate was not downloadable yet: ${error.message}`, "warn");
+          this.log(`Google Flow fresh-image candidate was not downloadable yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
         }
       }
       if (!fresh.length && baselineFingerprints.size && Date.now() >= nextExistingUrlFingerprintAt) {
@@ -891,7 +1186,7 @@ export class GoogleFlowBrowser {
             this.log("Detected a completed Google Flow image whose existing media URL was reused.", "info");
             return { sourceUrl, bytes: candidate.bytes };
           } catch (error) {
-            this.log(`Google Flow existing-image candidate could not be fingerprinted yet: ${error.message}`, "warn");
+            this.log(`Google Flow existing-image candidate could not be fingerprinted yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
           }
         }
       }
@@ -928,19 +1223,23 @@ export class GoogleFlowBrowser {
     if (sourceUrl.startsWith("blob:")) {
       return fetchThroughPage(sourceUrl);
     }
-    const response = await page.request.get(sourceUrl, { timeout: 120_000 });
-    if (!response.ok()) {
+    let directError = null;
+    try {
+      const response = await page.request.get(sourceUrl, { timeout: 120_000 });
+      if (response.ok()) return Buffer.from(await response.body());
+      directError = new Error(`HTTP ${response.status()}`);
+    } catch (error) {
+      directError = error instanceof Error ? error : new Error(String(error));
+    }
+    try {
+      return await fetchThroughPage(sourceUrl);
+    } catch (error) {
       try {
-        return await fetchThroughPage(sourceUrl);
-      } catch (error) {
-        try {
-          return await renderedImageBytes(sourceUrl);
-        } catch (renderError) {
-          throw new Error(`Google Flow image download returned HTTP ${response.status()}, page-session fetch failed (${error.message}), and rendered-image capture failed (${renderError.message})`);
-        }
+        return await renderedImageBytes(sourceUrl);
+      } catch (renderError) {
+        throw new Error(`Google Flow direct image download failed (${redactBrowserDiagnostic(directError?.message ?? "unknown error")}), page-session fetch failed (${redactBrowserDiagnostic(error.message)}), and rendered-image capture failed (${redactBrowserDiagnostic(renderError.message)})`);
       }
     }
-    return Buffer.from(await response.body());
   }
 
   async saveGeneratedImage(page, job, sourceUrl, bytes = null) {
@@ -953,8 +1252,8 @@ export class GoogleFlowBrowser {
     return filePath;
   }
 
-  async verifyVideoUiContract(page, job = {}) {
-    const durationSec = Math.max(4, Math.min(10, Math.round(Number(job.duration_sec ?? 8))));
+  async verifyVideoUiContract(page, job = {}, configurationAttempt = 1) {
+    const requestedDurationSec = Math.max(4, Math.min(10, Math.round(Number(job.duration_sec ?? 8))));
     const contract = {
       provider: "google-flow",
       media_type: "video",
@@ -962,7 +1261,8 @@ export class GoogleFlowBrowser {
       model_label: String(job.model_id ?? this.flowVideoModelLabel),
       aspect_ratio: "16:9",
       output_count: 1,
-      duration_sec: durationSec,
+      requested_duration_sec: requestedDurationSec,
+      duration_sec: null,
       input_binding: "first_frame",
     };
     try {
@@ -970,11 +1270,11 @@ export class GoogleFlowBrowser {
       if (!new RegExp(`\\b${this.flowPlanLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(bodyText)) {
         throw codedError("account_mismatch", `Expected Google Flow plan badge ${this.flowPlanLabel}.`);
       }
-      let mediaControl = await visibleLocator(page.getByRole("button", { name: /Nano Banana|Veo|Video/i }));
+      let mediaControl = await visibleLocator(page.getByRole("button", { name: FLOW_COMPOSER_MEDIA_CONTROL_PATTERN }));
       if (!mediaControl) {
         const agentToggle = await visibleLocator(page.getByRole("button", { name: "Agent", exact: true }));
         if (agentToggle) await agentToggle.click();
-        mediaControl = await waitForVisible(page.getByRole("button", { name: /Nano Banana|Veo|Video/i }), { timeoutMs: 10_000 });
+        mediaControl = await waitForVisible(page.getByRole("button", { name: FLOW_COMPOSER_MEDIA_CONTROL_PATTERN }), { timeoutMs: 10_000 });
       }
       if (!mediaControl) throw codedError("ui_contract_mismatch", "Google Flow video settings control is missing.");
       await mediaControl.click();
@@ -983,25 +1283,63 @@ export class GoogleFlowBrowser {
       const videoTab = await visibleLocator(menu.getByRole("tab", { name: /Video/i }));
       if (!videoTab) throw codedError("ui_contract_mismatch", "Google Flow Video mode is unavailable for this account.");
       await videoTab.click();
+      const framesTab = await waitForVisible(menu.getByRole("tab", { name: /Frames/i }), { timeoutMs: 10_000 });
+      if (!framesTab) throw codedError("ui_contract_mismatch", "Google Flow first-frame video mode is unavailable for this account.");
+      await framesTab.click();
       const landscape = await visibleLocator(menu.getByRole("tab", { name: /16:9/ }));
       const oneOutput = await visibleLocator(menu.getByRole("tab", { name: "x1", exact: true }));
       if (landscape) await landscape.click();
       if (oneOutput) await oneOutput.click();
-      const modelPattern = new RegExp(String(contract.model_label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      const currentModel = await visibleLocator(menu.getByRole("button", { name: /Veo/i }));
-      if (currentModel && !modelPattern.test(await currentModel.innerText())) {
+      const currentModel = await visibleLocator(menu.getByRole("button", { name: /Veo|Omni/i }));
+      if (!currentModel) throw codedError("ui_contract_mismatch", "Google Flow video model control is unavailable.");
+      if (!flowModelLabelMatches(await currentModel.innerText(), contract.model_label)) {
         await currentModel.click();
-        const wanted = await waitForVisible(page.getByRole("menuitem").filter({ hasText: modelPattern }), { timeoutMs: 10_000 });
+        const modelItems = page.getByRole("menuitem");
+        let wanted = null;
+        const modelDeadline = Date.now() + 10_000;
+        while (!wanted && Date.now() < modelDeadline) {
+          for (let index = 0; index < await modelItems.count(); index += 1) {
+            const candidate = modelItems.nth(index);
+            if (await candidate.isVisible().catch(() => false)
+              && flowModelLabelMatches(await candidate.innerText(), contract.model_label)) {
+              wanted = candidate;
+              break;
+            }
+          }
+          if (!wanted) await sleep(200);
+        }
         if (!wanted) throw codedError("ui_contract_mismatch", `Expected Google Flow video model ${contract.model_label}.`);
         await wanted.click();
       }
-      const durationControl = await visibleLocator(page.getByRole("button", { name: new RegExp(`^${durationSec}(?:\\s*seconds?|s)$`, "i") }));
-      if (durationControl) await durationControl.click();
+      const durationTabs = menu.getByRole("tab", { name: /^\d+s$/i });
+      const durationOptions = [];
+      for (let index = 0; index < await durationTabs.count(); index += 1) {
+        const candidate = durationTabs.nth(index);
+        if (!await candidate.isVisible().catch(() => false)) continue;
+        const value = Number.parseInt(await candidate.innerText(), 10);
+        if (Number.isFinite(value)) durationOptions.push(value);
+      }
+      const durationSec = nearestFlowVideoDuration(requestedDurationSec, durationOptions);
+      const durationControl = await visibleLocator(menu.getByRole("tab", { name: `${durationSec}s`, exact: true }));
+      if (!durationControl) throw codedError("ui_contract_mismatch", `Google Flow video duration ${durationSec}s is unavailable.`);
+      await durationControl.click();
+      contract.duration_sec = durationSec;
+      contract.ui_model_label = String(await (await visibleLocator(menu.getByRole("button", { name: /Veo|Omni/i })))?.innerText() ?? contract.model_label).trim();
       await page.keyboard.press("Escape").catch(() => {});
+      const configuredVideoControl = await waitForVisible(page.getByRole("button", { name: /^Video\s*·\s*\d+s/i }), { timeoutMs: 5_000 });
+      const configuredStartSlot = await waitForVisible(page.getByText("Start", { exact: true }), { timeoutMs: 5_000 });
+      if (!configuredVideoControl || !configuredStartSlot) {
+        if (configurationAttempt < 3) {
+          await sleep(500);
+          return this.verifyVideoUiContract(page, job, configurationAttempt + 1);
+        }
+        throw codedError("ui_contract_mismatch", "Google Flow did not retain Video Frames mode after configuration.");
+      }
       return { ...contract, verified_at: new Date().toISOString() };
     } catch (caught) {
       const error = caught instanceof Error ? caught : new Error(String(caught));
       const diagnosticPath = await this.diagnostics(page, contract, error).catch(() => null);
+      error.message = redactBrowserDiagnostic(error.message);
       if (diagnosticPath) error.message = `${error.message} Diagnostics: ${diagnosticPath}`;
       throw error;
     }
@@ -1022,6 +1360,15 @@ export class GoogleFlowBrowser {
     }, FLOW_MEDIA_PATH_FRAGMENT);
   }
 
+  async generatedVideoDetailUrls(page) {
+    const candidates = await page.locator('a[href*="/fx/tools/flow/project/"][href*="/edit/"]').evaluateAll((elements) => elements
+      .filter((element) => element instanceof HTMLAnchorElement
+        && element.offsetParent !== null
+        && [...element.querySelectorAll("img")].some((image) => /video thumbnail/i.test(image.alt ?? "")))
+      .map((element) => element.href));
+    return [...new Set(candidates)].filter(isFlowVideoDetailUrl);
+  }
+
   async mediaBytes(page, sourceUrl) {
     const fetchThroughPage = async (url) => {
       const base64 = await page.evaluate(async (url) => {
@@ -1037,29 +1384,41 @@ export class GoogleFlowBrowser {
     if (sourceUrl.startsWith("blob:")) {
       return fetchThroughPage(sourceUrl);
     }
-    const response = await page.request.get(sourceUrl, { timeout: 180_000 });
-    if (!response.ok()) {
-      try {
-        return await fetchThroughPage(sourceUrl);
-      } catch (error) {
-        throw new Error(`Google Flow video download returned HTTP ${response.status()}, and page-session fetch failed: ${error.message}`);
-      }
+    let directError = null;
+    try {
+      const response = await page.request.get(sourceUrl, { timeout: 180_000 });
+      if (response.ok()) return Buffer.from(await response.body());
+      directError = new Error(`HTTP ${response.status()}`);
+    } catch (error) {
+      directError = error instanceof Error ? error : new Error(String(error));
     }
-    return Buffer.from(await response.body());
+    try {
+      return await fetchThroughPage(sourceUrl);
+    } catch (error) {
+      throw new Error(`Google Flow direct video download failed (${redactBrowserDiagnostic(directError?.message ?? "unknown error")}), and page-session fetch failed: ${redactBrowserDiagnostic(error.message)}`);
+    }
   }
 
-  async waitForGeneratedVideo(page, baseline = new Set()) {
+  async waitForGeneratedVideo(page, baseline = {}) {
+    const baselineMediaUrls = baseline instanceof Set ? baseline : baseline.mediaUrls ?? new Set();
+    const baselineDetailUrls = baseline instanceof Set ? new Set() : baseline.detailUrls ?? new Set();
     const deadline = Date.now() + 45 * 60_000;
     while (Date.now() < deadline) {
       await this.blockingAlert(page);
-      const sourceUrl = (await this.generatedVideoUrls(page)).find((url) => !baseline.has(url));
+      const sourceUrl = (await this.generatedVideoUrls(page)).find((url) => !baselineMediaUrls.has(url));
       if (sourceUrl) {
         try {
           const bytes = await this.mediaBytes(page, sourceUrl);
           if (bytes.length > 100_000) return { sourceUrl, bytes };
         } catch (error) {
-          this.log(`Google Flow video candidate is not downloadable yet: ${error.message}`, "warn");
+          this.log(`Google Flow video candidate is not downloadable yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
         }
+      }
+      const detailUrl = (await this.generatedVideoDetailUrls(page)).find((url) => !baselineDetailUrls.has(url));
+      if (detailUrl) {
+        await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+        await waitForVisible(page.locator("video"), { timeoutMs: 90_000 });
+        continue;
       }
       await sleep(1_000);
     }
@@ -1070,80 +1429,127 @@ export class GoogleFlowBrowser {
     if (!Array.isArray(job.references) || job.references.length !== 1) {
       throw codedError("ui_contract_mismatch", "Google Flow image-to-video requires exactly one accepted first-frame image.");
     }
-    const page = await this.newJobPage();
-    let preservePage = false;
-    try {
-      const verified = await this.verifyVideoUiContract(page, job);
-      const prompt = [
-        "Animate the attached accepted image as the exact first frame of one continuous 16:9 shot.",
-        "Preserve identity, wardrobe, anatomy, objects, environment, lighting, and spatial continuity. Do not add cuts, panels, text, duplicate subjects, or unrelated objects.",
-        job.prompt,
-      ].join("\n\n");
-      await this.pastePrompt(page, prompt);
-      const { boundReferences } = await this.attachReferences(page, job, client, onPhase);
-      const baseline = new Set(await this.generatedVideoUrls(page));
-      const { create, referenceBinding } = await this.recordReferenceBindingEvidence(page, job, prompt, boundReferences);
-      await onPhase("submitting");
-      await create.click();
-      await onPhase("submitted");
-      const generated = await this.waitForGeneratedVideo(page, baseline);
-      const directory = path.join(this.downloadsRoot, safeName(job.manifest_id));
-      await fs.mkdir(directory, { recursive: true });
-      const downloadPath = path.join(directory, `${safeName(job.asset_id)}-${safeName(job.lease_token).slice(0, 12)}.mp4`);
-      await fs.writeFile(downloadPath, generated.bytes);
-      return {
-        downloadPath,
-        sourceUrl: generated.sourceUrl,
-        conversationUrl: page.url(),
-        uiContract: { ...verified, reference_binding: referenceBinding },
-        browserProvider: "google-flow",
-      };
-    } catch (error) {
-      preservePage = ["rate_limited", "usage_limited", "account_mismatch", "ui_contract_mismatch"].includes(error.code);
-      throw error;
-    } finally {
-      if (!preservePage) await page.close().catch(() => {});
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      let page = null;
+      let preservePage = false;
+      let creativeSubmissionStarted = false;
+      try {
+        page = await this.newJobPage();
+        const verified = await this.verifyVideoUiContract(page, job);
+        const prompt = [
+          "Animate the attached accepted image as the exact first frame of one continuous 16:9 shot.",
+          "Preserve identity, wardrobe, anatomy, objects, environment, lighting, and spatial continuity. Do not add cuts, panels, text, duplicate subjects, or unrelated objects.",
+          job.prompt,
+        ].join("\n\n");
+        await this.pastePrompt(page, prompt);
+        const { boundReferences } = await this.attachReferences(page, job, client, onPhase);
+        const baseline = {
+          mediaUrls: new Set(await this.generatedVideoUrls(page)),
+          detailUrls: new Set(await this.generatedVideoDetailUrls(page)),
+        };
+        const { create, referenceBinding } = await this.recordReferenceBindingEvidence(page, job, prompt, boundReferences);
+        await onPhase("submitting");
+        creativeSubmissionStarted = true;
+        await create.click();
+        await onPhase("submitted");
+        const generated = await this.waitForGeneratedVideo(page, baseline);
+        const directory = path.join(this.downloadsRoot, safeName(job.manifest_id));
+        await fs.mkdir(directory, { recursive: true });
+        const downloadPath = path.join(directory, `${safeName(job.asset_id)}-${safeName(job.lease_token).slice(0, 12)}.mp4`);
+        await fs.writeFile(downloadPath, generated.bytes);
+        return {
+          downloadPath,
+          sourceUrl: generated.sourceUrl,
+          conversationUrl: page.url(),
+          uiContract: { ...verified, reference_binding: referenceBinding },
+          browserProvider: "google-flow",
+        };
+      } catch (error) {
+        preservePage = ["rate_limited", "usage_limited", "account_mismatch"].includes(error.code);
+        if (!creativeSubmissionStarted && error.code === "ui_contract_mismatch" && page) {
+          const diagnosticPath = await this.diagnostics(page, {
+            provider: "google-flow",
+            media_type: "video",
+            stage: "pre_submission_transport",
+          }, error).catch(() => null);
+          if (diagnosticPath) this.log(`Google Flow video pre-submission diagnostics: ${diagnosticPath}`, "warn");
+        }
+        if (shouldRetryFlowPreSubmissionTransport({
+          errorCode: error.code,
+          errorName: error.name,
+          errorMessage: error.message,
+          creativeSubmissionStarted,
+          attempt,
+        })) {
+          this.log(`Google Flow video transport failed before submission; retrying once in a clean tab: ${redactBrowserDiagnostic(error.message)}`, "warn");
+          await sleep(1_000);
+          continue;
+        }
+        error.message = redactBrowserDiagnostic(error.message);
+        throw error;
+      } finally {
+        if (page && !preservePage) await page.close().catch(() => {});
+      }
     }
+    throw codedError("ui_contract_mismatch", "Google Flow video transport exhausted its pre-submission attempts.");
   }
 
   async runJob({ job, client, onPhase = async () => {} }) {
     if (job.type === "video") return this.runVideoJob({ job, client, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", "Google Flow browser received unsupported work.");
-    const page = await this.newJobPage();
-    let preservePage = false;
-    try {
-      const verified = await this.verifyUiContract(page);
-      const prompt = [
-        "Create exactly one original landscape still image in a 16:9 frame.",
-        job.references?.length
-          ? "Use the attached images only as ordered visual references. Do not create a collage, contact sheet, explanation, border, or multiple variants."
-          : "No reference images are attached. Generate directly from the text prompt without asking for uploads or clarification.",
-        job.prompt,
-      ].join("\n\n");
-      await this.pastePrompt(page, prompt);
-      const { referenceInputs, boundReferences } = await this.attachReferences(page, job, client, onPhase);
-      const baseline = new Set(await this.waitForVisibleImagesToSettle(page));
-      const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
-      const { create, referenceBinding } = await this.recordReferenceBindingEvidence(page, job, prompt, boundReferences);
-      await onPhase("submitting");
-      await create.click();
-      await onPhase("submitted");
-      const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints);
-      await onPhase("result_ready");
-      const downloadPath = await this.saveGeneratedImage(page, job, generated.sourceUrl, generated.bytes);
-      return {
-        downloadPath,
-        sourceUrl: generated.sourceUrl,
-        conversationUrl: page.url(),
-        uiContract: { ...verified, reference_binding: referenceBinding },
-        browserProvider: "google-flow",
-      };
-    } catch (error) {
-      preservePage = ["rate_limited", "usage_limited", "account_mismatch", "ui_contract_mismatch"].includes(error.code);
-      throw error;
-    } finally {
-      if (!preservePage) await page.close().catch(() => {});
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      let page = null;
+      let preservePage = false;
+      let creativeSubmissionStarted = false;
+      try {
+        page = await this.newJobPage();
+        const verified = await this.verifyUiContract(page);
+        const prompt = [
+          "Create exactly one original landscape still image in a 16:9 frame.",
+          job.references?.length
+            ? "Use the attached images only as ordered visual references. Do not create a collage, contact sheet, explanation, border, or multiple variants."
+            : "No reference images are attached. Generate directly from the text prompt without asking for uploads or clarification.",
+          job.prompt,
+        ].join("\n\n");
+        await this.pastePrompt(page, prompt);
+        const { referenceInputs, boundReferences } = await this.attachReferences(page, job, client, onPhase);
+        const baseline = new Set(await this.waitForVisibleImagesToSettle(page));
+        const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
+        const { create, referenceBinding } = await this.recordReferenceBindingEvidence(page, job, prompt, boundReferences);
+        await onPhase("submitting");
+        creativeSubmissionStarted = true;
+        await create.click();
+        await onPhase("submitted");
+        const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints);
+        await onPhase("result_ready");
+        const downloadPath = await this.saveGeneratedImage(page, job, generated.sourceUrl, generated.bytes);
+        return {
+          downloadPath,
+          sourceUrl: generated.sourceUrl,
+          conversationUrl: page.url(),
+          uiContract: { ...verified, reference_binding: referenceBinding },
+          browserProvider: "google-flow",
+        };
+      } catch (error) {
+        preservePage = ["rate_limited", "usage_limited", "account_mismatch"].includes(error.code);
+        if (shouldRetryFlowPreSubmissionTransport({
+          errorCode: error.code,
+          errorName: error.name,
+          errorMessage: error.message,
+          creativeSubmissionStarted,
+          attempt,
+        })) {
+          this.log(`Google Flow image transport failed before submission; retrying once in a clean tab: ${redactBrowserDiagnostic(error.message)}`, "warn");
+          await sleep(1_000);
+          continue;
+        }
+        error.message = redactBrowserDiagnostic(error.message);
+        throw error;
+      } finally {
+        if (page && !preservePage) await page.close().catch(() => {});
+      }
     }
+    throw codedError("ui_contract_mismatch", "Google Flow image transport exhausted its pre-submission attempts.");
   }
 }
 

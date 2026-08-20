@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getLLMBaseURL, getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompletionURL } from "./lib/llm-router.mjs";
 import { runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
@@ -38,22 +38,23 @@ const scoreDropPlanPath = path.join(episodeDir, `score_drop_plan_${episode}.json
 const sfxPlanPath = path.join(episodeDir, `sfx_event_plan_${episode}.json`);
 const sfxReportPath = path.join(episodeDir, "sfx_resolution_report.json");
 const enrichmentReportPath = path.join(episodeDir, `audio_enrichment_report_${episode}.json`);
+const audiovisualSpinePath = path.join(episodeDir, `audiovisual_emphasis_spine_${episode}.json`);
 const wordTimingPath = flags.wordTiming ?? flags["word-timing"] ?? path.join(episodeDir, `narration_word_timing_${episode}.json`);
 
-const plannerVersion = 1;
+const plannerVersion = 2;
 const plannerName = "llm_audio_enrichment_v1";
 const retentionMix = flags["retention-mix"] === "true" || /^(true|1|yes)$/i.test(String(process.env.ANIFACTORY_AUDIO_RETENTION_MIX ?? ""));
-const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? (retentionMix ? 320 : 220), 90, 420);
+const sfxTargetMax = clampInt(flags["sfx-target-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_MAX ?? (retentionMix ? 120 : 80), 16, 180);
 const scoreDropTargetMax = clampInt(flags["score-target-drops-max"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS_MAX ?? (retentionMix ? 90 : 60), 35, 110);
 const scoreDropMinDurationSec = Number(flags["score-drop-min-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MIN_DURATION_SEC ?? (retentionMix ? 8 : 5));
 const scoreDropMaxDurationSec = Number(flags["score-drop-max-duration-sec"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_DROP_MAX_DURATION_SEC ?? (retentionMix ? 18 : 15));
-const openingSfxMinCount = clampInt(flags["opening-sfx-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_MIN_COUNT ?? 14, 8, 28);
-const openingSfxIdealMinCount = clampInt(flags["opening-sfx-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MIN_COUNT ?? 16, openingSfxMinCount, 32);
-const openingSfxIdealMaxCount = clampInt(flags["opening-sfx-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MAX_COUNT ?? 20, openingSfxIdealMinCount, 36);
-const ambienceMinCount = clampInt(flags["ambience-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_MIN_COUNT ?? (retentionMix ? 20 : 12), 6, 36);
-const ambienceIdealMinCount = clampInt(flags["ambience-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MIN_COUNT ?? (retentionMix ? 24 : 14), ambienceMinCount, 40);
-const ambienceIdealMaxCount = clampInt(flags["ambience-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MAX_COUNT ?? (retentionMix ? 30 : 20), ambienceIdealMinCount, 44);
-const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? (retentionMix ? 220 : 90), 24, sfxTargetMax);
+const openingSfxMinCount = clampInt(flags["opening-sfx-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_MIN_COUNT ?? 2, 0, 12);
+const openingSfxIdealMinCount = clampInt(flags["opening-sfx-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MIN_COUNT ?? 3, openingSfxMinCount, 12);
+const openingSfxIdealMaxCount = clampInt(flags["opening-sfx-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_OPENING_SFX_IDEAL_MAX_COUNT ?? 5, openingSfxIdealMinCount, 14);
+const ambienceMinCount = clampInt(flags["ambience-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_MIN_COUNT ?? (retentionMix ? 8 : 4), 0, 24);
+const ambienceIdealMinCount = clampInt(flags["ambience-ideal-min-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MIN_COUNT ?? (retentionMix ? 10 : 6), ambienceMinCount, 28);
+const ambienceIdealMaxCount = clampInt(flags["ambience-ideal-max-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_AMBIENCE_IDEAL_MAX_COUNT ?? (retentionMix ? 14 : 10), ambienceIdealMinCount, 32);
+const sfxTargetCount = clampInt(flags["sfx-target-count"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SFX_TARGET_COUNT ?? (retentionMix ? 56 : 32), 8, sfxTargetMax);
 const scoreTargetChapters = clampInt(flags["score-target-chapters"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_CHAPTERS ?? 8, 5, 12);
 const scoreTargetDrops = clampInt(flags["score-target-drops"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_TARGET_DROPS ?? (retentionMix ? 64 : 24), 0, scoreDropTargetMax);
 const scoreMode = String(flags["score-mode"] ?? process.env.ANIFACTORY_AUDIO_ENRICHMENT_SCORE_MODE ?? "chapters").toLowerCase();
@@ -773,8 +774,8 @@ GENRE NEUTRALITY:
 Derive the sonic and musical palette from THIS story and bible. Do not use hardcoded genre templates. If this is finance/city/system, use that palette. If a future story is dungeon/monster/system, use that story's palette. Do not forbid or force any genre vocabulary globally.
 
 SFX REQUIREMENTS:
-- Emit about ${sfxTargetCount} abundant, beat-anchored SFX events across the full runtime, not sparse literal keyword hits. In retention mode, keep the episode audibly alive after the hook: system pings, screen pulses, room hushes, crowd reactions, phone/card/object hits, and payoff impacts should appear throughout the whole timeline.
-- The opening 30 seconds is a designed hook burst: place at least ${openingSfxMinCount} and ideally ${openingSfxIdealMinCount}-${openingSfxIdealMaxCount} audible narrative SFX cues in the first 30 seconds. Use the short sentence rhythm of the hook; do not stop at only a few literal hits.
+- Emit no more than about ${sfxTargetCount} beat-anchored SFX events across the full runtime. This is a ceiling and planning allowance, not a quota. Fewer purposeful events are better than decorative noise.
+- The opening 30 seconds may use roughly ${openingSfxMinCount}-${openingSfxIdealMaxCount} audible narrative effects only when visible action, interface behavior, or one precise editorial event earns them. Preserve clean narration and silence rather than manufacturing a cue for every short sentence.
 - Do not plan generic edit-transition whooshes, swipes, pops, or scene-card snaps as normal LLM SFX. Those are applied deterministically by the edit/mix layer from actual cut timing. Only include a whoosh/snap/flash when it is a diegetic or story-specific sound source, such as a physical card snap, screen glitch, camera flash, system window, or object impact.
 - After the opening, keep SFX consistently present but selective: punctuate scene transitions, system activations, broadcast screens, glass towers, kiosk payments, crowd hush/laughter, card/message handling, refusal hits, belief-collapse glitches, crown/throne pressure, and major reversals.
 - Scene turns may receive narrative SFX when the story itself provides a concrete sound source, but pure edit-transition SFX belongs to the deterministic transition-audio pass, not this LLM plan.
@@ -782,6 +783,7 @@ SFX REQUIREMENTS:
 - Ambience should cover most non-score runtime by location zones; avoid leaving long stretches with no environmental floor unless the scene intentionally needs hard silence.
 - Ambience should sit elsewhere under the narration when there is no score drop. Use low gains around -34 to -28 dB, and avoid melody, rhythm, vocals, speech, or crowd dialogue.
 - Every event needs: event_id, cue_id, segment_id, offset_sec, duration_sec, gain_db, priority, sound_description, beat_reason, recurrence_class ("signature", "incidental", or "ambience"), palette_note.
+- Every event also needs semantic_event_id and physical_or_editorial_cause. semantic_event_id must link to one emphasis_moment below. physical_or_editorial_cause must name the exact visible source/action or precise editorial event that creates the sound. A mood, genre, transition, or desire for energy is not a cause.
 - Ambience events also need: loop true, asset_duration_sec, and optional end_sec when a location ambience should end at a specific timeline point.
 - Every event also needs target_phrase: exact spoken script words inside the segment where the sound should hit. Anchor to the emotional beat word/phrase: e.g. "card declined", "cracked against the marble", "money becoming more money", "Over two billion". Deterministic code will resolve target_phrase to a word-level Whisper timestamp and write absolute_start_sec.
 - segment_id must come from the provided segment list.
@@ -804,6 +806,12 @@ SFX GENERATION PROMPT RULES:
 - Use dry, mixable sounds with clear attack and quick decay unless the cue is an intentional ambience.
 
 ${modeInstruction}
+
+AUDIOVISUAL EMPHASIS SPINE:
+- Return a short list of only the episode moments where two or more layers should coordinate. Do not mark every scene.
+- Each emphasis moment must bind an exact segment_id and target_phrase, identify story function and value tier, and direct visual change, motion role, SFX event or null, score behavior, silence behavior, and sparse subtitle emphasis.
+- Preserve silence before reveals when silence increases impact. Never use SFX and a score hit merely because both are available.
+- The later visual-beat director will consume these exact moment IDs. Keep direction provider-neutral and story-based.
 
 BANKED SFX SUMMARY FOR POSSIBLE TIGHT MATCHES ONLY:
 Bank cue IDs and existing asset prompts are inventory hints, not a quality standard. Some legacy cue names are too abstract or too short. If you reuse a banked cue_id, still write a production-quality concrete sound_description for the event using the SFX GENERATION PROMPT RULES above. If a bank cue name says only "hook room hush flash", translate the event description into concrete source/action/space language such as "sudden large-room hush wave with a short camera-flash pop and clean decay".
@@ -837,11 +845,29 @@ Return one valid JSON object only:
       "gain_db": -18,
       "priority": 1,
       "sound_description": "short cold digital contract ping",
+      "semantic_event_id": "emphasis_001",
+      "physical_or_editorial_cause": "the visible contract panel confirms the declined card",
       "target_phrase": "card declined",
       "beat_reason": "marks the mechanic signal landing before the reversal",
       "recurrence_class": "signature",
       "loop": false,
       "palette_note": "system/finance/city derived from episode"
+    }
+  ],
+  "emphasis_moments": [
+    {
+      "moment_id": "emphasis_001",
+      "segment_id": "voice_seg_01",
+      "target_phrase": "card declined",
+      "story_function": "first visible mechanic proof",
+      "value_tier": "hero",
+      "visual_change": "the panel visibly flips from pending to declined",
+      "motion_role": "changes_understanding",
+      "sfx_event_id": "sfx_001",
+      "score_behavior": "drop",
+      "silence_behavior": "preserve_before",
+      "subtitle_emphasis": ["declined"],
+      "coordination_note": "silence clears the phrase, then the visible status change and one dry confirmation ping land together"
     }
   ],
   "score_chapters": [
@@ -905,6 +931,8 @@ function normalizeEvent(event, index, validSegments) {
     gain_db: gain,
     priority: Number.isFinite(Number(event.priority)) ? Number(event.priority) : 2,
     sound_description: String(event.sound_description ?? cueId.replace(/_/g, " ")),
+    semantic_event_id: String(event.semantic_event_id ?? "").trim(),
+    physical_or_editorial_cause: String(event.physical_or_editorial_cause ?? "").trim(),
     target_phrase: String(event.target_phrase ?? event.anchor_phrase ?? event.anchor_text ?? "").trim(),
     beat_reason: String(event.beat_reason ?? "LLM-selected beat punctuation"),
     recurrence_class: recurrence,
@@ -914,6 +942,78 @@ function normalizeEvent(event, index, validSegments) {
     source: "llm_audio_enrichment",
     planner: plannerName,
   };
+}
+
+export function semanticSfxEventFindingsForTests(events, emphasisMomentIds = []) {
+  const validMomentIds = new Set((emphasisMomentIds ?? []).map(String));
+  return (events ?? []).flatMap((event, index) => {
+    const findings = [];
+    const eventId = String(event.event_id ?? `event_${index + 1}`);
+    const semanticEventId = String(event.semantic_event_id ?? "").trim();
+    const cause = String(event.physical_or_editorial_cause ?? "").trim();
+    const concreteCause = cause.length >= 12
+      && !/^(?:transition|energy|mood|impact|whoosh|beep|dramatic beat|retention|emphasis)$/i.test(cause);
+    if (!semanticEventId || !validMomentIds.has(semanticEventId)) {
+      findings.push({
+        severity: "blocker",
+        code: "sfx_semantic_event_binding_missing_or_invalid",
+        event_id: eventId,
+        semantic_event_id: semanticEventId || null,
+      });
+    }
+    if (!concreteCause) {
+      findings.push({
+        severity: "blocker",
+        code: "sfx_physical_or_editorial_cause_missing",
+        event_id: eventId,
+        physical_or_editorial_cause: cause || null,
+      });
+    }
+    return findings;
+  });
+}
+
+function normalizeEmphasisMoment(moment, index, validSegments) {
+  const segmentId = String(moment.segment_id ?? "");
+  const segment = validSegments.get(segmentId)
+    ?? [...validSegments.values()][Math.min(index, validSegments.size - 1)]
+    ?? {};
+  return {
+    moment_id: String(moment.moment_id ?? `emphasis_${String(index + 1).padStart(3, "0")}`),
+    segment_id: String(segment.segment_id ?? segmentId),
+    target_phrase: String(moment.target_phrase ?? "").trim(),
+    offset_sec: Math.max(0, Number(moment.offset_sec ?? 0) || 0),
+    story_function: String(moment.story_function ?? "").trim(),
+    value_tier: ["hero", "priority", "connective"].includes(String(moment.value_tier))
+      ? String(moment.value_tier)
+      : "priority",
+    visual_change: String(moment.visual_change ?? "").trim(),
+    motion_role: String(moment.motion_role ?? "still_preferred").trim(),
+    sfx_event_id: moment.sfx_event_id ? String(moment.sfx_event_id) : null,
+    score_behavior: String(moment.score_behavior ?? "no_change").trim(),
+    silence_behavior: String(moment.silence_behavior ?? "not_required").trim(),
+    subtitle_emphasis: [...new Set((moment.subtitle_emphasis ?? []).map(String).filter(Boolean))],
+    coordination_note: String(moment.coordination_note ?? "").trim(),
+  };
+}
+
+export function audiovisualEmphasisFindingsForTests(moments) {
+  const allowedMotion = new Set(["changes_understanding", "changes_emotion", "supports_clarity", "still_preferred"]);
+  const allowedScore = new Set(["hold", "build", "drop", "release", "silence", "no_change"]);
+  const allowedSilence = new Set(["preserve_before", "preserve_after", "preserve_both", "not_required"]);
+  const ids = new Set();
+  return (moments ?? []).flatMap((moment, index) => {
+    const findings = [];
+    for (const field of ["moment_id", "segment_id", "target_phrase", "story_function", "visual_change", "coordination_note"]) {
+      if (!String(moment?.[field] ?? "").trim()) findings.push({ severity: "blocker", code: "audiovisual_emphasis_field_missing", field, moment_index: index });
+    }
+    if (ids.has(moment.moment_id)) findings.push({ severity: "blocker", code: "audiovisual_emphasis_duplicate_id", moment_id: moment.moment_id });
+    ids.add(moment.moment_id);
+    if (!allowedMotion.has(moment.motion_role)) findings.push({ severity: "blocker", code: "audiovisual_emphasis_motion_role_invalid", moment_id: moment.moment_id });
+    if (!allowedScore.has(moment.score_behavior)) findings.push({ severity: "blocker", code: "audiovisual_emphasis_score_behavior_invalid", moment_id: moment.moment_id });
+    if (!allowedSilence.has(moment.silence_behavior)) findings.push({ severity: "blocker", code: "audiovisual_emphasis_silence_behavior_invalid", moment_id: moment.moment_id });
+    return findings;
+  });
 }
 
 function normalizeToken(value) {
@@ -1164,10 +1264,37 @@ async function main() {
   llm.parsed = await resolvePlannerArtifact(llm.parsed);
   const validSegments = new Map(segments.map((segment) => [String(segment.segment_id), segment]));
   const rawEvents = Array.isArray(llm.parsed.sfx_events) ? llm.parsed.sfx_events : [];
+  const rawEmphasisMoments = Array.isArray(llm.parsed.emphasis_moments)
+    ? llm.parsed.emphasis_moments
+    : [];
   const rawChapters = !sfxOnly && !scoreDropsOnly && Array.isArray(llm.parsed.score_chapters) ? llm.parsed.score_chapters : [];
   const rawScoreDrops = !sfxOnly && Array.isArray(llm.parsed.score_drops) ? llm.parsed.score_drops : [];
-  const normalizedEvents = rawEvents
+  const normalizedEmphasisMoments = rawEmphasisMoments
+    .map((moment, index) => normalizeEmphasisMoment(moment, index, validSegments))
+    .filter((moment) => moment.segment_id)
+    .map((moment) => {
+      const resolved = resolveWordTiming(moment, validSegments, wordTiming);
+      return {
+        ...resolved.event,
+        absolute_start_sec: resolved.event.absolute_start_sec ?? null,
+        placement_resolution: resolved.placement_resolution,
+      };
+    });
+  const emphasisFindings = audiovisualEmphasisFindingsForTests(normalizedEmphasisMoments);
+  if (emphasisFindings.some((finding) => finding.severity === "blocker")) {
+    throw new Error(`Audiovisual emphasis spine failed: ${emphasisFindings.slice(0, 12).map((finding) => `${finding.code}:${finding.field ?? finding.moment_id ?? finding.moment_index}`).join(", ")}`);
+  }
+  const normalizedEventRows = rawEvents
     .map((event, index) => normalizeEvent(event, index, validSegments))
+    .filter((event) => event.segment_id);
+  const semanticSfxFindings = semanticSfxEventFindingsForTests(
+    normalizedEventRows,
+    normalizedEmphasisMoments.map((moment) => moment.moment_id),
+  );
+  if (semanticSfxFindings.some((finding) => finding.severity === "blocker")) {
+    throw new Error(`Semantic SFX contract failed before asset spend: ${semanticSfxFindings.slice(0, 12).map((finding) => `${finding.code}:${finding.event_id}`).join(", ")}`);
+  }
+  const normalizedEvents = normalizedEventRows
     .filter((event) => event.segment_id)
     .map((event) => resolveWordTiming(event, validSegments, wordTiming));
   const normalizedChapters = rawChapters.map((chapter, index) => normalizeChapter(chapter, index, durationSec))
@@ -1296,6 +1423,29 @@ async function main() {
     }
   }
 
+  const audiovisualSpine = {
+    schema: "goldflow_audiovisual_emphasis_spine_v1",
+    status: "passed",
+    channel,
+    series_slug: series,
+    week,
+    episode,
+    source_script_hash: sourceScriptHash,
+    source_script_path: scriptPath,
+    narration_report_path: narrationReportPath,
+    word_timing_path: wordTimingPath,
+    timing_source: "local_whisper_word_timing",
+    timing_gate: whisperTimingGate,
+    policy: "Only earned high-value moments coordinate visual change, motion, semantic SFX, score, silence, and subtitle emphasis. Silence is an authored layer, and generic effects are forbidden.",
+    emphasis_moment_count: normalizedEmphasisMoments.length,
+    emphasis_moments: normalizedEmphasisMoments,
+    semantic_sfx_event_count: normalizedEventRows.length,
+    semantic_sfx_findings: semanticSfxFindings,
+    updated_at: nowIso(),
+  };
+  await writeJson(audiovisualSpinePath, audiovisualSpine);
+  const audiovisualSpineSha256 = await hashFile(audiovisualSpinePath);
+
   const sfxPlan = {
     status: eventResolutions.every((event) => event.asset_path && (event.validation?.status ?? "passed") !== "failed") ? "passed" : "failed",
     planner: plannerName,
@@ -1307,13 +1457,15 @@ async function main() {
     source_script_hash: sourceScriptHash,
     source_script_path: scriptPath,
     narration_report_path: narrationReportPath,
-    source_artifact_paths: [scriptPath, audioPlanPath, dialogueMapPath, qwenReportPath],
-    source_hashes: Object.fromEntries((await Promise.all([scriptPath, audioPlanPath, dialogueMapPath, qwenReportPath, wordTimingPath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: [scriptPath, audioPlanPath, dialogueMapPath, qwenReportPath, audiovisualSpinePath],
+    source_hashes: Object.fromEntries((await Promise.all([scriptPath, audioPlanPath, dialogueMapPath, qwenReportPath, wordTimingPath, audiovisualSpinePath].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: "local_whisper_word_timing",
     timing_gate: whisperTimingGate,
     policy: "LLM SFX enrichment is the primary cue source; deterministic regex SFX is fallback only. LLM decides sound intent and target phrase; deterministic code resolves target_phrase through local Whisper word timing and uses segment-relative placement only when a phrase miss passes the sanity envelope.",
     retention_mix: retentionMix,
     palette: llm.parsed.palette ?? {},
+    audiovisual_emphasis_spine_path: audiovisualSpinePath,
+    audiovisual_emphasis_spine_sha256: audiovisualSpineSha256,
     mix_rules: {
       narration_priority: "dominant",
       ambience_gain_db_range: "-34 to -28",
@@ -1450,6 +1602,12 @@ async function main() {
       content_path: llm.contentPath,
       retry_attempt: llm.retry_attempt ?? 0,
     },
+    audiovisual_emphasis_spine: {
+      path: audiovisualSpinePath,
+      sha256: audiovisualSpineSha256,
+      emphasis_moment_count: audiovisualSpine.emphasis_moment_count,
+      policy: audiovisualSpine.policy,
+    },
     sfx: {
       plan_path: sfxPlanPath,
       cue_count: sfxPlan.resolved_event_count,
@@ -1564,15 +1722,17 @@ async function main() {
   if (report.status !== "passed") process.exitCode = 1;
 }
 
-main().catch(async (error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  await writeJson(enrichmentReportPath, {
-    status: "failed",
-    planner: plannerName,
-    narration_report_path: narrationReportPath,
-    error: message,
-    updated_at: nowIso(),
-  }).catch(() => {});
-  console.error(message);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeJson(enrichmentReportPath, {
+      status: "failed",
+      planner: plannerName,
+      narration_report_path: narrationReportPath,
+      error: message,
+      updated_at: nowIso(),
+    }).catch(() => {});
+    console.error(message);
+    process.exitCode = 1;
+  });
+}

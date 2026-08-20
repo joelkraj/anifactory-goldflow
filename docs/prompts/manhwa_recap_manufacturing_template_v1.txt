@@ -1,0 +1,719 @@
+Write a complete manhwa recap narration script of at least [WORD COUNT] words.
+
+Title: [TITLE]
+
+Premise: [CORE PREMISE]
+
+Write this as a great longform manhwa recap story with [GENRE ELEMENTS, SUCH AS BETRAYAL, REVENGE, POWER SCALING, SURVIVAL, BUSINESS WARFARE, GAME SYSTEMS, ROMANCE, PUBLIC HUMILIATION, ETC].
+
+Use aggressive YouTube longform retention pacing.
+
+The story must continually create open loops, reversals, foreshadowing, escalating payoffs, status changes, and new threats.
+
+The first forty words must fully show [OPENING BETRAYAL OR HUMILIATION].
+
+The first eighty words must clearly establish [WHY THE MAIN CHARACTER IS CONSIDERED BROKE, WEAK, USELESS, LOW STATUS, OR UNWORTHY].
+
+The first one hundred twenty words must reveal [CORE POWER, SYSTEM, GAME MECHANIC, WORLD CHANGE, OR STORY ENGINE] and immediately move into story action.
+
+Within the first three hundred words, give the main character an immediate problem that forces them to use the mechanic.
+
+Within the first six hundred words, deliver the first satisfying proof that the mechanic works.
+
+Within the first one thousand words, introduce a larger threat showing that the first victory was only the beginning.
+
+The main character is [MAIN CHARACTER NAME AND BASIC DESCRIPTION].
+
+The main character begins as [STARTING STATUS, SUCH AS BROKE, LOW RANK, FIRED, BETRAYED, WEAK, UNKNOWN, ETC].
+
+The main antagonist or betrayal figure is [ANTAGONIST OR EX PARTNER].
+
+Their relationship to the main character is [RELATIONSHIP].
+
+The betrayal happens because [WHY THEY BETRAY OR ABANDON THE MAIN CHARACTER].
+
+The person or situation they choose instead is [RIVAL, RICH EXECUTIVE, STRONGER PLAYER, GUILD LEADER, ETC].
+
+The original insult, rejection, or humiliation is:
+
+[CORE INSULT OR BETRAYAL LINE]
+
+This line or idea should echo throughout the story and gain new meaning as the main character rises.
+
+The core mechanic is:
+
+[ONE SENTENCE EXPLANATION OF THE MAIN POWER OR SYSTEM]
+
+Keep the mechanic extremely easy to understand.
+
+The audience should understand the core rule almost immediately:
+
+[CORE RULE ONE]
+
+[CORE RULE TWO]
+
+[CORE RULE THREE]
+
+[CORE RULE FOUR]
+
+[CORE RULE FIVE]
+
+The main progression loop is:
+
+[STARTING ACTION]
+
+[RESOURCE OR EXPERIENCE GAINED]
+
+[HOW THE MAIN CHARACTER SPENDS OR USES IT]
+
+[HOW THEY BECOME STRONGER]
+
+[HOW THAT UNLOCKS HARDER CHALLENGES]
+
+[HOW THE LOOP REPEATS AT A BIGGER SCALE]
+
+The main character should not become overwhelmingly powerful immediately.
+
+Begin with small, satisfying victories and let those victories compound.
+
+Early progression should include:
+
+[FIRST SMALL WIN]
+
+[SECOND SMALL WIN]
+
+[FIRST IMPORTANT UPGRADE]
+
+[FIRST TEAMMATE OR ALLY]
+
+[FIRST SERIOUS LOSS OR CLOSE CALL]
+
+[FIRST PUBLIC STATUS REVERSAL]
+
+The main character should gain [LEVELS, MONEY, GOLD, SKILL POINTS, OWNERSHIP, ITEMS, STATS, RANK, ABILITIES, ETC] through [HOW PROGRESSION IS EARNED].
+
+Each progression milestone should unlock something concrete.
+
+Examples include:
+
+[ABILITY OR POWER ONE]
+
+[ABILITY OR POWER TWO]
+
+[ABILITY OR POWER THREE]
+
+[ABILITY OR POWER FOUR]
+
+[ABILITY OR POWER FIVE]
+
+As the story progresses, these abilities should evolve into stronger versions such as:
+
+[EVOLVED ABILITY ONE]
+
+[EVOLVED ABILITY TWO]
+
+[EVOLVED ABILITY THREE]
+
+[EVOLVED ABILITY FOUR]
+
+[FINAL OR LATE GAME ABILITY]
+
+Include item, equipment, asset, or resource progression where appropriate.
+
+Start with simple early upgrades such as:
+
+[EARLY ITEM ONE]
+
+[EARLY ITEM TWO]
+
+[EARLY ITEM THREE]
+
+[EARLY ITEM FOUR]
+
+Then scale into stronger mid and late game upgrades such as:
+
+[MID GAME UPGRADE]
+
+[MID GAME UPGRADE]
+
+[LATE GAME UPGRADE]
+
+[LEGENDARY OR FINAL UPGRADE]
+
+Make each upgrade easy to understand and immediately useful in the story.
+
+Plant important upgrades before their biggest payoff.
+
+If an item saves the main character later, introduce it earlier and allow another character to dismiss, mock, or misunderstand it.
+
+If an ability becomes decisive later, demonstrate a weaker version early.
+
+If a teammate becomes essential later, show their overlooked talent before they become powerful.
+
+If a hidden route, contract clause, ownership stake, side lane, weakness, item interaction, buff, or strategic option becomes decisive later, establish it naturally beforehand.
+
+Use delayed revenge payoffs.
+
+Enemies should frequently mock choices that later become the exact reason they lose.
+
+Apparent disadvantages should become future advantages.
+
+Examples include:
+
+A low damage class later becoming essential.
+
+A cheap item later saving the main character.
+
+An ignored teammate later deciding a major battle.
+
+A humiliating early loss teaching the exact mechanic needed for a later victory.
+
+A seemingly worthless asset becoming strategically essential.
+
+A rival laughing at preparation they later cannot counter.
+
+The world or conflict should begin at a small scale:
+
+[STARTING LOCATION OR FIRST MAP]
+
+Then expand into:
+
+[SECOND SCALE]
+
+[THIRD SCALE]
+
+[FOURTH SCALE]
+
+[FINAL WORLD SCALE]
+
+The story should continually expand without abandoning the original mechanic.
+
+The overall goal is:
+
+[MAIN SURFACE GOAL]
+
+The deeper goal is:
+
+[TRUE LONG TERM GOAL]
+
+The emotional goal is:
+
+[PERSONAL EMOTIONAL ARC]
+
+The final endgame threat or objective is:
+
+[FINAL BOSS, MOTHER NEXUS, CORPORATION, KINGDOM, INVASION SOURCE, WORLD SYSTEM, ETC]
+
+Explain why the main character must keep progressing instead of simply stopping after the first few wins.
+
+[REASON PROGRESSION IS NECESSARY]
+
+Make rank, money, level, ownership, or status materially affect survival and power.
+
+For example:
+
+[LOW TIER EFFECT]
+
+[MID TIER EFFECT]
+
+[HIGH TIER EFFECT]
+
+[TOP TIER EFFECT]
+
+[FINAL RANK OR STATUS EFFECT]
+
+The betrayal figure should initially believe they made the correct choice.
+
+As the main character rises, they should experience increasing:
+
+[DISBELIEF]
+
+[REGRET]
+
+[JEALOUSY]
+
+[EMBARRASSMENT]
+
+[FEAR]
+
+[REALIZATION]
+
+Do not make the main character obsessed with winning them back.
+
+The revenge should come from the main character becoming emotionally indifferent while the betrayal figure becomes increasingly unable to ignore their rise.
+
+The betrayal figure may eventually attempt to reconnect, apologize, or return, but the main character should understand:
+
+[WHAT THE BETRAYAL FIGURE ACTUALLY MISSES]
+
+Give the main character several antagonists beyond the original betrayal figure.
+
+Include:
+
+[ARROGANT EARLY ANTAGONIST]
+
+[STRONGER RIVAL]
+
+[FAKE LEADER]
+
+[POWERFUL MID GAME ENEMY]
+
+[CORRUPT AUTHORITY FIGURE]
+
+[MAJOR LATE GAME RIVAL]
+
+[FINAL ANTAGONIST]
+
+Each antagonist should challenge a different weakness in the main character.
+
+The main character should defeat enemies primarily through:
+
+[STRATEGY]
+
+[POWER MECHANIC]
+
+[RESOURCE MANAGEMENT]
+
+[TEAMWORK]
+
+[NEGOTIATION OR TACTICS]
+
+[ITEM OR ABILITY COUNTERS]
+
+[SUPERIOR TIMING]
+
+[ENEMY MISTAKES]
+
+Avoid solving every conflict through raw strength.
+
+Use aggressive reversal pacing.
+
+Every five hundred to eight hundred words, introduce at least one meaningful change such as:
+
+a new enemy
+
+a new ability
+
+a new item
+
+a new objective
+
+a rank increase
+
+a betrayal consequence
+
+a new ally
+
+a hidden rule
+
+a map change
+
+a new acquisition
+
+a public humiliation
+
+a status reversal
+
+a power escalation
+
+a new weakness
+
+a hidden opportunity
+
+Every one thousand five hundred to two thousand words, include a major reversal.
+
+The audience should temporarily believe the main character may lose because they are trapped, outnumbered, broke, outscaled, betrayed, injured, politically cornered, deprived of resources, or facing an apparently unbeatable enemy.
+
+The reversal should then pay off an earlier preparation, overlooked mechanic, hidden asset, item, teammate, contract, side route, buff, ability, clue, or misunderstood rule.
+
+Do not rely on random last second solutions that were never established.
+
+The audience should frequently realize:
+
+The enemy does not know they have already lost.
+
+That weak item mattered.
+
+That strange earlier scene was foreshadowing.
+
+The main character was preparing this the entire time.
+
+Winning the fight was never the real objective.
+
+Use false victories.
+
+Do not let a major victory simply end the tension.
+
+A victory should frequently reveal:
+
+a stronger enemy
+
+a higher rank requirement
+
+a hidden world layer
+
+a second betrayal
+
+a larger objective
+
+a new portal
+
+a new map
+
+a more dangerous version of the mechanic
+
+a powerful rival
+
+a hidden cost of victory
+
+a larger conspiracy
+
+a final enemy behind the apparent enemy
+
+Never resolve one major problem without creating the next larger problem soon afterward.
+
+Maintain at least two active open questions through most of the story.
+
+Possible open questions include:
+
+What is the true source of the system or invasion?
+
+Why did the main character receive this specific class or power?
+
+What is the antagonist secretly preparing?
+
+Why is one apparently worthless item important?
+
+What happens at the next rank?
+
+What exists beyond the current map?
+
+What did the main character notice that nobody else noticed?
+
+Who is manipulating the conflict?
+
+Why did the system choose this person?
+
+What is the hidden cost of the power?
+
+Resolve open questions gradually.
+
+When one major question is answered, introduce another meaningful question so curiosity remains active.
+
+Foreshadow the main character’s biggest plays early.
+
+If the climax involves a backdoor, show early that the main character notices side waves while everyone else watches fights.
+
+If a hidden acquisition wins the final corporate battle, establish the overlooked asset or clause long before the reveal.
+
+If a stopwatch or shield saves the main character later, let someone mock the purchase earlier.
+
+If an ally decides the climax, establish their useful trait while everyone still overlooks them.
+
+If the final enemy has a hidden weakness, plant evidence before the final battle.
+
+Use repeated callback reversals.
+
+Bring back earlier insults, mistakes, objects, abilities, locations, promises, losses, or humiliations in new contexts.
+
+A place where the main character was humiliated can later become the place where their authority is revealed.
+
+An insult about a weak class can later describe the exact ability that saves everyone.
+
+An enemy who mocks farming, saving money, warding, contracts, preparation, or caution should eventually lose because they ignored that exact principle.
+
+Include at least one major sequence where an enemy believes:
+
+[WHAT THE ENEMY THINKS THEY HAVE WON OR DESTROYED]
+
+But the main character reveals:
+
+[HIDDEN PLAN, OWNERSHIP, BACKDOOR, TRAP, OBJECTIVE PLAY, CONTRACT CLAUSE, SECOND ARMY, SECRET BUFF, ETC]
+
+The enemy should realize too late that:
+
+[CORE REVERSAL LINE OR IDEA]
+
+Include several satisfying public humiliation and status reversal moments.
+
+Examples can include:
+
+[STATUS REVERSAL ONE]
+
+[STATUS REVERSAL TWO]
+
+[STATUS REVERSAL THREE]
+
+[STATUS REVERSAL FOUR]
+
+[STATUS REVERSAL FIVE]
+
+Keep the humiliation believable within the rules of the story.
+
+The strongest moments should come from facts, results, mechanics, ownership, rankings, abilities, contracts, objective control, or enemy mistakes speaking for the main character.
+
+Do not make the main character constantly brag.
+
+Allow other characters, system announcements, public records, rankings, contracts, ownership reveals, respected allies, defeated enemies, or objective results to expose how powerful the main character has become.
+
+Include memorable high skill or high intelligence sequences inspired by:
+
+[REFERENCE OR PLAY ONE]
+
+[REFERENCE OR PLAY TWO]
+
+[REFERENCE OR PLAY THREE]
+
+[REFERENCE OR PLAY FOUR]
+
+[REFERENCE OR PLAY FIVE]
+
+Do not directly copy another story or game.
+
+Use the references only as inspiration for the type of play, reversal, duel, strategy, emotional beat, or spectacle.
+
+The main character should build a team over time.
+
+Important allies can include:
+
+[ALLY ONE AND ROLE]
+
+[ALLY TWO AND ROLE]
+
+[ALLY THREE AND ROLE]
+
+[ALLY FOUR AND ROLE]
+
+[ALLY FIVE AND ROLE]
+
+Each ally should have their own usefulness, personality, weakness, progression, and moment where their specific skill matters.
+
+Do not make every ally exist only to praise the main character.
+
+Include conflict within the team, mistakes, disagreements, jealousy, fear, learning, sacrifice, and earned loyalty.
+
+If there is a new romantic possibility, introduce them only after the main character has emotionally grown.
+
+The new romantic possibility should:
+
+[TRAIT ONE]
+
+[TRAIT TWO]
+
+[TRAIT THREE]
+
+[OWN GOAL OR AMBITION]
+
+[WHY THEY RESPECT THE MAIN CHARACTER]
+
+They should not exist only to make the ex jealous.
+
+Avoid long stretches where the main character simply wins repeatedly without uncertainty.
+
+Frequently alternate between:
+
+victory
+
+new threat
+
+preparation
+
+setback
+
+revelation
+
+revenge payoff
+
+larger escalation
+
+The main character’s advantage should evolve over the course of the story.
+
+For example:
+
+Early advantage is [EARLY ADVANTAGE].
+
+Then it becomes [SECOND ADVANTAGE].
+
+Then [THIRD ADVANTAGE].
+
+Then [LATE GAME ADVANTAGE].
+
+Finally [FINAL FORM OF ADVANTAGE].
+
+Do not let the same exact trick solve every arc.
+
+Maintain frequent forward movement.
+
+Every five hundred to eight hundred words should materially change the story.
+
+Avoid long stretches of reflection, travel, repetitive fighting, repetitive business explanation, or repeated emotional conversations that do not alter the situation.
+
+End important sequences with forward momentum rather than long reflection.
+
+Prefer endings such as:
+
+a new portal opens
+
+a boss spawns
+
+a hidden enemy reveals themselves
+
+a rank requirement appears
+
+an ally discovers something
+
+the system announces a new rule
+
+the main character realizes the victory was bait
+
+an enemy begins a larger plan
+
+a supposedly defeated threat evolves
+
+a hidden asset changes ownership
+
+a powerful figure arrives
+
+a betrayal is discovered
+
+a new world layer opens
+
+The audience should repeatedly feel:
+
+I need to see what happens next.
+
+How is the main character going to escape this?
+
+Why did they show that earlier?
+
+Wait, that weak item mattered?
+
+The enemy does not realize they already lost.
+
+The first victory was only the tutorial.
+
+Avoid spending too long explaining systems, powers, game terminology, business terminology, lore, or technical mechanics.
+
+Explain mechanics through action.
+
+Instead of explaining [MECHANIC], show:
+
+[SCENE THAT DEMONSTRATES IT]
+
+Instead of explaining [SECOND MECHANIC], show:
+
+[SCENE THAT DEMONSTRATES IT]
+
+Instead of explaining [THIRD MECHANIC], show:
+
+[SCENE THAT DEMONSTRATES IT]
+
+Keep the main character intelligent, calm, ambitious, increasingly confident, and emotionally controlled.
+
+They may enjoy revenge internally, but they should rarely behave like a cartoon villain.
+
+The strongest moments should come from:
+
+[FACTS]
+
+[RESULTS]
+
+[TIMING]
+
+[STRATEGY]
+
+[POWER SCALING]
+
+[ENEMY MISTAKES]
+
+[PUBLIC RECOGNITION]
+
+The midpoint must substantially redefine the story.
+
+At the midpoint, reveal:
+
+[MIDPOINT REVELATION]
+
+This should reclassify what the audience thought the story was about.
+
+Expand the apparent goal from:
+
+[EARLY GOAL]
+
+Into:
+
+[LARGER GOAL]
+
+The midpoint should make earlier events feel like preparation for something much larger.
+
+The final third should repeatedly call back to earlier planted details so the story feels planned rather than random.
+
+The late game should escalate into:
+
+[LATE GAME SCALE]
+
+[MAJOR WAR OR CONFLICT]
+
+[FINAL POWER EVOLUTION]
+
+[FINAL RANK OR STATUS]
+
+[FINAL OBJECTIVE]
+
+The climax should force the main character to use everything learned throughout the story.
+
+The final victory should require:
+
+[EARLY MECHANIC RETURNING]
+
+[TEAMWORK]
+
+[FINAL ABILITY]
+
+[STRATEGIC CHOICE]
+
+[SACRIFICE OR RISK]
+
+[EMOTIONAL GROWTH]
+
+[FORESHADOWED DETAIL PAYOFF]
+
+At least one previously mocked item, weak ability, overlooked ally, old failure, early clue, or apparently minor choice must become decisive in the climax.
+
+End with strong emotional payoff.
+
+The main character should recognize that:
+
+[EXTERNAL VICTORY] is satisfying, but the real victory is [INTERNAL VICTORY].
+
+The person who originally said:
+
+[ORIGINAL INSULT OR BETRAYAL LINE]
+
+Should finally understand:
+
+[FINAL REALIZATION]
+
+The ending should also show:
+
+[WORLD AFTERMATH]
+
+[TEAM AFTERMATH]
+
+[EX OR BETRAYAL FIGURE AFTERMATH]
+
+[MAIN CHARACTER AFTERMATH]
+
+[FINAL SYMBOLIC CALLBACK]
+
+The final lines should emotionally echo the opening without simply repeating it.
+
+The script must be TTS friendly.
+
+Spell out numbers in narration.
+
+Do not use brackets, parentheses, em dashes, slash marks, hashtags, emoji, timestamps, scene labels, production notes, chapter labels, markdown headings, or meta commentary.
+
+Do not say anything before or after the script.
+
+Output only the raw narration script.

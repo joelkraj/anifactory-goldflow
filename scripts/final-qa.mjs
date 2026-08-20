@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { buildFinalMasterIntegrity } from "./lib/final-master-integrity.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -132,9 +133,34 @@ async function main() {
     }
   }
 
-  const approved = flags.approve === "true" || flags["operator-approved"] === "true";
-  const status = blockers.length ? "blocked" : approved ? "passed" : "needs_review";
   const outputPath = path.resolve(flags.output ?? path.join(episodeDir, `final_qa_${episode}.json`));
+  const masterIntegrityPath = path.resolve(flags["master-integrity-output"] ?? path.join(episodeDir, `final_master_integrity_${episode}.json`));
+  let masterIntegrity = null;
+  if (finalVideoHash && media?.format?.duration && String(flags["master-scan"] ?? "true") !== "false") {
+    masterIntegrity = await buildFinalMasterIntegrity({
+      videoPath: finalVideoPath,
+      finalVideoSha256: finalVideoHash,
+      durationSec: Number(media.format.duration),
+      renderReport: { ...renderReport, run_identity_schema: identity.schema ?? "missing" },
+      renderReportPath,
+      outputPath: masterIntegrityPath,
+      ffmpeg: flags.ffmpeg ?? process.env.FFMPEG_BIN ?? "ffmpeg",
+    });
+    blockers.push(...masterIntegrity.blockers.map((row) => row.code));
+  } else if (finalVideoHash && String(flags["master-scan"] ?? "true") === "false") {
+    blockers.push("final_master_integrity_scan_disabled");
+  }
+
+  const approved = flags.approve === "true" || flags["operator-approved"] === "true";
+  const reviewedFindingCodes = new Set(String(flags["reviewed-finding-codes"] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean));
+  const reviewFindings = masterIntegrity?.review_findings ?? [];
+  const unreviewedFindingCodes = [...new Set(reviewFindings
+    .map((row) => String(row.code ?? ""))
+    .filter((code) => code && !reviewedFindingCodes.has(code)))];
+  const status = blockers.length ? "blocked" : approved && !unreviewedFindingCodes.length ? "passed" : "needs_review";
   const report = {
     schema: "goldflow_final_qa_v2",
     status,
@@ -147,10 +173,21 @@ async function main() {
     expected_final_video_sha256: expectedVideoHash,
     source_hash_validation: sourceValidation,
     media_probe: media,
+    final_master_integrity_path: masterIntegrity ? masterIntegrityPath : null,
+    final_master_integrity_sha256: masterIntegrity ? await fileSha256(masterIntegrityPath) : null,
+    final_master_integrity_status: masterIntegrity?.status ?? "missing",
+    final_master_integrity: masterIntegrity ? {
+      scan_policy: masterIntegrity.scan_policy,
+      generated_motion_delivery: masterIntegrity.generated_motion_delivery,
+      diagnostics: masterIntegrity.diagnostics,
+    } : null,
     blockers,
+    review_findings: reviewFindings,
+    reviewed_finding_codes: [...reviewedFindingCodes],
+    unreviewed_finding_codes: unreviewedFindingCodes,
     approved,
     approved_by: approved ? flags["approved-by"] ?? "codex-agent" : null,
-    approval_note: approved ? flags.note ?? "Render, source hashes, streams, and upload-safe geometry reviewed." : null,
+    approval_note: approved ? flags.note ?? "Render lineage, generated motion delivery, subtitles, decode integrity, visuals, and audio diagnostics reviewed." : null,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

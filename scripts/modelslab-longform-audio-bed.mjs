@@ -9,6 +9,11 @@ import { fileURLToPath } from "node:url";
 import { sha256File } from "./lib/file-hash.mjs";
 import { narrationDuckingFilterChain, resolveNarrationDuckingPolicy } from "./lib/narration-ducking-policy.mjs";
 import { resolveNarrationReportPath } from "./lib/narration-artifacts.mjs";
+import {
+  NARRATION_MASTERING_PASSTHROUGH_SCHEMA,
+  masterNarrationTwoPass,
+  narrationMasteringPassthroughDecision,
+} from "./lib/narration-mastering.mjs";
 
 const execFile = promisify(execFileCb);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,7 +26,9 @@ const channel = flags.channel ?? "53rebirth";
 const series = flags.series ?? flags.seriesSlug ?? "series";
 const week = flags.week ?? "current";
 const episode = flags.episode ?? "ep_01";
-const episodeDir = flags.episodeDir ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
+const episodeDir = flags.episodeDir
+  ?? flags["episode-dir"]
+  ?? path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
 const audioDir = path.join(episodeDir, "assets", "audio");
 const scoreProvider = flags["score-provider"] ?? process.env.ANIFACTORY_SCORE_PROVIDER ?? "modelslab";
 const scoreDir = path.join(audioDir, scoreProvider === "local_ace_step" ? "ace_step_score_beds" : "modelslab_score_beds");
@@ -73,6 +80,9 @@ const transitionSfxBoostDb = Number(flags["transition-sfx-boost-db"] ?? 0);
 const narrationVolumeDb = Number(flags["narration-volume-db"] ?? 0);
 const targetLufs = flags["target-lufs"] === undefined ? null : Number(flags["target-lufs"]);
 const truePeakDb = Number(flags["true-peak-db"] ?? -1.0);
+const narrationTruePeakDb = flags["true-peak-db"] === undefined
+  ? -1.5
+  : Number(flags["true-peak-db"]);
 const loudnessRange = Number(flags["loudness-range"] ?? 11);
 const narrationOnly = flags["narration-only"] === "true";
 const skipScore = flags["skip-score"] === "true";
@@ -761,8 +771,13 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
   filters.push(`${labels.join("")}amix=inputs=${labels.length}:duration=longest:normalize=0,alimiter=limit=0.98${loudnessFilter}[aout]`);
   await execFile("ffmpeg", ["-y", ...inputs, "-filter_complex", filters.join(";"), "-map", "[aout]", "-t", durationSec.toFixed(3), "-ar", "44100", "-ac", "2", "-acodec", "pcm_s16le", wavPath], { maxBuffer: 1024 * 1024 * 32 });
   await execFile("ffmpeg", ["-y", "-i", wavPath, "-c:a", "aac", "-b:a", "192k", m4aPath], { maxBuffer: 1024 * 1024 * 8 });
+  const renderInputSha256 = await sha256File(wavPath);
   return {
     wav_path: wavPath,
+    render_input_path: wavPath,
+    render_input_sha256: renderInputSha256,
+    render_input_codec: "pcm_s16le",
+    render_input_lossless: true,
     m4a_path: m4aPath,
     duration_sec: await mediaDuration(wavPath),
     score_input_count: scoreRows.length,
@@ -811,35 +826,81 @@ async function mixLongform({ narrationPath, scoreRows, scorePlan, scoreDropPlan,
   };
 }
 
-async function mixNarrationOnly({ narrationPath, durationSec }) {
+async function mixNarrationOnly({ narrationPath, durationSec, narrationReport }) {
   await fs.mkdir(mixDir, { recursive: true });
   const wavPath = path.join(mixDir, `${outputBase}.wav`);
   const m4aPath = path.join(mixDir, `${outputBase}.m4a`);
-  const loudnessFilter = Number.isFinite(targetLufs)
-    ? `,loudnorm=I=${targetLufs}:TP=${truePeakDb}:LRA=${loudnessRange}:print_format=summary`
-    : "";
-  await execFile("ffmpeg", [
-    "-y",
-    "-i", narrationPath,
-    "-filter_complex", `[0:a]volume=${narrationVolumeDb}dB,alimiter=limit=0.98${loudnessFilter}[aout]`,
-    "-map", "[aout]",
-    "-t", durationSec.toFixed(3),
-    "-ar", "44100",
-    "-ac", "2",
-    "-acodec", "pcm_s16le",
-    wavPath,
-  ], { maxBuffer: 1024 * 1024 * 16 });
+  const masteringReportPath = path.join(
+    episodeDir,
+    `narration_mastering_report_${episode}${reportSuffix}.json`,
+  );
+  const narrationSha256 = await sha256File(narrationPath);
+  const effectiveTargetLufs = Number.isFinite(targetLufs) ? targetLufs : -16;
+  const effectiveTruePeakDb = Number.isFinite(narrationTruePeakDb)
+    ? narrationTruePeakDb
+    : -1.5;
+  const passthroughDecision = narrationMasteringPassthroughDecision({
+    narrationPath,
+    narrationSha256,
+    durationSec,
+    narrationVolumeDb,
+    narrationReport,
+    targetLufs: effectiveTargetLufs,
+    truePeakDbtp: effectiveTruePeakDb,
+    loudnessRange,
+  });
+  const upstreamMaster = passthroughDecision.mastering;
+  let mastering;
+  if (passthroughDecision.eligible) {
+    await fs.copyFile(narrationPath, wavPath);
+    const outputSha256 = await sha256File(wavPath);
+    mastering = {
+      schema: NARRATION_MASTERING_PASSTHROUGH_SCHEMA,
+      status: "passed",
+      passthrough: true,
+      reason: "upstream_hash_bound_canonical_master_already_passed",
+      policy: upstreamMaster.policy,
+      input_path: narrationPath,
+      input_sha256: narrationSha256,
+      output_path: wavPath,
+      output_sha256: outputSha256,
+      input_probe: upstreamMaster.output_probe,
+      output_probe: upstreamMaster.output_probe,
+      measured_integrated_lufs: upstreamMaster.measured_integrated_lufs,
+      measured_true_peak_dbtp: upstreamMaster.measured_true_peak_dbtp,
+      duration_delta_ms: 0,
+      blockers: [],
+    };
+    await writeJson(masteringReportPath, mastering);
+  } else {
+    mastering = await masterNarrationTwoPass({
+      inputPath: narrationPath,
+      outputPath: wavPath,
+      reportPath: masteringReportPath,
+      targetLufs: effectiveTargetLufs,
+      truePeakDbtp: effectiveTruePeakDb,
+      loudnessRange,
+      sampleRateHz: 24000,
+      channels: 1,
+      preFilter: narrationVolumeDb === 0 ? null : `volume=${narrationVolumeDb}dB`,
+      maxDurationSec: durationSec,
+    });
+  }
+  if (mastering.status !== "passed") {
+    throw new Error(
+      `Narration mastering failed: ${mastering.blockers.map((row) => row.code).join(", ")}`,
+    );
+  }
   await execFile("ffmpeg", ["-y", "-i", wavPath, "-c:a", "aac", "-b:a", "192k", m4aPath], { maxBuffer: 1024 * 1024 * 8 });
   const duration = await mediaDuration(wavPath);
-  let intermediateWavDeleted = false;
-  if (!keepIntermediateWav) {
-    await fs.rm(wavPath, { force: true });
-    intermediateWavDeleted = true;
-  }
   return {
-    wav_path: keepIntermediateWav ? wavPath : null,
+    wav_path: wavPath,
+    render_input_path: wavPath,
+    render_input_sha256: await sha256File(wavPath),
+    render_input_codec: "pcm_s16le",
+    render_input_lossless: true,
     intermediate_wav_path: wavPath,
-    intermediate_wav_deleted: intermediateWavDeleted,
+    intermediate_wav_deleted: false,
     m4a_path: m4aPath,
     duration_sec: duration,
     audio_design_enabled: false,
@@ -855,10 +916,12 @@ async function mixNarrationOnly({ narrationPath, durationSec }) {
     transition_sfx_enabled: false,
     transition_sfx_input_count: 0,
     transition_sfx_event_count: 0,
-    target_lufs: Number.isFinite(targetLufs) ? targetLufs : null,
-    true_peak_db: Number.isFinite(targetLufs) ? truePeakDb : null,
-    loudness_range: Number.isFinite(targetLufs) ? loudnessRange : null,
-    mix_policy: "Narrator-only bed: narration gain, limiter, and optional loudnorm only. SFX, score, ambience, and transition SFX are disabled.",
+    target_lufs: effectiveTargetLufs,
+    true_peak_db: effectiveTruePeakDb,
+    loudness_range: loudnessRange,
+    mastering_report_path: masteringReportPath,
+    mastering,
+    mix_policy: "Narrator-only bed: immutable narration receives one deterministic two-pass stream-level loudness master. No per-unit normalization, denoise, tempo processing, SFX, score, ambience, or transition SFX.",
   };
 }
 
@@ -900,7 +963,11 @@ async function start() {
   const mix = dryRun
     ? null
     : narrationOnly
-      ? await mixNarrationOnly({ narrationPath, durationSec })
+      ? await mixNarrationOnly({
+          narrationPath,
+          durationSec,
+          narrationReport: qwenReport,
+        })
       : await mixLongform({
           narrationPath,
           scoreRows,
@@ -914,7 +981,7 @@ async function start() {
           qwenReport,
         });
   const scoreMeta = scoreProviderMeta();
-  const finalAudioPath = mix?.m4a_path ?? mix?.wav_path ?? null;
+  const finalAudioPath = mix?.render_input_path ?? mix?.wav_path ?? mix?.m4a_path ?? null;
   const qwenReportSha256 = await sha256File(qwenReportPath);
   const narrationSha256 = await sha256File(narrationPath);
   const finalAudioSha256 = finalAudioPath && await exists(finalAudioPath) ? await sha256File(finalAudioPath) : null;
@@ -945,6 +1012,7 @@ async function start() {
     qwen_report_path: qwenReportPath,
     qwen_report_sha256: qwenReportSha256,
     source_script_hash: qwenReport?.source_script_hash ?? null,
+    final_audio_path: finalAudioPath,
     final_audio_sha256: finalAudioSha256,
     source_hashes: {
       [qwenReportPath]: qwenReportSha256,

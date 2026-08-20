@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import {
+  bindTreatmentSelectionAnchors,
   ARCHITECTURE_REDTEAM_SCHEMA,
   LONGFORM_DRAFT_SELECTION_SCHEMA,
   PACKAGE_OUTLIER_LEDGER_SCHEMA,
+  PACKAGE_OUTLIER_LEDGER_SCHEMA_V2,
+  PACKAGE_OUTLIER_LEDGER_SCHEMA_V3,
   PACKAGE_ADJUDICATION_SCHEMA,
   PACKAGE_TOURNAMENT_CONSENSUS_SCHEMA,
   PACKAGE_TOURNAMENT_SCHEMA,
   PREMISE_SELECTION_V2_SCHEMA,
+  PREMISE_MARKET_DIMENSION_IDS,
+  PREMISE_SLATE_V3_SCHEMA,
   PREMISE_SLOT_IDS,
   REFERENCE_DENSITY_DIMENSION_IDS,
   REFERENCE_DENSITY_DOMINANCE_SCHEMA,
@@ -15,6 +20,7 @@ import {
   bindReferenceDensityAnchors,
   bindReferenceMeritFrontierAnchors,
   bindSourceSemanticAcceptanceAnchors,
+  projectPackageOutlierEntries,
   COLD_LISTENER_ACCEPTANCE_REQUIREMENT_IDS,
   SEMANTIC_ACCEPTANCE_REQUIREMENT_IDS,
   SOURCE_DIAGNOSTIC_V2_SCHEMA,
@@ -37,6 +43,7 @@ import {
   validatePackageOutlierLedger,
   validateSourceRoomReleaseV2,
   validateSourceDiagnosticV2,
+  validateSourceRevisionLedger,
   validateSourceEvidenceRegistry,
   validateSourceSemanticAcceptance,
   validateSourceStageApproval,
@@ -434,6 +441,33 @@ export async function runWinnerSourceRoomV2ContractTests() {
     evidenceRegistrySha256: "registry_hash",
     packageOutlierLedger: outliers,
   }).done, true);
+  const premiseMovieBindings = new Map(outlierBoundSlate.candidates.map((candidate, index) => [
+    `blind_movie_${String(index + 1).padStart(2, "0")}`,
+    HASHES.a,
+  ]));
+  const movieBoundSlate = structuredClone(outlierBoundSlate);
+  for (const [index, candidate] of movieBoundSlate.candidates.entries()) {
+    candidate.source_premise_movie = {
+      blind_id: `blind_movie_${String(index + 1).padStart(2, "0")}`,
+      premise_movie_sha256: HASHES.a,
+    };
+  }
+  assert.equal(validatePremiseSlateV2(movieBoundSlate, {
+    evidenceRegistry: evidence,
+    evidenceRegistrySha256: "registry_hash",
+    packageOutlierLedger: outliers,
+    premiseMovieBindings,
+  }).done, true);
+  const duplicateMoviePackage = structuredClone(movieBoundSlate);
+  duplicateMoviePackage.candidates[5].source_premise_movie = {
+    ...duplicateMoviePackage.candidates[0].source_premise_movie,
+  };
+  assert.equal(validatePremiseSlateV2(duplicateMoviePackage, {
+    evidenceRegistry: evidence,
+    evidenceRegistrySha256: "registry_hash",
+    packageOutlierLedger: outliers,
+    premiseMovieBindings,
+  }).done, false);
   const unknownOutlier = structuredClone(outlierBoundSlate);
   unknownOutlier.candidates[0].outlier_mirror.source_id = "missing_outlier";
   assert.equal(validatePremiseSlateV2(unknownOutlier, {
@@ -441,6 +475,96 @@ export async function runWinnerSourceRoomV2ContractTests() {
     evidenceRegistrySha256: "registry_hash",
     packageOutlierLedger: outliers,
   }).done, false);
+
+  const measuredOutliers = {
+    ...packageOutlierLedger(),
+    schema: PACKAGE_OUTLIER_LEDGER_SCHEMA_V2,
+    entries: Array.from({ length: 10 }, (_, index) => ({
+      entry_id: `measured_${index + 1}`,
+      title: `Measured title ${index + 1}`,
+      source_type: index < 7 ? "public_niche_outlier" : "own_channel",
+      performance_signal: `Measured performance ${index + 1}`,
+      source_reference: `https://youtube.test/watch?v=measured_${index + 1}`,
+      video_id: `measured_${index + 1}`,
+      channel_title: `Channel ${index + 1}`,
+      published_at: `2026-08-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+      captured_at: "2026-08-12T00:00:00.000Z",
+      views: 100_000 + index,
+      channel_subscribers: 10_000,
+      views_per_day: 1_000 + index,
+      previous_ten_median_views: 10_000,
+      breakout_multiple: index + 1,
+      measurement_status: "verified",
+      package_grammar: index < 5 ? "betrayed_then_regressed" : `grammar_${index}`,
+      thumbnail_reference: `/tmp/thumb_${index + 1}.png`,
+    })),
+  };
+  assert.equal(validatePackageOutlierLedger(measuredOutliers).done, true);
+  const rankedOutliers = projectPackageOutlierEntries(measuredOutliers, { perSourceLimit: 5, grammarCap: 3 });
+  assert.equal(rankedOutliers[0].entry_id, "measured_7");
+  assert.ok(rankedOutliers.filter((entry) => entry.package_grammar === "betrayed_then_regressed").length <= 3);
+  const measuredOutliersV3 = {
+    ...measuredOutliers,
+    schema: PACKAGE_OUTLIER_LEDGER_SCHEMA_V3,
+    comment_language_evidence: Array.from({ length: 25 }, (_, index) => {
+      const sourceIndex = (index % 5) + 1;
+      return {
+        evidence_id: `comment_${index + 1}`,
+        source_entry_id: `measured_${sourceIndex}`,
+        source_video_id: `measured_${sourceIndex}`,
+        exact_comment: `Anonymized viewer request or reaction ${index + 1}.`,
+        category: ["adjacent_request", "unresolved_question", "anger", "fantasy_desire", "confusion"][index % 5],
+        source_reference: `https://youtube.test/watch?v=measured_${sourceIndex}&comment=${index + 1}`,
+        captured_at: "2026-08-12T00:00:00.000Z",
+        production_use: "Audience wording evidence only.",
+        anonymized: true,
+      };
+    }),
+  };
+  assert.equal(validatePackageOutlierLedger(measuredOutliersV3, { requireCommentLanguage: true }).done, true);
+  const qualitySlate = structuredClone(outlierBoundSlate);
+  qualitySlate.schema = PREMISE_SLATE_V3_SCHEMA;
+  for (const [index, candidate] of qualitySlate.candidates.entries()) {
+    const sourceIndex = (index % 5) + 1;
+    candidate.outlier_mirror.source_id = `measured_${sourceIndex}`;
+    candidate.outlier_mirror.source_title = `Measured title ${sourceIndex}`;
+    candidate.market_validation = {
+      dimensions: PREMISE_MARKET_DIMENSION_IDS.map((id) => ({
+        id,
+        judgment: "strong",
+        evidence_ids: id === "recent_demand" ? [`measured_${sourceIndex}`] : ["claim_positive"],
+        rationale: `${id} has direct supplied evidence.`,
+      })),
+      fatal_weaknesses: [],
+    };
+    candidate.nearest_neighbors = [1, 2].map((neighborIndex) => ({
+      source_id: `measured_${neighborIndex}`,
+      source_title: `Measured title ${neighborIndex}`,
+      title_movie_overlap: "The injury-to-reversal grammar is recognizable.",
+      thumbnail_movie_overlap: "Both use one legible status receipt.",
+      betrayal_mechanic_overlap: "The betrayal is personal but the mechanism differs.",
+      meaningful_new_axis: "The protected relationship becomes the source of power.",
+      convergence_risk: "low",
+      decision: "distinct",
+    }));
+    candidate.audience_language_evidence_ids = [`comment_${sourceIndex}`];
+  }
+  assert.equal(validatePremiseSlateV2(qualitySlate, {
+    evidenceRegistry: evidence,
+    evidenceRegistrySha256: "registry_hash",
+    packageOutlierLedger: measuredOutliersV3,
+  }).done, true);
+  const averagedAwayWeakness = structuredClone(qualitySlate);
+  averagedAwayWeakness.candidates[0].market_validation.dimensions[0].judgment = "unknown";
+  averagedAwayWeakness.candidates[0].market_validation.dimensions[0].evidence_ids = [];
+  assert.equal(validatePremiseSlateV2(averagedAwayWeakness, {
+    evidenceRegistry: evidence,
+    evidenceRegistrySha256: "registry_hash",
+    packageOutlierLedger: measuredOutliersV3,
+  }).done, true);
+  const invalidMeasuredOutliers = structuredClone(measuredOutliers);
+  invalidMeasuredOutliers.entries[0].views_per_day = -1;
+  assert.equal(validatePackageOutlierLedger(invalidMeasuredOutliers).done, false);
   const missingChallenger = structuredClone(slate);
   missingChallenger.candidates[5].slot = "core_1";
   assert.equal(validatePremiseSlateV2(missingChallenger, {
@@ -455,12 +579,12 @@ export async function runWinnerSourceRoomV2ContractTests() {
     schema: PACKAGE_TOURNAMENT_SCHEMA,
     provider_role: "gpt_web_pro",
     premise_slate_sha256: HASHES.a,
-    eligible_candidate_ids: ["candidate_1", "candidate_2"],
+    eligible_candidate_ids: tournamentSlate.candidates.map((candidate) => candidate.id),
     selected_candidate_id: "candidate_1",
     selection_rationale: "Candidate one has the clearest complete click movie and durable human escalation.",
     click_confidence: "strong",
     runway_screen: "strong",
-    comparative_findings: ["candidate_1", "candidate_2"].map((candidateId) => ({
+    comparative_findings: tournamentSlate.candidates.map(({ id: candidateId }) => ({
       candidate_id: candidateId,
       click_movie: "A legible wound becomes a desirable reversal.",
       thumbnail_receipt: "One visible object proves the reversal.",
@@ -474,12 +598,56 @@ export async function runWinnerSourceRoomV2ContractTests() {
   };
   const tournamentOptions = { premiseSlate: tournamentSlate, premiseSlateSha256: HASHES.a };
   assert.equal(validatePackageTournament(tournament, tournamentOptions).done, true);
+  const qualityTournament = structuredClone(tournament);
+  qualityTournament.comparative_findings = qualityTournament.comparative_findings.map((finding) => ({
+    ...finding,
+    market_dimension_verdicts: {
+      dimensions: PREMISE_MARKET_DIMENSION_IDS.map((id) => ({
+        id,
+        judgment: "strong",
+        reason: `${id} passes independently.`,
+      })),
+    },
+    nearest_neighbor_verdict: {
+      decision: "pass",
+      reason: "The package retains demand while adding a meaningful new axis.",
+    },
+    fatal_weakness_verdict: {
+      decision: "pass",
+      reason: "No blocking or unresolved fatal weakness remains.",
+    },
+  }));
+  const qualityTournamentOptions = { premiseSlate: qualitySlate, premiseSlateSha256: HASHES.a };
+  assert.equal(validatePackageTournament(qualityTournament, qualityTournamentOptions).done, true);
+  const hiddenWeakDimension = structuredClone(qualityTournament);
+  hiddenWeakDimension.comparative_findings[0].market_dimension_verdicts.dimensions[0].judgment = "weak";
+  assert.equal(validatePackageTournament(hiddenWeakDimension, qualityTournamentOptions).done, false);
+  const documentedUnknownBreakout = structuredClone(qualityTournament);
+  const documentedBreakoutRow = documentedUnknownBreakout.comparative_findings[0].market_dimension_verdicts.dimensions
+    .find((row) => row.id === "breakout_multiple");
+  documentedBreakoutRow.judgment = "unknown";
+  documentedBreakoutRow.reason = "The previous-ten channel baseline is unavailable, so no formal breakout multiple can be established.";
+  assert.equal(validatePackageTournament(documentedUnknownBreakout, qualityTournamentOptions).done, true);
+  const undocumentedUnknownBreakout = structuredClone(documentedUnknownBreakout);
+  undocumentedUnknownBreakout.comparative_findings[0].market_dimension_verdicts.dimensions
+    .find((row) => row.id === "breakout_multiple").reason = "The result is unknown.";
+  assert.equal(validatePackageTournament(undocumentedUnknownBreakout, qualityTournamentOptions).done, false);
+  const unknownNovelty = structuredClone(qualityTournament);
+  unknownNovelty.comparative_findings[0].market_dimension_verdicts.dimensions
+    .find((row) => row.id === "novelty").judgment = "unknown";
+  assert.equal(validatePackageTournament(unknownNovelty, qualityTournamentOptions).done, false);
   const missingTournamentCandidate = structuredClone(tournament);
   missingTournamentCandidate.comparative_findings.pop();
   assert.equal(validatePackageTournament(missingTournamentCandidate, tournamentOptions).done, false);
   const ineligibleTournamentWinner = structuredClone(tournament);
-  ineligibleTournamentWinner.selected_candidate_id = "candidate_3";
+  ineligibleTournamentWinner.selected_candidate_id = "candidate_7";
   assert.equal(validatePackageTournament(ineligibleTournamentWinner, tournamentOptions).done, false);
+  const weakSelectedTournament = structuredClone(tournament);
+  weakSelectedTournament.click_confidence = "plausible";
+  assert.equal(validatePackageTournament(weakSelectedTournament, tournamentOptions).done, false);
+  const failedRunwaySelectedTournament = structuredClone(tournament);
+  failedRunwaySelectedTournament.comparative_findings[0].runway_veto = "fail";
+  assert.equal(validatePackageTournament(failedRunwaySelectedTournament, tournamentOptions).done, false);
 
   const geminiTournament = structuredClone(tournament);
   geminiTournament.provider_role = "gemini_web_3_6_flash";
@@ -539,7 +707,7 @@ export async function runWinnerSourceRoomV2ContractTests() {
   };
   assert.equal(validatePackageAdjudication(adjudication, adjudicationOptions).done, true);
   const ineligibleAdjudication = structuredClone(adjudication);
-  ineligibleAdjudication.selected_candidate_id = "candidate_3";
+  ineligibleAdjudication.selected_candidate_id = "candidate_7";
   assert.equal(validatePackageAdjudication(ineligibleAdjudication, adjudicationOptions).done, false);
   assert.equal(validatePackageAdjudication(adjudication, {
     ...adjudicationOptions,
@@ -576,6 +744,20 @@ export async function runWinnerSourceRoomV2ContractTests() {
     treatmentBatch: treatments,
     treatmentBatchSha256: "batch_hash",
   }).done, false);
+  const quoteVariantBatch = structuredClone(treatments);
+  quoteVariantBatch.treatments[1].treatment = quoteVariantBatch.treatments[1].treatment
+    .replace("treatment_b exact anchor", "Joey's exact anchor");
+  const quoteVariantSelection = structuredClone(selection);
+  quoteVariantSelection.comparative_findings[0].exact_anchor = "Joey’s exact anchor";
+  const boundQuoteVariant = bindTreatmentSelectionAnchors(quoteVariantSelection, {
+    treatmentBatch: quoteVariantBatch,
+  });
+  assert.equal(boundQuoteVariant.comparative_findings[0].exact_anchor, "Joey's exact anchor");
+  assert.equal(validateTreatmentSelection(boundQuoteVariant, {
+    packageSha256: "package_hash",
+    treatmentBatch: quoteVariantBatch,
+    treatmentBatchSha256: "batch_hash",
+  }).done, true);
 
   assert.equal(validateStoryArchitecture(architecture(), {
     packageSha256: "package_hash",
@@ -694,6 +876,41 @@ export async function runWinnerSourceRoomV2ContractTests() {
   const staleDiagnostic = structuredClone(validDiagnostic);
   staleDiagnostic.findings[0].exact_text = "Joey accepted the throne.";
   assert.equal(validateSourceDiagnosticV2(staleDiagnostic, { scriptText, scriptSha256: "script_hash" }).done, false);
+
+  const revisedScriptText = "Joey refused the throne in public. The city changed.";
+  const revisionLedger = {
+    schema: "goldflow_source_revision_ledger_v1",
+    status: "revised",
+    source_script_sha256: "script_hash",
+    revised_script_sha256: "revised_hash",
+    entries: [{
+      finding_id: "finding_1",
+      repair_intent: "Make the refusal visibly consequential.",
+      source_anchor: "Joey refused the throne.",
+      revised_anchor: "Joey refused the throne in public.",
+      dependent_spans_changed: [],
+    }],
+  };
+  const revisionOptions = {
+    sourceScriptSha256: "script_hash",
+    revisedScriptSha256: "revised_hash",
+    acceptedFindingIds: ["finding_1"],
+    sourceScriptText: scriptText,
+    revisedScriptText,
+  };
+  assert.equal(validateSourceRevisionLedger(revisionLedger, revisionOptions).done, true);
+  const inventedRevisionAnchor = structuredClone(revisionLedger);
+  inventedRevisionAnchor.entries[0].revised_anchor = "The crowd applauded the refusal.";
+  assert.equal(validateSourceRevisionLedger(inventedRevisionAnchor, revisionOptions).done, false);
+  const unexpectedRevisionFinding = structuredClone(revisionLedger);
+  unexpectedRevisionFinding.entries.push({
+    finding_id: "finding_2",
+    repair_intent: "Unrequested change.",
+    source_anchor: "The city changed.",
+    revised_anchor: "The city changed.",
+    dependent_spans_changed: [],
+  });
+  assert.equal(validateSourceRevisionLedger(unexpectedRevisionFinding, revisionOptions).done, false);
 
   const acceptance = {
     schema: SOURCE_SEMANTIC_ACCEPTANCE_SCHEMA,
@@ -1010,16 +1227,37 @@ export async function runWinnerSourceRoomV2ContractTests() {
     unexplained_story_terms_first_220: [],
     judgment: "The opening depicts a developing event and reaches a counter or consequence.",
   }));
+  openingBoundSelection.draft_rankings = Object.keys(expectedDrafts).map((id, index) => ({
+    draft_id: id,
+    rank: index + 1,
+    opening_strength: "strong",
+    causal_propulsion: "strong",
+    voice_distinction: "strong",
+    spoken_cadence_prediction: "strong",
+    midroll_resilience: "strong",
+    viewer_simulation: [
+      { viewer_id: "core_binge", predicted_percentage_viewed: 60 - (index * 10), exit_or_finish_reason: "The revenge progression holds attention." },
+      { viewer_id: "casual_clicker", predicted_percentage_viewed: 60 - (index * 10), exit_or_finish_reason: "The premise remains easy to follow." },
+      { viewer_id: "slop_skeptic", predicted_percentage_viewed: 60 - (index * 10), exit_or_finish_reason: "The prose stays specific." },
+      { viewer_id: "mobile_ad_sensitive", predicted_percentage_viewed: 60 - (index * 10), exit_or_finish_reason: "The story re-enters cleanly after interruptions." },
+      { viewer_id: "emotional_payoff", predicted_percentage_viewed: 60 - (index * 10), exit_or_finish_reason: "The relationship payoff remains active." },
+    ],
+    predicted_average_percentage_viewed: 60 - (index * 10),
+    highest_risk_dropoff_anchor: expectedDrafts[id].text.split(" ").slice(0, 3).join(" "),
+    retention_reason: "The simulated audience maintains the strongest percentage viewed at this rank.",
+    overall_reason: "The complete draft earns this unique rank.",
+  }));
   assert.equal(validateLongformDraftSelection(openingBoundSelection, {
     ...longformOptions,
     requireOpeningVerdicts: true,
+    requireRankings: true,
   }).done, true);
   const failedSelectedOpening = structuredClone(openingBoundSelection);
   failedSelectedOpening.opening_verdicts.find((row) => row.draft_id === failedSelectedOpening.selected_draft_id).decision = "fail";
   assert.equal(validateLongformDraftSelection(failedSelectedOpening, {
     ...longformOptions,
     requireOpeningVerdicts: true,
-  }).done, false);
+  }).done, true);
   const expositionFirstOpening = structuredClone(openingBoundSelection);
   const selectedOpening = expositionFirstOpening.opening_verdicts.find((row) => row.draft_id === expositionFirstOpening.selected_draft_id);
   selectedOpening.opening_mode = "exposition_first";
@@ -1028,7 +1266,7 @@ export async function runWinnerSourceRoomV2ContractTests() {
   assert.equal(validateLongformDraftSelection(expositionFirstOpening, {
     ...longformOptions,
     requireOpeningVerdicts: true,
-  }).done, false);
+  }).done, true);
   assert.equal(validateLongformDraftSelection(longformSelection, { expectedDrafts }).done, false);
   for (const mutate of [
     (value) => { value.package_sha256 = HASHES.i; },

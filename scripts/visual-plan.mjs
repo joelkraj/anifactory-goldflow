@@ -8,6 +8,12 @@ import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompleti
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { plannerChunkIdentityFindings, recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import {
+  appendPlannerChunkTelemetry,
+  derivePlannerChunkTuning,
+  loadPlannerChunkTuning,
+  plannerChunkTelemetryPath,
+} from "./lib/planner-adaptive-telemetry.mjs";
+import {
   allowedRefIdsForScene,
   dropOutOfScopePromptRefs,
   referenceTargetsForScene,
@@ -1308,6 +1314,10 @@ async function callCodex(prompt, stageName, expectedBeatIds = null, validatePars
         codex_cli_path: call.codex_cli_path,
         codex_cli_version: call.codex_cli_version,
         output_path: outputPath,
+        studio_timing: call.studio_timing ?? null,
+        bridge_duration_ms: call.bridge_duration_ms ?? null,
+        started_at: call.started_at ?? null,
+        completed_at: call.completed_at ?? null,
         content: call.content,
         parsed,
       };
@@ -1376,6 +1386,10 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null,
           codex_cli_path: metadata.codex_cli_path,
           codex_cli_version: metadata.codex_cli_version,
           output_path: candidate.outputPath,
+          studio_timing: metadata.studio_timing ?? null,
+          bridge_duration_ms: metadata.bridge_duration_ms ?? metadata.studio_timing?.total_ms ?? null,
+          started_at: metadata.started_at ?? null,
+          completed_at: metadata.completed_at ?? null,
           content,
           parsed,
         };
@@ -1488,6 +1502,13 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     editorial_cues: sourceUnit?.editorial_cues ?? row.editorial_cues ?? [],
     suggested_shot_job: sourceUnit?.suggested_shot_job ?? row.suggested_shot_job ?? null,
     visual_novelty_directive: sourceUnit?.visual_novelty_directive ?? row.visual_novelty_directive ?? null,
+    visual_information_delta: sourceUnit?.visual_information_delta ?? row.visual_information_delta ?? null,
+    sequence_grammar: sourceUnit?.sequence_grammar ?? row.sequence_grammar ?? null,
+    spatial_continuity: sourceUnit?.spatial_continuity ?? row.spatial_continuity ?? null,
+    beat_value: sourceUnit?.beat_value ?? row.beat_value ?? null,
+    retention_reset: sourceUnit?.retention_reset ?? row.retention_reset ?? null,
+    audiovisual_intent: sourceUnit?.audiovisual_intent ?? row.audiovisual_intent ?? null,
+    quality_budget: sourceUnit?.quality_budget ?? row.quality_budget ?? null,
     location_timeline_label: sourceUnit?.location_timeline_label ?? row.location_timeline_label ?? null,
     visual_beat_quality_findings: sourceUnit?.visual_beat_quality_findings ?? row.visual_beat_quality_findings ?? [],
     depiction_mode: sourceUnit?.depiction_mode ?? row.depiction_mode ?? "current_reality",
@@ -2119,13 +2140,32 @@ function isNativeCodexPlanner(planningProvider = null) {
   return /^(?:codex|codex[_-]cli|native[_-]codex)$/i.test(String(planningProvider ?? "").trim());
 }
 
-function adaptivePromptChunkLimits({ reasoningEffort = null, planningProvider = null, overrides = {} } = {}) {
+function adaptivePromptChunkLimits({
+  reasoningEffort = null,
+  planningProvider = null,
+  overrides = {},
+  telemetryTuning = null,
+} = {}) {
   const mediumWebPacket = String(reasoningEffort ?? "").trim().toLowerCase() === "medium"
     && !isNativeCodexPlanner(planningProvider);
+  const defaults = {
+    high: mediumWebPacket ? 2 : 4,
+    medium: mediumWebPacket ? 3 : 6,
+    simple: mediumWebPacket ? 4 : 10,
+  };
+  const selectedLimit = (riskClass) => {
+    const explicitOverride = overrides?.[riskClass];
+    if (explicitOverride != null && String(explicitOverride).trim() !== "") {
+      const parsedOverride = Number(explicitOverride);
+      if (Number.isFinite(parsedOverride)) return Math.max(1, parsedOverride);
+    }
+    const tuned = Number(telemetryTuning?.effective_limits?.[riskClass] ?? defaults[riskClass]);
+    return Number.isFinite(tuned) ? Math.max(1, tuned) : defaults[riskClass];
+  };
   return {
-    high: Math.max(1, Number(overrides.high ?? (mediumWebPacket ? 2 : 4))),
-    medium: Math.max(1, Number(overrides.medium ?? (mediumWebPacket ? 3 : 6))),
-    simple: Math.max(1, Number(overrides.simple ?? (mediumWebPacket ? 4 : 10))),
+    high: selectedLimit("high"),
+    medium: selectedLimit("medium"),
+    simple: selectedLimit("simple"),
   };
 }
 
@@ -2155,6 +2195,7 @@ function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex, options
       simple: flags["visual-simple-chunk-size"],
       ...(options.overrides ?? {}),
     },
+    telemetryTuning: options.telemetryTuning ?? null,
   });
   const priority = { simple: 1, medium: 2, high: 3 };
   const chunks = [];
@@ -2657,6 +2698,48 @@ async function main() {
     ? scopedVisualBeatPlanFromRows(visualBeatPlan, visualSourceRows)
     : null;
   const stageName = `${episode}_visual_plan`;
+  const requestedPlannerProvider = flags["planning-provider"]
+    ?? runIdentity?.provider_locks?.planning_provider
+    ?? runIdentity?.planning_provider
+    ?? "identity_locked";
+  const requestedPlannerEffort = flags["reasoning-effort"]
+    ?? runIdentity?.provider_locks?.planning_default_reasoning_effort
+    ?? runIdentity?.model_versions?.planning_reasoning_effort
+    ?? "medium";
+  const baselineAdaptiveLimits = adaptivePromptChunkLimits({
+    reasoningEffort: requestedPlannerEffort,
+    planningProvider: requestedPlannerProvider,
+  });
+  const adaptiveTelemetryPath = plannerChunkTelemetryPath(dataRoot);
+  const adaptiveTelemetryWarnings = [];
+  let plannerChunkTuning;
+  try {
+    plannerChunkTuning = await loadPlannerChunkTuning({
+      telemetryPath: adaptiveTelemetryPath,
+      plannerStage: "visual_prompt_plan",
+      requestedProvider: requestedPlannerProvider,
+      reasoningEffort: requestedPlannerEffort,
+      baseLimits: baselineAdaptiveLimits,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    adaptiveTelemetryWarnings.push({ code: "planner_chunk_telemetry_read_failed", message });
+    plannerChunkTuning = {
+      ...derivePlannerChunkTuning([], {
+        plannerStage: "visual_prompt_plan",
+        requestedProvider: requestedPlannerProvider,
+        reasoningEffort: requestedPlannerEffort,
+        baseLimits: baselineAdaptiveLimits,
+      }),
+      telemetry_path: adaptiveTelemetryPath,
+      telemetry_read_error: message,
+    };
+  }
+  const adaptivePromptChunkOptions = {
+    reasoningEffort: requestedPlannerEffort,
+    planningProvider: requestedPlannerProvider,
+    telemetryTuning: plannerChunkTuning,
+  };
   const wavefrontChunkFiles = [];
   async function emitWavefrontChunk({ chunkIndex, chunkId, inputHash, sourceRows, rawPrompts, styleSummary = "" }) {
     if (!wavefrontOutputDir) return null;
@@ -2699,7 +2782,12 @@ async function main() {
       && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
     const promptSizes = [];
     if (useChunkingForDryRun) {
-      const sceneChunks = adaptivePromptChunks(visualSourceRows, enrichedVisualReferencePlan, stateRefIndex);
+      const sceneChunks = adaptivePromptChunks(
+        visualSourceRows,
+        enrichedVisualReferencePlan,
+        stateRefIndex,
+        adaptivePromptChunkOptions,
+      );
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
@@ -2736,6 +2824,8 @@ async function main() {
       image_provider: activeImageProvider,
       image_provider_options: activeImageProviderOptions,
       context_audit: visualSourceContextAudit(visualSourceRows, scopedLocationCoverage),
+      adaptive_chunk_tuning: plannerChunkTuning,
+      telemetry_warnings: adaptiveTelemetryWarnings,
       prompt_sizes: promptSizes,
       updated_at: new Date().toISOString(),
     });
@@ -2883,7 +2973,12 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: manualWarnings },
     };
   } else if (useChunking) {
-    const sceneChunks = adaptivePromptChunks(visualSourceRows, enrichedVisualReferencePlan, stateRefIndex);
+    const sceneChunks = adaptivePromptChunks(
+      visualSourceRows,
+      enrichedVisualReferencePlan,
+      stateRefIndex,
+      adaptivePromptChunkOptions,
+    );
     if (wavefrontOutputDir) {
       await writeJsonAtomic(path.join(wavefrontOutputDir, "manifest.json"), {
         schema: "goldflow_visual_prompt_wavefront_manifest_v1",
@@ -2905,6 +3000,83 @@ async function main() {
       visual_unit_count: chunk.length,
       beat_ids: chunk.map((row) => row.visual_beat_id ?? null).filter(Boolean),
     }));
+    async function recordAdaptiveChunkExecution({
+      index,
+      sceneChunk,
+      chunkPrompt,
+      inputHash,
+      status,
+      attempt,
+      startedMs,
+      chunkLlm = null,
+      findingCodes = [],
+      errorMessage = null,
+    }) {
+      const completedAt = new Date().toISOString();
+      const durationMs = Math.max(0, Date.now() - startedMs);
+      const reused = String(chunkLlm?.provider ?? "").endsWith("_cache");
+      const studioTiming = chunkLlm?.studio_timing ?? null;
+      const queueWaitMs = Number.isFinite(Number(studioTiming?.queue_wait_ms))
+        ? Number(studioTiming.queue_wait_ms)
+        : null;
+      const serviceMs = Number.isFinite(Number(studioTiming?.service_ms))
+        ? Number(studioTiming.service_ms)
+        : reused
+          ? null
+          : Math.max(0, durationMs - (queueWaitMs ?? 0));
+      const execution = {
+        completed_at: completedAt,
+        status,
+        attempt,
+        first_pass: attempt === 1,
+        reused,
+        requested_provider: requestedPlannerProvider,
+        actual_provider: String(chunkLlm?.provider ?? requestedPlannerProvider).replace(/_cache$/, ""),
+        model: chunkLlm?.model ?? null,
+        reasoning_effort: chunkLlm?.reasoning_effort ?? requestedPlannerEffort,
+        prompt_chars: chunkPrompt.length,
+        output_chars: String(chunkLlm?.content ?? "").length,
+        duration_ms: durationMs,
+        queue_wait_ms: queueWaitMs,
+        service_ms: serviceMs,
+        provider_total_ms: Number.isFinite(Number(studioTiming?.total_ms)) ? Number(studioTiming.total_ms) : null,
+        finding_codes: [...new Set(findingCodes.filter(Boolean))],
+        error_message: errorMessage,
+      };
+      adaptiveChunkTelemetry[index] = {
+        ...adaptiveChunkTelemetry[index],
+        execution,
+      };
+      try {
+        await appendPlannerChunkTelemetry(adaptiveTelemetryPath, {
+          channel,
+          series_slug: series,
+          week,
+          episode,
+          planner_stage: "visual_prompt_plan",
+          chunk_id: `chunk_${String(index + 1).padStart(3, "0")}`,
+          input_sha256: inputHash,
+          risk_class: sceneChunk.risk_class,
+          target_chunk_size: sceneChunk.target_chunk_size,
+          visual_unit_count: sceneChunk.length,
+          ...execution,
+          requested_provider: requestedPlannerProvider,
+          actual_provider: execution.actual_provider,
+          model: execution.model,
+          reasoning_effort: requestedPlannerEffort,
+          actual_reasoning_effort: execution.reasoning_effort,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        adaptiveTelemetryWarnings.push({
+          code: "planner_chunk_telemetry_write_failed",
+          chunk_id: `chunk_${String(index + 1).padStart(3, "0")}`,
+          message,
+        });
+        console.error(`visual chunk ${index + 1}: telemetry write failed: ${message}`);
+      }
+      return execution;
+    }
     const chunkConcurrency = visualPromptConcurrencyForEffort(
       flags["visual-chunk-concurrency"] ?? 8,
       flags["reasoning-effort"] ?? null,
@@ -2912,6 +3084,7 @@ async function main() {
     );
     let sharedPlannerCooldownError = null;
     const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {
+      const chunkStartedMs = Date.now();
       const chunkTimedPlan = { ...timedPlan, scenes: sceneChunk, scene_count: sceneChunk.length };
       console.error(`visual chunk ${index + 1}/${sceneChunks.length}: ${sceneChunk.length} visual units, risk=${sceneChunk.risk_class}`);
       const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunk, visual_beat_count: sceneChunk.length } : null;
@@ -2949,6 +3122,16 @@ async function main() {
             ? await callLocal(attemptPrompt, chunkStageName, Number(flags["visual-chunk-max-tokens"] ?? 7000))
             : await callCodex(attemptPrompt, chunkStageName, expectedBeatIds, validateParsed);
           const checked = validateParsed(chunkLlm.parsed);
+          const execution = await recordAdaptiveChunkExecution({
+            index,
+            sceneChunk,
+            chunkPrompt: attemptPrompt,
+            inputHash,
+            status: "passed",
+            attempt,
+            startedMs: chunkStartedMs,
+            chunkLlm,
+          });
           await recordPlannerChunkCheckpoint({
             episodeDir,
             plannerStage: "visual_prompt_plan",
@@ -2963,6 +3146,7 @@ async function main() {
               risk_class: sceneChunk.risk_class,
               visual_unit_count: sceneChunk.length,
               prompt_count: checked.rawPrompts.length,
+              execution,
             },
           });
           await emitWavefrontChunk({
@@ -2986,6 +3170,17 @@ async function main() {
           lastFindings = Array.isArray(error?.findings)
             ? error.findings
             : [{ code: "visual_prompt_chunk_call_failed", message: lastError.message }];
+          const execution = await recordAdaptiveChunkExecution({
+            index,
+            sceneChunk,
+            chunkPrompt: attemptPrompt,
+            inputHash,
+            status: "failed",
+            attempt,
+            startedMs: chunkStartedMs,
+            findingCodes: lastFindings.map((finding) => finding.code),
+            errorMessage: lastError.message,
+          });
           await recordPlannerChunkCheckpoint({
             episodeDir,
             plannerStage: "visual_prompt_plan",
@@ -2995,7 +3190,7 @@ async function main() {
             status: "failed",
             attempt,
             findings: lastFindings,
-            metadata: { risk_class: sceneChunk.risk_class, visual_unit_count: sceneChunk.length },
+            metadata: { risk_class: sceneChunk.risk_class, visual_unit_count: sceneChunk.length, execution },
           });
         }
       }
@@ -3127,6 +3322,9 @@ async function main() {
           chunk_concurrency: Math.min(sceneChunks.length, chunkConcurrency),
           chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
           adaptive_chunks: adaptiveChunkTelemetry,
+          adaptive_chunk_tuning: plannerChunkTuning,
+          adaptive_chunk_telemetry_path: adaptiveTelemetryPath,
+          adaptive_chunk_telemetry_warnings: adaptiveTelemetryWarnings,
           wavefront_output_dir: wavefrontOutputDir,
           wavefront_chunk_count: wavefrontChunkFiles.length,
           partial_failure: {
@@ -3316,6 +3514,9 @@ async function main() {
       max_chunk_validation_attempt: llm.max_chunk_validation_attempt ?? 1,
       chunk_ledger_path: path.join(episodeDir, "planner_chunk_ledger.json"),
       adaptive_chunks: adaptiveChunkTelemetry,
+      adaptive_chunk_tuning: plannerChunkTuning,
+      adaptive_chunk_telemetry_path: adaptiveTelemetryPath,
+      adaptive_chunk_telemetry_warnings: adaptiveTelemetryWarnings,
       wavefront_output_dir: wavefrontOutputDir,
       wavefront_chunk_count: wavefrontChunkFiles.length,
       manual_recovery_output_files: manualRecoveryOutputFiles,
@@ -3350,6 +3551,7 @@ async function main() {
       ...retentionShotJobWarnings,
       ...editorialReuse.findings,
       ...motionEditorialAdvisories,
+      ...adaptiveTelemetryWarnings,
     ],
     updated_at: new Date().toISOString(),
   };

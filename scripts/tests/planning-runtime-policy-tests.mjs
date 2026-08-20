@@ -85,6 +85,21 @@ const webIdentity = {
 };
 
 const standaloneRuntime = planningRuntimeFromProcessContext({ argv: [], env: {} });
+const gpt55SourceDraftRuntime = planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web",
+  explicitModel: "gpt-5.5",
+  overrideStage: "winner_source_script_v3_draft_55_velocity",
+  argv: [],
+  env: {},
+});
+assert.equal(gpt55SourceDraftRuntime.model, "gpt-5.5");
+assert.throws(() => planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web",
+  explicitModel: "gpt-5.5",
+  overrideStage: "winner_source_story_architecture_creative",
+  argv: [],
+  env: {},
+}), /except declared GPT-5\.5 source-draft candidates/);
 assert.equal(ANTIGRAVITY_CLI_MAX_CONCURRENCY, 3);
 let activeAntigravityFixtureCalls = 0;
 let maximumAntigravityFixtureCalls = 0;
@@ -225,16 +240,44 @@ assert.equal(sourceContract.provider, SOURCE_MODEL_PROVIDER);
 assert.equal(sourceContract.model, SOURCE_MODEL_MODEL);
 assert.equal(sourceContract.reasoning_effort, SOURCE_MODEL_REASONING_EFFORT);
 assert.equal(sourceContract.visible_effort, SOURCE_MODEL_VISIBLE_EFFORT);
+const premiseMediumContract = sourceModelContract(
+  { provider: "chatgpt_web", "reasoning-effort": "medium" },
+  { stageName: "winner_source_ideate_v3_gpt_web_medium_independent_author" },
+);
+assert.equal(premiseMediumContract.provider, "chatgpt_web");
+assert.equal(premiseMediumContract.reasoning_effort, "medium");
+assert.equal(premiseMediumContract.visible_effort, "Medium");
+const treatmentMediumContract = sourceModelContract(
+  { provider: "chatgpt_web", "reasoning-effort": "medium" },
+  { stageName: "winner_source_creative_treatment_boundary_drama" },
+);
+assert.equal(treatmentMediumContract.reasoning_effort, "medium");
+assert.equal(treatmentMediumContract.visible_effort, "Medium");
+const architectureMediumContract = sourceModelContract(
+  { provider: "chatgpt_web", "reasoning-effort": "medium" },
+  { stageName: "winner_source_story_architecture_creative" },
+);
+assert.equal(architectureMediumContract.reasoning_effort, "medium");
+assert.equal(architectureMediumContract.visible_effort, "Medium");
 const priorGeminiUrl = process.env.ANIFACTORY_GEMINI_WEB_URL;
 const priorGeminiToken = process.env.ANIFACTORY_GEMINI_WEB_TOKEN;
 process.env.ANIFACTORY_GEMINI_WEB_URL = "http://127.0.0.1:19999";
 process.env.ANIFACTORY_GEMINI_WEB_TOKEN = "fixture-token";
 const sourceResearchContract = sourceModelContract({}, { stageName: "winner_source_deep_research" });
 const sourceAuditContract = sourceModelContract({}, { stageName: "winner_blueprint_audience_audit" });
+const storyTruthContract = sourceModelContract({}, { stageName: "winner_source_story_truth_ir_v2" });
+const storyTruthMediumContract = sourceModelContract(
+  { provider: "codex_cli", "reasoning-effort": "medium" },
+  { stageName: "winner_source_story_truth_ir_v2" },
+);
 assert.equal(sourceResearchContract.provider, "gemini_web");
 assert.equal(sourceResearchContract.stage_class, "source_research");
 assert.equal(sourceAuditContract.provider, "gemini_web");
 assert.equal(sourceAuditContract.stage_class, "global_reasoning");
+assert.equal(storyTruthContract.provider, "codex_cli");
+assert.equal(storyTruthContract.stage_class, "local_reconciliation");
+assert.equal(storyTruthMediumContract.provider, "codex_cli");
+assert.equal(storyTruthMediumContract.reasoning_effort, "medium");
 if (priorGeminiUrl == null) delete process.env.ANIFACTORY_GEMINI_WEB_URL;
 else process.env.ANIFACTORY_GEMINI_WEB_URL = priorGeminiUrl;
 if (priorGeminiToken == null) delete process.env.ANIFACTORY_GEMINI_WEB_TOKEN;
@@ -242,16 +285,24 @@ else process.env.ANIFACTORY_GEMINI_WEB_TOKEN = priorGeminiToken;
 const sourceCodexContract = sourceModelContract({ provider: "codex_cli" });
 assert.equal(sourceCodexContract.provider, "codex_cli");
 assert.equal(sourceCodexContract.stage_class, "premium_creative");
-assert.throws(() => sourceModelContract({ "reasoning-effort": "high" }), /requires --reasoning-effort max/);
+assert.throws(() => sourceModelContract({ "reasoning-effort": "high" }), /requires --reasoning-effort medium/);
 assert.deepEqual(validateSourceModelReceipt({
   provider: "chatgpt_web",
   model: CHATGPT_WEB_PLANNING_MODEL,
-  reasoning_effort: "max",
+  reasoning_effort: "medium",
+  transport: "goldflow_studio_local_api",
 }), { done: true, blockers: [] });
 assert.equal(validateSourceModelReceipt({
   provider: "codex_cli",
   model: CHATGPT_WEB_PLANNING_MODEL,
   reasoning_effort: "high",
+  transport: "codex_cli",
+}).done, false);
+assert.equal(validateSourceModelReceipt({
+  provider: "chatgpt_web",
+  model: CHATGPT_WEB_PLANNING_MODEL,
+  reasoning_effort: "medium",
+  transport: "codex_cli",
 }).done, false);
 
 assert.equal(planningProviderForIdentity(webIdentity), "chatgpt_web");
@@ -280,7 +331,8 @@ const fastPremiumProfile = productionProfileById("fast_premium_v1");
 assert.equal(fastPremiumProfile.planner.chatgpt_web_deep_text_concurrency, 1);
 assert.equal(fastPremiumProfile.planner.chatgpt_web_reasoning_starts_per_window, 2);
 assert.equal(fastPremiumProfile.planner.chatgpt_web_reasoning_window_ms, 900_000);
-assert.equal(fastPremiumProfile.media.chatgpt_web_image_concurrency, 3);
+assert.equal(fastPremiumProfile.media.chatgpt_web_image_concurrency, 0);
+assert.equal(fastPremiumProfile.media.chatgpt_web_image_fallback_concurrency, 3);
 assert.equal(fastPremiumProfile.orchestration.chatgpt_web_browser_host_concurrency, 10);
 
 const projectHome = "https://chatgpt.com/g/g-p-697e4bb9fad48191be862e32e1789064/project";

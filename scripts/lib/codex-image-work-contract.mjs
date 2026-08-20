@@ -4,6 +4,11 @@ import path from "node:path";
 
 import sharp from "sharp";
 
+import {
+  compileVisualPrompt,
+  validateVisualPromptCompilerReceipt,
+} from "./visual-prompt-compiler.mjs";
+
 export const CODEX_WORK_SCHEMA = "goldflow_codex_image_work_manifest_v1";
 export const DEFAULT_LEASE_SECONDS = 900;
 // One creative attempt per asset. A failed item is dead-lettered and repaired
@@ -55,6 +60,19 @@ function browserProviderConcurrency(value, allowedProviders) {
   const result = {};
   for (const provider of allowedProviders) {
     result[provider] = asPositiveInteger(source[provider], provider === "google-flow" ? 5 : 3, `${provider} concurrency`);
+  }
+  return result;
+}
+
+function browserProviderReferenceLimits(value, allowedProviders) {
+  if (!allowedProviders.length || !value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const provider of allowedProviders) {
+    const parsed = Number.parseInt(String(value[provider] ?? 4), 10);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 4) {
+      throw new Error(`${provider} ordered-reference limit must be an integer from zero through four.`);
+    }
+    result[provider] = parsed;
   }
   return result;
 }
@@ -146,6 +164,88 @@ function promptForCodex(row) {
     if (text) return text;
   }
   return "";
+}
+
+function compilerShotManifest(row) {
+  const manifest = row?.shot_manifest && typeof row.shot_manifest === "object" && !Array.isArray(row.shot_manifest)
+    ? row.shot_manifest
+    : {};
+  const grammar = row?.sequence_grammar && typeof row.sequence_grammar === "object" ? row.sequence_grammar : {};
+  return {
+    ...manifest,
+    shot_size: grammar.shot_size ?? manifest.shot_size ?? null,
+    camera_angle: grammar.camera_angle ?? manifest.camera_angle ?? null,
+    vantage: grammar.vantage ?? manifest.vantage ?? null,
+    sequence_role: grammar.sequence_role ?? manifest.sequence_role ?? null,
+    spatial_continuity: row?.spatial_continuity ?? manifest.spatial_continuity ?? null,
+  };
+}
+
+function priorityTier(value) {
+  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+export function sceneCriticalPathPriority(row = {}) {
+  const reasons = [];
+  let score = 0;
+  const startSec = Number(row?.start_sec ?? row?.timeline_start_sec ?? Infinity);
+  const qualityTier = priorityTier(row?.quality_budget?.tier ?? row?.beat_value?.tier ?? row?.beat_value?.value_tier);
+  const animationIntent = row?.shot_manifest?.animation_intent ?? row?.animation_intent ?? {};
+  const shotClass = priorityTier(animationIntent?.shot_class ?? row?.shot_manifest?.shot_job);
+  if (Number.isFinite(startSec) && startSec < 30) { score += 300; reasons.push("opening_30s"); }
+  else if (Number.isFinite(startSec) && startSec < 120) { score += 220; reasons.push("opening_120s"); }
+  else if (Number.isFinite(startSec) && startSec < 180) { score += 140; reasons.push("opening_180s"); }
+  if (qualityTier === "hero") { score += 260; reasons.push("hero_quality_tier"); }
+  else if (qualityTier === "priority") { score += 140; reasons.push("priority_quality_tier"); }
+  if (Number(row?.quality_budget?.image_candidate_count ?? 1) > 1) { score += 100; reasons.push("multi_candidate_hero"); }
+  if (priorityTier(animationIntent?.eligibility) === "animate") { score += 180; reasons.push("generated_motion_first_frame"); }
+  if (/physical_contact|locomotion_action|effect_or_impact|physical_action/.test(shotClass)) { score += 80; reasons.push("high_risk_action_geometry"); }
+  if (row?.retention_reset?.required === true || row?.retention_reset?.analytics_triggered === true) { score += 100; reasons.push("retention_reset"); }
+  const valueTags = [
+    row?.visual_job,
+    row?.beat_value?.reason,
+    row?.beat_value?.payoff_type,
+    row?.visual_information_delta,
+  ].map(cleanText).join(" ");
+  if (/title|thumbnail|package|betrayal|reveal|reversal|payoff|climax|proof|evidence/i.test(valueTags)) {
+    score += 90;
+    reasons.push("package_or_payoff_visual");
+  }
+  return { score, reasons };
+}
+
+function referenceCriticalPathPriority(item, dependentCount = 0) {
+  const kind = priorityTier(item?.asset_kind);
+  const reasons = [];
+  let score = 0;
+  if (/style/.test(kind)) { score += 1000; reasons.push("style_materialization_barrier"); }
+  if (/character|identity|base/.test(kind)) { score += 600; reasons.push("identity_anchor"); }
+  if (/location|environment/.test(kind)) { score += 360; reasons.push("location_anchor"); }
+  if (/prop|equipment|ui|faction/.test(kind)) { score += 220; reasons.push("supporting_anchor"); }
+  if (dependentCount > 0) {
+    score += Math.min(500, dependentCount * 100);
+    reasons.push(`unblocks_${dependentCount}_dependents`);
+  }
+  return { score, reasons };
+}
+
+function applyManifestPriorities(items, mode) {
+  const dependentCounts = new Map();
+  for (const item of items) {
+    for (const dependencyId of item.dependency_asset_ids ?? []) {
+      dependentCounts.set(dependencyId, Number(dependentCounts.get(dependencyId) ?? 0) + 1);
+    }
+  }
+  for (const item of items) {
+    const priority = mode === "scene"
+      ? sceneCriticalPathPriority(item.source_row ?? item)
+      : referenceCriticalPathPriority(item, Number(dependentCounts.get(item.asset_id) ?? 0));
+    item.critical_path_priority = priority.score;
+    item.critical_path_reasons = priority.reasons;
+  }
+  items.sort((left, right) => Number(right.critical_path_priority ?? 0) - Number(left.critical_path_priority ?? 0)
+    || left.asset_id.localeCompare(right.asset_id, undefined, { numeric: true }));
+  return items;
 }
 
 function routeIsCodex(row, plan) {
@@ -295,6 +395,18 @@ function referenceDependencyIds(target) {
   return ids;
 }
 
+function resolvedReferenceDependencyAssetIds(target, lookup) {
+  const targetId = cleanText(target?.ref_id ?? target?.state_ref_id);
+  const resolved = [];
+  for (const dependencyId of referenceDependencyIds(target)) {
+    const dependency = lookup.get(dependencyId);
+    const assetId = cleanText(dependency?.ref_id ?? dependency?.state_ref_id ?? dependencyId);
+    if (!assetId || assetId === targetId || resolved.includes(assetId)) continue;
+    resolved.push(assetId);
+  }
+  return resolved;
+}
+
 async function bindReferenceTargetInputs(target, lookup, sourceDir, sharedReferenceIds = []) {
   const slots = [];
   const dependencyIds = [...new Set([...referenceDependencyIds(target), ...sharedReferenceIds].map(cleanText).filter(Boolean))];
@@ -304,15 +416,18 @@ async function bindReferenceTargetInputs(target, lookup, sourceDir, sharedRefere
     if (cleanText(dependency.ref_id ?? dependency.state_ref_id) === cleanText(target.ref_id)) continue;
     const referencePath = normalizeAbsolute(dependency.reference_image_path ?? dependency.conditioning_image_path, sourceDir);
     if (!referencePath || !(await pathExists(referencePath))) continue;
+    const resolvedRefId = cleanText(dependency.ref_id ?? dependency.state_ref_id ?? dependencyId);
+    const referenceSha256 = await sha256File(referencePath);
+    if (slots.some((slot) => slot.ref_id === resolvedRefId || slot.sha256 === referenceSha256)) continue;
     slots.push({
       slot: slots.length + 1,
-      ref_id: cleanText(dependency.ref_id ?? dependency.state_ref_id ?? dependencyId),
+      ref_id: resolvedRefId,
       kind: cleanText(dependency.kind) || null,
       purpose: sharedReferenceIds.includes(dependencyId)
         ? `episode style conditioning for ${cleanText(target.ref_id)}`
         : `identity or state dependency for ${cleanText(target.ref_id)}`,
       path: referencePath,
-      sha256: await sha256File(referencePath),
+      sha256: referenceSha256,
     });
   }
   if (slots.length > 4) {
@@ -405,6 +520,7 @@ async function repairEvidenceRecord(value, requestedAssetIds) {
   if (!new Set([
     "provider_deadletters",
     "image_output_qa_blockers",
+    "reference_image_qa_blockers",
     "duplicate_output_hashes",
     "provider_deadletters_and_duplicate_output_hashes",
     "operator_provider_migration_from_modelslab",
@@ -444,6 +560,10 @@ export async function createCodexWorkManifest(options) {
   const sharedReferenceIds = parseIdScope(options.sharedReferenceIds);
   const allowedBrowserProviders = browserProviderList(options.allowedBrowserProviders);
   const providerConcurrency = browserProviderConcurrency(options.browserProviderConcurrency, allowedBrowserProviders);
+  const providerReferenceLimits = browserProviderReferenceLimits(
+    options.browserProviderMaxOrderedReferences,
+    allowedBrowserProviders,
+  );
   const browserProviderReceiptRequired = options.browserProviderReceiptRequired === true;
   const repairReason = cleanText(options.repairReason);
   if (repairReason && !explicitScope.length) throw new Error("A repair manifest requires an exact asset/image/reference ID scope.");
@@ -484,6 +604,13 @@ export async function createCodexWorkManifest(options) {
         asset_kind: "scene_cut",
         prompt,
         prompt_sha256: sha256(prompt),
+        neutral_prompt: prompt,
+        neutral_prompt_sha256: sha256(prompt),
+        shot_manifest: compilerShotManifest(row),
+        quality_budget: row?.quality_budget ?? null,
+        beat_value: row?.beat_value ?? null,
+        source_row: row,
+        prompt_compiler_policy: "lease_time_provider_compiler_v1",
         source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: promptsPath,
         source_plan_sha256: promptSource.sha256,
@@ -531,6 +658,11 @@ export async function createCodexWorkManifest(options) {
     };
     if (runIdentity) sources.run_identity = await sourceRecord(runIdentityPath);
     const lookup = buildReferenceLookup(referencePlan, characterStateRefs);
+    const stateMetadataByRefId = new Map(
+      (characterStateRefs?.character_state_refs ?? [])
+        .map((state) => [cleanText(state?.state_ref_id ?? state?.ref_id), state])
+        .filter(([id]) => Boolean(id)),
+    );
     for (const sharedReferenceId of sharedReferenceIds) {
       const shared = lookup.get(sharedReferenceId);
       if (!shared) throw new Error(`Shared reference ${sharedReferenceId} is not present in the approved reference artifacts.`);
@@ -545,25 +677,38 @@ export async function createCodexWorkManifest(options) {
       const assetId = assertAssetId(row.ref_id);
       const prompt = promptForCodex(row);
       if (!prompt) throw new Error(`Missing active Codex prompt for reference ${assetId}.`);
+      // The flattened production plan may retain a canonical/self base_asset_id,
+      // while character_state_refs carries the explicit visual identity parent.
+      // Union both records so the stricter state dependency always participates.
+      const dependencySource = { ...(stateMetadataByRefId.get(assetId) ?? {}), ...row };
       items.push({
         asset_id: assetId,
         asset_kind: cleanText(row.kind) || "reference",
         prompt,
         prompt_sha256: sha256(prompt),
+        neutral_prompt: prompt,
+        neutral_prompt_sha256: sha256(prompt),
+        shot_manifest: null,
+        quality_budget: row?.quality_budget ?? null,
+        prompt_compiler_policy: "lease_time_provider_compiler_v1",
         source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: referencePlanPath,
         source_plan_sha256: referenceSource.sha256,
         character_state_refs_path: characterStateRefsPath,
         character_state_refs_sha256: characterSource.sha256,
-        dependency_asset_ids: referenceDependencyIds(row).filter((id) => selectedIds.has(id)),
-        ordered_references: await bindReferenceTargetInputs(row, lookup, path.dirname(referencePlanPath), sharedReferenceIds),
+        // Planner base_asset_id values may be canonical inventory aliases rather
+        // than generated ref IDs. Resolve them before dependency gating so state
+        // plates cannot lease before their identity plate has materialized.
+        dependency_asset_ids: resolvedReferenceDependencyAssetIds(dependencySource, lookup).filter((id) => selectedIds.has(id)),
+        ordered_references: await bindReferenceTargetInputs(dependencySource, lookup, path.dirname(referencePlanPath), sharedReferenceIds),
         expected_output: expectedOutput(assetId),
         prior_accepted_sha256: await priorReferenceHash(row, episodeDir),
       });
     }
   }
 
-  items.sort((left, right) => left.asset_id.localeCompare(right.asset_id, undefined, { numeric: true }));
+  applyManifestPriorities(items, mode);
+  for (const item of items) delete item.source_row;
   const verificationAssetIds = representativeVerificationAssetIds(items);
   const verificationGateBypass = await verificationGateBypassRecord(options.verificationGateBypass);
   if (verificationGateBypass) {
@@ -610,9 +755,10 @@ export async function createCodexWorkManifest(options) {
       recommended_concurrency: asPositiveInteger(options.recommendedConcurrency, DEFAULT_RECOMMENDED_CONCURRENCY, "recommended concurrency"),
       max_concurrency: asPositiveInteger(options.maxConcurrency, DEFAULT_MAX_CONCURRENCY, "max concurrency"),
       ...(allowedBrowserProviders.length ? {
-        dispatch_policy: cleanText(options.dispatchPolicy) || "first_available_top_off_v1",
+        dispatch_policy: cleanText(options.dispatchPolicy) || "critical_path_first_available_top_off_v1",
         allowed_browser_providers: allowedBrowserProviders,
         browser_provider_concurrency: providerConcurrency,
+        ...(providerReferenceLimits ? { browser_provider_max_ordered_references: providerReferenceLimits } : {}),
         browser_provider_receipt_required: browserProviderReceiptRequired,
       } : {}),
       ...(sharedReferenceIds.length ? { shared_reference_ids: sharedReferenceIds } : {}),
@@ -1011,6 +1157,19 @@ export async function leaseNextWorkItem(options) {
       }
       const dependencyReferences = await resolvedDependencyReferences(manifestDir, item);
       if (dependencyReferences === null) continue;
+      const combinedReferences = [];
+      for (const reference of [...(item.ordered_references ?? []), ...dependencyReferences]) {
+        if (combinedReferences.some((row) => row.ref_id === reference.ref_id)) continue;
+        combinedReferences.push({ ...reference, slot: combinedReferences.length + 1 });
+      }
+      if (combinedReferences.length > 4) {
+        throw new Error(`Asset ${item.asset_id} requires ${combinedReferences.length} ordered references; provider limit is four.`);
+      }
+      const providerReferenceLimits = manifest.policy?.browser_provider_max_ordered_references ?? null;
+      const providerReferenceLimit = browserProvider && providerReferenceLimits
+        ? Number(providerReferenceLimits[browserProvider])
+        : null;
+      if (Number.isInteger(providerReferenceLimit) && combinedReferences.length > providerReferenceLimit) continue;
       const token = randomUUID();
       const attemptNumber = attempts.length + 1;
       const attemptDir = path.join(attemptAssetDir(manifestDir, item.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
@@ -1043,19 +1202,22 @@ export async function leaseNextWorkItem(options) {
         if (["EEXIST", "ENOTEMPTY"].includes(error?.code)) continue;
         throw error;
       }
-      const combinedReferences = [];
-      for (const reference of [...(item.ordered_references ?? []), ...dependencyReferences]) {
-        if (combinedReferences.some((row) => row.ref_id === reference.ref_id)) continue;
-        combinedReferences.push({ ...reference, slot: combinedReferences.length + 1 });
-      }
-      if (combinedReferences.length > 4) {
-        await closeLease(manifestDir, lease, "assignment-reference-overflow");
-        throw new Error(`Asset ${item.asset_id} requires ${combinedReferences.length} ordered references; provider limit is four.`);
-      }
       const assignmentItem = {
         ...item,
         ordered_references: combinedReferences,
       };
+      if (browserProvider && item.prompt_compiler_policy === "lease_time_provider_compiler_v1") {
+        const compiled = compileVisualPrompt({
+          provider: browserProvider,
+          neutralPrompt: item.neutral_prompt ?? item.prompt,
+          shotManifest: item.shot_manifest ?? null,
+          orderedReferences: combinedReferences,
+          assetId: item.asset_id,
+        });
+        assignmentItem.prompt = compiled.prompt;
+        assignmentItem.prompt_sha256 = compiled.prompt_sha256;
+        assignmentItem.prompt_compiler_receipt = compiled.receipt;
+      }
       const assignment = {
         schema: "goldflow_codex_image_assignment_v1",
         status: "assigned",
@@ -1201,6 +1363,20 @@ export async function completeWorkItem(options) {
   if (!assignedItem || assignedItem.asset_id !== item.asset_id || assignedItem.source_row_sha256 !== item.source_row_sha256) {
     throw new Error(`Assignment item binding is invalid for ${item.asset_id}.`);
   }
+  if (assignedItem.prompt_compiler_receipt) {
+    const compilerFindings = validateVisualPromptCompilerReceipt({
+      prompt: assignedItem.prompt,
+      receipt: assignedItem.prompt_compiler_receipt,
+      neutralPrompt: item.neutral_prompt ?? item.prompt,
+      provider: lease.browser_provider ?? browserProvider,
+      orderedReferences: assignedItem.ordered_references ?? [],
+    });
+    if (compilerFindings.length) {
+      throw new Error(`Assignment prompt compiler binding is invalid for ${item.asset_id}: ${compilerFindings.join(", ")}.`);
+    }
+  } else if (item.prompt_compiler_policy === "lease_time_provider_compiler_v1" && lease.browser_provider) {
+    throw new Error(`Assignment prompt compiler receipt is missing for ${item.asset_id}.`);
+  }
   await validateCurrentItemBindings(assignedItem);
   const output = await validateAttemptOutput(assignedItem, lease, options.sourcePath, options.reportedSha256);
   if (item.prior_accepted_sha256 && output.sha256 === item.prior_accepted_sha256) {
@@ -1226,7 +1402,9 @@ export async function completeWorkItem(options) {
     source_path: output.source,
     sha256: output.sha256,
     image: output.image,
-    prompt_sha256: item.prompt_sha256,
+    prompt_sha256: assignedItem.prompt_sha256,
+    neutral_prompt_sha256: item.neutral_prompt_sha256 ?? item.prompt_sha256,
+    prompt_compiler_receipt: assignedItem.prompt_compiler_receipt ?? null,
     ordered_reference_hashes: assignedItem.ordered_references.map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })),
     completed_at: nowIso(),
   };
@@ -1545,10 +1723,24 @@ export async function validateCodexWorkManifest(options) {
     const item = itemById(manifest, completion.asset_id);
     if (entry.name !== `${item.asset_id}.json`) findings.push({ code: "completion_filename_mismatch", asset_id: item.asset_id, path: filePath });
     if (completion.manifest_id !== manifest.manifest_id) findings.push({ code: "completion_manifest_mismatch", asset_id: item.asset_id });
-    if (completion.prompt_sha256 !== item.prompt_sha256) findings.push({ code: "completion_prompt_stale", asset_id: item.asset_id });
     const assignment = await readJson(path.join(completion.attempt_dir, "assignment.json")).catch(() => null);
     if (!assignment?.item || assignment.item.asset_id !== item.asset_id || assignment.item.source_row_sha256 !== item.source_row_sha256) {
       findings.push({ code: "completion_assignment_binding_invalid", asset_id: item.asset_id });
+    }
+    const expectedPromptSha256 = assignment?.item?.prompt_sha256 ?? item.prompt_sha256;
+    if (completion.prompt_sha256 !== expectedPromptSha256) findings.push({ code: "completion_prompt_stale", asset_id: item.asset_id });
+    if (assignment?.item?.prompt_compiler_receipt) {
+      const compilerFindings = validateVisualPromptCompilerReceipt({
+        prompt: assignment.item.prompt,
+        receipt: assignment.item.prompt_compiler_receipt,
+        neutralPrompt: item.neutral_prompt ?? item.prompt,
+        provider: assignment.browser_provider,
+        orderedReferences: assignment.item.ordered_references ?? [],
+      });
+      for (const code of compilerFindings) findings.push({ code, asset_id: item.asset_id });
+      if (JSON.stringify(completion.prompt_compiler_receipt ?? null) !== JSON.stringify(assignment.item.prompt_compiler_receipt)) {
+        findings.push({ code: "completion_prompt_compiler_receipt_stale", asset_id: item.asset_id });
+      }
     }
     if (manifest.policy?.browser_provider_receipt_required === true) {
       const allowedProviders = browserProviderList(manifest.policy?.allowed_browser_providers);
@@ -1565,6 +1757,15 @@ export async function validateCodexWorkManifest(options) {
       const receipt = await readJson(receiptPath).catch(() => null);
       if (!receipt || receipt.browser_provider !== completion.browser_provider || receipt.asset_id !== item.asset_id) {
         findings.push({ code: "completion_browser_provider_receipt_missing_or_invalid", asset_id: item.asset_id, path: receiptPath });
+      } else {
+        if (receipt.prompt_sha256 !== expectedPromptSha256) {
+          findings.push({ code: "completion_browser_provider_receipt_prompt_stale", asset_id: item.asset_id, path: receiptPath });
+        }
+        const receiptReferenceHashes = stableStringify(receipt.ordered_reference_hashes ?? []);
+        const assignmentReferenceHashes = stableStringify((assignment?.item?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })));
+        if (receiptReferenceHashes !== assignmentReferenceHashes) {
+          findings.push({ code: "completion_browser_provider_receipt_references_stale", asset_id: item.asset_id, path: receiptPath });
+        }
       }
     }
     const expectedRefRows = assignment?.item?.ordered_references ?? item.ordered_references;

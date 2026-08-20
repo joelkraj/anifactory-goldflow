@@ -256,14 +256,14 @@ async function main() {
     intents = intents.map((intent) => {
       const coverage = approvedGeneratedMotionById.get(String(intent.image_id ?? ""));
       if (!coverage) return intent;
-      const { clip, covered } = coverage;
+      const { clip, covered, decision } = coverage;
       if ((covered.image_sha256 ?? clip.source_image_sha256) !== intent.image_sha256) {
         throw new Error(`Approved generated-motion coverage image is stale for ${intent.image_id}.`);
       }
       return {
         ...intent,
         depth_treatment: null,
-        generated_video_treatment: generatedMotionTreatmentForClip(clip, covered),
+        generated_video_treatment: generatedMotionTreatmentForClip(clip, covered, decision),
       };
     });
   }

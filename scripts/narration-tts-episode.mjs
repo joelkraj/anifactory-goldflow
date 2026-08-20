@@ -42,6 +42,22 @@ import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import {
   validateNarrationPerformanceBakeoffApproval,
 } from "./lib/narration-performance-contract.mjs";
+import {
+  narrationQualityContractForIdentity,
+} from "./lib/narration-quality-contract.mjs";
+import {
+  adjudicateNarrationDeliveryConsensus,
+  exactNarrationListenReviewPacket,
+  exactNarrationRepairPacket,
+  narrationDeliveryNeedsConfirmation,
+  strictNarrationDeliveryDecision,
+} from "./lib/narration-delivery-quality.mjs";
+import {
+  validateNarrationStitchAccounting,
+} from "./lib/narration-boundary-editor.mjs";
+import {
+  buildNarrationProviderOutputManifest,
+} from "./lib/narration-provider-adapter.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -59,6 +75,7 @@ function qwenPinForVoiceId(voiceId, referenceVariantId = null) {
 }
 const QA_POLICY_VERSION = NARRATION_TTS_QA_POLICY_VERSION;
 const STITCH_POLICY_VERSION = "narration_tts_stitch_v1";
+const STITCH_POLICY_VERSION_V2 = "narration_alignment_safe_semantic_stitch_v2";
 const SAMPLE_RATE = 24000;
 const UNIT_GAP_SEC = 0.08;
 const SEGMENT_GAP_SEC = 0.08;
@@ -624,7 +641,12 @@ async function atomicWriteJson(filePath, value) {
   await fs.rename(temporary, filePath);
 }
 
-function run(command, commandArgs, { cwd = process.cwd(), timeoutMs = 7_200_000 } = {}) {
+function run(command, commandArgs, {
+  cwd = process.cwd(),
+  timeoutMs = 7_200_000,
+  progressJsonlPath = null,
+  onProgressEvent = null,
+} = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       cwd,
@@ -632,19 +654,87 @@ function run(command, commandArgs, { cwd = process.cwd(), timeoutMs = 7_200_000 
     });
     let stdout = "";
     let stderr = "";
+    let progressOffset = 0;
+    let progressCarry = "";
+    let progressChain = Promise.resolve();
+    const progressErrors = [];
+    let pumping = false;
+    const pumpProgress = async ({ final = false } = {}) => {
+      if (!progressJsonlPath || pumping) return;
+      pumping = true;
+      try {
+        const handle = await fs.open(progressJsonlPath, "r").catch(() => null);
+        if (!handle) return;
+        try {
+          const stat = await handle.stat();
+          if (stat.size < progressOffset) {
+            progressOffset = 0;
+            progressCarry = "";
+          }
+          if (stat.size > progressOffset) {
+            const buffer = Buffer.alloc(stat.size - progressOffset);
+            await handle.read(buffer, 0, buffer.length, progressOffset);
+            progressOffset = stat.size;
+            progressCarry += buffer.toString("utf8");
+          }
+        } finally {
+          await handle.close();
+        }
+        const lines = progressCarry.split("\n");
+        progressCarry = lines.pop() ?? "";
+        if (final && progressCarry.trim()) {
+          lines.push(progressCarry);
+          progressCarry = "";
+        }
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch (error) {
+            progressErrors.push({
+              code: "tts_progress_event_parse_failed",
+              error: error instanceof Error ? error.message : String(error),
+            });
+            continue;
+          }
+          if (typeof onProgressEvent === "function") {
+            progressChain = progressChain
+              .then(() => onProgressEvent(event))
+              .catch((error) => {
+                progressErrors.push({
+                  code: "tts_progress_event_handler_failed",
+                  cohort_id: event?.cohort_id ?? null,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
+          }
+        }
+      } finally {
+        pumping = false;
+      }
+    };
+    const progressTimer = progressJsonlPath
+      ? setInterval(() => { void pumpProgress(); }, 250)
+      : null;
     child.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
     child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
     const timer = setTimeout(() => {
+      if (progressTimer) clearInterval(progressTimer);
       child.kill("SIGKILL");
       reject(new Error(`${command} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     child.on("error", (error) => {
+      if (progressTimer) clearInterval(progressTimer);
       clearTimeout(timer);
       reject(error);
     });
-    child.on("exit", (code, signal) => {
+    child.on("exit", async (code, signal) => {
+      if (progressTimer) clearInterval(progressTimer);
       clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
+      await pumpProgress({ final: true });
+      await progressChain;
+      if (code === 0) resolve({ stdout, stderr, progressErrors });
       else reject(new Error(
         `${command} exited ${code ?? "null"} signal ${signal ?? "null"}\n${stdout.slice(-2000)}\n${stderr.slice(-4000)}`,
       ));
@@ -762,11 +852,12 @@ export function validateNarrationTtsPolicyForTests(identity) {
     status: findings.length ? "blocked" : "passed",
     findings,
     primary: {
-      ...primary,
       ...qwenPin,
+      ...primary,
       reference_text: primary.reference_text ?? qwenReferenceText,
     },
     fallback: null,
+    narration_quality_contract: policy.narration_quality_contract ?? null,
     unit_contract: policy.unit_contract,
     stitch_contract: policy.stitch_contract,
     retry_policy: policy.retry_policy,
@@ -960,24 +1051,33 @@ export function validateNarrationPlanPolicyForTests(plan, policy) {
       actual: actual.native_speed,
     });
   }
+  const unitContract = policy.unit_contract ?? QWEN_LIAM_UNIT_CONTRACT;
   requiredExact(
     plan?.qwen_liam_unit_grouping?.target_spoken_words_min,
-    QWEN_LIAM_UNIT_CONTRACT.target_words_min,
+    unitContract.target_words_min,
     "plan.qwen_liam_unit_grouping.target_spoken_words_min",
     findings,
   );
   requiredExact(
     plan?.qwen_liam_unit_grouping?.target_spoken_words_max,
-    QWEN_LIAM_UNIT_CONTRACT.target_words_max,
+    unitContract.target_words_max,
     "plan.qwen_liam_unit_grouping.target_spoken_words_max",
     findings,
   );
   requiredExact(
     plan?.qwen_liam_unit_grouping?.hard_spoken_words_max,
-    QWEN_LIAM_UNIT_CONTRACT.hard_words_max,
+    unitContract.hard_words_max,
     "plan.qwen_liam_unit_grouping.hard_spoken_words_max",
     findings,
   );
+  if (unitContract.soft_words_max != null) {
+    requiredExact(
+      plan?.qwen_liam_unit_grouping?.soft_spoken_words_max,
+      unitContract.soft_words_max,
+      "plan.qwen_liam_unit_grouping.soft_spoken_words_max",
+      findings,
+    );
+  }
   requiredExact(
     plan?.qwen_liam_unit_grouping?.continuous_requests_allowed,
     false,
@@ -1230,6 +1330,10 @@ function ttsStatusContract({
       uncertain_asr_findings_are_warning_only: true,
       automated_acoustic_findings_are_review_warnings: true,
       automated_asr_findings_are_review_warnings: true,
+      confirmed_dual_asr_delivery_defects_block_stitching:
+        Boolean(policy.narration_quality_contract),
+      exact_suspect_confirmation_required:
+        Boolean(policy.narration_quality_contract),
       automated_voice_continuity_findings_are_review_warnings: true,
       automated_qa_warnings_block_stitching: false,
       automated_qa_warnings_trigger_retry: false,
@@ -1311,6 +1415,35 @@ async function wavSampleCount(filePath) {
 
 function dbfs(value) {
   return value > 0 ? Number((20 * Math.log10(value)).toFixed(3)) : null;
+}
+
+function pcmRms(values, start, end) {
+  const from = Math.max(0, Math.min(values.length, Math.floor(start)));
+  const to = Math.max(from, Math.min(values.length, Math.floor(end)));
+  if (to <= from) return 0;
+  let sum = 0;
+  for (let index = from; index < to; index += 1) {
+    const sample = values[index] / 32768;
+    sum += sample * sample;
+  }
+  return Math.sqrt(sum / (to - from));
+}
+
+function pcmHighFrequencyProxy(values, start, end) {
+  const from = Math.max(1, Math.min(values.length, Math.floor(start)));
+  const to = Math.max(from, Math.min(values.length, Math.floor(end)));
+  if (to <= from) return 0;
+  let sum = 0;
+  for (let index = from; index < to; index += 1) {
+    const delta = (values[index] - values[index - 1]) / 32768;
+    sum += delta * delta;
+  }
+  return Math.sqrt(sum / (to - from));
+}
+
+function absoluteDbRatio(left, right) {
+  if (!(left > 0) || !(right > 0)) return null;
+  return Number(Math.abs(20 * Math.log10(left / right)).toFixed(3));
 }
 
 export function joinQaFromPcmForTests(samples, sampleRate, preparedInputs, boundaries) {
@@ -1518,6 +1651,159 @@ export function joinQaFromPcmForTests(samples, sampleRate, preparedInputs, bound
   };
 }
 
+export function joinQaV2FromPcmForTests(
+  samples,
+  sampleRate,
+  preparedInputs,
+  boundaries,
+) {
+  const values = samples instanceof Int16Array ? samples : Int16Array.from(samples);
+  const accounting = validateNarrationStitchAccounting({
+    preparedInputs,
+    boundaries,
+    finalSampleCount: values.length,
+    sampleRate,
+  });
+  const blockers = [...accounting.blockers];
+  const warnings = [...accounting.warnings];
+  const joins = [];
+  let cursor = 0;
+  for (let index = 0; index < preparedInputs.length; index += 1) {
+    const prepared = preparedInputs[index];
+    const preparedSamples = Number(
+      prepared.sample_count
+        ?? prepared.prepared_sample_count
+        ?? prepared.prepared_qa?.metrics?.sample_count,
+    );
+    if (!Number.isInteger(preparedSamples) || preparedSamples <= 0) continue;
+    cursor += preparedSamples;
+    if (index >= preparedInputs.length - 1) continue;
+    const boundary = boundaries[index];
+    if (!boundary) continue;
+    const gapSamples = Number(boundary.gap_sample_count ?? 0);
+    if (!Number.isInteger(gapSamples) || gapSamples < 0) continue;
+    const leftStep = cursor > 0 && cursor < values.length
+      ? Math.abs(values[cursor] - values[cursor - 1]) / 32768
+      : 0;
+    let silencePeak = 0;
+    for (let sample = cursor; sample < Math.min(values.length, cursor + gapSamples); sample += 1) {
+      silencePeak = Math.max(silencePeak, Math.abs(values[sample]) / 32768);
+    }
+    const gapEnd = cursor + gapSamples;
+    const rightStep = gapEnd > 0 && gapEnd < values.length
+      ? Math.abs(values[gapEnd] - values[gapEnd - 1]) / 32768
+      : 0;
+    const maximumStep = Math.max(leftStep, rightStep);
+    const blockerThreshold = 10 ** (-8 / 20);
+    const warningThreshold = 10 ** (-18 / 20);
+    const analysisWindow = Math.max(1, Math.round(sampleRate * 0.04));
+    const leftRetainedSilence = Number(prepared?.retained_trailing_silence_sample_count ?? 0);
+    const rightPrepared = preparedInputs[index + 1];
+    const rightRetainedSilence = Number(rightPrepared?.retained_leading_silence_sample_count ?? 0);
+    const leftSpeechEnd = Math.max(0, cursor - Math.max(0, leftRetainedSilence));
+    const rightSpeechStart = Math.min(values.length, gapEnd + Math.max(0, rightRetainedSilence));
+    const leftSpeechRms = pcmRms(values, leftSpeechEnd - analysisWindow, leftSpeechEnd);
+    const rightSpeechRms = pcmRms(values, rightSpeechStart, rightSpeechStart + analysisWindow);
+    const leftHighFrequency = pcmHighFrequencyProxy(values, leftSpeechEnd - analysisWindow, leftSpeechEnd);
+    const rightHighFrequency = pcmHighFrequencyProxy(values, rightSpeechStart, rightSpeechStart + analysisWindow);
+    const leftNoiseRms = pcmRms(values, leftSpeechEnd, cursor);
+    const rightNoiseRms = pcmRms(values, gapEnd, rightSpeechStart);
+    const prosodicEnergyResetDb = absoluteDbRatio(leftSpeechRms, rightSpeechRms);
+    const spectralEdgeResetDb = absoluteDbRatio(leftHighFrequency, rightHighFrequency);
+    const noiseFloorResetDb = absoluteDbRatio(leftNoiseRms, rightNoiseRms);
+    const row = {
+      boundary_id: boundary.boundary_id ?? null,
+      after_unit_id: boundary.after_unit_id ?? prepared.unit_id,
+      before_unit_id: boundary.before_unit_id
+        ?? preparedInputs[index + 1]?.unit_id
+        ?? null,
+      boundary_class: boundary.boundary_class ?? null,
+      boundary_sample_index: cursor,
+      target_pause_sample_count: boundary.target_pause_sample_count ?? null,
+      retained_natural_silence_sample_count:
+        boundary.retained_natural_silence_sample_count ?? null,
+      inserted_silence_sample_count: gapSamples,
+      effective_pause_sample_count: boundary.effective_pause_sample_count ?? null,
+      maximum_edge_step_dbfs: dbfs(maximumStep),
+      inserted_gap_peak_dbfs: dbfs(silencePeak),
+      edge_analysis_window_ms: 40,
+      left_speech_rms_dbfs: dbfs(leftSpeechRms),
+      right_speech_rms_dbfs: dbfs(rightSpeechRms),
+      prosodic_energy_reset_db: prosodicEnergyResetDb,
+      left_high_frequency_proxy_dbfs: dbfs(leftHighFrequency),
+      right_high_frequency_proxy_dbfs: dbfs(rightHighFrequency),
+      spectral_edge_reset_db: spectralEdgeResetDb,
+      left_noise_floor_dbfs: dbfs(leftNoiseRms),
+      right_noise_floor_dbfs: dbfs(rightNoiseRms),
+      noise_floor_reset_db: noiseFloorResetDb,
+      status: "passed",
+    };
+    if (silencePeak > 10 ** (-54 / 20)) {
+      const finding = {
+        code: "narration_semantic_join_inserted_gap_not_silent",
+        ...row,
+      };
+      blockers.push(finding);
+      row.status = "blocked";
+    }
+    if (maximumStep > blockerThreshold) {
+      const finding = {
+        code: "narration_semantic_join_impulsive_discontinuity",
+        repair_scope: "exact_boundary_only",
+        ...row,
+      };
+      blockers.push(finding);
+      row.status = "blocked";
+    } else if (maximumStep > warningThreshold) {
+      warnings.push({
+        severity: "warning",
+        code: "narration_semantic_join_possible_discontinuity",
+        review_required: true,
+        automatic_retry_allowed: false,
+        ...row,
+      });
+      row.status = "passed_with_warning";
+    }
+    for (const [code, value, threshold] of [
+      ["narration_semantic_join_prosodic_energy_reset", prosodicEnergyResetDb, 12],
+      ["narration_semantic_join_spectral_edge_reset", spectralEdgeResetDb, 10],
+      ["narration_semantic_join_noise_floor_reset", noiseFloorResetDb, 9],
+    ]) {
+      if (Number.isFinite(value) && value > threshold) {
+        warnings.push({
+          severity: "warning",
+          code,
+          measured_delta_db: value,
+          warning_threshold_db: threshold,
+          review_required: true,
+          automatic_retry_allowed: false,
+          repair_scope: "exact_boundary_only_after_listening_confirmation",
+          ...row,
+        });
+        if (row.status === "passed") row.status = "passed_with_warning";
+      }
+    }
+    joins.push(row);
+    cursor = gapEnd;
+  }
+  return {
+    schema: "goldflow_narration_semantic_join_qa_v2",
+    status: blockers.length
+      ? "blocked"
+      : warnings.length ? "passed_with_warnings" : "passed",
+    policy_version: STITCH_POLICY_VERSION_V2,
+    sample_rate_hz: sampleRate,
+    semantic_boundary_classes: true,
+    amplitude_only_trimming: false,
+    fade_over_speech: false,
+    sample_accounting: accounting,
+    join_count: joins.length,
+    joins,
+    blockers,
+    warnings,
+  };
+}
+
 async function runSynthesis({
   route,
   attempt,
@@ -1530,6 +1816,7 @@ async function runSynthesis({
   python,
   runnerPath,
   invocationId,
+  onCohortComplete = null,
 }) {
   if (route !== "qwen") {
     throw new Error(`Qwen Liam production forbids alternate synthesis route ${route}`);
@@ -1576,6 +1863,11 @@ async function runSynthesis({
   };
   const jobsPath = path.join(outputDir, "jobs", `${invocationId}-${route}-attempt-${attempt}.json`);
   const reportPath = path.join(outputDir, "runs", `${invocationId}-${route}-attempt-${attempt}.json`);
+  const cohortEventsPath = path.join(
+    outputDir,
+    "runs",
+    `${invocationId}-${route}-attempt-${attempt}-cohorts.jsonl`,
+  );
   await atomicWriteJson(jobsPath, jobs);
   const args = [
     runnerPath,
@@ -1583,12 +1875,24 @@ async function runSynthesis({
     "--jobs", jobsPath,
     "--output-dir", path.join(outputDir, "units", provider),
     "--report", reportPath,
+    "--events", cohortEventsPath,
   ];
   args.push(
     "--qwen-reference-audio", policy.primary.reference_audio_path,
     "--qwen-reference-text", policy.primary.reference_text,
   );
-  await run(python, args);
+  const runnerExecution = await run(python, args, {
+    progressJsonlPath: cohortEventsPath,
+    onProgressEvent: async (event) => {
+      if (event?.schema !== "goldflow_local_tts_cohort_event_v1"
+        || event?.event !== "cohort_complete") return;
+      if (event.jobs_sha256 !== await sha256File(jobsPath)
+        || event.batch_plan_sha256 !== batchPlan.batch_plan_sha256) {
+        throw new Error(`Stale Qwen cohort event for ${event.cohort_id ?? "unknown"}`);
+      }
+      if (typeof onCohortComplete === "function") await onCohortComplete(event);
+    },
+  });
   const report = await readJson(reportPath, null);
   if (!["passed", "completed_with_job_failures"].includes(report?.status)
     || report.job_count !== units.length
@@ -1732,6 +2036,9 @@ async function runSynthesis({
     reportPath,
     reportSha256: await sha256File(reportPath),
     results: units.map((unit) => resultMap.get(unit.unit_id)),
+    cohortEventsPath,
+    cohortEventsSha256: await sha256File(cohortEventsPath),
+    progressErrors: runnerExecution.progressErrors ?? [],
   };
 }
 
@@ -1743,6 +2050,7 @@ async function applyQwenVoiceContinuityQa({
   attempt,
   similarityPython,
   similarityRunnerPath,
+  narrationQualityContract = null,
 }) {
   if (!rows.length) return null;
   const reportPath = path.join(
@@ -1752,19 +2060,50 @@ async function applyQwenVoiceContinuityQa({
   );
   let report = null;
   let executionError = null;
+  let referencePaths = [policy.primary.reference_audio_path];
+  const calibratedContinuity = Boolean(
+    narrationQualityContract?.voice_identity_qa
+      ?.universal_absolute_similarity_threshold_forbidden,
+  );
+  if (narrationQualityContract?.voice_identity_qa?.reference_bank_centroid_required) {
+    const referenceManifest = await readJson(
+      policy.primary.reference_manifest_path,
+      null,
+    );
+    const bankRows = referenceManifest?.references
+      ?? referenceManifest?.reference_variants
+      ?? referenceManifest?.samples
+      ?? [];
+    const bankPaths = bankRows
+      .filter((row) => row?.status === "ready" && row?.wav_path)
+      .map((row) => path.resolve(row.wav_path));
+    if (bankPaths.length >= Number(
+      narrationQualityContract.voice_identity_qa.minimum_reference_count ?? 3,
+    )) {
+      referencePaths = [...new Set(bankPaths)];
+    }
+  }
   try {
     await run(similarityPython, [
       similarityRunnerPath,
       "--model", policy.primary.speaker_similarity_model_path,
-      "--reference", policy.primary.reference_audio_path,
+      ...referencePaths.flatMap((referencePath) => ["--reference", referencePath]),
       ...rows.flatMap((row) => ["--candidate", row.wav]),
       "--output", reportPath,
-      "--minimum-similarity", String(policy.primary.minimum_cosine_similarity),
-      "--warning-below-similarity", String(
-        policy.primary.warning_below_cosine_similarity,
-      ),
+      ...(!calibratedContinuity ? [
+        "--minimum-similarity", String(policy.primary.minimum_cosine_similarity),
+        "--warning-below-similarity", String(
+          policy.primary.warning_below_cosine_similarity,
+        ),
+      ] : []),
       "--reference-voice-id", policy.primary.reference_voice_id,
       "--reference-voice-sha256", policy.primary.reference_voice_sha256,
+      ...(calibratedContinuity ? [
+        "--threshold-mode", "reference_leave_one_out",
+        "--calibration-hard-margin", "0.05",
+        "--calibration-warning-margin", "0",
+        "--calibration-aggregate-margin", "0.03",
+      ] : []),
     ]);
     report = await readJson(reportPath, null);
   } catch (error) {
@@ -1783,19 +2122,31 @@ async function applyQwenVoiceContinuityQa({
       .filter((candidate) => candidate?.audio_sha256)
       .map((candidate) => [String(candidate.audio_sha256), candidate]),
   );
+  const thresholdIdentityValid = calibratedContinuity
+    ? report?.threshold_mode === "reference_leave_one_out"
+      && Number.isFinite(Number(report?.minimum_cosine_similarity))
+      && Number.isFinite(Number(report?.warning_below_cosine_similarity))
+      && Number.isFinite(Number(
+        report?.calibration?.reference_leave_one_out_floor,
+      ))
+      && Number(report.minimum_cosine_similarity)
+        < Number(report.warning_below_cosine_similarity)
+    : Number(report?.minimum_cosine_similarity)
+        === Number(policy.primary.minimum_cosine_similarity)
+      && Number(report?.warning_below_cosine_similarity)
+        === Number(policy.primary.warning_below_cosine_similarity);
   const reportIdentityValid = Boolean(
     report
     && report.schema === "goldflow_tts_voice_continuity_qa_v1"
     && report.method === policy.primary.speaker_similarity_method
     && report.model_sha256 === policy.primary.speaker_similarity_model_sha256
-    && Number(report.minimum_cosine_similarity)
-      === Number(policy.primary.minimum_cosine_similarity)
-    && Number(report.warning_below_cosine_similarity)
-      === Number(policy.primary.warning_below_cosine_similarity)
+    && thresholdIdentityValid
     && report.reference_voice_id === policy.primary.reference_voice_id
     && report.reference_voice_sha256 === policy.primary.reference_voice_sha256
-    && reportReferences.length === 1
-    && reportReferences[0]?.audio_sha256 === policy.primary.reference_audio_sha256
+    && reportReferences.length === referencePaths.length
+    && reportReferences.every((reference, index) => (
+      path.resolve(reference.audio_path) === path.resolve(referencePaths[index])
+    ))
     && reportCandidates.length === rows.length
   );
   for (const row of rows) {
@@ -1807,13 +2158,29 @@ async function applyQwenVoiceContinuityQa({
           schema: "goldflow_tts_voice_continuity_unit_qa_v1",
           reference_voice_id: report.reference_voice_id,
           reference_voice_sha256: report.reference_voice_sha256,
-          reference_audio_sha256: reportReferences[0]?.audio_sha256 ?? null,
+          reference_audio_sha256:
+            reportReferences.length === 1
+              ? reportReferences[0]?.audio_sha256 ?? null
+              : null,
+          reference_audio_sha256s: reportReferences.map((row) => row.audio_sha256),
+          reference_count: reportReferences.length,
+          reference_policy: reportReferences.length > 1
+            ? "owned_voice_bank_embedding_centroid"
+            : "single_selected_style_reference",
           similarity_method: report.method,
           similarity_model_sha256: report.model_sha256,
           similarity_calibration_sha256:
             policy.primary.speaker_similarity_calibration_sha256,
           warning_below_cosine_similarity:
             report.warning_below_cosine_similarity,
+          threshold_mode: report.threshold_mode ?? "fixed",
+          reference_leave_one_out_calibration:
+            report.reference_calibration ?? [],
+          reference_leave_one_out_floor:
+            report.calibration?.reference_leave_one_out_floor ?? null,
+          aggregate_voice_similarity:
+            report.candidate_aggregate ?? null,
+          aggregate_status: report.aggregate_status ?? null,
           voice_continuity_contract: policy.primary.voice_continuity_contract,
           report_path: reportPath,
           report_sha256: await sha256File(reportPath),
@@ -1826,11 +2193,26 @@ async function applyQwenVoiceContinuityQa({
         referenceVoiceId: policy.primary.voice_id,
         referenceVoiceSha256: policy.primary.voice_sha256,
         similarityModelSha256: policy.primary.speaker_similarity_model_sha256,
-        minimumCosineSimilarity: policy.primary.minimum_cosine_similarity,
+        minimumCosineSimilarity: calibratedContinuity
+          ? report?.minimum_cosine_similarity
+          : policy.primary.minimum_cosine_similarity,
         warningBelowCosineSimilarity:
-          policy.primary.warning_below_cosine_similarity,
+          calibratedContinuity
+            ? report?.warning_below_cosine_similarity
+            : policy.primary.warning_below_cosine_similarity,
       },
     );
+    if (calibratedContinuity && report?.aggregate_status === "blocked") {
+      decision.findings.push({
+        severity: "warning",
+        code: "tts_primary_voice_aggregate_below_calibrated_floor",
+        aggregate: report.candidate_aggregate ?? null,
+        aggregate_minimum_cosine_similarity:
+          report.aggregate_minimum_cosine_similarity ?? null,
+        review_required: true,
+        automatic_retry_allowed: false,
+      });
+    }
     if (!reportIdentityValid) {
       decision.findings.push({
         severity: "blocker",
@@ -1922,6 +2304,8 @@ async function main() {
     fs.readFile(scriptPath),
   ]);
   if (!identity || !plan) throw new Error("Missing locked run_identity.json or narration_generation_plan.json");
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
+  const narrationQualityV2 = Boolean(narrationQualityContract);
   const scriptHash = createHash("sha256").update(scriptBuffer).digest("hex");
   if (plan.source_script_hash !== scriptHash) {
     throw new Error(`Narration plan script hash ${plan.source_script_hash ?? "missing"} does not match ${scriptHash}`);
@@ -2039,16 +2423,25 @@ async function main() {
       throw new Error(`Locked local Qwen ${label} hash does not match`);
     }
   }
+  const calibratedSimilarityLockValid = narrationQualityContract
+    ? policy.primary.minimum_cosine_similarity == null
+      && policy.primary.warning_below_cosine_similarity == null
+      && policy.primary.warning_floor_cosine_similarity == null
+      && policy.primary.similarity_threshold_source
+        === narrationQualityContract.voice_identity_qa.threshold_source
+      && policy.primary.universal_absolute_similarity_threshold_forbidden === true
+      && policy.primary.reference_bank_centroid_required === true
+    : Number(policy.primary.minimum_cosine_similarity)
+        === QWEN_LIAM_MINIMUM_COSINE_SIMILARITY
+      && Number(policy.primary.warning_below_cosine_similarity)
+        === QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY
+      && Number(policy.primary.warning_floor_cosine_similarity)
+        === QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY;
   if (policy.primary.reference_voice_id !== policy.primary.voice_id
     || policy.primary.reference_voice_sha256 !== policy.primary.voice_sha256
     || policy.primary.voice_continuity_contract
       !== selectedVoiceLock.voice_continuity_contract
-    || Number(policy.primary.minimum_cosine_similarity)
-      !== QWEN_LIAM_MINIMUM_COSINE_SIMILARITY
-    || Number(policy.primary.warning_below_cosine_similarity)
-      !== QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY
-    || Number(policy.primary.warning_floor_cosine_similarity)
-      !== QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY) {
+    || !calibratedSimilarityLockValid) {
     throw new Error("Qwen production is not locked to the selected voice-continuity contract");
   }
   const units = normalizeNarrationUnitsForTests(plan, {
@@ -2239,11 +2632,13 @@ async function main() {
   };
   ensureArg("--episode-dir", episodeDir);
   ensureArg("--outDir", "narration_tts");
-  ensureExactNumericArg("--unit-gap-sec", "unit-gap-sec", UNIT_GAP_SEC);
-  ensureExactNumericArg("--segment-gap-sec", "segment-gap-sec", SEGMENT_GAP_SEC);
   ensureExactNumericArg("--stitch-sample-rate", "stitch-sample-rate", SAMPLE_RATE);
-  ensureExactNumericArg("--stitch-edge-pad-sec", "stitch-edge-pad-sec", EDGE_PAD_SEC);
-  ensureExactNumericArg("--stitch-fade-sec", "stitch-fade-sec", FADE_SEC);
+  if (!narrationQualityContract) {
+    ensureExactNumericArg("--unit-gap-sec", "unit-gap-sec", UNIT_GAP_SEC);
+    ensureExactNumericArg("--segment-gap-sec", "segment-gap-sec", SEGMENT_GAP_SEC);
+    ensureExactNumericArg("--stitch-edge-pad-sec", "stitch-edge-pad-sec", EDGE_PAD_SEC);
+    ensureExactNumericArg("--stitch-fade-sec", "stitch-fade-sec", FADE_SEC);
+  }
   if (flags["unit-transcript-qa"] != null
     && !/^(?:0|false|no|off)$/i.test(String(flags["unit-transcript-qa"]))) {
     throw new Error(
@@ -2265,6 +2660,8 @@ async function main() {
       candidate?.qa?.audio_sha256 ? [[candidate.qa.audio_sha256, candidate.qa]] : []
     )),
   );
+  const prefetchedQaByAudioHash = new Map();
+  const pipelinedQaEvents = [];
   const candidates = [];
   const attemptEvents = [];
   const synthesisRuns = [];
@@ -2306,6 +2703,80 @@ async function main() {
     } = {},
   ) => {
     const provider = PRIMARY_TTS_PROVIDER;
+    const targetUnitById = new Map(
+      targetUnits.map((unit) => [String(unit.unit_id), unit]),
+    );
+    const prefetchCohortQa = async (event) => {
+      const qaStartedAtMs = Date.now();
+      const rows = (event.results ?? []).flatMap((result) => {
+        if (result?.status === "failed" || !result?.output_path || !result?.output_sha256) {
+          return [];
+        }
+        const unit = targetUnitById.get(String(result.unit_id));
+        if (!unit) return [];
+        return [{
+          ...unit,
+          text: unit.spoken_text,
+          segment_id: unit.segment_id
+            ?? unit.source_segment_ids?.[0]
+            ?? unit.inherited_segment_id
+            ?? unit.unit_id,
+          speaker: unit.speaker ?? "NARRATOR",
+          voice_id: policy.primary.voice_id,
+          provider,
+          model_id: result.model_id,
+          attempt,
+          wav: result.output_path,
+          duration_sec: result.duration_sec,
+          synthesis_identity: result.synthesis_identity,
+          synthesis_identity_sha256: result.synthesis_identity_sha256,
+          unit_qa: previousQaByAudioHash.get(result.output_sha256)
+            ?? prefetchedQaByAudioHash.get(result.output_sha256)
+            ?? null,
+        }];
+      });
+      try {
+        await helpers.runUnitOutputQaForDiagnostics(rows);
+        applyProtectedTermQa(rows);
+        for (const row of rows) {
+          row.unit_qa = softenPrimaryQa(row.unit_qa);
+          if (row.unit_qa?.audio_sha256) {
+            prefetchedQaByAudioHash.set(row.unit_qa.audio_sha256, row.unit_qa);
+          }
+        }
+        pipelinedQaEvents.push({
+          schema: "goldflow_narration_pipelined_cohort_qa_event_v1",
+          status: "passed",
+          attempt,
+          cohort_id: event.cohort_id,
+          cohort_sha256: event.cohort_sha256,
+          cohort_index: event.cohort_index ?? null,
+          cohort_recorded_at_unix_ms: event.recorded_at_unix_ms ?? null,
+          qa_started_at_unix_ms: qaStartedAtMs,
+          qa_completed_at_unix_ms: Date.now(),
+          unit_count: rows.length,
+          audio_sha256s: rows.map((row) => row.unit_qa?.audio_sha256).filter(Boolean),
+          qa_scope: "waveform_and_enabled_unit_diagnostics_only",
+          full_stream_qa_still_required: true,
+        });
+      } catch (error) {
+        pipelinedQaEvents.push({
+          schema: "goldflow_narration_pipelined_cohort_qa_event_v1",
+          status: "failed_nonblocking_prefetch",
+          attempt,
+          cohort_id: event.cohort_id,
+          cohort_sha256: event.cohort_sha256,
+          cohort_index: event.cohort_index ?? null,
+          cohort_recorded_at_unix_ms: event.recorded_at_unix_ms ?? null,
+          qa_started_at_unix_ms: qaStartedAtMs,
+          qa_completed_at_unix_ms: Date.now(),
+          unit_count: rows.length,
+          error: error instanceof Error ? error.message : String(error),
+          final_serial_qa_still_required: true,
+        });
+        throw error;
+      }
+    };
     let synthesis;
     try {
       synthesis = await runSynthesis({
@@ -2320,6 +2791,7 @@ async function main() {
         python,
         runnerPath,
         invocationId,
+        onCohortComplete: prefetchCohortQa,
       });
     } catch (error) {
       for (const unit of targetUnits) {
@@ -2340,6 +2812,18 @@ async function main() {
       }
       throw error;
     }
+    const attemptPipelineEvents = pipelinedQaEvents
+      .filter((event) => Number(event.attempt) === Number(attempt))
+      .sort((left, right) => Number(left.cohort_index) - Number(right.cohort_index))
+      .map((event, index, events) => ({
+        ...event,
+        next_cohort_completed_before_qa: Number.isFinite(Number(
+          events[index + 1]?.cohort_recorded_at_unix_ms,
+        ))
+          ? Number(events[index + 1].cohort_recorded_at_unix_ms)
+            <= Number(event.qa_completed_at_unix_ms)
+          : false,
+      }));
     synthesisRuns.push({
       attempt,
       synthesis_mode: synthesisMode,
@@ -2353,6 +2837,10 @@ async function main() {
       results_restored_to_original_order:
         synthesis.report.results_restored_to_original_order,
       cohort_executions: synthesis.report.cohort_executions ?? [],
+      cohort_events_path: synthesis.cohortEventsPath,
+      cohort_events_sha256: synthesis.cohortEventsSha256,
+      pipelined_cohort_qa: attemptPipelineEvents,
+      pipelined_qa_progress_errors: synthesis.progressErrors ?? [],
     });
     const failedResults = synthesis.results.filter((result) => result.status === "failed");
     for (const result of failedResults) {
@@ -2463,7 +2951,9 @@ async function main() {
           ?? null,
         runner_report_path: synthesis.reportPath,
         runner_report_sha256: synthesis.reportSha256,
-        unit_qa: previousQaByAudioHash.get(result.output_sha256) ?? null,
+        unit_qa: previousQaByAudioHash.get(result.output_sha256)
+          ?? prefetchedQaByAudioHash.get(result.output_sha256)
+          ?? null,
       };
     });
     await helpers.runUnitOutputQaForDiagnostics(rows);
@@ -2477,6 +2967,7 @@ async function main() {
         attempt,
         similarityPython,
         similarityRunnerPath,
+        narrationQualityContract,
       });
     }
     for (const row of rows) row.unit_qa = softenPrimaryQa(row.unit_qa);
@@ -2795,6 +3286,229 @@ async function main() {
     const row = selected.get(unit.unit_id);
     return row ? [row] : [];
   });
+  let unitDeliveryQaV2 = null;
+  let strictUnitDeliveryBlockers = [];
+  let providerOutputManifest = null;
+  const providerOutputManifestPath = path.join(
+    episodeDir,
+    `narration_provider_output_manifest_${episode}.json`,
+  );
+  if (narrationQualityV2) {
+    providerOutputManifest = buildNarrationProviderOutputManifest({
+      provider: policy.primary.provider,
+      modelId: policy.primary.model_id,
+      modelRevision: policy.primary.model_revision,
+      voiceId: policy.primary.voice_id,
+      voiceSha256: policy.primary.voice_sha256,
+      voiceContinuityContract: policy.primary.voice_continuity_contract,
+      generationPlanSha256: plan.plan_sha256 ?? planSha256,
+      generationPlanFileSha256: planSha256,
+      qualityContractSha256: narrationQualityContract.contract_sha256,
+      providerExecution: {
+        synthesis_contract: policy.synthesis_contract,
+        batch_plan_sha256: batchPlan?.batch_plan_sha256 ?? null,
+        synthesis_runs: synthesisRuns,
+        effective_concurrency: 1,
+      },
+      units,
+      results: selectedRows,
+    });
+    await atomicWriteJson(providerOutputManifestPath, providerOutputManifest);
+    strictUnitDeliveryBlockers.push(
+      ...(providerOutputManifest.validation?.findings ?? []).map((finding) => ({
+        ...finding,
+        repair_scope: "exact_unit_only",
+      })),
+    );
+  }
+  if (narrationQualityV2
+    && unresolved.length === 0
+    && providerOutputManifest?.status === "passed") {
+    const { finalizeNarrationProviderOutput } = await import(
+      "./narration-provider-output-finalize.mjs"
+    );
+    await finalizeNarrationProviderOutput([
+      "--episode-dir", episodeDir,
+      "--plan", planPath,
+      "--manifest", providerOutputManifestPath,
+    ]);
+    return;
+  }
+  if (narrationQualityV2 && selectedRows.length) {
+    const primaryAlignmentMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
+      selectedRows.map((row) => ({ unit_id: row.unit_id, wav: row.wav })),
+      {
+        model: narrationQualityContract.delivery_qa.unit_screening_model ?? "small.en",
+        device: "cpu",
+        computeType: "int8_float32",
+      },
+    );
+    const perUnitContract = narrationQualityContract;
+    const maximumWordErrorRate = Number(
+      narrationQualityContract.delivery_qa.maximum_word_error_rate,
+    );
+    const primaryById = new Map();
+    const confirmationCandidates = [];
+    for (const row of selectedRows) {
+      const recognized = primaryAlignmentMap.get(String(row.unit_id)) ?? null;
+      const transcriptQa = recognized
+        ? helpers.transcriptQaForTests(row.text, recognized.text, {
+            maxWer: maximumWordErrorRate,
+            equivalentPhrases: equivalentPhrasesForTests(row),
+            blockAnySubstitution: false,
+          })
+        : null;
+      const primaryDecision = strictNarrationDeliveryDecision(transcriptQa, {
+        orderQa: { blockers: [] },
+        joinQa: { blockers: [], warnings: [] },
+        contract: perUnitContract,
+      });
+      primaryById.set(String(row.unit_id), {
+        recognized,
+        transcriptQa,
+        primaryDecision,
+      });
+      if (narrationDeliveryNeedsConfirmation(transcriptQa, primaryDecision)) {
+        confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
+      }
+    }
+    let confirmationMap = new Map();
+    let confirmationError = null;
+    if (confirmationCandidates.length) {
+      try {
+        confirmationMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
+          confirmationCandidates,
+          {
+            model: narrationQualityContract.delivery_qa.exact_suspect_confirmation_model
+              ?? "medium",
+            device: "cpu",
+            computeType: "int8_float32",
+          },
+        );
+      } catch (error) {
+        confirmationError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const rows = [];
+    for (const row of selectedRows) {
+      const primary = primaryById.get(String(row.unit_id));
+      const recognized = primary?.recognized ?? null;
+      const transcriptQa = primary?.transcriptQa ?? null;
+      const confirmation = confirmationMap.get(String(row.unit_id)) ?? null;
+      const confirmationTranscriptQa = confirmation
+        ? helpers.transcriptQaForTests(row.text, confirmation.text, {
+            maxWer: maximumWordErrorRate,
+            equivalentPhrases: equivalentPhrasesForTests(row),
+            blockAnySubstitution: false,
+          })
+        : null;
+      const alignmentRecognition = (recognized?.words?.length ?? 0) > 0
+        ? recognized
+        : confirmation;
+      const words = alignmentRecognition?.words ?? [];
+      const firstWord = words[0] ?? null;
+      const finalWord = words.at(-1) ?? null;
+      const edgeAlignment = firstWord && finalWord
+        ? {
+            status: "passed",
+            engine: `faster_whisper_${alignmentRecognition === confirmation ? "medium" : "small_en"}`,
+            first_speech_sample: Math.max(0, Math.round(Number(firstWord.start_sec ?? 0) * SAMPLE_RATE)),
+            last_speech_sample_exclusive: Math.min(
+              Number(row.unit_qa?.metrics?.sample_count ?? Math.round(row.duration_sec * SAMPLE_RATE)),
+              Math.max(1, Math.round(Number(finalWord.end_sec ?? row.duration_sec) * SAMPLE_RATE)),
+            ),
+            first_word: firstWord,
+            final_word: finalWord,
+            recognized_word_count: words.length,
+          }
+        : {
+            status: "missing",
+            engine: "faster_whisper_consensus_v2",
+            reason: "no_word_timestamps",
+          };
+      const decision = adjudicateNarrationDeliveryConsensus({
+        primaryTranscriptQa: transcriptQa,
+        confirmationTranscriptQa: confirmationCandidates.some(
+          (candidate) => String(candidate.unit_id) === String(row.unit_id),
+        ) ? confirmationTranscriptQa : transcriptQa,
+        orderQa: { blockers: [] },
+        joinQa: { blockers: [], warnings: [] },
+        contract: perUnitContract,
+        primaryModel: narrationQualityContract.delivery_qa.unit_screening_model ?? "small.en",
+        confirmationModel: narrationQualityContract.delivery_qa.exact_suspect_confirmation_model
+          ?? "medium",
+      });
+      row.unit_qa.edge_alignment = edgeAlignment;
+      row.unit_qa.delivery_qa_v2 = {
+        ...decision,
+        intended_text: row.text,
+        recognized_text: recognized?.text ?? null,
+        confirmation_recognized_text: confirmation?.text ?? null,
+        confirmation_error: confirmationError,
+        transcript_qa: transcriptQa,
+        confirmation_transcript_qa: confirmationTranscriptQa,
+      };
+      rows.push({
+        unit_id: row.unit_id,
+        audio_path: row.wav,
+        audio_sha256: row.unit_qa?.audio_sha256 ?? null,
+        edge_alignment: edgeAlignment,
+        intended_text: row.text,
+        recognized_text: recognized?.text ?? null,
+        primary_recognized_text: recognized?.text ?? null,
+        confirmation_recognized_text: confirmation?.text ?? null,
+        confirmation_error: confirmationError,
+        transcript_qa: transcriptQa,
+        confirmation_transcript_qa: confirmationTranscriptQa,
+        decision,
+      });
+      strictUnitDeliveryBlockers.push(...decision.blockers.map((finding) => ({
+        ...finding,
+        unit_id: row.unit_id,
+      })));
+    }
+    const listenReviewPacket = exactNarrationListenReviewPacket({
+      rows,
+      generationPlanSha256: plan.plan_sha256 ?? planSha256,
+      generationPlanFileSha256: planSha256,
+      qualityContractSha256: narrationQualityContract.contract_sha256,
+    });
+    unitDeliveryQaV2 = {
+      schema: "goldflow_narration_unit_delivery_qa_v2",
+      status: strictUnitDeliveryBlockers.length
+        ? "blocked"
+        : listenReviewPacket.item_count
+          ? "passed_with_warnings"
+          : "passed",
+      quality_contract_sha256: narrationQualityContract.contract_sha256,
+      asr_consensus_policy: {
+        screening_model: narrationQualityContract.delivery_qa.unit_screening_model ?? "small.en",
+        confirmation_model: narrationQualityContract.delivery_qa.exact_suspect_confirmation_model ?? "medium",
+        confirmation_candidate_count: confirmationCandidates.length,
+        confirmation_error: confirmationError,
+      },
+      unit_count: rows.length,
+      blocked_unit_count: new Set(strictUnitDeliveryBlockers.map((row) => row.unit_id)).size,
+      listen_review_unit_count: listenReviewPacket.item_count,
+      blockers: strictUnitDeliveryBlockers,
+      units: rows,
+    };
+    await atomicWriteJson(
+      path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`),
+      unitDeliveryQaV2,
+    );
+    await atomicWriteJson(
+      path.join(episodeDir, `narration_exact_listen_review_packet_${episode}.json`),
+      listenReviewPacket,
+    );
+    await atomicWriteJson(
+      path.join(episodeDir, `narration_exact_repair_packet_${episode}.json`),
+      exactNarrationRepairPacket({
+        decision: { status: unitDeliveryQaV2.status, blockers: strictUnitDeliveryBlockers },
+        units: selectedRows,
+      }),
+    );
+  }
   const orderQa = validateSelectedUnitOrder(units, selectedRows);
   const unitQaReport = rebuildQaAggregate(
     candidates.map((candidate) => ({
@@ -2810,6 +3524,22 @@ async function main() {
   unitQaReport.narration_generation_plan_sha256 = planSha256;
   unitQaReport.selection_policy_version = NARRATION_TTS_SELECTION_POLICY_VERSION;
   unitQaReport.recovery_scope = recoveryScope;
+  unitQaReport.narration_quality_contract_sha256 =
+    narrationQualityContract?.contract_sha256 ?? null;
+  unitQaReport.provider_output_manifest = providerOutputManifest
+    ? {
+        path: providerOutputManifestPath,
+        sha256: await sha256File(providerOutputManifestPath),
+        status: providerOutputManifest.status,
+      }
+    : null;
+  unitQaReport.unit_delivery_qa_v2 = unitDeliveryQaV2
+    ? {
+        status: unitDeliveryQaV2.status,
+        path: path.join(episodeDir, `narration_unit_delivery_qa_${episode}.json`),
+        blocked_unit_count: unitDeliveryQaV2.blocked_unit_count,
+      }
+    : null;
   unitQaReport.selected_units = selectedRows.map((row) => ({
     unit_id: row.unit_id,
     provider: row.provider,
@@ -2837,11 +3567,19 @@ async function main() {
   });
   unitQaReport.selected_blocker_count = selectedQaDecision.selected_blockers.length;
   unitQaReport.selected_blockers = selectedQaDecision.selected_blockers;
-  unitQaReport.status = selectedQaDecision.status;
+  unitQaReport.selected_blockers.push(...strictUnitDeliveryBlockers);
+  unitQaReport.selected_blocker_count = unitQaReport.selected_blockers.length;
+  unitQaReport.status = selectedQaDecision.status === "passed"
+    && strictUnitDeliveryBlockers.length === 0
+    ? "passed"
+    : "blocked";
   await atomicWriteJson(unitQaPath, unitQaReport);
 
-  if (unresolved.length || orderQa.status !== "passed") {
-    const blockers = selectedQaDecision.blockers;
+  if (unresolved.length || orderQa.status !== "passed" || strictUnitDeliveryBlockers.length) {
+    const blockers = [
+      ...selectedQaDecision.blockers,
+      ...strictUnitDeliveryBlockers,
+    ];
     const statusContract = ttsStatusContract({
       policy,
       units,
@@ -2927,6 +3665,7 @@ async function main() {
       skipRenderedTranscriptQa,
       unitGapSec: UNIT_GAP_SEC,
       segmentGapSec: SEGMENT_GAP_SEC,
+      narrationQualityContract,
     },
   );
   if (stitch?.status !== "passed") {
@@ -3030,12 +3769,19 @@ async function main() {
   for (let index = 0; index < samples.length; index += 1) {
     samples[index] = finalPcm.readInt16LE(index * 2);
   }
-  const joinQa = joinQaFromPcmForTests(
-    samples,
-    SAMPLE_RATE,
-    stitch.prepared_inputs,
-    stitch.boundaries,
-  );
+  const joinQa = narrationQualityContract
+    ? joinQaV2FromPcmForTests(
+        samples,
+        SAMPLE_RATE,
+        stitch.prepared_inputs,
+        stitch.boundaries,
+      )
+    : joinQaFromPcmForTests(
+        samples,
+        SAMPLE_RATE,
+        stitch.prepared_inputs,
+        stitch.boundaries,
+      );
   // Transcript fidelity is verified once by the mandatory
   // local_whisper_word_timing stage on this exact stitched audio. Repeating a
   // medium-Whisper pass here adds latency without producing the timing
@@ -3169,7 +3915,7 @@ async function main() {
   await atomicWriteJson(stitchReportPath, {
     schema: "goldflow_narration_stitch_report_v1",
     status,
-    provider: "qwen3_tts_1_7b_base_liam_unit_stitch",
+    provider: `${policy.primary.provider}_provider_neutral_unit_stitch`,
     primary_provider: policy.primary.provider,
     narrator_voice_id: policy.primary.voice_id,
     voice_sha256: policy.primary.voice_sha256,
@@ -3186,6 +3932,13 @@ async function main() {
     source_script_hash: scriptHash,
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
+    narration_quality_contract_sha256:
+      narrationQualityContract?.contract_sha256 ?? null,
+    provider_output_manifest_path: providerOutputManifest
+      ? providerOutputManifestPath
+      : null,
+    provider_output_manifest_sha256:
+      providerOutputManifest?.manifest_sha256 ?? null,
     recovery_scope: recoveryScope,
     stitch_repair_tail_unit_ids: stitchRepairTailUnitIds,
     skip_rendered_transcript_qa: skipRenderedTranscriptQa,
@@ -3196,13 +3949,23 @@ async function main() {
     final_m4a_path: status === "passed" ? finalM4a : null,
     final_m4a_sha256: finalM4aSha256,
     final_duration_sec: Number(stitch.final_qa?.metrics?.duration_sec ?? 0),
-    unit_gap_sec: UNIT_GAP_SEC,
-    segment_gap_sec: SEGMENT_GAP_SEC,
     stitch_sample_rate: SAMPLE_RATE,
-    stitch_edge_pad_sec: EDGE_PAD_SEC,
-    stitch_fade_sec: FADE_SEC,
     unit_qa_policy_version: QA_POLICY_VERSION,
-    stitch_policy_version: STITCH_POLICY_VERSION,
+    ...(narrationQualityContract
+      ? {
+          stitch_policy_version: STITCH_POLICY_VERSION_V2,
+          boundary_pause_policy: "semantic_class_with_preserved_natural_silence",
+          amplitude_only_trimming: false,
+          fade_over_speech: false,
+          sample_accounting: stitch.sample_accounting ?? joinQa.sample_accounting,
+        }
+      : {
+          unit_gap_sec: UNIT_GAP_SEC,
+          segment_gap_sec: SEGMENT_GAP_SEC,
+          stitch_edge_pad_sec: EDGE_PAD_SEC,
+          stitch_fade_sec: FADE_SEC,
+          stitch_policy_version: STITCH_POLICY_VERSION,
+        }),
     stitch_policy: stitch.policy,
     boundary_qa: stitch.boundary_qa,
     boundaries: stitch.boundaries,
@@ -3225,6 +3988,13 @@ async function main() {
     recovery_scope: recoveryScope,
     policy,
     ...statusContract,
+    narration_quality_contract_sha256:
+      narrationQualityContract?.contract_sha256 ?? null,
+    provider_output_manifest_path: providerOutputManifest
+      ? providerOutputManifestPath
+      : null,
+    provider_output_manifest_sha256:
+      providerOutputManifest?.manifest_sha256 ?? null,
     selection_policy_version: NARRATION_TTS_SELECTION_POLICY_VERSION,
     qa_policy: QA_POLICY_VERSION,
     qa_policy_version: QA_POLICY_VERSION,

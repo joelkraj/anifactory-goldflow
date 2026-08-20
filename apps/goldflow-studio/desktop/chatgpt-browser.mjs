@@ -254,8 +254,45 @@ async function waitForVisible(locator, { timeoutMs = 60_000, pollMs = 250 } = {}
   return null;
 }
 
+async function dismissHistoryRateLimitModal(page) {
+  const modal = await visibleLocator(page.locator(HISTORY_RATE_LIMIT_SELECTOR));
+  if (!modal) return false;
+  const acknowledgement = await visibleLocator(modal.getByRole("button", { name: /got it|okay|ok|dismiss|close/i }))
+    ?? await visibleLocator(page.getByRole("button", { name: /got it|okay|ok|dismiss|close/i }));
+  if (!acknowledgement) return false;
+  await acknowledgement.click({ timeout: 10_000 }).catch(() => acknowledgement.click({ timeout: 10_000, force: true }));
+  await modal.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+  return !await modal.isVisible().catch(() => false);
+}
+
 function escapedPattern(value) {
   return new RegExp(`\\b${String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+}
+
+function normalizedModelIdentity(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/\bgpt\b/g, "")
+    .replace(/[^a-z0-9.]+/g, " ")
+    .trim();
+}
+
+export function chatGptModelControlMatches(actualText, expectedLabel) {
+  const actual = normalizedModelIdentity(actualText);
+  const expected = normalizedModelIdentity(expectedLabel);
+  return Boolean(expected) && actual.includes(expected);
+}
+
+async function openChatGptPowerMenu(page, powerButton) {
+  if (await powerButton.getAttribute("aria-expanded") !== "true") {
+    try {
+      await powerButton.click();
+    } catch (error) {
+      if (!await dismissHistoryRateLimitModal(page)) throw error;
+      await powerButton.click();
+    }
+  }
+  return waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
 }
 
 export class ChatGptBrowser {
@@ -267,7 +304,7 @@ export class ChatGptBrowser {
     this.log = log;
     this.context = null;
     this.loginPage = null;
-    this.contractVerificationByKey = new Map();
+    this.contractVerificationByPage = new WeakMap();
     this.imageStartGate = Promise.resolve();
     this.llmSubmissionGate = Promise.resolve();
     this.lastImageStartAt = 0;
@@ -303,12 +340,16 @@ export class ChatGptBrowser {
       if (composer && !signedOutControl) {
         const cooldown = await visibleLocator(this.loginPage.locator(HISTORY_RATE_LIMIT_SELECTOR));
         if (cooldown) {
-          if (Date.now() - this.lastCooldownLogAt >= 60_000) {
-            this.lastCooldownLogAt = Date.now();
-            this.log("ChatGPT conversation cooldown is active; image dispatch remains stopped until it clears.", "warn");
+          const dismissed = await dismissHistoryRateLimitModal(this.loginPage);
+          if (!dismissed) {
+            if (Date.now() - this.lastCooldownLogAt >= 60_000) {
+              this.lastCooldownLogAt = Date.now();
+              this.log("ChatGPT conversation cooldown acknowledgement is blocking the browser.", "warn");
+            }
+            await sleep(15_000);
+            continue;
           }
-          await sleep(15_000);
-          continue;
+          this.log("Dismissed a stale ChatGPT conversation-history cooldown acknowledgement.", "info");
         }
         await markLoginVerified(this.profileDir, { url: this.loginPage.url() }, "chatgpt");
         this.log("ChatGPT authentication verified.");
@@ -350,7 +391,11 @@ export class ChatGptBrowser {
     const historyCooldown = await visibleLocator(page.locator(HISTORY_RATE_LIMIT_SELECTOR));
     if (historyCooldown) {
       const message = (await historyCooldown.innerText().catch(() => "")).trim();
-      throw codedError("rate_limited", message || "ChatGPT conversation-history cooldown is active.");
+      if (await dismissHistoryRateLimitModal(page)) {
+        this.log(`Dismissed ChatGPT conversation-history acknowledgement${message ? `: ${message.replace(/\s+/g, " ").slice(0, 180)}` : ""}.`, "warn");
+      } else {
+        throw codedError("rate_limited", message || "ChatGPT conversation-history cooldown is active.");
+      }
     }
     const alerts = page.locator('[role="alert"], [data-testid*="toast"], [data-testid*="error"]');
     const values = [];
@@ -435,15 +480,44 @@ export class ChatGptBrowser {
   async verifyUiContract(page, contract) {
     try {
       const profileText = await this.profilePlanText(page);
+      await dismissHistoryRateLimitModal(page);
       if (!escapedPattern(contract.account_plan).test(profileText)) {
         throw codedError("account_mismatch", `Expected a signed-in ${contract.account_plan} ChatGPT account.`);
       }
 
       const powerButton = await waitForVisible(page.locator('button[aria-haspopup="menu"]:has(.uFxlGa_SliderTriggerChatSelectionLabel)'), { timeoutMs: 30_000 });
       if (!powerButton) throw codedError("ui_contract_mismatch", "Expected the ChatGPT model and effort control.");
-      await powerButton.click();
-      const menu = await waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
+      let menu = await openChatGptPowerMenu(page, powerButton);
       if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT did not expose its effort menu.");
+
+      const advancedControl = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
+      if (advancedControl && await advancedControl.getAttribute("aria-expanded") !== "true") {
+        await advancedControl.click();
+        await sleep(150);
+      }
+      let modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
+      if (!modelControl) throw codedError("ui_contract_mismatch", "ChatGPT Advanced options did not expose its model selector.");
+      if (!chatGptModelControlMatches(await modelControl.innerText(), contract.model_label)) {
+        await modelControl.click();
+        const wantedModel = await waitForVisible(page.getByRole("menuitemradio", { name: contract.model_label, exact: true }), { timeoutMs: 10_000 });
+        if (!wantedModel) throw codedError("ui_contract_mismatch", `ChatGPT did not expose model ${contract.model_label}.`);
+        await wantedModel.press("Enter");
+        await sleep(250);
+        await page.keyboard.press("Escape").catch(() => {});
+        if (await powerButton.getAttribute("aria-expanded") !== "true") {
+          menu = await openChatGptPowerMenu(page, powerButton);
+        } else {
+          menu = await waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
+        }
+        if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT model selection closed the effort menu unexpectedly.");
+        const reopenedAdvanced = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
+        if (reopenedAdvanced && await reopenedAdvanced.getAttribute("aria-expanded") !== "true") {
+          await reopenedAdvanced.click();
+          await sleep(150);
+        }
+        modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
+      }
+
       const slider = menu.locator('[role="slider"]').first();
       let menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
       if (!menuText.includes(`Effort ${contract.effort_label}`)) {
@@ -454,9 +528,40 @@ export class ChatGptBrowser {
         await sleep(250);
         menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
       }
-      await page.keyboard.press("Escape");
-      if (!menuText.includes(contract.model_label)) throw codedError("ui_contract_mismatch", `Expected model ${contract.model_label}; visible control was ${menuText.slice(0, 300)}.`);
+      if (!menuText.includes(`Effort ${contract.effort_label}`)) {
+        const effortControl = await visibleLocator(menu.getByRole("menuitem", { name: /^effort\b/i }));
+        if (effortControl) {
+          await effortControl.click();
+          const effortMenus = page.locator('[role="menu"]');
+          const wantedEffort = await waitForVisible(
+            effortMenus.getByRole("menuitemradio", { name: contract.effort_label, exact: true }),
+            { timeoutMs: 10_000 },
+          ) ?? await waitForVisible(
+            effortMenus.getByText(contract.effort_label, { exact: true }),
+            { timeoutMs: 2_000 },
+          );
+          if (!wantedEffort) {
+            throw codedError("ui_contract_mismatch", `ChatGPT did not expose effort ${contract.effort_label}.`);
+          }
+          await wantedEffort.press("Enter").catch(() => wantedEffort.click());
+          await sleep(250);
+          await page.keyboard.press("Escape").catch(() => {});
+          menu = await openChatGptPowerMenu(page, powerButton);
+          if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT effort selection closed the power menu unexpectedly.");
+          const reopenedAdvanced = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
+          if (reopenedAdvanced && await reopenedAdvanced.getAttribute("aria-expanded") !== "true") {
+            await reopenedAdvanced.click();
+            await sleep(150);
+          }
+          modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
+          menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
+        }
+      }
+      if (!modelControl || !chatGptModelControlMatches(await modelControl.innerText(), contract.model_label)) {
+        throw codedError("ui_contract_mismatch", `Expected model ${contract.model_label}; visible control was ${menuText.slice(0, 300)}.`);
+      }
       if (!menuText.includes(`Effort ${contract.effort_label}`)) throw codedError("ui_contract_mismatch", `Expected effort ${contract.effort_label}; visible control was ${menuText.slice(0, 300)}.`);
+      await page.keyboard.press("Escape");
       return {
         account_plan: contract.account_plan,
         model_label: contract.model_label,
@@ -477,14 +582,19 @@ export class ChatGptBrowser {
       model_label: contract.model_label,
       effort_label: contract.effort_label,
     });
-    const existing = this.contractVerificationByKey.get(key);
+    let pageVerifications = this.contractVerificationByPage.get(page);
+    if (!pageVerifications) {
+      pageVerifications = new Map();
+      this.contractVerificationByPage.set(page, pageVerifications);
+    }
+    const existing = pageVerifications.get(key);
     if (existing) return existing;
     const verification = this.verifyUiContract(page, contract);
-    this.contractVerificationByKey.set(key, verification);
+    pageVerifications.set(key, verification);
     try {
       return await verification;
     } catch (error) {
-      this.contractVerificationByKey.delete(key);
+      pageVerifications.delete(key);
       throw error;
     }
   }
@@ -768,11 +878,17 @@ export class ChatGptBrowser {
         await this.attachReferences(page, job, client, onPhase);
         const referenceInstruction = job.references?.length
           ? "Use attached images only as ordered visual references."
-          : "No reference images are attached. Generate directly from the text prompt; do not ask for uploads or clarification.";
+          : "This is a standalone text-to-image request. Generate a brand-new image directly from the written description.";
+        const imagePrompt = job.references?.length
+          ? String(job.prompt ?? "")
+          : String(job.prompt ?? "")
+            .replace(/\b(?:no|without) image references\b[.,;:]?/gi, "")
+            .replace(/[ \t]{2,}/g, " ")
+            .trim();
         const prompt = [
           "Create exactly one original landscape image in a 16:9 frame.",
           `${referenceInstruction} Do not create a collage, contact sheet, explanation, or multiple variants. Do not add borders.`,
-          job.prompt,
+          imagePrompt,
         ].join("\n\n");
         await this.submit(page, prompt, { preserveImageMode: imageModeSelected, onPhase });
         const sourceUrl = await this.waitForGeneratedImage(page, baseline, startAssistantCount);

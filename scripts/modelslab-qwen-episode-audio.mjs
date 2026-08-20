@@ -12,6 +12,11 @@ import {
 import {
   automatedQaFindingsAsReviewWarnings,
 } from "./lib/tts-selection-policy.mjs";
+import {
+  planAlignmentSafeUnitEdit,
+  planNarrationBoundary,
+  validateNarrationStitchAccounting,
+} from "./lib/narration-boundary-editor.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -2819,6 +2824,117 @@ async function prepareStitchInput(row, index, options = {}) {
   if (!metrics || row.unit_qa?.status === "blocked") {
     throw new Error(`Refusing to prepare stitch input ${row?.unit_id ?? index}: per-unit audio QA is missing or blocked.`);
   }
+  if (options.narrationQualityContract) {
+    const workDir = options.workDir ?? outDir;
+    const qualityContract = options.narrationQualityContract;
+    const duration = Math.max(0, Number(metrics.duration_sec ?? row.duration_sec ?? 0));
+    const sourceSampleCount = Number.isInteger(Number(metrics.sample_count))
+      && Number(metrics.sample_count) > 0
+      ? Number(metrics.sample_count)
+      : secondsToSampleCount(duration);
+    const editPlan = planAlignmentSafeUnitEdit({
+      unitId: row.unit_id,
+      sampleCount: sourceSampleCount,
+      sampleRate: stitchSampleRate,
+      alignment: row.unit_qa?.edge_alignment ?? null,
+      contract: qualityContract,
+    });
+    if (editPlan.status !== "passed" || editPlan.retained_sample_count <= 0) {
+      throw new Error(
+        `Refusing V2 stitch input ${row.unit_id}: ${JSON.stringify(editPlan.blockers)}`,
+      );
+    }
+    const repairTailSilenceSec = options?.repairTailUnitIds?.has(String(row.unit_id))
+      ? Math.max(0.06, Number(options.repairTailSilenceSec ?? 0.06))
+      : 0;
+    const repairTailSilenceSampleCount = secondsToSampleCount(repairTailSilenceSec);
+    const preparedSampleCount = editPlan.retained_sample_count
+      + repairTailSilenceSampleCount;
+    const leadingDetected = metricSilenceSampleCount(
+      metrics,
+      "leading_silence_sample_count",
+      "leading_silence_sec",
+      stitchSampleRate,
+    );
+    const trailingDetected = metricSilenceSampleCount(
+      metrics,
+      "trailing_silence_sample_count",
+      "trailing_silence_sec",
+      stitchSampleRate,
+    );
+    const retainedLeadingSamples = editPlan.alignment_used
+      ? editPlan.retained_head_safety_sample_count
+      : Math.min(sourceSampleCount, leadingDetected);
+    const retainedTrailingSamples = editPlan.alignment_used
+      ? editPlan.retained_tail_safety_sample_count
+      : Math.min(sourceSampleCount, trailingDetected);
+    const preparationPolicy = {
+      mode: editPlan.mode,
+      quality_contract_sha256: qualityContract.contract_sha256,
+      sample_rate: stitchSampleRate,
+      amplitude_only_trimming: false,
+      fade_over_speech: false,
+      edge_alignment: row.unit_qa?.edge_alignment ?? null,
+      edit_plan: editPlan,
+      diagnostic_repair_tail_silence_sample_count: repairTailSilenceSampleCount,
+    };
+    const hashPrefix = String(row.unit_qa.audio_sha256 ?? "unhashed").slice(0, 12);
+    const policyHash = sha256Text(JSON.stringify(preparationPolicy)).slice(0, 12);
+    const preparedDir = path.join(workDir, "stitch-inputs-v2");
+    const preparedPath = path.join(
+      preparedDir,
+      `${String(index + 1).padStart(4, "0")}-${slug(row.unit_id)}-${hashPrefix}-${policyHash}.wav`,
+    );
+    await fs.mkdir(preparedDir, { recursive: true });
+    if (!(await exists(preparedPath))) {
+      const filter = [
+        `aresample=${stitchSampleRate}`,
+        `atrim=start_sample=${editPlan.trim_start_sample}:end_sample=${editPlan.trim_end_sample}`,
+        "asetpts=PTS-STARTPTS",
+        ...(repairTailSilenceSampleCount > 0
+          ? [`apad=pad_len=${repairTailSilenceSampleCount}`]
+          : []),
+      ].join(",");
+      await run("ffmpeg", [
+        "-y",
+        "-nostdin",
+        "-v", "error",
+        "-i", row.wav,
+        "-af", filter,
+        "-ar", String(stitchSampleRate),
+        "-ac", "1",
+        "-acodec", "pcm_s16le",
+        preparedPath,
+      ]);
+    }
+    return {
+      unit_id: row.unit_id,
+      source_wav: row.wav,
+      prepared_wav: preparedPath,
+      source_duration_sec: duration,
+      source_sample_count: sourceSampleCount,
+      trim_start_sample: editPlan.trim_start_sample,
+      trim_end_sample: editPlan.trim_end_sample,
+      trim_start_sec: Number((editPlan.trim_start_sample / stitchSampleRate).toFixed(6)),
+      trim_end_sec: Number((editPlan.trim_end_sample / stitchSampleRate).toFixed(6)),
+      content_sample_count: editPlan.retained_sample_count,
+      content_duration_sec: Number((editPlan.retained_sample_count / stitchSampleRate).toFixed(6)),
+      prepared_sample_count: preparedSampleCount,
+      prepared_duration_sec: Number((preparedSampleCount / stitchSampleRate).toFixed(6)),
+      retained_leading_silence_sample_count: retainedLeadingSamples,
+      retained_trailing_silence_sample_count:
+        retainedTrailingSamples + repairTailSilenceSampleCount,
+      retained_leading_silence_sec: Number((retainedLeadingSamples / stitchSampleRate).toFixed(6)),
+      retained_trailing_silence_sec: Number(((retainedTrailingSamples + repairTailSilenceSampleCount) / stitchSampleRate).toFixed(6)),
+      diagnostic_repair_tail_silence_sample_count: repairTailSilenceSampleCount,
+      diagnostic_repair_tail_silence_sec: Number(repairTailSilenceSec.toFixed(6)),
+      fade_sec: 0,
+      edge_edit_plan: editPlan,
+      preparation_policy: preparationPolicy,
+      preparation_policy_sha256: policyHash,
+      prepared_audio_sha256: await sha256File(preparedPath),
+    };
+  }
   const duration = Math.max(0, Number(metrics.duration_sec ?? row.duration_sec ?? 0));
   const sourceSampleCount = Number.isInteger(Number(metrics.sample_count))
     && Number(metrics.sample_count) > 0
@@ -3203,6 +3319,9 @@ async function finalStitchQa(finalWav, usable, prepared) {
 }
 
 async function stitchWavs(results, finalWav, options = {}) {
+  if (options.narrationQualityContract) {
+    return stitchWavsV2(results, finalWav, options);
+  }
   const usable = results.filter((row) => row.wav);
   if (!usable.length) return null;
   const boundaryRetentionPlans = [];
@@ -3395,6 +3514,170 @@ async function stitchWavs(results, finalWav, options = {}) {
       exact_effective_gap_sample_count: true,
       trims_verified_silence_only: true,
     },
+  };
+}
+
+async function stitchWavsV2(results, finalWav, options = {}) {
+  const usable = results.filter((row) => row.wav);
+  if (!usable.length) return null;
+  const qualityContract = options.narrationQualityContract;
+  const workDir = options.workDir ?? outDir;
+  const prepared = await mapPool(
+    usable,
+    4,
+    (row, index) => prepareStitchInput(row, index, options),
+  );
+  const preparedQa = await qaRenderedAudioRows(
+    usable,
+    prepared.map((row) => ({ unit_id: row.unit_id, wav: row.prepared_wav })),
+    "prepared_stitch_input_v2",
+    { skipTranscriptQa: options.skipRenderedTranscriptQa === true },
+  );
+  prepared.forEach((row, index) => {
+    row.prepared_qa = preparedQa.units[index] ?? null;
+    row.sample_count = Number(row.prepared_qa?.metrics?.sample_count ?? 0) || null;
+  });
+  const basePolicy = {
+    version: "narration_alignment_safe_semantic_stitch_v2",
+    quality_contract_sha256: qualityContract.contract_sha256,
+    sample_rate: stitchSampleRate,
+    amplitude_only_trimming: false,
+    alignment_required_for_trimming: true,
+    missing_alignment_policy: "preserve_entire_unit",
+    fade_over_speech: false,
+    semantic_boundary_classes: true,
+  };
+  if (preparedQa.status === "blocked") {
+    return {
+      status: "blocked",
+      prepared_inputs: prepared,
+      prepared_qa: preparedQa,
+      boundary_qa: null,
+      boundaries: [],
+      final_qa: null,
+      policy: basePolicy,
+    };
+  }
+  const concatPath = path.join(workDir, `concat-v2-${retryInvocationId}.txt`);
+  const lines = [];
+  const boundaries = [];
+  const boundaryBlockers = [];
+  const boundaryWarnings = [];
+  for (let index = 0; index < prepared.length; index += 1) {
+    lines.push(concatLine(prepared[index].prepared_wav));
+    if (index >= prepared.length - 1) continue;
+    const plan = planNarrationBoundary({
+      leftUnit: usable[index],
+      rightUnit: usable[index + 1],
+      leftPrepared: prepared[index],
+      rightPrepared: prepared[index + 1],
+      contract: qualityContract,
+    });
+    let gapPath = null;
+    if (plan.inserted_silence_sample_count > 0) {
+      gapPath = await writeSilenceWav(
+        path.join(
+          workDir,
+          `semantic-gap-${stitchSampleRate}hz-${plan.inserted_silence_sample_count}samples.wav`,
+        ),
+        plan.inserted_silence_sample_count,
+      );
+      lines.push(concatLine(gapPath));
+    }
+    const actualGapSampleCount = gapPath
+      ? Number((await audioPcmMetrics(gapPath)).sample_count)
+      : 0;
+    const boundary = {
+      boundary_id: `${usable[index].unit_id}__${usable[index + 1].unit_id}`,
+      after_unit_id: usable[index].unit_id,
+      before_unit_id: usable[index + 1].unit_id,
+      crosses_segment: lastSourceSegmentId(usable[index])
+        !== firstSourceSegmentId(usable[index + 1]),
+      gap_wav: gapPath,
+      gap_sample_count: actualGapSampleCount,
+      ...plan,
+    };
+    boundaries.push(boundary);
+    boundaryBlockers.push(...(plan.blockers ?? []).map((finding) => ({
+      ...finding,
+      boundary_id: boundary.boundary_id,
+      left_unit_id: boundary.after_unit_id,
+      right_unit_id: boundary.before_unit_id,
+    })));
+    boundaryWarnings.push(...(plan.warnings ?? []).map((finding) => ({
+      ...finding,
+      boundary_id: boundary.boundary_id,
+      left_unit_id: boundary.after_unit_id,
+      right_unit_id: boundary.before_unit_id,
+    })));
+  }
+  const boundaryQa = {
+    status: boundaryBlockers.length ? "blocked" : "passed",
+    sample_rate_hz: stitchSampleRate,
+    target_gap_policy: "semantic_boundary_class_with_natural_edge_silence",
+    boundary_count: boundaries.length,
+    boundaries,
+    blockers: boundaryBlockers,
+    warnings: boundaryWarnings,
+  };
+  if (boundaryBlockers.length) {
+    return {
+      status: "blocked",
+      concat_path: null,
+      prepared_inputs: prepared,
+      prepared_qa: preparedQa,
+      boundary_qa: boundaryQa,
+      boundaries,
+      final_qa: null,
+      policy: basePolicy,
+    };
+  }
+  await fs.writeFile(concatPath, lines.join("\n"));
+  await run("ffmpeg", [
+    "-y",
+    "-f", "concat",
+    "-safe", "0",
+    "-i", concatPath,
+    "-ar", String(stitchSampleRate),
+    "-ac", "1",
+    "-acodec", "pcm_s16le",
+    finalWav,
+  ]);
+  const finalQa = await finalStitchQa(finalWav, usable, prepared);
+  const sampleAccounting = validateNarrationStitchAccounting({
+    preparedInputs: prepared,
+    boundaries,
+    finalSampleCount: finalQa?.metrics?.sample_count,
+    sampleRate: stitchSampleRate,
+  });
+  const finalStatus = finalQa.status === "passed"
+    && sampleAccounting.status !== "blocked"
+    ? "passed"
+    : "blocked";
+  const rmsValues = usable
+    .map((row) => Number(row.unit_qa?.metrics?.rms_dbfs))
+    .filter(Number.isFinite);
+  const rmsSpread = rmsValues.length
+    ? Math.max(...rmsValues) - Math.min(...rmsValues)
+    : 0;
+  return {
+    status: finalStatus,
+    concat_path: concatPath,
+    prepared_inputs: prepared,
+    prepared_qa: preparedQa,
+    boundary_qa: boundaryQa,
+    boundaries,
+    final_qa: finalQa,
+    sample_accounting: sampleAccounting,
+    loudness_check: {
+      unit_rms_min_dbfs: rmsValues.length ? Number(Math.min(...rmsValues).toFixed(3)) : null,
+      unit_rms_max_dbfs: rmsValues.length ? Number(Math.max(...rmsValues).toFixed(3)) : null,
+      unit_rms_spread_db: Number(rmsSpread.toFixed(3)),
+      status: rmsSpread > 15 ? "warning_large_inter_unit_loudness_spread" : "passed",
+      normalization_applied: false,
+      note: "Raw dynamics are measured before one final stream-level mastering pass.",
+    },
+    policy: basePolicy,
   };
 }
 

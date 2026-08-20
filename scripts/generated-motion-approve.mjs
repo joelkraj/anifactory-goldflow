@@ -10,6 +10,7 @@ import {
   GENERATED_MOTION_REPORT_SCHEMA,
   requiredGeneratedMotionCoverageFindings,
 } from "./lib/generated-motion-contract.mjs";
+import { buildGeneratedMotionCoherenceAudit } from "./lib/generated-motion-coherence-audit.mjs";
 import { hashFile } from "./lib/ltx-video-contract.mjs";
 
 const flags = parseFlags(process.argv.slice(2));
@@ -22,6 +23,7 @@ const episodeDir = path.resolve(flags["episode-dir"] ?? path.join(dataRoot, "cha
 const motionDir = path.join(episodeDir, "assets", "motion", "generated");
 const reportPath = path.resolve(flags.report ?? path.join(motionDir, `generated_motion_report_${episode}.json`));
 const outputPath = path.resolve(flags.output ?? path.join(motionDir, `generated_motion_approval_${episode}.json`));
+const coherenceAuditPath = path.resolve(flags["coherence-audit"] ?? path.join(motionDir, `generated_motion_coherence_audit_${episode}.json`));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -71,8 +73,33 @@ async function main() {
   if (report?.schema !== GENERATED_MOTION_REPORT_SCHEMA || report?.status !== "passed") {
     throw new Error(`Generated-motion approval requires a passed generic report: ${reportPath}`);
   }
+  const coherenceAudit = await buildGeneratedMotionCoherenceAudit({
+    report,
+    reportPath,
+    outputPath: coherenceAuditPath,
+    framesRoot: path.join(motionDir, "coherence_frames"),
+    callsDir: path.join(motionDir, "coherence_calls"),
+    repoRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+    concurrency: Math.max(1, Math.min(8, Number(flags["coherence-concurrency"] ?? 4) || 4)),
+    model: flags["coherence-model"] ?? null,
+    reasoningEffort: String(flags["coherence-effort"] ?? "medium"),
+    timeoutMs: Math.max(60_000, Number(flags["coherence-timeout-ms"] ?? 600_000) || 600_000),
+  });
+  if (String(flags["audit-only"] ?? "false") === "true") {
+    console.log(JSON.stringify({
+      status: "passed",
+      audit_only: true,
+      output_path: coherenceAuditPath,
+      summary: coherenceAudit.summary,
+      review_candidate_ids: coherenceAudit.rows
+        .filter((row) => row.overall_verdict !== "pass")
+        .map((row) => row.candidate_id),
+    }, null, 2));
+    return;
+  }
   const approve = idSet(flags["approve-ids"]);
   const reject = idSet(flags["reject-ids"] ?? flags["decline-ids"]);
+  const coherenceReviewed = idSet(flags["coherence-reviewed-ids"]);
   const clipId = (row) => String(row.candidate_id ?? row.image_id ?? "");
   const known = new Set((report.clips ?? []).map(clipId));
   for (const id of [...approve, ...reject]) if (!known.has(id)) throw new Error(`Unknown generated-motion candidate ${id}.`);
@@ -93,6 +120,12 @@ async function main() {
   const reviewer = String(flags.reviewer ?? "").trim();
   const note = String(flags.note ?? "").trim();
   if (!reviewer || !note) throw new Error("--reviewer and --note are required.");
+  const coherenceByCandidate = new Map((coherenceAudit.rows ?? []).map((row) => [String(row.candidate_id), row]));
+  const acceptedCoherenceExceptions = [...approve].filter((id) => coherenceByCandidate.get(id)?.overall_verdict !== "pass");
+  const unreviewedCoherenceExceptions = acceptedCoherenceExceptions.filter((id) => !coherenceReviewed.has(id));
+  if (unreviewedCoherenceExceptions.length) {
+    throw new Error(`Accepted generated clips have unresolved coherence findings. Inspect ${coherenceAuditPath}, then reject them or explicitly pass --coherence-reviewed-ids ${unreviewedCoherenceExceptions.join(",")}.`);
+  }
   const decisions = [];
   const acceptedImages = new Set();
   for (const clip of report.clips ?? []) {
@@ -102,6 +135,7 @@ async function main() {
     const accepted = approve.has(id);
     if (accepted && acceptedImages.has(String(clip.image_id))) throw new Error(`Only one generated clip may be accepted for ${clip.image_id}.`);
     if (accepted) acceptedImages.add(String(clip.image_id));
+    const coherence = coherenceByCandidate.get(id) ?? null;
     decisions.push({
       image_id: clip.image_id,
       candidate_id: id,
@@ -110,6 +144,11 @@ async function main() {
       decision: accepted ? "accepted" : "rejected",
       source_image_sha256: clip.source_image_sha256,
       video_sha256: clip.normalized_video_sha256,
+      coherence_audit_status: coherence?.status ?? "missing",
+      coherence_verdict: coherence?.overall_verdict ?? "needs_review",
+      coherence_reviewed_override: accepted && coherence?.overall_verdict !== "pass" ? coherenceReviewed.has(id) : false,
+      usable_window: accepted ? coherence?.usable_window ?? null : null,
+      coherence_one_sentence_verdict: coherence?.one_sentence_verdict ?? null,
       reviewer,
       note,
     });
@@ -123,6 +162,10 @@ async function main() {
     episode,
     report_path: reportPath,
     report_sha256: await hashFile(reportPath),
+    coherence_audit_path: coherenceAuditPath,
+    coherence_audit_sha256: await hashFile(coherenceAuditPath),
+    coherence_audit_summary: coherenceAudit.summary,
+    coherence_review_policy: "every_clip_sampled; nonpass_acceptance_requires_exact_candidate_override",
     production_eligible: report.proof !== true,
     accepted_count: decisions.filter((row) => row.decision === "accepted").length,
     rejected_count: decisions.filter((row) => row.decision === "rejected").length,

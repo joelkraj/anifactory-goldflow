@@ -74,6 +74,7 @@ export async function runChatGptWebPlanner({
   prompt,
   outputPath,
   workId,
+  model = "gpt-5.6-sol",
   effort,
   projectUrl = null,
   timeoutMs = 1_200_000,
@@ -100,6 +101,7 @@ export async function runChatGptWebPlanner({
     jobs: [{
       id: `plan_${id}`,
       kind: "llm",
+      model,
       prompt: String(prompt ?? ""),
       effort,
       timeoutMs: Math.max(30_000, Math.min(3_600_000, Number(timeoutMs) || 1_200_000)),
@@ -162,7 +164,7 @@ export async function runChatGptWebPlanner({
     return {
       provider: "chatgpt_web",
       transport: "goldflow_authenticated_browser_jobs",
-      model: "gpt-5.6-sol",
+      model,
       reasoning_effort: effort,
       content,
       output_path: outputPath,

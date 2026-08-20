@@ -34,12 +34,15 @@ import {
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
 import {
+  EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
   hasGenericTtsIdentity,
   isLegacyQwenIdentity,
   narrationArtifactVoiceIdentityFindings,
   narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
+  narrationUnitContractForQuality,
+  narrationStitchContractForQuality,
   narrationTtsPolicyForIdentity,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
@@ -93,6 +96,25 @@ import {
   PLANNER_PROVIDER_REGISTRY,
   planningRoomContract,
 } from "./lib/planner-provider-registry.mjs";
+import {
+  narrationQualityContractForIdentity,
+} from "./lib/narration-quality-contract.mjs";
+import {
+  validateNarrationTextIr,
+} from "./lib/narration-text-ir.mjs";
+import {
+  validateNarrationProviderOutputManifest,
+} from "./lib/narration-provider-adapter.mjs";
+import {
+  NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA,
+  narrationExactListenReviewPacketSha256,
+  validateNarrationExactListenReviewDecision,
+} from "./lib/narration-delivery-quality.mjs";
+import {
+  narrationSubjectiveReviewManifestSha256,
+  validateNarrationSubjectiveReviewDecision,
+  validateNarrationSubjectiveReviewManifest,
+} from "./lib/narration-subjective-review.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -326,6 +348,9 @@ function runIdentityTtsComplete(runIdentity = {}) {
     if ((runIdentity.model_versions?.fallback_tts_model ?? null) !== (policy.fallback?.model_id ?? null)) mismatches.push("model_versions.fallback_tts_model");
     if ((runIdentity.model_versions?.fallback_tts_model_revision ?? null) !== (policy.fallback?.model_revision ?? null)) mismatches.push("model_versions.fallback_tts_model_revision");
     if (policy.primary.provider === "qwen_local") {
+      const qualityContract = narrationQualityContractForIdentity(runIdentity);
+      const unitContract = narrationUnitContractForQuality(qualityContract);
+      const stitchContract = narrationStitchContractForQuality(qualityContract);
       const exactQwenLocks = {
         tts_native_speed: null,
         tts_speed_control: "unsupported",
@@ -338,16 +363,36 @@ function runIdentityTtsComplete(runIdentity = {}) {
         primary_minimum_cosine_similarity: policy.primary.minimum_cosine_similarity,
         primary_warning_below_cosine_similarity: policy.primary.warning_below_cosine_similarity,
         primary_voice_continuity_contract: policy.primary.voice_continuity_contract,
-        tts_unit_target_words_min: QWEN_LIAM_UNIT_CONTRACT.target_words_min,
-        tts_unit_target_words_max: QWEN_LIAM_UNIT_CONTRACT.target_words_max,
-        tts_unit_hard_words_max: QWEN_LIAM_UNIT_CONTRACT.hard_words_max,
-        tts_sentence_complete_units: QWEN_LIAM_UNIT_CONTRACT.sentence_complete,
-        tts_continuous_requests: QWEN_LIAM_UNIT_CONTRACT.continuous_requests,
-        tts_join_silence_ms: QWEN_LIAM_STITCH_CONTRACT.join_silence_ms,
-        post_tempo_processing: QWEN_LIAM_STITCH_CONTRACT.post_tempo_processing,
+        tts_unit_target_words_min: unitContract.target_words_min,
+        tts_unit_target_words_max: unitContract.target_words_max,
+        tts_unit_hard_words_max: unitContract.hard_words_max,
+        tts_sentence_complete_units: unitContract.sentence_complete,
+        tts_continuous_requests: unitContract.continuous_requests,
+        tts_join_silence_ms: qualityContract
+          ? null
+          : QWEN_LIAM_STITCH_CONTRACT.join_silence_ms,
+        post_tempo_processing: stitchContract.post_tempo_processing,
         tts_retry_policy: QWEN_LIAM_RETRY_CONTRACT.retry_policy,
         tts_automatic_asr_retry: QWEN_LIAM_RETRY_CONTRACT.automatic_asr_retry,
       };
+      if (qualityContract) {
+        Object.assign(exactQwenLocks, {
+          primary_similarity_threshold_source:
+            qualityContract.voice_identity_qa.threshold_source,
+          primary_universal_similarity_threshold_forbidden: true,
+          primary_reference_bank_centroid_required: true,
+          primary_reference_bank_minimum_count:
+            qualityContract.voice_identity_qa.minimum_reference_count,
+          primary_unit_outliers_review_required: true,
+          primary_aggregate_drift_report_required: true,
+          tts_unit_soft_words_max: unitContract.soft_words_max,
+          tts_stitch_contract_version: stitchContract.contract_version,
+          tts_semantic_boundary_classes: true,
+          tts_alignment_required_for_trimming: true,
+          tts_missing_alignment_policy: stitchContract.missing_alignment_policy,
+          tts_exact_sample_accounting_required: true,
+        });
+      }
       for (const [field, expected] of Object.entries(exactQwenLocks)) {
         if (runIdentity.provider_locks?.[field] !== expected) {
           mismatches.push(`provider_locks.${field}`);
@@ -459,7 +504,7 @@ function runIdentityTtsComplete(runIdentity = {}) {
     return {
       done: true,
       evidence: policy.primary.provider === "qwen_local"
-        ? `run_identity.json TTS locked: ${policy.primary.provider}/${policy.primary.voice_id}; Liam reference clone; 45-60 words (hard 60); 80 ms joins; sequential; no fallback/speed/continuous/post-tempo`
+        ? `run_identity.json TTS locked: ${policy.primary.provider}/${policy.primary.voice_id}; owned reference clone; 20-42 words preferred (48 soft/60 hard); semantic joins; alignment-safe edges; batch-four; no fallback/speed/continuous/post-tempo`
         : `run_identity.json TTS locked: ${policy.primary.provider}/${policy.primary.voice_id}@${policy.primary.native_speed}; fallback=${policy.fallback?.provider ?? "none"}`,
     };
   } catch (error) {
@@ -1264,6 +1309,32 @@ async function longformMixComplete(episodeDir, episode, identity) {
   if (report.final_audio_sha256 && await fileSha256(finalAudio) !== report.final_audio_sha256) {
     return { done: false, state: "stale", evidence: `${latest.name}; final mix hash stale` };
   }
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
+  if (narrationQualityContract && report.narration_only === true) {
+    const mastering = report.mix?.mastering ?? null;
+    const masteringPath = report.mix?.mastering_report_path ?? null;
+    const masteringFile = masteringPath ? await readJson(masteringPath, null) : null;
+    const masteringCurrent = mastering?.status === "passed"
+      && masteringFile?.status === "passed"
+      && mastering?.output_sha256 === masteringFile?.output_sha256
+      && mastering?.input_sha256 === report.narration_sha256
+      && Number(mastering?.policy?.target_lufs)
+        === Number(narrationQualityContract.mastering.integrated_lufs_target)
+      && Number(mastering?.policy?.true_peak_dbtp_max)
+        === Number(narrationQualityContract.mastering.true_peak_dbtp_max)
+      && Number(mastering?.duration_delta_ms)
+        <= Number(narrationQualityContract.mastering.duration_delta_ms_max)
+      && mastering?.policy?.tempo_processing === false
+      && mastering?.policy?.broadband_denoise === false
+      && mastering?.policy?.per_unit_normalization === false;
+    if (!masteringCurrent) {
+      return {
+        done: false,
+        state: "stale",
+        evidence: `${latest.name}; deterministic two-pass narration mastering report missing or stale`,
+      };
+    }
+  }
   return {
     done: true,
     evidence: `${latest.name} -> ${finalAudio}; narration source current`,
@@ -1738,6 +1809,25 @@ async function whisperTimingComplete(episodeDir, episode, currentScriptHash, ide
       };
     }
   }
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
+  if (narrationQualityContract) {
+    const finalDeliveryPath = path.join(
+      episodeDir,
+      `narration_final_delivery_qa_${episode}.json`,
+    );
+    const finalDelivery = await readJson(finalDeliveryPath, null);
+    if (finalDelivery?.schema !== "goldflow_narration_final_delivery_qa_v2"
+      || finalDelivery?.status !== "passed"
+      || finalDelivery?.quality_contract_sha256
+        !== narrationQualityContract.contract_sha256
+      || finalDelivery?.narration_audio_hash !== currentAudioHash
+      || (finalDelivery?.blockers ?? []).length !== 0) {
+      return {
+        done: false,
+        evidence: `narration_final_delivery_qa_${episode}.json missing, blocked, or stale`,
+      };
+    }
+  }
   if (!isLegacyQwenIdentity(identity) && timing.full_stream_transcript_qa?.status !== "passed") {
     return {
       done: false,
@@ -2024,16 +2114,24 @@ async function synthesizedNarrationArtifactsComplete({
   const planPath = path.join(episodeDir, "narration_generation_plan.json");
   const unitQaPath = path.join(episodeDir, `narration_tts_unit_qa_${episode}.json`);
   const fullQaPath = path.join(episodeDir, `narration_full_stream_qa_${episode}.json`);
-  const [plan, unitQa, fullQa, planSha256] = await Promise.all([
+  const [plan, unitQa, fullQa, planFileSha256] = await Promise.all([
     readJson(planPath, null),
     readJson(unitQaPath, null),
     readJson(fullQaPath, null),
     fileSha256(planPath),
   ]);
+  const canonicalPlanSha256 = plan?.plan_sha256 ?? planFileSha256;
+  // Legacy synthesis artifacts predate the canonical in-document plan hash and
+  // intentionally bind the exact plan file. Narration Quality V2 binds both.
+  const artifactPlanSha256 = policy.narration_quality_contract
+    ? canonicalPlanSha256
+    : planFileSha256;
   const findings = [];
   const add = (message) => findings.push(message);
   if (!plan || plan.status !== "passed") add("narration_generation_plan.json missing or not passed");
-  if (!planSha256) add("narration_generation_plan.json hash missing");
+  if (!planFileSha256 || !canonicalPlanSha256 || !artifactPlanSha256) {
+    add("narration_generation_plan.json canonical or file hash missing");
+  }
   if (plan?.source_script_hash !== currentScriptHash) add("narration generation plan source script hash is stale");
   if (!unitQa || !qaStatusPassed(unitQa.status)) add(`narration_tts_unit_qa_${episode}.json missing or status=${unitQa?.status ?? "missing"}`);
   if (!fullQa || !qaStatusPassed(fullQa.status)) add(`narration_full_stream_qa_${episode}.json missing or status=${fullQa?.status ?? "missing"}`);
@@ -2047,15 +2145,23 @@ async function synthesizedNarrationArtifactsComplete({
     ["full-stream QA", fullQa],
   ];
   for (const [label, artifact] of planBoundArtifacts) {
-    if (artifact?.narration_generation_plan_sha256 !== planSha256) {
+    if (artifact?.narration_generation_plan_sha256 !== artifactPlanSha256) {
       add(`${label} narration plan hash is missing or stale`);
     }
+    if (policy.narration_quality_contract
+      && artifact?.narration_generation_plan_file_sha256 !== planFileSha256) {
+      add(`${label} narration plan file hash is missing or stale`);
+    }
   }
-  for (const [label, artifactPath] of [
+  const planPathArtifacts = [
     ["TTS report", ttsReport?.narration_generation_plan_path],
     ["stitch report", stitchReport?.narration_generation_plan_path],
     ["unit QA", unitQa?.narration_generation_plan_path],
-  ]) {
+    ...(policy.narration_quality_contract
+      ? [["full-stream QA", fullQa?.narration_generation_plan_path]]
+      : []),
+  ];
+  for (const [label, artifactPath] of planPathArtifacts) {
     if (!artifactPath || !(await sameResolvedFilePath(artifactPath, planPath))) {
       add(`${label} narration plan path is missing or stale`);
     }
@@ -2500,18 +2606,64 @@ async function synthesizedNarrationArtifactsComplete({
   if (ttsReport?.final_wav_sha256 && ttsReport.final_wav_sha256 !== outputHash) {
     add("TTS report final WAV hash differs from stitched narration");
   }
+  if (policy.narration_quality_contract) {
+    const ttsMaster = ttsReport?.mastering ?? {};
+    const stitchMaster = stitchReport?.mastering ?? {};
+    if (ttsMaster.status !== "passed" || stitchMaster.status !== "passed") {
+      add("canonical narration lacks passing two-pass stream mastering");
+    }
+    if (ttsMaster.output_sha256 !== outputHash
+      || stitchMaster.output_sha256 !== outputHash) {
+      add("canonical narration hash differs from the mastered output hash");
+    }
+    if (!ttsMaster.output_path
+      || !(await sameResolvedFilePath(ttsMaster.output_path, outputPath))
+      || !stitchMaster.output_path
+      || !(await sameResolvedFilePath(stitchMaster.output_path, outputPath))) {
+      add("canonical narration path differs from the mastered output path");
+    }
+    if (ttsMaster.policy?.tempo_processing !== false
+      || stitchMaster.policy?.tempo_processing !== false) {
+      add("canonical narration mastering used or failed to prohibit tempo processing");
+    }
+  }
 
   return {
     done: findings.length === 0,
     evidence: findings.length
       ? `synthesized narration artifact contract stale: ${findings.join("; ")}`
-      : `synthesized narration artifacts current; plan_sha256=${planSha256}; units=${plannedUnits.length}`,
+      : `synthesized narration artifacts current; plan_sha256=${canonicalPlanSha256}; plan_file_sha256=${planFileSha256}; artifact_plan_binding=${policy.narration_quality_contract ? "canonical_and_file" : "file"}; units=${plannedUnits.length}`,
     planned_units: plannedUnits,
   };
 }
 
 function firstPresent(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
+export function narrationNativeSpeedLockFindingForTests(
+  reportedValues = [],
+  expectedSpeed = null,
+) {
+  const populated = reportedValues.filter(
+    (value) => value !== undefined && value !== null && value !== "",
+  );
+  if (expectedSpeed === undefined || expectedSpeed === null || expectedSpeed === "") {
+    return populated.length
+      ? { expected: null, actual: populated[0] }
+      : null;
+  }
+  const expected = Number(expectedSpeed);
+  const actualValue = firstPresent(...reportedValues);
+  const actual = Number(actualValue);
+  if (!Number.isFinite(expected) || !Number.isFinite(actual)
+    || Math.abs(actual - expected) > 0.001) {
+    return {
+      expected: Number.isFinite(expected) ? expected : expectedSpeed,
+      actual: Number.isFinite(actual) ? actual : actualValue ?? null,
+    };
+  }
+  return null;
 }
 
 export function qwenLiamBoundaryContractFindingsForTests(
@@ -2657,6 +2809,7 @@ async function wavPcm16SampleCount(filePath) {
 
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
   let policy;
   try {
     policy = validateNarrationTtsPolicy(narrationTtsPolicyForIdentity(identity), {
@@ -2674,7 +2827,27 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     readJson(ttsReportPath, null),
     readJson(stitchReportPath, null),
   ]);
-  if (!ttsReport) return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
+  if (!ttsReport) {
+    if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(policy.primary?.provider)) {
+      const providerOutputPath = path.join(
+        episodeDir,
+        `narration_provider_output_manifest_${episode}.json`,
+      );
+      if (!(await exists(providerOutputPath))) {
+        return {
+          done: false,
+          evidence: `identity-locked ${policy.primary.provider} provider output manifest missing`,
+          next_command_shape: `node bin/goldflow.mjs tts import-provider --episode-dir ${episodeDir} --results <provider-results.json>`,
+        };
+      }
+      return {
+        done: false,
+        evidence: `provider output is imported; delivery/stitch/mastering report missing`,
+        next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
+      };
+    }
+    return { done: false, evidence: `narration_tts_report_${episode}.json missing` };
+  }
   if (!statusPassed(ttsReport.status)) {
     return { done: false, evidence: `narration_tts_report_${episode}.json status=${ttsReport.status ?? "missing"}` };
   }
@@ -2697,6 +2870,209 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     stitchReport,
   });
   if (proofImport.applicable) return { done: proofImport.done, evidence: proofImport.evidence };
+  if (narrationQualityContract) {
+    const planPath = path.join(episodeDir, "narration_generation_plan.json");
+    const unitDeliveryPath = path.join(
+      episodeDir,
+      `narration_unit_delivery_qa_${episode}.json`,
+    );
+    const providerOutputPath = path.join(
+      episodeDir,
+      `narration_provider_output_manifest_${episode}.json`,
+    );
+    const listenPacketPath = path.join(
+      episodeDir,
+      `narration_exact_listen_review_packet_${episode}.json`,
+    );
+    const listenDecisionPath = path.join(
+      episodeDir,
+      `narration_exact_listen_review_decision_${episode}.json`,
+    );
+    const [plan, unitDelivery, providerOutput, listenPacket, listenDecision] = await Promise.all([
+      readJson(planPath, null),
+      readJson(unitDeliveryPath, null),
+      readJson(providerOutputPath, null),
+      readJson(listenPacketPath, null),
+      readJson(listenDecisionPath, null),
+    ]);
+    const planUnits = narrationPlanUnitsForStatus(plan);
+    const planFileSha256 = await fileSha256(planPath);
+    const expectedUnits = planUnits;
+    const providerValidation = validateNarrationProviderOutputManifest(
+      providerOutput,
+      expectedUnits,
+      {
+        generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
+        generationPlanFileSha256: planFileSha256,
+        qualityContractSha256: narrationQualityContract.contract_sha256,
+        provider: policy.primary.provider,
+        voiceId: policy.primary.voice_id,
+        voiceSha256: policy.primary.voice_sha256,
+      },
+    );
+    const v2Findings = [];
+    if (!qaStatusPassed(unitDelivery?.status)
+      || unitDelivery?.quality_contract_sha256
+        !== narrationQualityContract.contract_sha256
+      || Number(unitDelivery?.blocked_unit_count ?? 0) !== 0
+      || (unitDelivery?.blockers ?? []).length !== 0) {
+      v2Findings.push("unit_delivery_qa");
+    }
+    if (providerValidation.status !== "passed") {
+      v2Findings.push(...providerValidation.findings.map((finding) => finding.code));
+    }
+    for (const row of providerOutput?.units ?? []) {
+      if (!row.audio_path || !row.audio_sha256
+        || !(await exists(row.audio_path))
+        || await fileSha256(row.audio_path) !== row.audio_sha256) {
+        v2Findings.push(`provider_audio_hash:${row.unit_id ?? "unknown"}`);
+      }
+    }
+    const expectedListenCount = Number(unitDelivery?.listen_review_unit_count ?? 0);
+    const listenPacketCurrent =
+      listenPacket?.schema === NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA
+      && listenPacket?.packet_sha256
+        === narrationExactListenReviewPacketSha256(listenPacket)
+      && listenPacket?.narration_generation_plan_sha256
+        === (plan?.plan_sha256 ?? planFileSha256)
+      && listenPacket?.narration_generation_plan_file_sha256 === planFileSha256
+      && listenPacket?.narration_quality_contract_sha256
+        === narrationQualityContract.contract_sha256
+      && Number(listenPacket?.item_count ?? -1) === expectedListenCount;
+    if (!listenPacketCurrent) {
+      v2Findings.push("exact_listen_review_packet");
+    } else {
+      for (const item of listenPacket.items ?? []) {
+        if (!item.audio_path || !item.audio_sha256
+          || !(await exists(item.audio_path))
+          || await fileSha256(item.audio_path) !== item.audio_sha256) {
+          v2Findings.push(`exact_listen_audio_hash:${item.unit_id ?? "unknown"}`);
+        }
+      }
+    }
+    if (listenPacketCurrent && expectedListenCount > 0) {
+      const listenDecisionValidation = validateNarrationExactListenReviewDecision(
+        listenPacket,
+        listenDecision,
+      );
+      if (listenDecisionValidation.status === "repair_required") {
+        const retryEvidencePath = path.join(
+          episodeDir,
+          `narration_confirmed_retry_evidence_${episode}.json`,
+        );
+        const repairUnitIds = listenDecisionValidation.repair_unit_ids;
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Exact narration listen review confirmed audible defects in ${repairUnitIds.join(", ")}; passed units remain immutable`,
+          next_command_shape: policy.primary.provider === "qwen_local"
+            && await exists(retryEvidencePath)
+            ? `node bin/goldflow.mjs tts narrate --episode-dir ${episodeDir} --confirmed-retry-unit-ids ${repairUnitIds.join(",")} --confirmed-retry-evidence ${retryEvidencePath}`
+            : EXTERNAL_NARRATION_TTS_PROVIDERS.includes(policy.primary.provider)
+              ? `Regenerate only ${repairUnitIds.join(",")} with ${policy.primary.provider}, preserve every other accepted WAV/hash, then run node bin/goldflow.mjs tts import-provider --episode-dir ${episodeDir} --results <complete-provider-results-with-exact-repair.json>`
+              : "Manual exact-unit repair planning required: inspect the hash-bound listen decision; do not regenerate passed audio.",
+        };
+      }
+      if (listenDecisionValidation.status !== "approved") {
+        const unitIds = (listenPacket.unit_ids ?? []).join(",");
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Exact narration listen approval missing or stale for ${expectedListenCount} immutable unit(s): ${listenDecisionValidation.findings.map((finding) => finding.code).join(", ")}`,
+          next_command_shape: `node bin/goldflow.mjs tts approve-listen --episode-dir ${episodeDir} --reviewer <name> --accept-unit-ids ${unitIds} --attestation exact_audio_listened_end_to_end`,
+        };
+      }
+    }
+    if (ttsReport.mastering?.status !== "passed"
+      || stitchReport.mastering?.status !== "passed") {
+      return {
+        done: false,
+        evidence: "Exact narration delivery is accepted; canonical mastering/final-stream materialization is pending",
+        next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
+      };
+    }
+    if (narrationQualityContract.subjective_review
+      ?.hash_bound_sampling_manifest_required === true) {
+      const subjectiveManifestPath = path.join(
+        episodeDir,
+        `narration_subjective_review_manifest_${episode}.json`,
+      );
+      const subjectiveDecisionPath = path.join(
+        episodeDir,
+        `narration_subjective_review_decision_${episode}.json`,
+      );
+      const [subjectiveManifest, subjectiveDecision] = await Promise.all([
+        readJson(subjectiveManifestPath, null),
+        readJson(subjectiveDecisionPath, null),
+      ]);
+      const subjectiveValidation = validateNarrationSubjectiveReviewManifest(
+        subjectiveManifest,
+      );
+      const subjectiveAudioCurrent = subjectiveValidation.status === "passed"
+        && subjectiveManifest?.audio_path
+        && await exists(subjectiveManifest.audio_path)
+        && await fileSha256(subjectiveManifest.audio_path)
+          === subjectiveManifest.audio_sha256;
+      const subjectiveLineageCurrent = subjectiveValidation.status === "passed"
+        && subjectiveManifest?.manifest_sha256
+          === narrationSubjectiveReviewManifestSha256(subjectiveManifest)
+        && subjectiveManifest?.narration_generation_plan_sha256
+          === (plan?.plan_sha256 ?? planFileSha256)
+        && subjectiveManifest?.narration_generation_plan_file_sha256
+          === planFileSha256
+        && subjectiveManifest?.narration_quality_contract_sha256
+          === narrationQualityContract.contract_sha256
+        && subjectiveManifest?.audio_sha256 === stitchReport.output_sha256;
+      if (!subjectiveAudioCurrent || !subjectiveLineageCurrent) {
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Mandatory canonical narration subjective-review manifest is missing or stale: ${subjectiveValidation.findings.map((finding) => finding.code).join(", ") || "lineage_or_audio_hash"}`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
+        };
+      }
+      const subjectiveDecisionValidation =
+        validateNarrationSubjectiveReviewDecision(
+          subjectiveManifest,
+          subjectiveDecision,
+        );
+      if (subjectiveDecisionValidation.status === "repair_required") {
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Subjective narration review confirmed defects in exact unit scope ${subjectiveDecisionValidation.repair_unit_ids.join(", ")}; every other unit remains immutable`,
+          next_command_shape: "Inspect the subjective review decision and authorize the narrowest exact-unit or exact-boundary repair; never regenerate the full narration.",
+        };
+      }
+      if (subjectiveDecisionValidation.status !== "approved") {
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Mandatory subjective narration review is pending for ${subjectiveManifest.sample_count} hash-bound canonical-stream sample(s): ${subjectiveDecisionValidation.findings.map((finding) => finding.code).join(", ")}`,
+          next_command_shape: `node bin/goldflow.mjs tts approve-subjective --episode-dir ${episodeDir} --reviewer <name> --accept-all true --attestation all_hash_bound_narration_samples_listened_end_to_end`,
+        };
+      }
+    }
+    if (stitchReport.narration_quality_contract_sha256
+        !== narrationQualityContract.contract_sha256
+      || stitchReport.stitch_policy_version
+        !== "narration_alignment_safe_semantic_stitch_v2"
+      || stitchReport.stitch_policy?.amplitude_only_trimming !== false
+      || stitchReport.stitch_policy?.fade_over_speech !== false
+      || stitchReport.stitch_policy?.semantic_boundary_classes !== true
+      || stitchReport.sample_accounting?.status !== "passed"
+      || stitchReport.sample_accounting?.exact_sample_accounting !== true
+      || stitchReport.boundary_qa?.status !== "passed") {
+      v2Findings.push("alignment_safe_semantic_stitch");
+    }
+    if (v2Findings.length) {
+      return {
+        done: false,
+        evidence: `narration quality V2 artifacts missing or stale: ${[...new Set(v2Findings)].slice(0, 12).join(", ")}`,
+      };
+    }
+  }
+
   const synthesizedArtifacts = await synthesizedNarrationArtifactsComplete({
     episodeDir,
     episode,
@@ -2748,19 +3124,19 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     stitchReport.native_speed,
   ];
   const reportedSpeedValue = firstPresent(...reportedSpeedValues);
-  const reportedSpeed = Number(reportedSpeedValue);
   const pinMismatches = [];
   if (reportedModelId !== policy.primary.model_id) pinMismatches.push(`model=${reportedModelId ?? "missing"}`);
   if (reportedRevision !== policy.primary.model_revision) pinMismatches.push(`revision=${reportedRevision ?? "missing"}`);
   if (reportedVoiceId !== policy.primary.voice_id) pinMismatches.push(`voice=${reportedVoiceId ?? "missing"}`);
   if (reportedVoiceHash !== policy.primary.voice_sha256) pinMismatches.push(`voice_hash=${reportedVoiceHash ?? "missing"}`);
-  if (policy.primary.provider === "qwen_local") {
-    if (reportedSpeedValues.some((value) => value !== undefined && value !== null)) {
-      pinMismatches.push(`speed=${reportedSpeedValue ?? "unexpected"}`);
-    }
-  } else if (!Number.isFinite(reportedSpeed)
-    || Math.abs(reportedSpeed - Number(policy.primary.native_speed)) > 0.001) {
-    pinMismatches.push(`speed=${Number.isFinite(reportedSpeed) ? reportedSpeed : "missing"}`);
+  const speedFinding = narrationNativeSpeedLockFindingForTests(
+    reportedSpeedValues,
+    policy.primary.native_speed,
+  );
+  if (speedFinding) {
+    pinMismatches.push(
+      `speed=${speedFinding.actual ?? "missing"}; expected=${speedFinding.expected ?? "none"}`,
+    );
   }
   if (pinMismatches.length) {
     return { done: false, evidence: `narration provider lock mismatch: ${pinMismatches.join(", ")}` };
@@ -2772,8 +3148,9 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     if (Number(ttsReport.effective_concurrency) !== 1) {
       return { done: false, evidence: `Qwen Liam effective concurrency=${ttsReport.effective_concurrency ?? "missing"}; required 1` };
     }
-    if (Number(stitchReport.unit_gap_sec) !== QWEN_LIAM_STITCH_CONTRACT.join_silence_ms / 1000
-      || Number(stitchReport.segment_gap_sec) !== QWEN_LIAM_STITCH_CONTRACT.join_silence_ms / 1000) {
+    if (!narrationQualityContract
+      && (Number(stitchReport.unit_gap_sec) !== QWEN_LIAM_STITCH_CONTRACT.join_silence_ms / 1000
+        || Number(stitchReport.segment_gap_sec) !== QWEN_LIAM_STITCH_CONTRACT.join_silence_ms / 1000)) {
       return { done: false, evidence: `Qwen Liam joins must be ${QWEN_LIAM_STITCH_CONTRACT.join_silence_ms} ms at every unit/segment boundary` };
     }
     const declaredFallbackIds = ttsReport.fallback_unit_ids
@@ -2799,31 +3176,42 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         ? ttsReport.retry_policy?.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures === false
         : ttsReport.retry_policy?.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures === true)
     );
+    const qualityV2RetryPolicyPassed = narrationQualityContract
+      ? ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only === true
+        && ttsReport.retry_policy?.confirmed_dual_asr_delivery_defects_block_stitching === true
+        && ttsReport.retry_policy?.exact_suspect_confirmation_required === true
+        && ttsReport.retry_policy?.automated_qa_warnings_trigger_retry === false
+        && ttsReport.retry_policy?.structural_failure_action
+          === "stop_and_emit_exact_unit_repair_scope"
+      : true;
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
       || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== true
       || (explicitSingleSubmissionRepairPolicy
         ? ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== false
         : ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true)
       || ttsReport.retry_policy?.other_acoustic_or_voice_identity_blockers_require_review !== true
-      || !warningOnlyAutomatedQaPassed) {
-      return { done: false, evidence: "Qwen narration policy must keep automated acoustic, ASR, and voice-continuity findings non-blocking and non-retrying; current reports must stop on a structural synthesis failure and expose only the exact unit repair scope, while historical reports retain their locked legacy recovery contract" };
+      || !warningOnlyAutomatedQaPassed
+      || !qualityV2RetryPolicyPassed) {
+      return { done: false, evidence: "Qwen narration retry policy is stale: uncertain findings remain review-only, confirmed dual-ASR delivery defects block, and all recovery stays exact-unit with no automatic creative resubmission" };
     }
-    const fullQaForBoundaryContract = await readJson(
-      path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
-      null,
-    );
-    const boundaryFindings = qwenLiamBoundaryContractFindingsForTests(
-      stitchReport,
-      fullQaForBoundaryContract,
-    );
-    if (boundaryFindings.length) {
-      return {
-        done: false,
-        evidence: `Qwen Liam exact 80 ms boundary contract stale: ${boundaryFindings
-          .slice(0, 8)
-          .map((finding) => finding.code)
-          .join(", ")}`,
-      };
+    if (!narrationQualityContract) {
+      const fullQaForBoundaryContract = await readJson(
+        path.join(episodeDir, `narration_full_stream_qa_${episode}.json`),
+        null,
+      );
+      const boundaryFindings = qwenLiamBoundaryContractFindingsForTests(
+        stitchReport,
+        fullQaForBoundaryContract,
+      );
+      if (boundaryFindings.length) {
+        return {
+          done: false,
+          evidence: `Qwen Liam exact 80 ms boundary contract stale: ${boundaryFindings
+            .slice(0, 8)
+            .map((finding) => finding.code)
+            .join(", ")}`,
+        };
+      }
     }
     for (const boundary of stitchReport.boundaries ?? []) {
       const gapPath = boundary?.gap_wav;
@@ -3093,11 +3481,13 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
       evidence: `${label} run identity TTS policy invalid: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
   const planProvider = plan?.primary_provider ?? plan?.provider ?? plan?.tts_provider;
   const planFallback = plan?.fallback_provider ?? plan?.provider_policy?.fallback_provider ?? null;
-  const primaryControls = policy.primary.provider === "qwen_local"
+  const primaryControls = plan?.provider_controls?.primary
+    ?? (policy.primary.provider === "qwen_local"
     ? plan?.provider_controls?.qwen3 ?? plan?.provider_controls?.qwen_local ?? {}
-    : plan?.provider_controls?.kokoro ?? plan?.provider_controls?.kokoro_local ?? {};
+    : plan?.provider_controls?.kokoro ?? plan?.provider_controls?.kokoro_local ?? {});
   const planVoiceId = plan?.narrator_voice_id
     ?? primaryControls.voice_id
     ?? primaryControls.voice
@@ -3111,8 +3501,10 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
   const planSpeed = rawPlanSpeed == null ? null : Number(rawPlanSpeed);
   const speedMismatch = policy.primary.provider === "qwen_local"
     ? rawPlanSpeed != null || primaryControls.speed_control_supported !== false
-    : !Number.isFinite(planSpeed)
-      || Math.abs(planSpeed - Number(policy.primary.native_speed)) > 0.001;
+    : policy.primary.native_speed == null
+      ? rawPlanSpeed != null
+      : !Number.isFinite(planSpeed)
+        || Math.abs(planSpeed - Number(policy.primary.native_speed)) > 0.001;
   if (planProvider !== policy.primary.provider
     || (planFallback ?? null) !== (policy.fallback?.provider ?? null)
     || planVoiceId !== policy.primary.voice_id
@@ -3132,18 +3524,79 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
         ?? []
       ));
   if (!units.length) return { done: false, evidence: `${label} contains no narration units` };
+  if (narrationQualityContract?.unitization?.semantic_boundary_class_required === true) {
+    const grouping = plan?.provider_neutral_unit_grouping ?? {};
+    const expectedUnitContract = narrationUnitContractForQuality(
+      narrationQualityContract,
+    );
+    const allowedBoundaryClasses = new Set([
+      "continuation",
+      "clause",
+      "sentence",
+      "emphasized_sentence",
+      "paragraph",
+      "reveal",
+      "episode_end",
+    ]);
+    const groupingValid = grouping.enabled === true
+      && grouping.sentence_complete === true
+      && Number(grouping.target_spoken_words_min)
+        === Number(expectedUnitContract.target_words_min)
+      && Number(grouping.target_spoken_words_max)
+        === Number(expectedUnitContract.target_words_max)
+      && Number(grouping.soft_spoken_words_max)
+        === Number(expectedUnitContract.soft_words_max)
+      && Number(grouping.hard_spoken_words_max)
+        === Number(expectedUnitContract.hard_words_max)
+      && grouping.semantic_boundary_class_required === true
+      && grouping.performance_intent_required === true
+      && grouping.continuous_requests_allowed === false;
+    const invalidDirectedUnit = units.find((unit, index) => {
+      const text = String(unit?.spoken_text ?? unit?.tts_spoken_text ?? "").trim();
+      const sourceSegmentIds = [...new Set([
+        ...(unit?.source_segment_ids ?? []),
+        ...(unit?.source_unit_refs ?? []).map((row) => row?.segment_id),
+      ].filter(Boolean).map(String))];
+      const boundary = String(unit?.boundary_after ?? "");
+      const performance = unit?.performance_intent;
+      return text.split(/\s+/u).filter(Boolean).length
+          > Number(expectedUnitContract.hard_words_max)
+        || !hasTtsTerminalPunctuation(text)
+        || sourceSegmentIds.length > 1
+        || !allowedBoundaryClasses.has(boundary)
+        || (index === units.length - 1 && boundary !== "episode_end")
+        || (index < units.length - 1 && boundary === "episode_end")
+        || !performance
+        || !String(performance.energy ?? "").trim()
+        || !String(performance.pace ?? "").trim()
+        || !String(performance.pause_strategy ?? "").trim();
+    });
+    if (!groupingValid || invalidDirectedUnit) {
+      return {
+        done: false,
+        evidence: `${label} provider-neutral unit/direction contract mismatch${invalidDirectedUnit ? ` at ${invalidDirectedUnit.unit_id ?? "unknown"}` : ""}`,
+      };
+    }
+  }
   if (policy.primary.provider === "qwen_local") {
     const qwenGrouping = plan?.qwen_liam_unit_grouping ?? {};
+    const expectedUnitContract = narrationUnitContractForQuality(
+      narrationQualityContract,
+    );
     const nullableNumberMatches = (actual, expected) => (
       expected == null ? actual == null : Number(actual) === Number(expected)
     );
     const groupingMismatches = [
       qwenGrouping.enabled !== true ? "enabled" : null,
-      qwenGrouping.sentence_complete !== QWEN_LIAM_UNIT_CONTRACT.sentence_complete ? "sentence_complete" : null,
-      !nullableNumberMatches(qwenGrouping.target_spoken_words_min, QWEN_LIAM_UNIT_CONTRACT.target_words_min) ? "target_spoken_words_min" : null,
-      !nullableNumberMatches(qwenGrouping.target_spoken_words_max, QWEN_LIAM_UNIT_CONTRACT.target_words_max) ? "target_spoken_words_max" : null,
-      Number(qwenGrouping.hard_spoken_words_max) !== QWEN_LIAM_UNIT_CONTRACT.hard_words_max ? "hard_spoken_words_max" : null,
-      qwenGrouping.continuous_requests_allowed !== QWEN_LIAM_UNIT_CONTRACT.continuous_requests ? "continuous_requests_allowed" : null,
+      qwenGrouping.sentence_complete !== expectedUnitContract.sentence_complete ? "sentence_complete" : null,
+      !nullableNumberMatches(qwenGrouping.target_spoken_words_min, expectedUnitContract.target_words_min) ? "target_spoken_words_min" : null,
+      !nullableNumberMatches(qwenGrouping.target_spoken_words_max, expectedUnitContract.target_words_max) ? "target_spoken_words_max" : null,
+      narrationQualityContract
+        && !nullableNumberMatches(qwenGrouping.soft_spoken_words_max, expectedUnitContract.soft_words_max)
+        ? "soft_spoken_words_max"
+        : null,
+      Number(qwenGrouping.hard_spoken_words_max) !== expectedUnitContract.hard_words_max ? "hard_spoken_words_max" : null,
+      qwenGrouping.continuous_requests_allowed !== expectedUnitContract.continuous_requests ? "continuous_requests_allowed" : null,
       plan?.sentence_unit_boundary_integrity?.status !== "passed" ? "sentence_unit_boundary_integrity.status" : null,
     ].filter(Boolean);
     const invalidUnit = units.find((unit) => {
@@ -3155,7 +3608,7 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
           ? unit.source_unit_refs.map((ref) => ref?.segment_id)
           : []),
       ].map((value) => String(value ?? "").trim()).filter(Boolean))];
-      return wordCount > QWEN_LIAM_UNIT_CONTRACT.hard_words_max
+      return wordCount > expectedUnitContract.hard_words_max
         || !hasTtsTerminalPunctuation(text)
         || sourceSegmentIds.length > 1;
     });
@@ -3218,6 +3671,44 @@ async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identit
     .filter((unitId, index, rows) => rows.indexOf(unitId) !== index);
   if (duplicateIds.length) {
     return { done: false, evidence: `${label} duplicate unit ids: ${[...new Set(duplicateIds)].slice(0, 8).join(", ")}` };
+  }
+  if (narrationQualityContract) {
+    if (plan?.narration_quality_contract?.contract_sha256
+      !== narrationQualityContract.contract_sha256) {
+      return {
+        done: false,
+        evidence: `${label} narration quality contract is missing or stale`,
+      };
+    }
+    const invalidProviderRequestUnit = units.find((unit) => {
+      const compiled = unit?.provider_request;
+      return compiled?.status !== "compiled"
+        || compiled?.adapter?.provider !== policy.primary.provider
+        || String(compiled?.request?.unit_id ?? "") !== String(unit?.unit_id ?? "")
+        || String(compiled?.request?.text ?? "")
+          !== String(unit?.spoken_text ?? unit?.tts_spoken_text ?? "");
+    });
+    if (invalidProviderRequestUnit) {
+      return {
+        done: false,
+        evidence: `${label} provider-neutral request is missing or stale for unit ${invalidProviderRequestUnit.unit_id ?? "unknown"}`,
+      };
+    }
+    const textIrPath = path.join(episodeDir, "narration_text_ir.json");
+    const textIr = await readJson(textIrPath, null);
+    const textIrValidation = validateNarrationTextIr(textIr, units, {
+      sourceScriptSha256: currentScriptHash,
+      generationPlanSha256: plan.plan_sha256,
+    });
+    if (textIrValidation.status !== "passed") {
+      return {
+        done: false,
+        evidence: `narration_text_ir.json missing or stale: ${textIrValidation.findings
+          .slice(0, 8)
+          .map((finding) => finding.code)
+          .join(", ")}`,
+      };
+    }
   }
   if (plan?.text_integrity_coverage?.status !== "passed"
     || plan?.system_ui_speech_coverage?.status !== "passed") {
@@ -3898,6 +4389,10 @@ async function main() {
   const readyCommandStages = readyStageIds(rows);
   const repairCommandStages = next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
+    : next?.stage === "qwen_tts_stitch"
+      && next?.state === "blocked"
+      && /tts (?:approve-listen|narrate)\b/.test(String(next.next_command_shape ?? ""))
+      ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"
       && /imagegen browser-pool\b.*--(?:reference|image)-ids\s+\S+.*--repair-reason\b/.test(String(next.next_command_shape ?? ""))

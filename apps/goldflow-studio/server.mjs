@@ -60,8 +60,38 @@ function bearerToken(request) {
 }
 
 export function providerFailurePausesDispatch(code) {
-  return ["rate_limited", "usage_limited", "account_mismatch", "ui_contract_mismatch", "auth_required"]
+  return [
+    "usage_limited",
+    "account_mismatch",
+    "ui_contract_mismatch",
+    "auth_required",
+    "google_gemini_generation_error",
+    "chatgpt_generation_error",
+  ]
     .includes(String(code ?? ""));
+}
+
+function llmJobTiming(job) {
+  const createdAt = job?.created_at ?? null;
+  const firstLeasedAt = job?.first_leased_at ?? job?.lease?.leased_at ?? null;
+  const lastLeasedAt = job?.last_leased_at ?? job?.lease?.leased_at ?? firstLeasedAt;
+  const completedAt = job?.completed_at ?? job?.result?.completed_at ?? null;
+  const elapsed = (start, end) => {
+    const startMs = Date.parse(start ?? "");
+    const endMs = Date.parse(end ?? "");
+    return Number.isFinite(startMs) && Number.isFinite(endMs)
+      ? Math.max(0, endMs - startMs)
+      : null;
+  };
+  return {
+    created_at: createdAt,
+    first_leased_at: firstLeasedAt,
+    last_leased_at: lastLeasedAt,
+    completed_at: completedAt,
+    queue_wait_ms: elapsed(createdAt, firstLeasedAt),
+    service_ms: elapsed(lastLeasedAt, completedAt),
+    total_ms: elapsed(createdAt, completedAt),
+  };
 }
 
 function setBaseHeaders(response, origin = null) {
@@ -176,6 +206,12 @@ export async function createStudioServer(options = {}) {
   const mediaJobs = await new MediaJobStore({ stateDir, downloadsRoot }).init();
   const workers = await new WorkerRegistry({ stateDir }).init();
   const bridge = await new GoldflowBridge({ repoRoot, dataRoot, stateDir, downloadsRoot, browserProvider }).init();
+  const plannerReservedSlots = Math.max(0, Number(options.plannerReservedSlots
+    ?? process.env.GOLDFLOW_PLANNER_RESERVED_SLOTS
+    ?? (browserProvider === "chatgpt" ? 2 : browserProvider === "google-gemini" ? 1 : 0)) || 0);
+  const plannerReservationLingerMs = Math.max(0, Number(options.plannerReservationLingerMs
+    ?? process.env.GOLDFLOW_PLANNER_RESERVATION_LINGER_MS
+    ?? 120_000) || 0);
   const runtime = {
     paused: false,
     pause_reason: null,
@@ -281,6 +317,7 @@ export async function createStudioServer(options = {}) {
           choices: [{ index: 0, message: { role: "assistant", content: finalJob.result.content }, finish_reason: "stop" }],
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
           goldflow_job_id: finalJob.job_id,
+          goldflow_timing: llmJobTiming(finalJob),
           cached: job.status === "completed",
         });
         return;
@@ -341,8 +378,17 @@ export async function createStudioServer(options = {}) {
             return;
           }
         }
+        const planningReservation = ["chatgpt", "google-gemini"].includes(browserProvider)
+          ? await llmJobs.planningReservationState({
+              reservedSlots: plannerReservedSlots,
+              lingerMs: plannerReservationLingerMs,
+            })
+          : { active: false, reserved_slots: 0 };
+        const plannerReservedSlot = planningReservation.active
+          && leaseWorker.slot < planningReservation.reserved_slots;
         const leaseImage = async () => {
           if (!types.includes("image")) return false;
+          if (plannerReservedSlot) return false;
           const imageLease = await bridge.leaseImage(leaseWorker.workerId);
           if (imageLease.status !== "leased") return false;
           sendJson(response, 200, { ...imageLease, worker_slot: leaseWorker.slot, ui_contract: expectedUiContract }, origin);
@@ -371,7 +417,13 @@ export async function createStudioServer(options = {}) {
         // while every idle slot may help the other queue.
         const videoPreferred = browserProvider === "google-flow" && leaseWorker.slot >= 3;
         if (videoPreferred ? await leaseVideo() || await leaseImage() : await leaseImage() || await leaseVideo()) return;
-        sendJson(response, 200, { status: "no_work" }, origin);
+        sendJson(response, 200, {
+          status: "no_work",
+          ...(plannerReservedSlot ? {
+            no_work_reason: "planner_capacity_reserved",
+            planning_reservation: planningReservation,
+          } : {}),
+        }, origin);
         return;
       }
 

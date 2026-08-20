@@ -118,7 +118,13 @@ const stages = [
       /^qwen_tts_unit_qa_.*\.json$/,
       /^audio_stitch_report_.*\.json$/,
     ],
-    commands: ["tts narrate", "tts qwen"],
+    commands: [
+      "tts narrate",
+      "tts import-provider",
+      "tts finalize-provider",
+      "tts approve-listen",
+      "tts qwen",
+    ],
   },
   {
     id: "local_whisper_word_timing",
@@ -597,11 +603,17 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   );
   const media = productionProfile.media;
   const chatGptWebImages = provider === "chatgpt_web_gpt_image";
+  const explicitChatGptImageConcurrency = Number(media.chatgpt_web_image_concurrency) > 0
+    ? media.chatgpt_web_image_concurrency
+    : media.chatgpt_web_image_fallback_concurrency ?? media.image_concurrency;
+  const explicitChatGptReferenceConcurrency = Number(media.chatgpt_web_reference_concurrency) > 0
+    ? media.chatgpt_web_reference_concurrency
+    : media.chatgpt_web_image_fallback_concurrency ?? media.reference_concurrency;
   const imageConcurrency = chatGptWebImages
-    ? media.chatgpt_web_image_concurrency ?? media.image_concurrency
+    ? explicitChatGptImageConcurrency
     : media.image_concurrency;
   const referenceMediaConcurrency = chatGptWebImages
-    ? media.chatgpt_web_reference_concurrency ?? media.reference_concurrency
+    ? explicitChatGptReferenceConcurrency
     : media.reference_concurrency;
   const render = productionProfile.render;
   const narrationConcurrency = ttsPolicy.primary?.provider === "qwen_local"
@@ -624,9 +636,15 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? `node bin/goldflow.mjs semantic plan ${base} --concurrency ${semanticConcurrency} --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1 --proof-baseline-word-timing <audited-baseline-word-timing.json>${boundedProofScopeFlag(identity)}`
       : `node bin/goldflow.mjs semantic plan ${base} --concurrency ${semanticConcurrency} --semantic-json-attempts 1 --semantic-chunk-validation-attempts 1 --semantic-reconciliation-attempts 1`,
     voice_plan: `node bin/goldflow.mjs voice plan ${base}`,
+    // The stage id is retained for historical manifests; the stage itself is
+    // provider-neutral for every quality-V2 run.
     qwen_tts_stitch: isLegacyQwenIdentity(identity)
       ? `node bin/goldflow.mjs tts qwen ${base} --native-speed ${nativeSpeed} --concurrency ${media.qwen_tts_concurrency}`
-      : `node bin/goldflow.mjs tts narrate ${base} --concurrency ${narrationConcurrency} --batch-size ${ttsPolicy.synthesis_contract?.nominal_batch_size ?? 1}`,
+      : ["fish_audio", "elevenlabs", "generic_tts"].includes(
+        ttsPolicy.primary?.provider,
+      )
+        ? `node bin/goldflow.mjs tts import-provider ${base} --results <provider-results.json>`
+        : `node bin/goldflow.mjs tts narrate ${base} --concurrency ${narrationConcurrency} --batch-size ${ttsPolicy.synthesis_contract?.nominal_batch_size ?? 1}`,
     local_whisper_word_timing:
       `node bin/goldflow.mjs audio whisper-timing ${base} `
       + localWhisperFlags,
@@ -636,7 +654,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? "skipped with waiver because run_identity.audio_target is narrator_only"
       : `node bin/goldflow.mjs audio enrich-sfx-score ${base} --score-mode drops_only`,
     longform_audio_mix: narratorOnly(identity)
-      ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 3 --target-lufs -13 --true-peak-db -1`
+      ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 0 --target-lufs -16 --true-peak-db -1.5`
       : `node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1${narrationDuckingFlags(identity)}`,
     visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${editorialConcurrency} --editorial-attempts 1${boundedProofScopeFlag(identity)}`,
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${referenceConcurrency} --visual-ref-json-attempts 1 --visual-ref-merge-validation-attempts 1`,
@@ -657,7 +675,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       ? `node bin/goldflow.mjs imagegen codex-work ${base} --action create --prompts <episode-dir>/section_image_prompts_hardened.json --image-ids <codex_cut_ids> --max-attempts 1 --lease-sec 900; after the validated Codex manifest is imported, run the ModelsLab remainder when this is a hybrid lane: node bin/goldflow.mjs imagegen start ${base}${codexOpeningFlag(identity)} --image-provider ${provider} --image-model ${imageModel} --provider-filter modelslab --skip-reference-generation true --concurrency ${media.image_concurrency} --output <episode-dir>/imagegen_report_${episode}.json`
       : `node bin/goldflow.mjs imagegen start ${base} --image-provider ${provider} --image-model ${imageModel} --prompts <episode-dir>/section_image_prompts_hardened.json --skip-reference-generation true --concurrency ${imageConcurrency} --reference-concurrency ${referenceMediaConcurrency}`,
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
-    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base}`,
+    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium`,
     animation_direction_plan: `node bin/goldflow.mjs visual animation-plan ${base}`,
     generated_video_motion: `node bin/goldflow.mjs visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}`,
     generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
@@ -665,7 +683,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,
     motion_edit_plan: `node bin/goldflow.mjs visual motion-plan ${base}`,
     premium_render: `node bin/goldflow.mjs render start ${base} --motion-plan <episode-dir>/motion_edit_plan_${episode}.json --motion ${renderProfile} --render-concurrency ${render.render_concurrency} --clip-preset ${render.clip_preset} --final-preset ${render.final_preset}${identity?.proof_scope?.mode === "bounded" ? ` --diagnostic-proof true --proof-scope-end-sec ${Number(identity.proof_scope.end_sec)}` : ""}`,
-    final_qa: `node bin/goldflow.mjs final qa ${base} --approve true --note "<QA review notes>"`,
+    final_qa: `node bin/goldflow.mjs final qa ${base} --master-scan true --approve true --reviewed-finding-codes <comma_separated_codes_if_any> --note "<QA review notes>"`,
     upload_packaging: `node bin/goldflow.mjs youtube approve-packaging ${base} --approve true --approved-by <name> --note "<packaging review notes>"`,
     youtube_publish_readiness: `node bin/goldflow.mjs youtube prepare ${base}`,
     youtube_studio_upload: `Use the youtube-studio-publish browser skill, upload privately first, verify every field, then run node bin/goldflow.mjs youtube record-upload ${base} --video-id <id> --watch-url <url> --visibility <private|unlisted|public|scheduled> --channel-verified true --initial-private-verified true --title-verified true --description-verified true --thumbnail-verified true --audience-verified true --monetization-verified true --comments-verified true --checks-complete true --recorded-by <name>`,

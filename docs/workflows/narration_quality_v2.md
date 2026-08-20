@@ -1,0 +1,212 @@
+# Narration Quality V2
+
+## Purpose
+
+Narration Quality V2 separates story text, provider synthesis, delivery verification, editing, and mastering. A TTS model may change without changing the quality gates or silently changing the words.
+
+The default provider remains local Qwen3-TTS 1.7B Base with the owned Joel reference clone. Fish Audio, ElevenLabs, and future providers enter through the same provider-neutral request and output contracts.
+
+## Invariants
+
+- `source_text` is approved story truth.
+- `caption_text` is subtitle truth.
+- `spoken_text` is provider-safe pronunciation text.
+- Every permitted text transformation has exact before/after text, hashes, a stage, and a reason.
+- Every source component closes through `goldflow_spoken_text_lineage_v1` before grouping; the grouped request then closes through a separate punctuation-only chain.
+- Punctuation direction may change delivery without changing lexical tokens.
+- Delivery tags and performance instructions are metadata only. They never enter `spoken_text` or the provider text payload.
+- Broad bracket deletion, hidden rewrites, unclosed receipt chains, and provider-specific text mutation are forbidden.
+- Every unit keeps a stable source-derived ID and original order.
+- Every creative synthesis gets one submission. There is no automatic retry or cross-provider failover.
+- A repair is exact-unit or exact-boundary only and never overwrites the accepted prior evidence.
+
+## Voice Plan
+
+The voice stage writes:
+
+- `narration_text_ir.json`
+- `narration_generation_plan.json`
+- `audio_performance_plan.json`
+- `voice_direction_strategy_<episode>.json`
+- `voice_reference_completeness_report.json`
+
+Sentence-complete units prefer 20-42 spoken words. Forty-eight words is the soft maximum and 60 is the hard maximum. Short dialogue, system/UI, emphasis, and hard-boundary units stay atomic.
+
+Each unit carries:
+
+- immutable source, caption, and spoken tracks
+- exact per-source-component spoken-text lineage and compiler version
+- semantic boundary class
+- provider-neutral performance intent
+- protected-token and speakability evidence
+- requested delivery ID plus the actually selected delivery-reference ID and hash
+- compiled provider request
+- exact provider request hash
+- exact synthesis identity hash
+
+Capability adapters currently normalize Qwen local, Fish Audio, ElevenLabs, and generic TTS. Unsupported direction is recorded. It is never silently treated as supported.
+
+The canonical compiler, `goldflow_provider_safe_spoken_text_v1`, handles approved number, rank, acronym, and pronunciation forms before provider selection. It distinguishes the `IT` initialism from the pronoun `it`. Provider requests must contain the exact final `spoken_text`; bracketed legacy performance tags are never submitted as words.
+
+Local Qwen and external providers converge on the same finalizer. Qwen's provider-execution identity preserves its resident-model batch contract, cohort membership, token counts, and runner receipts separately from the provider-request identity. This allows the actual batch execution identity to be richer than the request identity without weakening either hash check.
+
+## Same-Speaker Delivery Bank
+
+Preflight hash-binds `config/narration_delivery_reference_bank.json`. The bank contains five intended delivery classes from one owned narrator identity: `neutral_forward`, `urgent`, `intimate`, `cold_reveal`, and `restrained_grief`. Only references listed in `production_active_delivery_ids` may condition production. A unit may request any declared delivery, but an unpromoted request deterministically records the request and falls back to the unchanged `neutral_forward` reference rather than inventing a file, changing identity, or blocking the episode.
+
+Audit the bank with:
+
+```bash
+node bin/goldflow.mjs tts delivery-bank --action audit
+```
+
+Promotion requires an 8-10-minute blind comparison, a 20-30-minute fatigue soak, same-speaker evidence, and a clear voice-drift veto. The current runner remains single-reference; blind approval alone records a pending candidate and does not silently activate multi-reference production.
+
+## Provider Identity
+
+Preflight locks the provider, model ID, model revision, voice ID, voice hash, voice-continuity contract, delivery-bank hash, and reference/calibration evidence. External provider production requires a null fallback and a passed provider-promotion receipt whose provider, model, revision, voice ID, voice hash, and bakeoff-manifest hash exactly match the requested production identity. Missing, stale, losing, or mismatched evidence leaves Qwen as the incumbent.
+
+Every accepted unit output binds:
+
+- unit ID and source order
+- spoken-text hash
+- provider adapter ID
+- provider request hash
+- model ID and revision
+- voice ID and hash
+- voice-continuity contract
+- synthesis identity hash
+- WAV path, SHA-256, and positive duration
+- token-limit status
+
+Missing, duplicate, unknown, or reordered units; stale hashes; identity drift; and token-limit output block import.
+
+## Blind Provider Promotion
+
+Fish Audio, ElevenLabs, and future challengers do not become production options because a short sample sounds impressive. `goldflow tts provider-bakeoff --action prepare` creates a blinded packet with a representative 8-10-minute sample, 20-30-minute fatigue sample, two repeatability takes, identity evidence, and latency/cost evidence for Qwen and one challenger. `--action approve` can write a promotion only when the challenger wins and passes representative quality, fatigue, repeatability, voice identity, drift veto, and cost/latency justification. A tie, incomplete evidence, or baseline win retains Qwen.
+
+```bash
+node bin/goldflow.mjs tts provider-bakeoff --action prepare <hash-bound inputs>
+node bin/goldflow.mjs tts provider-bakeoff --action approve \
+  --manifest <manifest.json> \
+  --winner-label <blind-label> \
+  --reviewer <name> \
+  --representative-pass true \
+  --fatigue-pass true \
+  --repeatability-pass true \
+  --voice-identity-pass true \
+  --voice-drift-clear true \
+  --cost-latency-justified true \
+  --rationale <reason>
+```
+
+## External Provider Hand-Off
+
+The provider results file is intentionally small:
+
+```json
+{
+  "provider": "fish_audio",
+  "model_id": "locked-model-id",
+  "model_revision": "locked-revision",
+  "voice_id": "locked-voice-id",
+  "voice_sha256": "64-hex-hash",
+  "voice_continuity_contract": "owned-voice-contract-v1",
+  "results": [
+    {
+      "unit_id": "stable-unit-id",
+      "audio_path": "/absolute/path/to/unit.wav",
+      "audio_sha256": "optional-provider-declared-hash",
+      "synthesis_identity_sha256": "optional-provider-declared-lock"
+    }
+  ]
+}
+```
+
+Import and finalize it with:
+
+```bash
+node bin/goldflow.mjs tts import-provider \
+  --episode-dir <episode-dir> \
+  --results <provider-results.json>
+
+node bin/goldflow.mjs tts finalize-provider \
+  --episode-dir <episode-dir>
+```
+
+`run status` emits these command shapes automatically for an external-provider identity.
+
+An external exact-unit repair still imports a complete ordered result set. Reuse every accepted prior WAV and hash unchanged, replace only the operator-approved unit IDs, and then import the complete manifest again. This makes missing, reordered, or silently regenerated unaffected units detectable.
+
+## Delivery And Continuity QA
+
+Every unit receives waveform inspection, transcript comparison, and calibrated speaker-continuity measurement. The complete stitched stream receives independent transcript, order, edge, and duplication checks.
+
+The locked delivery ceiling is 0.05 WER. `small.en` screens units and the full stream. Exact `medium` confirmation is used when the contract requires it. Confirmed opening/final loss, missing or duplicated spans, insertion/deletion runs, wrong order/count, or excessive WER block finalization. Ambiguous substitution-only differences produce a hash-bound exact-listen item rather than an automatic regeneration.
+
+Voice continuity is calibrated against at least three owned reference clips with leave-one-out thresholds. Universal cosine thresholds and automatic voice switching are forbidden.
+
+## Mandatory Subjective Sampling
+
+Automation verifies words, hashes, continuity, edges, and mastering, but it cannot prove charisma, emotional control, or longform fatigue. Every R4 production finalizer writes `narration_subjective_review_manifest_<episode>.json` bound to the exact canonical WAV and generation plan. The sample set covers the complete opening, every chapter boundary, all system/pronunciation-risk passages, a middle fatigue window, the climax, and the final minute.
+
+`run status` does not complete narration until a reviewer listens to every bound sample and records either acceptance or exact-unit repair scope with the literal attestation shown by the command shape:
+
+```bash
+node bin/goldflow.mjs tts approve-subjective \
+  --episode-dir <episode-dir> \
+  --reviewer <name> \
+  --accept-all true \
+  --attestation all_hash_bound_narration_samples_listened_end_to_end
+```
+
+A confirmed defect names only the affected sample and unit IDs. Passed units remain immutable; after repair, the changed canonical audio requires a fresh manifest and fresh complete hash-bound review.
+
+## Editing And Stitching
+
+Amplitude-only trim is forbidden. A unit may be trimmed only from speech alignment while retaining at least 80 ms before its first aligned word and 140 ms after its last aligned word. If either ASR reports a leading or trailing deletion, edge alignment is considered uncertain and the whole unit is preserved. Otherwise dual-ASR alignment uses the widest speech envelope. Missing alignment preserves the entire unit. A four-millisecond fade may occur only inside verified retained silence, never over aligned speech.
+
+Semantic boundary targets are:
+
+| Boundary | Target |
+| --- | ---: |
+| continuation | 90 ms |
+| clause | 130 ms |
+| sentence | 230 ms |
+| emphasized sentence | 300 ms |
+| paragraph | 430 ms |
+| reveal | 600 ms |
+| episode end | 0 ms |
+
+The stitch report must prove exact expected and actual sample counts. Unit order is restored before any QA or stitch operation.
+
+## Mastering
+
+Mastering runs only after delivery acceptance. It uses two-pass loudness normalization at 24 kHz mono with:
+
+- target: -16 LUFS
+- tolerance: +/-1 LU
+- maximum true peak: -1.5 dBTP
+- maximum duration change: 10 ms
+- no default broadband denoise
+- no tempo processing
+
+Mastering does not repair a bad take, hide clipping, or mutate cached provider units.
+
+The narrator-only longform stage does not master this canonical WAV again when its exact path, SHA-256, duration, format, target, true peak, loudness range, and no-tempo/no-denoise/no-per-unit-normalization policy all match. It writes a hash-bound passthrough receipt and keeps a lossless render input. Render bypasses its own loudness pass only when that exact receipt and WAV hash still satisfy the requested target. Temporary proof trims, transition SFX, gain changes, or target changes force a fresh lossless normalization. AAC is encoded once, at the final video mux; M4A files produced earlier are previews or compatibility artifacts, not the preferred render source.
+
+## Repair Policy
+
+There is no automatic second creative submission. A confirmed problem produces an exact unit or boundary scope. Human review uses `goldflow tts approve-listen` and binds the prior report, unit audio, synthesis identity, finding codes, and decision. A pronunciation repair changes only the spoken track and preserves captions.
+
+## Measured Proof
+
+Proof root:
+
+`/Users/joel/AniFactoryData/voice_bank/proofs/2026-08-17-narration-v2-extreme-quality-v1`
+
+The broad real-Qwen bakeoff completed without structural blockers, opening/final word loss, token-limit output, or calibrated hard voice-identity failures. Its winning baseline V2 result measured 0.036435 mean unit WER, 0.857675 mean speaker similarity, 178.926 WPM, exact sample accounting, -16.22 LUFS, and -1.49 dBTP. The winning baseline contributes four exact-listen units; the complete two-treatment listening proof retains six ASR-sensitive items for subjective listening rather than mislabeling them as defects.
+
+The provider-neutral replay imported five immutable Qwen unit WAVs through the generic adapter with zero new creative submissions. Its rebuilt planner proof has five closed source-to-provider lineage components, zero provider-request text mismatches, and zero performance-metadata leaks. It passed with zero listen items, zero full-stream WER, exact 915,840-sample accounting, 0.879763 mean calibrated speaker similarity, -16.17 LUFS, -1.49 dBTP, and zero duration delta. The narrator-only bed then preserved the canonical WAV byte-for-byte and the render-master decision was `eligible`, proving that production does not add a second master or require an intermediate lossy encode. This proves that provider output can change while the downstream quality path remains identical.
+
+Automated integrity is proven. The mandatory production sampling gate protects each episode, while separate blind longform evidence is still required before promoting a different delivery treatment or provider.

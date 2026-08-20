@@ -1,0 +1,99 @@
+{
+  "schema": "goldflow_narration_delivery_reference_bank_v1",
+  "status": "production_safe_with_single_approved_reference",
+  "voice_id": "joel_owned_narrator_clone",
+  "voice_sha256": "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf",
+  "default_delivery_id": "neutral_forward",
+  "required_delivery_ids": [
+    "neutral_forward",
+    "urgent",
+    "intimate",
+    "cold_reveal",
+    "restrained_grief"
+  ],
+  "production_active_delivery_ids": [
+    "neutral_forward"
+  ],
+  "production_activation_contract": "single_active_reference_v1",
+  "blind_approved_delivery_ids": [
+    "neutral_forward"
+  ],
+  "promotion_policy": {
+    "blind_representative_test_minutes_min": 8,
+    "blind_representative_test_minutes_max": 10,
+    "fatigue_soak_minutes_min": 20,
+    "fatigue_soak_minutes_max": 30,
+    "same_voice_identity_required": true,
+    "voice_identity_drift_is_veto": true,
+    "operator_approval_required": true,
+    "unpromoted_fallback": "neutral_forward"
+  },
+  "references": [
+    {
+      "delivery_id": "neutral_forward",
+      "source_sample_id": "joel_ref_03_dry_deadpan",
+      "source_style_label": "dry humor and deadpan",
+      "status": "production_approved_baseline",
+      "intent_fit": "exact_current_production_baseline",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_03_dry_deadpan.wav",
+      "audio_sha256": "e15a1bd90fcca701003f7ac9a0308e8f37e493a28713ad1cca6afbd09ca21c18",
+      "reference_text": "Renji stared at the royal disaster egg, the smoking receipt printer, and the creature demanding tribute, then decided with professional confidence that minimum wage did not include dragon childcare.",
+      "reference_text_sha256": "cf6964e575a83f71a5d2aab2409818a0b435d36791b00318750e7d6ad1669a49",
+      "promotion_evidence": {
+        "basis": "existing_hash_locked_production_baseline",
+        "blind_review": null,
+        "fatigue_soak": null,
+        "voice_similarity": null
+      }
+    },
+    {
+      "delivery_id": "urgent",
+      "source_sample_id": "joel_ref_05_excited_fast",
+      "source_style_label": "quick-paced excited delivery",
+      "status": "candidate_unpromoted",
+      "intent_fit": "strong_candidate",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_05_excited_fast.wav",
+      "audio_sha256": "1d9e9364971d309e59d2d573d49eaaf8f99af566ad45bd5aaf50ee89218a7695",
+      "reference_text": "He grabbed batteries, tuna, tape, a flashlight, and a bent can opener, because apparently the apocalypse had a shopping phase, and Renji was already late for the end of the world.",
+      "reference_text_sha256": "e9eba6057274b63677fd0def870e0fb9672624d3e5e4d1c7a0145434cc77cf90",
+      "promotion_evidence": null
+    },
+    {
+      "delivery_id": "intimate",
+      "source_sample_id": "joel_ref_01_calm_narration",
+      "source_style_label": "calm narration",
+      "status": "candidate_unpromoted",
+      "intent_fit": "strong_candidate",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_01_calm_narration.wav",
+      "audio_sha256": "cb7158401ab4eefb16a3194253bc6c37073a82d6297ea227d440cf8d117d8546",
+      "reference_text": "At four twelve in the morning, the store lights hummed over empty aisles, and Renji counted the change twice, slowly, like the coins might confess a better ending if he gave them enough time.",
+      "reference_text_sha256": "ba46e9eea3bd671d73c3362bd9561facf45622a77453f20533ee22040a0e3f09",
+      "promotion_evidence": null
+    },
+    {
+      "delivery_id": "cold_reveal",
+      "source_sample_id": "joel_ref_04_dramatic_whisper",
+      "source_style_label": "dramatic emphasis and whisper",
+      "status": "candidate_unpromoted",
+      "intent_fit": "strong_candidate",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_04_dramatic_whisper.wav",
+      "audio_sha256": "7d7fe3358a0e8ad84dd6f481f935fdcbbaeee87435cb4fe6d3680ffe05ed2b82",
+      "reference_text": "Then the system printed one final line, small enough to miss and sharp enough to ruin him. Guardian status accepted. Somewhere behind the glass, every monster in the dark turned toward the store.",
+      "reference_text_sha256": "70766ec3d7d06dd189065d4a2e3ae791e2f7dabe958eaa5e8a9a53c42283b2d4",
+      "promotion_evidence": null
+    },
+    {
+      "delivery_id": "restrained_grief",
+      "source_sample_id": "joel_ref_02_tense_narration",
+      "source_style_label": "tense narration",
+      "status": "recording_or_curated_sample_required",
+      "intent_fit": "unsafe_proxy_do_not_activate",
+      "audio_path": "/Users/joel/AniFactoryData/voice_bank/qwen/reference_samples/joel_narrator/joel_ref_02_tense_narration.wav",
+      "audio_sha256": "4cb13c2fb887874b77125b70c020f3cfb103954246fb391a51ce99f0341d8a17",
+      "reference_text": "The register turned blue before the window cracked. Outside, something tall moved between the parked cars, stopped under the dead sign, and waited like it had already learned his name.",
+      "reference_text_sha256": "0d51ab6db4afea9f0e9341b009b5b100e280279d17752a154b6b248353df2d8d",
+      "promotion_evidence": null
+    }
+  ],
+  "policy": "Only production_active_delivery_ids may condition synthesis. Every other requested style falls back to neutral_forward until blind longform preference, fatigue, voice-drift, and operator-promotion receipts pass."
+}

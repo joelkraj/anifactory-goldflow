@@ -30,6 +30,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output")
     parser.add_argument("--minimum-similarity", type=float, default=0.88)
     parser.add_argument("--warning-below-similarity", type=float, default=0.90)
+    parser.add_argument(
+        "--threshold-mode",
+        choices=["fixed", "reference_leave_one_out"],
+        default="fixed",
+    )
+    parser.add_argument("--calibration-hard-margin", type=float, default=0.05)
+    parser.add_argument("--calibration-warning-margin", type=float, default=0.0)
+    parser.add_argument("--calibration-aggregate-margin", type=float, default=0.03)
     parser.add_argument("--reference-voice-id")
     parser.add_argument("--reference-voice-sha256")
     parser.add_argument("--num-threads", type=int, default=4)
@@ -105,12 +113,57 @@ def main() -> None:
 
     reference_embeddings = [embed(extractor, path) for path in reference_paths]
     centroid = unit(np.mean(reference_embeddings, axis=0))
+    reference_calibration = []
+    if len(reference_embeddings) > 1:
+        for index, (audio_path, embedding) in enumerate(
+            zip(reference_paths, reference_embeddings, strict=True)
+        ):
+            other_centroid = unit(np.mean([
+                other
+                for other_index, other in enumerate(reference_embeddings)
+                if other_index != index
+            ], axis=0))
+            reference_calibration.append({
+                "audio_path": str(audio_path),
+                "audio_sha256": sha256_file(audio_path),
+                "leave_one_out_cosine_similarity": round(
+                    float(np.dot(embedding, other_centroid)),
+                    6,
+                ),
+            })
+    reference_floor = (
+        min(row["leave_one_out_cosine_similarity"]
+            for row in reference_calibration)
+        if reference_calibration else None
+    )
+    if args.threshold_mode == "reference_leave_one_out":
+        if reference_floor is None:
+            raise ValueError(
+                "reference_leave_one_out threshold mode requires at least "
+                "two references"
+            )
+        effective_minimum = max(
+            0.01,
+            reference_floor - max(0.0, args.calibration_hard_margin),
+        )
+        effective_warning = max(
+            effective_minimum,
+            reference_floor - max(0.0, args.calibration_warning_margin),
+        )
+        aggregate_minimum = max(
+            effective_minimum,
+            reference_floor - max(0.0, args.calibration_aggregate_margin),
+        )
+    else:
+        effective_minimum = args.minimum_similarity
+        effective_warning = args.warning_below_similarity
+        aggregate_minimum = args.minimum_similarity
     if args.candidate:
         if args.bakeoff_root:
             raise ValueError("--candidate and --bakeoff-root are mutually exclusive")
-        if not 0 < args.minimum_similarity <= 1:
+        if not 0 < effective_minimum <= 1:
             raise ValueError("--minimum-similarity must be in (0, 1]")
-        if not args.minimum_similarity <= args.warning_below_similarity <= 1:
+        if not effective_minimum <= effective_warning <= 1:
             raise ValueError(
                 "--warning-below-similarity must be between the hard minimum "
                 "and 1"
@@ -126,12 +179,12 @@ def main() -> None:
                     "audio_path": str(audio_path),
                     "audio_sha256": sha256_file(audio_path),
                     "cosine_similarity": round(similarity, 6),
-                    "minimum_cosine_similarity": args.minimum_similarity,
+                    "minimum_cosine_similarity": round(effective_minimum, 6),
                     "warning_below_cosine_similarity":
-                        args.warning_below_similarity,
+                        round(effective_warning, 6),
                     "status": (
                         "passed"
-                        if similarity >= args.minimum_similarity
+                        if similarity >= effective_minimum
                         else "blocked"
                     ),
                     "warnings": (
@@ -141,8 +194,8 @@ def main() -> None:
                                 "tts_fallback_voice_similarity_low_margin",
                             "review_required": True,
                         }]
-                        if args.minimum_similarity <= similarity
-                        < args.warning_below_similarity
+                        if effective_minimum <= similarity
+                        < effective_warning
                         else []
                     ),
                 }
@@ -150,15 +203,36 @@ def main() -> None:
         blocked = [
             row for row in candidate_rows if row["status"] == "blocked"
         ]
+        candidate_aggregate = summarize([
+            row["cosine_similarity"] for row in candidate_rows
+        ])
+        aggregate_status = (
+            "passed"
+            if candidate_aggregate["mean_cosine_similarity"]
+            >= aggregate_minimum else "blocked"
+        )
         report = {
             "schema": "goldflow_tts_voice_continuity_qa_v1",
-            "status": "blocked" if blocked else "passed",
+            "status": "blocked" if blocked or aggregate_status == "blocked"
+                else "passed",
             "method": "WeSpeaker VoxCeleb ResNet34 LM cosine similarity",
             "model_path": str(model_path),
             "model_sha256": sha256_file(model_path),
-            "minimum_cosine_similarity": args.minimum_similarity,
+            "threshold_mode": args.threshold_mode,
+            "minimum_cosine_similarity": round(effective_minimum, 6),
             "warning_below_cosine_similarity":
-                args.warning_below_similarity,
+                round(effective_warning, 6),
+            "aggregate_minimum_cosine_similarity": round(
+                aggregate_minimum,
+                6,
+            ),
+            "aggregate_status": aggregate_status,
+            "calibration": {
+                "reference_leave_one_out_floor": reference_floor,
+                "hard_margin": args.calibration_hard_margin,
+                "warning_margin": args.calibration_warning_margin,
+                "aggregate_margin": args.calibration_aggregate_margin,
+            },
             "reference_voice_id": args.reference_voice_id,
             "reference_voice_sha256": args.reference_voice_sha256,
             "reference_count": len(reference_paths),
@@ -171,6 +245,8 @@ def main() -> None:
             ],
             "candidate_count": len(candidate_rows),
             "blocked_candidate_count": len(blocked),
+            "candidate_aggregate": candidate_aggregate,
+            "reference_calibration": reference_calibration,
             "candidates": candidate_rows,
         }
         output_path = Path(args.output).resolve()

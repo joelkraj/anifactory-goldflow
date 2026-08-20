@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 
 export const NARRATION_ACTIONABLE_DIRECTION_VERSION =
-  "narration_actionable_direction_v1";
+  "narration_actionable_direction_v3";
 export const NARRATION_PERFORMANCE_CONTRACT_VERSION =
-  "narration_performance_contract_v1";
+  "narration_performance_contract_v2";
 export const NARRATION_PERFORMANCE_BAKEOFF_APPROVAL_SCHEMA =
   "goldflow_narration_performance_bakeoff_approval_v1";
 
@@ -42,6 +42,56 @@ export function punctuationInsensitiveTokens(value) {
     .match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) ?? [];
 }
 
+export const NARRATION_BOUNDARY_CLASSES = Object.freeze([
+  "continuation",
+  "clause",
+  "sentence",
+  "emphasized_sentence",
+  "paragraph",
+  "reveal",
+  "episode_end",
+]);
+
+const PERFORMANCE_ENUMS = Object.freeze({
+  energy: ["restrained", "low", "controlled", "high", "urgent"],
+  tension: ["neutral", "warm", "cold", "social_pressure", "high"],
+  intimacy: ["distant", "standard", "close"],
+  pace: ["measured", "steady", "steady_forward", "precise", "fast"],
+  pause_strategy: ["minimal", "punctuation_led", "short_precise", "reveal_weighted"],
+});
+
+export function normalizeNarrationPerformanceIntent(intent = {}) {
+  const normalized = {};
+  for (const [field, allowed] of Object.entries(PERFORMANCE_ENUMS)) {
+    const fallback = {
+      energy: "controlled",
+      tension: "neutral",
+      intimacy: "standard",
+      pace: "steady_forward",
+      pause_strategy: "punctuation_led",
+    }[field];
+    normalized[field] = allowed.includes(String(intent?.[field] ?? ""))
+      ? String(intent[field])
+      : fallback;
+  }
+  normalized.emphasis = [...new Set(
+    (Array.isArray(intent?.emphasis) ? intent.emphasis : [])
+      .map(String)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  )].slice(0, 8);
+  normalized.style_tags = [...new Set(
+    (Array.isArray(intent?.style_tags) ? intent.style_tags : [])
+      .map(String)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  )].slice(0, 6);
+  normalized.source = String(
+    intent?.source ?? "provider_neutral_voice_director_v2",
+  );
+  return normalized;
+}
+
 export function validateActionableNarrationDirection({
   artifact,
   atomicUnits,
@@ -57,7 +107,10 @@ export function validateActionableNarrationDirection({
       groups: [],
     };
   }
-  if (artifact.schema !== "goldflow_narration_actionable_direction_v1") {
+  const directionSchema = String(artifact.schema ?? "");
+  const v3 = directionSchema === "goldflow_narration_actionable_direction_v3";
+  const v2 = directionSchema === "goldflow_narration_actionable_direction_v2";
+  if (!v3 && !v2 && directionSchema !== "goldflow_narration_actionable_direction_v1") {
     findings.push({ code: "actionable_direction_schema_invalid" });
   }
   if (artifact.status !== "approved") {
@@ -124,6 +177,42 @@ export function validateActionableNarrationDirection({
         hard_word_max: hardWordMax,
       });
     }
+    if (v2 || v3) {
+      if (!NARRATION_BOUNDARY_CLASSES.includes(String(group.boundary_after ?? ""))) {
+        findings.push({
+          code: "actionable_direction_boundary_class_invalid",
+          group_index: groupIndex,
+          value: group.boundary_after ?? null,
+        });
+      }
+      if (!group.performance_intent || typeof group.performance_intent !== "object") {
+        findings.push({
+          code: "actionable_direction_performance_intent_missing",
+          group_index: groupIndex,
+        });
+      } else {
+        for (const [field, allowed] of Object.entries(PERFORMANCE_ENUMS)) {
+          if (!allowed.includes(String(group.performance_intent[field] ?? ""))) {
+            findings.push({
+              code: "actionable_direction_performance_intent_invalid",
+              group_index: groupIndex,
+              field,
+              value: group.performance_intent[field] ?? null,
+            });
+          }
+        }
+        const submittedLower = submitted.toLocaleLowerCase("en-US");
+        for (const phrase of group.performance_intent.emphasis ?? []) {
+          if (!submittedLower.includes(String(phrase).toLocaleLowerCase("en-US"))) {
+            findings.push({
+              code: "actionable_direction_emphasis_not_in_spoken_text",
+              group_index: groupIndex,
+              phrase,
+            });
+          }
+        }
+      }
+    }
     actualKeys.push(...sourceRefKeys);
   }
   if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
@@ -132,6 +221,44 @@ export function validateActionableNarrationDirection({
       expected_source_ref_keys: expectedKeys,
       actual_source_ref_keys: actualKeys,
     });
+  }
+  if ((v2 || v3) && groups.length) {
+    if (groups.at(-1)?.boundary_after !== "episode_end") {
+      findings.push({ code: "actionable_direction_episode_end_boundary_missing" });
+    }
+    if (groups.slice(0, -1).some((group) => group.boundary_after === "episode_end")) {
+      findings.push({ code: "actionable_direction_episode_end_boundary_early" });
+    }
+  }
+  if (v3) {
+    const spine = artifact?.chapter_prosody_spine;
+    if (spine?.schema !== "goldflow_narration_chapter_prosody_spine_v1") {
+      findings.push({ code: "actionable_direction_prosody_spine_schema_invalid" });
+    }
+    const rows = Array.isArray(spine?.chapters) ? spine.chapters : [];
+    const expectedSegmentIds = [...new Set(atomicUnits.map((unit) => String(unit.segment_id ?? "")).filter(Boolean))];
+    const actualSegmentIds = rows.map((row) => String(row?.segment_id ?? ""));
+    if (JSON.stringify(actualSegmentIds) !== JSON.stringify(expectedSegmentIds)) {
+      findings.push({
+        code: "actionable_direction_prosody_spine_coverage_invalid",
+        expected_segment_ids: expectedSegmentIds,
+        actual_segment_ids: actualSegmentIds,
+      });
+    }
+    for (const [index, row] of rows.entries()) {
+      for (const field of ["dramatic_function", "audience_effect", "transition_from_previous", "avoidance"]) {
+        if (!String(row?.[field] ?? "").trim()) findings.push({ code: `actionable_direction_prosody_spine_${field}_missing`, chapter_index: index });
+      }
+      for (const field of ["energy_start", "energy_end", "tension_peak", "intimacy", "reveal_weight"]) {
+        const value = Number(row?.[field]);
+        if (!Number.isInteger(value) || value < 1 || value > 5) {
+          findings.push({ code: `actionable_direction_prosody_spine_${field}_invalid`, chapter_index: index });
+        }
+      }
+      if (!["measured", "steady", "steady_forward", "precise", "fast"].includes(String(row?.pace ?? ""))) {
+        findings.push({ code: "actionable_direction_prosody_spine_pace_invalid", chapter_index: index });
+      }
+    }
   }
   return {
     status: findings.length ? "blocked" : "passed",
@@ -151,6 +278,9 @@ export function buildNarrationPerformanceContract({
   referenceTextSha256,
   synthesisContract,
   actionableDirection,
+  preferredWordsMin = 20,
+  preferredWordsMax = 42,
+  softWordMax = 48,
   hardWordMax = 60,
 } = {}) {
   const contract = {
@@ -167,23 +297,26 @@ export function buildNarrationPerformanceContract({
       version: NARRATION_ACTIONABLE_DIRECTION_VERSION,
       authoring_kind: actionableDirection?.authoring_kind ?? "deterministic_fallback",
       artifact_sha256: actionableDirection?.artifact_sha256 ?? null,
-      controls_submitted_to_qwen_base: [
+      provider_neutral_controls: [
         "spoken_text",
         "punctuation",
         "sentence_complete_unit_boundaries",
         "dialogue_separation",
+        "semantic_boundary_class",
+        "performance_intent",
         "reference_audio",
         "reference_text",
       ],
-      unsupported_controls_not_submitted: [
-        "emotion_tags",
-        "natural_language_instruct",
-        "speed_control",
-      ],
+      capability_compilation_required: true,
+      unsupported_controls_must_be_reported: true,
     },
     unit_contract: {
       sentence_complete: true,
-      target_words_min: null,
+      preferred_words_min: preferredWordsMin,
+      preferred_words_max: preferredWordsMax,
+      soft_words_max: softWordMax,
+      target_words_min: preferredWordsMin,
+      target_words_max: preferredWordsMax,
       hard_words_max: hardWordMax,
       continuous_requests: false,
     },

@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import { assertMuxDurationIntegrity } from "../lib/media-duration-integrity.mjs";
-import { assertTransitionAccounting } from "../render.mjs";
+import {
+  assertGeneratedVideoRenderCoverageForTests,
+  assertTransitionAccounting,
+  preferredAudioBedRenderPathForTests,
+} from "../render.mjs";
+
+assert.equal(preferredAudioBedRenderPathForTests({
+  audioBedReport: {
+    mix: {
+      render_input_path: "/tmp/canonical.wav",
+      wav_path: "/tmp/fallback.wav",
+      m4a_path: "/tmp/lossy.m4a",
+    },
+  },
+}), "/tmp/canonical.wav");
+assert.equal(preferredAudioBedRenderPathForTests({
+  explicitAudio: "/tmp/operator.wav",
+  audioBedReport: { mix: { render_input_path: "/tmp/canonical.wav" } },
+}), "/tmp/operator.wav");
 
 const valid = assertMuxDurationIntegrity({
   outputDurationSec: 9415.87,
@@ -46,6 +64,47 @@ assert.throws(
     appliedTransitionCount: 97,
   }),
   /Planned\/applied transition mismatch/,
+);
+
+const providerNeutralFlowCoverage = assertGeneratedVideoRenderCoverageForTests({
+  approved_generated_video_count: 1,
+  motion_intents: [{
+    image_id: "cut_flow_001",
+    generated_video_treatment: { mode: "generated_video", provider: "google_flow" },
+  }],
+});
+assert.equal(providerNeutralFlowCoverage.declared_count, 1);
+assert.equal(providerNeutralFlowCoverage.treatment_count, 1);
+assert.deepEqual(providerNeutralFlowCoverage.image_ids, ["cut_flow_001"]);
+
+assert.equal(assertGeneratedVideoRenderCoverageForTests({
+  approved_generated_video_count: 1,
+  motion_intents: [{
+    image_id: "cut_ltx_001",
+    generated_video_treatment: { mode: "generated_video_ltx23", provider: "modelslab" },
+  }],
+}).treatment_count, 1);
+
+assert.throws(
+  () => assertGeneratedVideoRenderCoverageForTests({
+    approved_generated_video_count: 1,
+    motion_intents: [{
+      image_id: "cut_unknown_001",
+      generated_video_treatment: { mode: "generated_video_future" },
+    }],
+  }),
+  /Unsupported generated-video render mode/,
+);
+
+assert.throws(
+  () => assertGeneratedVideoRenderCoverageForTests({
+    approved_generated_video_count: 2,
+    motion_intents: [{
+      image_id: "cut_flow_001",
+      generated_video_treatment: { mode: "generated_video", provider: "google_flow" },
+    }],
+  }),
+  /Approved generated-video count mismatch/,
 );
 
 console.log("render duration integrity tests passed");

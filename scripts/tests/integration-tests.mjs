@@ -88,12 +88,31 @@ async function runProviderFreeSyntheticE2e() {
     "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
     "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", videoPath,
   ], { maxBuffer: 1024 * 1024 * 8 });
+  const { stdout: durationStdout } = await execFileAsync("ffprobe", [
+    "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath,
+  ]);
+  const outputDurationSec = Number(durationStdout.trim());
   const renderReportPath = path.join(episodeDir, "render_report_ep_01.json");
   await writeJson(renderReportPath, {
     schema: "goldflow_render_report_v2",
     status: "passed",
     final_video_path: videoPath,
     final_video_sha256: await fileSha256(videoPath),
+    output_duration_sec: outputDurationSec,
+    duration_integrity: { status: "passed" },
+    subtitle_count: 1,
+    subtitle_timeline_validated: true,
+    subtitle_text_source: "final_script_phrase_timing",
+    render_motion: {
+      planned_approved_generated_video_count: 0,
+      generated_video_clip_count: 0,
+      generated_video_clip_ids: [],
+      generated_video_source_hashes: {},
+      motion_trace_blocker_count: 0,
+      planned_transition_count: 0,
+      applied_transition_count: 0,
+      suppressed_continuous_ltx_transition_count: 0,
+    },
     source_hashes: { [evidencePath]: await fileSha256(evidencePath) },
   });
   await execFileAsync(process.execPath, [

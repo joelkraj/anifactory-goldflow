@@ -35,6 +35,7 @@ export function defaultChromeExecutable(platform = process.platform) {
 }
 
 export const PRODUCTION_BROWSER_CONCURRENCY_CEILING = 3;
+export const GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING = 5;
 export const DEFAULT_BROWSER_SUBMISSION_STAGGER_MS = 6_000;
 export const MIN_BROWSER_SUBMISSION_STAGGER_MS = 5_000;
 export const MAX_BROWSER_SUBMISSION_STAGGER_MS = 8_000;
@@ -47,7 +48,9 @@ function boundedNumber(value, fallback, minimum, maximum) {
 export function desktopConfig(flags = {}, environment = process.env) {
   const stateDir = path.resolve(flags["state-dir"] ?? environment.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"));
   const browserProvider = normalizeBrowserProvider(flags.provider ?? environment.GOLDFLOW_DESKTOP_PROVIDER ?? "chatgpt");
-  const browserConcurrencyCeiling = PRODUCTION_BROWSER_CONCURRENCY_CEILING;
+  const browserConcurrencyCeiling = browserProvider === "google-flow"
+    ? GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING
+    : PRODUCTION_BROWSER_CONCURRENCY_CEILING;
   const concurrency = Math.min(browserConcurrencyCeiling, Math.max(1, Number(flags.concurrency ?? environment.GOLDFLOW_DESKTOP_CONCURRENCY ?? 3)));
   return {
     serverUrl: String(flags["server-url"] ?? environment.GOLDFLOW_STUDIO_URL ?? "http://127.0.0.1:4317").replace(/\/+$/, ""),
@@ -86,7 +89,9 @@ export function desktopConfig(flags = {}, environment = process.env) {
 
 export function assertDesktopConfig(config) {
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(config.serverUrl)) throw new Error("Desktop host server URL must use http://127.0.0.1 with an explicit port.");
-  const concurrencyCeiling = PRODUCTION_BROWSER_CONCURRENCY_CEILING;
+  const concurrencyCeiling = config.browserProvider === "google-flow"
+    ? GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING
+    : PRODUCTION_BROWSER_CONCURRENCY_CEILING;
   if (!Number.isInteger(config.concurrency) || config.concurrency < 1 || config.concurrency > concurrencyCeiling) {
     throw new Error(`Desktop host concurrency must be 1 through ${concurrencyCeiling} for ${config.browserProvider}.`);
   }

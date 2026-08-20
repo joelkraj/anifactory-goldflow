@@ -96,6 +96,10 @@ async function collectLongformWavPruneCandidate() {
     || report.mix?.audio_design_enabled === false;
   const m4aPath = report.mix?.m4a_path ?? report.final_m4a_path ?? report.output_m4a_path ?? null;
   const wavPath = report.mix?.wav_path ?? null;
+  const canonicalRenderInput = report.final_audio_path ?? report.mix?.render_input_path ?? null;
+  if (canonicalRenderInput && wavPath && path.resolve(canonicalRenderInput) === path.resolve(wavPath)) {
+    return [];
+  }
   if (!narrationOnly || !wavPath || !(await exists(wavPath)) || !(await exists(m4aPath))) return [];
   return [{
     type: "narrator_only_longform_intermediate_wav",

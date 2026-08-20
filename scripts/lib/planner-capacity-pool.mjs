@@ -9,7 +9,41 @@ import {
 } from "./planning-runtime-policy.mjs";
 
 const activeByProvider = new Map();
+const healthByProvider = new Map();
 const waiters = [];
+const TRANSIENT_FAILURE_THRESHOLD = 3;
+
+function providerHealth(provider) {
+  return healthByProvider.get(provider) ?? {
+    open: false,
+    consecutive_failures: 0,
+    reason: null,
+  };
+}
+
+function fatalProviderFailure(error) {
+  return /authentication required|authentication timed out|eligibility check failed|oauth|unauthorized|forbidden|credentials? (?:expired|missing|invalid)/i
+    .test(String(error instanceof Error ? error.message : error ?? ""));
+}
+
+function recordProviderSuccess(provider) {
+  const current = providerHealth(provider);
+  if (current.open) return;
+  healthByProvider.set(provider, { open: false, consecutive_failures: 0, reason: null });
+}
+
+function recordProviderFailure(provider, error) {
+  const current = providerHealth(provider);
+  const message = String(error instanceof Error ? error.message : error ?? "unknown provider failure").slice(0, 2_000);
+  const consecutiveFailures = current.consecutive_failures + 1;
+  const open = current.open || fatalProviderFailure(error) || consecutiveFailures >= TRANSIENT_FAILURE_THRESHOLD;
+  healthByProvider.set(provider, {
+    open,
+    consecutive_failures: consecutiveFailures,
+    reason: open ? message : null,
+  });
+  dispatchWaiters();
+}
 
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -33,6 +67,7 @@ function poolRows(identity, stageName, env) {
 
 function claim(rows) {
   const candidates = rows
+    .filter((row) => providerHealth(row.provider).open !== true)
     .filter((row) => Number(activeByProvider.get(row.provider) ?? 0) < row.concurrency)
     .sort((left, right) => {
       const leftRatio = Number(activeByProvider.get(left.provider) ?? 0) / left.concurrency;
@@ -48,6 +83,12 @@ function claim(rows) {
 function dispatchWaiters() {
   for (let index = 0; index < waiters.length;) {
     const waiter = waiters[index];
+    const healthyRows = waiter.rows.filter((row) => providerHealth(row.provider).open !== true);
+    if (!healthyRows.length) {
+      waiters.splice(index, 1);
+      waiter.reject(new Error(`All federated planner providers opened their circuit for ${waiter.stageName}.`));
+      continue;
+    }
     const provider = claim(waiter.rows);
     if (!provider) {
       index += 1;
@@ -74,10 +115,16 @@ export async function acquireFederatedPlannerSlot({
   const resolvedIdentity = identity ?? planningIdentityFromProcessContext({ argv, env }).identity;
   const rows = poolRows(resolvedIdentity, stageName, env);
   if (!rows.length) return null;
-  const provider = claim(rows) ?? await new Promise((resolve) => waiters.push({ rows, resolve }));
+  const provider = claim(rows) ?? await new Promise((resolve, reject) => waiters.push({ rows, resolve, reject, stageName }));
   let released = false;
   return {
     provider,
+    recordSuccess() {
+      recordProviderSuccess(provider);
+    },
+    recordFailure(error) {
+      recordProviderFailure(provider, error);
+    },
     release() {
       if (released) return;
       released = true;
@@ -89,6 +136,7 @@ export async function acquireFederatedPlannerSlot({
 export function federatedPlannerPoolSnapshotForTests() {
   return {
     active: Object.fromEntries(activeByProvider),
+    health: Object.fromEntries(healthByProvider),
     waiting: waiters.length,
   };
 }
@@ -96,4 +144,5 @@ export function federatedPlannerPoolSnapshotForTests() {
 export function resetFederatedPlannerPoolForTests() {
   if (waiters.length) throw new Error("Cannot reset the planner pool while calls are waiting.");
   activeByProvider.clear();
+  healthByProvider.clear();
 }

@@ -14,6 +14,29 @@ import {
 
 export const LLM_JOB_SCHEMA = "goldflow_studio_llm_job_v1";
 export const DEFAULT_LLM_LEASE_SECONDS = 1800;
+export const DEFAULT_PLANNER_RESERVATION_LINGER_MS = 120_000;
+
+export function planningReservationStateForJobs(jobs = [], {
+  reservedSlots = 2,
+  lingerMs = DEFAULT_PLANNER_RESERVATION_LINGER_MS,
+  nowMs = Date.now(),
+} = {}) {
+  const activeJobs = jobs.filter((job) => ["queued", "leased"].includes(String(job?.status)));
+  const recentlyCompleted = jobs.filter((job) => {
+    if (job?.status !== "completed") return false;
+    const completedMs = Date.parse(job?.completed_at ?? job?.result?.completed_at ?? "");
+    return Number.isFinite(completedMs) && nowMs - completedMs <= Math.max(0, Number(lingerMs) || 0);
+  });
+  const active = activeJobs.length > 0 || recentlyCompleted.length > 0;
+  return {
+    active,
+    reserved_slots: active ? Math.max(0, Math.round(Number(reservedSlots) || 0)) : 0,
+    queued_count: activeJobs.filter((job) => job.status === "queued").length,
+    leased_count: activeJobs.filter((job) => job.status === "leased").length,
+    recently_completed_count: recentlyCompleted.length,
+    linger_ms: Math.max(0, Number(lingerMs) || 0),
+  };
+}
 
 function normalizedRequest(request) {
   const messages = Array.isArray(request?.messages)
@@ -99,6 +122,9 @@ export class LlmJobStore {
         result: null,
         error: null,
         created_at: nowIso(),
+        first_leased_at: null,
+        last_leased_at: null,
+        completed_at: null,
         updated_at: nowIso(),
       };
       await writeJsonAtomic(filePath, job);
@@ -151,6 +177,8 @@ export class LlmJobStore {
         ...candidate,
         status: "leased",
         attempt_count: 1,
+        first_leased_at: candidate.first_leased_at ?? leasedAt,
+        last_leased_at: leasedAt,
         lease: {
           lease_token: leaseToken,
           worker_id: workerId,
@@ -195,6 +223,7 @@ export class LlmJobStore {
     return this.withQueueLock(async () => {
       const job = await this.get(jobId);
       this.assertLiveLease(job, { leaseToken, workerId });
+      const completedAt = nowIso();
       const completed = {
         ...job,
         status: "completed",
@@ -203,11 +232,12 @@ export class LlmJobStore {
           response_sha256: sha256(finalContent),
           conversation_url: conversationUrl,
           ui_contract: uiContract,
-          completed_at: nowIso(),
+          completed_at: completedAt,
         },
         error: null,
         lease: null,
-        updated_at: nowIso(),
+        completed_at: completedAt,
+        updated_at: completedAt,
       };
       await writeJsonAtomic(this.jobPath(jobId), completed);
       return completed;
@@ -243,11 +273,34 @@ export class LlmJobStore {
         lease: null,
         result: null,
         error: null,
+        completed_at: null,
         manual_requeues: [...(job.manual_requeues ?? []), { reason: String(reason), at: nowIso() }],
         updated_at: nowIso(),
       };
       await writeJsonAtomic(this.jobPath(jobId), requeued);
       return requeued;
+    });
+  }
+
+  async cancelQueued(jobId, reason) {
+    if (!String(reason ?? "").trim()) throw new Error("Canceling an LLM job requires a reason.");
+    return this.withQueueLock(async () => {
+      const job = await this.get(jobId);
+      if (!job) throw new Error("Unknown LLM job.");
+      if (job.status !== "queued") throw new Error(`Only queued LLM jobs may be canceled; current status is ${job.status}.`);
+      const canceled = {
+        ...job,
+        status: "failed",
+        error: {
+          code: "operator_canceled_before_lease",
+          message: String(reason),
+          failed_at: nowIso(),
+        },
+        lease: null,
+        updated_at: nowIso(),
+      };
+      await writeJsonAtomic(this.jobPath(jobId), canceled);
+      return canceled;
     });
   }
 
@@ -281,9 +334,16 @@ export class LlmJobStore {
         attempt_count: job.attempt_count,
         worker_id: job.lease?.worker_id ?? null,
         created_at: job.created_at,
+        first_leased_at: job.first_leased_at ?? null,
+        last_leased_at: job.last_leased_at ?? null,
+        completed_at: job.completed_at ?? job.result?.completed_at ?? null,
         updated_at: job.updated_at,
         error: job.error,
       })),
     };
+  }
+
+  async planningReservationState(options = {}) {
+    return planningReservationStateForJobs(await this.list(), options);
   }
 }

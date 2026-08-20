@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import {
+  appendPlannerChunkTelemetry,
+  plannerChunkTelemetryPath,
+} from "./planner-adaptive-telemetry.mjs";
 
 const writeQueues = new Map();
 
@@ -62,6 +66,7 @@ export async function recordPlannerChunkCheckpoint({
   outputPath = null,
   findings = [],
   metadata = {},
+  telemetry = null,
 }) {
   const ledgerPath = path.join(episodeDir, "planner_chunk_ledger.json");
   const key = plannerChunkKey({ plannerStage, chunkId, inputHash });
@@ -121,6 +126,32 @@ export async function recordPlannerChunkCheckpoint({
     const temporary = `${ledgerPath}.${process.pid}.tmp`;
     await fs.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
     await fs.rename(temporary, ledgerPath);
+    if (telemetry && typeof telemetry === "object") {
+      try {
+        const identity = await readJson(path.join(episodeDir, "run_identity.json"), {});
+        await appendPlannerChunkTelemetry(
+          plannerChunkTelemetryPath(
+            process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData",
+          ),
+          {
+            channel: identity.channel ?? null,
+            series_slug: identity.series_slug ?? identity.series ?? null,
+            week: identity.week ?? identity.run_slug ?? null,
+            episode: identity.episode ?? path.basename(episodeDir),
+            planner_stage: plannerStage,
+            chunk_id: chunkId,
+            input_sha256: inputHash,
+            status,
+            attempt: Number(attempt ?? 1),
+            reused: Boolean(reused),
+            finding_codes: findings.map((finding) => finding?.code).filter(Boolean),
+            ...telemetry,
+          },
+        );
+      } catch {
+        // Telemetry is advisory and must never invalidate an accepted chunk.
+      }
+    }
     return entry;
   });
   writeQueues.set(ledgerPath, queued.catch(() => {}));

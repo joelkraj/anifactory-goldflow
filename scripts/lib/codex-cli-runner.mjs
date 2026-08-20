@@ -301,7 +301,8 @@ async function runChatGptWebLocalApi({
       content,
       transport: "goldflow_studio_local_api",
       studio_job_id: payload?.goldflow_job_id ?? null,
-      bridge_duration_ms: null,
+      studio_timing: payload?.goldflow_timing ?? null,
+      bridge_duration_ms: payload?.goldflow_timing?.total_ms ?? null,
     };
 }
 
@@ -321,7 +322,11 @@ async function runGeminiWebLocalApi({ prompt, stageName, resolvedModel, resolved
     }
     const content = String(payload?.choices?.[0]?.message?.content ?? "");
     if (!content.trim()) throw new Error("Local Gemini Web Studio returned an empty completion.");
-    return { content, studio_job_id: payload?.goldflow_job_id ?? null };
+    return {
+      content,
+      studio_job_id: payload?.goldflow_job_id ?? null,
+      studio_timing: payload?.goldflow_timing ?? null,
+    };
 }
 
 async function runGeminiWebCompletion({
@@ -357,6 +362,7 @@ async function runGeminiWebCompletion({
       codex_cli_path: null,
       codex_cli_version: null,
       studio_job_id: result.studio_job_id,
+      studio_timing: result.studio_timing ?? null,
       prompt_sha256: promptHash,
       output_path: outputPath,
       started_at: startedAt,
@@ -582,6 +588,7 @@ async function runChatGptWebCompletion({
         prompt,
         outputPath,
         workId: stageName,
+        model: resolvedModel,
         effort: resolvedEffort,
         projectUrl: runtime.identity?.chatgpt_web_project?.url
           ?? runtime.identity?.provider_locks?.chatgpt_web_project_url
@@ -590,6 +597,7 @@ async function runChatGptWebCompletion({
       });
     const content = String(result.content ?? "");
     await fs.writeFile(outputPath, content, "utf8");
+    const outputSha256 = createHash("sha256").update(content).digest("hex");
     const metadata = {
       schema: "goldflow_codex_call_metadata_v1",
       status: "passed",
@@ -608,6 +616,7 @@ async function runChatGptWebCompletion({
       bridge_receipt_path: result.bridge_receipt_path,
       bridge_duration_ms: result.bridge_duration_ms,
       studio_job_id: result.studio_job_id ?? null,
+      studio_timing: result.studio_timing ?? null,
       browser_worker_pool: result.browser_worker_pool,
       browser_worker_slot: result.browser_worker_slot,
       browser_worker_wait_ms: result.browser_worker_wait_ms,
@@ -621,6 +630,7 @@ async function runChatGptWebCompletion({
       chatgpt_project_url: result.chatgpt_project_url,
       bridge_source_sha256: result.source_sha256,
       normalized_output_sha256: result.normalized_output_sha256,
+      output_sha256: outputSha256,
       response_normalization: result.response_normalization,
       prompt_sha256: promptHash,
       output_path: outputPath,
@@ -769,6 +779,7 @@ async function runCodexCliWithResolvedProvider({
       child.stdin.end(prompt);
     });
     const content = await fs.readFile(outputPath, "utf8").catch(() => stdout || stderr);
+    const outputSha256 = createHash("sha256").update(content).digest("hex");
     const metadata = {
       schema: "goldflow_codex_call_metadata_v1",
       status: "passed",
@@ -791,6 +802,7 @@ async function runCodexCliWithResolvedProvider({
       codex_cli_path: runtime.executable,
       codex_cli_version: runtime.version,
       prompt_sha256: promptHash,
+      output_sha256: outputSha256,
       output_path: outputPath,
       started_at: startedAt,
       completed_at: new Date().toISOString(),
@@ -835,10 +847,15 @@ export async function runCodexCli(options = {}) {
     explicitProvider: options.provider,
   });
   try {
-    return await runCodexCliWithResolvedProvider({
+    const result = await runCodexCliWithResolvedProvider({
       ...options,
       provider: slot?.provider ?? options.provider ?? null,
     });
+    slot?.recordSuccess();
+    return result;
+  } catch (error) {
+    slot?.recordFailure(error);
+    throw error;
   } finally {
     slot?.release();
   }

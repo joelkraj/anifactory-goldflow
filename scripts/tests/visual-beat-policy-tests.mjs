@@ -6,8 +6,12 @@ import {
 } from "../lib/editorial-beat-director.mjs";
 import {
   mergeEditorialRecoveryBeatsForTests,
+  retentionResetEvidenceForTests,
   retentionBeatDensityFindingsForTests,
 } from "../visual-beat-plan.mjs";
+import {
+  visualBeatQualityContractFindings,
+} from "../lib/visual-beat-quality-contract.mjs";
 
 const atom = {
   atom_id: "atom_w000000_w000004",
@@ -56,6 +60,45 @@ const raw = {
     foreground_action_evidence: "Joey repairs Aria's damaged knee.",
     composition_intent: "Joey and Aria beside the opened knee joint.",
     continuity_note: "",
+    visual_information_delta: {
+      kind: "new_action_or_contact",
+      statement: "The repair is physically visible at Aria's opened knee joint.",
+      compared_to_previous: "The sequence moves from diagnosis to direct repair contact.",
+    },
+    sequence_grammar: {
+      shot_size: "medium",
+      camera_angle: "level three-quarter angle",
+      vantage: "Joey's working side",
+      sequence_role: "advance",
+    },
+    spatial_continuity: {
+      eyeline_axis: "Joey looks down toward Aria's knee",
+      primary_screen_position: "Joey left, Aria right",
+      primary_facing: "screen_right",
+      threat_or_counterparty_position: "not_applicable",
+      travel_direction: "stationary",
+      object_geography: "opened knee joint between both characters",
+      intentional_axis_break: false,
+      axis_break_reason: null,
+    },
+    beat_value: {
+      tier: "priority",
+      moment_types: [],
+      reason: "The repair proves capability but is not a package-scale hero moment.",
+    },
+    retention_reset: {
+      kind: "story_earned",
+      evidence_ids: [],
+      purpose: "Visible repair action changes the scene state.",
+    },
+    audiovisual_intent: {
+      motion_role: "supports_clarity",
+      sfx_event: null,
+      score_behavior: "hold",
+      silence_behavior: "not_required",
+      subtitle_emphasis: [],
+      coordination_note: "Keep the repair readable without decorative effects.",
+    },
     editorial_cues: ["physical_action"],
     rail_exception: null,
   }],
@@ -88,5 +131,21 @@ assert.throws(() => mergeEditorialRecoveryBeatsForTests(normalized.beats, normal
 const prompt = buildEditorialDirectorPrompt([atom], ledger, [atom.semantic_scene]);
 assert.match(prompt, /Retention timing is an editorial goal, never a validity gate/i);
 assert.match(prompt, /a 4-second beat is valid in any band/i);
+assert.match(prompt, /State exactly what new visual information each beat adds/i);
+assert.equal(normalized.beats[0].quality_budget.tier, "priority");
+const analyticsEvidence = retentionResetEvidenceForTests({
+  video_id: "video_1",
+  significant_drops: [{ elapsed_sec: 42, delta_from_previous_pct: -7.5 }],
+}, "/tmp/analytics.json", "a".repeat(64));
+assert.equal(analyticsEvidence[0].evidence_id, "retention_drop_001");
+const invalidAnalyticsReset = structuredClone(raw.beats);
+invalidAnalyticsReset[0].retention_reset = {
+  kind: "analytics_earned",
+  evidence_ids: ["invented_drop"],
+  purpose: "Claim a measured reset without measured evidence.",
+};
+assert.equal(visualBeatQualityContractFindings(invalidAnalyticsReset, {
+  analyticsEvidenceIds: analyticsEvidence.map((row) => row.evidence_id),
+}).some((finding) => finding.code === "visual_retention_reset_evidence_invalid"), true);
 
 console.log("visual beat advisory policy tests passed");

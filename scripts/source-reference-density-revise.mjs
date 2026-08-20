@@ -217,6 +217,8 @@ try {
     sourceScriptSha256: candidateSha256,
     revisedScriptSha256: existingSha256,
     acceptedFindingIds: revisionFindings.map((finding) => finding.id),
+    sourceScriptText: candidateText,
+    revisedScriptText: existingScript,
   });
   if (!validation.done) throw new Error(`Existing revision is blocked: ${validation.blockers.join(", ")}`);
   console.log(JSON.stringify({ status: "passed", resumed: true, output_path: outputPath, revised_script_sha256: existingSha256, ledger_path: ledgerPath }, null, 2));
@@ -309,6 +311,8 @@ const ledgerValidation = validateSourceRevisionLedger(parsed.ledger, {
   sourceScriptSha256: candidateSha256,
   revisedScriptSha256: revisedSha256,
   acceptedFindingIds: revisionFindings.map((finding) => finding.id),
+  sourceScriptText: candidateText,
+  revisedScriptText: parsed.script,
 });
 if (!ledgerValidation.done) throw new Error(`Revision ledger is blocked: ${ledgerValidation.blockers.join(", ")}`);
 await fs.writeFile(outputPath, scriptBytes, { flag: "wx" });

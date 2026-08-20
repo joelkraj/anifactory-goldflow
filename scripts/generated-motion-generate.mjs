@@ -14,6 +14,7 @@ import {
   clampGeneratedMotionDuration,
   generatedMotionArtifactPaths,
   generatedMotionEnabled,
+  generatedMotionDirectionContractSha256,
   generatedMotionIdentityContract,
 } from "./lib/generated-motion-contract.mjs";
 import { hashFile, sha256 } from "./lib/ltx-video-contract.mjs";
@@ -222,6 +223,10 @@ function buildPlan(directionPlan, identityContract) {
     source_prompt_sha256: direction.source_prompt_sha256,
     motion_prompt: direction.motion_prompt,
     motion_prompt_sha256: sha256(String(direction.motion_prompt ?? "")),
+    direction_contract_sha256: generatedMotionDirectionContractSha256({
+      ...direction,
+      requested_duration_sec: clampGeneratedMotionDuration(direction.requested_generation_duration_sec, identityContract.provider),
+    }),
     candidate_count: 1,
     automatic_generation_retry_allowed: false,
   }));
@@ -265,6 +270,24 @@ async function materializeCompletedJob(row, job) {
   const normalizedPath = path.join(outputDir, "normalized", `${row.candidate_id}-flow-1920x1080.mp4`);
   const normalizedProbe = await normalizeVideo(rawPath, normalizedPath, row.requested_duration_sec);
   const normalizedVideoSha256 = await hashFile(normalizedPath);
+  const elapsedMs = (startedAt, completedAt) => {
+    const start = Date.parse(startedAt ?? "");
+    const end = Date.parse(completedAt ?? "");
+    return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
+  };
+  const completedAt = job.completed_at ?? job.result?.completed_at ?? null;
+  const queueOrigin = job.last_queued_at ?? job.created_at ?? null;
+  const serviceOrigin = job.last_leased_at ?? null;
+  const providerTiming = {
+    created_at: job.created_at ?? null,
+    last_queued_at: queueOrigin,
+    first_leased_at: job.first_leased_at ?? null,
+    last_leased_at: serviceOrigin,
+    completed_at: completedAt,
+    queue_wait_ms: elapsedMs(queueOrigin, serviceOrigin),
+    service_ms: elapsedMs(serviceOrigin, completedAt),
+    total_ms: elapsedMs(queueOrigin, completedAt),
+  };
   const receipt = {
     schema: "goldflow_generated_motion_provider_receipt_v1",
     status: "passed",
@@ -275,6 +298,7 @@ async function materializeCompletedJob(row, job) {
     image_id: row.image_id,
     candidate_id: row.candidate_id,
     prompt_sha256: row.motion_prompt_sha256,
+    direction_contract_sha256: row.direction_contract_sha256,
     source_image_path: row.source_image_path,
     source_image_sha256: row.source_image_sha256,
     raw_video_path: rawPath,
@@ -283,7 +307,8 @@ async function materializeCompletedJob(row, job) {
     normalized_video_sha256: normalizedVideoSha256,
     ui_contract: job.result.ui_contract,
     conversation_url: job.result.conversation_url,
-    completed_at: job.result.completed_at,
+    provider_timing: providerTiming,
+    completed_at: completedAt,
     recorded_at: new Date().toISOString(),
   };
   const receiptPath = path.join(outputDir, "receipts", `${row.candidate_id}.json`);
@@ -293,7 +318,7 @@ async function materializeCompletedJob(row, job) {
     provider: GENERATED_MOTION_PROVIDER_FLOW,
     model_id: job.request.model_id,
     request_id: job.job_id,
-    creative_generation_attempt: Number(job.attempt_count ?? 1),
+    creative_generation_attempt: 1 + Number(job.manual_requeues?.length ?? 0),
     provider_receipt_path: receiptPath,
     provider_receipt_sha256: await hashFile(receiptPath),
     raw_video_path: rawPath,
@@ -302,6 +327,7 @@ async function materializeCompletedJob(row, job) {
     normalized_video_path: normalizedPath,
     normalized_video_sha256: normalizedVideoSha256,
     normalized_probe: normalizedProbe,
+    provider_timing: providerTiming,
     status: "generated",
   };
 }
@@ -371,7 +397,7 @@ async function main() {
         series_slug: series,
         week,
         episode,
-        animation_direction_plan_sha256: plan.source_hashes[directionPath],
+        animation_direction_contract_sha256: row.direction_contract_sha256,
         source_prompt_sha256: row.source_prompt_sha256,
       },
     };

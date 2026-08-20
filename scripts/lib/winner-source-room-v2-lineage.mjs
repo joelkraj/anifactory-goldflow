@@ -7,6 +7,7 @@ import {
   REFERENCE_DENSITY_ROOM_PROFILE_V1,
   REFERENCE_DENSITY_ROOM_PROFILE_V2,
   REFERENCE_DENSITY_ROOM_PROFILE_V3,
+  FIRST_CLASS_STORY_ROOM_PROFILE_V4,
   SOURCE_ROOM_RELEASE_V2_SCHEMA,
   hasDramaticColdOpenContract,
   validateReferenceMeritFrontier,
@@ -14,18 +15,44 @@ import {
   validateSourceSemanticAcceptance,
   validateSourceStageApproval,
 } from "./winner-source-room-v2-contract.mjs";
+import {
+  validateLongformDraftPortfolio,
+  validateNarrationRevisionLedger,
+  validateStoryTruthAudit,
+  validateStoryTruthIr,
+  validateStoryTruthScriptMap,
+} from "./first-class-story-contract.mjs";
+import {
+  SOURCE_DRAFT_CANDIDATE_SPECS,
+  sourceDraftCandidateContract,
+  validateSourceModelReceipt,
+} from "./source-model-policy.mjs";
 import { validateViewerTournamentAcceptance } from "./source-viewer-tournament-contract.mjs";
+import {
+  validateOpeningAudioAuditionManifest,
+  validateOpeningAudioAuditionReview,
+} from "./source-opening-audio-audition-contract.mjs";
+import {
+  aggregateMixedViewerShadow,
+  validateMixedViewerShadowManifest,
+  validateMixedViewerShadowReport,
+} from "./source-mixed-viewer-shadow-contract.mjs";
+import { validateMixedViewerCalibrationPolicy } from "./source-mixed-viewer-calibration-contract.mjs";
 
 const SOURCE_ROOM_PROFILES = new Set([
   REFERENCE_DENSITY_ROOM_PROFILE_V1,
   REFERENCE_DENSITY_ROOM_PROFILE_V2,
   REFERENCE_DENSITY_ROOM_PROFILE_V3,
+  FIRST_CLASS_STORY_ROOM_PROFILE_V4,
 ]);
 
 const DIAGNOSTIC_FILE_NAMES = Object.freeze({
   causality_learning: "causality_learning_diagnostic.json",
   promise_continuity: "promise_continuity_diagnostic.json",
   narrative_authenticity: "narrative_authenticity_diagnostic.json",
+  opening_stress: "opening_stress_diagnostic.json",
+  character_agency: "character_agency_diagnostic.json",
+  anti_slop: "anti_slop_diagnostic.json",
   reference_density_dominance: "reference_density_dominance_diagnostic.json",
 });
 
@@ -171,20 +198,123 @@ export async function loadSourceRoomReleaseV2Binding(releaseFilePath, {
     if (!SOURCE_ROOM_PROFILES.has(contract?.profile)) throw new Error(`Unknown source-room profile ${contract?.profile}.`);
     requireSame("Source-room profile", contract.profile, release.source_room_profile);
     requireSame("Source-room evidence hash", contract.evidence_registry_sha256, release.evidence_registry_sha256);
-    if ([REFERENCE_DENSITY_ROOM_PROFILE_V2, REFERENCE_DENSITY_ROOM_PROFILE_V3].includes(contract.profile)
+    if ([REFERENCE_DENSITY_ROOM_PROFILE_V2, REFERENCE_DENSITY_ROOM_PROFILE_V3, FIRST_CLASS_STORY_ROOM_PROFILE_V4].includes(contract.profile)
       && contract.material_reference_edges_required !== true) {
       throw new Error("Source-room contract does not require the complete material-reference edge inventory.");
     }
-    if (contract.profile === REFERENCE_DENSITY_ROOM_PROFILE_V3) {
+    if ([REFERENCE_DENSITY_ROOM_PROFILE_V3, FIRST_CLASS_STORY_ROOM_PROFILE_V4].includes(contract.profile)) {
       if (contract.reference_density_required !== true || contract.viewer_tournament_required !== true) {
         throw new Error("V3 source-room contract does not require density dominance and the viewer tournament.");
       }
       if (!String(contract.viewer_panel_seed ?? "").trim()) throw new Error("V3 source-room contract is missing its precommitted viewer panel seed.");
     }
+    if (contract.profile === FIRST_CLASS_STORY_ROOM_PROFILE_V4) {
+      for (const field of ["independent_premise_room_required", "story_truth_ir_required", "six_draft_portfolio_required", "narration_revision_required", "post_upload_learning_required"]) {
+        if (contract[field] !== true) throw new Error(`V4 source-room contract is missing ${field}.`);
+      }
+      if (!String(contract.draft_blind_seed ?? "").trim()) throw new Error("V4 source-room contract is missing its draft blind seed.");
+      if (contract.source_quality_gates_version === "aug_2026_v1") {
+        if (contract.opening_audio_audition_required !== true || contract.mixed_viewer_panel_required !== true) {
+          throw new Error("August V4 source-room contract does not require both source quality gates.");
+        }
+        if (!String(contract.mixed_viewer_panel_seed ?? "").trim()) throw new Error("August V4 source-room contract is missing its mixed-viewer panel seed.");
+      }
+    }
   }
   const sourceRoomProfile = roomContract?.document?.profile ?? release.source_room_profile ?? null;
-  const requiresViewerTournament = sourceRoomProfile === REFERENCE_DENSITY_ROOM_PROFILE_V3;
+  const requiresViewerTournament = [REFERENCE_DENSITY_ROOM_PROFILE_V3, FIRST_CLASS_STORY_ROOM_PROFILE_V4].includes(sourceRoomProfile);
+  const requiresAugustSourceQualityGates = sourceRoomProfile === FIRST_CLASS_STORY_ROOM_PROFILE_V4
+    && roomContract?.document?.source_quality_gates_version === "aug_2026_v1";
   if (requiresViewerTournament && !roomContract) throw new Error("V3 source-room release is missing its hash-bound source-room contract.");
+
+  let firstClassArtifacts = null;
+  let firstClassArtifactSha256s = null;
+  if (sourceRoomProfile === FIRST_CLASS_STORY_ROOM_PROFILE_V4) {
+    const expectedIds = [
+      "premise_slate_gpt",
+      "premise_slate_gemini",
+      "premise_pool",
+      "premise_blind_selection",
+      "premise_finalist_lineage",
+      "story_truth_ir",
+      "story_truth_audit",
+      "story_truth_script_map",
+      "longform_draft_portfolio",
+      "developmental_revised_script",
+      "narration_revision_ledger",
+    ];
+    firstClassArtifacts = {};
+    firstClassArtifactSha256s = {};
+    for (const artifactId of expectedIds) {
+      const artifactPath = resolveArtifact(releasePath, release?.first_class_artifact_paths?.[artifactId], `first_class_artifact_paths.${artifactId}`);
+      const bytes = await readBytes(artifactPath, `first-class artifact ${artifactId}`);
+      const actualSha256 = sha256(bytes);
+      requireSame(`First-class artifact ${artifactId} hash`, actualSha256, release?.first_class_artifact_sha256s?.[artifactId]);
+      firstClassArtifactSha256s[artifactId] = actualSha256;
+      firstClassArtifacts[artifactId] = {
+        path: artifactPath,
+        bytes,
+        sha256: actualSha256,
+        document: artifactId === "developmental_revised_script" ? null : JSON.parse(bytes.toString("utf8")),
+      };
+    }
+    const architecture = artifacts.architecture_path.document;
+    assertValid("Story Truth IR", validateStoryTruthIr(firstClassArtifacts.story_truth_ir.document, {
+      packageSha256: architecture.package_sha256,
+      selectedTreatmentSha256: architecture.selected_treatment_sha256,
+      architectureSha256: artifacts.architecture_path.sha256,
+      architecture,
+    }));
+    assertValid("Story Truth audit", validateStoryTruthAudit(firstClassArtifacts.story_truth_audit.document, {
+      storyTruthIrSha256: firstClassArtifacts.story_truth_ir.sha256,
+    }));
+    if (firstClassArtifacts.story_truth_audit.document.status !== "passed") throw new Error("Released Story Truth audit is not passed.");
+    assertValid("Longform draft portfolio", validateLongformDraftPortfolio(firstClassArtifacts.longform_draft_portfolio.document, {
+      packageSha256: architecture.package_sha256,
+      architectureSha256: artifacts.architecture_path.sha256,
+      storyTruthIrSha256: firstClassArtifacts.story_truth_ir.sha256,
+      expectedCandidates: SOURCE_DRAFT_CANDIDATE_SPECS,
+    }));
+    for (const candidate of firstClassArtifacts.longform_draft_portfolio.document.candidates) {
+      const spec = SOURCE_DRAFT_CANDIDATE_SPECS.find((row) => row.id === candidate.id);
+      if (!spec) throw new Error(`Released draft portfolio contains unknown candidate ${candidate.id}.`);
+      const draftPath = resolveArtifact(firstClassArtifacts.longform_draft_portfolio.path, candidate.output_path, `draft portfolio ${candidate.id} output_path`);
+      const receiptPath = resolveArtifact(firstClassArtifacts.longform_draft_portfolio.path, candidate.receipt_path, `draft portfolio ${candidate.id} receipt_path`);
+      const [draftBytes, receiptBytes] = await Promise.all([
+        readBytes(draftPath, `draft portfolio output ${candidate.id}`),
+        readBytes(receiptPath, `draft portfolio receipt ${candidate.id}`),
+      ]);
+      const draftSha256 = sha256(draftBytes);
+      const receiptSha256 = sha256(receiptBytes);
+      requireSame(`Draft portfolio ${candidate.id} output hash`, draftSha256, candidate.output_sha256);
+      requireSame(`Draft portfolio ${candidate.id} receipt hash`, receiptSha256, candidate.receipt_sha256);
+      const draftWordCount = draftBytes.toString("utf8").trim().split(/\s+/).filter(Boolean).length;
+      requireSame(`Draft portfolio ${candidate.id} word count`, draftWordCount, candidate.word_count);
+      const receipt = JSON.parse(receiptBytes.toString("utf8"));
+      const expectedContract = sourceDraftCandidateContract(spec, { stageName: `winner_source_script_v3_${candidate.id}` });
+      assertValid(`Draft portfolio ${candidate.id} provider receipt`, validateSourceModelReceipt(receipt, { expectedContract }));
+      if (receipt.status !== "passed") throw new Error(`Draft portfolio ${candidate.id} receipt is not passed.`);
+      requireSame(`Draft portfolio ${candidate.id} receipt prompt hash`, receipt.prompt_sha256, candidate.prompt_sha256);
+      requireSame(
+        `Draft portfolio ${candidate.id} receipt output hash`,
+        receipt.output_sha256 ?? receipt.normalized_output_sha256,
+        candidate.output_sha256,
+      );
+    }
+    assertValid("Story Truth script map", validateStoryTruthScriptMap(firstClassArtifacts.story_truth_script_map.document, {
+      storyTruthIr: firstClassArtifacts.story_truth_ir.document,
+      storyTruthIrSha256: firstClassArtifacts.story_truth_ir.sha256,
+      scriptText: sourceText,
+      scriptSha256: source.sha256,
+    }));
+    assertValid("Narration revision ledger", validateNarrationRevisionLedger(firstClassArtifacts.narration_revision_ledger.document, {
+      sourceScriptSha256: firstClassArtifacts.developmental_revised_script.sha256,
+      polishedScriptSha256: source.sha256,
+      storyTruthIrSha256: firstClassArtifacts.story_truth_ir.sha256,
+      sourceWordCount: firstClassArtifacts.developmental_revised_script.bytes.toString("utf8").trim().split(/\s+/).filter(Boolean).length,
+      polishedWordCount: sourceText.trim().split(/\s+/).filter(Boolean).length,
+    }));
+  }
 
   let reference = null;
   let frontier = null;
@@ -203,7 +333,7 @@ export async function loadSourceRoomReleaseV2Binding(releaseFilePath, {
       referenceText,
       referenceSha256: reference.sha256,
       referencePath: reference.path,
-      requireMaterialEdges: [REFERENCE_DENSITY_ROOM_PROFILE_V2, REFERENCE_DENSITY_ROOM_PROFILE_V3].includes(sourceRoomProfile),
+      requireMaterialEdges: [REFERENCE_DENSITY_ROOM_PROFILE_V2, REFERENCE_DENSITY_ROOM_PROFILE_V3, FIRST_CLASS_STORY_ROOM_PROFILE_V4].includes(sourceRoomProfile),
     }));
   }
 
@@ -272,6 +402,69 @@ export async function loadSourceRoomReleaseV2Binding(releaseFilePath, {
     viewerTournament = { acceptance, manifest, reportSha256s };
   }
 
+  let openingAudioAudition = null;
+  let mixedViewerPanel = null;
+  if (requiresAugustSourceQualityGates) {
+    const openingManifest = await readBoundArtifact(release, releasePath, "opening_audio_audition_manifest_path", "opening_audio_audition_manifest_sha256", "opening audio audition manifest", { json: true });
+    const openingReview = await readBoundArtifact(release, releasePath, "opening_audio_audition_review_path", "opening_audio_audition_review_sha256", "opening audio audition review", { json: true });
+    assertValid("Opening audio audition manifest", validateOpeningAudioAuditionManifest(openingManifest.document, {
+      draftSelectionSha256: artifacts.longform_draft_selection_path.sha256,
+      requireProductionGate: true,
+    }));
+    assertValid("Opening audio audition review", validateOpeningAudioAuditionReview(openingReview.document, {
+      manifestSha256: openingManifest.sha256,
+      allowedLabels: openingManifest.document.finalists.map((row) => row.blind_label).sort(),
+      requireProductionGate: true,
+    }));
+    openingAudioAudition = { manifest: openingManifest, review: openingReview };
+
+    const mixedManifest = await readBoundArtifact(release, releasePath, "mixed_viewer_panel_manifest_path", "mixed_viewer_panel_manifest_sha256", "mixed viewer panel manifest", { json: true });
+    const mixedAggregate = await readBoundArtifact(release, releasePath, "mixed_viewer_panel_aggregate_path", "mixed_viewer_panel_aggregate_sha256", "mixed viewer panel aggregate", { json: true });
+    const calibrationPolicy = await readBoundArtifact(release, releasePath, "mixed_viewer_calibration_policy_path", "mixed_viewer_calibration_policy_sha256", "mixed viewer calibration policy", { json: true });
+    assertValid("Mixed viewer calibration policy", validateMixedViewerCalibrationPolicy(calibrationPolicy.document, {
+      learningLedgerSha256: roomContract.document.source_learning_ledger_sha256 ?? null,
+    }));
+    assertValid("Mixed viewer panel manifest", validateMixedViewerShadowManifest(mixedManifest.document, {
+      requireProductionGate: true,
+      calibrationPolicySha256: calibrationPolicy.sha256,
+    }));
+    requireSame("Mixed viewer panel seed", mixedManifest.document.panel_seed, roomContract.document.mixed_viewer_panel_seed);
+    requireSame("Mixed viewer candidate hash", mixedManifest.document.candidate_sha256, source.sha256);
+    requireSame("Mixed viewer reference hash", mixedManifest.document.reference_sha256, reference?.sha256 ?? null);
+    requireSame("Mixed viewer aggregate hash", mixedManifest.document.aggregate_sha256, mixedAggregate.sha256);
+    const reports = [];
+    const reportSha256s = {};
+    for (const receipt of mixedManifest.document.receipts ?? []) {
+      const reportPath = resolveArtifact(mixedManifest.path, receipt.report_path, `mixed viewer report ${receipt.persona_id}`);
+      const report = await readJson(reportPath, `mixed viewer report ${receipt.persona_id}`);
+      requireSame(`Mixed viewer report ${receipt.persona_id} hash`, report.sha256, receipt.report_sha256);
+      assertValid(`Mixed viewer report ${receipt.persona_id}`, validateMixedViewerShadowReport(report.document, {
+        candidateText: sourceText,
+        referenceText: reference?.bytes.toString("utf8") ?? "",
+      }));
+      reports.push(report.document);
+      reportSha256s[receipt.persona_id] = report.sha256;
+    }
+    const recomputedAggregate = aggregateMixedViewerShadow(reports, {
+      candidateSha256: source.sha256,
+      referenceSha256: reference?.sha256 ?? null,
+      mode: mixedManifest.document.mode,
+    });
+    requireSame("Mixed viewer aggregate content", sha256(JSON.stringify(recomputedAggregate)), sha256(JSON.stringify(mixedAggregate.document)));
+    if (calibrationPolicy.document.status === "active" && recomputedAggregate.calibrated_decision !== "accept") {
+      throw new Error(`Calibrated mixed viewer panel decision is ${recomputedAggregate.calibrated_decision}.`);
+    }
+    for (const [personaId, reportSha256] of Object.entries(release.mixed_viewer_panel_report_sha256s ?? {})) {
+      requireSame(`Released mixed viewer report ${personaId} hash`, reportSha256s[personaId], reportSha256);
+    }
+    mixedViewerPanel = {
+      manifest: mixedManifest,
+      aggregate: mixedAggregate,
+      calibrationPolicy,
+      reportSha256s,
+    };
+  }
+
   const releaseValidationOptions = {
     finalScriptSha256: source.sha256,
     packageSelectionSha256: artifacts.package_selection_path.sha256,
@@ -291,9 +484,17 @@ export async function loadSourceRoomReleaseV2Binding(releaseFilePath, {
     viewerTournamentManifestSha256: viewerTournament?.manifest.sha256 ?? null,
     viewerTournamentReportSha256s: viewerTournament?.reportSha256s ?? null,
     requireViewerTournamentAcceptance: requiresViewerTournament,
+    requireAugustSourceQualityGates: requiresAugustSourceQualityGates,
+    openingAudioAuditionManifestSha256: openingAudioAudition?.manifest.sha256 ?? null,
+    openingAudioAuditionReviewSha256: openingAudioAudition?.review.sha256 ?? null,
+    mixedViewerPanelManifestSha256: mixedViewerPanel?.manifest.sha256 ?? null,
+    mixedViewerPanelAggregateSha256: mixedViewerPanel?.aggregate.sha256 ?? null,
+    mixedViewerCalibrationPolicySha256: mixedViewerPanel?.calibrationPolicy.sha256 ?? null,
+    mixedViewerPanelReportSha256s: mixedViewerPanel?.reportSha256s ?? null,
     sourceRoomContractSha256: roomContract?.sha256 ?? null,
     sourceRoomProfile,
     requireSourceRoomContract: Boolean(roomContract),
+    firstClassArtifactSha256s,
   };
   assertValid("Source-room release", validateSourceRoomReleaseV2(release, releaseValidationOptions));
 
@@ -324,6 +525,14 @@ export async function loadSourceRoomReleaseV2Binding(releaseFilePath, {
     reference_sha256: reference?.sha256 ?? null,
     reference_merit_frontier_path: frontier?.path ?? null,
     reference_merit_frontier_sha256: frontier?.sha256 ?? null,
+    story_truth_ir_path: firstClassArtifacts?.story_truth_ir?.path ?? null,
+    story_truth_ir_sha256: firstClassArtifacts?.story_truth_ir?.sha256 ?? null,
+    story_truth_script_map_path: firstClassArtifacts?.story_truth_script_map?.path ?? null,
+    story_truth_script_map_sha256: firstClassArtifacts?.story_truth_script_map?.sha256 ?? null,
+    longform_draft_portfolio_path: firstClassArtifacts?.longform_draft_portfolio?.path ?? null,
+    longform_draft_portfolio_sha256: firstClassArtifacts?.longform_draft_portfolio?.sha256 ?? null,
+    narration_revision_ledger_path: firstClassArtifacts?.narration_revision_ledger?.path ?? null,
+    narration_revision_ledger_sha256: firstClassArtifacts?.narration_revision_ledger?.sha256 ?? null,
     semantic_acceptance_path: artifacts.semantic_acceptance_path.path,
     semantic_acceptance_sha256: artifacts.semantic_acceptance_path.sha256,
     viewer_tournament_acceptance_path: viewerTournament?.acceptance.path ?? null,
@@ -331,6 +540,16 @@ export async function loadSourceRoomReleaseV2Binding(releaseFilePath, {
     viewer_tournament_manifest_path: viewerTournament?.manifest.path ?? null,
     viewer_tournament_manifest_sha256: viewerTournament?.manifest.sha256 ?? null,
     viewer_tournament_report_sha256s: viewerTournament?.reportSha256s ?? null,
+    opening_audio_audition_manifest_path: openingAudioAudition?.manifest.path ?? null,
+    opening_audio_audition_manifest_sha256: openingAudioAudition?.manifest.sha256 ?? null,
+    opening_audio_audition_review_path: openingAudioAudition?.review.path ?? null,
+    opening_audio_audition_review_sha256: openingAudioAudition?.review.sha256 ?? null,
+    mixed_viewer_panel_manifest_path: mixedViewerPanel?.manifest.path ?? null,
+    mixed_viewer_panel_manifest_sha256: mixedViewerPanel?.manifest.sha256 ?? null,
+    mixed_viewer_panel_aggregate_path: mixedViewerPanel?.aggregate.path ?? null,
+    mixed_viewer_panel_aggregate_sha256: mixedViewerPanel?.aggregate.sha256 ?? null,
+    mixed_viewer_calibration_policy_path: mixedViewerPanel?.calibrationPolicy.path ?? null,
+    mixed_viewer_calibration_policy_sha256: mixedViewerPanel?.calibrationPolicy.sha256 ?? null,
     released_at: release.released_at,
     bound_at: new Date().toISOString(),
   };

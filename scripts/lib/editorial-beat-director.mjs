@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import { sanitizeBackgroundPopulation } from "./background-population-utils.mjs";
+import {
+  normalizeVisualBeatQuality,
+  visualBeatQualityContractFindings,
+  visualBeatQualityContractSchema,
+} from "./visual-beat-quality-contract.mjs";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -497,6 +502,12 @@ export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = []
     props: scene.props ?? [],
     ui_text_on_screen: scene.ui_text_on_screen ?? [],
   }));
+  const retentionResetEvidence = Array.isArray(options.retentionResetEvidence)
+    ? options.retentionResetEvidence
+    : [];
+  const audiovisualEmphasis = Array.isArray(options.audiovisualEmphasis)
+    ? options.audiovisualEmphasis
+    : [];
   return `Act as the ${plannerRole}.
 
 CONTENT PROFILE: ${contentProfile.id ?? "manhwa_recap_v1"}
@@ -521,6 +532,11 @@ Structural requirements:
 - Do not expand a collective phrase such as "four attackers," "the hunters," or "the crew" into every known individual identity. You may depict the supported group as foreground action, background action, reaction, atmosphere, or omit it from this particular frame when another truthful visual job better serves the beat. Preserve narrated counts whenever the group is shown.
 - For dense physical action, choose one intelligible decisive instant. You decide how many supported participants are individually readable and how they are distributed across foreground and background; preserve exact story identities, counts, contact, and action without forcing one frame to perform incompatible moments.
 - Each beat has one decisive visible job and foreground action. The foreground action must be a direct concrete paraphrase of its exact foreground_action_evidence. Do not infer an injury, emotion, pose, wardrobe, or intent that the grouped atoms and supplied scene facts do not establish.
+- State exactly what new visual information each beat adds compared with the previous beat. Use necessary_continuity_hold only when preserving geography or emotional observation is more valuable than a new fact; do not disguise repetition as novelty.
+- Direct the cuts as a sequence. Author shot size, angle, vantage, and sequence role while preserving eyelines, screen direction, travel direction, threat position, and important object geography. Mark an axis break only when deliberate and explain its story purpose.
+- Tier each beat as hero, priority, or connective. Hero is reserved for package proof, opening reversal, first visible payoff, major reveal, relationship turn, power demonstration, climax, or final payoff. Do not inflate ordinary connective material.
+- A retention reset must be earned by story change or by supplied measured analytics. analytics_earned requires one or more exact evidence IDs below. When no measured evidence applies, use story_earned or none; never invent analytics.
+- Author motion, SFX, score, silence, and subtitle emphasis as one restrained audiovisual intention. SFX is null unless one visible physical event or precise editorial event causes it. Generic beeps, whooshes, and impacts without a named cause are forbidden.
 ${animationEnabled ? `- ANIMATION MODE IS LOCKED FOR THIS PRODUCTION. Author animation_intent for every beat. This is pre-image direction: choose an animation-ready starting composition, one coherent subject action, one camera move, restrained environmental motion, a readable end state, continuity into the next shot, and immutable elements. UI/screen shots remain eligible; exact generated text legibility is not required.
 - Every beat beginning before ${requiredMotionThroughSec}s is REQUIRED GENERATED MOTION: set eligibility=animate and provide every animation_intent field completely. still_preferred is forbidden before that boundary. After ${requiredMotionThroughSec}s, selection returns to normal editorial judgment.
 - Set eligibility=animate when generated motion adds story value. Use still_preferred only when motion would undermine a decisive frozen tableau. Never invent an action beyond local evidence.
@@ -556,6 +572,15 @@ ${JSON.stringify(dictionaries.uiElements, null, 2)}
 SEMANTIC SCENE CONTEXT (broad hints, local atoms win):
 ${JSON.stringify(sceneContext, null, 2)}
 
+MEASURED RETENTION-RESET EVIDENCE (may be empty; exact IDs only):
+${JSON.stringify(retentionResetEvidence, null, 2)}
+
+LOCKED AUDIOVISUAL EMPHASIS MOMENTS (may be empty; cite exact moment IDs only when this beat covers the target phrase):
+${JSON.stringify(audiovisualEmphasis, null, 2)}
+
+BEAT QUALITY ENUMS:
+${JSON.stringify(visualBeatQualityContractSchema(), null, 2)}
+
 Return JSON only:
 {
   "beats": [{
@@ -582,6 +607,46 @@ Return JSON only:
     "foreground_action_evidence": "exact excerpt from grouped atoms",
     "composition_intent": "specific framing, focal subject, and spatial relationship",
     "continuity_note": "local continuity only",
+    "visual_information_delta": {
+      "kind": "one allowed delta kind",
+      "statement": "the exact new information this image contributes",
+      "compared_to_previous": "specific difference from the preceding cut"
+    },
+    "sequence_grammar": {
+      "shot_size": "extreme_wide|wide|medium|close|extreme_close|insert",
+      "camera_angle": "specific angle",
+      "vantage": "specific point of view or camera side",
+      "sequence_role": "establish|orient|advance|reveal|react|prove|escalate|resolve|bridge"
+    },
+    "spatial_continuity": {
+      "eyeline_axis": "who looks toward whom or not_applicable",
+      "primary_screen_position": "left|center|right|not_applicable with useful detail",
+      "primary_facing": "screen_left|screen_right|camera|away|not_applicable",
+      "threat_or_counterparty_position": "relative screen position or not_applicable",
+      "travel_direction": "screen_left_to_right|screen_right_to_left|toward_camera|away_from_camera|stationary|not_applicable",
+      "object_geography": "position of the decisive object or not_applicable",
+      "intentional_axis_break": false,
+      "axis_break_reason": null
+    },
+    "beat_value": {
+      "tier": "hero|priority|connective",
+      "moment_types": ["zero or more allowed hero types"],
+      "reason": "why this tier is proportionate"
+    },
+    "retention_reset": {
+      "kind": "analytics_earned|story_earned|none",
+      "evidence_ids": [],
+      "purpose": "the viewer-facing reason for the reset or why none is needed"
+    },
+    "audiovisual_intent": {
+      "emphasis_moment_ids": [],
+      "motion_role": "changes_understanding|changes_emotion|supports_clarity|still_preferred",
+      "sfx_event": null,
+      "score_behavior": "hold|build|drop|release|silence|no_change",
+      "silence_behavior": "preserve_before|preserve_after|preserve_both|not_required",
+      "subtitle_emphasis": [],
+      "coordination_note": "how the limited audiovisual choices reinforce this beat without competing"
+    },
     ${animationEnabled ? `"animation_intent": {
       "eligibility": "animate|still_preferred",
       "shot_class": "portrait_reaction|dialogue_pair|physical_contact|locomotion_action|object_insert|ui_or_screen|environment_establishing|effect_or_impact",
@@ -605,7 +670,7 @@ Return JSON only:
 }`;
 }
 
-function groupingFindings(rows, atoms, factLedger) {
+function groupingFindings(rows, atoms, factLedger, options = {}) {
   const findings = [];
   const expected = atoms.map((atom) => atom.atom_id);
   const flattened = rows.flatMap((row) => row.source_atom_ids ?? []).map(String);
@@ -688,6 +753,10 @@ function groupingFindings(rows, atoms, factLedger) {
       });
     }
   }
+  findings.push(...visualBeatQualityContractFindings(rows, {
+    analyticsEvidenceIds: (options.retentionResetEvidence ?? []).map((row) => row.evidence_id),
+    emphasisMomentIds: (options.audiovisualEmphasis ?? []).map((row) => row.moment_id),
+  }));
   return findings;
 }
 
@@ -696,6 +765,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
   const requiredMotionThroughSec = Math.max(0, Number(options.requiredMotionThroughSec ?? 0));
   const rows = Array.isArray(raw?.beats) ? raw.beats.map((row) => ({
     ...row,
+    ...normalizeVisualBeatQuality(row),
     location_id: canonicalId(row.location_id),
     physically_visible_entity_ids: (row.physically_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
     screen_visible_entity_ids: (row.screen_visible_entity_ids ?? []).map(canonicalId).filter(Boolean),
@@ -707,7 +777,7 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
   })) : [];
   if (!rows.length) throw new Error("Editorial beat director returned no beats.");
   const atomMap = new Map(atoms.map((atom) => [atom.atom_id, atom]));
-  const findings = groupingFindings(rows, atoms, factLedger);
+  const findings = groupingFindings(rows, atoms, factLedger, options);
   if (animationEnabled) {
     rows.forEach((row, rowIndex) => {
       const intent = row.animation_intent;
@@ -806,6 +876,13 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
       editorial_cues: unique(row.editorial_cues ?? []),
       visual_novelty_directive: normalizeText(row.composition_intent),
       local_continuity_note: normalizeText(row.continuity_note),
+      visual_information_delta: row.visual_information_delta,
+      sequence_grammar: row.sequence_grammar,
+      spatial_continuity: row.spatial_continuity,
+      beat_value: row.beat_value,
+      retention_reset: row.retention_reset,
+      audiovisual_intent: row.audiovisual_intent,
+      quality_budget: row.quality_budget,
       ...(animationEnabled ? { animation_intent: row.animation_intent ?? null } : {}),
       rail_exception: normalizeText(row.rail_exception) || null,
       retention_rail: retentionRailForTime(first.start_sec),

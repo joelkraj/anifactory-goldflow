@@ -6,11 +6,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildStageCommand } from "./lib/pipeline-stage-registry.mjs";
+import { generatedMotionEnabled } from "./lib/generated-motion-contract.mjs";
 import { motionIntentForPrompt, rebalanceEditorialMotionStreaks } from "./lib/motion-plan-utils.mjs";
 import { productionProfileForIdentity } from "./lib/production-profiles.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
-  FEDERATED_TOTAL_IMAGE_CONCURRENCY,
+  federatedWebImageConcurrencyForIdentity,
   HYBRID_TOTAL_IMAGE_CONCURRENCY,
   HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
   isBrowserPoolImageProvider,
@@ -693,6 +694,103 @@ async function prebuildStableMotionClips({
   };
 }
 
+async function prefetchGeneratedMotionForBatch({
+  batch,
+  identity,
+  episodeDir,
+  profile,
+}) {
+  if (!generatedMotionEnabled(identity)) return { status: "disabled", selected_image_ids: [] };
+  const acceptedRows = batch?.incremental_accepted_images ?? [];
+  if (!acceptedRows.length) return { status: "nothing_accepted", selected_image_ids: [] };
+  const acceptedIds = new Set(acceptedRows.map((row) => String(row.image_id ?? "")).filter(Boolean));
+  const [promptPlan, imagegenReport, incrementalQa] = await Promise.all([
+    readJson(batch.qa_prompt_path ?? batch.hardened_plan_path, null),
+    readJson(batch.qa_imagegen_report_path ?? batch.imagegen_report_path, null),
+    readJson(batch.incremental_qa_path, null),
+  ]);
+  const acceptedHashes = incrementalQa?.accepted_image_hashes ?? Object.fromEntries(acceptedRows.map((row) => [row.image_id, row.image_sha256]));
+  const prompts = (promptPlan?.prompts ?? []).filter((row) => acceptedIds.has(String(row.image_id)));
+  const results = (imagegenReport?.results ?? []).filter((row) => acceptedIds.has(String(row.image_id)));
+  if (!prompts.length || results.length !== prompts.length) {
+    return { status: "deferred_incomplete_hash_bound_subset", selected_image_ids: [...acceptedIds] };
+  }
+  const prefetchDir = path.join(path.dirname(batch.incremental_qa_path), "generated-motion-prefetch");
+  const promptPath = path.join(prefetchDir, "accepted-prompts.json");
+  const imagegenPath = path.join(prefetchDir, "accepted-imagegen.json");
+  const imageQaPath = path.join(prefetchDir, "accepted-image-qa.json");
+  const directionPath = path.join(prefetchDir, "animation-direction-plan.json");
+  const generatedDir = path.join(prefetchDir, "generated");
+  const generatedPlanPath = path.join(generatedDir, "generated-motion-plan.json");
+  const generatedReportPath = path.join(generatedDir, "generated-motion-report.json");
+  await fs.mkdir(prefetchDir, { recursive: true });
+  await writeJsonAtomic(promptPath, {
+    ...promptPlan,
+    status: "passed",
+    prompts,
+    wavefront_incremental_generated_motion_source: batch.hardened_plan_path,
+    updated_at: new Date().toISOString(),
+  });
+  await writeJsonAtomic(imagegenPath, {
+    ...imagegenReport,
+    status: "passed",
+    prompt_plan_path: promptPath,
+    prompt_plan_hash: await sha256File(promptPath),
+    image_count: results.length,
+    expected_image_count: results.length,
+    missing_image_count: 0,
+    results,
+    updated_at: new Date().toISOString(),
+  });
+  await writeJsonAtomic(imageQaPath, {
+    schema: "goldflow_incremental_generated_motion_image_qa_v1",
+    status: "passed",
+    accepted_image_hashes: Object.fromEntries(prompts.map((row) => [row.image_id, acceptedHashes[row.image_id]])),
+    source_incremental_qa_path: batch.incremental_qa_path,
+    source_incremental_qa_sha256: await sha256File(batch.incremental_qa_path),
+    updated_at: new Date().toISOString(),
+  });
+  const direction = await runNode([
+    path.join(repoRoot, "scripts", "visual-animation-plan.mjs"),
+    ...identityFlags(identity),
+    "--episode-dir", episodeDir,
+    "--prompts", promptPath,
+    "--imagegen-report", imagegenPath,
+    "--image-output-qa", imageQaPath,
+    "--output", directionPath,
+  ]);
+  const directionPlan = await readJson(directionPath, null);
+  if (direction.code !== 0 || directionPlan?.status !== "passed") {
+    return { status: "direction_failed", selected_image_ids: [...acceptedIds], direction_plan_path: directionPath };
+  }
+  const selectedImageIds = (directionPlan.directions ?? []).map((row) => String(row.image_id));
+  if (!selectedImageIds.length) {
+    return { status: "no_animation_eligible_cuts", selected_image_ids: [], direction_plan_path: directionPath };
+  }
+  const generated = await runNode([
+    path.join(repoRoot, "scripts", "generated-motion-generate.mjs"),
+    ...identityFlags(identity),
+    "--episode-dir", episodeDir,
+    "--animation-direction-plan", directionPath,
+    "--output-dir", generatedDir,
+    "--plan", generatedPlanPath,
+    "--output", generatedReportPath,
+    "--cut-ids", selectedImageIds.join(","),
+    "--concurrency", String(profile.media.generated_motion_concurrency ?? 3),
+  ]);
+  const generatedReport = await readJson(generatedReportPath, null);
+  return {
+    status: generated.code === 0 ? "passed" : "failed_or_omitted",
+    selected_image_ids: selectedImageIds,
+    direction_plan_path: directionPath,
+    generated_plan_path: generatedPlanPath,
+    generated_report_path: generatedReportPath,
+    generated_count: Number(generatedReport?.generated_count ?? 0),
+    omitted_count: Number(generatedReport?.omitted_count ?? 0),
+    idempotency_policy: "official_stage_reuses_exact_per_cut_flow_request",
+  };
+}
+
 async function main() {
   const initial = await readStatus();
   const identityPath = path.join(initial.episode_dir, "run_identity.json");
@@ -763,10 +861,12 @@ async function main() {
   const processed = new Set();
   const batches = [];
   const motionPrefetches = [];
+  const generatedMotionPrefetches = [];
   const motionPrefetchedIds = new Set();
   let incrementalQaChain = Promise.resolve();
   let motionPrefetchSnapshot = 0;
   let motionPrefetchChain = Promise.resolve();
+  let generatedMotionPrefetchChain = Promise.resolve();
   let batchIndex = 0;
   let finalDiscoveryDone = false;
   while (!plannerDone || !finalDiscoveryDone || [...discovered.keys()].some((filePath) => !processed.has(filePath))) {
@@ -803,6 +903,17 @@ async function main() {
           profile,
           cumulativeDecisionsPath,
         });
+        if (profile.orchestration?.incremental_generated_motion_prefetch === true) {
+          generatedMotionPrefetchChain = generatedMotionPrefetchChain.then(async () => {
+            const prefetch = await prefetchGeneratedMotionForBatch({
+              batch,
+              identity,
+              episodeDir: initial.episode_dir,
+              profile,
+            });
+            generatedMotionPrefetches.push({ snapshot_index: snapshotIndex, ...prefetch });
+          });
+        }
         if (profile.orchestration?.incremental_motion_clip_prefetch !== true) return;
         motionPrefetchChain = motionPrefetchChain.then(async () => {
           const finalized = await officialFinalizePromise;
@@ -834,6 +945,7 @@ async function main() {
   if (!plannerResult) plannerResult = await plannerPromise;
   const officialFinalize = await officialFinalizePromise;
   await incrementalQaChain;
+  await generatedMotionPrefetchChain;
   await motionPrefetchChain;
   const acceptedSummary = dedupeIncrementalAcceptedImagesForTests(batches);
   const report = {
@@ -852,6 +964,8 @@ async function main() {
     cumulative_review_decisions_path: cumulativeDecisionsPath,
     official_visual_finalize: officialFinalize,
     motion_prefetches: motionPrefetches,
+    generated_motion_prefetches: generatedMotionPrefetches,
+    generated_motion_prefetched_cut_count: new Set(generatedMotionPrefetches.flatMap((row) => row.selected_image_ids ?? [])).size,
     motion_prefetched_cut_count: motionPrefetchedIds.size,
     deferred_cut_ids: [...new Set(batches.flatMap((batch) => batch.deferred_cut_ids ?? []))],
     policy: {
@@ -860,7 +974,7 @@ async function main() {
       max_batch_cuts: maxBatchCuts,
       provider_concurrency: isBrowserPoolImageProvider(imageProvider)
         ? isFederatedWebImageProvider(imageProvider)
-          ? FEDERATED_TOTAL_IMAGE_CONCURRENCY
+          ? federatedWebImageConcurrencyForIdentity(identity)
           : isGoogleFlowPrimaryProvider(imageProvider)
           ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
           : HYBRID_TOTAL_IMAGE_CONCURRENCY
@@ -868,7 +982,9 @@ async function main() {
       official_full_harden_and_image_materialization_still_required: true,
       incremental_image_qa_enabled: profile.orchestration?.incremental_image_qa === true,
       incremental_motion_clip_prefetch_enabled: profile.orchestration?.incremental_motion_clip_prefetch === true,
+      incremental_generated_motion_prefetch_enabled: profile.orchestration?.incremental_generated_motion_prefetch === true,
       motion_prefetch_scope: "hash-bound QA-accepted static holds without parallax dependency",
+      generated_motion_prefetch_scope: "hash-bound QA-accepted animation-ready cuts; official stage reuses the exact per-cut Flow request",
     },
     batches,
     completed_at: new Date().toISOString(),
@@ -884,6 +1000,7 @@ async function main() {
     incremental_qa_accepted_cut_count: report.incremental_qa_accepted_cut_count,
     incremental_qa_pending_risk_count: report.incremental_qa_pending_risk_ids.length,
     motion_prefetched_cut_count: report.motion_prefetched_cut_count,
+    generated_motion_prefetched_cut_count: report.generated_motion_prefetched_cut_count,
     deferred_cut_count: report.deferred_cut_ids.length,
   }, null, 2));
   if (plannerResult.code !== 0) process.exitCode = 1;

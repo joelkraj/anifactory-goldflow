@@ -3,6 +3,9 @@ import {
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT,
 } from "./qwen-liam-batch-contract.mjs";
+import {
+  narrationQualityContractForIdentity,
+} from "./narration-quality-contract.mjs";
 
 export const DEFAULT_TTS_PROVIDER = "qwen_local";
 export const DEFAULT_TTS_FALLBACK_PROVIDER = null;
@@ -67,6 +70,69 @@ export const QWEN_LIAM_STITCH_CONTRACT = Object.freeze({
   join_silence_ms: DEFAULT_TTS_JOIN_SILENCE_MS,
   post_tempo_processing: false,
 });
+
+export function narrationUnitContractForQuality(qualityContract = null) {
+  if (!qualityContract) return QWEN_LIAM_UNIT_CONTRACT;
+  const policy = qualityContract.unitization ?? {};
+  return {
+    contract_version: "narration_sentence_complete_units_v2",
+    sentence_complete: policy.sentence_complete === true,
+    target_words_min: Number(policy.preferred_words_min),
+    target_words_max: Number(policy.preferred_words_max),
+    soft_words_max: Number(policy.soft_words_max),
+    hard_words_max: Number(policy.hard_words_max),
+    continuous_requests: policy.continuous_longform_requests === true,
+    boundary_authoring: "provider_neutral_performance_direction",
+    minimum_word_target_enforced: false,
+  };
+}
+
+export function narrationStitchContractForQuality(qualityContract = null) {
+  if (!qualityContract) return QWEN_LIAM_STITCH_CONTRACT;
+  return {
+    contract_version: "narration_alignment_safe_semantic_stitch_v2",
+    quality_contract_sha256: qualityContract.contract_sha256,
+    semantic_boundary_classes: true,
+    amplitude_only_trimming: false,
+    alignment_required_for_trimming: true,
+    missing_alignment_policy: "preserve_entire_unit",
+    fade_over_speech: false,
+    exact_sample_accounting_required: true,
+    post_tempo_processing: false,
+  };
+}
+
+export function narrationVoiceQaContractForQuality(qualityContract = null) {
+  if (!qualityContract) return null;
+  const policy = qualityContract.voice_identity_qa ?? {};
+  return {
+    similarity_threshold_source: policy.threshold_source,
+    universal_absolute_similarity_threshold_forbidden:
+      policy.universal_absolute_similarity_threshold_forbidden === true,
+    reference_bank_centroid_required:
+      policy.reference_bank_centroid_required === true,
+    minimum_reference_count: Number(policy.minimum_reference_count),
+    unit_outliers_are_review_required:
+      policy.unit_outliers_are_review_required === true,
+    aggregate_drift_report_required:
+      policy.aggregate_drift_report_required === true,
+    automatic_voice_switch_forbidden:
+      policy.automatic_voice_switch_forbidden === true,
+  };
+}
+
+function voiceQaOverridesForQuality(qualityContract = null) {
+  const contract = narrationVoiceQaContractForQuality(qualityContract);
+  if (!contract) return {};
+  return {
+    // A threshold is calibrated from the owned reference bank for each run.
+    // The historical 0.88/0.90 constants remain available only to legacy runs.
+    minimum_cosine_similarity: null,
+    warning_below_cosine_similarity: null,
+    warning_floor_cosine_similarity: null,
+    ...contract,
+  };
+}
 
 export const QWEN_LIAM_RETRY_CONTRACT = Object.freeze({
   retry_policy: "confirmed_skips_truncations_or_stutters_only",
@@ -224,6 +290,23 @@ const TTS_PROVIDER_ALIASES = new Map([
   ["qwen3_tts", "qwen_local"],
   ["qwen_local", "qwen_local"],
   ["modelslab_qwen", "modelslab_qwen"],
+  ["fish", "fish_audio"],
+  ["fish_api", "fish_audio"],
+  ["fish_audio", "fish_audio"],
+  ["fish_s2", "fish_audio"],
+  ["fish_s2_pro", "fish_audio"],
+  ["eleven", "elevenlabs"],
+  ["eleven_labs", "elevenlabs"],
+  ["elevenlabs", "elevenlabs"],
+  ["generic", "generic_tts"],
+  ["generic_tts", "generic_tts"],
+  ["provider_neutral", "generic_tts"],
+]);
+
+export const EXTERNAL_NARRATION_TTS_PROVIDERS = Object.freeze([
+  "fish_audio",
+  "elevenlabs",
+  "generic_tts",
 ]);
 
 function cleanId(value) {
@@ -291,7 +374,9 @@ export function normalizeTtsProvider(value, fallback = DEFAULT_TTS_PROVIDER) {
     .replace(/^_+|_+$/g, "");
   const provider = TTS_PROVIDER_ALIASES.get(normalized);
   if (!provider) {
-    throw new Error(`Unknown TTS provider: ${value}. Expected kokoro_local, qwen_local, or modelslab_qwen.`);
+    throw new Error(
+      `Unknown TTS provider: ${value}. Expected kokoro_local, qwen_local, modelslab_qwen, fish_audio, elevenlabs, or generic_tts.`,
+    );
   }
   return provider;
 }
@@ -392,11 +477,20 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
       : "qwen_joel_primary_v1"
     : primaryProvider === "kokoro_local"
       ? "legacy_kokoro_puck"
-      : "generic_narration_v1";
+      : EXTERNAL_NARRATION_TTS_PROVIDERS.includes(primaryProvider)
+        ? "provider_neutral_external_v2"
+        : "generic_narration_v1";
   const qwenSynthesisContract = primaryProvider === "qwen_local"
     ? identity.voice_provider_options?.synthesis_contract
       ?? QWEN_LIAM_SERIAL_SYNTHESIS_CONTRACT
     : null;
+  const narrationQualityContract = narrationQualityContractForIdentity(identity);
+  const effectiveUnitContract = narrationQualityContract
+    ? narrationUnitContractForQuality(narrationQualityContract)
+    : primaryProvider === "qwen_local" ? QWEN_LIAM_UNIT_CONTRACT : null;
+  const effectiveStitchContract = narrationQualityContract
+    ? narrationStitchContractForQuality(narrationQualityContract)
+    : primaryProvider === "qwen_local" ? QWEN_LIAM_STITCH_CONTRACT : null;
 
   const rawPrimary = {
     ...(primaryProvider === "kokoro_local" ? KOKORO_MODEL_LOCK : {}),
@@ -407,15 +501,27 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
         ?? null,
     ) : {}),
     ...(identity.voice_provider_options?.primary ?? {}),
+    ...voiceQaOverridesForQuality(narrationQualityContract),
     provider: primaryProvider,
     voice_id: voiceId,
     native_speed: nativeSpeed,
+    ...(effectiveUnitContract ? { unit_contract: effectiveUnitContract } : {}),
+    ...(effectiveStitchContract ? { stitch_contract: effectiveStitchContract } : {}),
     ...(primaryProvider === "kokoro_local" ? KOKORO_VOICE_LOCKS[voiceId] ?? {} : {}),
   };
   return {
     contract,
     primary: primaryProvider === "qwen_local"
-      ? resolveOwnedQwenReferenceVariant(rawPrimary, identity)
+      ? {
+          ...resolveOwnedQwenReferenceVariant(rawPrimary, identity),
+          ...voiceQaOverridesForQuality(narrationQualityContract),
+          ...(effectiveUnitContract
+            ? { unit_contract: effectiveUnitContract }
+            : {}),
+          ...(effectiveStitchContract
+            ? { stitch_contract: effectiveStitchContract }
+            : {}),
+        }
       : rawPrimary,
     fallback: fallbackProvider
       ? {
@@ -426,14 +532,21 @@ export function narrationTtsPolicyForIdentity(identity = {}) {
           provider: fallbackProvider,
         }
       : null,
-    unit_contract: identity.voice_provider_options?.unit_contract
-      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_UNIT_CONTRACT : null),
-    stitch_contract: identity.voice_provider_options?.stitch_contract
-      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_STITCH_CONTRACT : null),
+    narration_quality_contract: narrationQualityContract,
+    unit_contract: narrationQualityContract
+      ? effectiveUnitContract
+      : identity.voice_provider_options?.unit_contract ?? effectiveUnitContract,
+    stitch_contract: narrationQualityContract
+      ? effectiveStitchContract
+      : identity.voice_provider_options?.stitch_contract ?? effectiveStitchContract,
     retry_policy: identity.voice_provider_options?.retry_policy
-      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_RETRY_CONTRACT.retry_policy : null),
+      ?? (primaryProvider === "qwen_local" || narrationQualityContract
+        ? QWEN_LIAM_RETRY_CONTRACT.retry_policy
+        : null),
     retry_contract: identity.voice_provider_options?.retry_contract
-      ?? (primaryProvider === "qwen_local" ? QWEN_LIAM_RETRY_CONTRACT : null),
+      ?? (primaryProvider === "qwen_local" || narrationQualityContract
+        ? QWEN_LIAM_RETRY_CONTRACT
+        : null),
     synthesis_contract: qwenSynthesisContract,
     qa_policy: identity.voice_provider_options?.qa_policy
       ?? identity.tts_qa_policy
@@ -504,10 +617,11 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
   const findings = [];
   const primary = policy.primary ?? {};
   const fallback = policy.fallback ?? {};
-  const topPrimary = primary.provider === "qwen_local"
+  const topPrimary = plan.provider_controls?.primary
+    ?? (primary.provider === "qwen_local"
     ? plan.provider_controls?.qwen3 ?? plan.provider_controls?.qwen_local
     : plan.provider_controls?.kokoro ?? plan.provider_controls?.kokoro_local
-    ?? null;
+    ?? null);
   findings.push(...identityAliasFindings([
     plan.narrator_voice_id,
     topPrimary?.voice_id,
@@ -558,6 +672,18 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
       "plan.provider_controls.qwen3",
     ));
   }
+  if (!expectedPrimaryControls
+    && EXTERNAL_NARRATION_TTS_PROVIDERS.includes(primary.provider)) {
+    findings.push(...exactControlFindings(topPrimary, {
+      provider: primary.provider,
+      model_id: primary.model_id,
+      model_revision: primary.model_revision,
+      voice_id: primary.voice_id,
+      voice_sha256: primary.voice_sha256,
+      voice_continuity_contract: primary.voice_continuity_contract,
+      native_speed: primary.native_speed ?? null,
+    }, "plan.provider_controls.primary"));
+  }
 
   const expectedFallbackControls = fallback?.provider === "qwen_local"
     ? {
@@ -591,10 +717,11 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
 
   for (const [index, unit] of narrationPlanUnits(plan).entries()) {
     const unitPath = `plan unit ${unit?.unit_id ?? index}`;
-    const unitPrimary = primary.provider === "qwen_local"
+    const unitPrimary = unit?.provider_controls?.primary
+      ?? (primary.provider === "qwen_local"
       ? unit?.provider_controls?.qwen3 ?? unit?.provider_controls?.qwen_local
       : unit?.provider_controls?.kokoro ?? unit?.provider_controls?.kokoro_local
-      ?? null;
+      ?? null);
     findings.push(...identityAliasFindings([
       unit?.reference_id,
       unit?.voice_id,
@@ -615,6 +742,18 @@ export function narrationPlanVoiceIdentityFindings(plan = {}, policy = {}) {
         expectedPrimaryControls,
         `${unitPath}.provider_controls.qwen3`,
       ));
+    }
+    if (!expectedPrimaryControls
+      && EXTERNAL_NARRATION_TTS_PROVIDERS.includes(primary.provider)) {
+      findings.push(...exactControlFindings(unitPrimary, {
+        provider: primary.provider,
+        model_id: primary.model_id,
+        model_revision: primary.model_revision,
+        voice_id: primary.voice_id,
+        voice_sha256: primary.voice_sha256,
+        voice_continuity_contract: primary.voice_continuity_contract,
+        native_speed: primary.native_speed ?? null,
+      }, `${unitPath}.provider_controls.primary`));
     }
     if (expectedFallbackControls) {
       findings.push(...exactControlFindings(
@@ -672,6 +811,17 @@ export function narrationArtifactVoiceIdentityFindings({
       voice_sha256: primary.voice_sha256,
       voice_continuity_contract: primary.voice_continuity_contract,
     }, "stitchReport.primary"));
+  } else if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(primary.provider)) {
+    const expected = {
+      provider: primary.provider,
+      model_id: primary.model_id,
+      model_revision: primary.model_revision,
+      voice_id: primary.voice_id,
+      voice_sha256: primary.voice_sha256,
+      voice_continuity_contract: primary.voice_continuity_contract,
+    };
+    findings.push(...exactControlFindings(ttsReport.primary, expected, "ttsReport.primary"));
+    findings.push(...exactControlFindings(stitchReport.primary, expected, "stitchReport.primary"));
   }
 
   const results = Array.isArray(ttsReport.results) ? ttsReport.results : [];
@@ -806,6 +956,83 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
     if (fallbackMismatches.length) {
       throw new Error(`Qwen fallback lock differs from the audited model/reference assets: ${fallbackMismatches.join(", ")}.`);
     }
+  } else if (policy.contract === "provider_neutral_external_v2") {
+    if (!EXTERNAL_NARRATION_TTS_PROVIDERS.includes(policy.primary?.provider)) {
+      throw new Error(
+        `Provider-neutral external narration has an unsupported provider ${policy.primary?.provider ?? "missing"}.`,
+      );
+    }
+    if (policy.fallback != null) {
+      throw new Error(
+        "Provider-neutral narration does not silently fail over; fallback must be null.",
+      );
+    }
+    if (!policy.narration_quality_contract) {
+      throw new Error(
+        "Provider-neutral production narration requires the narration quality V2 contract.",
+      );
+    }
+    const requiredPrimaryFields = [
+      "model_id",
+      "model_revision",
+      "voice_id",
+      "voice_sha256",
+      "voice_continuity_contract",
+      "reference_manifest_path",
+      "reference_manifest_sha256",
+      "reference_voice_id",
+      "reference_voice_sha256",
+      "speaker_similarity_method",
+      "speaker_similarity_model_path",
+      "speaker_similarity_model_sha256",
+      "speaker_similarity_calibration_path",
+      "speaker_similarity_calibration_sha256",
+    ];
+    const missingFields = requiredPrimaryFields.filter(
+      (field) => !String(policy.primary?.[field] ?? "").trim(),
+    );
+    if (missingFields.length) {
+      throw new Error(
+        `Provider-neutral narrator identity is incomplete: ${missingFields.join(", ")}.`,
+      );
+    }
+    const binding = policy.narration_quality_contract.provider_binding ?? {};
+    if (binding.provider !== policy.primary.provider
+      || binding.model_id !== policy.primary.model_id
+      || binding.model_revision !== policy.primary.model_revision) {
+      throw new Error(
+        "Narration quality contract provider/model binding differs from the external voice lock.",
+      );
+    }
+    const expectedUnitContract = narrationUnitContractForQuality(
+      policy.narration_quality_contract,
+    );
+    const expectedStitchContract = narrationStitchContractForQuality(
+      policy.narration_quality_contract,
+    );
+    if (JSON.stringify(policy.unit_contract) !== JSON.stringify(expectedUnitContract)
+      || JSON.stringify(policy.primary.unit_contract) !== JSON.stringify(expectedUnitContract)) {
+      throw new Error(
+        "Provider-neutral narrator units do not match the identity-bound quality contract.",
+      );
+    }
+    if (JSON.stringify(policy.stitch_contract) !== JSON.stringify(expectedStitchContract)
+      || JSON.stringify(policy.primary.stitch_contract) !== JSON.stringify(expectedStitchContract)) {
+      throw new Error(
+        "Provider-neutral stitch behavior does not match the identity-bound quality contract.",
+      );
+    }
+    if (policy.retry_policy !== QWEN_LIAM_RETRY_CONTRACT.retry_policy
+      || JSON.stringify(policy.retry_contract) !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT)) {
+      throw new Error(
+        "Provider-neutral retry policy must preserve passed units and allow only confirmed exact-unit repair.",
+      );
+    }
+    if (policy.synthesis_contract != null) {
+      throw new Error(
+        "External provider batching must be declared in provider receipts, not a Qwen synthesis contract.",
+      );
+    }
   } else {
     if (!["qwen_joel_primary_v1", "qwen_liam_primary_v1"].includes(policy.contract)
       || policy.primary?.provider !== "qwen_local") {
@@ -814,10 +1041,13 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
     if (![DEFAULT_NARRATOR_VOICE_ID, QWEN_LIAM_PRIMARY_LOCK.voice_id].includes(policy.primary.voice_id)) {
       throw new Error(`Narration identities require an approved locked narrator voice; got ${policy.primary.voice_id ?? "missing"}.`);
     }
-    const expectedPrimaryLock = qwenPrimaryLockForVoice(
-      policy.primary.voice_id,
-      policy.primary.reference_variant_id ?? null,
-    );
+    const expectedPrimaryLock = {
+      ...qwenPrimaryLockForVoice(
+        policy.primary.voice_id,
+        policy.primary.reference_variant_id ?? null,
+      ),
+      ...voiceQaOverridesForQuality(policy.narration_quality_contract),
+    };
     const primaryLockFields = [
       "provider",
       "model_id",
@@ -878,13 +1108,19 @@ export function validateNarrationTtsPolicy(policy, { production = true } = {}) {
       || policy.primary.speed_control_supported !== false) {
       throw new Error("Qwen Liam production does not support a native-speed control.");
     }
-    if (JSON.stringify(policy.unit_contract) !== JSON.stringify(QWEN_LIAM_UNIT_CONTRACT)
-      || JSON.stringify(policy.primary.unit_contract) !== JSON.stringify(QWEN_LIAM_UNIT_CONTRACT)) {
-      throw new Error("Qwen narrator units must be sentence-complete, have no forced minimum, stay within the hard 60-word maximum, and be non-continuous.");
+    const expectedUnitContract = narrationUnitContractForQuality(
+      policy.narration_quality_contract,
+    );
+    const expectedStitchContract = narrationStitchContractForQuality(
+      policy.narration_quality_contract,
+    );
+    if (JSON.stringify(policy.unit_contract) !== JSON.stringify(expectedUnitContract)
+      || JSON.stringify(policy.primary.unit_contract) !== JSON.stringify(expectedUnitContract)) {
+      throw new Error("Qwen narrator units do not match the identity-bound narration quality contract.");
     }
-    if (JSON.stringify(policy.stitch_contract) !== JSON.stringify(QWEN_LIAM_STITCH_CONTRACT)
-      || JSON.stringify(policy.primary.stitch_contract) !== JSON.stringify(QWEN_LIAM_STITCH_CONTRACT)) {
-      throw new Error("Qwen Liam stitch contract must use 80 ms joins and no post-tempo processing.");
+    if (JSON.stringify(policy.stitch_contract) !== JSON.stringify(expectedStitchContract)
+      || JSON.stringify(policy.primary.stitch_contract) !== JSON.stringify(expectedStitchContract)) {
+      throw new Error("Qwen narrator stitch behavior does not match the identity-bound narration quality contract.");
     }
     if (policy.retry_policy !== QWEN_LIAM_RETRY_CONTRACT.retry_policy
       || JSON.stringify(policy.retry_contract) !== JSON.stringify(QWEN_LIAM_RETRY_CONTRACT)
@@ -916,6 +1152,8 @@ export function defaultNarrationVoiceProviderOptions({
   voiceId = DEFAULT_NARRATOR_VOICE_ID,
   nativeSpeed = DEFAULT_TTS_NATIVE_SPEED,
   referenceVariantId = null,
+  narrationQualityContract = null,
+  primaryOptions = {},
 } = {}) {
   const primaryProvider = normalizeTtsProvider(provider);
   const fallback = fallbackProvider ? normalizeTtsProvider(fallbackProvider) : null;
@@ -943,7 +1181,68 @@ export function defaultNarrationVoiceProviderOptions({
     };
   }
   if (primaryProvider !== DEFAULT_TTS_PROVIDER) {
-    throw new Error(`New generic run identities require ${DEFAULT_TTS_PROVIDER}.`);
+    if (!EXTERNAL_NARRATION_TTS_PROVIDERS.includes(primaryProvider)) {
+      throw new Error(`New generic run identities require ${DEFAULT_TTS_PROVIDER}.`);
+    }
+    if (fallback !== null) {
+      throw new Error(
+        "External narration providers use one hash-locked provider per unit; fallback must be null.",
+      );
+    }
+    if (!narrationQualityContract) {
+      throw new Error(
+        "External narration providers require a narration quality contract.",
+      );
+    }
+    const unitContract = narrationUnitContractForQuality(
+      narrationQualityContract,
+    );
+    const stitchContract = narrationStitchContractForQuality(
+      narrationQualityContract,
+    );
+    const primary = {
+      ...primaryOptions,
+      provider: primaryProvider,
+      voice_id: voiceId,
+      native_speed: nativeSpeed,
+      unit_contract: unitContract,
+      stitch_contract: stitchContract,
+    };
+    const required = [
+      "model_id",
+      "model_revision",
+      "voice_id",
+      "voice_sha256",
+      "voice_continuity_contract",
+      "reference_manifest_path",
+      "reference_manifest_sha256",
+      "reference_voice_id",
+      "reference_voice_sha256",
+      "speaker_similarity_method",
+      "speaker_similarity_model_path",
+      "speaker_similarity_model_sha256",
+      "speaker_similarity_calibration_path",
+      "speaker_similarity_calibration_sha256",
+    ].filter((field) => !String(primary[field] ?? "").trim());
+    if (required.length) {
+      throw new Error(
+        `External narration voice lock is missing: ${required.join(", ")}.`,
+      );
+    }
+    return {
+      primary,
+      fallback: null,
+      qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
+      pace_strategy: "provider_native_cadence_no_post_tempo",
+      narrator_identity_policy: "single_hash_locked_external_voice",
+      allowed_production_voice_ids: [voiceId],
+      narration_quality_contract: narrationQualityContract,
+      unit_contract: unitContract,
+      stitch_contract: stitchContract,
+      retry_policy: QWEN_LIAM_RETRY_CONTRACT.retry_policy,
+      retry_contract: QWEN_LIAM_RETRY_CONTRACT,
+      synthesis_contract: null,
+    };
   }
   if (voiceId !== DEFAULT_NARRATOR_VOICE_ID) {
     throw new Error(`New narration identities require ${DEFAULT_NARRATOR_VOICE_ID}; ${voiceId ?? "missing"} is not selectable for production.`);
@@ -954,15 +1253,25 @@ export function defaultNarrationVoiceProviderOptions({
   if (nativeSpeed != null) {
     throw new Error("Qwen Liam has no native-speed control; omit nativeSpeed.");
   }
+  const unitContract = narrationUnitContractForQuality(narrationQualityContract);
+  const stitchContract = narrationStitchContractForQuality(
+    narrationQualityContract,
+  );
   return {
-    primary: qwenPrimaryLockForVoice(voiceId, referenceVariantId),
+    primary: {
+      ...qwenPrimaryLockForVoice(voiceId, referenceVariantId),
+      ...voiceQaOverridesForQuality(narrationQualityContract),
+      unit_contract: unitContract,
+      stitch_contract: stitchContract,
+    },
     fallback: null,
     qa_policy: NARRATION_TTS_QA_POLICY_VERSION,
     pace_strategy: "qwen_reference_native_cadence_no_speed_no_post_tempo",
     narrator_identity_policy: "single_voice_qwen_joel_owned_icl",
     allowed_production_voice_ids: [DEFAULT_NARRATOR_VOICE_ID],
-    unit_contract: QWEN_LIAM_UNIT_CONTRACT,
-    stitch_contract: QWEN_LIAM_STITCH_CONTRACT,
+    narration_quality_contract: narrationQualityContract,
+    unit_contract: unitContract,
+    stitch_contract: stitchContract,
     retry_policy: QWEN_LIAM_RETRY_CONTRACT.retry_policy,
     retry_contract: QWEN_LIAM_RETRY_CONTRACT,
     synthesis_contract: QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,

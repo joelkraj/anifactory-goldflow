@@ -156,6 +156,7 @@ async function main() {
   const attemptsByStage = new Map();
   let status = await readStatus();
   const episodeDir = path.resolve(status.episode_dir);
+  const resumeAfterResolutionCommand = `node bin/goldflow.mjs run director --episode-dir ${episodeDir} --action advance`;
   const profile = flags.profile || flags["production-profile"]
     ? productionProfileById(flags.profile ?? flags["production-profile"])
     : productionProfileForIdentity(status.identity ?? {});
@@ -216,8 +217,8 @@ async function main() {
       command = `node bin/goldflow.mjs run visual-wavefront --episode-dir ${episodeDir} --min-cuts ${profile.orchestration.wavefront_min_cuts ?? 15} --max-wait-ms ${profile.orchestration.wavefront_max_wait_ms ?? 5000}`;
     }
     if (!decision.executable) {
-      await writeAdvanceState(episodeDir, { status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps });
-      console.log(JSON.stringify({ status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, steps }, null, 2));
+      await writeAdvanceState(episodeDir, { status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, resume_after_resolution_command: resumeAfterResolutionCommand, steps });
+      console.log(JSON.stringify({ status: "held", production_profile: profile.id, current_stage: stageId, current_stage_state: stageState, stop_reason: decision.reason, next_command: command, resume_after_resolution_command: resumeAfterResolutionCommand, steps }, null, 2));
       return;
     }
     const invocation = advanceCommandTokensForTests(command, episodeDir, status.identity?.source_path ?? null);
@@ -246,8 +247,8 @@ async function main() {
     status = await readStatus();
     if (result.code !== 0 || ["blocked", "failed", "stale"].includes(String(status.current_stage_state ?? ""))) {
       const stopReason = result.code !== 0 ? "command_failed" : `stage_${status.current_stage_state}`;
-      await writeAdvanceState(episodeDir, { status: "held", current_stage: status.current_stage, current_stage_state: status.current_stage_state, stop_reason: stopReason, next_command: status.next_command_shape, steps });
-      console.log(JSON.stringify({ status: "held", current_stage: status.current_stage, current_stage_state: status.current_stage_state, stop_reason: stopReason, next_command: status.next_command_shape, steps }, null, 2));
+      await writeAdvanceState(episodeDir, { status: "held", current_stage: status.current_stage, current_stage_state: status.current_stage_state, stop_reason: stopReason, next_command: status.next_command_shape, resume_after_resolution_command: resumeAfterResolutionCommand, steps });
+      console.log(JSON.stringify({ status: "held", current_stage: status.current_stage, current_stage_state: status.current_stage_state, stop_reason: stopReason, next_command: status.next_command_shape, resume_after_resolution_command: resumeAfterResolutionCommand, steps }, null, 2));
       return;
     }
     if (stageIsSatisfied(status.stage_ledger?.find((row) => row.stage === stageId)?.state)) attemptsByStage.delete(stageId);

@@ -39,6 +39,14 @@ const outputPath = flags.output ?? path.join(episodeDir, "visual_beat_plan.json"
 const storyFactLedgerPath = flags["story-fact-ledger"] ?? path.join(episodeDir, "story_fact_ledger.json");
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const visualBeatApprovalPath = flags["approval-output"] ?? path.join(episodeDir, "visual_beat_approval.json");
+const retentionResetEvidencePath = path.resolve(
+  flags["retention-reset-evidence"]
+    ?? path.join(dataRoot, "channels", channel, "analytics", "retention_reset_evidence.json"),
+);
+const audiovisualEmphasisSpinePath = path.resolve(
+  flags["audiovisual-emphasis-spine"]
+    ?? path.join(episodeDir, `audiovisual_emphasis_spine_${episode}.json`),
+);
 const targetBeatSec = Number(flags["target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_TARGET_BEAT_SEC ?? 8.5);
 const maxBeatSec = Number(flags["max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_BEAT_SEC ?? 15);
 const minBeatSec = Number(flags["min-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_MIN_BEAT_SEC ?? 3);
@@ -59,7 +67,7 @@ const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["sc
 const scopeEndSec = flags["scope-end-sec"] ?? flags["max-time-sec"] ?? flags["first-sec"];
 const scopeEndSecNumber = scopeEndSec == null ? null : Number(scopeEndSec);
 const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
-const EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v3";
+const EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v4_quality_spine";
 
 function parseFlags(parts) {
   const parsed = {};
@@ -134,6 +142,36 @@ async function hashFile(filePath) {
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+export function retentionResetEvidenceForTests(document, sourcePath = null, sourceSha256 = null) {
+  const rows = Array.isArray(document?.retention_reset_evidence)
+    ? document.retention_reset_evidence
+    : Array.isArray(document?.significant_drops)
+      ? document.significant_drops
+      : [];
+  return rows.flatMap((row, index) => {
+    const elapsed = Number(row.elapsed_sec ?? row.observed_elapsed_sec);
+    const delta = Number(row.delta_from_previous_pct ?? row.retention_delta_pct ?? row.delta_pct);
+    const hasMeasuredValue = Number.isFinite(elapsed) || Number.isFinite(delta);
+    if (!hasMeasuredValue) return [];
+    return [{
+      evidence_id: String(row.evidence_id ?? `retention_drop_${String(index + 1).padStart(3, "0")}`),
+      source_path: sourcePath,
+      source_sha256: sourceSha256,
+      video_id: row.video_id ?? document?.video_id ?? null,
+      observed_elapsed_sec: Number.isFinite(elapsed) ? elapsed : null,
+      retention_delta_pct: Number.isFinite(delta) ? delta : null,
+      visual_job: row.visual_job ?? null,
+      shot_job: row.shot_job ?? null,
+      cut_duration_sec: Number.isFinite(Number(row.cut_duration_sec))
+        ? Number(row.cut_duration_sec)
+        : null,
+      transition_type: row.transition_type ?? null,
+      motion_behavior: row.motion_behavior ?? null,
+      interpretation_policy: "observed_correlation_only_not_causal_proof",
+    }];
+  });
 }
 
 function beatFocusLabel(index, count, startSec = null) {
@@ -1384,6 +1422,7 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
       }));
   const concurrency = Math.max(1, Math.min(11, Number(flags.concurrency ?? flags["editorial-concurrency"] ?? 11)));
   const results = await runPool(descriptors, concurrency, async (descriptor, index) => {
+    const chunkStartedMs = Date.now();
     const chunk = descriptor.chunk;
     const basePrompt = buildEditorialDirectorPrompt(chunk, factLedger, timedScenes, options);
     const chunkId = descriptor.chunkId ?? `editorial_${String(index + 1).padStart(3, "0")}`;
@@ -1418,6 +1457,17 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
           automatic_validation_attempts: 1,
           recovery_generation: recoveryGeneration,
         },
+        telemetry: {
+          requested_provider: flags["editorial-provider"] ?? "identity_locked",
+          actual_provider: call.provider ?? "unknown",
+          model: call.model ?? null,
+          reasoning_effort: call.reasoning_effort ?? flags["reasoning-effort"] ?? null,
+          risk_class: "medium",
+          item_count: chunk.length,
+          atom_count: chunk.length,
+          prompt_chars: prompt.length,
+          service_ms: Date.now() - chunkStartedMs,
+        },
       });
       return { ...normalized, call, atom_count: chunk.length, chunkId, ordinal };
     } catch (error) {
@@ -1432,6 +1482,16 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
         attempt: 1,
         findings: [{ code: "editorial_chunk_validation_failed", message: chunkError.message }],
         metadata: { atom_count: chunk.length, automatic_validation_attempts: 1, recovery_generation: recoveryGeneration },
+        telemetry: {
+          requested_provider: flags["editorial-provider"] ?? "identity_locked",
+          actual_provider: "unknown",
+          reasoning_effort: flags["reasoning-effort"] ?? null,
+          risk_class: "medium",
+          item_count: chunk.length,
+          atom_count: chunk.length,
+          prompt_chars: prompt.length,
+          service_ms: Date.now() - chunkStartedMs,
+        },
       });
       return { chunkError, chunk, chunkId, ordinal, inputHash, recoveryGeneration };
     }
@@ -1724,18 +1784,36 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, 
 }
 
 async function main() {
-  const [timedPlan, scriptText, wordTiming, runIdentity, factLedger] = await Promise.all([
+  const [timedPlan, scriptText, wordTiming, runIdentity, factLedger, retentionResetDocument, audiovisualSpine] = await Promise.all([
     readJson(timedPlanPath, null),
     fs.readFile(scriptPath, "utf8").catch(() => ""),
     readJson(wordTimingPath, null),
     readJson(runIdentityPath, {}),
     readJson(storyFactLedgerPath, null),
+    readJson(retentionResetEvidencePath, null),
+    readJson(audiovisualEmphasisSpinePath, null),
   ]);
   if (timedPlan?.status !== "passed" || !Array.isArray(timedPlan.scenes) || !timedPlan.scenes.length) throw new Error(`Missing passed timed scene plan: ${timedPlanPath}`);
   if (!scriptText.trim()) throw new Error(`Missing script: ${scriptPath}`);
   if (wordTiming?.status !== "passed" || !Array.isArray(wordTiming.words) || !wordTiming.words.length) throw new Error(`Missing passed local Whisper word timing: ${wordTimingPath}`);
   const scriptHash = sha256(scriptText);
   const contentProfile = contentProfileForIdentity(runIdentity);
+  const retentionResetEvidenceSha256 = retentionResetDocument
+    ? await hashFile(retentionResetEvidencePath)
+    : null;
+  const retentionResetEvidence = retentionResetEvidenceForTests(
+    retentionResetDocument,
+    retentionResetDocument ? retentionResetEvidencePath : null,
+    retentionResetEvidenceSha256,
+  );
+  const audiovisualEmphasis = audiovisualSpine?.status === "passed"
+    && audiovisualSpine?.schema === "goldflow_audiovisual_emphasis_spine_v1"
+    && audiovisualSpine?.source_script_hash === scriptHash
+    ? audiovisualSpine.emphasis_moments ?? []
+    : [];
+  const audiovisualEmphasisSha256 = audiovisualEmphasis.length
+    ? await hashFile(audiovisualEmphasisSpinePath)
+    : null;
   if (timedPlan.source_script_hash && timedPlan.source_script_hash !== scriptHash) throw new Error("timed_scene_plan.json is stale for current script_clean.md.");
   if (wordTiming.source_script_hash && wordTiming.source_script_hash !== scriptHash) throw new Error("narration_word_timing is stale for current script_clean.md.");
   const useEditorialDirector = runIdentity.schema === "goldflow_run_identity_v2" && flags["legacy-deterministic-beats"] !== "true";
@@ -1751,13 +1829,22 @@ async function main() {
       animationEnabled: ltxVideoEnabled(runIdentity),
       requiredMotionThroughSec: Number(runIdentity.generated_motion_required_through_sec ?? runIdentity.provider_locks?.generated_motion_required_through_sec ?? 0),
       contentProfile,
+      retentionResetEvidence,
+      audiovisualEmphasis,
     });
     if (editorialResult.reused) {
       console.log(JSON.stringify({ status: "passed", output_path: outputPath, reused_grouping_lock: true, visual_beat_count: editorialResult.report.visual_beat_count }, null, 2));
       return;
     }
     if (editorialResult.blocked) {
-      const sourcePaths = [timedPlanPath, scriptPath, wordTimingPath, storyFactLedgerPath];
+      const sourcePaths = [
+        timedPlanPath,
+        scriptPath,
+        wordTimingPath,
+        storyFactLedgerPath,
+        ...(retentionResetEvidence.length ? [retentionResetEvidencePath] : []),
+        ...(audiovisualEmphasis.length ? [audiovisualEmphasisSpinePath] : []),
+      ];
       const blockedReport = {
         schema: "goldflow_visual_beat_plan_v2",
         planner_contract_version: EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION,
@@ -1870,8 +1957,22 @@ async function main() {
     week,
     episode,
     source_script_hash: scriptHash,
-    source_artifact_paths: [timedPlanPath, scriptPath, wordTimingPath, ...(useEditorialDirector ? [storyFactLedgerPath] : [])],
-    source_hashes: Object.fromEntries((await Promise.all([timedPlanPath, scriptPath, wordTimingPath, ...(useEditorialDirector ? [storyFactLedgerPath] : [])].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
+    source_artifact_paths: [
+      timedPlanPath,
+      scriptPath,
+      wordTimingPath,
+      ...(useEditorialDirector ? [storyFactLedgerPath] : []),
+      ...(retentionResetEvidence.length ? [retentionResetEvidencePath] : []),
+      ...(audiovisualEmphasis.length ? [audiovisualEmphasisSpinePath] : []),
+    ],
+    source_hashes: Object.fromEntries((await Promise.all([
+      timedPlanPath,
+      scriptPath,
+      wordTimingPath,
+      ...(useEditorialDirector ? [storyFactLedgerPath] : []),
+      ...(retentionResetEvidence.length ? [retentionResetEvidencePath] : []),
+      ...(audiovisualEmphasis.length ? [audiovisualEmphasisSpinePath] : []),
+    ].map(async (filePath) => [filePath, await hashFile(filePath)]))).filter(([, hash]) => hash)),
     timing_source: timedPlan.timing_source,
     audio_duration_sec: timedPlan.audio_duration_sec,
     word_timing_path: wordTimingPath,
@@ -1890,6 +1991,22 @@ async function main() {
     hook_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) < hookDurationSec).length,
     retention_ramp_sec: retentionRampSec,
     retention_ramp_visual_beat_count: beatsWithQuality.filter((beat) => Number(beat.start_sec) >= hookDurationSec && Number(beat.start_sec) < retentionRampSec).length,
+    retention_reset_evidence: {
+      source_path: retentionResetEvidence.length ? retentionResetEvidencePath : null,
+      source_sha256: retentionResetEvidenceSha256,
+      evidence_count: retentionResetEvidence.length,
+      policy: "observational_only; analytics_earned reset claims require exact supplied evidence IDs",
+    },
+    audiovisual_emphasis_spine: {
+      source_path: audiovisualEmphasis.length ? audiovisualEmphasisSpinePath : null,
+      source_sha256: audiovisualEmphasisSha256,
+      emphasis_moment_count: audiovisualEmphasis.length,
+      policy: "Exact emphasis IDs may be bound only by beats covering their target phrases.",
+    },
+    beat_value_summary: Object.fromEntries(["hero", "priority", "connective"].map((tier) => [
+      tier,
+      beatsWithQuality.filter((beat) => beat.beat_value?.tier === tier).length,
+    ])),
     animation_policy: runIdentity.animation_policy ?? runIdentity.ltx_video_policy ?? "disabled",
     content_profile: {
       id: contentProfile.id,

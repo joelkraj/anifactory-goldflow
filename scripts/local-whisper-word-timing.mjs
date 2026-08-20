@@ -23,6 +23,13 @@ import {
 } from "./lib/local-whisper-policy.mjs";
 import { transcriptQaForTests } from "./modelslab-qwen-episode-audio.mjs";
 import { softenPrimaryQa } from "./lib/tts-selection-policy.mjs";
+import {
+  narrationQualityContractForIdentity,
+} from "./lib/narration-quality-contract.mjs";
+import {
+  exactNarrationRepairPacket,
+  strictNarrationDeliveryDecision,
+} from "./lib/narration-delivery-quality.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -424,6 +431,7 @@ async function main() {
   ]);
   if (!qwenReport?.segments?.length) throw new Error(`Missing narration stitch report: ${qwenReportPath}`);
   const canonicalContract = identityUsesCanonicalNarrationContract(runIdentity);
+  const narrationQualityContract = narrationQualityContractForIdentity(runIdentity);
   const audioPath = narrationAudioPath(qwenReport);
   const [
     scriptHash,
@@ -515,28 +523,57 @@ async function main() {
     blockAnySubstitution: false,
     blockIsolatedEdits: false,
   });
-  rawTranscriptIntegrity.findings = deliveryFirstFullStreamFindingsForTests(rawTranscriptIntegrity);
-  const softenedTranscriptQa = softenPrimaryQa({
-    status: rawTranscriptIntegrity.findings.some((finding) => finding.severity === "blocker")
-      ? "blocked"
-      : "passed",
-    transcript: rawTranscriptIntegrity,
-    findings: rawTranscriptIntegrity.findings,
-  });
-  const transcriptIntegrity = {
-    ...rawTranscriptIntegrity,
-    findings: softenedTranscriptQa.findings,
-    delivery_first_gate: softenedTranscriptQa.delivery_first_gate,
-  };
-  const fullStreamBlockers = transcriptIntegrity.findings.filter((finding) => finding.severity === "blocker");
+  let strictDeliveryDecision = null;
+  let transcriptIntegrity;
+  if (narrationQualityContract) {
+    strictDeliveryDecision = strictNarrationDeliveryDecision(rawTranscriptIntegrity, {
+      orderQa: { blockers: [] },
+      joinQa: qwenReport.join_qa
+        ?? qwenReport.boundary_qa
+        ?? { blockers: [], warnings: [] },
+      contract: narrationQualityContract,
+    });
+    transcriptIntegrity = {
+      ...rawTranscriptIntegrity,
+      findings: [
+        ...strictDeliveryDecision.blockers,
+        ...strictDeliveryDecision.warnings,
+      ],
+      delivery_first_gate: {
+        status: strictDeliveryDecision.status,
+        policy: "narration_quality_v2_strict_delivery",
+        softened: false,
+      },
+    };
+  } else {
+    rawTranscriptIntegrity.findings = deliveryFirstFullStreamFindingsForTests(rawTranscriptIntegrity);
+    const softenedTranscriptQa = softenPrimaryQa({
+      status: rawTranscriptIntegrity.findings.some((finding) => finding.severity === "blocker")
+        ? "blocked"
+        : "passed",
+      transcript: rawTranscriptIntegrity,
+      findings: rawTranscriptIntegrity.findings,
+    });
+    transcriptIntegrity = {
+      ...rawTranscriptIntegrity,
+      findings: softenedTranscriptQa.findings,
+      delivery_first_gate: softenedTranscriptQa.delivery_first_gate,
+    };
+  }
+  const fullStreamBlockers = narrationQualityContract
+    ? strictDeliveryDecision.blockers
+    : transcriptIntegrity.findings.filter((finding) => finding.severity === "blocker");
   const fullStreamTranscriptQa = {
     status: words.length && fullStreamBlockers.length === 0 ? "passed" : "blocked",
-    policy_version: "narration_full_stream_transcript_v1",
+    policy_version: narrationQualityContract
+      ? "narration_full_stream_transcript_v2_strict"
+      : "narration_full_stream_transcript_v1",
     intended_text: intendedSpokenText,
     recognized_text: recognizedText,
     alignment_model: transcription.model,
     ...transcriptIntegrity,
     blockers: fullStreamBlockers,
+    strict_delivery_decision: strictDeliveryDecision,
   };
   const report = {
     ...(!revalidateExisting || existingTiming?.schema
@@ -563,6 +600,8 @@ async function main() {
     qwen_report_path: qwenReportPath,
     run_identity_path: runIdentityPath,
     run_identity_sha256: runIdentitySha256,
+    narration_quality_contract_sha256:
+      narrationQualityContract?.contract_sha256 ?? null,
     alignment_contract_version: transcription.contract?.contract_version
       ?? null,
     alignment_engine: "faster_whisper",
@@ -596,6 +635,41 @@ async function main() {
     updated_at: nowIso(),
   };
   await writeJson(outputPath, report);
+  if (narrationQualityContract) {
+    const firstUnitId = qwenReport.segments?.[0]?.unit_id ?? null;
+    const finalUnitId = qwenReport.segments?.at(-1)?.unit_id ?? null;
+    const repairBlockers = fullStreamBlockers.map((finding) => ({
+      ...finding,
+      unit_id: finding.unit_id
+        ?? (finding.code === "narration_opening_word_missing" ? firstUnitId : null)
+        ?? (finding.code === "narration_final_word_missing" ? finalUnitId : null),
+    }));
+    const finalDeliveryPath = path.join(
+      episodeDir,
+      `narration_final_delivery_qa_${episode}.json`,
+    );
+    await writeJson(finalDeliveryPath, {
+      schema: "goldflow_narration_final_delivery_qa_v2",
+      status: fullStreamTranscriptQa.status,
+      quality_contract_sha256: narrationQualityContract.contract_sha256,
+      narration_audio_path: audioPath,
+      narration_audio_hash: audioHash,
+      transcript_qa: fullStreamTranscriptQa,
+      blockers: repairBlockers,
+      warnings: strictDeliveryDecision?.warnings ?? [],
+    });
+    await writeJson(
+      path.join(episodeDir, `narration_final_exact_repair_packet_${episode}.json`),
+      exactNarrationRepairPacket({
+        decision: {
+          status: fullStreamTranscriptQa.status,
+          blockers: repairBlockers,
+        },
+        units: qwenReport.segments ?? [],
+        boundaries: qwenReport.boundaries ?? [],
+      }),
+    );
+  }
   console.log(JSON.stringify({
     status: report.status,
     output_path: outputPath,

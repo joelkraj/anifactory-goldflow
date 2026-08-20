@@ -114,8 +114,13 @@ export class MediaJobStore {
         result: null,
         error: null,
         created_at: nowIso(),
+        last_queued_at: null,
+        first_leased_at: null,
+        last_leased_at: null,
+        completed_at: null,
         updated_at: nowIso(),
       };
+      job.last_queued_at = job.created_at;
       await writeJsonAtomic(filePath, job);
       return { job, created: true };
     });
@@ -170,6 +175,8 @@ export class MediaJobStore {
         ...candidate,
         status: "leased",
         attempt_count: 1,
+        first_leased_at: candidate.first_leased_at ?? leasedAt,
+        last_leased_at: leasedAt,
         lease: {
           lease_token: randomToken(24),
           worker_id: workerId,
@@ -234,8 +241,11 @@ export class MediaJobStore {
         },
         error: null,
         lease: null,
-        updated_at: nowIso(),
+        completed_at: null,
+        updated_at: null,
       };
+      completed.completed_at = completed.result.completed_at;
+      completed.updated_at = completed.completed_at;
       await writeJsonAtomic(this.jobPath(jobId), completed);
       return completed;
     });
@@ -245,12 +255,14 @@ export class MediaJobStore {
     return this.withQueueLock(async () => {
       const job = await this.get(jobId);
       this.assertLiveLease(job, { leaseToken, workerId });
+      const failedAt = nowIso();
       const failed = {
         ...job,
         status: code === "lease_ambiguous" ? "needs_triage" : "failed",
-        error: { code, message: clean(message), details, failed_at: nowIso() },
+        error: { code, message: clean(message), details, failed_at: failedAt },
         lease: null,
-        updated_at: nowIso(),
+        completed_at: failedAt,
+        updated_at: failedAt,
       };
       await writeJsonAtomic(this.jobPath(jobId), failed);
       return failed;
@@ -272,6 +284,8 @@ export class MediaJobStore {
         lease: null,
         result: null,
         error: null,
+        last_queued_at: nowIso(),
+        completed_at: null,
         manual_requeues: [...(job.manual_requeues ?? []), { reason: clean(reason), at: nowIso() }],
         updated_at: nowIso(),
       };
@@ -312,6 +326,10 @@ export class MediaJobStore {
         attempt_count: job.attempt_count,
         worker_id: job.lease?.worker_id ?? null,
         created_at: job.created_at,
+        last_queued_at: job.last_queued_at ?? job.created_at,
+        first_leased_at: job.first_leased_at ?? null,
+        last_leased_at: job.last_leased_at ?? null,
+        completed_at: job.completed_at ?? job.result?.completed_at ?? job.error?.failed_at ?? null,
         updated_at: job.updated_at,
         error: job.error,
       })),

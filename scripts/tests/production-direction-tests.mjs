@@ -65,6 +65,13 @@ assert.equal(ttsSpokenTextAuditMatches({
   sourceScriptSha256: "script-hash",
   overridesSha256: "override-hash",
 }), true);
+const riskyAudit = buildTtsSpokenTextAudit({
+  plan: { units: [{ unit_id: "unit_risky", kind: "narration", source_text: "Kael Voss read the SSS rank notice at 41%.", caption_text: "Kael Voss read the SSS rank notice at 41%.", spoken_text: "Kael Voss read the S S S rank notice at forty-one percent." }] },
+  sourceScriptSha256: "script-hash",
+});
+assert.ok(riskyAudit.pronunciation_homograph_ledger.entry_count >= 4);
+assert.ok(riskyAudit.pronunciation_homograph_ledger.entries.some((row) => row.category === "proper_name"));
+assert.ok(riskyAudit.pronunciation_homograph_ledger.entries.some((row) => row.category === "homograph"));
 
 const itRegression = buildTtsSpokenTextAudit({
   plan: { units: [{ unit_id: "unit_it", kind: "system", source_text: "IT was over.", caption_text: "IT was over.", spoken_text: "I T was over." }] },
@@ -250,6 +257,33 @@ assert.deepEqual(
 );
 assert.deepEqual(federatedPlannerPoolSnapshotForTests().active, { codex_cli: 8, antigravity_cli: 3 });
 for (const slot of plannerSlots) slot.release();
+resetFederatedPlannerPoolForTests();
+
+const circuitProbeSlots = await Promise.all(Array.from({ length: 11 }, () => acquireFederatedPlannerSlot({
+  identity: federatedIdentity,
+  stageName: "ep_01_visual_prompt_chunk",
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+})));
+const failedAntigravitySlot = circuitProbeSlots.find((slot) => slot.provider === "antigravity_cli");
+assert.ok(failedAntigravitySlot);
+failedAntigravitySlot.recordFailure(new Error("Authentication required. Authentication timed out."));
+for (const slot of circuitProbeSlots) slot.release();
+assert.equal(federatedPlannerPoolSnapshotForTests().health.antigravity_cli.open, true);
+const postCircuitSlots = await Promise.all(Array.from({ length: 8 }, () => acquireFederatedPlannerSlot({
+  identity: federatedIdentity,
+  stageName: "ep_01_visual_prompt_chunk",
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+})));
+assert.ok(postCircuitSlots.every((slot) => slot.provider === "codex_cli"));
+for (const slot of postCircuitSlots) slot.release();
 resetFederatedPlannerPoolForTests();
 
 console.log("production direction contract tests passed");

@@ -75,7 +75,7 @@ export function normalizePlannerProviderId(value, fallback = PLANNING_ROOM_PROVI
 export function plannerStageClass(stageName = "") {
   const stage = String(stageName ?? "").trim().toLowerCase();
   if (/(?:source_(?:deep_)?research|market_research|fact_research|research_dossier)/.test(stage)) return "source_research";
-  if (/(?:global_reconciliation|global_reasoning|continuity|reference_plan_merge|full_dependent|retention_review|retention_map|diagnostic|enhancement_judge|audit)/.test(stage)) return "global_reasoning";
+  if (/(?:global_reconciliation|global_reasoning|continuity|reference_plan_merge|full_dependent|retention_review|retention_map|longform_draft_selection|diagnostic|enhancement_judge|audit)/.test(stage)) return "global_reasoning";
   if (/(?:winner_(?:ideation|story_blueprint|opening_generation|script_generation|integrated_revision|line_flow_polish)|source_(?:ideate|blueprint|opening|script|revise|polish)|package|thumbnail|title|premise|creative)/.test(stage)) return "premium_creative";
   if (/(?:semantic|narration_performance|visual_beat|editorial_beat|visual_reference|reference_anchor|visual_plan|visual_prompt|visual_review|transition|audio|sfx|score|engagement|overlay)/.test(stage)) return "structured_planning";
   return "local_reconciliation";

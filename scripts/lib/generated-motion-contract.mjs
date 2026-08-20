@@ -8,6 +8,7 @@ import {
   ltxMotionPromptForSequence,
   ltxNegativePrompt,
   ltxTreatmentForClip,
+  sha256,
 } from "./ltx-video-contract.mjs";
 
 export const GENERATED_MOTION_PLAN_SCHEMA = "goldflow_generated_motion_plan_v1";
@@ -138,6 +139,20 @@ export function generatedMotionPromptForSequence(direction) {
   return ltxMotionPromptForSequence(direction);
 }
 
+export function generatedMotionDirectionContractSha256(direction = {}) {
+  return sha256(JSON.stringify({
+    image_id: direction.image_id ?? null,
+    cut_duration_sec: Number(direction.cut_duration_sec ?? 0),
+    requested_duration_sec: Number(direction.requested_duration_sec ?? direction.requested_generation_duration_sec ?? 0),
+    source_image_sha256: direction.source_image_sha256 ?? null,
+    source_prompt_sha256: direction.source_prompt_sha256 ?? null,
+    animation_intent: direction.animation_intent ?? direction.coverage?.[0]?.animation_intent ?? null,
+    start_frame_contract: direction.start_frame_contract ?? null,
+    end_frame_contract: direction.end_frame_contract ?? null,
+    motion_prompt: direction.motion_prompt ?? null,
+  }));
+}
+
 export function generatedMotionNegativePrompt() {
   return ltxNegativePrompt();
 }
@@ -149,6 +164,10 @@ export async function generatedMotionApprovalMatches(report, approval, { reportP
   if (report?.schema !== GENERATED_MOTION_REPORT_SCHEMA || report?.status !== "passed") return false;
   if (approval?.schema !== GENERATED_MOTION_APPROVAL_SCHEMA || approval?.status !== "passed") return false;
   if (reportPath && approval.report_sha256 !== await hashFile(reportPath)) return false;
+  if (approval.coherence_audit_path) {
+    if (!approval.coherence_audit_sha256) return false;
+    if (await hashFile(approval.coherence_audit_path).catch(() => null) !== approval.coherence_audit_sha256) return false;
+  }
   const decisions = new Map((approval.decisions ?? []).map((row) => [String(row.candidate_id ?? row.image_id ?? ""), row]));
   for (const clip of report.clips ?? []) {
     const decision = decisions.get(String(clip.candidate_id ?? clip.image_id ?? ""));
@@ -182,13 +201,13 @@ export async function approvedGeneratedMotionCoverageByImage(report, approval, {
         }];
     for (const covered of coverage) {
       const imageId = String(covered.image_id ?? "");
-      if (imageId && !rows.has(imageId)) rows.set(imageId, { clip, covered });
+      if (imageId && !rows.has(imageId)) rows.set(imageId, { clip, covered, decision: (approval.decisions ?? []).find((row) => String(row.candidate_id ?? row.image_id ?? "") === String(clip.candidate_id ?? clip.image_id ?? "")) ?? null });
     }
   }
   return rows;
 }
 
-export function generatedMotionTreatmentForClip(clip, covered = null) {
+export function generatedMotionTreatmentForClip(clip, covered = null, decision = null) {
   if (clip.provider === "modelslab" || clip.model_id === "ltx-2.3") return ltxTreatmentForClip(clip, covered);
   const coverage = covered ?? {
     image_id: clip.image_id,
@@ -196,6 +215,16 @@ export function generatedMotionTreatmentForClip(clip, covered = null) {
     source_offset_sec: 0,
     source_end_offset_sec: Number(clip.cut_duration_sec ?? clip.requested_duration_sec),
   };
+  const nativeDuration = Number(clip.normalized_probe?.duration_sec ?? clip.requested_duration_sec);
+  const approvedWindow = decision?.usable_window ?? null;
+  const coverageStart = Number(coverage.source_offset_sec ?? 0);
+  const coverageEnd = Number(coverage.source_end_offset_sec ?? coverageStart + Number(clip.cut_duration_sec ?? 0));
+  const usableStart = approvedWindow && approvedWindow.disposition !== "reject"
+    ? Math.max(coverageStart, Number(approvedWindow.start_sec ?? coverageStart))
+    : coverageStart;
+  const usableEnd = approvedWindow && approvedWindow.disposition !== "reject"
+    ? Math.min(coverageEnd, Number(approvedWindow.end_sec ?? coverageEnd))
+    : coverageEnd;
   return {
     mode: "generated_video",
     provider: clip.provider ?? GENERATED_MOTION_PROVIDER_FLOW,
@@ -203,12 +232,14 @@ export function generatedMotionTreatmentForClip(clip, covered = null) {
     source_image_sha256: clip.source_image_sha256,
     covered_image_id: coverage.image_id,
     covered_image_sha256: coverage.image_sha256 ?? clip.source_image_sha256,
-    source_offset_sec: Number(coverage.source_offset_sec ?? 0),
-    source_end_offset_sec: Number(coverage.source_end_offset_sec ?? Number(coverage.source_offset_sec ?? 0) + Number(clip.cut_duration_sec ?? 0)),
+    source_offset_sec: usableStart,
+    source_end_offset_sec: Math.max(usableStart, usableEnd),
+    coherence_usable_window: approvedWindow,
+    coherence_verdict: decision?.coherence_verdict ?? null,
     animation_sequence_id: clip.animation_sequence_id ?? null,
     video_path: path.resolve(clip.normalized_video_path),
     video_sha256: clip.normalized_video_sha256,
-    native_duration_sec: Number(clip.normalized_probe?.duration_sec ?? clip.requested_duration_sec),
+    native_duration_sec: nativeDuration,
     native_width: Number(clip.normalized_probe?.width ?? 1920),
     native_height: Number(clip.normalized_probe?.height ?? 1080),
     native_fps: Number(clip.normalized_probe?.fps ?? 24),

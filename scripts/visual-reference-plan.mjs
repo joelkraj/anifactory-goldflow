@@ -3204,6 +3204,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
       throw new Error("This partial contains a single global-director call; repair it with --repair-global true.");
     }
     let result;
+    const globalStartedMs = Date.now();
     try {
       result = useLocalRoute ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
       await recordPlannerChunkCheckpoint({
@@ -3219,6 +3220,18 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
         metadata: {
           selected_target_count: result.parsed?.reference_targets?.length ?? 0,
           automatic_creative_retry_count: 0,
+        },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: result.provider ?? "unknown",
+          model: result.model ?? null,
+          reasoning_effort: result.reasoning_effort ?? null,
+          risk_class: "high",
+          item_count: semanticPlan.scenes.length,
+          scene_count: semanticPlan.scenes.length,
+          prompt_chars: prompt.length,
+          output_chars: String(result.content ?? "").length,
+          service_ms: Date.now() - globalStartedMs,
         },
       });
     } catch (error) {
@@ -3237,6 +3250,15 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           recovery: "Use one later explicit --repair-global true invocation. Automatic creative retry is disabled.",
         }],
         metadata: { automatic_creative_retry_count: 0 },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: "unknown",
+          risk_class: "high",
+          item_count: semanticPlan.scenes.length,
+          scene_count: semanticPlan.scenes.length,
+          prompt_chars: prompt.length,
+          service_ms: Date.now() - globalStartedMs,
+        },
       });
       await writeJson(referencePartialPath, referencePartialArtifact({
         semanticPlan,
@@ -3357,6 +3379,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     }
     const chunkStageName = `${stageName}_${stageSuffix}`;
     let llm = null;
+    const chunkStartedMs = Date.now();
     try {
       llm = useLocalRoute
         ? await callLocal(prompt, chunkStageName, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000))
@@ -3378,6 +3401,18 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           raw_target_count: rawTargetCount,
           retained_candidate_count: candidatePlan.reference_targets.length,
           automatic_creative_retry_count: 0,
+        },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: llm.provider ?? "unknown",
+          model: llm.model ?? null,
+          reasoning_effort: llm.reasoning_effort ?? null,
+          risk_class: "medium",
+          item_count: sceneChunk.length,
+          scene_count: sceneChunk.length,
+          prompt_chars: prompt.length,
+          output_chars: String(llm.content ?? "").length,
+          service_ms: Date.now() - chunkStartedMs,
         },
       });
       console.error(`visual refs ${displayLabel}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
@@ -3419,6 +3454,18 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           scene_count: sceneChunk.length,
           automatic_creative_retry_count: 0,
           explicit_manual_repair_required: true,
+        },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: llm?.provider ?? "unknown",
+          model: llm?.model ?? null,
+          reasoning_effort: llm?.reasoning_effort ?? null,
+          risk_class: "medium",
+          item_count: sceneChunk.length,
+          scene_count: sceneChunk.length,
+          prompt_chars: prompt.length,
+          output_chars: String(llm?.content ?? "").length,
+          service_ms: Date.now() - chunkStartedMs,
         },
       });
       console.error(`visual refs ${displayLabel}: single creative attempt failed; preserving passed chunks and requiring explicit repair`);
@@ -3489,6 +3536,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     const attemptPrompt = attempt === 1
       ? mergePrompt
       : `${mergePrompt}\n\nGlobal-director correction: the previous response failed validation with ${lastMergeError?.message}. Return the complete selected reference plan again with at least one clean, evidence-backed reference target.`;
+    const mergeStartedMs = Date.now();
     try {
       const candidate = useLocalRoute
         ? await callLocal(attemptPrompt, mergeStageName, Number(flags["visual-ref-merge-max-tokens"] ?? 8000))
@@ -3516,6 +3564,18 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           selected_target_count: materializedParsed.reference_targets.length,
           director_selection_contract: candidate.parsed?.selection_contract ?? "legacy_full_objects",
         },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: candidate.provider ?? "unknown",
+          model: candidate.model ?? null,
+          reasoning_effort: candidate.reasoning_effort ?? null,
+          risk_class: "high",
+          item_count: globalExpectedSceneIds.length,
+          scene_count: globalExpectedSceneIds.length,
+          prompt_chars: attemptPrompt.length,
+          output_chars: String(candidate.content ?? "").length,
+          service_ms: Date.now() - mergeStartedMs,
+        },
       });
       break;
     } catch (error) {
@@ -3535,6 +3595,15 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           recovery: "Automatic creative retry is disabled. Repair the named references from the preserved raw output when available, or provide an explicit manual structured global selection.",
         }],
         metadata: { automatic_creative_retry_count: 0, explicit_manual_repair_required: true },
+        telemetry: {
+          requested_provider: "identity_locked",
+          actual_provider: "unknown",
+          risk_class: "high",
+          item_count: globalExpectedSceneIds.length,
+          scene_count: globalExpectedSceneIds.length,
+          prompt_chars: attemptPrompt.length,
+          service_ms: Date.now() - mergeStartedMs,
+        },
       });
     }
   }

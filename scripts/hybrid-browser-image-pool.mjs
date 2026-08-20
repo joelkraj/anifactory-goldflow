@@ -28,15 +28,13 @@ import {
 } from "./lib/chatgpt-web-throttle-state.mjs";
 import {
   CHATGPT_WEB_IMAGE_PROVIDER,
-  FEDERATED_TOTAL_IMAGE_CONCURRENCY,
   FEDERATED_WEB_IMAGE_PROVIDER,
-  FEDERATED_GOOGLE_PRIMARY_CONCURRENCY,
+  federatedWebImageAutomaticChatGptEnabled,
   GOOGLE_FLOW_BROWSER_PROVIDER,
   GOOGLE_GEMINI_BROWSER_PROVIDER,
   GOOGLE_GEMINI_IMAGE_CONCURRENCY,
   HYBRID_CHATGPT_IMAGE_CONCURRENCY,
   HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-  HYBRID_TOTAL_IMAGE_CONCURRENCY,
   HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
   HYBRID_WEB_FLOW_PROVIDER,
   GOOGLE_FLOW_IMAGE_PROVIDER,
@@ -50,6 +48,13 @@ import {
   isStyleReferenceTarget,
 } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
+import { buildImageSemanticAudit } from "./lib/image-semantic-audit.mjs";
+import {
+  buildHeroCandidatePromptPlan,
+  heroCandidateGroups,
+  selectHeroCandidate,
+  writeCanonicalHeroSelectionReceipt,
+} from "./lib/hero-image-candidate-contract.mjs";
 
 const execFile = promisify(execFileCallback);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -69,6 +74,14 @@ function parseFlags(parts) {
 
 function boolFlag(value) {
   return /^(true|1|yes)$/i.test(String(value ?? ""));
+}
+
+export function validateFlowRuntimeConcurrency(value = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY) {
+  const concurrency = Number(value);
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY) {
+    throw new Error(`--flow-runtime-concurrency must be an integer from 1 to ${HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY}.`);
+  }
+  return concurrency;
 }
 
 export function validateRepairSharedReferenceScope({ ids = [], repairReason = "", referencesOnly = false } = {}) {
@@ -411,11 +424,13 @@ async function receiptValidHybridCompletion({ loaded, item, completion, download
     || assignment.manifest_id !== loaded.manifest.manifest_id
     || assignment.item.asset_id !== item.asset_id
     || assignment.item.source_row_sha256 !== item.source_row_sha256
-    || assignment.item.prompt_sha256 !== item.prompt_sha256
     || assignment.browser_provider !== completion.browser_provider) return false;
-  if (completion.prompt_sha256 !== item.prompt_sha256) return false;
+  if (item.prompt_compiler_policy === "lease_time_provider_compiler_v1"
+    && (!assignment.item.prompt_compiler_receipt
+      || assignment.item.prompt_compiler_receipt.neutral_prompt_sha256 !== (item.neutral_prompt_sha256 ?? item.prompt_sha256))) return false;
+  if (completion.prompt_sha256 !== assignment.item.prompt_sha256) return false;
+  if (JSON.stringify(completion.prompt_compiler_receipt ?? null) !== JSON.stringify(assignment.item.prompt_compiler_receipt ?? null)) return false;
   const expectedReferenceHashes = orderedReferenceHashes(assignment.item.ordered_references ?? []);
-  if (JSON.stringify(expectedReferenceHashes) !== JSON.stringify(orderedReferenceHashes(item.ordered_references ?? []))) return false;
   if (JSON.stringify(completion.ordered_reference_hashes ?? []) !== JSON.stringify(expectedReferenceHashes)) return false;
   for (const reference of assignment.item.ordered_references ?? []) {
     if (!reference?.path || !reference.sha256 || !await exists(reference.path)) return false;
@@ -431,7 +446,7 @@ async function receiptValidHybridCompletion({ loaded, item, completion, download
     && receipt.manifest_id === loaded.manifest.manifest_id
     && receipt.asset_id === item.asset_id
     && receipt.browser_provider === completion.browser_provider
-    && receipt.prompt_sha256 === item.prompt_sha256
+    && receipt.prompt_sha256 === assignment.item.prompt_sha256
     && receipt.accepted_png_sha256 === completion.sha256
     && JSON.stringify(receipt.ordered_reference_hashes ?? []) === JSON.stringify(expectedReferenceHashes));
   if (!validTopLevelReceipt) return false;
@@ -533,19 +548,20 @@ async function resolveRepairEvidence({ episodeDir, episode, mode, currentRows, r
     };
   }
   if (qaRecovery) {
-    if (mode !== "scene") throw new Error("Image-QA recovery is valid only for scene cuts.");
-    const reportPath = path.join(episodeDir, `image_output_qa_${episode}.json`);
+    const reportPath = mode === "reference"
+      ? path.join(episodeDir, `reference_image_qa_${episode}.json`)
+      : path.join(episodeDir, `image_output_qa_${episode}.json`);
     const report = await readJson(reportPath, null);
     const authorizedIds = [...new Set((report?.findings ?? [])
-      .filter((finding) => finding?.severity === "blocker" && finding?.image_id)
-      .map((finding) => String(finding.image_id)))];
+      .filter((finding) => finding?.severity === "blocker" && (finding?.image_id || finding?.ref_id))
+      .map((finding) => String(finding.image_id ?? finding.ref_id)))];
     const unauthorized = [...requestedIds].filter((assetId) => !authorizedIds.includes(assetId));
     if (report?.status !== "blocked" || unauthorized.length) {
-      throw new Error(`QA repair scope is not authorized by the current blocked image-QA report: ${unauthorized.join(", ") || "report is not blocked"}.`);
+      throw new Error(`${mode === "reference" ? "Reference" : "Image"}-QA repair scope is not authorized by the current blocked QA report: ${unauthorized.join(", ") || "report is not blocked"}.`);
     }
     return {
       schema: "goldflow_hybrid_image_repair_evidence_v1",
-      kind: "image_output_qa_blockers",
+      kind: mode === "reference" ? "reference_image_qa_blockers" : "image_output_qa_blockers",
       authorized_asset_ids: authorizedIds,
       records: [{
         path: reportPath,
@@ -674,7 +690,14 @@ export function hybridManifestDispatchOptions({
   chatgptOnly = false,
   geminiOnly = false,
   federated = false,
+  federatedChatGptEnabled = false,
+  mode = "scene",
+  flowConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
 } = {}) {
+  const effectiveFlowConcurrency = validateFlowRuntimeConcurrency(flowConcurrency);
+  const hybridTotalConcurrency = effectiveFlowConcurrency + HYBRID_CHATGPT_IMAGE_CONCURRENCY;
+  const federatedTotalConcurrency = effectiveFlowConcurrency + GOOGLE_GEMINI_IMAGE_CONCURRENCY
+    + (federatedChatGptEnabled ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0);
   if (flowOnly && chatgptOnly) throw new Error("A phase cannot be both Flow-only and ChatGPT-only.");
   if (geminiOnly && (flowOnly || chatgptOnly)) throw new Error("A Gemini-only phase cannot select another browser provider.");
   if (styleOnly && geminiOnly) throw new Error("A style-only phase cannot also be Gemini-only.");
@@ -683,10 +706,11 @@ export function hybridManifestDispatchOptions({
       workProvider: HYBRID_WEB_FLOW_PROVIDER,
       dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
       allowedBrowserProviders: [GOOGLE_FLOW_BROWSER_PROVIDER],
-      browserProviderConcurrency: { [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY },
+      browserProviderConcurrency: { [GOOGLE_FLOW_BROWSER_PROVIDER]: effectiveFlowConcurrency },
+      browserProviderMaxOrderedReferences: { [GOOGLE_FLOW_BROWSER_PROVIDER]: 4 },
       browserProviderReceiptRequired: true,
-      recommendedConcurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-      maxConcurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+      recommendedConcurrency: effectiveFlowConcurrency,
+      maxConcurrency: effectiveFlowConcurrency,
     };
   }
   if (geminiOnly) {
@@ -695,6 +719,7 @@ export function hybridManifestDispatchOptions({
       dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
       allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
       browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
+      browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
       browserProviderReceiptRequired: true,
       recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
       maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
@@ -707,6 +732,7 @@ export function hybridManifestDispatchOptions({
         dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
         allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
         browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
+        browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
         browserProviderReceiptRequired: true,
         recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
         maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
@@ -715,15 +741,24 @@ export function hybridManifestDispatchOptions({
     return {
       workProvider: FEDERATED_WEB_IMAGE_PROVIDER,
       dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
-      allowedBrowserProviders: [GOOGLE_FLOW_BROWSER_PROVIDER, GOOGLE_GEMINI_BROWSER_PROVIDER, "chatgpt"],
+      allowedBrowserProviders: [
+        GOOGLE_FLOW_BROWSER_PROVIDER,
+        GOOGLE_GEMINI_BROWSER_PROVIDER,
+        ...(federatedChatGptEnabled ? ["chatgpt"] : []),
+      ],
       browserProviderConcurrency: {
-        [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+        [GOOGLE_FLOW_BROWSER_PROVIDER]: effectiveFlowConcurrency,
         [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
-        chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
+        ...(federatedChatGptEnabled ? { chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY } : {}),
+      },
+      browserProviderMaxOrderedReferences: {
+        [GOOGLE_FLOW_BROWSER_PROVIDER]: 4,
+        [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4,
+        ...(federatedChatGptEnabled ? { chatgpt: 4 } : {}),
       },
       browserProviderReceiptRequired: true,
-      recommendedConcurrency: FEDERATED_TOTAL_IMAGE_CONCURRENCY,
-      maxConcurrency: FEDERATED_TOTAL_IMAGE_CONCURRENCY,
+      recommendedConcurrency: federatedTotalConcurrency,
+      maxConcurrency: federatedTotalConcurrency,
     };
   }
   return styleOnly || chatgptOnly
@@ -732,6 +767,7 @@ export function hybridManifestDispatchOptions({
         dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
         allowedBrowserProviders: ["chatgpt"],
         browserProviderConcurrency: { chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY },
+        browserProviderMaxOrderedReferences: { chatgpt: 4 },
         browserProviderReceiptRequired: true,
         recommendedConcurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
         maxConcurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
@@ -742,11 +778,15 @@ export function hybridManifestDispatchOptions({
         allowedBrowserProviders: ["chatgpt", GOOGLE_FLOW_BROWSER_PROVIDER],
         browserProviderConcurrency: {
           chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
-          [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+          [GOOGLE_FLOW_BROWSER_PROVIDER]: effectiveFlowConcurrency,
+        },
+        browserProviderMaxOrderedReferences: {
+          chatgpt: 4,
+          [GOOGLE_FLOW_BROWSER_PROVIDER]: 4,
         },
         browserProviderReceiptRequired: true,
-        recommendedConcurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
-        maxConcurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
+        recommendedConcurrency: hybridTotalConcurrency,
+        maxConcurrency: hybridTotalConcurrency,
       };
 }
 
@@ -940,6 +980,7 @@ async function createAndRunPhase({
   federated = false,
   chatgptElectron = false,
   chatgptElectronConcurrency = HYBRID_CHATGPT_IMAGE_CONCURRENCY,
+  flowRuntimeConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
   repairReason,
   healthProof,
   bridges,
@@ -957,12 +998,13 @@ async function createAndRunPhase({
 }) {
   if (!assetIds.length) return null;
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("A phase can select only one browser provider.");
+  const federatedChatGptEnabled = federatedWebImageAutomaticChatGptEnabled(identity);
   const activeRuntimes = flowOnly
     ? [runtimes.flow]
     : geminiOnly ? [runtimes.gemini]
       : federated && styleOnly ? [runtimes.gemini]
         : styleOnly || chatgptOnly ? [runtimes.chatgpt]
-          : federated ? [runtimes.flow, runtimes.gemini, runtimes.chatgpt]
+          : federated ? [runtimes.flow, runtimes.gemini, ...(federatedChatGptEnabled ? [runtimes.chatgpt] : [])]
             : [runtimes.chatgpt, runtimes.flow];
   const checkedRuntimes = chatgptElectron
     ? activeRuntimes.filter((runtime) => runtime.provider !== "chatgpt")
@@ -974,7 +1016,16 @@ async function createAndRunPhase({
         expectedModelLabel: runtime.modelLabel,
       })));
   }
-  const dispatch = hybridManifestDispatchOptions({ styleOnly, flowOnly, chatgptOnly, geminiOnly, federated });
+  const dispatch = hybridManifestDispatchOptions({
+    styleOnly,
+    flowOnly,
+    chatgptOnly,
+    geminiOnly,
+    federated,
+    federatedChatGptEnabled,
+    mode,
+    flowConcurrency: flowRuntimeConcurrency,
+  });
   const created = await createCodexWorkManifest({
     mode,
     episodeDir,
@@ -1000,14 +1051,14 @@ async function createAndRunPhase({
     : geminiOnly ? [bridges.gemini]
       : federated && styleOnly ? [bridges.gemini]
         : styleOnly || chatgptOnly ? [bridges.chatgpt]
-          : federated ? [bridges.flow, bridges.gemini, bridges.chatgpt]
+          : federated ? [bridges.flow, bridges.gemini, ...(federatedChatGptEnabled ? [bridges.chatgpt] : [])]
             : [bridges.chatgpt, bridges.flow];
   const inactiveBridges = flowOnly
     ? [bridges.chatgpt, bridges.gemini]
     : geminiOnly ? [bridges.chatgpt, bridges.flow]
       : federated && styleOnly ? [bridges.chatgpt, bridges.flow]
         : styleOnly || chatgptOnly ? [bridges.flow, bridges.gemini]
-          : federated ? [] : [bridges.gemini];
+          : federated ? (federatedChatGptEnabled ? [] : [bridges.chatgpt]) : [bridges.gemini];
   for (const bridge of inactiveBridges) await bridge.deactivateManifest(created.manifest.manifest_path);
   for (const bridge of activeBridges) await bridge.activateManifest(created.manifest.manifest_path);
   const electronDispatch = chatgptElectron && activeBridges.includes(bridges.chatgpt)
@@ -1052,6 +1103,195 @@ async function createAndRunPhase({
   }
 }
 
+async function runHeroCandidateLane({
+  promptPlan,
+  canonicalPromptsPath,
+  candidateCanonicalIds,
+  episodeDir,
+  referencePlanPath,
+  characterStateRefsPath,
+  healthProof,
+  bridges,
+  runtimes,
+  timeoutMs,
+  identity,
+  dataRoot,
+  downloadsRoot,
+  checkHostRuntimes,
+  flowOnly,
+  chatgptOnly,
+  geminiOnly,
+  federated,
+  chatgptElectron,
+  chatgptElectronConcurrency,
+  flowRuntimeConcurrency,
+}) {
+  if (!candidateCanonicalIds.length) return null;
+  const sourcePromptPlanSha256 = await sha256File(canonicalPromptsPath);
+  const completeCandidatePlan = buildHeroCandidatePromptPlan(promptPlan, {
+    sourcePath: canonicalPromptsPath,
+    sourceSha256: sourcePromptPlanSha256,
+  });
+  const wantedCanonicalIds = new Set(candidateCanonicalIds);
+  const candidatePlan = {
+    ...completeCandidatePlan,
+    canonical_hero_image_ids: completeCandidatePlan.canonical_hero_image_ids.filter((id) => wantedCanonicalIds.has(id)),
+    prompts: completeCandidatePlan.prompts.filter((row) => wantedCanonicalIds.has(row.hero_candidate?.canonical_image_id)),
+  };
+  candidatePlan.candidate_count = candidatePlan.prompts.length;
+  if (!candidatePlan.prompts.length) return null;
+  const root = path.join(episodeDir, "reports", "hero-image-candidates");
+  await fs.mkdir(root, { recursive: true });
+  const candidatePlanPath = path.join(root, `hero_candidate_prompt_plan_${identity.episode}.json`);
+  const candidateImagegenReportPath = path.join(root, `hero_candidate_imagegen_report_${identity.episode}.json`);
+  const candidateCutLedgerPath = path.join(root, `hero_candidate_cut_execution_ledger_${identity.episode}.json`);
+  await writeJson(candidatePlanPath, candidatePlan);
+  const candidateIds = candidatePlan.prompts.map((row) => row.image_id);
+  const phase = await createAndRunPhase({
+    mode: "scene",
+    episodeDir,
+    promptsPath: candidatePlanPath,
+    referencePlanPath,
+    characterStateRefsPath,
+    assetIds: candidateIds,
+    styleOnly: false,
+    flowOnly,
+    chatgptOnly,
+    geminiOnly,
+    federated,
+    chatgptElectron,
+    chatgptElectronConcurrency,
+    flowRuntimeConcurrency,
+    repairReason: null,
+    healthProof,
+    bridges,
+    runtimes,
+    timeoutMs,
+    identity,
+    dataRoot,
+    downloadsRoot,
+    checkHostRuntimes,
+    qaRecovery: false,
+    repairEvidence: null,
+    imagegenReportPath: candidateImagegenReportPath,
+    cutExecutionLedgerPath: candidateCutLedgerPath,
+    wavefrontPrefetch: false,
+  });
+  const candidateImagegenReport = await readJson(candidateImagegenReportPath, null);
+  if (!Array.isArray(candidateImagegenReport?.results)) {
+    return {
+      status: "blocked",
+      phase,
+      candidate_plan_path: candidatePlanPath,
+      failed_canonical_image_ids: candidateCanonicalIds,
+      selected_canonical_image_ids: [],
+      reason: "candidate_imagegen_report_missing",
+    };
+  }
+  const semanticAuditPath = path.join(root, `hero_candidate_semantic_audit_${identity.episode}.json`);
+  const semanticAudit = await buildImageSemanticAudit({
+    promptPlan: candidatePlan,
+    imagegenReport: candidateImagegenReport,
+    promptPlanPath: candidatePlanPath,
+    imagegenReportPath: candidateImagegenReportPath,
+    outputPath: semanticAuditPath,
+    callsDir: path.join(root, "semantic-calls"),
+    repoRoot,
+    concurrency: 8,
+    openingSec: Number.POSITIVE_INFINITY,
+    ordinarySampleRate: 1,
+    reasoningEffort: "medium",
+  });
+  const resultById = new Map(candidateImagegenReport.results.map((row) => [String(row?.image_id ?? ""), row]));
+  const canonicalPromptById = new Map(promptPlan.prompts.map((row) => [String(row?.image_id ?? ""), row]));
+  const selectedCanonicalImageIds = [];
+  const failedCanonicalImageIds = [];
+  const selectionPaths = [];
+  for (const group of heroCandidateGroups(candidatePlan)) {
+    const canonicalPrompt = canonicalPromptById.get(group.canonical_image_id);
+    const candidateRows = group.prompts.map((candidatePrompt) => {
+      const result = resultById.get(candidatePrompt.image_id);
+      return {
+        image_id: candidatePrompt.image_id,
+        candidate_label: candidatePrompt.hero_candidate?.candidate_label,
+        image_path: result?.image_path ?? null,
+        image_sha256: result?.generated?.output_sha256 ?? null,
+        browser_provider: result?.browser_provider ?? null,
+        provider_receipt_path: result?.provider_receipt_path ?? null,
+        provider_receipt_sha256: result?.provider_receipt_sha256 ?? null,
+      };
+    }).filter((row) => row.image_path && row.image_sha256);
+    if (!canonicalPrompt || !candidateRows.length) {
+      failedCanonicalImageIds.push(group.canonical_image_id);
+      continue;
+    }
+    const selectionDir = path.join(root, group.canonical_image_id);
+    await fs.mkdir(selectionDir, { recursive: true });
+    const selectorOutputPath = path.join(selectionDir, "blind_selector_response.json");
+    const selection = await selectHeroCandidate({
+      canonicalPrompt,
+      candidates: candidateRows,
+      semanticAuditRows: semanticAudit.rows,
+      outputPath: selectorOutputPath,
+      repoRoot,
+      reasoningEffort: "medium",
+    });
+    const selectionPath = path.join(selectionDir, "selection.json");
+    await writeJson(selectionPath, selection);
+    const receiptPath = path.join(selectionDir, "canonical_selection_receipt.json");
+    const receipt = await writeCanonicalHeroSelectionReceipt({
+      selection,
+      outputPath: receiptPath,
+      canonicalPromptPlanPath: canonicalPromptsPath,
+      canonicalPromptPlanSha256: sourcePromptPlanSha256,
+    });
+    const selected = selection.selected_candidate;
+    const importArgs = [
+      path.join(repoRoot, "scripts", "codex-image-manual-import.mjs"),
+      ...identityCliArgs(identity),
+      "--prompts", canonicalPromptsPath,
+      "--image-id", group.canonical_image_id,
+      "--source", selected.image_path,
+      "--output", path.join(episodeDir, `imagegen_report_${identity.episode}.json`),
+      "--cut-execution-ledger", path.join(episodeDir, "cut_execution_ledger.json"),
+      "--import-route", "hero_candidate_selection",
+      "--work-manifest", phase.manifest_path,
+      "--browser-provider", selected.browser_provider,
+      "--provider-receipt", receiptPath,
+      "--provider-receipt-sha256", receipt.sha256,
+      "--model", "blind_selected_federated_hero_candidate",
+    ];
+    await execFile(process.execPath, importArgs, {
+      cwd: repoRoot,
+      env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot },
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 30 * 60_000,
+    });
+    selectedCanonicalImageIds.push(group.canonical_image_id);
+    selectionPaths.push({
+      canonical_image_id: group.canonical_image_id,
+      selection_path: selectionPath,
+      selection_sha256: await sha256File(selectionPath),
+      receipt_path: receiptPath,
+      receipt_sha256: receipt.sha256,
+    });
+  }
+  return {
+    status: failedCanonicalImageIds.length ? "partial" : "passed",
+    phase,
+    candidate_plan_path: candidatePlanPath,
+    candidate_plan_sha256: await sha256File(candidatePlanPath),
+    candidate_imagegen_report_path: candidateImagegenReportPath,
+    candidate_imagegen_report_sha256: await sha256File(candidateImagegenReportPath),
+    semantic_audit_path: semanticAuditPath,
+    semantic_audit_sha256: await sha256File(semanticAuditPath),
+    selected_canonical_image_ids: selectedCanonicalImageIds,
+    failed_canonical_image_ids: failedCanonicalImageIds,
+    selections: selectionPaths,
+  };
+}
+
 export async function runHybridBrowserImagePool(flags) {
   const dataRoot = path.resolve(flags["data-root"] ?? defaultDataRoot);
   const episodeDir = episodeDirectory(flags, dataRoot);
@@ -1085,6 +1325,7 @@ export async function runHybridBrowserImagePool(flags) {
     HYBRID_CHATGPT_IMAGE_CONCURRENCY,
     Number(flags["chatgpt-electron-concurrency"] ?? HYBRID_CHATGPT_IMAGE_CONCURRENCY),
   ));
+  const flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flags["flow-runtime-concurrency"]);
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("--flow-only, --chatgpt-only, and --gemini-only are mutually exclusive.");
   const repairReason = String(flags["repair-reason"] ?? "").trim();
   const repairSharedReferenceIds = validateRepairSharedReferenceScope({
@@ -1099,6 +1340,10 @@ export async function runHybridBrowserImagePool(flags) {
     referencesOnly ? null : flags["cut-id"],
   ));
   if (repairReason && !requestedIds.size) throw new Error("--repair-reason requires exact --image-ids/--reference-ids scope.");
+  if (federated && chatgptOnly && !federatedWebImageAutomaticChatGptEnabled(identity)
+    && (!repairReason || !requestedIds.size)) {
+    throw new Error("This federated identity permits ChatGPT Image only for an explicit exact-ID repair with --repair-reason.");
+  }
   if (qaRecovery && !repairReason) throw new Error("--qa-recovery true requires an exact repair reason and evidence-bound image IDs.");
   if (providerMigration && (!repairReason || !requestedIds.size || referencesOnly)) {
     throw new Error("--provider-migration true requires an exact scene --image-ids scope and --repair-reason.");
@@ -1176,19 +1421,26 @@ export async function runHybridBrowserImagePool(flags) {
       style_reference_provider: identity.image_provider_options.style_reference_provider,
       shared_pool: {
         assignment_policy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
-        chatgpt_concurrency: flowOnly || geminiOnly
+        chatgpt_concurrency: flowOnly || geminiOnly || (federated && !federatedWebImageAutomaticChatGptEnabled(identity) && !chatgptOnly)
           ? 0
           : chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY,
-        google_flow_concurrency: chatgptOnly || geminiOnly ? 0 : HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+        google_flow_concurrency: chatgptOnly || geminiOnly ? 0 : flowRuntimeConcurrency,
+        google_flow_profile_max_concurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
         google_gemini_concurrency: federated || geminiOnly ? GOOGLE_GEMINI_IMAGE_CONCURRENCY : 0,
-        total_concurrency: federated
-          ? FEDERATED_TOTAL_IMAGE_CONCURRENCY
-          : flowOnly
-          ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
+        total_concurrency: flowOnly
+          ? flowRuntimeConcurrency
           : chatgptOnly
             ? (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY)
-            : geminiOnly ? GOOGLE_GEMINI_IMAGE_CONCURRENCY : HYBRID_TOTAL_IMAGE_CONCURRENCY,
+            : geminiOnly
+              ? GOOGLE_GEMINI_IMAGE_CONCURRENCY
+              : federated
+                ? flowRuntimeConcurrency + GOOGLE_GEMINI_IMAGE_CONCURRENCY
+                  + (federatedWebImageAutomaticChatGptEnabled(identity)
+                    ? (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY)
+                    : 0)
+              : flowRuntimeConcurrency + (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY),
       },
+      flow_runtime_concurrency: flowRuntimeConcurrency,
       flow_only: flowOnly,
       chatgpt_only: chatgptOnly,
       gemini_only: geminiOnly,
@@ -1395,6 +1647,7 @@ export async function runHybridBrowserImagePool(flags) {
         repairReason, healthProof, bridges, runtimes, timeoutMs, identity, dataRoot,
         chatgptElectron,
         chatgptElectronConcurrency,
+        flowRuntimeConcurrency,
         downloadsRoot,
         checkHostRuntimes,
         qaRecovery,
@@ -1413,6 +1666,7 @@ export async function runHybridBrowserImagePool(flags) {
         repairReason: null, healthProof, bridges, runtimes, timeoutMs, identity, dataRoot,
         chatgptElectron,
         chatgptElectronConcurrency,
+        flowRuntimeConcurrency,
         downloadsRoot,
         checkHostRuntimes,
         qaRecovery,
@@ -1457,6 +1711,7 @@ export async function runHybridBrowserImagePool(flags) {
           federated,
           chatgptElectron,
           chatgptElectronConcurrency,
+          flowRuntimeConcurrency,
           repairReason, healthProof, bridges, runtimes, timeoutMs, identity, dataRoot,
           downloadsRoot,
           checkHostRuntimes,
@@ -1485,6 +1740,44 @@ export async function runHybridBrowserImagePool(flags) {
         accepted.add(row.image_id);
       }
     }
+    if (!repairReason && !wavefrontPrefetch) {
+      const heroCanonicalIds = candidates
+        .filter((prompt) => !requestedIds.size || requestedIds.has(prompt.image_id))
+        .filter((prompt) => !accepted.has(prompt.image_id))
+        .filter((prompt) => {
+          const tier = String(prompt?.quality_budget?.tier ?? prompt?.beat_value?.tier ?? "").toLowerCase();
+          return tier === "hero" || Number(prompt?.quality_budget?.image_candidate_count ?? 1) === 2;
+        })
+        .map((prompt) => prompt.image_id);
+      const heroLane = await runHeroCandidateLane({
+        promptPlan,
+        canonicalPromptsPath: promptsPath,
+        candidateCanonicalIds: heroCanonicalIds,
+        episodeDir,
+        referencePlanPath,
+        characterStateRefsPath,
+        healthProof,
+        bridges,
+        runtimes,
+        timeoutMs,
+        identity,
+        dataRoot,
+        downloadsRoot,
+        checkHostRuntimes,
+        flowOnly,
+        chatgptOnly,
+        geminiOnly,
+        federated,
+        chatgptElectron,
+        chatgptElectronConcurrency,
+        flowRuntimeConcurrency,
+      });
+      if (heroLane) {
+        phases.push({ phase: "hero_image_candidate_lane", ...heroLane });
+        for (const imageId of heroLane.selected_canonical_image_ids ?? []) accepted.add(imageId);
+        for (const imageId of heroLane.failed_canonical_image_ids ?? []) failedAssetIds.add(imageId);
+      }
+    }
     let sceneIds = candidates
       .filter((prompt) => !requestedIds.size || requestedIds.has(prompt.image_id))
       .filter((prompt) => repairReason || !accepted.has(prompt.image_id))
@@ -1506,6 +1799,7 @@ export async function runHybridBrowserImagePool(flags) {
         federated,
         chatgptElectron,
         chatgptElectronConcurrency,
+        flowRuntimeConcurrency,
         timeoutMs, identity, dataRoot,
         downloadsRoot,
         checkHostRuntimes,

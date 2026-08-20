@@ -32,13 +32,13 @@ Use stateful repetition. A recurring fantasy is allowed only when it retains and
 The opening contract is a binding dramatic cold-open contract, not a milestone checklist. Set
 `opening_semantic_contract.version` to `dramatic_cold_open_v2` and specify all of the following:
 
-- `first_sentence_event`: the visible action, injury, humiliation, threat, impossible result, or bodily consequence happening in the first sentence. A setting description, family history, rule, status label, or unexplained fantasy noun is not an event.
+- `first_sentence_event`: an object with `visible_event`, containing the visible action, injury, humiliation, threat, impossible result, or bodily consequence happening in the first sentence. A setting description, family history, rule, status label, or unexplained fantasy noun is not an event.
 - `cold_open_loop`: one continuous `visible_wound`, `active_pressure`, `owned_choice`, `counteraction`, `observable_result`, and `next_question`. The viewer must experience this miniature story before receiving broad world, bloodline, institutional, mechanic, or historical explanation.
-- `by_approximately_30_seconds`: the title-native wound or contradiction is visible, someone is doing something under pressure, and the protagonist has immediate direction.
-- `by_approximately_60_seconds`: the protagonist has made an owned choice and begun a counteraction. When the package promises a system, stolen talent, regression, hidden identity, supernatural bond, or comparable reversal engine, its reveal or first unmistakable spark belongs here unless the package's cited winning analogue proves a later reveal while sustaining active danger.
-- `by_approximately_90_seconds`: the cold-open loop has produced an observable changed state and opened the next contested question. The opening may continue escalating, but it may no longer be pure setup.
-- `by_approximately_3_minutes`: the package engine has produced visible proof rather than only a label, forecast, explanation, or UI announcement.
-- `by_approximately_5_minutes`: the first larger causal unit closes in a changed state and the second contested loop begins.
+- `by_approximately_30_seconds`: an object with `required_state`, describing how the title-native wound or contradiction is visible, someone is doing something under pressure, and the protagonist has immediate direction.
+- `by_approximately_60_seconds`: an object with `required_state`, describing the protagonist's owned choice and begun counteraction. When the package promises a system, stolen talent, regression, hidden identity, supernatural bond, or comparable reversal engine, its reveal or first unmistakable spark belongs here unless the package's cited winning analogue proves a later reveal while sustaining active danger.
+- `by_approximately_90_seconds`: an object with `required_state`, describing the observable changed state and next contested question produced by the cold-open loop. The opening may continue escalating, but it may no longer be pure setup.
+- `by_approximately_3_minutes`: an object with `required_state`, describing the package engine's visible proof rather than only a label, forecast, explanation, or UI announcement.
+- `by_approximately_5_minutes`: an object with `required_state`, describing how the first larger causal unit closes in a changed state and the second contested loop begins.
 - `exposition_release_point`: the exact result after which broader lore may enter, plus the minimum causal facts needed before that point. Before it, use no more than one new proper name, two unexplained story terms, and one short explanatory sentence at a time.
 
 Do not design an opening that requires the viewer to understand inheritance procedure, faction hierarchy,
@@ -47,7 +47,7 @@ important, reveal them after the viewer has watched the protagonist suffer, choo
 
 Return JSON only using schema goldflow_story_architecture_v1. Include package_sha256, selected_treatment_sha256, name_familiarity_ledger_sha256, target_word_range, opening_semantic_contract, protagonist_contract, character_name_plan, mechanic_and_world_constraints, relationship_ladder, opposition_ladder, learning_ledger, continuity_ledger, climax_proof_obligations, closure_contract, and movements. When a reference frontier is supplied, also include `reference_merit_frontier_sha256` and `merit_dominance_contract` with the exact normalization policy, one `dimension_obligations` row per required frontier dimension, and one `edge_obligations` row per supplied material edge. Dimension rows contain `id`, `candidate_strategy`, `proof_shape`, and valid `movement_ids`; edge rows use `edge_id` with those same fields.
 
-Also include `mechanic_comprehension_contract` with `current_objective_plain_language` and `concepts`. Each concept contains `spoken_name`, `category`, `input_or_trigger`, `observable_output`, `limit_or_cost`, `why_it_matters_now`, `first_clear_movement_id`, and `distinct_from`. Use plain listener language rather than circular labels. The writer must dramatize these facts through consequence and action; do not paste this planning structure into narration.
+Also include `mechanic_comprehension_contract` with `current_objective_plain_language` and `concepts`. Each concept contains `spoken_name`, `category`, `input_or_trigger`, `observable_output`, `limit_or_cost`, `why_it_matters_now`, `first_clear_movement_id`, and `distinct_from`. `distinct_from` must be an array of strings, even when only one adjacent concept applies. Use plain listener language rather than circular labels. The writer must dramatize these facts through consequence and action; do not paste this planning structure into narration.
 
 `character_name_plan` contains every recurring named character with `name`, `role`, `voice_or_behavior_distinction`, `reuse_disposition` (`new`, `intentional_reuse`, or `series_recurring`), and `selection_rationale`. A recent familiar name may still be selected, but `intentional_reuse` must explain why it fits better than a natural alternative. Do not include unnamed crowds or one-line functionaries.
 
@@ -59,7 +59,7 @@ Every movement has exactly these creative fields:
 - consequence_and_changed_state
 - relationship_opposition_or_learning_change
 - promise_or_viewer_question_movement
-- continuity_constraints
+- continuity_constraints: an array of strings, using an empty array only when no carried state applies
 - listener_orientation: `current_goal`, `immediate_obstacle`, `what_changed_from_previous_movement`, and `active_concepts`. These are backstage checks that keep a one-pass listener oriented; they are not sentences to paste into narration.
 
 Do not duplicate the architecture into a second retention map.

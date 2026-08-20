@@ -121,8 +121,8 @@ export async function runWinnerSourceCliTests() {
     assert.equal(researchReceipt.status, "passed");
     assert.equal(researchReceipt.research_mode, "chatgpt_web_planning_room_research");
     assert.equal(researchReceipt.source_model_contract.provider, "chatgpt_web");
-    assert.equal(researchReceipt.source_model_contract.reasoning_effort, "max");
-    assert.equal(researchReceipt.source_model_contract.visible_effort, "Pro");
+    assert.equal(researchReceipt.source_model_contract.reasoning_effort, "medium");
+    assert.equal(researchReceipt.source_model_contract.visible_effort, "Medium");
     assert.equal(researchReceipt.exported_source_url_count, 5);
 
     await runGoldflow([

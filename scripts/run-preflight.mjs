@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { sha256File } from "./lib/file-hash.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
   DEFAULT_GOOGLE_GEMINI_MODEL,
@@ -75,6 +76,7 @@ import {
   DEFAULT_NARRATOR_VOICE_ID,
   DEFAULT_TTS_FALLBACK_PROVIDER,
   DEFAULT_TTS_PROVIDER,
+  EXTERNAL_NARRATION_TTS_PROVIDERS,
   KOKORO_MODEL_LOCK,
   QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK,
   QWEN_JOEL_PRIMARY_LOCK,
@@ -82,9 +84,23 @@ import {
   QWEN_LOCAL_FALLBACK_LOCK,
   defaultNarrationVoiceProviderOptions,
   normalizeTtsProvider,
+  narrationStitchContractForQuality,
+  narrationUnitContractForQuality,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
+import {
+  buildNarrationQualityContract,
+} from "./lib/narration-quality-contract.mjs";
+import {
+  DEFAULT_NARRATION_DELIVERY_BANK_PATH,
+  loadNarrationDeliveryReferenceBank,
+  validateNarrationDeliveryBankPrimaryBinding,
+} from "./lib/narration-delivery-reference-bank.mjs";
+import {
+  validateNarrationProviderBakeoffManifest,
+  validateNarrationProviderPromotion,
+} from "./lib/narration-provider-bakeoff-contract.mjs";
 import {
   LTX_VIDEO_MODEL_ID,
   LTX_VIDEO_PROVIDER,
@@ -248,14 +264,17 @@ const explicitLegacyQwenFlags = flags["qwen-narrator-voice-id"] != null || flags
 const ttsProvider = normalizeTtsProvider(
   flags["tts-provider"] ?? DEFAULT_TTS_PROVIDER,
 );
-if (!["qwen_local", "kokoro_local", "modelslab_qwen"].includes(ttsProvider)) {
+if (!["qwen_local", "kokoro_local", "modelslab_qwen", ...EXTERNAL_NARRATION_TTS_PROVIDERS].includes(ttsProvider)) {
   throw new Error(`Unsupported TTS provider: ${ttsProvider}.`);
+}
+if (runIntent === "production" && ttsProvider === "modelslab_qwen") {
+  throw new Error(
+    "Production runs require qwen_local with joel_owned_narrator_clone; "
+    + "modelslab_qwen remains a legacy diagnostic adapter.",
+  );
 }
 if (explicitLegacyQwenFlags && flags["tts-provider"] == null) {
   throw new Error("Legacy Qwen flags do not select the local production provider. Omit them for the Joel/Qwen default, or explicitly pass --tts-provider modelslab_qwen for a legacy diagnostic.");
-}
-if (runIntent === "production" && ttsProvider !== DEFAULT_TTS_PROVIDER) {
-  throw new Error(`New production runs require ${DEFAULT_TTS_PROVIDER} with ${DEFAULT_NARRATOR_VOICE_ID}.`);
 }
 if (ttsProvider === "qwen_local"
   && flags["tts-model"] != null
@@ -272,6 +291,12 @@ const narratorVoiceId = cleanOptionalId(
     ? DEFAULT_NARRATOR_VOICE_ID
     : ttsProvider === "kokoro_local" ? "am_puck" : null),
 );
+if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(ttsProvider)
+  && !narratorVoiceId) {
+  throw new Error(
+    "External TTS preflight requires --narrator-voice-id with a stable provider voice identifier.",
+  );
+}
 const narratorReferenceVariantId = cleanOptionalId(
   flags["narrator-reference-variant"]
     ?? (ttsProvider === "qwen_local"
@@ -305,12 +330,86 @@ if (ttsProvider === "qwen_local" && requestedTtsNativeSpeed != null) {
 }
 const ttsNativeSpeed = ttsProvider === "qwen_local"
   ? null
-  : boundedNumber(
-      requestedTtsNativeSpeed,
-      ttsProvider === "kokoro_local" ? 1.2 : 1.25,
-      0.75,
-      1.5,
+  : requestedTtsNativeSpeed == null
+    ? ttsProvider === "kokoro_local" ? 1.2 : null
+    : boundedNumber(
+        requestedTtsNativeSpeed,
+        ttsProvider === "kokoro_local" ? 1.2 : 1,
+        0.75,
+        1.5,
+      );
+const externalNarrationProvider = EXTERNAL_NARRATION_TTS_PROVIDERS.includes(
+  ttsProvider,
+);
+const narratorVoiceSha256 = externalNarrationProvider
+  ? cleanOptionalId(flags["narrator-voice-sha256"] ?? flags["tts-voice-sha256"])
+  : ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_sha256 : null;
+const externalTtsPrimaryOptions = externalNarrationProvider
+  ? {
+      model_id: cleanOptionalId(flags["tts-model"]),
+      model_revision: cleanOptionalId(flags["tts-model-revision"]),
+      voice_sha256: narratorVoiceSha256,
+      voice_continuity_contract: cleanOptionalId(
+        flags["voice-continuity-contract"],
+      ),
+      reference_audio_path: cleanOptionalId(flags["voice-reference-audio"]),
+      reference_audio_sha256: cleanOptionalId(
+        flags["voice-reference-audio-sha256"],
+      ),
+      reference_text: cleanOptionalId(flags["voice-reference-text"]),
+      reference_text_sha256: cleanOptionalId(
+        flags["voice-reference-text-sha256"],
+      ),
+      reference_manifest_path: path.resolve(
+        flags["voice-reference-manifest"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.reference_manifest_path,
+      ),
+      reference_manifest_sha256: cleanOptionalId(
+        flags["voice-reference-manifest-sha256"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256,
+      ),
+      reference_voice_id: cleanOptionalId(
+        flags["voice-reference-id"] ?? DEFAULT_NARRATOR_VOICE_ID,
+      ),
+      reference_voice_sha256: cleanOptionalId(
+        flags["voice-reference-sha256"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.reference_voice_sha256,
+      ),
+      speaker_similarity_method: cleanOptionalId(
+        flags["speaker-similarity-method"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_method,
+      ),
+      speaker_similarity_model_path: path.resolve(
+        flags["speaker-similarity-model"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_path,
+      ),
+      speaker_similarity_model_sha256: cleanOptionalId(
+        flags["speaker-similarity-model-sha256"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_sha256,
+      ),
+      speaker_similarity_calibration_path: path.resolve(
+        flags["speaker-similarity-calibration"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_path,
+      ),
+      speaker_similarity_calibration_sha256: cleanOptionalId(
+        flags["speaker-similarity-calibration-sha256"]
+          ?? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256,
+      ),
+    }
+  : null;
+if (externalNarrationProvider) {
+  const missing = [
+    ["--tts-model", externalTtsPrimaryOptions.model_id],
+    ["--tts-model-revision", externalTtsPrimaryOptions.model_revision],
+    ["--narrator-voice-sha256", externalTtsPrimaryOptions.voice_sha256],
+    ["--voice-continuity-contract", externalTtsPrimaryOptions.voice_continuity_contract],
+  ].filter(([, value]) => !value).map(([label]) => label);
+  if (missing.length) {
+    throw new Error(
+      `External TTS preflight requires ${missing.join(", ")}.`,
     );
+  }
+}
 const operatorQwenNarratorVoiceId = cleanOptionalId(flags["qwen-narrator-voice-id"] ?? flags["narrator-voice-id"] ?? null);
 const qwenNarratorVoiceId = operatorQwenNarratorVoiceId ?? DEFAULT_QWEN_NARRATOR_VOICE_ID;
 const qwenNarratorVoicePolicy = operatorQwenNarratorVoiceId
@@ -479,8 +578,16 @@ function lockedModelVersions() {
   return {
     planning_model: planningModel,
     planning_reasoning_effort: planningDefaultReasoningEffort,
-    tts_model: genericTts ? primaryLock.model_id : flags["tts-model"] ?? "qwen-tts",
-    tts_model_revision: genericTts ? primaryLock.model_revision : null,
+    tts_model: genericTts
+      ? primaryLock.model_id
+      : externalNarrationProvider
+        ? externalTtsPrimaryOptions.model_id
+        : flags["tts-model"] ?? "qwen-tts",
+    tts_model_revision: genericTts
+      ? primaryLock.model_revision
+      : externalNarrationProvider
+        ? externalTtsPrimaryOptions.model_revision
+        : null,
     tts_runtime: genericTts ? `${primaryLock.runtime}@${primaryLock.runtime_version}` : null,
     fallback_tts_model: fallbackLock?.model_id ?? null,
     fallback_tts_model_revision: fallbackLock?.model_revision ?? null,
@@ -579,14 +686,16 @@ function validateImageFallbackPolicy() {
   }
 }
 
-function voiceProviderOptions() {
-  if (ttsProvider === "qwen_local" || ttsProvider === "kokoro_local") {
+function voiceProviderOptions(narrationQualityContract) {
+  if (ttsProvider !== "modelslab_qwen") {
     const options = defaultNarrationVoiceProviderOptions({
       provider: ttsProvider,
       fallbackProvider: ttsFallbackProvider,
       voiceId: narratorVoiceId,
       nativeSpeed: ttsNativeSpeed,
       referenceVariantId: narratorReferenceVariantId,
+      narrationQualityContract,
+      primaryOptions: externalTtsPrimaryOptions ?? {},
     });
     validateNarrationTtsPolicy(narrationTtsPolicyForIdentity({
       episode,
@@ -598,6 +707,7 @@ function voiceProviderOptions() {
       },
       tts_native_speed: ttsNativeSpeed,
       voice_provider_options: options,
+      narration_quality_contract: narrationQualityContract,
     }), { production: runIntent === "production" });
     return options;
   }
@@ -606,6 +716,138 @@ function voiceProviderOptions() {
     qwen_narrator_voice_policy: qwenNarratorVoicePolicy,
     qwen_native_speed: qwenNativeSpeed,
     pace_strategy: "provider_native_speed_no_post_tempo",
+  };
+}
+
+async function validateExternalNarrationVoiceAssets() {
+  if (!externalNarrationProvider) return;
+  const profile = externalTtsPrimaryOptions;
+  const requiredAssets = [
+    ["voice reference manifest", profile.reference_manifest_path, profile.reference_manifest_sha256],
+    ["speaker-similarity model", profile.speaker_similarity_model_path, profile.speaker_similarity_model_sha256],
+    ["speaker-similarity calibration", profile.speaker_similarity_calibration_path, profile.speaker_similarity_calibration_sha256],
+  ];
+  if (profile.reference_audio_path || profile.reference_audio_sha256) {
+    requiredAssets.push([
+      "voice reference audio",
+      profile.reference_audio_path,
+      profile.reference_audio_sha256,
+    ]);
+  }
+  for (const [label, filePath, expectedSha256] of requiredAssets) {
+    if (!filePath || !/^[a-f0-9]{64}$/iu.test(String(expectedSha256 ?? ""))) {
+      throw new Error(`${label} requires an absolute path and a SHA-256 lock.`);
+    }
+    const actualSha256 = await sha256File(filePath).catch(() => null);
+    if (!actualSha256 || actualSha256 !== expectedSha256) {
+      throw new Error(
+        `${label} is missing or stale: ${filePath}; expected ${expectedSha256}, found ${actualSha256 ?? "missing"}.`,
+      );
+    }
+  }
+  const referenceManifest = await readJsonWithBytes(
+    profile.reference_manifest_path,
+    "voice reference manifest",
+  ).then((row) => row.value);
+  const referenceRows = referenceManifest?.references
+    ?? referenceManifest?.reference_variants
+    ?? referenceManifest?.samples
+    ?? [];
+  const readyReferences = referenceRows.filter((row) => (
+    row?.status === "ready" && (row?.wav_path || row?.audio_path)
+  ));
+  if (readyReferences.length < 3) {
+    throw new Error(
+      `Voice reference bank requires at least three ready samples; found ${readyReferences.length}.`,
+    );
+  }
+  for (const reference of readyReferences) {
+    const audioPath = path.resolve(reference.wav_path ?? reference.audio_path);
+    const currentSha256 = await sha256File(audioPath).catch(() => null);
+    const lockedSha256 = reference.wav_sha256
+      ?? reference.audio_sha256
+      ?? reference.sha256
+      ?? null;
+    if (!currentSha256 || (lockedSha256 && currentSha256 !== lockedSha256)) {
+      throw new Error(
+        `Voice reference bank sample is missing or stale: ${audioPath}.`,
+      );
+    }
+  }
+}
+
+async function loadNarrationProviderPromotionBinding({
+  provider,
+  modelId,
+  modelRevision,
+  voiceId,
+  voiceSha256,
+  promotionPath,
+  bakeoffManifestPath,
+}) {
+  if (!promotionPath) {
+    throw new Error(
+      `Production provider ${provider} requires --narration-provider-promotion <approved receipt>.`,
+    );
+  }
+  const resolvedPromotionPath = path.resolve(promotionPath);
+  const resolvedManifestPath = path.resolve(
+    bakeoffManifestPath
+      ?? path.join(path.dirname(resolvedPromotionPath), "narration_provider_bakeoff_manifest.json"),
+  );
+  const [promotionRead, manifestRead] = await Promise.all([
+    readJsonWithBytes(resolvedPromotionPath, "narration provider promotion"),
+    readJsonWithBytes(resolvedManifestPath, "narration provider bakeoff manifest"),
+  ]);
+  const manifestValidation = validateNarrationProviderBakeoffManifest(
+    manifestRead.value,
+  );
+  if (manifestValidation.status !== "passed") {
+    throw new Error(
+      `Narration provider bakeoff manifest is blocked: ${manifestValidation.findings.map((row) => row.code).join(", ")}.`,
+    );
+  }
+  const promotionValidation = validateNarrationProviderPromotion(
+    promotionRead.value,
+    manifestRead.value,
+    { requiredProvider: provider },
+  );
+  if (promotionValidation.status !== "passed") {
+    throw new Error(
+      `Narration provider promotion is blocked: ${promotionValidation.findings.map((row) => row.code).join(", ")}.`,
+    );
+  }
+  const expected = {
+    promoted_provider: provider,
+    promoted_model_id: modelId,
+    promoted_model_revision: modelRevision,
+    promoted_voice_id: voiceId,
+    promoted_voice_sha256: voiceSha256,
+  };
+  const mismatches = Object.entries(expected)
+    .filter(([, value]) => value != null)
+    .filter(([key, value]) => promotionRead.value?.[key] !== value)
+    .map(([key]) => key);
+  if (mismatches.length) {
+    throw new Error(
+      `Narration provider promotion does not match preflight identity: ${mismatches.join(", ")}.`,
+    );
+  }
+  return {
+    schema: "goldflow_run_identity_narration_provider_promotion_binding_v1",
+    promotion_path: resolvedPromotionPath,
+    promotion_file_sha256: sha256(promotionRead.bytes),
+    promotion_sha256: promotionRead.value.promotion_sha256,
+    bakeoff_manifest_path: resolvedManifestPath,
+    bakeoff_manifest_file_sha256: sha256(manifestRead.bytes),
+    bakeoff_manifest_sha256: manifestRead.value.manifest_sha256,
+    promoted_provider: promotionRead.value.promoted_provider,
+    promoted_model_id: promotionRead.value.promoted_model_id,
+    promoted_model_revision: promotionRead.value.promoted_model_revision,
+    promoted_voice_id: promotionRead.value.promoted_voice_id,
+    promoted_voice_sha256: promotionRead.value.promoted_voice_sha256,
+    operator_reviewer: promotionRead.value.reviewer,
+    reviewed_at: promotionRead.value.reviewed_at,
   };
 }
 
@@ -868,11 +1110,70 @@ async function main() {
         });
   }
   validateImageFallbackPolicy();
+  await validateExternalNarrationVoiceAssets();
+  const narrationProviderPromotion = externalNarrationProvider
+    && runIntent === "production"
+    ? await loadNarrationProviderPromotionBinding({
+        provider: ttsProvider,
+        modelId: externalTtsPrimaryOptions.model_id,
+        modelRevision: externalTtsPrimaryOptions.model_revision,
+        voiceId: narratorVoiceId,
+        voiceSha256: narratorVoiceSha256,
+        promotionPath: flags["narration-provider-promotion"],
+        bakeoffManifestPath: flags["narration-provider-bakeoff-manifest"],
+      })
+    : null;
   const git = await gitSnapshot();
   validateDirtyWorktreePolicy({ dirty: git.dirty, intent: runIntent, allowDirty: allowDirtyWorktree, reason: dirtyReason });
   const episodeDir = path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode);
   const now = new Date().toISOString();
+  const narrationQualityContract = buildNarrationQualityContract({
+    provider: ttsProvider,
+    modelId: lockedModelVersions().tts_model,
+    modelRevision: lockedModelVersions().tts_model_revision,
+  });
   const resolvedImageProviderOptions = imageProviderOptions(imageProvider);
+  const resolvedVoiceProviderOptions = voiceProviderOptions(
+    narrationQualityContract,
+  );
+  const narrationDeliveryBank = ttsProvider === "qwen_local"
+    ? await loadNarrationDeliveryReferenceBank(
+      flags["narration-delivery-bank"] ?? DEFAULT_NARRATION_DELIVERY_BANK_PATH,
+    )
+    : null;
+  if (narrationDeliveryBank?.validation.status === "blocked") {
+    throw new Error(`Narration delivery reference bank is blocked: ${narrationDeliveryBank.validation.findings.map((row) => row.code).join(", ")}`);
+  }
+  if (narrationDeliveryBank) {
+    const binding = validateNarrationDeliveryBankPrimaryBinding(
+      narrationDeliveryBank.document,
+      resolvedVoiceProviderOptions.primary,
+    );
+    if (binding.status !== "passed") {
+      throw new Error(`Narration delivery bank does not match the identity-locked primary reference: ${binding.findings.map((row) => row.code).join(", ")}`);
+    }
+  }
+  if (narrationProviderPromotion) {
+    resolvedVoiceProviderOptions.provider_promotion = narrationProviderPromotion;
+  }
+  if (narrationDeliveryBank) {
+    resolvedVoiceProviderOptions.delivery_reference_bank = {
+      path: narrationDeliveryBank.path,
+      sha256: narrationDeliveryBank.sha256,
+      schema: narrationDeliveryBank.document.schema,
+      default_delivery_id: narrationDeliveryBank.document.default_delivery_id,
+      production_active_delivery_ids: narrationDeliveryBank.document.production_active_delivery_ids,
+      unpromoted_fallback: narrationDeliveryBank.document.promotion_policy.unpromoted_fallback,
+    };
+    resolvedVoiceProviderOptions.primary.delivery_reference_bank_path = narrationDeliveryBank.path;
+    resolvedVoiceProviderOptions.primary.delivery_reference_bank_sha256 = narrationDeliveryBank.sha256;
+  }
+  const narrationUnitContract = narrationUnitContractForQuality(
+    narrationQualityContract,
+  );
+  const narrationStitchContract = narrationStitchContractForQuality(
+    narrationQualityContract,
+  );
   const planningRoom = planningProvider === PLANNING_ROOM_PROVIDER
     ? planningRoomContract({
         planning_provider: planningProvider,
@@ -915,7 +1216,16 @@ async function main() {
     } : null,
     image_provider: imageProvider,
     image_provider_options: resolvedImageProviderOptions,
-    voice_provider_options: voiceProviderOptions(),
+    voice_provider_options: resolvedVoiceProviderOptions,
+    narration_quality_contract: narrationQualityContract,
+    narration_delivery_reference_bank: narrationDeliveryBank ? {
+      path: narrationDeliveryBank.path,
+      sha256: narrationDeliveryBank.sha256,
+      schema: narrationDeliveryBank.document.schema,
+      default_delivery_id: narrationDeliveryBank.document.default_delivery_id,
+      production_active_delivery_ids: narrationDeliveryBank.document.production_active_delivery_ids,
+    } : null,
+    narration_provider_promotion: narrationProviderPromotion,
     ...(ttsProvider !== "modelslab_qwen" ? {
       tts_provider: ttsProvider,
       tts_fallback_provider: ttsFallbackProvider,
@@ -1016,28 +1326,63 @@ async function main() {
       tts_fallback_provider: ttsFallbackProvider,
       narrator_voice_id: ttsProvider !== "modelslab_qwen" ? narratorVoiceId : qwenNarratorVoiceId,
       tts_native_speed: ttsProvider !== "modelslab_qwen" ? ttsNativeSpeed : qwenNativeSpeed,
-      tts_speed_control: ttsProvider === "qwen_local" ? "unsupported" : "provider_native",
+      tts_speed_control: ttsProvider === "qwen_local"
+        ? "unsupported"
+        : ttsNativeSpeed == null ? "unused" : "provider_native",
       tts_model: lockedModelVersions().tts_model,
       tts_model_revision: lockedModelVersions().tts_model_revision,
       fallback_tts_model: lockedModelVersions().fallback_tts_model,
       fallback_tts_model_revision: lockedModelVersions().fallback_tts_model_revision,
       narrator_voice_identity: ttsProvider !== "modelslab_qwen" ? narratorVoiceId : qwenNarratorVoiceId,
       primary_reference_variant_id: ttsProvider === "qwen_local" ? narratorReferenceVariantId : null,
-      primary_reference_audio_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.reference_audio_sha256 : null,
-      primary_reference_manifest_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_manifest_sha256 : null,
-      primary_reference_metadata_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.reference_metadata_sha256 : null,
-      primary_voice_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.voice_sha256 : null,
-      primary_similarity_model_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_model_sha256 : null,
-      primary_similarity_calibration_sha256: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.speaker_similarity_calibration_sha256 : null,
-      primary_minimum_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.minimum_cosine_similarity : null,
-      primary_warning_below_cosine_similarity: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.warning_below_cosine_similarity : null,
-      primary_voice_continuity_contract: ttsProvider === "qwen_local" ? QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK.voice_continuity_contract : null,
-      tts_unit_target_words_min: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.target_words_min : null,
-      tts_unit_target_words_max: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.target_words_max : null,
-      tts_unit_hard_words_max: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.hard_words_max : null,
-      tts_sentence_complete_units: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.sentence_complete : null,
-      tts_continuous_requests: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.continuous_requests : null,
-      tts_join_silence_ms: ttsProvider === "qwen_local" ? QWEN_JOEL_PRIMARY_LOCK.stitch_contract.join_silence_ms : null,
+      primary_reference_audio_sha256:
+        resolvedVoiceProviderOptions.primary?.reference_audio_sha256 ?? null,
+      primary_reference_manifest_sha256:
+        resolvedVoiceProviderOptions.primary?.reference_manifest_sha256 ?? null,
+      primary_reference_metadata_sha256:
+        resolvedVoiceProviderOptions.primary?.reference_metadata_sha256 ?? null,
+      primary_voice_sha256:
+        resolvedVoiceProviderOptions.primary?.voice_sha256 ?? null,
+      primary_similarity_model_sha256:
+        resolvedVoiceProviderOptions.primary?.speaker_similarity_model_sha256
+          ?? null,
+      primary_similarity_calibration_sha256:
+        resolvedVoiceProviderOptions.primary
+          ?.speaker_similarity_calibration_sha256 ?? null,
+      primary_minimum_cosine_similarity: null,
+      primary_warning_below_cosine_similarity: null,
+      primary_similarity_threshold_source:
+        narrationQualityContract.voice_identity_qa.threshold_source,
+      primary_universal_similarity_threshold_forbidden: true,
+      primary_reference_bank_centroid_required: true,
+      primary_reference_bank_minimum_count:
+        narrationQualityContract.voice_identity_qa.minimum_reference_count,
+      primary_unit_outliers_review_required: true,
+      primary_aggregate_drift_report_required: true,
+      primary_voice_continuity_contract:
+        resolvedVoiceProviderOptions.primary?.voice_continuity_contract ?? null,
+      narration_provider_promotion_sha256:
+        narrationProviderPromotion?.promotion_sha256 ?? null,
+      narration_provider_bakeoff_manifest_sha256:
+        narrationProviderPromotion?.bakeoff_manifest_sha256 ?? null,
+      narration_quality_contract_version: narrationQualityContract.version,
+      narration_quality_contract_sha256: narrationQualityContract.contract_sha256,
+      narration_text_ir_schema: narrationQualityContract.text_ir.schema,
+      narration_edge_editing_mode: "alignment_safe_preserve_on_missing_alignment",
+      narration_boundary_policy: "semantic_boundary_classes_v2",
+      narration_final_delivery_gate: "strict_transcript_edges_joins_order_v2",
+      tts_unit_target_words_min: narrationUnitContract.target_words_min,
+      tts_unit_target_words_max: narrationUnitContract.target_words_max,
+      tts_unit_soft_words_max: narrationUnitContract.soft_words_max,
+      tts_unit_hard_words_max: narrationUnitContract.hard_words_max,
+      tts_sentence_complete_units: narrationUnitContract.sentence_complete,
+      tts_continuous_requests: narrationUnitContract.continuous_requests,
+      tts_stitch_contract_version: narrationStitchContract.contract_version,
+      tts_semantic_boundary_classes: narrationStitchContract.semantic_boundary_classes,
+      tts_join_silence_ms: null,
+      tts_alignment_required_for_trimming: ttsProvider === "qwen_local" ? narrationStitchContract.alignment_required_for_trimming : null,
+      tts_missing_alignment_policy: ttsProvider === "qwen_local" ? narrationStitchContract.missing_alignment_policy : null,
+      tts_exact_sample_accounting_required: ttsProvider === "qwen_local" ? narrationStitchContract.exact_sample_accounting_required : null,
       post_tempo_processing: false,
       tts_retry_policy: ttsProvider === "qwen_local"
         ? QWEN_JOEL_PRIMARY_LOCK.retry_contract.retry_policy
@@ -1112,12 +1457,23 @@ async function main() {
       fallback_must_clone_primary_voice_identity: ttsProvider === "kokoro_local",
       sentence_complete_tts_units_required: ttsProvider === "qwen_local",
       tts_spoken_text_audit_required: ttsProvider === "qwen_local",
+      narration_text_ir_required: true,
+      narration_exact_transformation_ledger_required: true,
+      narration_alignment_required_for_edge_trimming: true,
+      narration_amplitude_only_edge_trimming_forbidden: true,
+      narration_strict_final_stream_delivery_qa_required: true,
       tts_unit_hard_words_max: ttsProvider === "qwen_local"
-        ? QWEN_JOEL_PRIMARY_LOCK.unit_contract.hard_words_max
+        ? narrationUnitContract.hard_words_max
         : null,
-      tts_join_silence_ms: ttsProvider === "qwen_local"
-        ? QWEN_JOEL_PRIMARY_LOCK.stitch_contract.join_silence_ms
+      tts_unit_soft_words_max: ttsProvider === "qwen_local"
+        ? narrationUnitContract.soft_words_max
         : null,
+      tts_join_silence_ms: null,
+      tts_stitch_contract_version: ttsProvider === "qwen_local"
+        ? narrationStitchContract.contract_version
+        : null,
+      tts_semantic_boundary_classes_required: ttsProvider === "qwen_local",
+      tts_exact_sample_accounting_required: ttsProvider === "qwen_local",
       continuous_longform_tts_requests_forbidden: ttsProvider === "qwen_local",
       deterministic_length_matched_tts_batching_required:
         ttsProvider === "qwen_local",

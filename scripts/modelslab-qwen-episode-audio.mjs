@@ -17,6 +17,9 @@ import {
   planNarrationBoundary,
   validateNarrationStitchAccounting,
 } from "./lib/narration-boundary-editor.mjs";
+import {
+  buildNarrationProviderUnitAsrContract,
+} from "./lib/narration-provider-unit-asr-reuse.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -2194,6 +2197,11 @@ async function runFasterWhisperUnitBatch(rows, {
   computeType = unitQaWhisperComputeType,
 } = {}) {
   if (!rows.length) return new Map();
+  const asrContract = buildNarrationProviderUnitAsrContract({
+    model,
+    device,
+    computeType,
+  });
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-tts-unit-qa-"));
   const inputPath = path.join(tmpDir, "input.json");
   const outputPath = path.join(tmpDir, "output.json");
@@ -2264,7 +2272,11 @@ with open(output_path, "w", encoding="utf-8") as handle:
       });
     });
     const output = JSON.parse(await fs.readFile(outputPath, "utf8"));
-    return new Map(output.map((row) => [String(row.unit_id), row]));
+    return new Map(output.map((row) => [String(row.unit_id), {
+      ...row,
+      asr_contract: asrContract,
+      asr_contract_sha256: asrContract.contract_sha256,
+    }]));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
@@ -2315,13 +2327,45 @@ export function requiredMediumQaReasonsForTests(row = {}) {
   return requiredMediumQaReasons(row);
 }
 
-async function runUnitOutputQa(results) {
+function reusableUnitOutputQa(row, { reuseHashValidQa = false } = {}) {
+  const qa = row?.unit_qa;
+  if (!reuseHashValidQa
+    || row?.audio_hash_verified !== true
+    || !String(row?.audio_sha256 ?? "").trim()
+    || qa?.policy_version !== TTS_OUTPUT_QA_POLICY_VERSION
+    || qa?.audio_sha256 !== row.audio_sha256
+    || !Number.isFinite(Number(qa?.metrics?.sample_count))
+    || Number(qa.metrics.sample_count) <= 0
+    || !Array.isArray(qa?.findings)
+    || !["passed", "passed_with_warnings", "blocked"].includes(qa?.status)) {
+    return null;
+  }
+  return structuredClone(qa);
+}
+
+export function reusableUnitOutputQaForTests(row, options = {}) {
+  return reusableUnitOutputQa(row, options);
+}
+
+async function runUnitOutputQa(results, options = {}) {
   const usable = results.filter((row) => row?.wav);
-  const measurements = await mapPool(usable, 6, async (row) => ({
-    row,
-    audio_sha256: await sha256File(row.wav),
-    metrics: await audioPcmMetrics(row.wav),
-  }));
+  const measurements = await mapPool(usable, 6, async (row) => {
+    const reusedQa = reusableUnitOutputQa(row, options);
+    if (reusedQa) {
+      return {
+        row,
+        audio_sha256: row.audio_sha256,
+        metrics: reusedQa.metrics,
+        reused_qa: reusedQa,
+      };
+    }
+    return {
+      row,
+      audio_sha256: await sha256File(row.wav),
+      metrics: await audioPcmMetrics(row.wav),
+      reused_qa: null,
+    };
+  });
   const reusableTranscripts = new Map();
   const needsTranscript = [];
   for (const measurement of measurements) {
@@ -2335,6 +2379,12 @@ async function runUnitOutputQa(results) {
       reusableTranscripts.set(String(measurement.row.unit_id), {
         text: previousQa.transcript.recognized_text,
         words: previousQa.transcript.recognized_words ?? [],
+        language: previousQa.transcript.language ?? "en",
+        language_probability:
+          previousQa.transcript.language_probability ?? null,
+        asr_contract: previousQa.transcript.asr_contract ?? null,
+        asr_contract_sha256:
+          previousQa.transcript.asr_contract_sha256 ?? null,
         reused: true,
       });
     } else if (transcriptQaRequired) {
@@ -2350,7 +2400,13 @@ async function runUnitOutputQa(results) {
       transcriptEngineError = error instanceof Error ? error.message : String(error);
     }
   }
-  const rows = measurements.map(({ row, audio_sha256, metrics }) => {
+  const rows = measurements.map(({ row, audio_sha256, metrics, reused_qa: reusedQa }) => {
+    if (reusedQa) {
+      return {
+        ...reusedQa,
+        reused_exact_hash_waveform_qa: true,
+      };
+    }
     const recognized = reusableTranscripts.get(String(row.unit_id)) ?? freshTranscripts.get(String(row.unit_id)) ?? null;
     const audioFindings = audioQaFindings(metrics, row);
     const deliveryFirstPrimary = isDeliveryFirstLocalNarrator(row.provider);
@@ -2458,6 +2514,10 @@ async function runUnitOutputQa(results) {
         model: unitQaWhisperModel,
         device: unitQaWhisperDevice,
         compute_type: unitQaWhisperComputeType,
+        language: recognized.language ?? "en",
+        language_probability: recognized.language_probability ?? null,
+        asr_contract: recognized.asr_contract ?? null,
+        asr_contract_sha256: recognized.asr_contract_sha256 ?? null,
         recognized_text: recognized.text,
         recognized_words: recognized.words ?? [],
         reused_exact_hash_qa: Boolean(recognized.reused),
@@ -2592,6 +2652,12 @@ async function runUnitOutputQa(results) {
     transcript_model: unitTranscriptQa ? unitQaWhisperModel : null,
     transcript_engine_error: transcriptEngineError,
     unit_count: rows.length,
+    reused_exact_hash_waveform_qa_unit_count: rows.filter(
+      (row) => row.reused_exact_hash_waveform_qa === true,
+    ).length,
+    decoded_waveform_qa_unit_count: rows.filter(
+      (row) => row.reused_exact_hash_waveform_qa !== true,
+    ).length,
     passed_unit_count: rows.filter((row) => row.status !== "blocked").length,
     blocked_unit_count: rows.filter((row) => row.status === "blocked").length,
     blocker_count: blockers.length,
@@ -2608,8 +2674,8 @@ async function runUnitOutputQa(results) {
   };
 }
 
-export async function runUnitOutputQaForDiagnostics(results) {
-  return runUnitOutputQa(results);
+export async function runUnitOutputQaForDiagnostics(results, options = {}) {
+  return runUnitOutputQa(results, options);
 }
 
 function concatLine(filePath) {

@@ -19,6 +19,7 @@ import {
   isGoogleFlowPrimaryProvider,
 } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
+import { openWavefrontBrowserImageStream } from "./hybrid-browser-image-pool.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -287,6 +288,7 @@ export function stableMotionPrefetchCandidatesForTests({
 } = {}) {
   const acceptedById = new Map(acceptedImages.map((row) => [String(row.image_id ?? ""), row]));
   const decisionById = new Map(decisions.map((row) => [String(row.image_id ?? ""), row]));
+  const promptById = new Map(prompts.map((row) => [String(row.image_id ?? ""), row]));
   let intents = prompts
     .filter((prompt) => prompt?.image_generation_required !== false)
     .map((prompt) => {
@@ -302,19 +304,31 @@ export function stableMotionPrefetchCandidatesForTests({
         { timelineEndSec },
       );
     });
-  const originallyStaticIds = new Set(intents
-    .filter((intent) => intent.behavior === "static_hold")
-    .map((intent) => String(intent.image_id)));
   if (motionPolicy === "selective_editorial_v1") {
     intents = rebalanceEditorialMotionStreaks(intents, { maximumMovingCuts: 7 });
   }
-  return intents.filter((intent) => (
-    acceptedById.has(String(intent.image_id))
-    && originallyStaticIds.has(String(intent.image_id))
-    && intent.behavior === "static_hold"
-    && intent.depth_candidate?.eligible !== true
-    && !intent.depth_treatment
-  ));
+  return intents.filter((intent) => {
+    const imageId = String(intent.image_id);
+    const accepted = acceptedById.get(imageId);
+    const prompt = promptById.get(imageId);
+    const animationEligibility = String(
+      prompt?.shot_manifest?.animation_intent?.eligibility
+      ?? prompt?.animation_intent?.eligibility
+      ?? "",
+    ).trim().toLowerCase();
+    const authoredDepthCandidate = prompt?.shot_manifest?.motion_intent?.depth_candidate
+      ?? prompt?.motion_intent?.depth_candidate
+      ?? null;
+    return Boolean(
+      accepted?.image_sha256
+      && intent.image_sha256 === accepted.image_sha256
+      && animationEligibility !== "animate"
+      && authoredDepthCandidate?.eligible !== true
+      && intent.depth_candidate?.eligible !== true
+      && !intent.depth_treatment
+      && !intent.generated_video_treatment
+    );
+  });
 }
 
 async function discoverPlans(waveDir, discovered) {
@@ -344,91 +358,23 @@ function selectPendingBatch(pendingRows, maxCuts) {
   return selected;
 }
 
-async function processPrefetchBatch({
+async function finalizePrefetchBatch({
+  batchId,
+  batchDir,
   rows,
-  batchIndex,
-  attemptDir,
-  identity,
-  profile,
-  firstProviderProbe,
+  combined,
+  hardenedPlanPath,
+  imagegenReportPath,
+  hybridPoolReportPath,
+  cutLedgerPath,
+  focalAnalysisPath,
+  semanticAuditPath,
+  incrementalQaPath,
+  incrementalQaReviewDir,
   incrementalQaEnabled,
+  hybridProvider,
+  imagegen,
 }) {
-  const batchId = `batch_${String(batchIndex).padStart(4, "0")}`;
-  const batchDir = path.join(attemptDir, batchId);
-  await fs.mkdir(batchDir, { recursive: true });
-  const rawPlanPath = path.join(batchDir, `${batchId}.plan.json`);
-  const hardenedPlanPath = path.join(batchDir, `${batchId}.hardened.json`);
-  const hardeningReportPath = path.join(batchDir, `${batchId}.hardening.json`);
-  const hardeningSamplePath = path.join(batchDir, `${batchId}.sample.md`);
-  const imagegenReportPath = path.join(batchDir, `${batchId}.imagegen.json`);
-  const cutLedgerPath = path.join(batchDir, `${batchId}.cut-ledger.json`);
-  const providerHealthPath = path.join(batchDir, `${batchId}.provider-health.json`);
-  const focalAnalysisPath = path.join(batchDir, `${batchId}.focal.json`);
-  const incrementalQaPath = path.join(batchDir, `${batchId}.incremental-qa.json`);
-  const incrementalQaReviewDir = path.join(batchDir, "qa-review");
-  const combined = combineWavefrontPlansForTests(rows.map((row) => row.plan), { identity });
-  await writeJsonAtomic(rawPlanPath, combined);
-  const common = identityFlags(identity);
-  const harden = await runNode([
-    path.join(repoRoot, "scripts", "visual-prompt-harden.mjs"),
-    ...common,
-    "--prompts", rawPlanPath,
-    "--output", hardenedPlanPath,
-    "--report-output", hardeningReportPath,
-    "--sample-output", hardeningSamplePath,
-  ]);
-  if (harden.code !== 0) {
-    return {
-      batch_id: batchId,
-      status: "hardening_blocked",
-      cut_ids: combined.prompts.map((prompt) => prompt.image_id),
-      source_chunk_files: rows.map((row) => row.filePath),
-      hardening_report_path: hardeningReportPath,
-    };
-  }
-  const imageModel = identity?.model_versions?.image_model
-    ?? identity?.provider_locks?.image_model
-    ?? "flux-klein";
-  const hybridProvider = isBrowserPoolImageProvider(normalizeImageProvider(identity.image_provider));
-  const hybridPoolReportPath = path.join(batchDir, `${batchId}.hybrid-pool.json`);
-  let imagegen;
-  if (hybridProvider) {
-    await writeJsonAtomic(providerHealthPath, {
-      schema: "goldflow_wavefront_provider_health_binding_v1",
-      status: "passed_by_identity_health_proof",
-      image_provider: identity.image_provider,
-      google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
-      google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
-      provider_concurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
-      updated_at: new Date().toISOString(),
-    });
-    imagegen = await runNode([
-      path.join(repoRoot, "scripts", "hybrid-browser-image-pool.mjs"),
-      ...common,
-      "--prompts", hardenedPlanPath,
-      "--image-ids", combined.prompts.map((prompt) => prompt.image_id).join(","),
-      "--output", imagegenReportPath,
-      "--pool-report-output", hybridPoolReportPath,
-      "--cut-execution-ledger", cutLedgerPath,
-      "--wavefront-prefetch", "true",
-    ]);
-  } else {
-    imagegen = await runNode([
-      path.join(repoRoot, "scripts", "imagegen.mjs"),
-      ...common,
-      "--image-provider", "modelslab",
-      "--image-model", imageModel,
-      "--prompts", hardenedPlanPath,
-      "--skip-reference-generation", "true",
-      "--concurrency", String(profile.media.image_concurrency),
-      "--reference-concurrency", String(profile.media.reference_concurrency),
-      "--provider-health-probe", firstProviderProbe ? "true" : "false",
-      "--provider-health-report", providerHealthPath,
-      "--output", imagegenReportPath,
-      "--cut-execution-ledger", cutLedgerPath,
-      "--batch-kind", "wavefront_prefetch",
-    ]);
-  }
   const report = await readJson(imagegenReportPath, null);
   const completionPartition = wavefrontCompletionPartitionForTests(combined.prompts, report);
   const completedCutIds = completionPartition.completed_cut_ids;
@@ -485,9 +431,142 @@ async function processPrefetchBatch({
     incremental_qa_eligible: imagegen.code === 0 || completedCutIds.length > 0,
     incremental_qa_enabled: incrementalQaEnabled,
     focal_analysis_path: focalAnalysisPath,
+    semantic_audit_path: semanticAuditPath,
     incremental_qa_path: incrementalQaPath,
     incremental_qa_review_dir: incrementalQaReviewDir,
   };
+}
+
+async function processPrefetchBatch({
+  rows,
+  batchIndex,
+  attemptDir,
+  identity,
+  profile,
+  firstProviderProbe,
+  incrementalQaEnabled,
+  browserImageStream = null,
+}) {
+  const batchId = `batch_${String(batchIndex).padStart(4, "0")}`;
+  const batchDir = path.join(attemptDir, batchId);
+  await fs.mkdir(batchDir, { recursive: true });
+  const rawPlanPath = path.join(batchDir, `${batchId}.plan.json`);
+  const hardenedPlanPath = path.join(batchDir, `${batchId}.hardened.json`);
+  const hardeningReportPath = path.join(batchDir, `${batchId}.hardening.json`);
+  const hardeningSamplePath = path.join(batchDir, `${batchId}.sample.md`);
+  const imagegenReportPath = path.join(batchDir, `${batchId}.imagegen.json`);
+  const cutLedgerPath = path.join(batchDir, `${batchId}.cut-ledger.json`);
+  const providerHealthPath = path.join(batchDir, `${batchId}.provider-health.json`);
+  const focalAnalysisPath = path.join(batchDir, `${batchId}.focal.json`);
+  const semanticAuditPath = path.join(batchDir, `${batchId}.semantic-audit.json`);
+  const incrementalQaPath = path.join(batchDir, `${batchId}.incremental-qa.json`);
+  const incrementalQaReviewDir = path.join(batchDir, "qa-review");
+  const combined = combineWavefrontPlansForTests(rows.map((row) => row.plan), { identity });
+  await writeJsonAtomic(rawPlanPath, combined);
+  const common = identityFlags(identity);
+  const harden = await runNode([
+    path.join(repoRoot, "scripts", "visual-prompt-harden.mjs"),
+    ...common,
+    "--prompts", rawPlanPath,
+    "--output", hardenedPlanPath,
+    "--report-output", hardeningReportPath,
+    "--sample-output", hardeningSamplePath,
+  ]);
+  if (harden.code !== 0) {
+    return {
+      batch_id: batchId,
+      status: "hardening_blocked",
+      cut_ids: combined.prompts.map((prompt) => prompt.image_id),
+      source_chunk_files: rows.map((row) => row.filePath),
+      hardening_report_path: hardeningReportPath,
+    };
+  }
+  const imageModel = identity?.model_versions?.image_model
+    ?? identity?.provider_locks?.image_model
+    ?? "flux-klein";
+  const hybridProvider = isBrowserPoolImageProvider(normalizeImageProvider(identity.image_provider));
+  const hybridPoolReportPath = path.join(batchDir, `${batchId}.hybrid-pool.json`);
+  let imagegen;
+  if (hybridProvider) {
+    await writeJsonAtomic(providerHealthPath, {
+      schema: "goldflow_wavefront_provider_health_binding_v1",
+      status: "passed_by_identity_health_proof",
+      image_provider: identity.image_provider,
+      google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
+      google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
+      provider_concurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
+      updated_at: new Date().toISOString(),
+    });
+    if (browserImageStream) {
+      const completion = browserImageStream.append({
+        promptsPath: hardenedPlanPath,
+        assetIds: combined.prompts.map((prompt) => prompt.image_id),
+        imagegenReportPath,
+        poolReportPath: hybridPoolReportPath,
+        cutExecutionLedgerPath: cutLedgerPath,
+      }).then((result) => finalizePrefetchBatch({
+        batchId,
+        batchDir,
+        rows,
+        combined,
+        hardenedPlanPath,
+        imagegenReportPath,
+        hybridPoolReportPath,
+        cutLedgerPath,
+        focalAnalysisPath,
+        semanticAuditPath,
+        incrementalQaPath,
+        incrementalQaReviewDir,
+        incrementalQaEnabled,
+        hybridProvider,
+        imagegen: result,
+      }));
+      return { queued: true, batch_id: batchId, completion };
+    }
+    imagegen = await runNode([
+      path.join(repoRoot, "scripts", "hybrid-browser-image-pool.mjs"),
+      ...common,
+      "--prompts", hardenedPlanPath,
+      "--image-ids", combined.prompts.map((prompt) => prompt.image_id).join(","),
+      "--output", imagegenReportPath,
+      "--pool-report-output", hybridPoolReportPath,
+      "--cut-execution-ledger", cutLedgerPath,
+      "--wavefront-prefetch", "true",
+    ]);
+  } else {
+    imagegen = await runNode([
+      path.join(repoRoot, "scripts", "imagegen.mjs"),
+      ...common,
+      "--image-provider", "modelslab",
+      "--image-model", imageModel,
+      "--prompts", hardenedPlanPath,
+      "--skip-reference-generation", "true",
+      "--concurrency", String(profile.media.image_concurrency),
+      "--reference-concurrency", String(profile.media.reference_concurrency),
+      "--provider-health-probe", firstProviderProbe ? "true" : "false",
+      "--provider-health-report", providerHealthPath,
+      "--output", imagegenReportPath,
+      "--cut-execution-ledger", cutLedgerPath,
+      "--batch-kind", "wavefront_prefetch",
+    ]);
+  }
+  return finalizePrefetchBatch({
+    batchId,
+    batchDir,
+    rows,
+    combined,
+    hardenedPlanPath,
+    imagegenReportPath,
+    hybridPoolReportPath,
+    cutLedgerPath,
+    focalAnalysisPath,
+    semanticAuditPath,
+    incrementalQaPath,
+    incrementalQaReviewDir,
+    incrementalQaEnabled,
+    hybridProvider,
+    imagegen,
+  });
 }
 
 async function processIncrementalQaForBatch({
@@ -533,6 +612,7 @@ async function processIncrementalQaForBatch({
     "--prompts", batch.qa_prompt_path ?? batch.hardened_plan_path,
     "--imagegen-report", batch.qa_imagegen_report_path ?? batch.imagegen_report_path,
     "--focal-analysis", batch.focal_analysis_path,
+    "--semantic-audit-output", batch.semantic_audit_path,
     "--output", batch.incremental_qa_path,
     "--decisions", cumulativeDecisionsPath,
     "--review-dir", batch.incremental_qa_review_dir,
@@ -767,6 +847,9 @@ async function prefetchGeneratedMotionForBatch({
   if (!selectedImageIds.length) {
     return { status: "no_animation_eligible_cuts", selected_image_ids: [], direction_plan_path: directionPath };
   }
+  const coherencePrefetchEnabled = profile.orchestration?.generated_motion_coherence_prefetch
+    ?? profile.orchestration?.incremental_generated_motion_prefetch
+    ?? false;
   const generated = await runNode([
     path.join(repoRoot, "scripts", "generated-motion-generate.mjs"),
     ...identityFlags(identity),
@@ -777,8 +860,11 @@ async function prefetchGeneratedMotionForBatch({
     "--output", generatedReportPath,
     "--cut-ids", selectedImageIds.join(","),
     "--concurrency", String(profile.media.generated_motion_concurrency ?? 3),
+    "--prefetch-coherence-cache", String(coherencePrefetchEnabled),
   ]);
   const generatedReport = await readJson(generatedReportPath, null);
+  const coherencePrefetchPath = path.join(generatedDir, `generated_motion_coherence_prefetch_${identity.episode}.json`);
+  const coherencePrefetch = await readJson(coherencePrefetchPath, null);
   return {
     status: generated.code === 0 ? "passed" : "failed_or_omitted",
     selected_image_ids: selectedImageIds,
@@ -787,6 +873,9 @@ async function prefetchGeneratedMotionForBatch({
     generated_report_path: generatedReportPath,
     generated_count: Number(generatedReport?.generated_count ?? 0),
     omitted_count: Number(generatedReport?.omitted_count ?? 0),
+    coherence_prefetch_status: coherencePrefetch?.status ?? (coherencePrefetchEnabled ? "unavailable" : "disabled"),
+    coherence_prefetch_path: coherencePrefetch?.status === "passed" ? coherencePrefetchPath : null,
+    coherence_prefetch_summary: coherencePrefetch?.summary ?? null,
     idempotency_policy: "official_stage_reuses_exact_per_cut_flow_request",
   };
 }
@@ -833,6 +922,18 @@ async function main() {
     `image_output_review_decisions_${identity.episode}.json`,
   );
   await fs.mkdir(waveDir, { recursive: true });
+  const exactRecoveryScope = String(flags["cut-ids"] ?? flags["beat-ids"] ?? "").trim();
+  const streamScopeSuffix = exactRecoveryScope
+    ? `:exact-repair:${createHash("sha256").update(exactRecoveryScope).digest("hex").slice(0, 16)}`
+    : "";
+  const browserImageStream = isFederatedWebImageProvider(imageProvider)
+    ? await openWavefrontBrowserImageStream({
+        episodeDir: initial.episode_dir,
+        identity,
+        streamId: `visual-wavefront:${identity.channel}:${identity.series_slug}:${identity.week}:${identity.episode}:${identity.stage_registry_version ?? "registry"}${streamScopeSuffix}`,
+        flowRuntimeConcurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+      })
+    : null;
 
   const plannerCommand = buildStageCommand("visual_prompt_plan", identity);
   let plannerTokens = quoteAwareTokens(plannerCommand);
@@ -864,6 +965,7 @@ async function main() {
   const generatedMotionPrefetches = [];
   const motionPrefetchedIds = new Set();
   let incrementalQaChain = Promise.resolve();
+  const incrementalQaTasks = [];
   let motionPrefetchSnapshot = 0;
   let motionPrefetchChain = Promise.resolve();
   let generatedMotionPrefetchChain = Promise.resolve();
@@ -884,7 +986,7 @@ async function main() {
     })) {
       const selected = selectPendingBatch(pending, maxBatchCuts);
       batchIndex += 1;
-      const batch = await processPrefetchBatch({
+      const scheduledBatch = await processPrefetchBatch({
         rows: selected,
         batchIndex,
         attemptDir,
@@ -892,61 +994,80 @@ async function main() {
         profile,
         firstProviderProbe: batchIndex === 1,
         incrementalQaEnabled: profile.orchestration?.incremental_image_qa === true,
+        browserImageStream,
       });
-      batches.push(batch);
       motionPrefetchSnapshot += 1;
       const snapshotIndex = motionPrefetchSnapshot;
-      incrementalQaChain = incrementalQaChain.then(async () => {
-        await processIncrementalQaForBatch({
-          batch,
-          identity,
-          profile,
-          cumulativeDecisionsPath,
-        });
-        if (profile.orchestration?.incremental_generated_motion_prefetch === true) {
-          generatedMotionPrefetchChain = generatedMotionPrefetchChain.then(async () => {
-            const prefetch = await prefetchGeneratedMotionForBatch({
-              batch,
+      const batchReady = scheduledBatch?.queued === true
+        ? scheduledBatch.completion
+        : Promise.resolve(scheduledBatch);
+      const incrementalQaTask = batchReady.then((batch) => {
+        const queuedQa = incrementalQaChain.then(async () => {
+          batches.push(batch);
+          batches.sort((left, right) => String(left.batch_id).localeCompare(String(right.batch_id)));
+          await processIncrementalQaForBatch({
+            batch,
+            identity,
+            profile,
+            cumulativeDecisionsPath,
+          });
+          if (profile.orchestration?.incremental_generated_motion_prefetch === true) {
+            generatedMotionPrefetchChain = generatedMotionPrefetchChain.then(async () => {
+              const prefetch = await prefetchGeneratedMotionForBatch({
+                batch,
+                identity,
+                episodeDir: initial.episode_dir,
+                profile,
+              });
+              generatedMotionPrefetches.push({ snapshot_index: snapshotIndex, ...prefetch });
+            });
+          }
+          if (profile.orchestration?.incremental_motion_clip_prefetch !== true) return;
+          motionPrefetchChain = motionPrefetchChain.then(async () => {
+            const finalized = await officialFinalizePromise;
+            if (finalized.status !== "passed") {
+              motionPrefetches.push({
+                status: "deferred_official_visual_artifacts_not_ready",
+                snapshot_index: snapshotIndex,
+                finalized_status: finalized.status,
+              });
+              return;
+            }
+            const prefetch = await prebuildStableMotionClips({
+              batches,
               identity,
               episodeDir: initial.episode_dir,
+              attemptDir,
               profile,
+              alreadyPrefetchedIds: motionPrefetchedIds,
+              snapshotIndex,
             });
-            generatedMotionPrefetches.push({ snapshot_index: snapshotIndex, ...prefetch });
+            motionPrefetches.push({ snapshot_index: snapshotIndex, ...prefetch });
           });
-        }
-        if (profile.orchestration?.incremental_motion_clip_prefetch !== true) return;
-        motionPrefetchChain = motionPrefetchChain.then(async () => {
-          const finalized = await officialFinalizePromise;
-          if (finalized.status !== "passed") {
-            motionPrefetches.push({
-              status: "deferred_official_visual_artifacts_not_ready",
-              snapshot_index: snapshotIndex,
-              finalized_status: finalized.status,
-            });
-            return;
-          }
-          const prefetch = await prebuildStableMotionClips({
-            batches,
-            identity,
-            episodeDir: initial.episode_dir,
-            attemptDir,
-            profile,
-            alreadyPrefetchedIds: motionPrefetchedIds,
-            snapshotIndex,
-          });
-          motionPrefetches.push({ snapshot_index: snapshotIndex, ...prefetch });
         });
+        incrementalQaChain = queuedQa;
+        return queuedQa;
       });
+      incrementalQaTasks.push(incrementalQaTask);
       for (const row of selected) processed.add(row.filePath);
       continue;
     }
     await sleep(250);
   }
+  const browserStreamDrainPromise = browserImageStream
+    ? browserImageStream.seal().then(
+        (result) => ({ result, error: null }),
+        (error) => ({ result: null, error }),
+      )
+    : Promise.resolve({ result: null, error: null });
   if (!plannerResult) plannerResult = await plannerPromise;
   const officialFinalize = await officialFinalizePromise;
-  await incrementalQaChain;
+  await Promise.all(incrementalQaTasks);
   await generatedMotionPrefetchChain;
   await motionPrefetchChain;
+  const browserStreamDrainOutcome = await browserStreamDrainPromise;
+  if (browserStreamDrainOutcome.error) throw browserStreamDrainOutcome.error;
+  const browserStreamDrain = browserStreamDrainOutcome.result;
   const acceptedSummary = dedupeIncrementalAcceptedImagesForTests(batches);
   const report = {
     schema: "goldflow_visual_wavefront_prefetch_v1",
@@ -962,6 +1083,7 @@ async function main() {
     incremental_qa_risk_sheet_paths: [...new Set(batches.flatMap((batch) => batch.incremental_risk_sheet_paths ?? []))],
     incremental_qa_pending_risk_ids: [...new Set(batches.flatMap((batch) => batch.incremental_not_inspected_image_ids ?? []))],
     cumulative_review_decisions_path: cumulativeDecisionsPath,
+    browser_stream_drain: browserStreamDrain,
     official_visual_finalize: officialFinalize,
     motion_prefetches: motionPrefetches,
     generated_motion_prefetches: generatedMotionPrefetches,
@@ -972,6 +1094,7 @@ async function main() {
       min_cuts: minCuts,
       max_wait_ms: maxWaitMs,
       max_batch_cuts: maxBatchCuts,
+      browser_queue_mode: browserImageStream ? "single_appendable_episode_manifest" : "legacy_batch_terminal_wait",
       provider_concurrency: isBrowserPoolImageProvider(imageProvider)
         ? isFederatedWebImageProvider(imageProvider)
           ? federatedWebImageConcurrencyForIdentity(identity)
@@ -983,7 +1106,7 @@ async function main() {
       incremental_image_qa_enabled: profile.orchestration?.incremental_image_qa === true,
       incremental_motion_clip_prefetch_enabled: profile.orchestration?.incremental_motion_clip_prefetch === true,
       incremental_generated_motion_prefetch_enabled: profile.orchestration?.incremental_generated_motion_prefetch === true,
-      motion_prefetch_scope: "hash-bound QA-accepted static holds without parallax dependency",
+      motion_prefetch_scope: "hash-bound QA-accepted single-plane still-motion intents without generated-video or parallax dependency",
       generated_motion_prefetch_scope: "hash-bound QA-accepted animation-ready cuts; official stage reuses the exact per-cut Flow request",
     },
     batches,

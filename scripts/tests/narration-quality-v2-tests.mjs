@@ -17,9 +17,14 @@ import {
 import {
   buildNarrationProviderOutputManifest,
   compileNarrationProviderRequest,
+  narrationProviderUnitQaSha256,
   narrationSynthesisIdentitySha256,
   validateNarrationProviderOutputManifest,
 } from "../lib/narration-provider-adapter.mjs";
+import {
+  buildNarrationProviderUnitAsrContract,
+  validateNarrationProviderUnitAsrReuse,
+} from "../lib/narration-provider-unit-asr-reuse.mjs";
 import {
   classifyNarrationBoundary,
   planAlignmentSafeUnitEdit,
@@ -52,7 +57,28 @@ import {
 } from "../run-status.mjs";
 import {
   conservativeNarrationEdgeAlignmentForTests,
+  narrationAudioSampleCountForTests,
 } from "../narration-provider-output-finalize.mjs";
+import {
+  planNarrationConfirmationWindows,
+} from "../lib/narration-confirmation-windows.mjs";
+import {
+  buildLocalWhisperTimingCandidate,
+  validateLocalWhisperTimingCandidate,
+} from "../lib/local-whisper-timing-candidate.mjs";
+import {
+  emptyNarrationFinalizationCheckpoint,
+  narrationFinalizationStageKey,
+  narrationFinalizationUnitKey,
+  reusableNarrationFinalizationStage,
+  reusableNarrationFinalizationUnit,
+} from "../lib/narration-finalization-checkpoint.mjs";
+import {
+  productionLocalWhisperContract,
+} from "../lib/local-whisper-policy.mjs";
+import {
+  reusableUnitOutputQaForTests,
+} from "../modelslab-qwen-episode-audio.mjs";
 import {
   compileProviderSafeSpokenText,
   PROVIDER_SAFE_SPOKEN_COMPILER_ID,
@@ -268,6 +294,207 @@ assert.deepEqual(conservativeNarrationEdgeAlignmentForTests({
   reason: "transcript_edge_uncertain_preserve_entire_unit",
 });
 
+const exactWindowUnits = ["u1", "u2", "u3"].map((unitId) => ({
+  unit_id: unitId,
+  spoken_text: `${unitId} first second.`,
+  canonical_token_count: 2,
+}));
+const exactWindowTimeline = [
+  { unit_id: "u1", start_sample: 0, end_sample_exclusive: 100 },
+  { unit_id: "u2", start_sample: 110, end_sample_exclusive: 210 },
+  { unit_id: "u3", start_sample: 220, end_sample_exclusive: 320 },
+];
+const boundaryInsertionOperations = [
+  { type: "match", intended: "a", recognized: "a" },
+  { type: "match", intended: "b", recognized: "b" },
+  { type: "insertion", intended: null, recognized: "extra" },
+  { type: "match", intended: "c", recognized: "c" },
+  { type: "match", intended: "d", recognized: "d" },
+  { type: "match", intended: "e", recognized: "e" },
+  { type: "match", intended: "f", recognized: "f" },
+];
+const boundaryWindowPlan = planNarrationConfirmationWindows({
+  units: exactWindowUnits,
+  timeline: exactWindowTimeline,
+  operations: boundaryInsertionOperations,
+  audioSampleCount: 320,
+});
+assert.equal(boundaryWindowPlan.status, "passed");
+assert.equal(boundaryWindowPlan.window_count, 1);
+assert.deepEqual(boundaryWindowPlan.windows[0].unit_ids, ["u1", "u2"]);
+assert.deepEqual(boundaryWindowPlan.windows[0].boundary_ids, ["u1__u2"]);
+assert.equal(boundaryWindowPlan.windows[0].start_sample, 0);
+assert.equal(boundaryWindowPlan.windows[0].end_sample_exclusive, 210);
+assert.equal(boundaryWindowPlan.coverage.opening_confirmation_required, true);
+assert.equal(boundaryWindowPlan.coverage.final_confirmation_required, false);
+
+const trailingDeletionOperations = [
+  ...["a", "b", "c", "d", "e"].map((token) => ({
+    type: "match",
+    intended: token,
+    recognized: token,
+  })),
+  { type: "deletion", intended: "f", recognized: null },
+];
+const trailingWindowPlan = planNarrationConfirmationWindows({
+  units: exactWindowUnits,
+  timeline: exactWindowTimeline,
+  operations: trailingDeletionOperations,
+  audioSampleCount: 320,
+});
+assert.equal(trailingWindowPlan.status, "passed");
+assert.deepEqual(trailingWindowPlan.windows[0].unit_ids, ["u3"]);
+assert.equal(trailingWindowPlan.coverage.final_confirmation_required, true);
+assert.ok(trailingWindowPlan.coverage.final_confirmation_window_ids.length > 0);
+assert.equal(planNarrationConfirmationWindows({
+  units: exactWindowUnits,
+  timeline: exactWindowTimeline,
+  operations: trailingDeletionOperations,
+  audioSampleCount: 319,
+}).status, "blocked", "sample mapping must fail closed instead of widening to full Medium");
+
+const timingContract = productionLocalWhisperContract();
+const timingCandidate = buildLocalWhisperTimingCandidate({
+  transcription: {
+    text: "Opening ending",
+    language: "en",
+    language_probability: 0.999,
+    duration_sec: 1,
+    words: [
+      { word: "Opening", start_sec: 0.05, end_sec: 0.35, probability: 0.99 },
+      { word: "ending", start_sec: 0.5, end_sec: 0.9, probability: 0.99 },
+    ],
+  },
+  contract: timingContract,
+  sourceScriptPath: "/tmp/script_clean.md",
+  sourceScriptSha256: "1".repeat(64),
+  narrationAudioPath: "/tmp/narration.wav",
+  narrationAudioSha256: "2".repeat(64),
+  narrationReportPath: "/tmp/stitch.json",
+  narrationReportSha256: "3".repeat(64),
+  runIdentityPath: "/tmp/run_identity.json",
+  runIdentitySha256: "4".repeat(64),
+  narrationQualityContractSha256: "5".repeat(64),
+});
+const timingBindings = {
+  contract: timingContract,
+  sourceScriptSha256: "1".repeat(64),
+  narrationAudioSha256: "2".repeat(64),
+  narrationReportSha256: "3".repeat(64),
+  runIdentitySha256: "4".repeat(64),
+  narrationQualityContractSha256: "5".repeat(64),
+};
+assert.equal(
+  validateLocalWhisperTimingCandidate(timingCandidate, timingBindings).status,
+  "passed",
+);
+assert.equal(validateLocalWhisperTimingCandidate(timingCandidate, {
+  ...timingBindings,
+  narrationAudioSha256: "9".repeat(64),
+}).status, "blocked");
+
+const checkpointUnit = {
+  unit_id: "u-checkpoint",
+  spoken_text_sha256: "6".repeat(64),
+  audio_sha256: "7".repeat(64),
+  synthesis_identity_sha256: "8".repeat(64),
+  provider: "qwen_local",
+};
+const checkpointUnitKey = narrationFinalizationUnitKey({
+  unit: checkpointUnit,
+  qualityContractSha256: "a".repeat(64),
+});
+const finalizationCheckpoint = emptyNarrationFinalizationCheckpoint();
+finalizationCheckpoint.status = "in_progress";
+finalizationCheckpoint.units[checkpointUnit.unit_id] = {
+  unit_key: checkpointUnitKey,
+  primary_recognition: { text: "cached" },
+};
+assert.equal(
+  reusableNarrationFinalizationUnit(
+    finalizationCheckpoint,
+    checkpointUnit.unit_id,
+    checkpointUnitKey,
+  ).primary_recognition.text,
+  "cached",
+  "an interrupted finalizer must resume an immutable passed unit",
+);
+const preservedCheckpointUnit = {
+  ...checkpointUnit,
+  unit_id: "u-preserved",
+  audio_sha256: "e".repeat(64),
+};
+const preservedCheckpointUnitKey = narrationFinalizationUnitKey({
+  unit: preservedCheckpointUnit,
+  qualityContractSha256: "a".repeat(64),
+});
+finalizationCheckpoint.units[preservedCheckpointUnit.unit_id] = {
+  unit_key: preservedCheckpointUnitKey,
+  primary_recognition: { text: "preserved after exact peer repair" },
+};
+const repairedUnitKey = narrationFinalizationUnitKey({
+  unit: { ...checkpointUnit, audio_sha256: "b".repeat(64) },
+  qualityContractSha256: "a".repeat(64),
+});
+assert.equal(
+  reusableNarrationFinalizationUnit(
+    finalizationCheckpoint,
+    checkpointUnit.unit_id,
+    repairedUnitKey,
+  ),
+  null,
+  "an exact-unit audio repair must invalidate only that unit checkpoint",
+);
+assert.equal(
+  reusableNarrationFinalizationUnit(
+    finalizationCheckpoint,
+    preservedCheckpointUnit.unit_id,
+    preservedCheckpointUnitKey,
+  ).primary_recognition.text,
+  "preserved after exact peer repair",
+  "a stale repaired peer must not invalidate an unrelated exact unit",
+);
+const stitchStageKey = narrationFinalizationStageKey("semantic_stitch", {
+  unit_keys: [checkpointUnitKey],
+});
+finalizationCheckpoint.stages.semantic_stitch = {
+  input_key: stitchStageKey,
+  status: "passed",
+  payload: { raw_wav_sha256: "c".repeat(64) },
+};
+assert.ok(reusableNarrationFinalizationStage(
+  finalizationCheckpoint,
+  "semantic_stitch",
+  stitchStageKey,
+), "an interrupted run may resume a completed content-addressed aggregate");
+assert.equal(reusableNarrationFinalizationStage(
+  finalizationCheckpoint,
+  "semantic_stitch",
+  narrationFinalizationStageKey("semantic_stitch", { unit_keys: [repairedUnitKey] }),
+), null, "a repaired unit must invalidate downstream stitch while preserving other unit caches");
+
+const reusableWaveformQa = {
+  policy_version: "tts_output_qa_v3_review_warnings",
+  status: "passed_with_warnings",
+  audio_sha256: checkpointUnit.audio_sha256,
+  metrics: { sample_count: 24_000, duration_sec: 1 },
+  findings: [{ severity: "warning", code: "diagnostic" }],
+};
+const reusableWaveformRow = {
+  audio_sha256: checkpointUnit.audio_sha256,
+  audio_hash_verified: true,
+  unit_qa: reusableWaveformQa,
+};
+const discoveredWaveformPolicy = reusableUnitOutputQaForTests(
+  reusableWaveformRow,
+  { reuseHashValidQa: true },
+);
+assert.ok(discoveredWaveformPolicy, "exact hash-valid cohort waveform QA should be reusable");
+assert.equal(reusableUnitOutputQaForTests({
+  ...reusableWaveformRow,
+  audio_sha256: "d".repeat(64),
+}, { reuseHashValidQa: true }), null);
+
 const sourceText = "The SSS hero said it was 41% certain.";
 const spokenText = "The S S S hero said it was forty-one percent certain.";
 const strictLineage = strictSpokenTextLineage("u1", sourceText, spokenText, [{
@@ -436,6 +663,141 @@ assert.equal(validateNarrationProviderOutputManifest(providerOutput, providerUni
   qualityContractSha256: contract.contract_sha256,
 }).status, "passed");
 
+const providerSmallAsrContract = buildNarrationProviderUnitAsrContract({
+  model: contract.delivery_qa.unit_screening_model,
+  device: "cpu",
+  computeType: "int8_float32",
+});
+const providerOutputWithExactSmallAsr = buildNarrationProviderOutputManifest({
+  provider: "fish_audio",
+  modelId: "test-model",
+  modelRevision: "test-revision",
+  voiceId: "test-voice",
+  voiceSha256: "d".repeat(64),
+  voiceContinuityContract: "test-owned-voice-continuity-v1",
+  generationPlanSha256: "b".repeat(64),
+  qualityContractSha256: contract.contract_sha256,
+  units: providerUnits,
+  results: [{
+    unit_id: "u1",
+    audio_path: "/tmp/u1.wav",
+    audio_sha256: "c".repeat(64),
+    duration_sec: 1,
+    unit_qa: {
+      ...reusableWaveformQa,
+      audio_sha256: "c".repeat(64),
+      transcript: {
+        engine: "faster_whisper",
+        model: contract.delivery_qa.unit_screening_model,
+        device: "cpu",
+        compute_type: "int8_float32",
+        language: "en",
+        language_probability: 0.999,
+        asr_contract: providerSmallAsrContract,
+        asr_contract_sha256: providerSmallAsrContract.contract_sha256,
+        recognized_text: spokenText,
+        recognized_words: [{
+          word: "The",
+          start_sec: 0,
+          end_sec: 0.1,
+          probability: 0.99,
+        }],
+      },
+    },
+  }],
+});
+assert.equal(providerOutputWithExactSmallAsr.status, "passed");
+const exactSmallAsrUnit = providerOutputWithExactSmallAsr.units[0];
+assert.match(
+  exactSmallAsrUnit.provider_unit_qa.primary_asr_reuse_binding.binding_sha256,
+  /^[a-f0-9]{64}$/u,
+);
+const freshProviderSmallAsrReuse = validateNarrationProviderUnitAsrReuse({
+  unitId: exactSmallAsrUnit.unit_id,
+  audioSha256: exactSmallAsrUnit.audio_sha256,
+  audioHashVerified: true,
+  providerUnitQa: exactSmallAsrUnit.provider_unit_qa,
+  providerUnitQaSha256: exactSmallAsrUnit.provider_unit_qa_sha256,
+  narrationQualityContractSha256: contract.contract_sha256,
+  expectedAsrContract: providerSmallAsrContract,
+  providerUnitQaContentSha256: narrationProviderUnitQaSha256,
+});
+assert.equal(freshProviderSmallAsrReuse.status, "reused");
+assert.equal(freshProviderSmallAsrReuse.recognition.text, spokenText);
+assert.equal(
+  freshProviderSmallAsrReuse.recognition.reuse_source,
+  "provider_unit_qa_exact_bound_small_asr",
+);
+const staleProviderSmallAsrReuse = validateNarrationProviderUnitAsrReuse({
+  unitId: exactSmallAsrUnit.unit_id,
+  audioSha256: exactSmallAsrUnit.audio_sha256,
+  audioHashVerified: true,
+  providerUnitQa: exactSmallAsrUnit.provider_unit_qa,
+  providerUnitQaSha256: exactSmallAsrUnit.provider_unit_qa_sha256,
+  narrationQualityContractSha256: "e".repeat(64),
+  expectedAsrContract: providerSmallAsrContract,
+  providerUnitQaContentSha256: narrationProviderUnitQaSha256,
+});
+assert.equal(staleProviderSmallAsrReuse.status, "fresh_asr_required");
+assert.equal(staleProviderSmallAsrReuse.recognition, null);
+assert.ok(staleProviderSmallAsrReuse.findings.some(
+  (finding) => finding.code === "provider_unit_asr_quality_contract_binding_invalid",
+));
+const repairedAudioProviderSmallAsrReuse = validateNarrationProviderUnitAsrReuse({
+  unitId: exactSmallAsrUnit.unit_id,
+  audioSha256: "f".repeat(64),
+  audioHashVerified: true,
+  providerUnitQa: exactSmallAsrUnit.provider_unit_qa,
+  providerUnitQaSha256: exactSmallAsrUnit.provider_unit_qa_sha256,
+  narrationQualityContractSha256: contract.contract_sha256,
+  expectedAsrContract: providerSmallAsrContract,
+  providerUnitQaContentSha256: narrationProviderUnitQaSha256,
+});
+assert.equal(repairedAudioProviderSmallAsrReuse.status, "fresh_asr_required");
+assert.equal(repairedAudioProviderSmallAsrReuse.recognition, null);
+assert.ok(repairedAudioProviderSmallAsrReuse.findings.some(
+  (finding) => finding.code === "provider_unit_asr_audio_binding_invalid",
+));
+const mismatchedComputeProviderSmallAsrReuse =
+  validateNarrationProviderUnitAsrReuse({
+    unitId: exactSmallAsrUnit.unit_id,
+    audioSha256: exactSmallAsrUnit.audio_sha256,
+    audioHashVerified: true,
+    providerUnitQa: exactSmallAsrUnit.provider_unit_qa,
+    providerUnitQaSha256: exactSmallAsrUnit.provider_unit_qa_sha256,
+    narrationQualityContractSha256: contract.contract_sha256,
+    expectedAsrContract: buildNarrationProviderUnitAsrContract({
+      model: contract.delivery_qa.unit_screening_model,
+      device: "cpu",
+      computeType: "auto",
+    }),
+    providerUnitQaContentSha256: narrationProviderUnitQaSha256,
+  });
+assert.equal(
+  mismatchedComputeProviderSmallAsrReuse.status,
+  "fresh_asr_required",
+);
+assert.equal(mismatchedComputeProviderSmallAsrReuse.recognition, null);
+assert.ok(mismatchedComputeProviderSmallAsrReuse.findings.some(
+  (finding) => finding.code === "provider_unit_asr_contract_mismatch",
+));
+const partialProviderSmallAsrQa = structuredClone(
+  exactSmallAsrUnit.provider_unit_qa,
+);
+partialProviderSmallAsrQa.transcript.recognized_words = [];
+const partialProviderSmallAsrReuse = validateNarrationProviderUnitAsrReuse({
+  unitId: exactSmallAsrUnit.unit_id,
+  audioSha256: exactSmallAsrUnit.audio_sha256,
+  audioHashVerified: true,
+  providerUnitQa: partialProviderSmallAsrQa,
+  providerUnitQaSha256: narrationProviderUnitQaSha256(partialProviderSmallAsrQa),
+  narrationQualityContractSha256: contract.contract_sha256,
+  expectedAsrContract: providerSmallAsrContract,
+  providerUnitQaContentSha256: narrationProviderUnitQaSha256,
+});
+assert.equal(partialProviderSmallAsrReuse.status, "fresh_asr_required");
+assert.equal(partialProviderSmallAsrReuse.recognition, null);
+
 const qwenLockedRequest = compileNarrationProviderRequest(units[0], {
   provider: "qwen_local",
   modelId: "qwen-model",
@@ -498,9 +860,26 @@ const qwenProviderOutput = buildNarrationProviderOutputManifest({
     synthesis_identity_sha256: narrationSynthesisIdentitySha256(
       richQwenSynthesisIdentity,
     ),
+    unit_qa: {
+      ...reusableWaveformQa,
+      audio_sha256: "a".repeat(64),
+      voice_continuity: {
+        report_path: "/tmp/qwen-full-set-voice-continuity.json",
+        report_sha256: "f".repeat(64),
+      },
+    },
   }],
 });
 assert.equal(qwenProviderOutput.status, "passed");
+assert.equal(
+  qwenProviderOutput.units[0].provider_unit_qa.audio_sha256,
+  "a".repeat(64),
+);
+assert.match(qwenProviderOutput.units[0].provider_unit_qa_sha256, /^[a-f0-9]{64}$/u);
+assert.equal(
+  qwenProviderOutput.units[0].provider_unit_qa.voice_continuity.report_sha256,
+  "f".repeat(64),
+);
 assert.notEqual(
   qwenProviderOutput.units[0].provider_request_synthesis_identity_sha256,
   qwenProviderOutput.units[0].synthesis_identity_sha256,
@@ -975,6 +1354,9 @@ try {
     maxDurationSec: 2,
   });
   assert.equal(mastering.status, "passed");
+  const masteredSampleCount = await narrationAudioSampleCountForTests(outputPath);
+  assert.equal(masteredSampleCount.sample_rate_hz, 24_000);
+  assert.equal(masteredSampleCount.sample_count, 48_000);
   assert.equal(mastering.policy.passes, 2);
   assert.equal(mastering.policy.tempo_processing, false);
   assert.equal(mastering.policy.per_unit_normalization, false);

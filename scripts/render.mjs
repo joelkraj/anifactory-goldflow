@@ -1684,6 +1684,18 @@ export function xfadeSegmentTimingForTests(clipDurations, transitionDurations) {
   };
 }
 
+function xfadeGroupCacheKey({ inputHashes, transitions, encoding }) {
+  return sha256(JSON.stringify({
+    input_hashes: inputHashes,
+    transitions,
+    encoding,
+  }));
+}
+
+export function xfadeGroupCacheKeyForTests(options) {
+  return xfadeGroupCacheKey(options);
+}
+
 const SUPPORTED_GENERATED_VIDEO_RENDER_MODES = new Set([
   "generated_video",
   "generated_video_ltx23",
@@ -2069,14 +2081,19 @@ async function buildMotionClips(
     });
   }
   const timelineGroups = xfadeTimelineGroups(clipRows, selectedXfadeDurations);
+  const timelineGroupPaths = new Array(timelineGroups.length);
+  const xfadeSegmentJobs = [];
+  let xfadeGroupCacheReused = 0;
+  let xfadeGroupCacheGenerated = 0;
   for (let groupIndex = 0; groupIndex < timelineGroups.length; groupIndex += 1) {
     const group = timelineGroups[groupIndex];
     if (group.length === 1) {
-      lines.push(`file '${concatEscape(group[0].clipPath)}'`);
+      timelineGroupPaths[groupIndex] = group[0].clipPath;
       continue;
     }
     const segmentPath = path.join(clipDir, `${String(groupIndex + 1).padStart(5, "0")}-xfade-segment.mp4`);
     const filterParts = [];
+    const transitionParameters = [];
     let previousLabel = "0:v";
     let cumulative = 0;
     for (let index = 0; index < group.length - 1; index += 1) {
@@ -2091,6 +2108,14 @@ async function buildMotionClips(
       const incomingLabel = `xin${index + 1}`;
       filterParts.push(`[${index + 1}:v]tpad=start_mode=clone:start_duration=${duration.toFixed(3)},setpts=PTS-STARTPTS[${incomingLabel}]`);
       filterParts.push(`[${previousLabel}][${incomingLabel}]xfade=transition=${transition}:duration=${duration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`);
+      transitionParameters.push({
+        from_image_id: current.prompt.image_id,
+        to_image_id: next.prompt.image_id,
+        transition,
+        duration_sec: Number(duration.toFixed(6)),
+        offset_sec: Number(offset.toFixed(6)),
+        incoming_start_padding_sec: Number(duration.toFixed(6)),
+      });
       appliedXfadeTransitions.push({
         from_image_id: current.prompt.image_id,
         to_image_id: next.prompt.image_id,
@@ -2102,26 +2127,64 @@ async function buildMotionClips(
       });
       previousLabel = outLabel;
     }
-    await execFile(ffmpegBin, [
-      "-y",
-      ...group.flatMap((row) => ["-i", row.clipPath]),
-      "-filter_complex", filterParts.join(";"),
-      "-map", "[segmentout]",
-      "-an",
-      "-c:v", "libx264",
-      "-preset", clipPreset,
-      "-crf", "20",
-      "-pix_fmt", "yuv420p",
-      "-r", String(fps),
-      segmentPath,
-    ], { maxBuffer: 1024 * 1024 * 64 });
     const expected = group.reduce((sum, row) => sum + row.duration, 0);
-    const actual = await mediaDuration(segmentPath);
-    if (Math.abs(actual - expected) > Math.max(0.12, expected * 0.015)) {
-      throw new Error(`Rendered malformed xfade segment ${groupIndex + 1}: expected ${expected.toFixed(3)}s, got ${actual.toFixed(3)}s`);
-    }
-    lines.push(`file '${concatEscape(segmentPath)}'`);
+    const cacheKey = xfadeGroupCacheKey({
+      inputHashes: group.map((row) => row.motionClipSha256),
+      transitions: transitionParameters,
+      encoding: { width, height, fps, codec: "libx264", preset: clipPreset, crf: 20, pixel_format: "yuv420p" },
+    });
+    const cachePath = `${segmentPath}.cache.json`;
+    timelineGroupPaths[groupIndex] = segmentPath;
+    xfadeSegmentJobs.push(async () => {
+      const cache = await readJson(cachePath, null);
+      if (cache?.cache_key === cacheKey && await exists(segmentPath)) {
+        const [actual, actualSha256] = await Promise.all([
+          mediaDuration(segmentPath).catch(() => NaN),
+          hashFile(segmentPath).catch(() => null),
+        ]);
+        if (
+          Number.isFinite(actual)
+          && Math.abs(actual - expected) <= Math.max(0.12, expected * 0.015)
+          && actualSha256 === cache.segment_sha256
+        ) {
+          xfadeGroupCacheReused += 1;
+          return;
+        }
+      }
+      await execFile(ffmpegBin, [
+        "-y",
+        ...group.flatMap((row) => ["-i", row.clipPath]),
+        "-filter_complex", filterParts.join(";"),
+        "-map", "[segmentout]",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", clipPreset,
+        "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-r", String(fps),
+        segmentPath,
+      ], { maxBuffer: 1024 * 1024 * 64 });
+      const actual = await mediaDuration(segmentPath);
+      if (Math.abs(actual - expected) > Math.max(0.12, expected * 0.015)) {
+        throw new Error(`Rendered malformed xfade segment ${groupIndex + 1}: expected ${expected.toFixed(3)}s, got ${actual.toFixed(3)}s`);
+      }
+      const segmentSha256 = await hashFile(segmentPath);
+      await writeJson(cachePath, {
+        schema: "goldflow_xfade_group_cache_v1",
+        cache_key: cacheKey,
+        input_clip_sha256s: group.map((row) => row.motionClipSha256),
+        transition_parameters: transitionParameters,
+        encoding: { width, height, fps, codec: "libx264", preset: clipPreset, crf: 20, pixel_format: "yuv420p" },
+        expected_duration_sec: Number(expected.toFixed(6)),
+        segment_path: segmentPath,
+        segment_sha256: segmentSha256,
+        updated_at: new Date().toISOString(),
+      });
+      xfadeGroupCacheGenerated += 1;
+    });
   }
+  await runLimited(xfadeSegmentJobs, renderConcurrency);
+  lines.push(...timelineGroupPaths.map((filePath) => `file '${concatEscape(filePath)}'`));
   assertTransitionAccounting({
     plannedTransitionCount,
     selectedBoundaryCount: selectedBoundaryRows.length,
@@ -2189,6 +2252,8 @@ async function buildMotionClips(
     transition_clip_ids: transitionClipIds,
     motion_clip_cache_reused_count: clipCacheReused,
     motion_clip_cache_generated_count: clipCacheGenerated,
+    xfade_group_cache_reused_count: xfadeGroupCacheReused,
+    xfade_group_cache_generated_count: xfadeGroupCacheGenerated,
     planned_approved_generated_video_count: generatedVideoPlanCoverage.declared_count,
     generated_video_clip_count: consumedGeneratedVideoRows.length,
     generated_video_clip_ids: consumedGeneratedVideoRows.map((row) => row.prompt.image_id),
@@ -2801,6 +2866,8 @@ async function main() {
       generated_video_source_hashes: concat.generated_video_source_hashes,
       motion_clip_cache_reused_count: concat.motion_clip_cache_reused_count,
       motion_clip_cache_generated_count: concat.motion_clip_cache_generated_count,
+      xfade_group_cache_reused_count: concat.xfade_group_cache_reused_count,
+      xfade_group_cache_generated_count: concat.xfade_group_cache_generated_count,
     },
     updated_at: new Date().toISOString(),
   };

@@ -201,7 +201,7 @@ ${registryCommands}
   goldflow run codex-doctor        Inspect the identity-locked Web/Codex planning runtime
   goldflow run status              Print the artifact-backed stage ledger
   goldflow run advance             Advance automatic stages continuously using the locked production profile
-  goldflow run director            Show or advance the eight-phase agent-led production view
+  goldflow run director            Show, advance, or persistently babysit the eight-phase production view
   goldflow run audio-semantic-fork Run semantic planning and the voice/TTS/Whisper branch concurrently
   goldflow run visual-wavefront    Prefetch hardened provider-bound cuts while prompt chunks are authored
   goldflow run web-archive-cleanup Archive legacy unscoped GPT Image chats through one throttled maintenance lane

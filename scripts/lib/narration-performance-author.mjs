@@ -31,7 +31,12 @@ function extractJson(content) {
   throw new Error("Narration performance author did not return valid JSON.");
 }
 
-function segmentChunks(atomicUnits, maximumAtoms = 54) {
+export const NARRATION_PERFORMANCE_TARGET_ATOMS = 96;
+
+function segmentChunks(
+  atomicUnits,
+  maximumAtoms = NARRATION_PERFORMANCE_TARGET_ATOMS,
+) {
   const segments = [];
   for (const unit of atomicUnits) {
     const segmentId = String(unit.segment_id ?? unit.source_segment_ids?.[0] ?? "");
@@ -64,18 +69,23 @@ function segmentChunks(atomicUnits, maximumAtoms = 54) {
 }
 
 function promptForChunk(units, chunkIndex, chunkCount) {
-  const atoms = units.map((unit) => ({
-    source_ref_key: narrationSourceRefKey(unit.source_unit_refs?.[0]),
-    segment_id: unit.segment_id,
-    kind: unit.kind,
-    source_speaker: unit.source_speaker,
-    spoken_text: unit.spoken_text,
-    word_count: punctuationInsensitiveTokens(unit.spoken_text).length,
-    merge_barrier: unit.source_merge_barrier === true
+  const atoms = units.map((unit) => {
+    const mergeBarrier = unit.source_merge_barrier === true
       || unit.risk_flags?.includes("system_ui_atomic")
       || unit.risk_flags?.includes("speaker_or_performance_turn")
-      || unit.risk_flags?.includes("tts_override_applied"),
-  }));
+      || unit.risk_flags?.includes("tts_override_applied");
+    const speaker = String(unit.source_speaker ?? "").trim();
+    const kind = String(unit.kind ?? "").trim();
+    return {
+      source_ref_key: narrationSourceRefKey(unit.source_unit_refs?.[0]),
+      segment_id: unit.segment_id,
+      spoken_text: unit.spoken_text,
+      word_count: punctuationInsensitiveTokens(unit.spoken_text).length,
+      ...(kind && kind !== "narration" ? { kind } : {}),
+      ...(speaker && speaker !== "NARRATOR" ? { source_speaker: speaker } : {}),
+      ...(mergeBarrier ? { merge_barrier: true } : {}),
+    };
+  });
   return `You are the provider-neutral narration performance editor for a fast, emotional YouTube manhwa recap.
 
 The output will be compiled through a capability adapter. Every model receives exact spoken text, punctuation, sentence-complete grouping, semantic boundary timing, and a locked voice. Models with an instruction channel also receive your restrained performance intent. Models without one still benefit from your punctuation, grouping, and boundary classes.
@@ -87,6 +97,7 @@ Binding rules:
 - Preserve every source_ref_key exactly once and in the supplied order.
 - Keep each output unit inside one segment_id.
 - A merge_barrier atom must remain a standalone output unit.
+- Omitted kind/source_speaker/merge_barrier fields mean ordinary narrator narration with no merge barrier.
 - Prefer 20-42 words when adjacent sentences belong to one breath and one dramatic thought. Treat 48 words as a soft ceiling and 60 as the hard ceiling. Never split a source sentence to hit a target.
 - Every output unit must contain at most 60 spoken words and end with terminal punctuation.
 - Preserve all spoken words in exact order. You may change punctuation and capitalization only.
@@ -322,7 +333,10 @@ export const NARRATION_PERFORMANCE_SAFE_MAX_BYTES = 48_000;
 
 export function narrationPerformancePacketPlanForTests(
   atomicUnits,
-  { maximumAtoms = 54, maxPromptBytes = NARRATION_PERFORMANCE_SAFE_MAX_BYTES } = {},
+  {
+    maximumAtoms = NARRATION_PERFORMANCE_TARGET_ATOMS,
+    maxPromptBytes = NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+  } = {},
 ) {
   const ceiling = Math.min(
     NARRATION_PERFORMANCE_SAFE_MAX_BYTES,

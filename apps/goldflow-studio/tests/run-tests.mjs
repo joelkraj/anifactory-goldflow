@@ -59,7 +59,11 @@ import { validReferenceRoute } from "../desktop/worker-client.mjs";
 import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldflow-bridge.mjs";
 import { chatGptEffortLabel, chatGptEffortSliderIndex, chatGptModelLabel, chatGptUiContractForLlmJob } from "../lib/chatgpt-ui-contract.mjs";
 import { LlmJobStore } from "../lib/llm-job-store.mjs";
-import { MediaJobStore } from "../lib/media-job-store.mjs";
+import {
+  MediaJobStore,
+  mediaCreativeIdentityForTests,
+} from "../lib/media-job-store.mjs";
+import { sha256, stableStringify } from "../lib/util.mjs";
 import { createStudioServer, providerFailurePausesDispatch, studioServerOptionsFromFlags } from "../server.mjs";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
@@ -238,7 +242,54 @@ async function testMediaJobStore() {
   assert.equal(first.created, true);
   assert.equal(duplicate.created, false);
   assert.equal(first.job.job_id, duplicate.job.job_id);
+  const provenanceDuplicate = await store.createOrGet({
+    ...request,
+    manifest_id: "generated-motion-proof-02",
+    asset_id: "proof-cut-001",
+    references: [{ ref_id: "proof_first_frame", path: referencePath, sha256: referenceSha256 }],
+    source: { direction_contract_sha256: "new-provenance-only" },
+  });
+  assert.equal(provenanceDuplicate.created, false, "provenance changes must not resubmit identical creative work");
+  assert.equal(provenanceDuplicate.job.job_id, first.job.job_id);
+  assert.equal(provenanceDuplicate.job.provenance_bindings.length, 2);
+  const creativeIdentity = mediaCreativeIdentityForTests(request);
+  assert.deepEqual(Object.keys(creativeIdentity), ["provider", "model_id", "prompt_sha256", "duration_sec", "first_frame_sha256"]);
+  assert.notDeepEqual(mediaCreativeIdentityForTests({ ...request, model_id: "Veo 3.1 Quality" }), creativeIdentity);
+  assert.notDeepEqual(mediaCreativeIdentityForTests({ ...request, prompt: `${request.prompt} Slowly.` }), creativeIdentity);
+  assert.notDeepEqual(mediaCreativeIdentityForTests({ ...request, duration_sec: 10 }), creativeIdentity);
   await assert.rejects(() => store.createOrGet({ ...request, references: [] }), /exactly one first-frame reference/);
+
+  const legacyStore = await new MediaJobStore({
+    stateDir: path.join(root, "legacy-state"),
+    downloadsRoot,
+  }).init();
+  const seeded = await legacyStore.createOrGet(request);
+  const seededLease = await legacyStore.leaseNext({ workerId: "legacy-flow-worker" });
+  assert.equal(seededLease.status, "leased");
+  const legacyRequest = structuredClone(seededLease.job.request);
+  delete legacyRequest.provider;
+  const legacyJobId = sha256(stableStringify(legacyRequest));
+  const legacyJob = { ...seededLease.job, job_id: legacyJobId, request_sha256: legacyJobId, request: legacyRequest };
+  delete legacyJob.creative_identity;
+  delete legacyJob.creative_identity_sha256;
+  delete legacyJob.creative_identity_storage;
+  delete legacyJob.provenance_bindings;
+  await fs.writeFile(legacyStore.jobPath(legacyJobId), `${JSON.stringify(legacyJob, null, 2)}\n`, "utf8");
+  await fs.unlink(legacyStore.jobPath(seeded.job.job_id));
+  const adopted = await legacyStore.createOrGet({
+    ...request,
+    manifest_id: "new-manifest-provenance",
+    asset_id: "new-asset-provenance",
+    source: { direction_contract_sha256: "new-direction-provenance" },
+  });
+  assert.equal(adopted.created, false, "an in-flight legacy request must be adopted instead of duplicate-submitted");
+  assert.equal(adopted.adopted_legacy_identity, true);
+  assert.equal(adopted.job.job_id, legacyJobId, "legacy live job IDs must remain stable for connected workers");
+  assert.equal(adopted.job.status, "leased", "legacy adoption must preserve an in-flight provider lease");
+  assert.equal(adopted.job.lease.lease_token, seededLease.job.lease.lease_token);
+  assert.equal(adopted.job.creative_identity_storage, "legacy_full_request_job_id");
+  assert.equal(adopted.job.provenance_bindings.length, 2);
+  assert.equal((await legacyStore.list()).length, 1);
 
   const leased = await store.leaseNext({ workerId: "flow-video-1" });
   assert.equal(leased.status, "leased");

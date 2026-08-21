@@ -18,10 +18,14 @@ import {
   buildNarrationQualityContract,
   narrationQualityContractForIdentity,
 } from "./lib/narration-quality-contract.mjs";
-import { validateNarrationProviderOutputManifest } from "./lib/narration-provider-adapter.mjs";
+import {
+  narrationProviderUnitQaSha256,
+  validateNarrationProviderOutputManifest,
+} from "./lib/narration-provider-adapter.mjs";
 import { masterNarrationTwoPass } from "./lib/narration-mastering.mjs";
 import {
   buildNarrationSubjectiveReviewManifest,
+  narrationUnitTimeline,
   validateNarrationSubjectiveReviewManifest,
 } from "./lib/narration-subjective-review.mjs";
 import {
@@ -30,7 +34,29 @@ import {
 } from "./lib/narration-tts-policy.mjs";
 import { runNarrationVoiceContinuityQa } from "./lib/narration-voice-continuity.mjs";
 import { sha256File } from "./lib/file-hash.mjs";
+import {
+  localWhisperContractForIdentity,
+  validateLocalWhisperIdentityContract,
+} from "./lib/local-whisper-policy.mjs";
+import {
+  buildLocalWhisperTimingCandidate,
+} from "./lib/local-whisper-timing-candidate.mjs";
+import {
+  planNarrationConfirmationWindows,
+} from "./lib/narration-confirmation-windows.mjs";
+import {
+  emptyNarrationFinalizationCheckpoint,
+  narrationFinalizationStageKey,
+  narrationFinalizationUnitKey,
+  reusableNarrationFinalizationStage,
+  reusableNarrationFinalizationUnit,
+} from "./lib/narration-finalization-checkpoint.mjs";
+import {
+  buildNarrationProviderUnitAsrContract,
+  validateNarrationProviderUnitAsrReuse,
+} from "./lib/narration-provider-unit-asr-reuse.mjs";
 import { equivalentPhrasesForTests } from "./narration-tts-episode.mjs";
+import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -71,6 +97,11 @@ async function atomicWriteJson(filePath, value) {
   const temporary = `${filePath}.${process.pid}.tmp`;
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporary, filePath);
+}
+
+async function fileMatchesSha256(filePath, expectedSha256) {
+  if (!filePath || !expectedSha256) return false;
+  return await sha256File(filePath).catch(() => null) === expectedSha256;
 }
 
 function planUnits(plan) {
@@ -115,6 +146,26 @@ function mergeDecisionWarnings(decision, warnings = []) {
     warnings: merged,
     review_required: merged.length > 0,
   };
+}
+
+function waveformQaWithoutVoiceAggregate(value) {
+  if (!value || typeof value !== "object") return null;
+  const qa = structuredClone(value);
+  delete qa.voice_continuity;
+  delete qa.delivery_qa_v2;
+  delete qa.edge_alignment;
+  qa.findings = (qa.findings ?? []).filter((finding) => !(
+    /(?:voice_continuity|voice_similarity|voice_aggregate)/iu.test(
+      String(finding?.code ?? ""),
+    )
+  ));
+  const blockerCount = qa.findings.filter(
+    (finding) => finding?.severity === "blocker",
+  ).length;
+  qa.status = blockerCount
+    ? "blocked"
+    : qa.findings.length ? "passed_with_warnings" : "passed";
+  return qa;
 }
 
 export function conservativeNarrationEdgeAlignmentForTests({
@@ -202,27 +253,141 @@ function joinQaFromStitch(stitch) {
   };
 }
 
-async function runFullStreamDeliveryQa({
+async function audioSampleCount(audioPath) {
+  const { stdout } = await execFile("ffprobe", [
+    "-v", "error",
+    "-select_streams", "a:0",
+    "-show_entries", "stream=sample_rate,duration_ts,time_base",
+    "-of", "json",
+    audioPath,
+  ]);
+  const stream = JSON.parse(stdout)?.streams?.[0] ?? {};
+  const sampleRate = Number(stream.sample_rate);
+  const durationTs = Number(stream.duration_ts);
+  const timeBase = String(stream.time_base ?? "");
+  const [numerator, denominator] = timeBase.split("/").map(Number);
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0
+    || !Number.isInteger(durationTs) || durationTs <= 0
+    || !Number.isFinite(numerator) || !Number.isFinite(denominator)
+    || numerator <= 0 || denominator <= 0) {
+    throw new Error(`Cannot prove exact sample count for ${audioPath}.`);
+  }
+  const samples = Math.round(durationTs * numerator / denominator * sampleRate);
+  if (!Number.isInteger(samples) || samples <= 0) {
+    throw new Error(`Invalid exact sample count for ${audioPath}.`);
+  }
+  return { sample_rate_hz: sampleRate, sample_count: samples };
+}
+
+export async function narrationAudioSampleCountForTests(audioPath) {
+  return audioSampleCount(audioPath);
+}
+
+async function extractConfirmationWindow({
+  audioPath,
+  outputPath,
+  startSample,
+  endSampleExclusive,
+  sampleRateHz,
+}) {
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await execFile("ffmpeg", [
+    "-y", "-nostdin", "-hide_banner", "-v", "error",
+    "-i", audioPath,
+    "-af", `atrim=start_sample=${startSample}:end_sample=${endSampleExclusive},asetpts=N/SR/TB`,
+    "-ar", String(sampleRateHz),
+    "-ac", "1",
+    "-acodec", "pcm_s16le",
+    outputPath,
+  ]);
+  const probe = await audioSampleCount(outputPath);
+  const expectedSamples = endSampleExclusive - startSample;
+  if (probe.sample_rate_hz !== sampleRateHz
+    || probe.sample_count !== expectedSamples) {
+    throw new Error(
+      `Confirmation window sample mismatch for ${outputPath}: `
+      + `expected ${expectedSamples}, got ${probe.sample_count}.`,
+    );
+  }
+  return {
+    audio_path: outputPath,
+    audio_sha256: await sha256File(outputPath),
+    sample_rate_hz: sampleRateHz,
+    sample_count: probe.sample_count,
+  };
+}
+
+function localizedConsensusDecision({
+  windowRows,
+  orderQa,
+  joinQa,
+  primaryModel,
+  confirmationModel,
+}) {
+  const blockers = [
+    ...(orderQa?.blockers ?? []),
+    ...(joinQa?.blockers ?? []),
+  ];
+  const warnings = [...(joinQa?.warnings ?? [])];
+  for (const row of windowRows) {
+    const scope = {
+      confirmation_window_id: row.window_id,
+      unit_ids: row.unit_ids,
+      ...(row.unit_ids.length === 1 ? { unit_id: row.unit_ids[0] } : {}),
+      ...(row.boundary_ids.length === 1
+        ? { boundary_id: row.boundary_ids[0] }
+        : {}),
+    };
+    blockers.push(...(row.decision?.blockers ?? []).map((finding) => ({
+      ...finding,
+      ...scope,
+    })));
+    warnings.push(...(row.decision?.warnings ?? []).map((finding) => ({
+      ...finding,
+      ...scope,
+    })));
+  }
+  return {
+    schema: "goldflow_narration_localized_delivery_consensus_v1",
+    status: blockers.length ? "blocked" : warnings.length ? "passed_with_warnings" : "passed",
+    primary_model: primaryModel,
+    confirmation_model: confirmationModel,
+    confirmation_required: windowRows.length > 0,
+    review_required: warnings.some((finding) => finding.review_required === true),
+    blockers,
+    warnings,
+  };
+}
+
+export async function runFullStreamDeliveryQa({
   helpers,
   audioPath,
+  audioSha256,
   units,
   qualityContract,
   orderQa,
   joinQa,
+  stitch,
+  workDir,
+  localWhisperContract,
 }) {
   const intendedText = units.map((unit) => (
     String(unit.spoken_text ?? unit.tts_spoken_text ?? "").trim()
   )).filter(Boolean).join(" ");
-  const row = { unit_id: "__full_stream__", wav: audioPath };
   const primaryModel = qualityContract.delivery_qa.full_stream_screening_model
     ?? "small.en";
   const confirmationModel = qualityContract.delivery_qa.full_stream_confirmation_model
     ?? "medium";
-  const primaryMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
-    [row],
-    { model: primaryModel, device: "cpu", computeType: "int8_float32" },
+  if (primaryModel !== localWhisperContract.model) {
+    throw new Error(
+      `Full-stream screening model ${primaryModel} does not match the locked `
+      + `official timing model ${localWhisperContract.model}.`,
+    );
+  }
+  const primary = await runFasterWhisperForDiagnostics(
+    audioPath,
+    localWhisperContract,
   );
-  const primary = primaryMap.get(row.unit_id) ?? null;
   const equivalentPhrases = units.flatMap((unit) => equivalentPhrasesForTests(unit));
   const primaryTranscriptQa = primary
     ? helpers.transcriptQaForTests(intendedText, primary.text, {
@@ -240,33 +405,164 @@ async function runFullStreamDeliveryQa({
     .full_stream_dual_asr_on_any_difference === true
       ? narrationDeliveryNeedsConfirmation(primaryTranscriptQa, primaryDecision)
       : primaryDecision.blockers.length > 0;
-  let confirmation = null;
-  let confirmationTranscriptQa = null;
+  let windowPlan = null;
+  let confirmationWindows = [];
+  let decision = primaryDecision;
   if (confirmationRequired) {
-    const confirmationMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
-      [row],
-      { model: confirmationModel, device: "cpu", computeType: "int8_float32" },
-    );
-    confirmation = confirmationMap.get(row.unit_id) ?? null;
-    confirmationTranscriptQa = confirmation
-      ? helpers.transcriptQaForTests(intendedText, confirmation.text, {
-          maxWer: qualityContract.delivery_qa.maximum_word_error_rate,
-          equivalentPhrases,
-          blockAnySubstitution: false,
-        })
-      : null;
+    const probe = await audioSampleCount(audioPath);
+    if (probe.sample_rate_hz !== CANONICAL_SAMPLE_RATE_HZ) {
+      throw new Error(
+        `Canonical narration sample rate is ${probe.sample_rate_hz}; `
+        + `${CANONICAL_SAMPLE_RATE_HZ} is required for exact confirmation windows.`,
+      );
+    }
+    const timeline = narrationUnitTimeline({
+      plan: { units },
+      stitch,
+      sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
+    });
+    const mappedUnits = units.map((unit) => ({
+      ...unit,
+      canonical_token_count: helpers.transcriptQaForTests(
+        String(unit.spoken_text ?? unit.tts_spoken_text ?? ""),
+        String(unit.spoken_text ?? unit.tts_spoken_text ?? ""),
+        { equivalentPhrases: equivalentPhrasesForTests(unit) },
+      ).intended_canonical_token_count,
+    }));
+    windowPlan = planNarrationConfirmationWindows({
+      units: mappedUnits,
+      timeline: timeline.rows,
+      operations: primaryTranscriptQa?.operations ?? [],
+      audioSampleCount: probe.sample_count,
+    });
+    if (windowPlan.status !== "passed" || windowPlan.window_count === 0) {
+      decision = {
+        ...primaryDecision,
+        schema: "goldflow_narration_localized_delivery_consensus_v1",
+        status: "blocked",
+        confirmation_required: true,
+        confirmation_model: confirmationModel,
+        review_required: true,
+        blockers: [
+          ...(primaryDecision.blockers ?? []),
+          ...((windowPlan?.blockers?.length ? windowPlan.blockers : [{
+            code: "narration_confirmation_window_scope_empty",
+          }]).map((finding) => ({
+            ...finding,
+            severity: "blocker",
+          }))),
+        ],
+      };
+    } else {
+      const windowDir = path.join(workDir, "full-stream-confirmation-windows");
+      const materialized = [];
+      for (const window of windowPlan.windows) {
+        const bindingSha256 = sha256(JSON.stringify({
+          source_audio_sha256: audioSha256,
+          start_sample: window.start_sample,
+          end_sample_exclusive: window.end_sample_exclusive,
+          intended_text_sha256: window.intended_text_sha256,
+          unit_ids: window.unit_ids,
+          boundary_ids: window.boundary_ids,
+        }));
+        const outputPath = path.join(
+          windowDir,
+          `${window.window_id}-${bindingSha256.slice(0, 12)}.wav`,
+        );
+        const audio = await extractConfirmationWindow({
+          audioPath,
+          outputPath,
+          startSample: window.start_sample,
+          endSampleExclusive: window.end_sample_exclusive,
+          sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
+        });
+        materialized.push({
+          ...window,
+          ...audio,
+          source_audio_path: audioPath,
+          source_audio_sha256: audioSha256,
+          binding_sha256: bindingSha256,
+        });
+      }
+      const confirmationMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
+        materialized.map((window) => ({
+          unit_id: window.window_id,
+          wav: window.audio_path,
+        })),
+        { model: confirmationModel, device: "cpu", computeType: "int8_float32" },
+      );
+      confirmationWindows = materialized.map((window) => {
+        const startSec = window.start_sample / CANONICAL_SAMPLE_RATE_HZ;
+        const endSec = window.end_sample_exclusive / CANONICAL_SAMPLE_RATE_HZ;
+        const primaryWords = (primary?.words ?? []).filter((word) => (
+          Number(word.end_sec ?? 0) > startSec
+            && Number(word.start_sec ?? 0) < endSec
+        ));
+        const primaryText = primaryWords.map((word) => word.word).join(" ");
+        const confirmation = confirmationMap.get(window.window_id) ?? null;
+        const scopedUnits = units.filter((unit) => (
+          window.unit_ids.includes(String(unit.unit_id))
+        ));
+        const scopedEquivalences = scopedUnits.flatMap(equivalentPhrasesForTests);
+        const primaryQa = helpers.transcriptQaForTests(
+          window.intended_text,
+          primaryText,
+          {
+            maxWer: qualityContract.delivery_qa.maximum_word_error_rate,
+            equivalentPhrases: scopedEquivalences,
+            blockAnySubstitution: false,
+          },
+        );
+        const confirmationQa = confirmation
+          ? helpers.transcriptQaForTests(
+              window.intended_text,
+              confirmation.text,
+              {
+                maxWer: qualityContract.delivery_qa.maximum_word_error_rate,
+                equivalentPhrases: scopedEquivalences,
+                blockAnySubstitution: false,
+              },
+            )
+          : null;
+        const windowDecision = adjudicateNarrationDeliveryConsensus({
+          primaryTranscriptQa: primaryQa,
+          confirmationTranscriptQa: confirmationQa,
+          orderQa: { blockers: [] },
+          joinQa: { blockers: [], warnings: [] },
+          contract: qualityContract,
+          primaryModel,
+          confirmationModel,
+        });
+        return {
+          ...window,
+          primary_recognized_text: primaryText,
+          primary_recognized_words: primaryWords,
+          primary_transcript_qa: primaryQa,
+          confirmation_recognized_text: confirmation?.text ?? null,
+          confirmation_recognized_words: confirmation?.words ?? [],
+          confirmation_transcript_qa: confirmationQa,
+          decision: windowDecision,
+        };
+      });
+      decision = localizedConsensusDecision({
+        windowRows: confirmationWindows,
+        orderQa,
+        joinQa,
+        primaryModel,
+        confirmationModel,
+      });
+    }
+  } else {
+    decision = adjudicateNarrationDeliveryConsensus({
+      primaryTranscriptQa,
+      confirmationTranscriptQa: primaryTranscriptQa,
+      orderQa,
+      joinQa,
+      contract: qualityContract,
+      primaryModel,
+      confirmationModel,
+    });
   }
-  const decision = adjudicateNarrationDeliveryConsensus({
-    primaryTranscriptQa,
-    confirmationTranscriptQa: confirmationRequired
-      ? confirmationTranscriptQa
-      : primaryTranscriptQa,
-    orderQa,
-    joinQa,
-    contract: qualityContract,
-    primaryModel,
-    confirmationModel,
-  });
   return {
     intended_text: intendedText,
     intended_text_sha256: sha256(intendedText),
@@ -275,10 +571,22 @@ async function runFullStreamDeliveryQa({
     primary_recognized_words: primary?.words ?? [],
     primary_transcript_qa: primaryTranscriptQa,
     confirmation_required: confirmationRequired,
+    primary_transcription: primary,
+    primary_alignment_contract: localWhisperContract,
+    confirmation_scope: confirmationRequired
+      ? "exact_hash_bound_suspect_and_boundary_windows"
+      : "not_required",
     confirmation_model: confirmationRequired ? confirmationModel : null,
-    confirmation_recognized_text: confirmation?.text ?? null,
-    confirmation_recognized_words: confirmation?.words ?? [],
-    confirmation_transcript_qa: confirmationTranscriptQa,
+    confirmation_recognized_text: confirmationWindows
+      .map((window) => window.confirmation_recognized_text)
+      .filter(Boolean)
+      .join(" ") || null,
+    confirmation_recognized_words: confirmationWindows.flatMap(
+      (window) => window.confirmation_recognized_words ?? [],
+    ),
+    confirmation_transcript_qa: null,
+    confirmation_window_plan: windowPlan,
+    confirmation_windows: confirmationWindows,
     decision,
   };
 }
@@ -299,7 +607,13 @@ export async function finalizeNarrationProviderOutput(
   const flags = parseFlags(argv);
   if (!flags["episode-dir"]) throw new Error("--episode-dir is required.");
   const episodeDir = path.resolve(flags["episode-dir"]);
-  const identity = await readJson(path.join(episodeDir, "run_identity.json"), {});
+  const identityPath = path.join(episodeDir, "run_identity.json");
+  const identity = await readJson(identityPath, {});
+  const localWhisperIdentity = validateLocalWhisperIdentityContract(identity);
+  if (!localWhisperIdentity.done) {
+    throw new Error(localWhisperIdentity.evidence);
+  }
+  const officialLocalWhisperContract = localWhisperContractForIdentity(identity);
   const episode = String(identity.episode ?? flags.episode ?? "ep_01");
   const planPath = path.resolve(
     flags.plan ?? path.join(episodeDir, "narration_generation_plan.json"),
@@ -308,10 +622,18 @@ export async function finalizeNarrationProviderOutput(
     flags.manifest
       ?? path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`),
   );
-  const [plan, manifest, planFileSha256] = await Promise.all([
+  const [
+    plan,
+    manifest,
+    planFileSha256,
+    manifestFileSha256,
+    identityFileSha256,
+  ] = await Promise.all([
     readJson(planPath),
     readJson(manifestPath),
     sha256File(planPath),
+    sha256File(manifestPath),
+    sha256File(identityPath),
   ]);
   if (!plan || !manifest) {
     throw new Error("Narration plan and provider output manifest are required.");
@@ -371,6 +693,32 @@ export async function finalizeNarrationProviderOutput(
       ?? path.join(episodeDir, "assets/audio/narration_provider_neutral"),
   );
   await fs.mkdir(workDir, { recursive: true });
+  const checkpointPath = path.resolve(
+    flags["checkpoint"]
+      ?? path.join(workDir, `narration-finalization-checkpoint-${episode}.json`),
+  );
+  const priorCheckpoint = await readJson(checkpointPath, null);
+  const checkpoint = priorCheckpoint?.schema
+    === "goldflow_narration_finalization_checkpoint_v1"
+      ? priorCheckpoint
+      : emptyNarrationFinalizationCheckpoint({});
+  checkpoint.status = "in_progress";
+  checkpoint.context = {
+    narration_generation_plan_sha256: canonicalPlanSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    provider_output_manifest_sha256:
+      manifest.manifest_sha256 ?? manifestFileSha256,
+    provider_output_manifest_file_sha256: manifestFileSha256,
+    narration_quality_contract_sha256: qualityContract.contract_sha256,
+    provider: manifest.provider,
+    model_id: manifest.model_id,
+    model_revision: manifest.model_revision,
+    voice_id: manifest.voice_id,
+    voice_sha256: manifest.voice_sha256,
+    voice_continuity_contract: manifest.voice_continuity_contract,
+  };
+  checkpoint.units ??= {};
+  checkpoint.stages ??= {};
   const helpers = await import("./modelslab-qwen-episode-audio.mjs");
   const rows = units.map((unit, orderIndex) => {
     const output = manifestById.get(String(unit.unit_id));
@@ -405,8 +753,34 @@ export async function finalizeNarrationProviderOutput(
       runner_report_path: output.runner_report_path ?? null,
       runner_report_sha256: output.runner_report_sha256 ?? null,
       provider_receipt: output.provider_receipt,
+      provider_unit_qa: output.provider_unit_qa ?? null,
+      provider_unit_qa_sha256: output.provider_unit_qa_sha256 ?? null,
+      unit_qa: output.provider_unit_qa
+        ? waveformQaWithoutVoiceAggregate(output.provider_unit_qa)
+        : null,
+      audio_hash_verified: true,
     };
   });
+  for (const row of rows) {
+    row.finalization_unit_key = narrationFinalizationUnitKey({
+      unit: row,
+      qualityContractSha256: qualityContract.contract_sha256,
+      provider: manifest.provider,
+      modelId: manifest.model_id,
+      modelRevision: manifest.model_revision,
+      voiceId: manifest.voice_id,
+      voiceSha256: manifest.voice_sha256,
+      voiceContinuityContract: manifest.voice_continuity_contract,
+    });
+    const cached = reusableNarrationFinalizationUnit(
+      checkpoint,
+      row.unit_id,
+      row.finalization_unit_key,
+    );
+    if (!row.unit_qa && cached?.acoustic_qa) {
+      row.unit_qa = waveformQaWithoutVoiceAggregate(cached.acoustic_qa);
+    }
+  }
 
   const continuityPath = path.join(
     episodeDir,
@@ -416,27 +790,135 @@ export async function finalizeNarrationProviderOutput(
     episodeDir,
     `narration_speaker_similarity_${episode}.json`,
   );
-  const [acousticQa, primaryMap, voiceContinuity] = await Promise.all([
-    helpers.runUnitOutputQaForDiagnostics(rows),
-    helpers.runFasterWhisperUnitBatchForDiagnostics(
-      rows.map((row) => ({ unit_id: row.unit_id, wav: row.wav })),
-      {
-        model: qualityContract.delivery_qa.unit_screening_model ?? "small.en",
-        device: "cpu",
-        computeType: "int8_float32",
-      },
-    ),
+  const cachedPrimaryMap = new Map();
+  const embeddedPrimaryMap = new Map();
+  const primaryRecognitionSourceById = new Map();
+  const embeddedPrimaryReuseDecisions = [];
+  const primaryNeeds = [];
+  const primaryAsrContract = buildNarrationProviderUnitAsrContract({
+    model: qualityContract.delivery_qa.unit_screening_model ?? "small.en",
+    device: "cpu",
+    computeType: "int8_float32",
+  });
+  for (const row of rows) {
+    const cached = reusableNarrationFinalizationUnit(
+      checkpoint,
+      row.unit_id,
+      row.finalization_unit_key,
+    );
+    if (cached?.primary_recognition) {
+      cachedPrimaryMap.set(String(row.unit_id), cached.primary_recognition);
+      primaryRecognitionSourceById.set(
+        String(row.unit_id),
+        cached.primary_recognition_source ?? "finalization_checkpoint",
+      );
+    } else {
+      const embeddedReuse = validateNarrationProviderUnitAsrReuse({
+        unitId: row.unit_id,
+        audioSha256: row.audio_sha256,
+        audioHashVerified: row.audio_hash_verified,
+        providerUnitQa: row.provider_unit_qa,
+        providerUnitQaSha256: row.provider_unit_qa_sha256,
+        narrationQualityContractSha256: qualityContract.contract_sha256,
+        expectedAsrContract: primaryAsrContract,
+        providerUnitQaContentSha256: narrationProviderUnitQaSha256,
+      });
+      embeddedPrimaryReuseDecisions.push({
+        unit_id: row.unit_id,
+        status: embeddedReuse.status,
+        findings: embeddedReuse.findings,
+      });
+      if (embeddedReuse.recognition) {
+        embeddedPrimaryMap.set(String(row.unit_id), embeddedReuse.recognition);
+        primaryRecognitionSourceById.set(
+          String(row.unit_id),
+          "provider_unit_qa_exact_bound_small_asr",
+        );
+      } else {
+        primaryNeeds.push({ unit_id: row.unit_id, wav: row.wav });
+        primaryRecognitionSourceById.set(
+          String(row.unit_id),
+          "fresh_finalizer_small_asr",
+        );
+      }
+    }
+  }
+  const voiceContinuityInputKey = narrationFinalizationStageKey(
+    "voice_continuity",
+    {
+      unit_keys: rows.map((row) => row.finalization_unit_key),
+      quality_contract_sha256: qualityContract.contract_sha256,
+      reference_manifest_sha256: policy.primary.reference_manifest_sha256,
+      similarity_model_sha256: policy.primary.speaker_similarity_model_sha256,
+      similarity_calibration_sha256:
+        policy.primary.speaker_similarity_calibration_sha256,
+    },
+  );
+  const cachedContinuityStage = reusableNarrationFinalizationStage(
+    checkpoint,
+    "voice_continuity",
+    voiceContinuityInputKey,
+  );
+  const embeddedContinuityRows = rows.map(
+    (row) => row.provider_unit_qa?.voice_continuity ?? null,
+  );
+  const embeddedContinuityPaths = new Set(
+    embeddedContinuityRows.map((row) => row?.report_path).filter(Boolean),
+  );
+  const embeddedContinuityHashes = new Set(
+    embeddedContinuityRows.map((row) => row?.report_sha256).filter(Boolean),
+  );
+  const embeddedContinuityComplete = embeddedContinuityRows.every(Boolean)
+    && embeddedContinuityPaths.size === 1
+    && embeddedContinuityHashes.size === 1;
+  const reuseContinuityPath = cachedContinuityStage?.payload?.report_path
+    ?? (embeddedContinuityComplete ? [...embeddedContinuityPaths][0] : null);
+  const reuseContinuitySha256 = cachedContinuityStage?.payload?.report_sha256
+    ?? (embeddedContinuityComplete ? [...embeddedContinuityHashes][0] : null);
+  const [acousticQa, freshPrimaryMap, voiceContinuity] = await Promise.all([
+    helpers.runUnitOutputQaForDiagnostics(rows, {
+      reuseHashValidQa: true,
+    }),
+    primaryNeeds.length
+      ? helpers.runFasterWhisperUnitBatchForDiagnostics(
+          primaryNeeds,
+          {
+            model: qualityContract.delivery_qa.unit_screening_model ?? "small.en",
+            device: "cpu",
+            computeType: "int8_float32",
+          },
+        )
+      : Promise.resolve(new Map()),
     runNarrationVoiceContinuityQa({
       rows,
       profile: policy.primary,
       qualityContract,
       reportPath: similarityEvidencePath,
+      reuseReportPath: reuseContinuityPath,
+      reuseReportSha256: reuseContinuitySha256,
     }),
   ]);
+  const primaryMap = new Map([
+    ...cachedPrimaryMap,
+    ...embeddedPrimaryMap,
+    ...freshPrimaryMap,
+  ]);
+  checkpoint.stages.voice_continuity = {
+    input_key: voiceContinuityInputKey,
+    status: voiceContinuity.status === "blocked" ? "blocked" : "passed",
+    payload: {
+      report_path: voiceContinuity.report_path,
+      report_sha256: voiceContinuity.report_sha256,
+      reused_exact_hash_report:
+        voiceContinuity.reused_exact_hash_report === true,
+    },
+  };
   await atomicWriteJson(continuityPath, voiceContinuity);
   const continuityArtifactSha256 = await sha256File(continuityPath);
   const primaryById = new Map();
   const confirmationCandidates = [];
+  const cachedConfirmationMap = new Map();
+  const confirmationRequiredIds = new Set();
   for (const row of rows) {
     const recognized = primaryMap.get(String(row.unit_id)) ?? null;
     const transcriptQa = recognized
@@ -453,10 +935,45 @@ export async function finalizeNarrationProviderOutput(
     });
     primaryById.set(String(row.unit_id), { recognized, transcriptQa, decision });
     if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)) {
-      confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
+      confirmationRequiredIds.add(String(row.unit_id));
+      const cached = reusableNarrationFinalizationUnit(
+        checkpoint,
+        row.unit_id,
+        row.finalization_unit_key,
+      );
+      if (cached?.confirmation_recognition) {
+        cachedConfirmationMap.set(
+          String(row.unit_id),
+          cached.confirmation_recognition,
+        );
+      } else {
+        confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
+      }
     }
   }
-  const confirmationMap = confirmationCandidates.length
+  for (const row of rows) {
+    const primary = primaryById.get(String(row.unit_id));
+    const cached = reusableNarrationFinalizationUnit(
+      checkpoint,
+      row.unit_id,
+      row.finalization_unit_key,
+    );
+    checkpoint.units[String(row.unit_id)] = {
+      unit_key: row.finalization_unit_key,
+      audio_sha256: row.audio_sha256,
+      spoken_text_sha256: row.spoken_text_sha256,
+      acoustic_qa: waveformQaWithoutVoiceAggregate(row.unit_qa),
+      primary_recognition: primary?.recognized ?? null,
+      primary_recognition_source:
+        primaryRecognitionSourceById.get(String(row.unit_id)) ?? null,
+      primary_transcript_qa: primary?.transcriptQa ?? null,
+      confirmation_recognition: cached?.confirmation_recognition ?? null,
+      confirmation_transcript_qa: cached?.confirmation_transcript_qa ?? null,
+      checkpoint_state: "primary_and_waveform_complete",
+    };
+  }
+  await atomicWriteJson(checkpointPath, checkpoint);
+  const freshConfirmationMap = confirmationCandidates.length
     ? await helpers.runFasterWhisperUnitBatchForDiagnostics(
         confirmationCandidates,
         {
@@ -467,6 +984,10 @@ export async function finalizeNarrationProviderOutput(
         },
       )
     : new Map();
+  const confirmationMap = new Map([
+    ...cachedConfirmationMap,
+    ...freshConfirmationMap,
+  ]);
   const continuityById = new Map(
     (voiceContinuity.units ?? []).map((row) => [String(row.unit_id), row]),
   );
@@ -485,9 +1006,7 @@ export async function finalizeNarrationProviderOutput(
           blockAnySubstitution: false,
         })
       : null;
-    const confirmationRequired = confirmationCandidates.some(
-      (candidate) => String(candidate.unit_id) === String(row.unit_id),
-    );
+    const confirmationRequired = confirmationRequiredIds.has(String(row.unit_id));
     let decision = adjudicateNarrationDeliveryConsensus({
       primaryTranscriptQa: primary.transcriptQa,
       confirmationTranscriptQa: confirmationRequired
@@ -533,6 +1052,8 @@ export async function finalizeNarrationProviderOutput(
       intended_text: row.text,
       intended_text_sha256: row.spoken_text_sha256,
       primary_recognized_text: primary.recognized?.text ?? null,
+      primary_recognition_source:
+        primaryRecognitionSourceById.get(String(row.unit_id)) ?? null,
       confirmation_recognized_text: confirmation?.text ?? null,
       transcript_qa: primary.transcriptQa,
       confirmation_transcript_qa: confirmationQa,
@@ -545,6 +1066,19 @@ export async function finalizeNarrationProviderOutput(
       ...finding,
       unit_id: row.unit_id,
     })));
+    checkpoint.units[String(row.unit_id)] = {
+      unit_key: row.finalization_unit_key,
+      audio_sha256: row.audio_sha256,
+      spoken_text_sha256: row.spoken_text_sha256,
+      acoustic_qa: waveformQaWithoutVoiceAggregate(row.unit_qa),
+      primary_recognition: primary.recognized,
+      primary_recognition_source:
+        primaryRecognitionSourceById.get(String(row.unit_id)) ?? null,
+      primary_transcript_qa: primary.transcriptQa,
+      confirmation_recognition: confirmation,
+      confirmation_transcript_qa: confirmationQa,
+      delivery_row: structuredClone(deliveryRow),
+    };
   }
 
   const listenPacket = exactNarrationListenReviewPacket({
@@ -642,6 +1176,16 @@ export async function finalizeNarrationProviderOutput(
     narration_quality_contract_sha256: qualityContract.contract_sha256,
     expected_unit_count: rows.length,
     selected_unit_count: selectedUnits.length,
+    reused_exact_hash_waveform_qa_unit_count:
+      acousticQa.reused_exact_hash_waveform_qa_unit_count ?? 0,
+    decoded_waveform_qa_unit_count:
+      acousticQa.decoded_waveform_qa_unit_count ?? rows.length,
+    reused_exact_hash_voice_continuity_report:
+      voiceContinuity.reused_exact_hash_report === true,
+    reused_exact_bound_provider_small_asr_unit_count:
+      embeddedPrimaryMap.size,
+    fresh_finalizer_small_asr_unit_count: primaryNeeds.length,
+    provider_small_asr_reuse_decisions: embeddedPrimaryReuseDecisions,
     selected_blocker_count: selectedBlockers.length,
     selected_blockers: selectedBlockers,
     selected_units: selectedUnits,
@@ -654,6 +1198,7 @@ export async function finalizeNarrationProviderOutput(
       decision: { status: blockers.length ? "blocked" : "passed", blockers },
       units: rows,
     })),
+    atomicWriteJson(checkpointPath, checkpoint),
   ]);
   if (blockers.length) {
     throw new Error(
@@ -681,15 +1226,57 @@ export async function finalizeNarrationProviderOutput(
     || listenDecisionValidation?.status === "approved";
 
   const rawWav = path.join(workDir, `${episode}-narration-provider-neutral-raw.wav`);
-  const stitch = await helpers.stitchWavsForDiagnostics(rows, rawWav, {
-    narrationQualityContract: qualityContract,
-    workDir,
-    skipRenderedTranscriptQa: true,
+  const stitchInputKey = narrationFinalizationStageKey("semantic_stitch", {
+    ordered_unit_keys: rows.map((row) => row.finalization_unit_key),
+    quality_contract_sha256: qualityContract.contract_sha256,
+    stitch_sample_rate_hz: CANONICAL_SAMPLE_RATE_HZ,
+    alignment_policy: "narration_alignment_safe_semantic_stitch_v2",
   });
+  const cachedStitchStage = reusableNarrationFinalizationStage(
+    checkpoint,
+    "semantic_stitch",
+    stitchInputKey,
+  );
+  let stitch = cachedStitchStage?.payload?.stitch ?? null;
+  let rawWavSha256 = cachedStitchStage?.payload?.raw_wav_sha256 ?? null;
+  if (stitch && !(await fileMatchesSha256(rawWav, rawWavSha256))) {
+    stitch = null;
+    rawWavSha256 = null;
+  }
+  if (stitch) {
+    const preparedValid = (await Promise.all(
+      (stitch.prepared_inputs ?? []).map((prepared) => fileMatchesSha256(
+        prepared.prepared_wav,
+        prepared.prepared_audio_sha256
+          ?? prepared.prepared_qa?.audio_sha256,
+      )),
+    )).every(Boolean);
+    if (!preparedValid) {
+      stitch = null;
+      rawWavSha256 = null;
+    }
+  }
+  if (!stitch) {
+    stitch = await helpers.stitchWavsForDiagnostics(rows, rawWav, {
+      narrationQualityContract: qualityContract,
+      workDir,
+      skipRenderedTranscriptQa: true,
+    });
+  }
   if (!stitch || stitch.status !== "passed") {
     throw new Error("Provider-neutral semantic stitch did not pass.");
   }
-  const rawWavSha256 = await sha256File(rawWav);
+  rawWavSha256 ??= await sha256File(rawWav);
+  checkpoint.stages.semantic_stitch = {
+    input_key: stitchInputKey,
+    status: "passed",
+    payload: {
+      raw_wav_path: rawWav,
+      raw_wav_sha256: rawWavSha256,
+      stitch,
+    },
+  };
+  await atomicWriteJson(checkpointPath, checkpoint);
   const masteringRequested = boolFlag(flags.master, true);
   let mastering = {
     status: masteringRequested
@@ -706,25 +1293,50 @@ export async function finalizeNarrationProviderOutput(
       workDir,
       `${episode}-narration-provider-neutral-mastered.wav`,
     );
-    mastering = await masterNarrationTwoPass({
-      inputPath: rawWav,
-      outputPath: masteredPath,
-      reportPath: path.join(
-        episodeDir,
-        `narration_mastering_report_${episode}-provider-neutral.json`,
-      ),
-      targetLufs: qualityContract.mastering.integrated_lufs_target,
-      truePeakDbtp: qualityContract.mastering.true_peak_dbtp_max,
-      sampleRateHz: qualityContract.mastering.sample_rate_hz,
-      channels: qualityContract.mastering.mono ? 1 : 2,
-      integratedTolerance: qualityContract.mastering.integrated_lufs_tolerance,
-      durationDeltaMsMax: qualityContract.mastering.duration_delta_ms_max,
+    const masteringInputKey = narrationFinalizationStageKey("mastering", {
+      raw_wav_sha256: rawWavSha256,
+      mastering_contract: qualityContract.mastering,
+      delivery_accepted: true,
     });
+    const cachedMasteringStage = reusableNarrationFinalizationStage(
+      checkpoint,
+      "mastering",
+      masteringInputKey,
+    );
+    const cachedMastering = cachedMasteringStage?.payload?.mastering ?? null;
+    if (cachedMastering?.status === "passed"
+      && await fileMatchesSha256(
+        cachedMastering.output_path,
+        cachedMastering.output_sha256,
+      )) {
+      mastering = cachedMastering;
+    } else {
+      mastering = await masterNarrationTwoPass({
+        inputPath: rawWav,
+        outputPath: masteredPath,
+        reportPath: path.join(
+          episodeDir,
+          `narration_mastering_report_${episode}-provider-neutral.json`,
+        ),
+        targetLufs: qualityContract.mastering.integrated_lufs_target,
+        truePeakDbtp: qualityContract.mastering.true_peak_dbtp_max,
+        sampleRateHz: qualityContract.mastering.sample_rate_hz,
+        channels: qualityContract.mastering.mono ? 1 : 2,
+        integratedTolerance: qualityContract.mastering.integrated_lufs_tolerance,
+        durationDeltaMsMax: qualityContract.mastering.duration_delta_ms_max,
+      });
+    }
     if (mastering.status !== "passed") {
       throw new Error("Final stream-level narration mastering did not pass.");
     }
     canonicalWav = mastering.output_path;
     canonicalWavSha256 = mastering.output_sha256;
+    checkpoint.stages.mastering = {
+      input_key: masteringInputKey,
+      status: "passed",
+      payload: { mastering },
+    };
+    await atomicWriteJson(checkpointPath, checkpoint);
   }
   const subjectiveManifestPath = path.join(
     episodeDir,
@@ -770,14 +1382,49 @@ export async function finalizeNarrationProviderOutput(
       : [{ code: "narration_full_stream_unit_order_mismatch" }],
   };
   const joinQa = joinQaFromStitch(stitch);
-  const fullStream = await runFullStreamDeliveryQa({
-    helpers,
-    audioPath: canonicalWav,
-    units: rows,
-    qualityContract,
-    orderQa,
-    joinQa,
-  });
+  const fullStreamInputKey = narrationFinalizationStageKey(
+    "full_stream_delivery_qa",
+    {
+      audio_sha256: canonicalWavSha256,
+      intended_text_sha256: sha256(rows.map((row) => row.text).join(" ")),
+      quality_contract_sha256: qualityContract.contract_sha256,
+      local_whisper_contract: officialLocalWhisperContract,
+      order_qa: orderQa,
+      join_qa: joinQa,
+    },
+  );
+  const cachedFullStreamStage = reusableNarrationFinalizationStage(
+    checkpoint,
+    "full_stream_delivery_qa",
+    fullStreamInputKey,
+  );
+  let cachedFullStream = cachedFullStreamStage?.payload?.full_stream ?? null;
+  if (cachedFullStream) {
+    const confirmationEvidenceValid = (await Promise.all(
+      (cachedFullStream.confirmation_windows ?? []).map((window) => (
+        fileMatchesSha256(window.audio_path, window.audio_sha256)
+      )),
+    )).every(Boolean);
+    if (!confirmationEvidenceValid) cachedFullStream = null;
+  }
+  const fullStream = cachedFullStream
+    ?? await runFullStreamDeliveryQa({
+      helpers,
+      audioPath: canonicalWav,
+      audioSha256: canonicalWavSha256,
+      units: rows,
+      qualityContract,
+      orderQa,
+      joinQa,
+      stitch,
+      workDir,
+      localWhisperContract: officialLocalWhisperContract,
+    });
+  checkpoint.stages.full_stream_delivery_qa = {
+    input_key: fullStreamInputKey,
+    status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
+    payload: { full_stream: fullStream },
+  };
   const fullStreamPath = path.join(
     episodeDir,
     `narration_full_stream_qa_${episode}.json`,
@@ -800,21 +1447,49 @@ export async function finalizeNarrationProviderOutput(
     primary_recognized_words: fullStream.primary_recognized_words,
     primary_transcript_qa: fullStream.primary_transcript_qa,
     confirmation_required: fullStream.confirmation_required,
+    confirmation_scope: fullStream.confirmation_scope,
     confirmation_model: fullStream.confirmation_model,
     confirmation_recognized_text: fullStream.confirmation_recognized_text,
     confirmation_recognized_words: fullStream.confirmation_recognized_words,
     confirmation_transcript_qa: fullStream.confirmation_transcript_qa,
+    confirmation_window_plan: fullStream.confirmation_window_plan,
+    confirmation_windows: fullStream.confirmation_windows,
+    primary_alignment_contract: fullStream.primary_alignment_contract,
     decision: fullStream.decision,
     blockers: fullStream.decision.blockers,
     warnings: fullStream.decision.warnings,
   };
-  await atomicWriteJson(fullStreamPath, fullStreamArtifact);
+  await Promise.all([
+    atomicWriteJson(fullStreamPath, fullStreamArtifact),
+    atomicWriteJson(checkpointPath, checkpoint),
+  ]);
 
   const finalM4a = path.join(
     workDir,
     `${episode}-narration-provider-neutral.m4a`,
   );
-  const finalM4aSha256 = await encodeM4a(canonicalWav, finalM4a);
+  const encodeInputKey = narrationFinalizationStageKey("encode_m4a", {
+    canonical_wav_sha256: canonicalWavSha256,
+    codec: "aac",
+    bitrate: "192k",
+  });
+  const cachedEncodeStage = reusableNarrationFinalizationStage(
+    checkpoint,
+    "encode_m4a",
+    encodeInputKey,
+  );
+  let finalM4aSha256 = cachedEncodeStage?.payload?.final_m4a_sha256 ?? null;
+  if (!(await fileMatchesSha256(finalM4a, finalM4aSha256))) {
+    finalM4aSha256 = await encodeM4a(canonicalWav, finalM4a);
+  }
+  checkpoint.stages.encode_m4a = {
+    input_key: encodeInputKey,
+    status: "passed",
+    payload: {
+      final_m4a_path: finalM4a,
+      final_m4a_sha256: finalM4aSha256,
+    },
+  };
   const sourceHash = sourceScriptHash(plan);
   const primary = {
     ...policy.primary,
@@ -1016,11 +1691,67 @@ export async function finalizeNarrationProviderOutput(
       boundaries: stitch.boundaries,
     })),
   ]);
+  const scriptPath = path.resolve(
+    flags.script ?? path.join(episodeDir, "script_clean.md"),
+  );
+  const actualSourceScriptSha256 = await sha256File(scriptPath);
+  if (sourceHash && actualSourceScriptSha256 !== sourceHash) {
+    throw new Error(
+      "Cannot emit official Whisper timing candidate: the narration plan "
+      + "source hash differs from script_clean.md.",
+    );
+  }
+  const stitchReportSha256 = await sha256File(stitchReportPath);
+  const timingCandidate = buildLocalWhisperTimingCandidate({
+    transcription: fullStream.primary_transcription,
+    contract: officialLocalWhisperContract,
+    sourceScriptPath: scriptPath,
+    sourceScriptSha256: actualSourceScriptSha256,
+    narrationAudioPath: canonicalWav,
+    narrationAudioSha256: canonicalWavSha256,
+    narrationReportPath: stitchReportPath,
+    narrationReportSha256: stitchReportSha256,
+    runIdentityPath: identityPath,
+    runIdentitySha256: identityFileSha256,
+    narrationQualityContractSha256: qualityContract.contract_sha256,
+  });
+  const timingCandidatePath = path.join(
+    episodeDir,
+    `narration_word_timing_candidate_${episode}.json`,
+  );
+  await atomicWriteJson(timingCandidatePath, timingCandidate);
+  checkpoint.stages.local_whisper_timing_candidate = {
+    input_key: narrationFinalizationStageKey(
+      "local_whisper_timing_candidate",
+      {
+        source_script_sha256: actualSourceScriptSha256,
+        narration_audio_sha256: canonicalWavSha256,
+        narration_report_sha256: stitchReportSha256,
+        run_identity_sha256: identityFileSha256,
+        local_whisper_contract: officialLocalWhisperContract,
+      },
+    ),
+    status: timingCandidate.status === "passed" ? "passed" : "blocked",
+    payload: {
+      candidate_path: timingCandidatePath,
+      candidate_sha256: timingCandidate.candidate_sha256,
+    },
+  };
+  checkpoint.status = fullStream.decision.status === "blocked"
+    || timingCandidate.status !== "passed"
+    ? "blocked"
+    : "complete";
+  await atomicWriteJson(checkpointPath, checkpoint);
   if (fullStream.decision.status === "blocked") {
     throw new Error(
       `Canonical full-stream delivery QA blocked: ${fullStream.decision.blockers
         .map((finding) => finding.code)
         .join(", ")}`,
+    );
+  }
+  if (timingCandidate.status !== "passed") {
+    throw new Error(
+      "Official local-Whisper timing candidate failed structural word-timing QA.",
     );
   }
   const result = {
@@ -1041,6 +1772,9 @@ export async function finalizeNarrationProviderOutput(
       : null,
     subjective_review_sample_count: subjectiveManifest?.sample_count ?? 0,
     full_stream_qa_status: fullStreamArtifact.status,
+    timing_candidate_path: timingCandidatePath,
+    timing_candidate_sha256: timingCandidate.candidate_sha256,
+    checkpoint_path: checkpointPath,
     tts_report_path: ttsReportPath,
     stitch_report_path: stitchReportPath,
   };

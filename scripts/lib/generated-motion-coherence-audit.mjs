@@ -10,6 +10,7 @@ const execFile = promisify(execFileCallback);
 
 export const GENERATED_MOTION_COHERENCE_AUDIT_SCHEMA = "goldflow_generated_motion_coherence_audit_v1";
 export const GENERATED_MOTION_COHERENCE_ROW_SCHEMA = "goldflow_generated_motion_coherence_row_v1";
+export const GENERATED_MOTION_COHERENCE_POLICY = "all_generated_clips_source_plus_five_timeline_samples_v1";
 
 const CHECK_VERDICTS = new Set(["pass", "fail", "uncertain", "not_applicable"]);
 const BASE_DIMENSIONS = [
@@ -91,6 +92,22 @@ function compactClipContract(clip) {
     end_frame_contract: clip?.end_frame_contract ?? null,
     required_dimensions: requiredDimensions(clip),
   };
+}
+
+function rowCacheIdentity({ videoSha256, sourceImageSha256, contractSha256, model, reasoningEffort }) {
+  return {
+    video_sha256: videoSha256,
+    source_image_sha256: sourceImageSha256,
+    contract_sha256: contractSha256,
+    audit_policy: GENERATED_MOTION_COHERENCE_POLICY,
+    model: cleanText(model) || "codex_cli_default",
+    reasoning_effort: cleanText(reasoningEffort) || "medium",
+    sample_policy: "five_fixed_fraction_frames_v1",
+  };
+}
+
+export function generatedMotionCoherenceRowCacheKeyForTests(options = {}) {
+  return sha256(JSON.stringify(rowCacheIdentity(options)));
 }
 
 function sampleTimes(durationSec) {
@@ -250,15 +267,32 @@ export async function buildGeneratedMotionCoherenceAudit({
   timeoutMs = 600_000,
   frameExtractor = defaultFrameExtractor,
   auditExecutor = defaultAuditExecutor,
+  rowCacheDir,
   generatedAt = new Date(),
 } = {}) {
   if (!Array.isArray(report?.clips)) throw new Error("Generated-motion coherence audit requires generated clips.");
   const reportSha256 = reportPath ? await fileHash(reportPath) : sha256(JSON.stringify(report));
+  const auditConfiguration = {
+    audit_policy: GENERATED_MOTION_COHERENCE_POLICY,
+    model: cleanText(model) || "codex_cli_default",
+    reasoning_effort: cleanText(reasoningEffort) || "medium",
+    sample_policy: "five_fixed_fraction_frames_v1",
+  };
+  const auditConfigurationSha256 = sha256(JSON.stringify(auditConfiguration));
   const prior = outputPath ? await readJson(outputPath, null) : null;
-  if (prior?.status === "passed" && prior.report_sha256 === reportSha256) return { ...prior, reused: true };
+  if (
+    prior?.status === "passed"
+    && prior.report_sha256 === reportSha256
+    && prior.audit_configuration_sha256 === auditConfigurationSha256
+  ) return { ...prior, reused: true };
   const resolvedFramesRoot = path.resolve(framesRoot ?? path.join(path.dirname(outputPath), "coherence_frames"));
   const resolvedCallsDir = path.resolve(callsDir ?? path.join(path.dirname(outputPath), "coherence_calls"));
-  await Promise.all([fs.mkdir(resolvedFramesRoot, { recursive: true }), fs.mkdir(resolvedCallsDir, { recursive: true })]);
+  const resolvedRowCacheDir = path.resolve(rowCacheDir ?? path.join(path.dirname(outputPath), "coherence_row_cache"));
+  await Promise.all([
+    fs.mkdir(resolvedFramesRoot, { recursive: true }),
+    fs.mkdir(resolvedCallsDir, { recursive: true }),
+    fs.mkdir(resolvedRowCacheDir, { recursive: true }),
+  ]);
   const rows = await runPool(report.clips, concurrency, async (clip) => {
     const candidateId = cleanText(clip?.candidate_id ?? clip?.image_id);
     const videoPath = path.resolve(clip.normalized_video_path);
@@ -267,12 +301,27 @@ export async function buildGeneratedMotionCoherenceAudit({
     if (videoSha256 !== clip.normalized_video_sha256) throw new Error(`Generated-motion video is stale for ${candidateId}.`);
     if (sourceImageSha256 !== clip.source_image_sha256) throw new Error(`Generated-motion source image is stale for ${candidateId}.`);
     const contractSha256 = sha256(JSON.stringify(compactClipContract(clip)));
+    const cacheIdentity = rowCacheIdentity({ videoSha256, sourceImageSha256, contractSha256, model, reasoningEffort });
+    const rowCacheKey = sha256(JSON.stringify(cacheIdentity));
     const priorRow = prior?.rows?.find((row) => row.candidate_id === candidateId
       && row.video_sha256 === videoSha256
       && row.source_image_sha256 === sourceImageSha256
       && row.contract_sha256 === contractSha256
+      && row.row_cache_key === rowCacheKey
       && row.status === "audited");
     if (priorRow) return { ...priorRow, reused: true };
+    const rowCachePath = path.join(resolvedRowCacheDir, `${rowCacheKey}.json`);
+    const cachedRow = await readJson(rowCachePath, null);
+    if (
+      cachedRow?.schema === GENERATED_MOTION_COHERENCE_ROW_SCHEMA
+      && cachedRow?.status === "audited"
+      && cachedRow?.row_cache_key === rowCacheKey
+      && cachedRow?.video_sha256 === videoSha256
+      && cachedRow?.source_image_sha256 === sourceImageSha256
+      && cachedRow?.contract_sha256 === contractSha256
+    ) {
+      return { ...cachedRow, reused: true, reuse_source: "content_addressed_row_cache" };
+    }
     const frameDir = path.join(resolvedFramesRoot, `${candidateId}-${videoSha256.slice(0, 12)}`);
     const frames = await frameExtractor({
       videoPath,
@@ -283,7 +332,7 @@ export async function buildGeneratedMotionCoherenceAudit({
     const callOutputPath = path.join(resolvedCallsDir, `${candidateId}-${videoSha256.slice(0, 12)}.json`);
     try {
       const response = await auditExecutor({ clip, frames, outputPath: callOutputPath, repoRoot, model, reasoningEffort, timeoutMs });
-      return {
+      const auditedRow = {
         ...normalizeAuditResponse(clip, response),
         status: "audited",
         video_sha256: videoSha256,
@@ -291,7 +340,11 @@ export async function buildGeneratedMotionCoherenceAudit({
         contract_sha256: contractSha256,
         sampled_frames: frames,
         call_output_path: callOutputPath,
+        row_cache_key: rowCacheKey,
+        row_cache_identity: cacheIdentity,
       };
+      await writeJsonAtomic(rowCachePath, auditedRow);
+      return auditedRow;
     } catch (error) {
       return {
         schema: GENERATED_MOTION_COHERENCE_ROW_SCHEMA,
@@ -322,13 +375,17 @@ export async function buildGeneratedMotionCoherenceAudit({
     needs_review_count: rows.filter((row) => row.overall_verdict === "needs_review").length,
     reject_recommended_count: rows.filter((row) => row.overall_verdict === "reject_recommended").length,
     unavailable_count: rows.filter((row) => row.status === "unavailable").length,
+    row_cache_reused_count: rows.filter((row) => row.reuse_source === "content_addressed_row_cache").length,
   };
   const artifact = {
     schema: GENERATED_MOTION_COHERENCE_AUDIT_SCHEMA,
     status: "passed",
     report_path: reportPath ? path.resolve(reportPath) : null,
     report_sha256: reportSha256,
-    audit_policy: "all_generated_clips_source_plus_five_timeline_samples_v1",
+    audit_policy: GENERATED_MOTION_COHERENCE_POLICY,
+    audit_configuration: auditConfiguration,
+    audit_configuration_sha256: auditConfigurationSha256,
+    row_cache_dir: resolvedRowCacheDir,
     model_findings_policy: "advisory_exact_clip_review_no_automatic_regeneration",
     summary,
     rows,

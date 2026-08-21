@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import {
+  bindNarrationProviderUnitAsrReuse,
+} from "./narration-provider-unit-asr-reuse.mjs";
 
 export const NARRATION_PROVIDER_OUTPUT_SCHEMA =
   "goldflow_narration_provider_output_manifest_v1";
@@ -24,6 +27,10 @@ function canonicalize(value, omittedKeys = new Set()) {
 
 function canonicalSha256(value, omittedKeys = []) {
   return sha256(JSON.stringify(canonicalize(value, new Set(omittedKeys))));
+}
+
+export function narrationProviderUnitQaSha256(value) {
+  return canonicalSha256(value);
 }
 
 const ADAPTERS = {
@@ -263,6 +270,16 @@ export function buildNarrationProviderOutputManifest({
     const unitId = String(unit?.unit_id ?? "");
     const result = resultById.get(unitId) ?? null;
     const spokenText = String(unit?.spoken_text ?? unit?.tts_spoken_text ?? "");
+    const providerUnitQa = result?.unit_qa
+      ? bindNarrationProviderUnitAsrReuse({
+          providerUnitQa: result.unit_qa,
+          unitId,
+          audioSha256: result?.audio_sha256
+            ?? result?.unit_qa?.audio_sha256
+            ?? null,
+          narrationQualityContractSha256: qualityContractSha256,
+        })
+      : null;
     return {
       unit_id: unitId,
       order_index: orderIndex,
@@ -312,6 +329,12 @@ export function buildNarrationProviderOutputManifest({
       runner_report_path: result?.runner_report_path ?? null,
       runner_report_sha256: result?.runner_report_sha256 ?? null,
       provider_receipt: result?.provider_receipt ?? null,
+      provider_unit_qa: providerUnitQa
+        ? structuredClone(providerUnitQa)
+        : null,
+      provider_unit_qa_sha256: providerUnitQa
+        ? narrationProviderUnitQaSha256(providerUnitQa)
+        : null,
     };
   });
   const manifest = {
@@ -520,6 +543,25 @@ export function validateNarrationProviderOutputManifest(
     if (row.token_limit_reached === true) {
       findings.push({
         code: "narration_provider_output_token_limit_reached",
+        unit_id: expectedId,
+      });
+    }
+    if (row.provider_unit_qa != null) {
+      if (row.provider_unit_qa_sha256
+          !== narrationProviderUnitQaSha256(row.provider_unit_qa)
+        || row.provider_unit_qa.audio_sha256 !== row.audio_sha256
+        || !String(row.provider_unit_qa.policy_version ?? "").trim()
+        || !Array.isArray(row.provider_unit_qa.findings)
+        || !Number.isFinite(Number(row.provider_unit_qa.metrics?.sample_count))
+        || Number(row.provider_unit_qa.metrics.sample_count) <= 0) {
+        findings.push({
+          code: "narration_provider_output_unit_qa_invalid",
+          unit_id: expectedId,
+        });
+      }
+    } else if (row.provider_unit_qa_sha256 != null) {
+      findings.push({
+        code: "narration_provider_output_unit_qa_hash_without_payload",
         unit_id: expectedId,
       });
     }

@@ -156,7 +156,7 @@ async function main() {
   const attemptsByStage = new Map();
   let status = await readStatus();
   const episodeDir = path.resolve(status.episode_dir);
-  const resumeAfterResolutionCommand = `node bin/goldflow.mjs run director --episode-dir ${episodeDir} --action advance`;
+  const resumeAfterResolutionCommand = `node bin/goldflow.mjs run director --episode-dir ${episodeDir} --action babysit`;
   const profile = flags.profile || flags["production-profile"]
     ? productionProfileById(flags.profile ?? flags["production-profile"])
     : productionProfileForIdentity(status.identity ?? {});

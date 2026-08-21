@@ -12,12 +12,15 @@ import {
   validateGoogleFlowReferenceBinding,
 } from "../apps/goldflow-studio/lib/goldflow-bridge.mjs";
 import {
+  appendCodexWorkManifestStream,
   codexWorkSourceRowSha256,
   createCodexWorkManifest,
   getCodexWorkStatus,
   leaseNextWorkItem,
   loadWorkManifest,
+  openCodexWorkManifestStream,
   parseIdScope,
+  sealCodexWorkManifestStream,
   sha256File,
   validateCodexWorkManifest,
 } from "./lib/codex-image-work-contract.mjs";
@@ -874,6 +877,49 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
   }
 }
 
+async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, providerRuntimes }) {
+  const wanted = new Set(parseIdScope(assetIds));
+  if (!wanted.size) throw new Error("Streaming image wait requires exact asset IDs.");
+  const started = Date.now();
+  let lastProgress = "";
+  let lastRuntimeCheck = 0;
+  while (true) {
+    const status = await getCodexWorkStatus({ manifestPath });
+    const rows = status.items.filter((row) => wanted.has(row.asset_id));
+    const unknown = [...wanted].filter((assetId) => !rows.some((row) => row.asset_id === assetId));
+    if (unknown.length) throw new Error(`Streaming manifest does not contain: ${unknown.join(", ")}.`);
+    const counts = Object.fromEntries(["pending", "leased", "completed", "deadlettered"].map((state) => [
+      state,
+      rows.filter((row) => row.status === state).length,
+    ]));
+    const progress = JSON.stringify(counts);
+    if (progress !== lastProgress) {
+      process.stderr.write(`[browser-pool-stream] ${path.basename(path.dirname(manifestPath))} ${progress}\n`);
+      lastProgress = progress;
+    }
+    if (counts.pending === 0 && counts.leased === 0) {
+      return {
+        ...status,
+        status: counts.deadlettered ? "blocked_deadletter" : "completed",
+        item_count: rows.length,
+        counts,
+        items: rows,
+      };
+    }
+    if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for streaming browser assets in ${manifestPath}.`);
+    if (Date.now() - lastRuntimeCheck > 15_000) {
+      for (const runtime of providerRuntimes) {
+        await assertHostRuntime(runtime.path, runtime.provider, {
+          expectedPlanLabel: runtime.planLabel,
+          expectedModelLabel: runtime.modelLabel,
+        });
+      }
+      lastRuntimeCheck = Date.now();
+    }
+    await delay(2_000);
+  }
+}
+
 async function providerPhaseSummary(manifestPath, status) {
   const completedAssetIds = status.items.filter((row) => row.status === "completed").map((row) => row.asset_id);
   const failedAssetIds = status.items.filter((row) => row.status === "deadlettered").map((row) => row.asset_id);
@@ -905,6 +951,44 @@ async function providerPhaseSummary(manifestPath, status) {
     browser_provider_concurrency: status.browser_provider_concurrency,
     browser_provider_worker_session_policy: status.browser_provider_worker_session_policy,
     validation_status: validation?.status ?? "not_applicable_no_completions",
+  };
+}
+
+async function providerStreamingScopeSummary(manifestPath, status) {
+  const completedAssetIds = status.items.filter((row) => row.status === "completed").map((row) => row.asset_id);
+  const failedAssetIds = status.items.filter((row) => row.status === "deadlettered").map((row) => row.asset_id);
+  let validation = null;
+  if (completedAssetIds.length) {
+    validation = await validateCodexWorkManifest({
+      manifestPath,
+      assetIds: completedAssetIds,
+      allowIncomplete: true,
+    });
+    if (validation.status !== "passed") {
+      throw new Error(`Streaming browser manifest validation failed with ${validation.finding_count} finding(s): ${manifestPath}`);
+    }
+  }
+  return {
+    manifest_id: status.manifest_id,
+    manifest_path: manifestPath,
+    manifest_sha256: await sha256File(manifestPath),
+    status: status.status,
+    item_count: status.item_count,
+    counts: status.counts,
+    completed_asset_ids: completedAssetIds,
+    failed_asset_ids: failedAssetIds,
+    pending_asset_ids: status.items.filter((row) => row.status === "pending").map((row) => row.asset_id),
+    completed_by_browser_provider: Object.fromEntries(
+      (status.allowed_browser_providers ?? []).map((provider) => [
+        provider,
+        status.items.filter((row) => row.status === "completed" && row.browser_provider === provider).length,
+      ]),
+    ),
+    allowed_browser_providers: status.allowed_browser_providers,
+    browser_provider_concurrency: status.browser_provider_concurrency,
+    browser_provider_worker_session_policy: status.browser_provider_worker_session_policy,
+    validation_status: validation?.status ?? "not_applicable_no_completions",
+    streaming_queue: status.streaming_queue ?? null,
   };
 }
 
@@ -1340,6 +1424,270 @@ async function runHeroCandidateLane({
     selected_canonical_image_ids: selectedCanonicalImageIds,
     failed_canonical_image_ids: failedCanonicalImageIds,
     selections: selectionPaths,
+  };
+}
+
+export async function openWavefrontBrowserImageStream({
+  episodeDir,
+  identity,
+  streamId,
+  dataRoot = defaultDataRoot,
+  stateRoot = process.env.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"),
+  downloadsRoot = path.join(os.homedir(), "Downloads", "GoldflowStudio"),
+  flowRuntimeConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+  timeoutMs = 6 * 60 * 60_000,
+  checkHostRuntimes = true,
+} = {}) {
+  const resolvedEpisodeDir = path.resolve(episodeDir);
+  const resolvedDataRoot = path.resolve(dataRoot);
+  const resolvedStateRoot = path.resolve(stateRoot);
+  const resolvedDownloadsRoot = path.resolve(downloadsRoot);
+  if (!isFederatedWebImageProvider(identity?.image_provider)) {
+    throw new Error("Appendable wavefront streaming is restricted to the identity-locked federated Flow + Gemini image pool.");
+  }
+  const identityStatus = await federatedWebImageIdentityStatus(identity);
+  if (!identityStatus.done) throw new Error(identityStatus.evidence);
+  const federatedChatGptEnabled = federatedWebImageAutomaticChatGptEnabled(identity);
+  const dispatch = hybridManifestDispatchOptions({
+    mode: "scene",
+    federated: true,
+    federatedChatGptEnabled,
+    flowConcurrency: flowRuntimeConcurrency,
+    persistentWorkerPool: true,
+  });
+  const runtimes = {
+    chatgpt: { provider: "chatgpt", path: path.join(resolvedStateRoot, "studio-runtime.json") },
+    flow: {
+      provider: GOOGLE_FLOW_BROWSER_PROVIDER,
+      path: path.join(resolvedStateRoot, "providers", GOOGLE_FLOW_BROWSER_PROVIDER, "studio-runtime.json"),
+      planLabel: identity.image_provider_options.google_flow.plan_label,
+      modelLabel: identity.image_provider_options.google_flow.model_label,
+    },
+    gemini: {
+      provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
+      path: path.join(resolvedStateRoot, "providers", GOOGLE_GEMINI_BROWSER_PROVIDER, "studio-runtime.json"),
+      planLabel: identity.image_provider_options.google_gemini?.plan_label ?? "Ultra",
+      modelLabel: identity.image_provider_options.google_gemini?.model_label ?? "Nano Banana 2",
+    },
+  };
+  const runtimeByProvider = new Map([
+    ["chatgpt", runtimes.chatgpt],
+    [GOOGLE_FLOW_BROWSER_PROVIDER, runtimes.flow],
+    [GOOGLE_GEMINI_BROWSER_PROVIDER, runtimes.gemini],
+  ]);
+  const activeRuntimes = (dispatch.allowedBrowserProviders ?? []).map((provider) => runtimeByProvider.get(provider)).filter(Boolean);
+  if (checkHostRuntimes) {
+    await Promise.all(activeRuntimes.map((runtime) => assertHostRuntime(runtime.path, runtime.provider, {
+      expectedPlanLabel: runtime.planLabel,
+      expectedModelLabel: runtime.modelLabel,
+    })));
+  }
+  const bridgeByProvider = new Map([
+    ["chatgpt", await new GoldflowBridge({
+      repoRoot,
+      dataRoot: resolvedDataRoot,
+      stateDir: resolvedStateRoot,
+      downloadsRoot: resolvedDownloadsRoot,
+      browserProvider: "chatgpt",
+    }).init()],
+    [GOOGLE_FLOW_BROWSER_PROVIDER, await new GoldflowBridge({
+      repoRoot,
+      dataRoot: resolvedDataRoot,
+      stateDir: path.join(resolvedStateRoot, "providers", GOOGLE_FLOW_BROWSER_PROVIDER),
+      downloadsRoot: resolvedDownloadsRoot,
+      browserProvider: GOOGLE_FLOW_BROWSER_PROVIDER,
+    }).init()],
+    [GOOGLE_GEMINI_BROWSER_PROVIDER, await new GoldflowBridge({
+      repoRoot,
+      dataRoot: resolvedDataRoot,
+      stateDir: path.join(resolvedStateRoot, "providers", GOOGLE_GEMINI_BROWSER_PROVIDER),
+      downloadsRoot: resolvedDownloadsRoot,
+      browserProvider: GOOGLE_GEMINI_BROWSER_PROVIDER,
+    }).init()],
+  ]);
+  const activeBridges = (dispatch.allowedBrowserProviders ?? []).map((provider) => bridgeByProvider.get(provider)).filter(Boolean);
+  const healthProof = {
+    kind: "prior_health_proof",
+    path: identity.image_provider_options.google_flow.health_proof_path,
+    sha256: identity.image_provider_options.google_flow.health_proof_sha256,
+  };
+  const referencePlanPath = path.join(resolvedEpisodeDir, "visual_reference_plan.json");
+  const characterStateRefsPath = path.join(resolvedEpisodeDir, "character_state_refs.json");
+  let manifestPath = null;
+  let appendChain = Promise.resolve();
+  let sealed = false;
+  let activated = false;
+
+  const activateOnce = async () => {
+    if (activated) return;
+    await Promise.all(activeBridges.map((bridge) => bridge.activateManifest(manifestPath)));
+    activated = true;
+  };
+  const deactivate = async () => {
+    if (!activated || !manifestPath) return;
+    await Promise.all(activeBridges.map((bridge) => bridge.deactivateManifest(manifestPath).catch(() => null)));
+    activated = false;
+  };
+  const scheduleAppend = (input) => {
+    if (sealed) throw new Error("Wavefront browser image stream is already sealed.");
+    const exactAssetIds = parseIdScope(input.assetIds);
+    if (!exactAssetIds.length) throw new Error("Wavefront browser image stream append requires exact asset IDs.");
+    const appendReady = appendChain.then(async () => {
+      const currentPlan = await readJson(input.promptsPath, null);
+      const currentRows = (currentPlan?.prompts ?? []).filter((row) => exactAssetIds.includes(String(row?.image_id ?? "")));
+      const reconciledAssetIds = await reconcileCompatibleManifestCompletions({
+        mode: "scene",
+        episodeDir: resolvedEpisodeDir,
+        currentRows,
+        acceptedAssetIds: new Set(),
+        requestedIds: new Set(exactAssetIds),
+        identity,
+        promptsPath: input.promptsPath,
+        referencePlanPath,
+        characterStateRefsPath,
+        imagegenReportPath: input.imagegenReportPath,
+        cutExecutionLedgerPath: input.cutExecutionLedgerPath,
+        dataRoot: resolvedDataRoot,
+        downloadsRoot: resolvedDownloadsRoot,
+        wavefrontPrefetch: true,
+      });
+      const reconciledSet = new Set(reconciledAssetIds);
+      const pendingAssetIds = exactAssetIds.filter((assetId) => !reconciledSet.has(assetId));
+      const compatibleDeadletters = await findSourceCompatibleHybridDeadletters({
+        episodeDir: resolvedEpisodeDir,
+        mode: "scene",
+        currentRows,
+        requestedIds: new Set(pendingAssetIds),
+      });
+      if (compatibleDeadletters.size) {
+        throw new Error(`Streaming wavefront will not resubmit prior deadletters: ${[...compatibleDeadletters.keys()].join(", ")}. Use an evidence-bound exact-ID repair command.`);
+      }
+      if (!pendingAssetIds.length) {
+        return { manifest: null, pending_asset_ids: [], reconciled_asset_ids: reconciledAssetIds };
+      }
+      const manifestOptions = {
+        streamId,
+        mode: "scene",
+        episodeDir: resolvedEpisodeDir,
+        promptsPath: input.promptsPath,
+        imageIds: pendingAssetIds,
+        maxAttempts: 1,
+        leaseSeconds: 1800,
+        verificationGateBypass: healthProof,
+        ...dispatch,
+      };
+      if (!manifestPath) {
+        const opened = await openCodexWorkManifestStream(manifestOptions);
+        manifestPath = opened.manifest.manifest_path;
+        await activateOnce();
+        if (opened.resumed === true) {
+          const appended = await appendCodexWorkManifestStream({ manifestPath, ...manifestOptions });
+          return { ...appended, pending_asset_ids: pendingAssetIds, reconciled_asset_ids: reconciledAssetIds };
+        }
+        return {
+          manifest: opened.manifest,
+          appended_asset_ids: pendingAssetIds,
+          appended_count: pendingAssetIds.length,
+          pending_asset_ids: pendingAssetIds,
+          reconciled_asset_ids: reconciledAssetIds,
+        };
+      }
+      const appended = await appendCodexWorkManifestStream({ manifestPath, ...manifestOptions });
+      return { ...appended, pending_asset_ids: pendingAssetIds, reconciled_asset_ids: reconciledAssetIds };
+    });
+    appendChain = appendReady;
+    return appendReady.then(async (appendResult) => {
+      const pendingAssetIds = appendResult.pending_asset_ids ?? exactAssetIds;
+      if (!pendingAssetIds.length) {
+        const batchReport = {
+          schema: "goldflow_wavefront_stream_batch_v1",
+          status: "passed",
+          stream_id: streamId,
+          manifest_id: null,
+          manifest_path: null,
+          exact_asset_ids: exactAssetIds,
+          reconciled_asset_ids: appendResult.reconciled_asset_ids ?? [],
+          one_creative_submission_per_item: true,
+          automatic_retry_policy: "none",
+          phase: { status: "reused_compatible_completions", completed_asset_ids: exactAssetIds, failed_asset_ids: [] },
+          updated_at: new Date().toISOString(),
+        };
+        if (input.poolReportPath) await writeJson(input.poolReportPath, batchReport);
+        return { code: 0, phase: batchReport.phase, batch_report: batchReport };
+      }
+      const terminalStatus = await waitForManifestAssetIds({
+        manifestPath,
+        assetIds: pendingAssetIds,
+        timeoutMs,
+        providerRuntimes: checkHostRuntimes ? activeRuntimes : [],
+      });
+      const phase = await providerStreamingScopeSummary(manifestPath, terminalStatus);
+      phase.reconciled_asset_ids = appendResult.reconciled_asset_ids ?? [];
+      if (phase.completed_asset_ids.length) {
+        await importManifest({
+          identity,
+          manifestPath,
+          referencesOnly: false,
+          assetIds: phase.completed_asset_ids,
+          repairReason: null,
+          qaRecovery: false,
+          allowPartial: true,
+          promptsPath: input.promptsPath,
+          referencePlanPath,
+          characterStateRefsPath,
+          imagegenReportPath: input.imagegenReportPath,
+          cutExecutionLedgerPath: input.cutExecutionLedgerPath,
+          dataRoot: resolvedDataRoot,
+          wavefrontPrefetch: true,
+        });
+      }
+      const batchReport = {
+        schema: "goldflow_wavefront_stream_batch_v1",
+        status: phase.failed_asset_ids.length ? "blocked" : "passed",
+        stream_id: streamId,
+        manifest_id: phase.manifest_id,
+        manifest_path: phase.manifest_path,
+        exact_asset_ids: exactAssetIds,
+        one_creative_submission_per_item: true,
+        automatic_retry_policy: "none",
+        phase,
+        updated_at: new Date().toISOString(),
+      };
+      if (input.poolReportPath) await writeJson(input.poolReportPath, batchReport);
+      return { code: phase.failed_asset_ids.length ? 1 : 0, phase, batch_report: batchReport };
+    });
+  };
+
+  return {
+    stream_id: streamId,
+    append(input) {
+      return scheduleAppend(input);
+    },
+    async seal() {
+      if (sealed) return { status: "already_sealed", manifest_path: manifestPath };
+      sealed = true;
+      try {
+        await appendChain;
+        if (!manifestPath) return { status: "empty", manifest_path: null };
+        await sealCodexWorkManifestStream({ manifestPath, streamId });
+        const terminal = await waitForManifest({
+          manifestPath,
+          timeoutMs,
+          providerRuntimes: checkHostRuntimes ? activeRuntimes : [],
+        });
+        return providerPhaseSummary(manifestPath, terminal);
+      } finally {
+        await deactivate();
+      }
+    },
+    async abort() {
+      sealed = true;
+      await deactivate();
+      return { status: "aborted", manifest_path: manifestPath };
+    },
+    get manifest_path() {
+      return manifestPath;
+    },
   };
 }
 

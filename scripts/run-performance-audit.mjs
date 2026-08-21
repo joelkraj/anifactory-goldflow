@@ -270,6 +270,12 @@ async function productionForecastInputs({ episodeDir, identity, events, provider
     imageConcurrency: Number(identity?.production_profile_config?.media?.federated_web_image_concurrency
       ?? identity?.production_profile_config?.media?.image_concurrency
       ?? 8),
+    plannerConcurrency: Number(identity?.production_profile_config?.planner?.codex_cli_structured_concurrency ?? 8),
+    plannerInitialConcurrency: Number(
+      identity?.production_profile_config?.planner?.codex_cli_structured_initial_concurrency
+        ?? identity?.production_profile_config?.planner?.codex_cli_structured_concurrency
+        ?? 8,
+    ),
     generatedMotionConcurrency: Number(identity?.production_profile_config?.media?.generated_motion_concurrency ?? 3),
     imageFailureRate: attemptCount ? failureCount / attemptCount : 0.1,
     expectedOperatorCheckpointCount: Number(identity?.production_profile_config?.forecast?.expected_operator_checkpoint_count ?? 5),

@@ -3593,12 +3593,16 @@ async function main() {
           ?? null,
         runner_report_path: synthesis.reportPath,
         runner_report_sha256: synthesis.reportSha256,
+        audio_sha256: result.output_sha256,
+        audio_hash_verified: true,
         unit_qa: previousQaByAudioHash.get(result.output_sha256)
           ?? prefetchedQaByAudioHash.get(result.output_sha256)
           ?? null,
       };
     });
-    await helpers.runUnitOutputQaForDiagnostics(rows);
+    await helpers.runUnitOutputQaForDiagnostics(rows, {
+      reuseHashValidQa: true,
+    });
     applyProtectedTermQa(rows);
     if (route === "qwen") {
       await applyQwenVoiceContinuityQa({

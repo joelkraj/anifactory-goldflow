@@ -120,6 +120,8 @@ export function buildEpisodeProductionForecast({
   referenceCount = 0,
   generatedMotionCount = 0,
   imageConcurrency = 8,
+  plannerConcurrency = 8,
+  plannerInitialConcurrency = null,
   generatedMotionConcurrency = 3,
   imageFailureRate = 0.1,
   expectedOperatorCheckpointCount = 5,
@@ -135,6 +137,12 @@ export function buildEpisodeProductionForecast({
   const references = Math.max(0, Math.round(finiteNumber(referenceCount)));
   const motion = Math.max(0, Math.round(finiteNumber(generatedMotionCount)));
   const baseImageConcurrency = Math.max(1, Math.round(positiveNumber(imageConcurrency, 8)));
+  const plannerCeiling = Math.max(1, Math.round(positiveNumber(plannerConcurrency, 8)));
+  const plannerInitial = Math.min(
+    plannerCeiling,
+    Math.max(1, Math.round(positiveNumber(plannerInitialConcurrency, plannerCeiling))),
+  );
+  const effectivePlannerConcurrency = Math.max(1, Math.round((plannerInitial + plannerCeiling) / 2));
   const failureRate = Math.min(0.75, Math.max(0, finiteNumber(imageFailureRate, 0.1)));
   const effectiveImageConcurrency = Math.max(1, baseImageConcurrency * (1 - failureRate));
   const videoConcurrency = Math.max(1, Math.round(positiveNumber(generatedMotionConcurrency, 3)));
@@ -177,9 +185,9 @@ export function buildEpisodeProductionForecast({
   );
   const promptPlanning = workstream(
     "prompt_planning",
-    Math.ceil(stills / 8) * 1.35,
-    Math.ceil(stills / 8) * 2.25,
-    `${stills} cuts through the eight-slot Codex Medium structured planning pool`,
+    Math.ceil(stills / effectivePlannerConcurrency) * 1.35,
+    Math.ceil(stills / effectivePlannerConcurrency) * 2.25,
+    `${stills} cuts through the ${plannerInitial}-${plannerCeiling}-slot success-ramped Codex Medium structured planning pool`,
   );
   const stillGeneration = workstream(
     "still_generation",

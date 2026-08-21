@@ -11,6 +11,7 @@ import {
   buildImageSemanticAudit,
   semanticAuditSelectionForTests,
 } from "../lib/image-semantic-audit.mjs";
+import { structuralAuditForTests } from "../image-output-qa.mjs";
 
 const heroPrompt = {
   image_id: "cut_hero",
@@ -32,10 +33,61 @@ const ordinaryPrompt = {
   quality_budget: { tier: "connective", image_candidate_count: 1 },
   shot_manifest: { shot_job: "location_wide", foreground_action: null, visible_characters: [], visible_props: [] },
 };
+const locationUiPriorityPrompt = {
+  image_id: "cut_location_ui_priority",
+  start_sec: 20,
+  provider_prompt: "A quiet guild terminal in the established command room.",
+  quality_budget: { tier: "priority", image_candidate_count: 1 },
+  shot_manifest: {
+    shot_job: "ui_insert",
+    foreground_action: null,
+    visible_characters: [],
+    visible_props: [],
+    ui_elements: ["status panel"],
+    location_contract_id: "guild_command_room",
+  },
+};
+const identityCriticalPrompt = {
+  image_id: "cut_identity_critical",
+  start_sec: 500,
+  provider_prompt: "Joey and Mira face the tribunal together.",
+  quality_budget: { tier: "connective", image_candidate_count: 1 },
+  visual_information_delta: { kind: "new_relationship_evidence" },
+  sequence_grammar: { sequence_role: "reveal" },
+  shot_manifest: {
+    shot_job: "relationship_reveal",
+    foreground_action: null,
+    visible_characters: ["Joey", "Mira"],
+    reference_slots: [
+      { ref_id: "joey", kind: "character_state", reference_priority: "decisive_subject" },
+      { ref_id: "mira", kind: "character_state", reference_priority: "readable_identity" },
+    ],
+    visible_props: [],
+  },
+};
 
 assert.equal(semanticAuditSelectionForTests(heroPrompt, { ordinarySampleRate: 0 }).selected, true);
 assert.equal(semanticAuditSelectionForTests(heroPrompt, { ordinarySampleRate: 0 }).reasons.includes("hero_beat"), true);
 assert.equal(semanticAuditSelectionForTests(ordinaryPrompt, { ordinarySampleRate: 0 }).selected, false);
+assert.equal(
+  semanticAuditSelectionForTests(locationUiPriorityPrompt, { ordinarySampleRate: 0 }).selected,
+  false,
+  "priority, opening, location, and UI contracts must not alone spend an image-semantic call",
+);
+assert.equal(
+  semanticAuditSelectionForTests(locationUiPriorityPrompt, { ordinarySampleRate: 0 }).required_dimensions.includes("location_continuity"),
+  true,
+  "location remains an audit dimension when another true-risk reason selects the cut",
+);
+assert.equal(
+  semanticAuditSelectionForTests(locationUiPriorityPrompt, { ordinarySampleRate: 0 }).required_dimensions.includes("ui_hierarchy"),
+  true,
+  "UI remains an audit dimension when another true-risk reason selects the cut",
+);
+assert.deepEqual(
+  semanticAuditSelectionForTests(identityCriticalPrompt, { ordinarySampleRate: 0 }).reasons,
+  ["identity_critical"],
+);
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-image-semantic-audit-"));
 try {
@@ -102,6 +154,46 @@ try {
     },
   });
   assert.equal(reused.reused, true);
+
+  const officialPromptPlanPath = path.join(root, "official-prompts.json");
+  const officialImagegenReportPath = path.join(root, "official-images.json");
+  const officialOutputPath = path.join(root, "official-semantic.json");
+  const officialPromptPlan = { status: "passed", prompts: [ordinaryPrompt, heroPrompt] };
+  const officialImagegenReport = { status: "passed", results: [{ image_id: "cut_hero", image_path: imagePath }] };
+  await fs.writeFile(officialPromptPlanPath, `${JSON.stringify(officialPromptPlan)}\n`);
+  await fs.writeFile(officialImagegenReportPath, `${JSON.stringify(officialImagegenReport)}\n`);
+  const crossReportReuse = await buildImageSemanticAudit({
+    promptPlan: officialPromptPlan,
+    imagegenReport: officialImagegenReport,
+    promptPlanPath: officialPromptPlanPath,
+    imagegenReportPath: officialImagegenReportPath,
+    outputPath: officialOutputPath,
+    callsDir: path.join(root, "calls"),
+    repoRoot: root,
+    ordinarySampleRate: 0,
+    auditExecutor: async () => {
+      throw new Error("durable row cache should be shared across incremental and official reports");
+    },
+  });
+  assert.equal(crossReportReuse.reused, undefined);
+  assert.equal(crossReportReuse.row_cache_hit_count, 1);
+  assert.equal(crossReportReuse.row_cache_miss_count, 0);
+  assert.equal(crossReportReuse.rows[0].reused, true);
+  assert.match(crossReportReuse.rows[0].row_cache_path, /row-cache/);
+
+  const ordinaryImagePath = path.join(root, "ordinary.png");
+  await sharp({ create: { width: 640, height: 360, channels: 3, background: "#555555" } }).png().toFile(ordinaryImagePath);
+  const structural = await structuralAuditForTests(
+    { prompts: [heroPrompt, ordinaryPrompt] },
+    { results: [
+      { image_id: heroPrompt.image_id, image_path: imagePath },
+      { image_id: ordinaryPrompt.image_id, image_path: ordinaryImagePath },
+    ] },
+    null,
+    crossReportReuse,
+  );
+  assert.equal(structural.rows.length, 2, "structural QA must still inspect every generated cut");
+  assert.equal(structural.rows.find((row) => row.image_id === ordinaryPrompt.image_id)?.semantic_audit, null);
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

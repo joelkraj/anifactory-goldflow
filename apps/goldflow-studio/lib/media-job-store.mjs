@@ -44,6 +44,7 @@ function normalizedRequest(request = {}) {
   const durationSec = Math.max(4, Math.min(10, Math.round(Number(request.duration_sec ?? 8))));
   return {
     type,
+    provider: "google_flow",
     manifest_id: clean(request.manifest_id) || "goldflow-generated-motion",
     asset_id: clean(request.asset_id),
     prompt,
@@ -53,6 +54,42 @@ function normalizedRequest(request = {}) {
     references,
     source: request.source && typeof request.source === "object" ? request.source : {},
   };
+}
+
+function creativeIdentity(request) {
+  return {
+    provider: request.provider,
+    model_id: request.model_id,
+    prompt_sha256: request.prompt_sha256,
+    duration_sec: request.duration_sec,
+    first_frame_sha256: request.references[0].sha256,
+  };
+}
+
+function legacyRequestSha256(request) {
+  const { provider: ignoredProvider, ...legacyRequest } = request;
+  return sha256(stableStringify(legacyRequest));
+}
+
+function provenanceBinding(request) {
+  const binding = {
+    manifest_id: request.manifest_id,
+    asset_id: request.asset_id,
+    first_frame: request.references[0],
+    source: request.source,
+  };
+  return {
+    ...binding,
+    provenance_sha256: sha256(stableStringify(binding)),
+  };
+}
+
+export function mediaCreativeIdentityForTests(rawRequest = {}) {
+  return creativeIdentity(normalizedRequest(rawRequest));
+}
+
+export function mediaProvenanceBindingForTests(rawRequest = {}) {
+  return provenanceBinding(normalizedRequest(rawRequest));
 }
 
 export class MediaJobStore {
@@ -98,15 +135,72 @@ export class MediaJobStore {
         throw new Error(`Media reference hash is stale: ${reference.path}`);
       }
     }
-    const requestSha256 = sha256(stableStringify(request));
-    const filePath = this.jobPath(requestSha256);
+    const identity = creativeIdentity(request);
+    const creativeIdentitySha256 = sha256(stableStringify(identity));
+    const provenance = provenanceBinding(request);
+    const filePath = this.jobPath(creativeIdentitySha256);
     return this.withQueueLock(async () => {
       const existing = await readJson(filePath);
-      if (existing) return { job: existing, created: false };
+      if (existing) {
+        const bindings = Array.isArray(existing.provenance_bindings) ? existing.provenance_bindings : [];
+        if (bindings.some((row) => row.provenance_sha256 === provenance.provenance_sha256)) {
+          return { job: existing, created: false };
+        }
+        const updated = {
+          ...existing,
+          provenance_bindings: [...bindings, { ...provenance, recorded_at: nowIso() }],
+          updated_at: nowIso(),
+        };
+        await writeJsonAtomic(filePath, updated);
+        return { job: updated, created: false };
+      }
+      const legacyMatches = [];
+      for (const candidate of await this.list()) {
+        if (!candidate?.request || candidate.job_id === creativeIdentitySha256) continue;
+        let candidateRequest;
+        try {
+          candidateRequest = normalizedRequest(candidate.request);
+        } catch {
+          continue;
+        }
+        const candidateIdentitySha256 = sha256(stableStringify(creativeIdentity(candidateRequest)));
+        const validLegacyStorage = candidate.job_id === candidate.request_sha256
+          && candidate.job_id === legacyRequestSha256(candidateRequest);
+        if (candidateIdentitySha256 === creativeIdentitySha256 && validLegacyStorage) {
+          legacyMatches.push({ candidate, candidateRequest });
+        }
+      }
+      if (legacyMatches.length > 1) {
+        throw new Error(`Multiple legacy media jobs match creative identity ${creativeIdentitySha256}; refusing a duplicate submission.`);
+      }
+      if (legacyMatches.length === 1) {
+        const { candidate, candidateRequest } = legacyMatches[0];
+        const bindings = Array.isArray(candidate.provenance_bindings)
+          ? candidate.provenance_bindings
+          : [{ ...provenanceBinding(candidateRequest), recorded_at: candidate.created_at ?? nowIso() }];
+        const adoptedBindings = bindings.some((row) => row.provenance_sha256 === provenance.provenance_sha256)
+          ? bindings
+          : [...bindings, { ...provenance, recorded_at: nowIso() }];
+        const adopted = {
+          ...candidate,
+          creative_identity: identity,
+          creative_identity_sha256: creativeIdentitySha256,
+          creative_identity_storage: "legacy_full_request_job_id",
+          legacy_request_sha256: candidate.request_sha256,
+          provenance_bindings: adoptedBindings,
+          updated_at: nowIso(),
+        };
+        await writeJsonAtomic(this.jobPath(candidate.job_id), adopted);
+        return { job: adopted, created: false, adopted_legacy_identity: true };
+      }
       const job = {
         schema: MEDIA_JOB_SCHEMA,
-        job_id: requestSha256,
-        request_sha256: requestSha256,
+        job_id: creativeIdentitySha256,
+        request_sha256: creativeIdentitySha256,
+        creative_identity: identity,
+        creative_identity_sha256: creativeIdentitySha256,
+        creative_identity_storage: "creative_identity_job_id",
+        provenance_bindings: [{ ...provenance, recorded_at: nowIso() }],
         status: "queued",
         attempt_count: 0,
         request,

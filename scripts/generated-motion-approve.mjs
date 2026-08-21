@@ -79,6 +79,7 @@ async function main() {
     outputPath: coherenceAuditPath,
     framesRoot: path.join(motionDir, "coherence_frames"),
     callsDir: path.join(motionDir, "coherence_calls"),
+    rowCacheDir: path.resolve(flags["coherence-row-cache"] ?? path.join(motionDir, "coherence_row_cache")),
     repoRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
     concurrency: Math.max(1, Math.min(8, Number(flags["coherence-concurrency"] ?? 4) || 4)),
     model: flags["coherence-model"] ?? null,

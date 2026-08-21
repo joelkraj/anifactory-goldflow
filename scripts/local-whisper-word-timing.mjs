@@ -30,6 +30,9 @@ import {
   exactNarrationRepairPacket,
   strictNarrationDeliveryDecision,
 } from "./lib/narration-delivery-quality.mjs";
+import {
+  validateLocalWhisperTimingCandidate,
+} from "./lib/local-whisper-timing-candidate.mjs";
 
 const execFile = promisify(execFileCb);
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -252,7 +255,7 @@ export function resolveLocalWhisperRuntimeContractForTests({
   return contract;
 }
 
-async function runFasterWhisper(audioPath, contract) {
+export async function runFasterWhisperForDiagnostics(audioPath, contract) {
   const {
     model,
     device,
@@ -296,8 +299,9 @@ segments, info = model.transcribe(
     beam_size=beam_size,
 )
 
+segment_rows = list(segments)
 rows = []
-for seg in segments:
+for seg in segment_rows:
     seg_words = []
     for word in (seg.words or []):
         item = {
@@ -314,6 +318,7 @@ with open(output_path, "w", encoding="utf-8") as handle:
     "language": info.language,
     "language_probability": info.language_probability,
     "duration_sec": info.duration,
+    "text": " ".join(seg.text.strip() for seg in segment_rows if seg.text.strip()).strip(),
     "words": rows,
     }, handle, ensure_ascii=False)
 
@@ -464,6 +469,25 @@ async function main() {
     revalidateExisting,
     existingTiming,
   });
+  const timingCandidatePath = path.resolve(
+    flags["timing-candidate"]
+      ?? path.join(episodeDir, `narration_word_timing_candidate_${episode}.json`),
+  );
+  const timingCandidate = revalidateExisting
+    ? null
+    : await readJson(timingCandidatePath, null);
+  const timingCandidateValidation = timingCandidate
+    ? validateLocalWhisperTimingCandidate(timingCandidate, {
+        contract: runtimeContract,
+        sourceScriptSha256: scriptHash,
+        narrationAudioSha256: audioHash,
+        narrationReportSha256,
+        runIdentitySha256,
+        narrationQualityContractSha256:
+          narrationQualityContract?.contract_sha256 ?? null,
+      })
+    : null;
+  const promotedTimingCandidate = timingCandidateValidation?.status === "passed";
   const transcription = revalidateExisting
     ? {
         contract: runtimeContract,
@@ -500,7 +524,24 @@ async function main() {
           probability: word.probability,
         })),
       }
-    : await runFasterWhisper(audioPath, runtimeContract);
+    : promotedTimingCandidate
+      ? {
+          contract: runtimeContract,
+          model: timingCandidate.alignment_model,
+          device: timingCandidate.alignment_device,
+          compute_type: timingCandidate.alignment_compute_type,
+          omp_num_threads: timingCandidate.alignment_omp_num_threads,
+          cpu_threads: timingCandidate.alignment_cpu_threads,
+          language: timingCandidate.language,
+          beam_size: timingCandidate.alignment_beam_size,
+          word_timestamps: timingCandidate.alignment_word_timestamps,
+          vad_filter: timingCandidate.alignment_vad_filter,
+          language_probability: timingCandidate.language_probability,
+          duration_sec: timingCandidate.audio_duration_sec,
+          text: timingCandidate.recognized_text,
+          words: timingCandidate.words,
+        }
+      : await runFasterWhisperForDiagnostics(audioPath, runtimeContract);
   const words = attachSegments(transcription.words ?? [], qwenReport);
   const wordTimingQa = localWhisperWordTimingQa(
     words,
@@ -619,6 +660,12 @@ async function main() {
       ? { alignment_contract: transcription.contract }
       : {}),
     alignment_revalidated_without_transcription: revalidateExisting,
+    alignment_promoted_from_finalizer_candidate: promotedTimingCandidate,
+    timing_candidate_path: timingCandidate ? timingCandidatePath : null,
+    timing_candidate_sha256: promotedTimingCandidate
+      ? timingCandidate.candidate_sha256
+      : null,
+    timing_candidate_validation: timingCandidateValidation,
     language: transcription.language,
     language_probability: transcription.language_probability,
     audio_duration_sec: transcription.duration_sec,

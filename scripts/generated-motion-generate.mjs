@@ -17,6 +17,7 @@ import {
   generatedMotionDirectionContractSha256,
   generatedMotionIdentityContract,
 } from "./lib/generated-motion-contract.mjs";
+import { buildGeneratedMotionCoherenceAudit } from "./lib/generated-motion-coherence-audit.mjs";
 import { hashFile, sha256 } from "./lib/ltx-video-contract.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -38,7 +39,11 @@ const studioUrl = String(flags["studio-url"] ?? process.env.GOLDFLOW_FLOW_STUDIO
 const timeoutMs = boundedInteger(flags["timeout-ms"], 7_200_000, 60_000, 14_400_000);
 const pollMs = boundedInteger(flags["poll-ms"], 1_000, 250, 10_000);
 const concurrency = boundedInteger(flags.concurrency, 3, 1, 5);
+const submissionConcurrency = boundedInteger(flags["submission-concurrency"], concurrency, 1, 8);
+const providerWaitConcurrency = boundedInteger(flags["provider-wait-concurrency"], concurrency, 1, 8);
+const normalizationConcurrency = boundedInteger(flags["normalization-concurrency"], concurrency, 1, 8);
 const repairReason = String(flags["repair-reason"] ?? "").trim();
+const prefetchCoherenceCache = /^(true|1|yes)$/i.test(String(flags["prefetch-coherence-cache"] ?? "false"));
 
 function parseFlags(parts) {
   const parsed = {};
@@ -134,6 +139,71 @@ async function runLimited(rows, limit, worker) {
       await worker(rows[index], index);
     }
   }));
+}
+
+function boundedWorkerQueue(limit, worker) {
+  const pending = [];
+  let active = 0;
+  const pump = () => {
+    while (active < Math.max(1, limit) && pending.length) {
+      const entry = pending.shift();
+      active += 1;
+      Promise.resolve()
+        .then(() => worker(entry.value, entry.index))
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          active -= 1;
+          pump();
+        });
+    }
+  };
+  return {
+    push(value, index) {
+      return new Promise((resolve, reject) => {
+        pending.push({ value, index, resolve, reject });
+        pump();
+      });
+    },
+  };
+}
+
+export async function runGeneratedMotionPipelineForTests({
+  rows = [],
+  submissionConcurrency: submitLimit = 1,
+  providerWaitConcurrency: waitLimit = 1,
+  normalizationConcurrency: normalizeLimit = 1,
+  submit,
+  wait,
+  normalize,
+} = {}) {
+  const results = new Array(rows.length);
+  const failures = [];
+  const waitPromises = [];
+  const normalizationPromises = [];
+  const normalizationQueue = boundedWorkerQueue(normalizeLimit, normalize);
+  const waitQueue = boundedWorkerQueue(waitLimit, wait);
+  await runLimited(rows, submitLimit, async (row, index) => {
+    let submitted;
+    try {
+      submitted = await submit(row, index);
+    } catch (error) {
+      failures.push({ row, index, stage: "submission", error });
+      return;
+    }
+    waitPromises.push(waitQueue.push(submitted, index)
+      .then((completed) => {
+        normalizationPromises.push(normalizationQueue.push(completed, index)
+          .then((value) => { results[index] = value; })
+          .catch((error) => { failures.push({ row, index, stage: "normalization", value: completed, error }); }));
+      })
+      .catch((error) => { failures.push({ row, index, stage: "provider_wait", value: submitted, error }); }));
+  });
+  await Promise.all(waitPromises);
+  await Promise.all(normalizationPromises);
+  return {
+    results: results.filter((value) => value !== undefined),
+    failures: failures.sort((left, right) => left.index - right.index),
+  };
 }
 
 function forwardLegacyLtx() {
@@ -258,7 +328,64 @@ function buildPlan(directionPlan, identityContract) {
   };
 }
 
-async function materializeCompletedJob(row, job) {
+function flowRequestForRow(row, identityContract) {
+  return {
+    type: "video",
+    manifest_id: `generated-motion-${episode}`,
+    asset_id: row.candidate_id,
+    prompt: row.motion_prompt,
+    model_id: identityContract.model,
+    duration_sec: row.requested_duration_sec,
+    references: [{
+      slot: 1,
+      ref_id: row.image_id,
+      path: row.source_image_path,
+      sha256: row.source_image_sha256,
+    }],
+    source: {
+      channel,
+      series_slug: series,
+      week,
+      episode,
+      animation_direction_contract_sha256: row.direction_contract_sha256,
+      source_prompt_sha256: row.source_prompt_sha256,
+    },
+  };
+}
+
+function matchingProvenanceBinding(job, request) {
+  return (job?.provenance_bindings ?? []).find((binding) => (
+    binding?.manifest_id === request.manifest_id
+    && binding?.asset_id === request.asset_id
+    && binding?.first_frame?.ref_id === request.references[0].ref_id
+    && binding?.first_frame?.path === request.references[0].path
+    && binding?.first_frame?.sha256 === request.references[0].sha256
+    && binding?.source?.channel === request.source.channel
+    && binding?.source?.series_slug === request.source.series_slug
+    && binding?.source?.week === request.source.week
+    && binding?.source?.episode === request.source.episode
+    && binding?.source?.animation_direction_contract_sha256 === request.source.animation_direction_contract_sha256
+    && binding?.source?.source_prompt_sha256 === request.source.source_prompt_sha256
+  ));
+}
+
+async function materializeCompletedJob(row, job, request) {
+  const creativeIdentity = job?.creative_identity;
+  const validIdentityStorage = job?.creative_identity_storage === "legacy_full_request_job_id"
+    ? job?.legacy_request_sha256 === job?.job_id && job?.request_sha256 === job?.job_id
+    : job?.creative_identity_sha256 === job?.job_id;
+  if (
+    creativeIdentity?.provider !== GENERATED_MOTION_PROVIDER_FLOW
+    || creativeIdentity?.model_id !== request.model_id
+    || creativeIdentity?.prompt_sha256 !== row.motion_prompt_sha256
+    || creativeIdentity?.duration_sec !== row.requested_duration_sec
+    || creativeIdentity?.first_frame_sha256 !== row.source_image_sha256
+    || !validIdentityStorage
+  ) {
+    throw new Error(`Flow job creative identity is stale for ${row.image_id}.`);
+  }
+  const provenance = matchingProvenanceBinding(job, request);
+  if (!provenance) throw new Error(`Flow job provenance binding is stale for ${row.image_id}.`);
   if (job.request?.prompt_sha256 !== row.motion_prompt_sha256) throw new Error(`Flow job prompt hash is stale for ${row.image_id}.`);
   if (job.request?.references?.[0]?.sha256 !== row.source_image_sha256) throw new Error(`Flow job first-frame hash is stale for ${row.image_id}.`);
   if (await hashFile(job.result?.download_path) !== job.result?.output_sha256) throw new Error(`Flow job output hash is stale for ${row.image_id}.`);
@@ -295,6 +422,8 @@ async function materializeCompletedJob(row, job) {
     model_id: job.request.model_id,
     job_id: job.job_id,
     request_sha256: job.request_sha256,
+    creative_identity_sha256: job.creative_identity_sha256,
+    provenance_binding_sha256: provenance.provenance_sha256,
     image_id: row.image_id,
     candidate_id: row.candidate_id,
     prompt_sha256: row.motion_prompt_sha256,
@@ -375,57 +504,54 @@ async function main() {
   if (health.status !== "ok" || health.browser_provider !== "google-flow") {
     throw new Error(`Expected an active Google Flow Studio at ${studioUrl}.`);
   }
-  const generated = [];
-  const omitted = [];
   const batchStartedAt = Date.now();
-  await runLimited(plan.clips, concurrency, async (row) => {
-    const request = {
-      type: "video",
-      manifest_id: `generated-motion-${episode}`,
-      asset_id: row.candidate_id,
-      prompt: row.motion_prompt,
-      model_id: identityContract.model,
-      duration_sec: row.requested_duration_sec,
-      references: [{
-        slot: 1,
-        ref_id: row.image_id,
-        path: row.source_image_path,
-        sha256: row.source_image_sha256,
-      }],
-      source: {
-        channel,
-        series_slug: series,
-        week,
-        episode,
-        animation_direction_contract_sha256: row.direction_contract_sha256,
-        source_prompt_sha256: row.source_prompt_sha256,
-      },
-    };
-    try {
+  let creativeSubmissionCount = 0;
+  let creativeResubmissionCount = 0;
+  const pipeline = await runGeneratedMotionPipelineForTests({
+    rows: plan.clips,
+    submissionConcurrency,
+    providerWaitConcurrency,
+    normalizationConcurrency,
+    submit: async (row) => {
+      const request = flowRequestForRow(row, identityContract);
       let created = await studioRequest("/v1/media/jobs", token, { method: "POST", body: request });
+      if (created.created) creativeSubmissionCount += 1;
       if (["failed", "needs_triage"].includes(created.job?.status)) {
         if (!repairReason) throw new Error(created.job.error?.message ?? `Flow media job ${created.job.job_id} requires triage.`);
         created = await studioRequest("/v1/dashboard/media/requeue", token, {
           method: "POST",
           body: { jobId: created.job.job_id, reason: repairReason },
         });
+        creativeSubmissionCount += 1;
+        creativeResubmissionCount += 1;
       }
-      const completedJob = created.job?.status === "completed"
-        ? created.job
-        : await waitForMediaJob(created.job.job_id, token);
-      generated.push(await materializeCompletedJob(row, completedJob));
-    } catch (error) {
-      omitted.push({
-        ...row,
-        provider: GENERATED_MOTION_PROVIDER_FLOW,
-        model_id: identityContract.model,
-        status: "omitted",
-        disposition: "accepted_still_fallback",
-        omission_stage: "flow_studio_generation_or_normalization",
-        creative_generation_attempt: Number(priorOmissions.get(row.image_id)?.creative_generation_attempt ?? 0) + 1,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+      return { row, request, job: created.job };
+    },
+    wait: async (submitted) => ({
+      ...submitted,
+      job: submitted.job?.status === "completed"
+        ? submitted.job
+        : await waitForMediaJob(submitted.job.job_id, token),
+    }),
+    normalize: async ({ row, request, job }) => materializeCompletedJob(row, job, request),
+  });
+  const generated = pipeline.results;
+  const omitted = pipeline.failures.map((failure) => {
+    const row = failure.row;
+    const job = failure.value?.job;
+    return {
+      ...row,
+      provider: GENERATED_MOTION_PROVIDER_FLOW,
+      model_id: identityContract.model,
+      status: "omitted",
+      disposition: "accepted_still_fallback",
+      omission_stage: failure.stage,
+      creative_generation_attempt: Math.max(
+        Number(priorOmissions.get(row.image_id)?.creative_generation_attempt ?? 0),
+        job ? 1 + Number(job.manual_requeues?.length ?? 0) : 0,
+      ),
+      error: failure.error instanceof Error ? failure.error.message : String(failure.error),
+    };
   });
 
   const repairedIds = new Set(plan.clips.map((row) => row.image_id));
@@ -456,17 +582,22 @@ async function main() {
     plan_contract_sha256: plan.plan_sha256,
     source_hashes: plan.source_hashes,
     requested_concurrency: concurrency,
+    queue_concurrency: {
+      submission: submissionConcurrency,
+      provider_wait: providerWaitConcurrency,
+      local_normalization: normalizationConcurrency,
+    },
     provider_image_inputs: ["first_frame"],
     candidate_policy: "one_candidate_per_motion_moment",
     automatic_generation_retries: 0,
-    creative_resubmission_count: priorReport ? plan.clips.length : 0,
+    creative_resubmission_count: creativeResubmissionCount,
     repair_history: [
       ...(priorReport?.repair_history ?? []),
       ...(priorReport ? [{ cut_ids: [...repairedIds], reason: repairReason, at: new Date().toISOString() }] : []),
     ],
     planned_count: cumulativeClips.length + cumulativeOmissions.length,
     attempted_count: plan.clips.length,
-    creative_submission_count: plan.clips.length,
+    creative_submission_count: creativeSubmissionCount,
     clip_count: cumulativeClips.length,
     generated_count: cumulativeClips.length,
     failed_count: 0,
@@ -478,6 +609,25 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
   await writeJson(reportPath, report);
+  let coherencePrefetch = null;
+  if (prefetchCoherenceCache && generated.length) {
+    const coherencePath = path.join(outputDir, `generated_motion_coherence_prefetch_${episode}.json`);
+    try {
+      const audit = await buildGeneratedMotionCoherenceAudit({
+        report,
+        reportPath,
+        outputPath: coherencePath,
+        framesRoot: path.join(outputDir, "coherence_frames"),
+        callsDir: path.join(outputDir, "coherence_calls"),
+        rowCacheDir: path.join(episodeDir, "assets", "motion", "generated", "coherence_row_cache"),
+        repoRoot,
+        concurrency: providerWaitConcurrency,
+      });
+      coherencePrefetch = { status: "passed", output_path: coherencePath, summary: audit.summary };
+    } catch (error) {
+      coherencePrefetch = { status: "unavailable", error: error instanceof Error ? error.message : String(error) };
+    }
+  }
   console.log(JSON.stringify({
     status: report.status,
     output_path: reportPath,
@@ -485,6 +635,7 @@ async function main() {
     generated_count: report.generated_count,
     omitted_count: report.omitted_count,
     still_fallback_count: report.omitted_count,
+    coherence_prefetch: coherencePrefetch,
   }, null, 2));
 }
 

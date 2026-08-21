@@ -55,6 +55,8 @@ export async function runNarrationVoiceContinuityQa({
   pythonPath = process.env.ANIFACTORY_TTS_SIMILARITY_PYTHON
     ?? DEFAULT_PYTHON,
   runnerPath = DEFAULT_RUNNER,
+  reuseReportPath = null,
+  reuseReportSha256 = null,
 } = {}) {
   const blockers = [];
   const warnings = [];
@@ -105,6 +107,19 @@ export async function runNarrationVoiceContinuityQa({
       actual: selectedReferences.length,
     });
   }
+  const selectedReferenceHashes = await Promise.all(
+    selectedReferences.map((referencePath) => (
+      sha256File(referencePath).catch(() => null)
+    )),
+  );
+  selectedReferenceHashes.forEach((audioSha256, index) => {
+    if (!audioSha256) {
+      blockers.push({
+        code: "narration_voice_reference_audio_missing_or_unreadable",
+        audio_path: selectedReferences[index],
+      });
+    }
+  });
   const candidateRows = [];
   for (const row of rows) {
     const audioPath = path.resolve(row.wav ?? row.audio_path ?? "");
@@ -136,33 +151,82 @@ export async function runNarrationVoiceContinuityQa({
   }
   await fs.mkdir(path.dirname(reportPath), { recursive: true });
   let executionError = null;
-  try {
-    await execFile(pythonPath, [
-      runnerPath,
-      "--model", profile.speaker_similarity_model_path,
-      ...selectedReferences.flatMap((referencePath) => [
-        "--reference",
-        referencePath,
-      ]),
-      ...candidateRows.flatMap((candidate) => [
-        "--candidate",
-        candidate.audio_path,
-      ]),
-      "--output", reportPath,
-      "--reference-voice-id", profile.reference_voice_id,
-      "--reference-voice-sha256", profile.reference_voice_sha256,
-      "--threshold-mode", "reference_leave_one_out",
-      "--calibration-hard-margin", "0.05",
-      "--calibration-warning-margin", "0",
-      "--calibration-aggregate-margin", "0.03",
-    ], { maxBuffer: 16 * 1024 * 1024 });
-  } catch (error) {
-    executionError = error instanceof Error ? error.message : String(error);
-    // The helper deliberately exits non-zero when a candidate falls below a
-    // calibrated floor, while still writing the complete evidence report.
+  let report = null;
+  let reportSha256 = null;
+  let reusedExactHashReport = false;
+  const reuseRejectionReasons = [];
+  if (reuseReportPath && reuseReportSha256) {
+    const reusePath = path.resolve(reuseReportPath);
+    const [candidateReport, candidateReportSha256] = await Promise.all([
+      readJson(reusePath, null),
+      sha256File(reusePath).catch(() => null),
+    ]);
+    const reportCandidateHashes = (candidateReport?.candidates ?? [])
+      .map((candidate) => String(candidate?.audio_sha256 ?? ""));
+    const expectedCandidateHashes = candidateRows.map((candidate) => candidate.audio_sha256);
+    const reportReferencePaths = (candidateReport?.references ?? [])
+      .map((reference) => path.resolve(reference?.audio_path ?? ""));
+    const reportReferenceHashes = (candidateReport?.references ?? [])
+      .map((reference) => String(reference?.audio_sha256 ?? ""));
+    if (candidateReportSha256 !== reuseReportSha256) {
+      reuseRejectionReasons.push("report_hash_mismatch");
+    }
+    if (JSON.stringify(reportCandidateHashes) !== JSON.stringify(expectedCandidateHashes)) {
+      reuseRejectionReasons.push("candidate_hash_set_or_order_mismatch");
+    }
+    if (JSON.stringify(reportReferencePaths) !== JSON.stringify(selectedReferences)) {
+      reuseRejectionReasons.push("reference_path_set_or_order_mismatch");
+    }
+    if (JSON.stringify(reportReferenceHashes)
+      !== JSON.stringify(selectedReferenceHashes)) {
+      reuseRejectionReasons.push("reference_hash_set_or_order_mismatch");
+    }
+    if (candidateReport?.schema !== "goldflow_tts_voice_continuity_qa_v1"
+      || candidateReport?.method !== profile.speaker_similarity_method
+      || candidateReport?.model_sha256 !== profile.speaker_similarity_model_sha256
+      || candidateReport?.reference_voice_id !== profile.reference_voice_id
+      || candidateReport?.reference_voice_sha256 !== profile.reference_voice_sha256
+      || candidateReport?.threshold_mode !== "reference_leave_one_out") {
+      reuseRejectionReasons.push("report_identity_mismatch");
+    }
+    if (!reuseRejectionReasons.length) {
+      if (reusePath !== path.resolve(reportPath)) {
+        await fs.copyFile(reusePath, reportPath);
+      }
+      report = candidateReport;
+      reportSha256 = candidateReportSha256;
+      reusedExactHashReport = true;
+    }
   }
-  const report = await readJson(reportPath, null);
-  const reportSha256 = report ? await sha256File(reportPath) : null;
+  if (!report) {
+    try {
+      await execFile(pythonPath, [
+        runnerPath,
+        "--model", profile.speaker_similarity_model_path,
+        ...selectedReferences.flatMap((referencePath) => [
+          "--reference",
+          referencePath,
+        ]),
+        ...candidateRows.flatMap((candidate) => [
+          "--candidate",
+          candidate.audio_path,
+        ]),
+        "--output", reportPath,
+        "--reference-voice-id", profile.reference_voice_id,
+        "--reference-voice-sha256", profile.reference_voice_sha256,
+        "--threshold-mode", "reference_leave_one_out",
+        "--calibration-hard-margin", "0.05",
+        "--calibration-warning-margin", "0",
+        "--calibration-aggregate-margin", "0.03",
+      ], { maxBuffer: 16 * 1024 * 1024 });
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : String(error);
+      // The helper deliberately exits non-zero when a candidate falls below a
+      // calibrated floor, while still writing the complete evidence report.
+    }
+    report = await readJson(reportPath, null);
+    reportSha256 = report ? await sha256File(reportPath) : null;
+  }
   const reportReferences = report?.references ?? [];
   const reportCandidates = report?.candidates ?? [];
   const identityValid = Boolean(
@@ -174,6 +238,10 @@ export async function runNarrationVoiceContinuityQa({
       && report.reference_voice_id === profile.reference_voice_id
       && report.reference_voice_sha256 === profile.reference_voice_sha256
       && reportReferences.length === selectedReferences.length
+      && reportReferences.every((reference, index) => (
+        path.resolve(reference?.audio_path ?? "") === selectedReferences[index]
+          && reference?.audio_sha256 === selectedReferenceHashes[index]
+      ))
       && reportCandidates.length === candidateRows.length
       && Number.isFinite(Number(report.minimum_cosine_similarity))
       && Number.isFinite(Number(report.warning_below_cosine_similarity))
@@ -283,5 +351,7 @@ export async function runNarrationVoiceContinuityQa({
     warnings,
     units,
     report,
+    reused_exact_hash_report: reusedExactHashReport,
+    reuse_rejection_reasons: reuseRejectionReasons,
   };
 }

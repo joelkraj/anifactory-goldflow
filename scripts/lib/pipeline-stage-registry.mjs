@@ -603,6 +603,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     { visualPromptWavefront: true },
   );
   const media = productionProfile.media;
+  const orchestration = productionProfile.orchestration ?? {};
   const chatGptWebImages = provider === "chatgpt_web_gpt_image";
   const explicitChatGptImageConcurrency = Number(media.chatgpt_web_image_concurrency) > 0
     ? media.chatgpt_web_image_concurrency
@@ -678,7 +679,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     image_focal_analysis: `node bin/goldflow.mjs imagegen analyze ${base} --concurrency ${media.focal_analysis_concurrency}`,
     image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium`,
     animation_direction_plan: `node bin/goldflow.mjs visual animation-plan ${base}`,
-    generated_video_motion: `node bin/goldflow.mjs visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}`,
+    generated_video_motion: `node bin/goldflow.mjs visual generated-motion ${base} --concurrency ${media.generated_motion_concurrency ?? 3}${(orchestration.generated_motion_coherence_prefetch ?? orchestration.incremental_generated_motion_prefetch) === true ? " --prefetch-coherence-cache true" : ""}`,
     generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --reviewer <name> --note "<clip review notes>" --approve-ids <ids> --reject-ids <ids>`,
     parallax_asset_generation: `node bin/goldflow.mjs visual parallax-assets ${base}`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --reviewer <name> --note "<mask and layer review notes>" --approve-ids <ids> --decline-ids <ids>`,

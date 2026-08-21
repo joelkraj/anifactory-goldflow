@@ -26,6 +26,14 @@ import {
   agentDirectorStatus,
 } from "../lib/agent-director-contract.mjs";
 import {
+  DIRECTOR_WATCH_SCHEMA,
+  directorWatchDecision,
+  directorWatchDispatchKey,
+  directorWatchRestartState,
+  directorWatchSignature,
+  executionEventsCursorFromText,
+} from "../lib/director-watch-policy.mjs";
+import {
   GENERATED_MOTION_PROVIDER_FLOW,
   generatedMotionIdentityContract,
   requiredGeneratedMotionCoverageFindings,
@@ -37,6 +45,7 @@ import {
 } from "../lib/planner-provider-registry.mjs";
 import {
   acquireFederatedPlannerSlot,
+  effectivePlannerConcurrencyForTests,
   federatedPlannerPoolSnapshotForTests,
   resetFederatedPlannerPoolForTests,
 } from "../lib/planner-capacity-pool.mjs";
@@ -205,6 +214,263 @@ const proofApprovedDirector = agentDirectorStatus({
   stage_ledger: motionStageLedger,
 }, { approvals: { opening_audiovisual_proof: { approved: true } } });
 assert.deepEqual(proofApprovedDirector.checkpoint_hold, []);
+const watchStatus = {
+  episode_dir: "/episode",
+  identity: { episode: "ep_01" },
+  current_stage: "semantic_scene_plan",
+  current_stage_state: "missing",
+  next_command_shape: "node bin/goldflow.mjs semantic plan --episode-dir /episode",
+  stage_ledger: [{ stage: "semantic_scene_plan", state: "missing" }],
+};
+const emptyExecutionCursor = executionEventsCursorFromText("");
+const watchSignature = directorWatchSignature(watchStatus, { approvals: {} }, emptyExecutionCursor);
+const watchDispatchKey = directorWatchDispatchKey(watchStatus);
+assert.equal(watchSignature, directorWatchSignature(watchStatus, { approvals: {} }, emptyExecutionCursor));
+const startedExecutionLine = `${JSON.stringify({
+  schema: "goldflow_execution_event_v1",
+  event_type: "stage_started",
+  execution_id: "execution-semantic-1",
+  stage: "semantic_scene_plan",
+})}\n`;
+const openExecutionCursor = executionEventsCursorFromText(startedExecutionLine);
+assert.notEqual(
+  watchSignature,
+  directorWatchSignature(watchStatus, { approvals: {} }, openExecutionCursor),
+  "execution-event advancement must participate in the watcher state signature",
+);
+assert.equal(
+  watchDispatchKey,
+  directorWatchDispatchKey(watchStatus),
+  "an unchanged stage must keep one dispatch key",
+);
+assert.equal(
+  watchDispatchKey,
+  directorWatchDispatchKey({ ...watchStatus }),
+  "observation-only changes must not authorize another dispatch",
+);
+assert.deepEqual(openExecutionCursor.open_execution_ids, ["execution-semantic-1"]);
+const completedExecutionCursor = executionEventsCursorFromText(`${startedExecutionLine}${JSON.stringify({
+  schema: "goldflow_execution_event_v1",
+  event_type: "stage_completed",
+  execution_id: "execution-semantic-1",
+  stage: "semantic_scene_plan",
+  status: "passed",
+})}\n`);
+assert.deepEqual(completedExecutionCursor.open_execution_ids, []);
+assert.deepEqual(directorWatchDecision({
+  runStatus: watchStatus,
+  director: { checkpoint_hold: [] },
+  profile: { advance: { agent_validated_stages: ["visual_beat_plan"] } },
+  signature: watchSignature,
+}), { action: "advance", reason: "automatic_stage_ready" });
+assert.deepEqual(directorWatchDecision({
+  runStatus: watchStatus,
+  director: { checkpoint_hold: [] },
+  signature: watchSignature,
+  lastActionedSignature: watchSignature,
+  dispatchKey: watchDispatchKey,
+  lastActionedDispatchKey: watchDispatchKey,
+}), { action: "wait", reason: "awaiting_state_change" });
+assert.deepEqual(directorWatchDecision({
+  runStatus: { ...watchStatus, current_stage: "script_approval" },
+  director: { checkpoint_hold: [] },
+}), { action: "wait", reason: "operator_stage_approval_required" });
+assert.deepEqual(directorWatchDecision({
+  runStatus: { ...watchStatus, current_stage_state: "blocked" },
+  director: { checkpoint_hold: [] },
+}), { action: "stop", reason: "blocker_triage_required" });
+assert.deepEqual(directorWatchDecision({
+  runStatus: watchStatus,
+  director: { checkpoint_hold: ["reference_plan_review"] },
+}), { action: "wait", reason: "operator_checkpoint_required" });
+
+const persistedWatchState = {
+  schema: DIRECTOR_WATCH_SCHEMA,
+  status: "watching",
+  episode_dir: "/episode",
+  episode: "ep_01",
+  current_stage: watchStatus.current_stage,
+  state_signature: watchSignature,
+  dispatch_key: watchDispatchKey,
+  last_actioned_signature: watchSignature,
+  last_actioned_dispatch_key: watchDispatchKey,
+  execution_events_cursor: emptyExecutionCursor,
+  execution_events_cursor_sha256: emptyExecutionCursor.sha256,
+  in_flight_advance: null,
+  last_progress_at: "2026-08-21T12:00:00.000Z",
+};
+assert.deepEqual(directorWatchRestartState({
+  state: persistedWatchState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+}), {
+  state_present: true,
+  state_valid: true,
+  preserve_last_actioned_signature: true,
+  last_actioned_signature: watchSignature,
+  preserve_last_actioned_dispatch_key: true,
+  last_actioned_dispatch_key: watchDispatchKey,
+  hold: false,
+  hold_reason: null,
+  in_flight_advance: null,
+  validation: {
+    schema_matches: true,
+    episode_dir_matches: true,
+    episode_matches: true,
+    signature_matches: true,
+    dispatch_key_matches: true,
+    execution_cursor_matches: true,
+    stage_matches: true,
+  },
+});
+
+const crashWindowState = {
+  ...persistedWatchState,
+  status: "advancing",
+  in_flight_advance: {
+    active: true,
+    phase: "spawn_pending",
+    stage: watchStatus.current_stage,
+    state_signature: watchSignature,
+    execution_events_cursor: emptyExecutionCursor,
+    child_pid: null,
+  },
+};
+const crashWindowRestart = directorWatchRestartState({
+  state: crashWindowState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+});
+assert.equal(crashWindowRestart.hold, true);
+assert.equal(crashWindowRestart.hold_reason, "restart_inflight_spawn_window_ambiguous");
+assert.equal(crashWindowRestart.last_actioned_signature, null);
+
+const stalePidState = {
+  ...crashWindowState,
+  in_flight_advance: {
+    ...crashWindowState.in_flight_advance,
+    phase: "running",
+    child_pid: 424242,
+  },
+};
+const stalePidRestart = directorWatchRestartState({
+  state: stalePidState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+  isProcessAlive: () => false,
+});
+assert.equal(stalePidRestart.hold, true);
+assert.equal(stalePidRestart.hold_reason, "restart_inflight_stale_pid_stage_unchanged");
+assert.equal(stalePidRestart.child_pid, 424242);
+
+const liveChildRestart = directorWatchRestartState({
+  state: stalePidState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+  isProcessAlive: (pid) => pid === 424242,
+});
+assert.equal(liveChildRestart.hold, true);
+assert.equal(liveChildRestart.hold_reason, "restart_inflight_child_active");
+
+const openExecutionRestart = directorWatchRestartState({
+  state: stalePidState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: openExecutionCursor,
+  signature: directorWatchSignature(watchStatus, { approvals: {} }, openExecutionCursor),
+  isProcessAlive: () => false,
+});
+assert.equal(openExecutionRestart.hold, true);
+assert.equal(openExecutionRestart.hold_reason, "restart_inflight_execution_open");
+assert.deepEqual(openExecutionRestart.open_execution_ids, ["execution-semantic-1"]);
+const externalOpenExecutionRestart = directorWatchRestartState({
+  state: persistedWatchState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: openExecutionCursor,
+  signature: directorWatchSignature(watchStatus, { approvals: {} }, openExecutionCursor),
+});
+assert.equal(externalOpenExecutionRestart.hold, true);
+assert.equal(externalOpenExecutionRestart.hold_reason, "restart_inflight_execution_open");
+
+const advancedWatchStatus = {
+  ...watchStatus,
+  current_stage: "voice_plan",
+  next_command_shape: "node bin/goldflow.mjs voice plan --episode-dir /episode",
+  stage_ledger: [
+    { stage: "semantic_scene_plan", state: "passed" },
+    { stage: "voice_plan", state: "missing" },
+  ],
+};
+const advancedWatchSignature = directorWatchSignature(advancedWatchStatus, { approvals: {} }, completedExecutionCursor);
+const completedChildRestart = directorWatchRestartState({
+  state: stalePidState,
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: advancedWatchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: completedExecutionCursor,
+  signature: advancedWatchSignature,
+  isProcessAlive: () => false,
+});
+assert.equal(completedChildRestart.hold, false);
+assert.equal(completedChildRestart.preserve_last_actioned_signature, false);
+assert.equal(completedChildRestart.last_actioned_signature, null);
+
+const wrongEpisodeRestart = directorWatchRestartState({
+  state: { ...persistedWatchState, episode: "ep_02" },
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+});
+assert.equal(wrongEpisodeRestart.hold, true);
+assert.equal(wrongEpisodeRestart.hold_reason, "restart_state_binding_unverifiable");
+const legacyUnverifiableRestart = directorWatchRestartState({
+  state: { ...persistedWatchState, schema: "goldflow_agent_director_watch_v1", episode: undefined },
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+});
+assert.equal(legacyUnverifiableRestart.hold, true);
+assert.equal(legacyUnverifiableRestart.hold_reason, "restart_state_binding_unverifiable");
+const unreadableRestart = directorWatchRestartState({
+  stateReadError: new Error("Unexpected token at byte 17"),
+  episodeDir: "/episode",
+  episode: "ep_01",
+  runStatus: watchStatus,
+  checkpoints: { approvals: {} },
+  executionEventsCursor: emptyExecutionCursor,
+  signature: watchSignature,
+});
+assert.equal(unreadableRestart.hold, true);
+assert.equal(unreadableRestart.hold_reason, "restart_state_unreadable");
+assert.equal(unreadableRestart.validation_error, "Unexpected token at byte 17");
 
 const motion = generatedMotionIdentityContract({
   animation_policy: "selective_generated_video",
@@ -232,20 +498,46 @@ assert.deepEqual(room.stage_routes.global_reasoning, ["codex_cli"]);
 assert.deepEqual(room.stage_routes.premium_creative, ["chatgpt_web", "codex_cli"]);
 
 const federatedIdentity = {
+  schema: "goldflow_run_identity_v2",
+  channel: "planner-pool-fixture",
+  series_slug: "scope-isolation",
+  week: "2026-W34-a",
+  episode: "ep_01",
   planning_provider: PLANNING_ROOM_PROVIDER,
   production_profile_config: {
     planner: {
       federated_structured_pool: true,
-      codex_cli_structured_concurrency: 8,
+      codex_cli_structured_concurrency: 12,
+      codex_cli_structured_initial_concurrency: 8,
+      codex_cli_structured_ramp_successes_per_step: 4,
+      codex_cli_structured_ramp_step: 2,
       antigravity_cli_structured_concurrency: 0,
     },
   },
 };
 federatedIdentity.planning_room = planningRoomContract(federatedIdentity);
 assert.equal(federatedIdentity.planning_room.schema, FEDERATED_PLANNING_ROOM_SCHEMA);
-const plannerSlots = await Promise.all(Array.from({ length: 8 }, () => acquireFederatedPlannerSlot({
+assert.equal(effectivePlannerConcurrencyForTests({
+  concurrency: 12,
+  initial_concurrency: 8,
+  ramp_successes_per_step: 4,
+  ramp_step: 2,
+}, { successful_completions: 0 }), 8);
+assert.equal(effectivePlannerConcurrencyForTests({
+  concurrency: 12,
+  initial_concurrency: 8,
+  ramp_successes_per_step: 4,
+  ramp_step: 2,
+}, { successful_completions: 4 }), 10);
+assert.equal(effectivePlannerConcurrencyForTests({
+  concurrency: 12,
+  initial_concurrency: 8,
+  ramp_successes_per_step: 4,
+  ramp_step: 2,
+}, { successful_completions: 8 }), 12);
+const plannerSlots = await Promise.all(Array.from({ length: 8 }, (_, index) => acquireFederatedPlannerSlot({
   identity: federatedIdentity,
-  stageName: "ep_01_visual_prompt_chunk",
+  stageName: `ep_01_semantic_scene_plan_chunk_${String(index + 1).padStart(3, "0")}`,
   env: {
     ...process.env,
     ANIFACTORY_CODEX_CLI_PATH: process.execPath,
@@ -256,11 +548,72 @@ assert.deepEqual(
   plannerSlots.reduce((counts, slot) => ({ ...counts, [slot.provider]: (counts[slot.provider] ?? 0) + 1 }), {}),
   { codex_cli: 8 },
 );
+assert.ok(plannerSlots.every((slot) => slot.planner_stage_key === "semantic_scene_plan"));
+assert.equal(new Set(plannerSlots.map((slot) => slot.pool_scope_key)).size, 1);
 assert.deepEqual(federatedPlannerPoolSnapshotForTests().active, { codex_cli: 8 });
-for (const slot of plannerSlots) slot.release();
+for (const slot of plannerSlots.slice(0, 4)) {
+  slot.recordSuccess();
+  slot.release();
+}
+const rampedSlots = await Promise.all(Array.from({ length: 6 }, (_, index) => acquireFederatedPlannerSlot({
+  identity: federatedIdentity,
+  stageName: `ep_01_semantic_scene_plan_chunk_${String(index + 9).padStart(3, "0")}`,
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+})));
+assert.equal(federatedPlannerPoolSnapshotForTests().active.codex_cli, 10);
+for (const slot of plannerSlots.slice(4)) {
+  slot.recordSuccess();
+  slot.release();
+}
+for (const slot of rampedSlots) slot.release();
+const semanticScopeKey = plannerSlots[0].pool_scope_key;
+assert.equal(federatedPlannerPoolSnapshotForTests().health[semanticScopeKey].successful_completions, 8);
+
+const beatSlots = await Promise.all(Array.from({ length: 8 }, (_, index) => acquireFederatedPlannerSlot({
+  identity: federatedIdentity,
+  stageName: `ep_01_editorial_beats_${String(index + 1).padStart(3, "0")}_attempt_1`,
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+})));
+assert.ok(beatSlots.every((slot) => slot.planner_stage_key === "visual_beat_plan"));
+assert.equal(new Set(beatSlots.map((slot) => slot.pool_scope_key)).size, 1);
+assert.notEqual(beatSlots[0].pool_scope_key, semanticScopeKey);
+assert.equal(federatedPlannerPoolSnapshotForTests().health[beatSlots[0].pool_scope_key], undefined);
+let ninthBeatSlot = null;
+const ninthBeatPromise = acquireFederatedPlannerSlot({
+  identity: federatedIdentity,
+  stageName: "ep_01_editorial_beats_009_attempt_1",
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+}).then((slot) => {
+  ninthBeatSlot = slot;
+  return slot;
+});
+await new Promise((resolve) => setTimeout(resolve, 5));
+assert.equal(ninthBeatSlot, null, "semantic successes must not raise the visual-beat initial ceiling");
+beatSlots[0].release();
+await ninthBeatPromise;
+assert.ok(ninthBeatSlot);
+ninthBeatSlot.release();
+for (const slot of beatSlots.slice(1)) slot.release();
 resetFederatedPlannerPoolForTests();
 
 const legacyFederatedIdentity = {
+  schema: "goldflow_run_identity_v2",
+  channel: "planner-pool-fixture",
+  series_slug: "circuit-isolation",
+  week: "2026-W34-a",
+  episode: "ep_01",
   planning_provider: PLANNING_ROOM_PROVIDER,
   production_profile_config: {
     planner: {
@@ -275,9 +628,9 @@ const legacyFederatedIdentity = {
   },
 };
 legacyFederatedIdentity.planning_room = planningRoomContract(legacyFederatedIdentity);
-const circuitProbeSlots = await Promise.all(Array.from({ length: 11 }, () => acquireFederatedPlannerSlot({
+const circuitProbeSlots = await Promise.all(Array.from({ length: 11 }, (_, index) => acquireFederatedPlannerSlot({
   identity: legacyFederatedIdentity,
-  stageName: "ep_01_visual_prompt_chunk",
+  stageName: `ep_01_semantic_scene_plan_chunk_${String(index + 1).padStart(3, "0")}`,
   env: {
     ...process.env,
     ANIFACTORY_CODEX_CLI_PATH: process.execPath,
@@ -288,10 +641,10 @@ const failedAntigravitySlot = circuitProbeSlots.find((slot) => slot.provider ===
 assert.ok(failedAntigravitySlot);
 failedAntigravitySlot.recordFailure(new Error("Authentication required. Authentication timed out."));
 for (const slot of circuitProbeSlots) slot.release();
-assert.equal(federatedPlannerPoolSnapshotForTests().health.antigravity_cli.open, true);
+assert.equal(federatedPlannerPoolSnapshotForTests().health[failedAntigravitySlot.pool_scope_key].open, true);
 const postCircuitSlots = await Promise.all(Array.from({ length: 8 }, () => acquireFederatedPlannerSlot({
   identity: legacyFederatedIdentity,
-  stageName: "ep_01_visual_prompt_chunk",
+  stageName: "ep_01_semantic_scene_plan_chunk_012",
   env: {
     ...process.env,
     ANIFACTORY_CODEX_CLI_PATH: process.execPath,
@@ -300,6 +653,34 @@ const postCircuitSlots = await Promise.all(Array.from({ length: 8 }, () => acqui
 })));
 assert.ok(postCircuitSlots.every((slot) => slot.provider === "codex_cli"));
 for (const slot of postCircuitSlots) slot.release();
+
+const crossStageSlots = await Promise.all(Array.from({ length: 11 }, (_, index) => acquireFederatedPlannerSlot({
+  identity: legacyFederatedIdentity,
+  stageName: `ep_01_visual_reference_plan_chunk_${String(index + 1).padStart(2, "0")}`,
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+})));
+assert.ok(crossStageSlots.some((slot) => slot.provider === "antigravity_cli"), "semantic circuit must not leak into reference planning");
+assert.ok(crossStageSlots.every((slot) => slot.planner_stage_key === "visual_reference_plan"));
+for (const slot of crossStageSlots) slot.release();
+
+const secondRunIdentity = structuredClone(legacyFederatedIdentity);
+secondRunIdentity.week = "2026-W34-b";
+const crossIdentitySlots = await Promise.all(Array.from({ length: 11 }, (_, index) => acquireFederatedPlannerSlot({
+  identity: secondRunIdentity,
+  stageName: `ep_01_semantic_scene_plan_chunk_${String(index + 1).padStart(3, "0")}`,
+  env: {
+    ...process.env,
+    ANIFACTORY_CODEX_CLI_PATH: process.execPath,
+    ANIFACTORY_ANTIGRAVITY_CLI_PATH: process.execPath,
+  },
+})));
+assert.ok(crossIdentitySlots.some((slot) => slot.provider === "antigravity_cli"), "semantic circuit must not leak into another run identity");
+assert.notEqual(crossIdentitySlots[0].run_identity_key, circuitProbeSlots[0].run_identity_key);
+for (const slot of crossIdentitySlots) slot.release();
 resetFederatedPlannerPoolForTests();
 
 console.log("production direction contract tests passed");

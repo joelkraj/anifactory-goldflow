@@ -117,7 +117,7 @@ node bin/goldflow.mjs imagegen codex-work \
   --lease-sec 1800
 ```
 
-Activate the resulting `work_manifest.json` in the dashboard. The worker receives no arbitrary local path. References are served through authenticated localhost URLs and rechecked against their source hashes. New fast-premium runs dispatch each asset once across Flow (five), Gemini (three), and idle ChatGPT image capacity (three); style references use Gemini first, and ChatGPT image slots remain planning-first. Downloaded stills are decoded by Sharp, normalized to PNG, validated as 16:9, and completed through `completeWorkItem`. Flow video jobs use the separate durable media ledger, exactly one first-frame reference, output-hash validation, and normalized silent 1920x1080 clips.
+Activate the resulting `work_manifest.json` in the dashboard. The worker receives no arbitrary local path. References are served through authenticated localhost URLs and rechecked against their source hashes. New fast-premium bulk runs dispatch each asset once across five Flow projects plus three Gemini tabs; style references use Gemini first, and ChatGPT Image is reserved for an operator-approved exact-ID fallback or deliberate comparison. Downloaded stills are decoded by Sharp, normalized to PNG, validated as 16:9, and completed through `completeWorkItem`. Flow video jobs use the separate durable media ledger, exactly one first-frame reference, output-hash validation, and normalized silent 1920x1080 clips.
 
 ## Recovery Policy
 

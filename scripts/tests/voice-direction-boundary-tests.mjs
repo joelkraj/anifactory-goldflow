@@ -26,6 +26,7 @@ import {
 } from "../narration-tts-episode.mjs";
 import {
   NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+  NARRATION_PERFORMANCE_TARGET_ATOMS,
   authorNarrationPerformanceDirection,
   narrationPerformancePacketPlanForTests,
 } from "../lib/narration-performance-author.mjs";
@@ -284,6 +285,27 @@ assert.deepEqual(
   multibytePerformanceUnits.map((unit) => narrationSourceRefKey(unit.source_unit_refs[0])),
 );
 assert.equal(NARRATION_PERFORMANCE_SAFE_MAX_BYTES, 48_000);
+assert.equal(NARRATION_PERFORMANCE_TARGET_ATOMS, 96);
+const defaultSizedPerformanceUnits = Array.from({ length: 190 }, (_, index) => ({
+  segment_id: "voice_seg_default_packet",
+  source_unit_refs: [{
+    segment_id: "voice_seg_default_packet",
+    unit_index: index + 1,
+  }],
+  kind: "narration",
+  source_speaker: "NARRATOR",
+  spoken_text: `Exact compact packet sentence ${index + 1}.`,
+}));
+const defaultSizedPackets = narrationPerformancePacketPlanForTests(
+  defaultSizedPerformanceUnits,
+);
+assert.deepEqual(
+  defaultSizedPackets.map((packet) => packet.chunk.length),
+  [96, 94],
+);
+assert.ok(defaultSizedPackets.every(
+  (packet) => packet.prompt_bytes <= NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+));
 assert.throws(() => narrationPerformancePacketPlanForTests([{
   segment_id: "voice_seg_oversized",
   source_segment_ids: ["voice_seg_oversized"],

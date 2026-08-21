@@ -367,6 +367,10 @@ async function structuralAudit(promptPlan, imagegenReport, focalAnalysis = null,
   return { rows, findings };
 }
 
+export async function structuralAuditForTests(promptPlan, imagegenReport, focalAnalysis = null, semanticAudit = null) {
+  return structuralAudit(promptPlan, imagegenReport, focalAnalysis, semanticAudit);
+}
+
 async function writeReviewPackets(rows) {
   await fs.mkdir(reviewDir, { recursive: true });
   const allSheets = [];

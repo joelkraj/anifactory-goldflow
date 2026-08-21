@@ -2,10 +2,15 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { runCodexCli } from "./codex-cli-runner.mjs";
+import {
+  configuredCodexModel,
+  configuredCodexReasoningEffort,
+  runCodexCli,
+} from "./codex-cli-runner.mjs";
 
 export const IMAGE_SEMANTIC_AUDIT_SCHEMA = "goldflow_image_semantic_audit_v1";
 export const IMAGE_SEMANTIC_AUDIT_ROW_SCHEMA = "goldflow_image_semantic_audit_row_v1";
+export const IMAGE_SEMANTIC_AUDIT_VERSION = "2026-08-21.2";
 
 const VALID_VERDICTS = new Set(["pass", "fail", "uncertain", "not_applicable"]);
 
@@ -65,21 +70,50 @@ function qualityTier(prompt) {
   return cleanText(prompt?.quality_budget?.tier ?? prompt?.beat_value?.tier ?? prompt?.beat_value?.value_tier).toLowerCase();
 }
 
+function rows(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function identityCritical(prompt) {
+  const manifest = prompt?.shot_manifest ?? {};
+  const visibleCharacters = rows(manifest.visible_characters ?? prompt?.visible_characters).map(cleanText).filter(Boolean);
+  const referenceSlots = rows(manifest.reference_slots ?? prompt?.reference_requirements);
+  const identitySlots = referenceSlots.filter((slot) => {
+    const kind = cleanText(slot?.kind ?? slot?.conditioning_asset_role ?? slot?.identity_subtype).toLowerCase();
+    const priority = cleanText(slot?.reference_priority).toLowerCase();
+    return /character|identity|creature|construct|faction/.test(kind)
+      || /decisive_subject|contact_counterpart|readable_identity/.test(priority);
+  });
+  const explicitCritical = manifest.identity_critical === true
+    || prompt?.identity_critical === true
+    || prompt?.quality_budget?.identity_critical === true;
+  const denseNamedCast = visibleCharacters.length >= 3;
+  const deltaKind = cleanText(prompt?.visual_information_delta?.kind).toLowerCase();
+  const sequenceRole = cleanText(prompt?.sequence_grammar?.sequence_role).toLowerCase();
+  const decisiveRelationshipReveal = visibleCharacters.length >= 2
+    && identitySlots.length >= 2
+    && new Set(["new_character_state", "new_relationship_evidence"]).has(deltaKind)
+    && /reveal|prove|resolve/.test(sequenceRole);
+  const anatomyText = rows(manifest.anatomy_contracts).map((entry) => (
+    typeof entry === "string" ? entry : JSON.stringify(entry)
+  )).join(" ");
+  const materialIdentityState = deltaKind === "new_character_state"
+    && /amput|missing limb|prosthe|injur|wound|scar|transform|disguis|mask|helmet|uniform|age|form/i.test(anatomyText);
+  return explicitCritical || denseNamedCast || decisiveRelationshipReveal || materialIdentityState;
+}
+
 function semanticRiskReasons(prompt, { openingSec = 120, ordinarySampleRate = 0.05 } = {}) {
   const manifest = prompt?.shot_manifest ?? {};
   const reasons = [];
   const tier = qualityTier(prompt);
   if (tier === "hero" || Number(prompt?.quality_budget?.image_candidate_count ?? 1) > 1) reasons.push("hero_beat");
-  if (tier === "priority") reasons.push("priority_beat");
-  if (Number(prompt?.start_sec ?? Infinity) < openingSec) reasons.push("opening");
-  const action = `${manifest.shot_job ?? ""} ${manifest.foreground_action ?? ""}`;
-  if (/physical_action|contact|handoff|catch|block|strike|stab|shield|lift|carry|grab|pin|restrain/i.test(action)) reasons.push("action_contact_geometry");
-  if ((manifest.anatomy_contracts ?? []).length) reasons.push("body_state");
-  if ((manifest.equipment_contracts ?? []).length) reasons.push("equipment_geometry");
-  if (visibleCount(prompt) >= 3) reasons.push("multi_subject_staging");
-  if ((manifest.reference_slots ?? prompt?.reference_requirements ?? []).length >= 4) reasons.push("four_reference_integration");
-  if ((manifest.ui_elements ?? []).length) reasons.push("ui_hierarchy");
-  if (manifest.location_contract_id || manifest.location_ref_id) reasons.push("location_continuity");
+  const shotClass = cleanText(manifest.shot_job);
+  const foregroundAction = cleanText(manifest.foreground_action);
+  if (/physical_contact|contact_action/i.test(shotClass)
+    || /contact\b|handoff|catch|block|strike|stab|lift|carry|grab|pin|restrain|collid|clash|impact|grapple|shove|push|pull/i.test(foregroundAction)) {
+    reasons.push("action_contact_geometry");
+  }
+  if (identityCritical(prompt)) reasons.push("identity_critical");
   if (!reasons.length && deterministicSampleSelected(prompt?.image_id, ordinarySampleRate)) reasons.push("deterministic_ordinary_sample");
   return [...new Set(reasons)];
 }
@@ -124,6 +158,37 @@ function compactContract(prompt) {
       forbidden_ref_ids: manifest.forbidden_ref_ids ?? [],
     },
   };
+}
+
+function safeFileSegment(value) {
+  const normalized = cleanText(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || "image";
+}
+
+function auditCacheIdentity({ provider, model, reasoningEffort }) {
+  return {
+    audit_version: IMAGE_SEMANTIC_AUDIT_VERSION,
+    provider,
+    model,
+    reasoning_effort: reasoningEffort,
+  };
+}
+
+function auditRowCacheKey({ imageSha256, contractSha256, cacheIdentity }) {
+  return sha256(JSON.stringify({
+    image_sha256: imageSha256,
+    compact_contract_sha256: contractSha256,
+    ...cacheIdentity,
+  }));
+}
+
+function reusableCachedRow(row, { imageSha256, contractSha256, cacheIdentity, cacheKey }) {
+  return row?.schema === IMAGE_SEMANTIC_AUDIT_ROW_SCHEMA
+    && row?.status === "audited"
+    && row?.image_sha256 === imageSha256
+    && row?.contract_sha256 === contractSha256
+    && row?.audit_cache_key === cacheKey
+    && JSON.stringify(row?.audit_cache_identity ?? null) === JSON.stringify(cacheIdentity);
 }
 
 function auditPrompt(prompt) {
@@ -178,7 +243,7 @@ function normalizeAuditResponse(prompt, response) {
   };
 }
 
-async function defaultAuditExecutor({ prompt, imagePath, outputPath, repoRoot, model, reasoningEffort, timeoutMs }) {
+async function defaultAuditExecutor({ prompt, imagePath, outputPath, repoRoot, provider, model, reasoningEffort, timeoutMs }) {
   const result = await runCodexCli({
     prompt: auditPrompt(prompt),
     stageName: "image_semantic_audit",
@@ -188,7 +253,7 @@ async function defaultAuditExecutor({ prompt, imagePath, outputPath, repoRoot, m
     reasoningEffort,
     verbosity: "low",
     timeoutMs,
-    provider: "codex_cli",
+    provider,
     extraArgs: ["--sandbox", "read-only", "--image", imagePath],
   });
   return parseModelJson(result.content);
@@ -226,6 +291,7 @@ export async function buildImageSemanticAudit({
   ordinarySampleRate = 0.05,
   model = null,
   reasoningEffort = "medium",
+  auditProvider = "codex_cli",
   timeoutMs = 600_000,
   auditExecutor = defaultAuditExecutor,
   generatedAt = new Date(),
@@ -235,10 +301,29 @@ export async function buildImageSemanticAudit({
   }
   const promptPlanSha256 = promptPlanPath ? await fileHash(promptPlanPath) : sha256(JSON.stringify(promptPlan));
   const imagegenReportSha256 = imagegenReportPath ? await fileHash(imagegenReportPath) : sha256(JSON.stringify(imagegenReport));
+  const resolvedProvider = cleanText(auditProvider) || "codex_cli";
+  const resolvedModel = configuredCodexModel(model);
+  const resolvedReasoningEffort = configuredCodexReasoningEffort(
+    reasoningEffort,
+    "image_semantic_audit",
+    resolvedProvider,
+  );
+  const cacheIdentity = auditCacheIdentity({
+    provider: resolvedProvider,
+    model: resolvedModel,
+    reasoningEffort: resolvedReasoningEffort,
+  });
+  const selectionIdentity = {
+    audit_version: IMAGE_SEMANTIC_AUDIT_VERSION,
+    opening_sec: openingSec,
+    ordinary_sample_rate: ordinarySampleRate,
+  };
   const prior = outputPath ? await readJson(outputPath, null) : null;
   if (prior?.status === "passed"
     && prior.prompt_plan_sha256 === promptPlanSha256
-    && prior.imagegen_report_sha256 === imagegenReportSha256) return { ...prior, reused: true };
+    && prior.imagegen_report_sha256 === imagegenReportSha256
+    && JSON.stringify(prior.audit_cache_identity ?? null) === JSON.stringify(cacheIdentity)
+    && JSON.stringify(prior.selection_identity ?? null) === JSON.stringify(selectionIdentity)) return { ...prior, reused: true };
   const resultById = new Map(imagegenReport.results.map((row) => [cleanText(row?.image_id), row]));
   const targets = promptPlan.prompts.filter((prompt) => {
     if (prompt?.image_generation_required === false) return false;
@@ -252,7 +337,12 @@ export async function buildImageSemanticAudit({
     };
   });
   const resolvedCallsDir = path.resolve(callsDir ?? path.join(path.dirname(outputPath), "reports", "image_semantic_audit_calls"));
-  await fs.mkdir(resolvedCallsDir, { recursive: true });
+  const rowCacheDir = path.join(resolvedCallsDir, "row-cache");
+  const rawCallsDir = path.join(resolvedCallsDir, "raw");
+  await Promise.all([
+    fs.mkdir(rowCacheDir, { recursive: true }),
+    fs.mkdir(rawCallsDir, { recursive: true }),
+  ]);
   const rows = await runPool(targets, concurrency, async (target) => {
     const imageId = cleanText(target.prompt.image_id);
     if (!target.image_path || !await fs.stat(target.image_path).then((stat) => stat.isFile()).catch(() => false)) {
@@ -270,34 +360,48 @@ export async function buildImageSemanticAudit({
     }
     const imageSha256 = await fileHash(target.image_path);
     const contractSha256 = sha256(JSON.stringify(compactContract(target.prompt)));
+    const cacheKey = auditRowCacheKey({ imageSha256, contractSha256, cacheIdentity });
+    const rowCachePath = path.join(rowCacheDir, `${safeFileSegment(imageId)}-${cacheKey}.json`);
+    const cachedRow = await readJson(rowCachePath, null);
+    if (reusableCachedRow(cachedRow, { imageSha256, contractSha256, cacheIdentity, cacheKey })) {
+      return { ...cachedRow, selection_reasons: target.selection_reasons, reused: true, row_cache_path: rowCachePath };
+    }
     const priorRow = prior?.rows?.find((row) => row.image_id === imageId
-      && row.image_sha256 === imageSha256
-      && row.contract_sha256 === contractSha256
-      && row.status === "audited");
-    if (priorRow) return { ...priorRow, reused: true };
-    const callOutputPath = path.join(resolvedCallsDir, `${imageId}-${imageSha256.slice(0, 12)}.json`);
+      && reusableCachedRow(row, { imageSha256, contractSha256, cacheIdentity, cacheKey }));
+    if (priorRow) {
+      const reusable = { ...priorRow, selection_reasons: target.selection_reasons, reused: true, row_cache_path: rowCachePath };
+      await writeJsonAtomic(rowCachePath, reusable);
+      return reusable;
+    }
+    const callOutputPath = path.join(rawCallsDir, `${safeFileSegment(imageId)}-${cacheKey}.json`);
     try {
       const response = await auditExecutor({
         prompt: target.prompt,
         imagePath: target.image_path,
         outputPath: callOutputPath,
         repoRoot,
-        model,
-        reasoningEffort,
+        provider: resolvedProvider,
+        model: resolvedModel,
+        reasoningEffort: resolvedReasoningEffort,
         timeoutMs,
       });
       const normalized = normalizeAuditResponse(target.prompt, response);
-      return {
+      const auditedRow = {
         ...normalized,
         status: "audited",
         selection_reasons: target.selection_reasons,
         image_path: target.image_path,
         image_sha256: imageSha256,
         contract_sha256: contractSha256,
+        audit_cache_identity: cacheIdentity,
+        audit_cache_key: cacheKey,
         call_output_path: callOutputPath,
         call_output_sha256: await fs.stat(callOutputPath).then(() => fileHash(callOutputPath)).catch(() => null),
+        row_cache_path: rowCachePath,
         reused: false,
       };
+      await writeJsonAtomic(rowCachePath, auditedRow);
+      return auditedRow;
     } catch (error) {
       return {
         schema: IMAGE_SEMANTIC_AUDIT_ROW_SCHEMA,
@@ -329,13 +433,17 @@ export async function buildImageSemanticAudit({
     prompt_plan_sha256: promptPlanSha256,
     imagegen_report_path: imagegenReportPath ?? null,
     imagegen_report_sha256: imagegenReportSha256,
+    audit_cache_identity: cacheIdentity,
+    selection_identity: selectionIdentity,
     policy: {
-      selection: "hero_priority_opening_structural_risk_plus_deterministic_ordinary_sample",
+      selection: "hero_contact_or_identity_critical_plus_deterministic_ordinary_sample",
       opening_sec: openingSec,
       ordinary_sample_rate: ordinarySampleRate,
       concurrency,
-      model: model ?? "identity_locked_codex_cli",
-      reasoning_effort: reasoningEffort,
+      provider: resolvedProvider,
+      model: resolvedModel,
+      reasoning_effort: resolvedReasoningEffort,
+      location_and_ui_policy: "audit_dimensions_only_not_selection_reasons",
       result_policy: "model_findings_are_advisory; hero_or_audited_nonpass_requires_narrow_manual_review; no_automatic_regeneration",
     },
     selected_count: rows.length,
@@ -343,6 +451,8 @@ export async function buildImageSemanticAudit({
     unavailable_count: rows.filter((row) => row.status === "unavailable").length,
     passed_count: rows.filter((row) => row.overall_verdict === "pass").length,
     needs_review_count: rows.filter((row) => row.overall_verdict !== "pass").length,
+    row_cache_hit_count: rows.filter((row) => row.reused === true).length,
+    row_cache_miss_count: rows.filter((row) => row.status === "audited" && row.reused !== true).length,
     rows,
   };
   if (outputPath) await writeJsonAtomic(outputPath, report);

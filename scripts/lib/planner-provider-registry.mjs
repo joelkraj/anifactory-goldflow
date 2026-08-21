@@ -182,15 +182,23 @@ export function planningProvidersForStage(identity, stageName, { env = process.e
 
 function structuredPoolContract(identity = {}) {
   const planner = identity?.production_profile_config?.planner ?? {};
-  const configuredConcurrency = (provider, fallback) => {
-    const raw = planner[`${provider}_structured_concurrency`];
+  const configuredInteger = (key, fallback) => {
+    const raw = planner[key];
     const parsed = Number(raw);
     return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
   };
+  const configuredConcurrency = (provider, fallback) => configuredInteger(`${provider}_structured_concurrency`, fallback);
+  const codexConcurrency = configuredConcurrency("codex_cli", 8);
   return {
     assignment_policy: String(planner.structured_pool_assignment_policy ?? "weighted_least_utilized_v1"),
     providers: {
-      codex_cli: { concurrency: configuredConcurrency("codex_cli", 8) },
+      codex_cli: {
+        concurrency: codexConcurrency,
+        initial_concurrency: configuredInteger("codex_cli_structured_initial_concurrency", codexConcurrency),
+        ramp_successes_per_step: configuredInteger("codex_cli_structured_ramp_successes_per_step", 0) || null,
+        ramp_step: configuredInteger("codex_cli_structured_ramp_step", 0) || null,
+        ramp_policy: String(planner.codex_cli_structured_ramp_policy ?? "fixed_v1"),
+      },
       antigravity_cli: { concurrency: configuredConcurrency("antigravity_cli", 0) },
     },
   };

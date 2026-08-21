@@ -20,6 +20,7 @@ export const DEFAULT_RECOMMENDED_CONCURRENCY = 8;
 export const DEFAULT_MAX_CONCURRENCY = 12;
 const LEASE_DISPATCH_LOCK_TIMEOUT_MS = 30_000;
 const LEASE_DISPATCH_LOCK_STALE_MS = 60_000;
+const BUILD_MANIFEST_SKELETON_ONLY = Symbol("build_manifest_skeleton_only");
 const BROWSER_WORKER_SESSION_POLICIES = new Set([
   "fresh_session_per_job_v1",
   "fresh_project_per_job",
@@ -797,6 +798,7 @@ export async function createCodexWorkManifest(options) {
     item_count: items.length,
     items,
   };
+  if (options[BUILD_MANIFEST_SKELETON_ONLY] === true) return { skeleton };
   const manifestId = `codex-work-${sha256(stableStringify(skeleton)).slice(0, 24)}`;
   const stagingRoot = normalizeAbsolute(options.stagingRoot)
     ?? path.join(episodeDir, "assets", "images", "codex_worker_staging");
@@ -831,6 +833,250 @@ export async function createCodexWorkManifest(options) {
   return { manifest, created: true };
 }
 
+function streamingPolicyContract(policy = {}) {
+  const {
+    verification_asset_ids: _verificationAssetIds,
+    verification_required_before_full_queue: _verificationRequired,
+    ...contract
+  } = policy;
+  return contract;
+}
+
+function sameStreamingItemContract(left, right) {
+  return left?.asset_id === right?.asset_id
+    && left?.source_row_sha256 === right?.source_row_sha256
+    && left?.prompt_sha256 === right?.prompt_sha256
+    && stableStringify((left?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })))
+      === stableStringify((right?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })));
+}
+
+function mergeStreamingSources(current = {}, incoming = {}) {
+  const merged = { ...current };
+  for (const [name, source] of Object.entries(incoming)) {
+    if (Object.values(merged).some((candidate) => (
+      candidate?.path === source?.path && candidate?.sha256 === source?.sha256
+    ))) continue;
+    let candidateName = name;
+    if (merged[candidateName]) candidateName = `${name}_${cleanText(source?.sha256).slice(0, 12) || "source"}`;
+    let suffix = 2;
+    while (merged[candidateName]) candidateName = `${name}_${cleanText(source?.sha256).slice(0, 12) || "source"}_${suffix++}`;
+    merged[candidateName] = source;
+  }
+  return merged;
+}
+
+async function writeStreamingManifestEvent(manifestDir, revision, event) {
+  const eventPath = path.join(manifestDir, "append-events", `${String(revision).padStart(6, "0")}-${event.event_type}.json`);
+  await writeJsonExclusive(eventPath, event).catch(async (error) => {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = await readJson(eventPath);
+    if (stableStringify(existing) !== stableStringify(event)) throw error;
+  });
+  return eventPath;
+}
+
+async function findStreamingManifests(stagingRoot) {
+  const entries = await fs.readdir(stagingRoot, { withFileTypes: true }).catch(() => []);
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const manifestPath = path.join(stagingRoot, entry.name, "work_manifest.json");
+    const manifest = await readJson(manifestPath).catch(() => null);
+    if (manifest?.streaming_queue?.stream_id) matches.push({ manifest, manifestPath });
+  }
+  return matches;
+}
+
+export async function openCodexWorkManifestStream(options) {
+  const streamId = cleanText(options.streamId);
+  if (!streamId) throw new Error("An appendable image manifest requires a stable streamId.");
+  const episodeDir = normalizeAbsolute(options.episodeDir);
+  if (!episodeDir) throw new Error("An appendable image manifest requires episodeDir.");
+  const stagingRoot = normalizeAbsolute(options.stagingRoot)
+    ?? path.join(episodeDir, "assets", "images", "codex_worker_staging");
+  await fs.mkdir(stagingRoot, { recursive: true });
+  // Serialize discovery and creation at episode scope. Per-manifest locks cannot
+  // prevent two interrupted/recovery processes from creating competing queues.
+  return withLeaseDispatchLock(stagingRoot, async () => {
+    const streams = await findStreamingManifests(stagingRoot);
+    const prior = streams.find((row) => row.manifest.streaming_queue.stream_id === streamId);
+    if (prior) {
+      if (path.resolve(prior.manifest.episode_dir) !== episodeDir) throw new Error(`Streaming manifest ${streamId} belongs to another episode.`);
+      if (prior.manifest.streaming_queue?.sealed === true) throw new Error(`Streaming manifest ${streamId} is already sealed; a full rerun is forbidden.`);
+      await ensureRuntimeDirectories(path.dirname(prior.manifestPath));
+      return { manifest: prior.manifest, created: false, resumed: true };
+    }
+    const competing = streams.find((row) => (
+      path.resolve(row.manifest.episode_dir) === episodeDir
+      && row.manifest.mode === (options.mode ?? "scene")
+      && row.manifest.streaming_queue?.sealed !== true
+    ));
+    if (competing) {
+      throw new Error(
+        `Episode already has active unsealed streaming manifest ${competing.manifest.manifest_id} `
+        + `(${competing.manifest.streaming_queue.stream_id}); refusing competing stream ${streamId}. `
+        + "Resume or explicitly seal/drain the existing stream before exact-ID recovery.",
+      );
+    }
+    const created = await createCodexWorkManifest(options);
+    const manifestPath = created.manifest.manifest_path;
+    const manifestDir = path.dirname(manifestPath);
+    return withLeaseDispatchLock(manifestDir, async () => {
+      const current = (await loadWorkManifest(manifestPath)).manifest;
+      if (current.streaming_queue?.stream_id && current.streaming_queue.stream_id !== streamId) {
+        throw new Error(`Manifest ${current.manifest_id} is already bound to stream ${current.streaming_queue.stream_id}.`);
+      }
+      const openedAt = nowIso();
+      const next = {
+        ...current,
+        streaming_queue: {
+          schema: "goldflow_appendable_image_manifest_v1",
+          stream_id: streamId,
+          appendable: true,
+          sealed: false,
+          revision: 1,
+          append_count: 1,
+          opened_at: openedAt,
+          sealed_at: null,
+        },
+      };
+      next.content_sha256 = sha256(stableStringify(manifestContentForHash(next)));
+      await writeJsonAtomic(manifestPath, next);
+      await writeStreamingManifestEvent(manifestDir, 1, {
+        schema: "goldflow_appendable_image_manifest_event_v1",
+        event_type: "stream_opened",
+        stream_id: streamId,
+        manifest_id: next.manifest_id,
+        revision: 1,
+        appended_asset_ids: next.items.map((item) => item.asset_id),
+        created_at: openedAt,
+      });
+      return { manifest: next, created: created.created, resumed: false };
+    });
+  });
+}
+
+export async function appendCodexWorkManifestStream(options) {
+  const manifestPath = await resolveManifestPath(options.manifestPath);
+  const manifestDir = path.dirname(manifestPath);
+  const built = await createCodexWorkManifest({ ...options, [BUILD_MANIFEST_SKELETON_ONLY]: true });
+  const incoming = built.skeleton;
+  return withLeaseDispatchLock(manifestDir, async () => {
+    const current = (await loadWorkManifest(manifestPath)).manifest;
+    if (current.streaming_queue?.sealed === true) throw new Error(`Manifest ${current.manifest_id} is sealed and cannot accept more assets.`);
+    if (current.streaming_queue?.appendable !== true) throw new Error(`Manifest ${current.manifest_id} is not appendable.`);
+    if (path.resolve(current.episode_dir) !== path.resolve(incoming.episode_dir) || current.mode !== incoming.mode || current.provider !== incoming.provider) {
+      throw new Error("Append source does not match the streaming manifest episode, mode, or provider.");
+    }
+    if (stableStringify(streamingPolicyContract(current.policy)) !== stableStringify(streamingPolicyContract(incoming.policy))) {
+      throw new Error("Append source does not match the streaming manifest lease/provider policy.");
+    }
+    const existingById = new Map(current.items.map((item) => [item.asset_id, item]));
+    const appended = [];
+    const reused = [];
+    for (const item of incoming.items) {
+      const existing = existingById.get(item.asset_id);
+      if (!existing) {
+        appended.push(item);
+        existingById.set(item.asset_id, item);
+        continue;
+      }
+      if (!sameStreamingItemContract(existing, item)) {
+        throw new Error(`Streaming manifest already contains ${item.asset_id} with a different creative contract.`);
+      }
+      reused.push(item.asset_id);
+    }
+    if (!appended.length) {
+      return { manifest: current, appended_asset_ids: [], reused_asset_ids: reused, appended_count: 0 };
+    }
+    const revision = Number(current.streaming_queue.revision ?? 1) + 1;
+    const items = [...current.items, ...appended].sort((left, right) => (
+      Number(right.critical_path_priority ?? 0) - Number(left.critical_path_priority ?? 0)
+      || left.asset_id.localeCompare(right.asset_id, undefined, { numeric: true })
+    ));
+    const verificationAssetIds = current.policy?.verification_asset_ids ?? [];
+    const appendedAt = nowIso();
+    const next = {
+      ...current,
+      sources: mergeStreamingSources(current.sources, incoming.sources),
+      scope: {
+        ...current.scope,
+        explicit: true,
+        asset_ids: items.map((item) => item.asset_id),
+      },
+      policy: {
+        ...current.policy,
+        verification_required_before_full_queue: items.length > verificationAssetIds.length
+          && !current.policy?.verification_gate_bypass,
+      },
+      item_count: items.length,
+      items,
+      streaming_queue: {
+        ...current.streaming_queue,
+        revision,
+        append_count: Number(current.streaming_queue.append_count ?? 1) + 1,
+        last_appended_at: appendedAt,
+      },
+    };
+    next.content_sha256 = sha256(stableStringify(manifestContentForHash(next)));
+    await writeJsonAtomic(manifestPath, next);
+    const eventPath = await writeStreamingManifestEvent(manifestDir, revision, {
+      schema: "goldflow_appendable_image_manifest_event_v1",
+      event_type: "items_appended",
+      stream_id: next.streaming_queue.stream_id,
+      manifest_id: next.manifest_id,
+      revision,
+      appended_asset_ids: appended.map((item) => item.asset_id),
+      reused_asset_ids: reused,
+      source_paths: Object.values(incoming.sources ?? {}).map((source) => source?.path).filter(Boolean),
+      created_at: appendedAt,
+    });
+    return {
+      manifest: next,
+      appended_asset_ids: appended.map((item) => item.asset_id),
+      reused_asset_ids: reused,
+      appended_count: appended.length,
+      event_path: eventPath,
+    };
+  });
+}
+
+export async function sealCodexWorkManifestStream({ manifestPath, streamId = null } = {}) {
+  const resolvedManifestPath = await resolveManifestPath(manifestPath);
+  const manifestDir = path.dirname(resolvedManifestPath);
+  return withLeaseDispatchLock(manifestDir, async () => {
+    const current = (await loadWorkManifest(resolvedManifestPath)).manifest;
+    if (!current.streaming_queue) throw new Error(`Manifest ${current.manifest_id} is not appendable.`);
+    if (streamId && current.streaming_queue.stream_id !== cleanText(streamId)) throw new Error("Streaming manifest seal identity mismatch.");
+    if (current.streaming_queue.sealed === true) return { manifest: current, sealed: false, reused: true };
+    if (current.streaming_queue.appendable !== true) throw new Error(`Manifest ${current.manifest_id} is not appendable.`);
+    const revision = Number(current.streaming_queue.revision ?? 1) + 1;
+    const sealedAt = nowIso();
+    const next = {
+      ...current,
+      streaming_queue: {
+        ...current.streaming_queue,
+        appendable: false,
+        sealed: true,
+        revision,
+        sealed_at: sealedAt,
+      },
+    };
+    next.content_sha256 = sha256(stableStringify(manifestContentForHash(next)));
+    await writeJsonAtomic(resolvedManifestPath, next);
+    const eventPath = await writeStreamingManifestEvent(manifestDir, revision, {
+      schema: "goldflow_appendable_image_manifest_event_v1",
+      event_type: "stream_sealed",
+      stream_id: next.streaming_queue.stream_id,
+      manifest_id: next.manifest_id,
+      revision,
+      asset_ids: next.items.map((item) => item.asset_id),
+      created_at: sealedAt,
+    });
+    return { manifest: next, sealed: true, reused: false, event_path: eventPath };
+  });
+}
+
 function manifestDirectory(manifestOrPath) {
   if (typeof manifestOrPath === "string") {
     const resolved = path.resolve(manifestOrPath);
@@ -860,6 +1106,7 @@ export async function loadWorkManifest(manifestOrDirectory) {
 
 async function ensureRuntimeDirectories(manifestDir) {
   await Promise.all([
+    "append-events",
     "leases",
     "attempts",
     "completions",
@@ -1667,7 +1914,9 @@ export async function getCodexWorkStatus(options) {
     manifest_id: manifest.manifest_id,
     manifest_path: manifestPath,
     mode: manifest.mode,
-    status: counts.completed === rows.length ? "completed" : counts.deadlettered ? "blocked_deadletter" : "in_progress",
+    status: manifest.streaming_queue?.sealed === false
+      ? "in_progress"
+      : counts.completed === rows.length ? "completed" : counts.deadlettered ? "blocked_deadletter" : "in_progress",
     item_count: rows.length,
     counts,
     recommended_concurrency: manifest.policy?.recommended_concurrency ?? DEFAULT_RECOMMENDED_CONCURRENCY,
@@ -1676,6 +1925,7 @@ export async function getCodexWorkStatus(options) {
     allowed_browser_providers: manifest.policy?.allowed_browser_providers ?? [],
     browser_provider_concurrency: manifest.policy?.browser_provider_concurrency ?? null,
     browser_provider_worker_session_policy: manifest.policy?.browser_provider_worker_session_policy ?? null,
+    streaming_queue: manifest.streaming_queue ?? null,
     completed_by_browser_provider: Object.fromEntries(
       (manifest.policy?.allowed_browser_providers ?? []).map((provider) => [
         provider,

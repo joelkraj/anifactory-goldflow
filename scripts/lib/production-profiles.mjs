@@ -20,11 +20,18 @@ const profiles = {
     planner: {
       federated_structured_pool: true,
       structured_pool_assignment_policy: "weighted_least_utilized_v1",
-      codex_cli_structured_concurrency: 8,
-      semantic_concurrency: 8,
-      editorial_concurrency: 8,
-      visual_ref_chunk_concurrency: 8,
-      visual_chunk_concurrency: 8,
+      // New stages begin with the proven eight-slot load, then the shared
+      // capacity pool promotes itself to twelve only after clean completions.
+      // Existing run identities retain the exact concurrency they recorded.
+      codex_cli_structured_concurrency: 12,
+      codex_cli_structured_initial_concurrency: 8,
+      codex_cli_structured_ramp_successes_per_step: 4,
+      codex_cli_structured_ramp_step: 2,
+      codex_cli_structured_ramp_policy: "success_gated_in_stage_soak_v1",
+      semantic_concurrency: 12,
+      editorial_concurrency: 12,
+      visual_ref_chunk_concurrency: 12,
+      visual_chunk_concurrency: 12,
       // Disabled for production structured planning until the task-class
       // benchmark, permissions, and schema-output reliability are re-approved.
       antigravity_cli_structured_concurrency: 0,
@@ -81,6 +88,8 @@ const profiles = {
         enabled: true,
         contract: "eight_macro_phases_v1",
         routine_stage_advancement: "automatic_until_approval_or_blocker",
+        persistent_watch_resume: true,
+        persistent_watch_policy: "state_change_resume_never_auto_approve_v1",
         analytics_feedback_nonblocking: true,
       },
       chatgpt_web_browser_host_concurrency: 10,
@@ -96,6 +105,7 @@ const profiles = {
       incremental_image_qa: true,
       incremental_motion_clip_prefetch: true,
       incremental_generated_motion_prefetch: true,
+      generated_motion_coherence_prefetch: true,
       wavefront_min_cuts: 15,
       wavefront_max_wait_ms: 5000,
       planner_recovery_policy: "scoped_only",
@@ -160,6 +170,7 @@ const profiles = {
       incremental_image_qa: false,
       incremental_motion_clip_prefetch: false,
       incremental_generated_motion_prefetch: false,
+      generated_motion_coherence_prefetch: false,
       wavefront_min_cuts: 15,
       wavefront_max_wait_ms: 5000,
       planner_recovery_policy: "scoped_only",

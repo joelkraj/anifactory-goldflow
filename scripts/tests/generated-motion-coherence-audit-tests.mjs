@@ -69,6 +69,7 @@ const report = {
   }],
 };
 const outputPath = path.join(temporaryRoot, "audit.json");
+const rowCacheDir = path.join(temporaryRoot, "row-cache");
 const dimensions = [
   "source_first_frame_fidelity",
   "identity_body_and_prop_continuity",
@@ -79,21 +80,23 @@ const dimensions = [
   "next_shot_continuity_bridge",
   "artifact_and_motion_stability",
 ];
+const fakeFrameExtractor = async ({ frameDir }) => {
+  await fs.mkdir(frameDir, { recursive: true });
+  return Promise.all([0.04, 2, 4, 6, 7.92].map(async (timestampSec, index) => {
+    const framePath = path.join(frameDir, `${index}.jpg`);
+    const bytes = `frame-${index}`;
+    await fs.writeFile(framePath, bytes);
+    return { index: index + 1, timestamp_sec: timestampSec, path: framePath, sha256: digest(bytes) };
+  }));
+};
 const artifact = await buildGeneratedMotionCoherenceAudit({
   report,
   outputPath,
   framesRoot: path.join(temporaryRoot, "frames"),
   callsDir: path.join(temporaryRoot, "calls"),
+  rowCacheDir,
   repoRoot: temporaryRoot,
-  frameExtractor: async ({ frameDir }) => {
-    await fs.mkdir(frameDir, { recursive: true });
-    return Promise.all([0.04, 2, 4, 6, 7.92].map(async (timestampSec, index) => {
-      const framePath = path.join(frameDir, `${index}.jpg`);
-      const bytes = `frame-${index}`;
-      await fs.writeFile(framePath, bytes);
-      return { index: index + 1, timestamp_sec: timestampSec, path: framePath, sha256: digest(bytes) };
-    }));
-  },
+  frameExtractor: fakeFrameExtractor,
   auditExecutor: async () => ({
     checks: dimensions.map((dimension) => ({ dimension, verdict: "pass", visible_evidence: `${dimension} is visibly coherent.` })),
     overall_verdict: "pass",
@@ -108,6 +111,41 @@ assert.equal(artifact.rows[0].usable_window.end_sec, 6);
 
 const reused = await buildGeneratedMotionCoherenceAudit({ report, outputPath, repoRoot: temporaryRoot });
 assert.equal(reused.reused, true);
+
+const prefetched = await buildGeneratedMotionCoherenceAudit({
+  report: { ...report, prefetch_batch: "different aggregate provenance" },
+  outputPath: path.join(temporaryRoot, "official-audit.json"),
+  framesRoot: path.join(temporaryRoot, "official-frames"),
+  callsDir: path.join(temporaryRoot, "official-calls"),
+  rowCacheDir,
+  repoRoot: temporaryRoot,
+  frameExtractor: async () => { throw new Error("content-addressed rows must be reused before frame extraction"); },
+  auditExecutor: async () => { throw new Error("content-addressed rows must be reused before model audit"); },
+});
+assert.equal(prefetched.summary.row_cache_reused_count, 1);
+assert.equal(prefetched.rows[0].reuse_source, "content_addressed_row_cache");
+
+let changedConfigurationAuditCalls = 0;
+const changedConfiguration = await buildGeneratedMotionCoherenceAudit({
+  report,
+  outputPath,
+  framesRoot: path.join(temporaryRoot, "changed-effort-frames"),
+  callsDir: path.join(temporaryRoot, "changed-effort-calls"),
+  rowCacheDir,
+  repoRoot: temporaryRoot,
+  reasoningEffort: "high",
+  frameExtractor: fakeFrameExtractor,
+  auditExecutor: async () => {
+    changedConfigurationAuditCalls += 1;
+    return {
+      checks: dimensions.map((dimension) => ({ dimension, verdict: "pass", visible_evidence: `${dimension} remains coherent.` })),
+      usable_window: { disposition: "full_clip", start_sec: 0, end_sec: 8 },
+      confidence: "high",
+    };
+  },
+});
+assert.equal(changedConfigurationAuditCalls, 1, "a changed audit configuration must not reuse a row from another effort policy");
+assert.equal(changedConfiguration.summary.row_cache_reused_count, 0);
 
 await fs.rm(temporaryRoot, { recursive: true, force: true });
 console.log("generated motion coherence audit tests passed");

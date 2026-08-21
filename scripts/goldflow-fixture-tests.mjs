@@ -137,7 +137,7 @@ import {
   creditExhaustedIdsFromReport,
   isModelslabCreditExhaustion,
 } from "./lib/image-fallback-policy.mjs";
-import { alignExpandedZeroMultiplierCaptionsForTests, assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, coalesceOverlappingSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
+import { alignExpandedZeroMultiplierCaptionsForTests, assertLockedRenderProfileForTests, assertRenderImageIntegrityForTests, buildSubtitleEventsForTests, coalesceOverlappingSubtitleEventsForTests, mergeShortSubtitleEvents, motionClipFilterForTests, subpixelPerspectiveCoreForTests, xfadeGroupCacheKeyForTests, xfadeSegmentTimingForTests, xfadeTimelineGroupsForTests } from "./render.mjs";
 import { promoteEditorialMotionPlans } from "./editorial-motion-promote-proof.mjs";
 import { applyAutomaticFocalAnchorForTests } from "./visual-motion-plan.mjs";
 import {
@@ -1578,12 +1578,51 @@ function testVisualWavefrontBatchPolicy() {
           },
         },
       },
+      {
+        image_id: "cut_depth",
+        start_sec: 8,
+        duration_sec: 4,
+        shot_manifest: {
+          motion_intent: {
+            behavior: "slow_push_in",
+            focal_subject: "Joey",
+            start_anchor: { x: 0.5, y: 0.5 },
+            end_anchor: { x: 0.5, y: 0.5 },
+            start_scale: 1.01,
+            end_scale: 1.06,
+            easing: "ease_in_out",
+            depth_candidate: { eligible: true, priority: 2, separation_confidence: "high", editorial_reason: "clean foreground" },
+          },
+        },
+      },
+      {
+        image_id: "cut_generated",
+        start_sec: 12,
+        duration_sec: 4,
+        shot_manifest: {
+          animation_intent: { eligibility: "animate" },
+          motion_intent: {
+            behavior: "slow_push_in",
+            focal_subject: "Joey",
+            start_anchor: { x: 0.5, y: 0.5 },
+            end_anchor: { x: 0.5, y: 0.5 },
+            start_scale: 1.01,
+            end_scale: 1.06,
+            easing: "ease_in_out",
+            depth_candidate: { eligible: false, priority: 0, separation_confidence: "low", editorial_reason: "single plane" },
+          },
+        },
+      },
     ],
-    acceptedImages: deduped.accepted_images,
-    timelineEndSec: 8,
+    acceptedImages: [
+      ...deduped.accepted_images,
+      { image_id: "cut_depth", image_path: "/tmp/depth.png", image_sha256: "hash-depth", start_sec: 8 },
+      { image_id: "cut_generated", image_path: "/tmp/generated.png", image_sha256: "hash-generated", start_sec: 12 },
+    ],
+    timelineEndSec: 16,
     motionPolicy: "selective_editorial_v1",
   });
-  assert.deepEqual(stable.map((row) => row.image_id), ["cut_static"]);
+  assert.deepEqual(stable.map((row) => row.image_id), ["cut_static", "cut_move"], "every QA-passed single-plane still cut should prebuild its exact directed motion cache");
 }
 
 function testRunIdentityV2Policies() {
@@ -1605,11 +1644,13 @@ function testRunIdentityV2Policies() {
   assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
   assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v1");
   assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v1");
-  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 8);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 12);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.parallel_audio_semantic, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.visual_wavefront_prefetch, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_image_qa, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_motion_clip_prefetch, true);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_generated_motion_prefetch, true);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.generated_motion_coherence_prefetch, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.planner_recovery_policy, "scoped_only");
   assert.equal(
     productionProfileForIdentity({ production_profile: "fast_premium_v1" }).media.google_flow_worker_session_policy,
@@ -4354,6 +4395,22 @@ function testDirectedMotionAndFullTimelineTransitions() {
   ]);
   assert.equal(xfadeTiming.expected_duration_sec, 15);
   assert.equal(xfadeTiming.duration_after_xfade_sec, 15);
+  const xfadeCacheIdentity = {
+    inputHashes: ["clip-sha-a", "clip-sha-b"],
+    transitions: [{ from_image_id: "cut_001", to_image_id: "cut_002", transition: "dissolve", duration_sec: 0.25, offset_sec: 3.75, incoming_start_padding_sec: 0.25 }],
+    encoding: { width: 1920, height: 1080, fps: 60, codec: "libx264", preset: "veryfast", crf: 20, pixel_format: "yuv420p" },
+  };
+  const xfadeCacheKey = xfadeGroupCacheKeyForTests(xfadeCacheIdentity);
+  assert.equal(xfadeGroupCacheKeyForTests(structuredClone(xfadeCacheIdentity)), xfadeCacheKey);
+  assert.notEqual(xfadeGroupCacheKeyForTests({ ...xfadeCacheIdentity, inputHashes: ["clip-sha-a", "changed"] }), xfadeCacheKey);
+  assert.notEqual(xfadeGroupCacheKeyForTests({
+    ...xfadeCacheIdentity,
+    transitions: [{ ...xfadeCacheIdentity.transitions[0], duration_sec: 0.3 }],
+  }), xfadeCacheKey);
+  assert.notEqual(xfadeGroupCacheKeyForTests({
+    ...xfadeCacheIdentity,
+    encoding: { ...xfadeCacheIdentity.encoding, preset: "fast" },
+  }), xfadeCacheKey);
 
   const subpixel = subpixelPerspectiveCoreForTests(
     "1.02+0.04*(on/599)",
@@ -4900,7 +4957,13 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.planning_room.deterministic_local_reconciliation_provider, "codex_cli");
   assert.equal(identity.planning_room.stage_routes.structured_planning[0], "codex_cli");
   assert.deepEqual(identity.planning_room.structured_pool.providers, {
-    codex_cli: { concurrency: 8 },
+    codex_cli: {
+      concurrency: 12,
+      initial_concurrency: 8,
+      ramp_successes_per_step: 4,
+      ramp_step: 2,
+      ramp_policy: "success_gated_in_stage_soak_v1",
+    },
     antigravity_cli: { concurrency: 0 },
   });
   assert.equal(identity.provider_locks.planning_default_reasoning_effort, "medium");
@@ -4918,11 +4981,12 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.deepEqual(identity.production_profile_config.target_wall_clock_band_minutes, { minimum: 300, maximum: 420 });
   assert.equal(identity.production_profile_config.target_wall_clock_policy, "episode_size_aware_p50_p90_v1");
   assert.equal(identity.production_profile_config.stretch_target_wall_clock_minutes, 300);
-  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.codex_cli_structured_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 12);
+  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 12);
+  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 12);
+  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 12);
+  assert.equal(identity.production_profile_config.planner.codex_cli_structured_concurrency, 12);
+  assert.equal(identity.production_profile_config.planner.codex_cli_structured_initial_concurrency, 8);
   assert.equal(identity.production_profile_config.planner.antigravity_cli_structured_concurrency, 0);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_semantic_concurrency, 10);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_visual_chunk_concurrency, 10);
@@ -5074,11 +5138,12 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     buildStageCommand("local_whisper_word_timing", identity),
     /--engine faster_whisper --model small\.en --device cpu --compute-type int8_float32 --omp-num-threads 12 --cpu-threads 0/,
   );
-  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8\b/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8\b/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 12\b/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 12\b/);
+  assert.match(buildStageCommand("generated_video_motion", identity), /--prefetch-coherence-cache true\b/);
   const chatGptWebImageIdentity = structuredClone(identity);
   chatGptWebImageIdentity.image_provider = "chatgpt_web_gpt_image";
-  assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 8\b/);
+  assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 12\b/);
   assert.match(buildStageCommand("reference_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--concurrency 3\b/);
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
@@ -5092,7 +5157,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   delete legacyPlanningIdentity.provider_locks.planning_default_reasoning_effort;
   assert.equal(planningProviderForIdentity(legacyPlanningIdentity), "codex_cli");
   assert.equal(runIdentityPlanningCompleteForTests(legacyPlanningIdentity).done, true);
-  assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 8\b/);
+  assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 12\b/);
   const legacySerialQwenIdentity = structuredClone(identity);
   legacySerialQwenIdentity.stage_registry_version = "2026-07-27.1";
   delete legacySerialQwenIdentity.voice_provider_options.synthesis_contract;
@@ -5128,10 +5193,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--batch-size 4/);
   assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
-  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8/);
-  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 8/);
-  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 8/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8 .*--visual-chunk-validation-attempts 1/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 12/);
+  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 12/);
+  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 12/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 12 .*--visual-chunk-validation-attempts 1/);
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",

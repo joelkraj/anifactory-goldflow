@@ -12,6 +12,15 @@ import {
   agentDirectorStatus,
   nextAgentDirectorPhase,
 } from "./lib/agent-director-contract.mjs";
+import {
+  DIRECTOR_WATCH_SCHEMA,
+  directorWatchDecision,
+  directorWatchDispatchKey,
+  directorWatchRestartState,
+  directorWatchSignature,
+  executionEventsCursorFromText,
+} from "./lib/director-watch-policy.mjs";
+import { productionProfileForIdentity } from "./lib/production-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -33,6 +42,16 @@ function boolFlag(value) {
   return /^(?:true|1|yes)$/i.test(String(value ?? ""));
 }
 
+function boundedNumberFlag(value, fallback, { minimum, maximum }) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function identityArgs() {
   if (flags["episode-dir"]) return ["--episode-dir", path.resolve(flags["episode-dir"])];
   const required = ["channel", "week", "episode"];
@@ -42,7 +61,7 @@ function identityArgs() {
   return args;
 }
 
-async function runNode(args, { capture = false } = {}) {
+async function runNode(args, { capture = false, onSpawn = null } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, {
       cwd: repoRoot,
@@ -51,12 +70,34 @@ async function runNode(args, { capture = false } = {}) {
     });
     let stdout = "";
     let stderr = "";
+    let spawnTrackingError = null;
+    const spawnTracking = typeof onSpawn === "function"
+      ? Promise.resolve(onSpawn({
+          pid: child.pid,
+          spawned_at: new Date().toISOString(),
+        })).catch((error) => {
+          spawnTrackingError = error instanceof Error ? error : new Error(String(error));
+        })
+      : Promise.resolve();
     if (capture) {
       child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
       child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
     }
-    child.once("error", (error) => resolve({ code: 1, stdout, stderr: `${stderr}\n${error.message}`.trim() }));
-    child.once("close", (code, signal) => resolve({ code: code ?? 1, signal, stdout, stderr }));
+    child.once("error", async (error) => {
+      await spawnTracking;
+      resolve({ code: 1, stdout, stderr: `${stderr}\n${error.message}`.trim(), spawn_tracking_error: spawnTrackingError?.message ?? null });
+    });
+    child.once("close", async (code, signal) => {
+      await spawnTracking;
+      const trackingMessage = spawnTrackingError ? `\n${spawnTrackingError.message}` : "";
+      resolve({
+        code: spawnTrackingError ? 1 : code ?? 1,
+        signal,
+        stdout,
+        stderr: `${stderr}${trackingMessage}`.trim(),
+        spawn_tracking_error: spawnTrackingError?.message ?? null,
+      });
+    });
   });
 }
 
@@ -64,6 +105,15 @@ async function readRunStatus() {
   const result = await runNode([path.join(repoRoot, "scripts", "run-status.mjs"), ...identityArgs()], { capture: true });
   if (result.code !== 0) throw new Error(result.stderr || result.stdout || "run status failed");
   return JSON.parse(result.stdout);
+}
+
+async function readExecutionEventsCursor(episodeDir) {
+  const eventPath = path.join(episodeDir, "execution_events.jsonl");
+  const content = await fs.readFile(eventPath, "utf8").catch((error) => {
+    if (error?.code === "ENOENT") return "";
+    throw error;
+  });
+  return executionEventsCursorFromText(content);
 }
 
 async function readJson(filePath, fallback = null) {
@@ -80,6 +130,42 @@ async function writeJson(filePath, value) {
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporaryPath, filePath);
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireWatchLock(episodeDir) {
+  const lockPath = path.join(episodeDir, ".agent_director_watch.lock");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await fs.open(lockPath, "wx");
+      await handle.writeFile(`${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`, "utf8");
+      await handle.close();
+      return {
+        path: lockPath,
+        async release() {
+          const current = await readJson(lockPath);
+          if (Number(current?.pid) === process.pid) await fs.unlink(lockPath).catch(() => {});
+        },
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const current = await readJson(lockPath);
+      if (processIsAlive(Number(current?.pid))) {
+        throw new Error(`Another agent-director watcher is already active for this episode (pid ${current.pid}).`);
+      }
+      await fs.unlink(lockPath).catch(() => {});
+    }
+  }
+  throw new Error(`Unable to acquire agent-director watcher lock: ${lockPath}`);
 }
 
 async function readAnalyticsFeedbackState(episodeDir, episode) {
@@ -195,10 +281,261 @@ async function checkpoint(runStatus) {
   console.log(JSON.stringify({ status: "passed", checkpoint: checkpointId, output_path: checkpointPath }, null, 2));
 }
 
+async function babysit(initialRunStatus) {
+  const episodeDir = path.resolve(initialRunStatus.episode_dir);
+  const episode = initialRunStatus.identity?.episode ?? flags.episode ?? "ep_01";
+  const checkpointPath = path.join(episodeDir, `agent_director_checkpoints_${episode}.json`);
+  const statePath = path.join(episodeDir, "agent_director_watch_state.json");
+  const pollMs = boundedNumberFlag(flags["poll-ms"], 5_000, { minimum: 1_000, maximum: 60_000 });
+  const idleTimeoutMs = boundedNumberFlag(flags["idle-timeout-minutes"], 480, { minimum: 1, maximum: 2_880 }) * 60_000;
+  const maxRuntimeMs = boundedNumberFlag(flags["max-runtime-minutes"], 1_440, { minimum: 1, maximum: 4_320 }) * 60_000;
+  const maxSteps = String(flags["max-steps"] ?? 50);
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+  let runStatus = initialRunStatus;
+  let executionEventsCursor = null;
+  let lastSignature = null;
+  let lastActionedSignature = null;
+  let lastActionedDispatchKey = null;
+  let lastProgressAtMs = startedAtMs;
+  let lastPersistAtMs = 0;
+  let lastPersistedReason = null;
+  let inFlightAdvance = null;
+  let restartRecovery = null;
+  const watchLock = await acquireWatchLock(episodeDir);
+
+  const persistWatchState = async ({ decision, signature, dispatchKey, director, force = false }) => {
+    const now = Date.now();
+    if (!force && decision.reason === lastPersistedReason && now - lastPersistAtMs < 60_000) return;
+    await writeJson(statePath, {
+      schema: DIRECTOR_WATCH_SCHEMA,
+      status: decision.action === "stop"
+        ? decision.reason === "pipeline_complete" ? "complete" : "held"
+        : decision.action === "advance" ? "advancing" : "watching",
+      decision,
+      episode_dir: episodeDir,
+      episode,
+      current_stage: runStatus.current_stage,
+      current_stage_state: runStatus.current_stage_state ?? null,
+      state_signature: signature,
+      dispatch_key: dispatchKey,
+      last_actioned_signature: lastActionedSignature,
+      last_actioned_dispatch_key: lastActionedDispatchKey,
+      execution_events_cursor: executionEventsCursor,
+      execution_events_cursor_sha256: executionEventsCursor?.sha256 ?? null,
+      in_flight_advance: inFlightAdvance,
+      restart_recovery: restartRecovery,
+      checkpoint_hold: director.checkpoint_hold ?? [],
+      started_at: startedAt,
+      last_progress_at: new Date(lastProgressAtMs).toISOString(),
+      heartbeat_at: new Date(now).toISOString(),
+      pid: process.pid,
+      poll_ms: pollMs,
+      idle_timeout_ms: idleTimeoutMs,
+      max_runtime_ms: maxRuntimeMs,
+      approval_policy: "observe_hash_bound_approvals_never_auto_approve",
+    });
+    lastPersistAtMs = now;
+    lastPersistedReason = decision.reason;
+  };
+
+  try {
+    const initialCheckpoints = await readJson(checkpointPath, { approvals: {} });
+    executionEventsCursor = await readExecutionEventsCursor(episodeDir);
+    const initialSignature = directorWatchSignature(runStatus, initialCheckpoints, executionEventsCursor);
+    const initialDispatchKey = directorWatchDispatchKey(runStatus);
+    let previousWatchState = null;
+    let previousWatchStateReadError = null;
+    try {
+      previousWatchState = await readJson(statePath);
+    } catch (error) {
+      previousWatchStateReadError = error instanceof Error ? error : new Error(String(error));
+    }
+    restartRecovery = directorWatchRestartState({
+      state: previousWatchState,
+      stateReadError: previousWatchStateReadError,
+      episodeDir,
+      episode,
+      runStatus,
+      checkpoints: initialCheckpoints,
+      executionEventsCursor,
+      signature: initialSignature,
+      dispatchKey: initialDispatchKey,
+      isProcessAlive: processIsAlive,
+    });
+    lastActionedSignature = restartRecovery.last_actioned_signature;
+    lastActionedDispatchKey = restartRecovery.last_actioned_dispatch_key;
+    inFlightAdvance = restartRecovery.in_flight_advance;
+    if (restartRecovery.state_valid) {
+      const restoredProgressAtMs = new Date(previousWatchState?.last_progress_at ?? "").getTime();
+      if (Number.isFinite(restoredProgressAtMs)) lastProgressAtMs = restoredProgressAtMs;
+      lastSignature = initialSignature;
+    }
+    if (restartRecovery.hold) {
+      const analyticsFeedback = await readAnalyticsFeedbackState(episodeDir, episode);
+      const director = agentDirectorStatus(runStatus, initialCheckpoints, { analyticsFeedback });
+      const decision = {
+        action: "stop",
+        reason: restartRecovery.hold_reason,
+        prior_child_pid: restartRecovery.child_pid ?? inFlightAdvance?.child_pid ?? null,
+        open_execution_ids: restartRecovery.open_execution_ids ?? [],
+      };
+      await persistWatchState({ decision, signature: initialSignature, dispatchKey: initialDispatchKey, director, force: true });
+      console.log(JSON.stringify({
+        status: "held",
+        stop_reason: decision.reason,
+        current_stage: runStatus.current_stage,
+        prior_child_pid: decision.prior_child_pid,
+        output_path: statePath,
+      }, null, 2));
+      return;
+    }
+
+    while (true) {
+      const now = Date.now();
+      executionEventsCursor = await readExecutionEventsCursor(episodeDir);
+      if (now - startedAtMs >= maxRuntimeMs) {
+        const checkpoints = await readJson(checkpointPath, { approvals: {} });
+        const analyticsFeedback = await readAnalyticsFeedbackState(episodeDir, episode);
+        const director = agentDirectorStatus(runStatus, checkpoints, { analyticsFeedback });
+        const signature = directorWatchSignature(runStatus, checkpoints, executionEventsCursor);
+        const dispatchKey = directorWatchDispatchKey(runStatus);
+        const decision = { action: "stop", reason: "maximum_runtime_reached" };
+        await persistWatchState({ decision, signature, dispatchKey, director, force: true });
+        console.log(JSON.stringify({ status: "held", stop_reason: decision.reason, output_path: statePath }, null, 2));
+        return;
+      }
+
+      const checkpoints = await readJson(checkpointPath, { approvals: {} });
+      const analyticsFeedback = await readAnalyticsFeedbackState(episodeDir, episode);
+      const director = agentDirectorStatus(runStatus, checkpoints, { analyticsFeedback });
+      const signature = directorWatchSignature(runStatus, checkpoints, executionEventsCursor);
+      const dispatchKey = directorWatchDispatchKey(runStatus);
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        lastProgressAtMs = now;
+        await persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath });
+      }
+      const profile = productionProfileForIdentity(runStatus.identity ?? {});
+      const decision = directorWatchDecision({
+        runStatus,
+        director,
+        profile,
+        signature,
+        lastActionedSignature,
+        dispatchKey,
+        lastActionedDispatchKey,
+        idleElapsedMs: now - lastProgressAtMs,
+        idleTimeoutMs,
+      });
+      await persistWatchState({ decision, signature, dispatchKey, director, force: decision.action !== "wait" });
+
+      if (decision.action === "stop") {
+        console.log(JSON.stringify({
+          status: decision.reason === "pipeline_complete" ? "complete" : "held",
+          stop_reason: decision.reason,
+          current_stage: runStatus.current_stage,
+          output_path: statePath,
+        }, null, 2));
+        return;
+      }
+      if (decision.action === "advance") {
+        const actionedStage = runStatus.current_stage;
+        const actionedDispatchKey = dispatchKey;
+        lastActionedSignature = signature;
+        lastActionedDispatchKey = actionedDispatchKey;
+        inFlightAdvance = {
+          active: true,
+          phase: "spawn_pending",
+          stage: actionedStage,
+          state_signature: signature,
+          dispatch_key: actionedDispatchKey,
+          execution_events_cursor: executionEventsCursor,
+          execution_events_cursor_sha256: executionEventsCursor?.sha256 ?? null,
+          child_pid: null,
+          watcher_pid: process.pid,
+          requested_at: new Date().toISOString(),
+        };
+        await persistWatchState({ decision, signature, dispatchKey, director, force: true });
+        const advanced = await runNode([
+          path.join(repoRoot, "scripts", "run-advance.mjs"),
+          ...identityArgs(),
+          "--max-steps", maxSteps,
+        ], {
+          capture: true,
+          onSpawn: async ({ pid, spawned_at: spawnedAt }) => {
+            inFlightAdvance = {
+              ...inFlightAdvance,
+              phase: "running",
+              child_pid: Number(pid) || null,
+              spawned_at: spawnedAt,
+            };
+            await persistWatchState({ decision, signature, dispatchKey, director, force: true });
+          },
+        });
+        if (advanced.stdout) process.stdout.write(advanced.stdout);
+        if (advanced.stderr) process.stderr.write(advanced.stderr);
+        runStatus = await readRunStatus();
+        const completedCheckpoints = await readJson(checkpointPath, { approvals: {} });
+        const completedAnalyticsFeedback = await readAnalyticsFeedbackState(episodeDir, episode);
+        const completedDirector = agentDirectorStatus(runStatus, completedCheckpoints, { analyticsFeedback: completedAnalyticsFeedback });
+        executionEventsCursor = await readExecutionEventsCursor(episodeDir);
+        const completedSignature = directorWatchSignature(runStatus, completedCheckpoints, executionEventsCursor);
+        const completedDispatchKey = directorWatchDispatchKey(runStatus);
+        inFlightAdvance = null;
+        if (completedDispatchKey === actionedDispatchKey) {
+          // The child returned without moving the authoritative stage. Rebind
+          // the observation guard to the post-child cursor. The independent
+          // dispatch key remains consumed even if unrelated observations move.
+          lastActionedSignature = completedSignature;
+        }
+        if (advanced.code !== 0) {
+          const failedDecision = {
+            action: "stop",
+            reason: advanced.spawn_tracking_error ? "advance_child_tracking_failed" : "advance_process_failed",
+            exit_code: advanced.code,
+          };
+          await persistWatchState({
+            decision: failedDecision,
+            signature: completedSignature,
+            dispatchKey: completedDispatchKey,
+            director: completedDirector,
+            force: true,
+          });
+          console.log(JSON.stringify({ status: "held", stop_reason: failedDecision.reason, current_stage: runStatus.current_stage, output_path: statePath }, null, 2));
+          return;
+        }
+        await persistWatchState({
+          decision: {
+            action: "wait",
+            reason: completedDispatchKey === actionedDispatchKey
+              ? "advance_process_completed_awaiting_state_change"
+              : "advance_process_completed",
+          },
+          signature: completedSignature,
+          dispatchKey: completedDispatchKey,
+          director: completedDirector,
+          force: true,
+        });
+        continue;
+      }
+
+      await sleep(pollMs);
+      runStatus = await readRunStatus();
+    }
+  } finally {
+    await watchLock.release();
+  }
+}
+
 async function main() {
   let runStatus = await readRunStatus();
   if (action === "checkpoint") {
     await checkpoint(runStatus);
+    return;
+  }
+  if (action === "babysit" || action === "watch") {
+    await babysit(runStatus);
     return;
   }
   const episodeDir = path.resolve(runStatus.episode_dir);
@@ -244,7 +581,7 @@ async function main() {
     checkpoints = await readJson(checkpointPath, { approvals: {} });
     analyticsFeedback = await readAnalyticsFeedbackState(episodeDir, episode);
   } else if (action !== "status") {
-    throw new Error("Agent director --action must be status, advance, or checkpoint.");
+    throw new Error("Agent director --action must be status, advance, babysit, watch, or checkpoint.");
   }
   const snapshot = await persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath });
   console.log(JSON.stringify({

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   hasTtsTerminalPunctuation,
@@ -21,6 +24,11 @@ import {
 import {
   validateNarrationPerformanceGateForTests,
 } from "../narration-tts-episode.mjs";
+import {
+  NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+  authorNarrationPerformanceDirection,
+  narrationPerformancePacketPlanForTests,
+} from "../lib/narration-performance-author.mjs";
 
 assert.equal(isInlineQuotedNarrationTerm({
   before: "The second time, because I wrote",
@@ -258,6 +266,155 @@ assert.equal(validateNarrationPerformanceGateForTests({
   plan: { performance_contract: performanceContract },
   approval: staleApproval,
 }).status, "blocked");
+
+const multibytePerformanceUnits = Array.from({ length: 20 }, (_, index) => ({
+  segment_id: "voice_seg_packet",
+  source_segment_ids: ["voice_seg_packet"],
+  source_unit_refs: [{ segment_id: "voice_seg_packet", unit_index: index + 1 }],
+  spoken_text: `Unit ${index + 1} ${"界".repeat(180)}.`,
+}));
+const performancePackets = narrationPerformancePacketPlanForTests(multibytePerformanceUnits, {
+  maximumAtoms: 20,
+  maxPromptBytes: 4_500,
+});
+assert.ok(performancePackets.length > 1);
+assert.ok(performancePackets.every((packet) => packet.prompt_bytes <= 4_500));
+assert.deepEqual(
+  performancePackets.flatMap((packet) => packet.source_ref_keys),
+  multibytePerformanceUnits.map((unit) => narrationSourceRefKey(unit.source_unit_refs[0])),
+);
+assert.equal(NARRATION_PERFORMANCE_SAFE_MAX_BYTES, 48_000);
+assert.throws(() => narrationPerformancePacketPlanForTests([{
+  segment_id: "voice_seg_oversized",
+  source_segment_ids: ["voice_seg_oversized"],
+  source_unit_refs: [{ segment_id: "voice_seg_oversized", unit_index: 1 }],
+  spoken_text: `${"🔥".repeat(20_000)}.`,
+}]), /safe ceiling is 48000 bytes/);
+
+const performanceTempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-performance-author-"));
+try {
+  let creativeSubmissionCount = 0;
+  const invalidPlannerExecutor = async () => {
+    creativeSubmissionCount += 1;
+    return { content: "{}", provider: "codex_cli", model: "gpt-5.6-sol", reasoning_effort: "medium" };
+  };
+  await assert.rejects(() => authorNarrationPerformanceDirection({
+    atomicUnits,
+    sourceScriptSha256,
+    episodeDir: performanceTempDir,
+    repoRoot: performanceTempDir,
+    provider: "codex_cli",
+    plannerExecutor: invalidPlannerExecutor,
+  }), /failed exact packet scope/);
+  assert.equal(creativeSubmissionCount, 1, "a failed packet must not trigger an automatic second creative submission");
+  const blockedDirection = JSON.parse(await fs.readFile(path.join(performanceTempDir, "narration_actionable_direction.json"), "utf8"));
+  assert.equal(blockedDirection.status, "blocked");
+  assert.equal(blockedDirection.authoring.packet_policy.automatic_creative_retry, false);
+  assert.equal(blockedDirection.repair_scope.failed_packet_ids.length, 1);
+  const failedPacketId = blockedDirection.repair_scope.failed_packet_ids[0];
+  const passedPacketArtifact = structuredClone(blockedDirection);
+  passedPacketArtifact.authoring.calls[0].status = "passed";
+  passedPacketArtifact.repair_scope.failed_packet_ids = [];
+  await fs.writeFile(
+    path.join(performanceTempDir, "narration_actionable_direction.json"),
+    `${JSON.stringify(passedPacketArtifact, null, 2)}\n`,
+    "utf8",
+  );
+  await assert.rejects(() => authorNarrationPerformanceDirection({
+    atomicUnits,
+    sourceScriptSha256,
+    episodeDir: performanceTempDir,
+    repoRoot: performanceTempDir,
+    provider: "codex_cli",
+    repairPacketIds: [failedPacketId],
+    repairReason: "Attempted repair of an already passed packet.",
+    plannerExecutor: invalidPlannerExecutor,
+  }), /not failed in the blocked artifact.*Passed packets are immutable/);
+  assert.equal(creativeSubmissionCount, 1, "a passed packet must be rejected before provider submission");
+  await fs.writeFile(
+    path.join(performanceTempDir, "narration_actionable_direction.json"),
+    `${JSON.stringify(blockedDirection, null, 2)}\n`,
+    "utf8",
+  );
+  await assert.rejects(() => authorNarrationPerformanceDirection({
+    atomicUnits,
+    sourceScriptSha256,
+    episodeDir: performanceTempDir,
+    repoRoot: performanceTempDir,
+    provider: "codex_cli",
+    plannerExecutor: invalidPlannerExecutor,
+  }), /unscoped resubmission is forbidden/);
+  assert.equal(creativeSubmissionCount, 1);
+  await assert.rejects(() => authorNarrationPerformanceDirection({
+    atomicUnits,
+    sourceScriptSha256,
+    episodeDir: performanceTempDir,
+    repoRoot: performanceTempDir,
+    provider: "codex_cli",
+    repairPacketIds: [failedPacketId],
+    repairReason: "界".repeat(20_000),
+    plannerExecutor: invalidPlannerExecutor,
+  }), /failed exact packet scope/);
+  assert.equal(creativeSubmissionCount, 1, "an over-ceiling final repair prompt must fail before provider submission");
+  const overCeilingDirection = JSON.parse(await fs.readFile(path.join(performanceTempDir, "narration_actionable_direction.json"), "utf8"));
+  assert.match(overCeilingDirection.authoring.calls[0].error, /final serialized prompt is .*safe ceiling is 48000 bytes/);
+  const validPlannerExecutor = async (options) => {
+    creativeSubmissionCount += 1;
+    assert.equal(options.reasoningEffort, "medium");
+    assert.ok(options.timeoutMs <= 480_000);
+    return {
+      provider: "codex_cli",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "medium",
+      content: JSON.stringify({
+        chapters: [{
+          segment_id: "voice_seg_01",
+          dramatic_function: "Open and accelerate.",
+          audience_effect: "Immediate curiosity.",
+          energy_start: 2,
+          energy_end: 4,
+          tension_peak: 4,
+          intimacy: 3,
+          pace: "steady_forward",
+          reveal_weight: 2,
+          transition_from_previous: "Episode opening.",
+          avoidance: "Avoid melodrama.",
+        }],
+        units: [
+          {
+            source_ref_keys: ["voice_seg_01:u001"],
+            spoken_text: "He opened the door.",
+            dialogue_separation: "preserve",
+            boundary_after: "sentence",
+            performance_intent: { energy: "controlled", tension: "neutral", intimacy: "standard", pace: "steady_forward", emphasis: [], pause_strategy: "punctuation_led", style_tags: [] },
+          },
+          {
+            source_ref_keys: ["voice_seg_01:u002"],
+            spoken_text: "She said, run now.",
+            dialogue_separation: "preserve",
+            boundary_after: "episode_end",
+            performance_intent: { energy: "urgent", tension: "high", intimacy: "close", pace: "fast", emphasis: ["run now"], pause_strategy: "short_precise", style_tags: [] },
+          },
+        ],
+      }),
+    };
+  };
+  const repaired = await authorNarrationPerformanceDirection({
+    atomicUnits,
+    sourceScriptSha256,
+    episodeDir: performanceTempDir,
+    repoRoot: performanceTempDir,
+    provider: "codex_cli",
+    repairPacketIds: [failedPacketId],
+    repairReason: "Reviewed exact packet: prior response omitted required source refs.",
+    plannerExecutor: validPlannerExecutor,
+  });
+  assert.equal(creativeSubmissionCount, 2);
+  assert.equal(repaired.artifact.status, "approved");
+  assert.deepEqual(repaired.artifact.repair_scope.submitted_repair_packet_ids, [failedPacketId]);
+} finally {
+  await fs.rm(performanceTempDir, { recursive: true, force: true });
+}
 assert.equal(validateNarrationPerformanceGateForTests({
   plan: {},
   approval: null,

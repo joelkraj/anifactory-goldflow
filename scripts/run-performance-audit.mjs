@@ -315,9 +315,20 @@ export async function runPerformanceAudit(flags = {}) {
     providerAttempts,
   }));
   const configuredPolicy = identity?.production_profile_config?.target_wall_clock_policy ?? null;
-  const targetWallClockMinutes = configuredPolicy === EPISODE_SIZE_AWARE_FORECAST_POLICY
-    ? forecast.forecast.total_p90_minutes
-    : identity?.production_profile_config?.target_wall_clock_minutes ?? null;
+  const fixedTargetWallClockMinutes = Number(
+    identity?.production_profile_config?.target_wall_clock_minutes,
+  );
+  const forecastTargetWallClockMinutes = configuredPolicy === EPISODE_SIZE_AWARE_FORECAST_POLICY
+    ? Number(forecast.forecast.total_p90_minutes)
+    : Number.NaN;
+  const targetWallClockMinutes = Number.isFinite(forecastTargetWallClockMinutes)
+    && Number.isFinite(fixedTargetWallClockMinutes)
+    ? Math.min(forecastTargetWallClockMinutes, fixedTargetWallClockMinutes)
+    : Number.isFinite(forecastTargetWallClockMinutes)
+      ? forecastTargetWallClockMinutes
+      : Number.isFinite(fixedTargetWallClockMinutes)
+        ? fixedTargetWallClockMinutes
+        : null;
   const report = buildRunPerformanceAudit(events, {
     targetWallClockMinutes,
     idleThresholdSec: Number(flags["idle-threshold-sec"] ?? 60),
@@ -327,6 +338,8 @@ export async function runPerformanceAudit(flags = {}) {
   report.production_profile = identity.production_profile ?? identity.production_profile_id ?? null;
   report.target_wall_clock_policy = configuredPolicy
     ?? (targetWallClockMinutes === null ? "none" : "fixed_legacy");
+  report.target_wall_clock_band_minutes = identity?.production_profile_config
+    ?.target_wall_clock_band_minutes ?? null;
   report.production_forecast = forecast;
   report.image_provider_attempts = providerAttempts;
   report.provider_task_telemetry = providerTaskTelemetry;

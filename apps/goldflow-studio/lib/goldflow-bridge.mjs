@@ -56,6 +56,27 @@ function runProcess(command, args, { cwd, env = {}, timeoutMs = 60_000 } = {}) {
 
 const GOOGLE_FLOW_REFERENCE_BINDING_SCHEMA = "goldflow_google_flow_reference_binding_v1";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const PERSISTENT_BROWSER_WORKER_SESSION_POLICIES = new Set([
+  "persistent_project_per_worker_slot_v1",
+  "persistent_tab_per_worker_slot_v1",
+]);
+
+function assertPersistentWorkerSessionReceipt(assignment, uiContract) {
+  const expectedPolicy = String(assignment?.worker_session_policy ?? "");
+  if (!PERSISTENT_BROWSER_WORKER_SESSION_POLICIES.has(expectedPolicy)) return;
+  if (uiContract?.worker_session_policy !== expectedPolicy) {
+    const error = new Error(`Persistent browser completion requires worker_session_policy ${expectedPolicy}.`);
+    error.code = "ui_contract_mismatch";
+    error.statusCode = 422;
+    throw error;
+  }
+  if (!Number.isInteger(uiContract?.worker_slot) || uiContract.worker_slot < 0) {
+    const error = new Error("Persistent browser completion requires its non-negative integer worker_slot receipt.");
+    error.code = "ui_contract_mismatch";
+    error.statusCode = 422;
+    throw error;
+  }
+}
 
 function googleFlowReferenceBindingError(message) {
   return Object.assign(new Error(`Google Flow reference-binding receipt is invalid: ${message}`), {
@@ -290,6 +311,26 @@ export class GoldflowBridge {
     return (await this.activeManifestEntries()).map((entry) => entry.manifest_path);
   }
 
+  async activeWorkerSessionPolicies() {
+    const policies = new Set();
+    for (const manifestPath of await this.activeManifestPaths()) {
+      try {
+        const summary = await getCodexWorkStatus({ manifestPath, reconcile: false });
+        if (Number(summary.counts?.pending ?? 0) + Number(summary.counts?.leased ?? 0) === 0) continue;
+        const loaded = await loadWorkManifest(manifestPath);
+        const policy = String(
+          loaded.manifest.policy?.browser_provider_worker_session_policy?.[this.browserProvider]
+            ?? "",
+        ).trim();
+        if (policy) policies.add(policy);
+      } catch {
+        // Invalid manifests are reported through the normal dashboard/status
+        // path and must not cause an unrelated desktop host to prewarm pages.
+      }
+    }
+    return [...policies].sort();
+  }
+
   async activateManifest(manifestPath) {
     const resolved = this.manifestPath(manifestPath);
     await loadWorkManifest(resolved);
@@ -412,6 +453,7 @@ export class GoldflowBridge {
             asset_kind: assignment.asset_kind,
             lease_token: assignment.lease_token,
             expires_at: assignment.expires_at,
+            worker_session_policy: assignment.worker_session_policy ?? null,
             prompt: assignment.item.prompt,
             prompt_sha256: assignment.item.prompt_sha256,
             expected_output: assignment.item.expected_output,
@@ -464,6 +506,7 @@ export class GoldflowBridge {
     const receiptProvider = this.browserProvider;
     const { manifestPath } = await this.manifestById(manifestId);
     const { assignment } = await this.assignmentFor({ manifestId, assetId, leaseToken, workerId });
+    assertPersistentWorkerSessionReceipt(assignment, uiContract);
     if (receiptProvider === "google-flow") {
       await validateGoogleFlowReferenceBinding({
         uiContract,

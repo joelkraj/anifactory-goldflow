@@ -45,9 +45,9 @@ function recordProviderFailure(provider, error) {
   dispatchWaiters();
 }
 
-function positiveInteger(value, fallback) {
+function nonnegativeInteger(value, fallback) {
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function poolRows(identity, stageName, env) {
@@ -61,8 +61,9 @@ function poolRows(identity, stageName, env) {
     .filter((provider) => available.has(provider))
     .map((provider) => ({
       provider,
-      concurrency: positiveInteger(configured?.[provider]?.concurrency, provider === "codex_cli" ? 8 : 3),
-    }));
+      concurrency: nonnegativeInteger(configured?.[provider]?.concurrency, provider === "codex_cli" ? 8 : 0),
+    }))
+    .filter((row) => row.concurrency > 0);
 }
 
 function claim(rows) {

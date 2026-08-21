@@ -16,6 +16,7 @@ const FLOW_MEDIA_PATH_FRAGMENT = "media.getMediaUrlRedirect";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const FLOW_COMPOSER_MEDIA_CONTROL_PATTERN = /^(?:(?:🍌\s*)?Nano Banana\b|Veo\b|Video\s*·\s*\d+s\b)/i;
+const PERSISTENT_FLOW_WORKER_POLICY = "persistent_project_per_worker_slot_v1";
 
 export function redactBrowserDiagnostic(value) {
   return String(value ?? "")
@@ -191,6 +192,16 @@ export function isFlowVideoDetailUrl(value) {
   }
 }
 
+export function isFlowProjectWorkspaceUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""));
+    return url.origin === "https://labs.google"
+      && /^\/fx\/tools\/flow\/project\/[^/]+(?:\/|$)/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 export class GoogleFlowBrowser {
   constructor({
     profileDir,
@@ -217,11 +228,13 @@ export class GoogleFlowBrowser {
     this.context = null;
     this.loginPage = null;
     this.clipboardQueue = Promise.resolve();
+    this.workerPages = new Map();
+    this.workerPagePromises = new Map();
   }
 
   async start() {
     if (this.concurrency > 1 && this.flowProjectUrl) {
-      throw codedError("ui_contract_mismatch", "Concurrent Google Flow work requires a fresh project per job; a shared flowProjectUrl is unsafe.");
+      throw codedError("ui_contract_mismatch", "Concurrent Google Flow work requires one dedicated project per persistent worker slot; a single shared flowProjectUrl is unsafe.");
     }
     await Promise.all([
       fs.mkdir(this.profileDir, { recursive: true }),
@@ -293,7 +306,109 @@ export class GoogleFlowBrowser {
   async close() {
     const context = this.context;
     this.context = null;
+    this.workerPages.clear();
+    this.workerPagePromises.clear();
     if (context) await context.close().catch(() => {});
+  }
+
+  workerPoolState() {
+    return {
+      policy: PERSISTENT_FLOW_WORKER_POLICY,
+      configured_slots: this.concurrency,
+      ready_slots: [...this.workerPages.entries()]
+        .filter(([, worker]) => worker?.page && !worker.page.isClosed())
+        .map(([slot, worker]) => ({ slot, project_url: worker.projectUrl })),
+    };
+  }
+
+  assertWorkerSlot(slot) {
+    const value = Number(slot);
+    if (!Number.isInteger(value) || value < 0 || value >= this.concurrency) {
+      throw codedError("ui_contract_mismatch", `Google Flow worker slot must be an integer from 0 through ${this.concurrency - 1}.`);
+    }
+    return value;
+  }
+
+  async prepareWorkerSlots() {
+    await Promise.all(Array.from(
+      { length: this.concurrency },
+      (_, slot) => this.ensurePersistentWorkerPage(slot),
+    ));
+    this.log(`Google Flow persistent worker pool ready: ${this.concurrency} tabs/projects.`);
+    return this.workerPoolState();
+  }
+
+  async createPersistentWorkerPage(slot) {
+    if (!this.context) throw new Error("Goldflow Google Flow browser is not running.");
+    const page = slot === 0 && this.loginPage && !this.loginPage.isClosed()
+      ? this.loginPage
+      : await this.context.newPage();
+    try {
+      await page.goto(
+        this.concurrency === 1 && this.flowProjectUrl ? this.flowProjectUrl : GOOGLE_FLOW_URL,
+        { waitUntil: "domcontentloaded", timeout: 90_000 },
+      );
+      if (await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
+        throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
+      }
+      if (!isFlowProjectWorkspaceUrl(page.url())) {
+        const newProject = await waitForVisible(
+          page.getByRole("button", { name: /new project/i }),
+          { timeoutMs: 30_000 },
+        );
+        if (!newProject) throw codedError("ui_contract_mismatch", "Google Flow did not expose a New project control for the persistent worker slot.");
+        await newProject.click();
+        await page.waitForURL((url) => isFlowProjectWorkspaceUrl(url.href), { timeout: 15_000 }).catch(() => {});
+      }
+      if (!isFlowProjectWorkspaceUrl(page.url())) {
+        throw codedError("ui_contract_mismatch", `Google Flow worker slot ${slot + 1} did not materialize a dedicated project URL.`);
+      }
+      const composer = await waitForVisible(page.locator(PROMPT_SELECTOR), { timeoutMs: 60_000 });
+      if (!composer) throw codedError("ui_contract_mismatch", "Google Flow persistent worker project did not expose its prompt composer.");
+      return {
+        slot,
+        page,
+        projectUrl: page.url(),
+        preparedAt: new Date().toISOString(),
+      };
+    } catch (caught) {
+      if (page !== this.loginPage) await page.close().catch(() => {});
+      throw caught;
+    }
+  }
+
+  async ensurePersistentWorkerPage(slotValue) {
+    const slot = this.assertWorkerSlot(slotValue);
+    const existing = this.workerPages.get(slot);
+    if (existing?.page && !existing.page.isClosed()) return existing;
+    const pending = this.workerPagePromises.get(slot);
+    if (pending) return pending;
+    const promise = this.createPersistentWorkerPage(slot)
+      .then((worker) => {
+        this.workerPages.set(slot, worker);
+        this.workerPagePromises.delete(slot);
+        return worker;
+      })
+      .catch((error) => {
+        this.workerPagePromises.delete(slot);
+        throw error;
+      });
+    this.workerPagePromises.set(slot, promise);
+    return promise;
+  }
+
+  async persistentJobPage(slotValue) {
+    const slot = this.assertWorkerSlot(slotValue);
+    let worker = await this.ensurePersistentWorkerPage(slot);
+    if (worker.page.isClosed()) worker = await this.ensurePersistentWorkerPage(slot);
+    await worker.page.goto(worker.projectUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    if (await visibleLocator(worker.page.locator(SIGNED_OUT_SELECTOR))) {
+      throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
+    }
+    if (!await waitForVisible(worker.page.locator(PROMPT_SELECTOR), { timeoutMs: 30_000 })) {
+      throw codedError("ui_contract_mismatch", `Google Flow persistent worker slot ${slot + 1} lost its project composer.`);
+    }
+    return worker.page;
   }
 
   async newJobPage() {
@@ -1425,7 +1540,7 @@ export class GoogleFlowBrowser {
     throw codedError("ui_contract_mismatch", "Timed out waiting for a generated Google Flow video.");
   }
 
-  async runVideoJob({ job, client, onPhase = async () => {} }) {
+  async runVideoJob({ slot = 0, job, client, onPhase = async () => {} }) {
     if (!Array.isArray(job.references) || job.references.length !== 1) {
       throw codedError("ui_contract_mismatch", "Google Flow image-to-video requires exactly one accepted first-frame image.");
     }
@@ -1434,7 +1549,8 @@ export class GoogleFlowBrowser {
       let preservePage = false;
       let creativeSubmissionStarted = false;
       try {
-        page = await this.newJobPage();
+        const persistentWorker = job.worker_session_policy === PERSISTENT_FLOW_WORKER_POLICY;
+        page = persistentWorker ? await this.persistentJobPage(slot) : await this.newJobPage();
         const verified = await this.verifyVideoUiContract(page, job);
         const prompt = [
           "Animate the attached accepted image as the exact first frame of one continuous 16:9 shot.",
@@ -1461,7 +1577,12 @@ export class GoogleFlowBrowser {
           downloadPath,
           sourceUrl: generated.sourceUrl,
           conversationUrl: page.url(),
-          uiContract: { ...verified, reference_binding: referenceBinding },
+          uiContract: {
+            ...verified,
+            reference_binding: referenceBinding,
+            worker_session_policy: job.worker_session_policy ?? "fresh_project_per_job",
+            worker_slot: slot,
+          },
           browserProvider: "google-flow",
         };
       } catch (error) {
@@ -1481,28 +1602,29 @@ export class GoogleFlowBrowser {
           creativeSubmissionStarted,
           attempt,
         })) {
-          this.log(`Google Flow video transport failed before submission; retrying once in a clean tab: ${redactBrowserDiagnostic(error.message)}`, "warn");
+          this.log(`Google Flow video transport failed before submission; retrying once in the dedicated worker project: ${redactBrowserDiagnostic(error.message)}`, "warn");
           await sleep(1_000);
           continue;
         }
         error.message = redactBrowserDiagnostic(error.message);
         throw error;
       } finally {
-        if (page && !preservePage) await page.close().catch(() => {});
+        if (page && job.worker_session_policy !== PERSISTENT_FLOW_WORKER_POLICY && !preservePage) await page.close().catch(() => {});
       }
     }
     throw codedError("ui_contract_mismatch", "Google Flow video transport exhausted its pre-submission attempts.");
   }
 
-  async runJob({ job, client, onPhase = async () => {} }) {
-    if (job.type === "video") return this.runVideoJob({ job, client, onPhase });
+  async runJob({ slot = 0, job, client, onPhase = async () => {} }) {
+    if (job.type === "video") return this.runVideoJob({ slot, job, client, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", "Google Flow browser received unsupported work.");
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       let page = null;
       let preservePage = false;
       let creativeSubmissionStarted = false;
       try {
-        page = await this.newJobPage();
+        const persistentWorker = job.worker_session_policy === PERSISTENT_FLOW_WORKER_POLICY;
+        page = persistentWorker ? await this.persistentJobPage(slot) : await this.newJobPage();
         const verified = await this.verifyUiContract(page);
         const prompt = [
           "Create exactly one original landscape still image in a 16:9 frame.",
@@ -1527,7 +1649,12 @@ export class GoogleFlowBrowser {
           downloadPath,
           sourceUrl: generated.sourceUrl,
           conversationUrl: page.url(),
-          uiContract: { ...verified, reference_binding: referenceBinding },
+          uiContract: {
+            ...verified,
+            reference_binding: referenceBinding,
+            worker_session_policy: job.worker_session_policy ?? "fresh_project_per_job",
+            worker_slot: slot,
+          },
           browserProvider: "google-flow",
         };
       } catch (error) {
@@ -1539,14 +1666,14 @@ export class GoogleFlowBrowser {
           creativeSubmissionStarted,
           attempt,
         })) {
-          this.log(`Google Flow image transport failed before submission; retrying once in a clean tab: ${redactBrowserDiagnostic(error.message)}`, "warn");
+          this.log(`Google Flow image transport failed before submission; retrying once in the dedicated worker project: ${redactBrowserDiagnostic(error.message)}`, "warn");
           await sleep(1_000);
           continue;
         }
         error.message = redactBrowserDiagnostic(error.message);
         throw error;
       } finally {
-        if (page && !preservePage) await page.close().catch(() => {});
+        if (page && job.worker_session_policy !== PERSISTENT_FLOW_WORKER_POLICY && !preservePage) await page.close().catch(() => {});
       }
     }
     throw codedError("ui_contract_mismatch", "Google Flow image transport exhausted its pre-submission attempts.");

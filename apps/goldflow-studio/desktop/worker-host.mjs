@@ -17,16 +17,26 @@ function normalizeError(error, fallbackCode = "browser_worker_failure") {
   return normalized;
 }
 
+const PERSISTENT_WORKER_SESSION_POLICIES = new Set([
+  "persistent_project_per_worker_slot_v1",
+  "persistent_tab_per_worker_slot_v1",
+]);
+
 export function browserFailureDisposition(error) {
   const code = String(error?.code ?? "").toLowerCase();
   const message = String(error?.message ?? error ?? "").toLowerCase();
   if (code === "rate_limited" || /rate.?limit|too many requests|requesting generations too quickly|cooldown/.test(message)) {
     return { kind: "rate_limit", pausesDispatch: true };
   }
+  if (code === "ui_contract_mismatch"
+    && /timed out waiting for (?:a )?complete(?:d)? (?:chatgpt |gemini )?(?:text )?response/.test(message)) {
+    return { kind: "transport", pausesDispatch: true };
+  }
   if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(code)) {
     return { kind: code, pausesDispatch: true };
   }
-  if (/timeout|timed out|transport|connection|socket|fetch failed|upload files.*not enabled|element is not enabled/.test(message)) {
+  if (/(?:google_flow|google_gemini|chatgpt)_generation_error/.test(code)
+    || /timeout|timed out|transport|connection|socket|fetch failed|upload files.*not enabled|element is not enabled|failed to generate|generation failed|something went wrong/.test(message)) {
     return { kind: "transport", pausesDispatch: true };
   }
   return { kind: "asset", pausesDispatch: false };
@@ -56,6 +66,9 @@ export class GoldflowDesktopHost {
     this.nextLeaseAt = 0;
     this.dispatchCooldownUntil = 0;
     this.consecutiveTransportFailures = 0;
+    this.providerCircuit = null;
+    this.preparedWorkerSessionPolicies = new Set();
+    this.workerPoolPreparation = null;
     this.stopPromise = new Promise((resolve) => { this.resolveStopped = resolve; });
   }
 
@@ -76,6 +89,12 @@ export class GoldflowDesktopHost {
       types: this.config.types,
       profile_dir: this.config.profileDir,
       browser_provider: this.config.browserProvider,
+      worker_pool: typeof this.browser.workerPoolState === "function"
+        ? {
+            ...this.browser.workerPoolState(),
+            prepared_session_policies: [...this.preparedWorkerSessionPolicies].sort(),
+          }
+        : null,
       active_jobs: [...this.activeJobs.values()].map((active) => ({
         slot: active.slot,
         job: active.job,
@@ -90,6 +109,7 @@ export class GoldflowDesktopHost {
         cooldown_until: this.dispatchCooldownUntil ? new Date(this.dispatchCooldownUntil).toISOString() : null,
         consecutive_transport_failures: this.consecutiveTransportFailures,
         transport_failure_threshold: this.config.transportFailureThreshold,
+        provider_circuit: this.providerCircuit,
       },
       events: this.events,
       updated_at: nowIso(),
@@ -143,6 +163,27 @@ export class GoldflowDesktopHost {
     }
   }
 
+  async preparePersistentWorkerPool(policyValue, reason = "persistent image manifest") {
+    const policy = String(policyValue ?? "");
+    if (!PERSISTENT_WORKER_SESSION_POLICIES.has(policy)) return false;
+    if (this.preparedWorkerSessionPolicies.has(policy)) return true;
+    if (typeof this.browser.prepareWorkerSlots !== "function") {
+      throw new Error(`${this.config.browserProvider} cannot satisfy persistent worker-session policy ${policy}.`);
+    }
+    if (this.workerPoolPreparation) {
+      await this.workerPoolPreparation;
+      return this.preparePersistentWorkerPool(policy, reason);
+    }
+    this.workerPoolPreparation = this.browser.prepareWorkerSlots()
+      .then(() => {
+        this.preparedWorkerSessionPolicies.add(policy);
+        this.log(`Prepared persistent browser workers for ${policy} (${reason}).`);
+      })
+      .finally(() => { this.workerPoolPreparation = null; });
+    await this.workerPoolPreparation;
+    return true;
+  }
+
   async start() {
     if (this.running) return this;
     await Promise.all([
@@ -153,6 +194,10 @@ export class GoldflowDesktopHost {
     await this.reconcileInterruptedJobs();
     await this.browser.start();
     await this.browser.waitForAuthentication();
+    const health = await this.client.health();
+    for (const policy of health.active_image_worker_session_policies ?? []) {
+      await this.preparePersistentWorkerPool(policy, "active manifest at startup");
+    }
     this.running = true;
     await this.persistRuntime();
     this.log(`Desktop worker ready with ${this.config.concurrency} browser slot(s): ${this.config.types.join(", ")}.`);
@@ -240,19 +285,55 @@ export class GoldflowDesktopHost {
       this.client.heartbeat(lease.job, slot).catch((error) => this.log(`Heartbeat failed for ${lease.job.job_id}: ${error.message}`, "error"));
     }, 60_000);
     try {
+      await this.preparePersistentWorkerPool(
+        lease.job.worker_session_policy,
+        `leased ${lease.job.job_id}`,
+      );
       const result = await this.browser.runJob({
+        slot,
         job: lease.job,
         uiContract: lease.ui_contract,
         client: this.client,
         onPhase: (phase) => this.setPhase(slot, phase),
       });
       await this.client.complete(lease.job, slot, result);
-      this.consecutiveTransportFailures = 0;
+      const circuitOpenedAt = Date.parse(this.providerCircuit?.opened_at ?? "");
+      const jobStartedAt = Date.parse(active.startedAt ?? "");
+      const inFlightBeforeOpenCircuit = this.providerCircuit?.status === "open"
+        && Number.isFinite(circuitOpenedAt)
+        && Number.isFinite(jobStartedAt)
+        && jobStartedAt <= circuitOpenedAt;
+      if (!inFlightBeforeOpenCircuit) {
+        this.consecutiveTransportFailures = 0;
+        this.providerCircuit = null;
+      }
       this.log(`Completed ${lease.job.job_id}.`);
     } catch (caught) {
       const error = normalizeError(caught);
       const disposition = browserFailureDisposition(error);
+      if (disposition.kind === "transport" && String(error.code).toLowerCase() === "ui_contract_mismatch") {
+        error.code = "provider_response_timeout";
+      }
       if (disposition.kind === "transport") this.consecutiveTransportFailures += 1;
+      if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(disposition.kind)) {
+        this.providerCircuit = {
+          status: "open",
+          reason: disposition.kind,
+          failure_count: 1,
+          opened_at: nowIso(),
+        };
+      } else if (disposition.kind === "transport"
+        && this.consecutiveTransportFailures >= this.config.transportFailureThreshold) {
+        const originalCode = String(error.code ?? "browser_worker_failure");
+        error.code = "provider_transient_circuit_open";
+        error.message = `${originalCode}: ${error.message}`;
+        this.providerCircuit = {
+          status: "open",
+          reason: "consecutive_transient_provider_failures",
+          failure_count: this.consecutiveTransportFailures,
+          opened_at: nowIso(),
+        };
+      }
       if (disposition.kind === "rate_limit") {
         this.dispatchCooldownUntil = Date.now() + this.config.rateLimitCooldownMs;
       } else if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(disposition.kind)) {

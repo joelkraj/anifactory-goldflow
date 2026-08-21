@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import os
@@ -20,12 +21,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
-import numpy as np
-from huggingface_hub import snapshot_download
-from mlx_audio.audio_io import write as audio_write
-from mlx_audio.tts.utils import load_model
-from mlx_audio.utils import load_audio
+
+# Loaded only after the hash-bound pre-synthesis gate and all dependency-free
+# job/identity checks pass. Keeping these imports lazy makes a false/false gate
+# a real zero-model-import failure boundary.
+mx: Any = None
+np: Any = None
+snapshot_download: Any = None
+audio_write: Any = None
+load_model: Any = None
+load_audio: Any = None
 
 
 KOKORO = {
@@ -245,6 +250,7 @@ MLX_AUDIO_VERSION = "0.4.6"
 SERIAL_SYNTHESIS_MODE = "serial_unit_v1"
 BATCH4_SYNTHESIS_MODE = "fixed_batch4_length_matched_v1"
 EXACT_UNIT_RECOVERY_MODE = "serial_exact_unit_recovery_v1"
+INCOMPLETE_UNIT_RESUME_MODE = "serial_incomplete_unit_resume_v1"
 SERIAL_SYNTHESIS_CONTRACT = {
     "schema": "goldflow_qwen_liam_synthesis_contract_v1",
     "contract_id": "qwen_liam_serial_unit_v1",
@@ -316,6 +322,185 @@ def canonical_sha256(value: Any) -> str:
     )
 
 
+def narration_gate_sha256(value: Any) -> str:
+    def canonicalize(item: Any) -> Any:
+        if isinstance(item, list):
+            return [canonicalize(child) for child in item]
+        if not isinstance(item, dict):
+            return item
+        return {
+            key: canonicalize(child)
+            for key, child in sorted(item.items())
+            if key not in {"generated_at", "updated_at", "gate_sha256"}
+        }
+
+    return sha256_text(
+        json.dumps(
+            canonicalize(value),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def validate_pre_synthesis_gate(
+    jobs_manifest: dict[str, Any],
+    jobs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    binding = jobs_manifest.get("pre_synthesis_gate")
+    if not isinstance(binding, dict):
+        raise ValueError("Narration jobs lack a pre-synthesis gate binding")
+    gate_path = Path(str(binding.get("path") or "")).resolve()
+    if not gate_path.is_file():
+        raise FileNotFoundError(
+            f"Narration pre-synthesis gate is missing: {gate_path}"
+        )
+    gate_file_sha256 = sha256_file(gate_path)
+    if gate_file_sha256 != binding.get("file_sha256"):
+        raise ValueError("Narration pre-synthesis gate file hash is stale")
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    if (
+        gate.get("schema") != "goldflow_narration_pre_synthesis_gate_v2"
+        or gate.get("status") != "passed"
+        or gate.get("phase")
+        != "synthesis_authorized_immediately_before_helper_import"
+        or gate.get("model_load_performed") is not True
+        or gate.get("synthesis_invoked") is not True
+        or not isinstance(gate.get("historical_synthesis_authorized"), bool)
+        or gate.get("gate_sha256") != binding.get("gate_sha256")
+        or gate.get("gate_sha256") != narration_gate_sha256(gate)
+        or gate.get("authorization", {}).get("schema")
+        != "goldflow_narration_synthesis_authorization_v1"
+        or not gate.get("authorization", {}).get("validation_gate_sha256")
+    ):
+        raise ValueError(
+            "Narration pre-synthesis gate is blocked, stale, or not authorized"
+        )
+    bindings = gate.get("bindings") or {}
+    for manifest_field, gate_field in (
+        (
+            "narration_generation_plan_sha256",
+            "narration_generation_plan_sha256",
+        ),
+        (
+            "narration_generation_plan_file_sha256",
+            "narration_generation_plan_file_sha256",
+        ),
+        ("run_identity_file_sha256", "run_identity_file_sha256"),
+        ("source_script_sha256", "script_sha256"),
+    ):
+        if jobs_manifest.get(manifest_field) != bindings.get(gate_field):
+            raise ValueError(
+                f"Narration pre-synthesis gate binding is stale: {manifest_field}"
+            )
+    contract = gate.get("contract") or {}
+    for manifest_field, gate_field in (
+        ("provider", "provider"),
+        ("model_id", "model_id"),
+        ("model_revision", "model_revision"),
+        ("voice_id", "voice_id"),
+        ("voice_sha256", "voice_sha256"),
+        ("voice_continuity_contract", "voice_continuity_contract"),
+    ):
+        if jobs_manifest.get(manifest_field) != contract.get(gate_field):
+            raise ValueError(
+                f"Narration pre-synthesis gate identity is stale: {manifest_field}"
+            )
+    requested_ids = [str(job["unit_id"]) for job in jobs]
+    scope = gate.get("scope") or {}
+    authorized_ids = [
+        str(unit_id)
+        for unit_id in scope.get("authorized_synthesis_unit_ids") or []
+    ]
+    if requested_ids != authorized_ids:
+        raise ValueError(
+            "Narration jobs exceed or reorder the pre-synthesis authorized scope"
+        )
+    jobs_by_id = {str(job["unit_id"]): job for job in jobs}
+    preserved = scope.get("preserved_artifacts") or []
+    preserved_ids = [str(row.get("unit_id") or "") for row in preserved]
+    declared_preserved_ids = [
+        str(unit_id)
+        for unit_id in scope.get("preserved_unit_ids") or []
+    ]
+    if (
+        preserved_ids != declared_preserved_ids
+        or len(set(preserved_ids)) != len(preserved_ids)
+        or set(requested_ids).intersection(preserved_ids)
+    ):
+        raise ValueError(
+            "Narration jobs overlap or disagree with preserved unit bindings"
+        )
+    if jobs_manifest.get("synthesis_mode") == INCOMPLETE_UNIT_RESUME_MODE and (
+        scope.get("mode")
+        != "interrupted_full_synthesis_resume_preserving_accepted_units"
+        or not preserved_ids
+        or len(set(requested_ids + preserved_ids))
+        != int(gate.get("unit_count", -1))
+    ):
+        raise ValueError(
+            "Interrupted narration resume must exclude every preserved unit "
+            "and cover only the remaining plan units"
+        )
+    for artifact in preserved:
+        unit_id = str(artifact.get("unit_id") or "")
+        audio_path = Path(str(artifact.get("audio_path") or "")).resolve()
+        sidecar_path = Path(
+            str(artifact.get("synthesis_sidecar_path") or "")
+        ).resolve()
+        if (
+            not unit_id
+            or not audio_path.is_file()
+            or not sidecar_path.is_file()
+            or sha256_file(audio_path) != artifact.get("audio_sha256")
+            or sha256_file(sidecar_path)
+            != artifact.get("synthesis_sidecar_sha256")
+        ):
+            raise ValueError(
+                f"Preserved narration artifact is missing or stale: {unit_id!r}"
+            )
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if (
+            sidecar.get("unit_id") != unit_id
+            or sidecar.get("output_sha256") != artifact.get("audio_sha256")
+            or sidecar.get("spoken_text_sha256")
+            != artifact.get("spoken_text_sha256")
+            or sidecar.get("synthesis_identity_sha256")
+            != artifact.get("synthesis_identity_sha256")
+        ):
+            raise ValueError(
+                f"Preserved narration sidecar identity is stale: {unit_id!r}"
+            )
+        job = jobs_by_id.get(unit_id)
+        if job is not None:
+            raise ValueError(
+                f"Interrupted-resume job would overwrite accepted narration: {unit_id!r}"
+            )
+    return preserved
+
+
+def verify_preserved_artifacts_unchanged(
+    preserved: list[dict[str, Any]],
+) -> None:
+    for artifact in preserved:
+        unit_id = str(artifact.get("unit_id") or "")
+        audio_path = Path(str(artifact.get("audio_path") or "")).resolve()
+        sidecar_path = Path(
+            str(artifact.get("synthesis_sidecar_path") or "")
+        ).resolve()
+        if (
+            not audio_path.is_file()
+            or not sidecar_path.is_file()
+            or sha256_file(audio_path) != artifact.get("audio_sha256")
+            or sha256_file(sidecar_path)
+            != artifact.get("synthesis_sidecar_sha256")
+        ):
+            raise RuntimeError(
+                f"Accepted narration artifact changed during synthesis: {unit_id!r}"
+            )
+
+
 def atomic_json(file_path: Path, value: Any) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = file_path.with_name(f".{file_path.name}.tmp-{os.getpid()}")
@@ -347,6 +532,28 @@ def package_version(name: str) -> str | None:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def load_synthesis_dependencies() -> None:
+    global mx, np, snapshot_download, audio_write, load_model, load_audio
+    mx = importlib.import_module("mlx.core")
+    np = importlib.import_module("numpy")
+    snapshot_download = getattr(
+        importlib.import_module("huggingface_hub"),
+        "snapshot_download",
+    )
+    audio_write = getattr(
+        importlib.import_module("mlx_audio.audio_io"),
+        "write",
+    )
+    load_model = getattr(
+        importlib.import_module("mlx_audio.tts.utils"),
+        "load_model",
+    )
+    load_audio = getattr(
+        importlib.import_module("mlx_audio.utils"),
+        "load_audio",
+    )
 
 
 def validate_file(file_path: Path, expected_sha256: str) -> None:
@@ -460,7 +667,11 @@ def validate_qwen_synthesis_manifest(
     contract = value.get("synthesis_contract")
     if mode == SERIAL_SYNTHESIS_MODE:
         expected_contract = SERIAL_SYNTHESIS_CONTRACT
-    elif mode in {BATCH4_SYNTHESIS_MODE, EXACT_UNIT_RECOVERY_MODE}:
+    elif mode in {
+        BATCH4_SYNTHESIS_MODE,
+        EXACT_UNIT_RECOVERY_MODE,
+        INCOMPLETE_UNIT_RESUME_MODE,
+    }:
         expected_contract = BATCH4_SYNTHESIS_CONTRACT
     else:
         raise ValueError(f"Unsupported Qwen synthesis mode: {mode!r}")
@@ -480,7 +691,11 @@ def validate_qwen_synthesis_manifest(
     batch_plan_sha256 = str(value.get("batch_plan_sha256") or "")
     if not batch_plan_sha256:
         raise ValueError("Qwen synthesis manifest lacks batch_plan_sha256")
-    if mode in {BATCH4_SYNTHESIS_MODE, EXACT_UNIT_RECOVERY_MODE}:
+    if mode in {
+        BATCH4_SYNTHESIS_MODE,
+        EXACT_UNIT_RECOVERY_MODE,
+        INCOMPLETE_UNIT_RESUME_MODE,
+    }:
         if not isinstance(batch_plan, dict):
             raise ValueError("Batch-four synthesis requires its exact batch plan")
         unsigned_plan = {
@@ -510,7 +725,7 @@ def validate_qwen_synthesis_manifest(
                 "Batch-four jobs are not in the exact original narration order"
             )
         if (
-            mode == EXACT_UNIT_RECOVERY_MODE
+            mode in {EXACT_UNIT_RECOVERY_MODE, INCOMPLETE_UNIT_RESUME_MODE}
             and (
                 len(set(requested_ids)) != len(requested_ids)
                 or any(unit_id not in original_ids for unit_id in requested_ids)
@@ -742,6 +957,33 @@ def validate_qwen_synthesis_manifest(
                     f"Exact-unit recovery provenance is incomplete for "
                     f"{job['unit_id']}"
                 )
+    if mode == INCOMPLETE_UNIT_RESUME_MODE:
+        gate = value.get("pre_synthesis_gate") or {}
+        for job in jobs:
+            provenance = job.get("recovery_provenance")
+            cohort = job.get("synthesis_cohort")
+            if (
+                not isinstance(provenance, dict)
+                or provenance.get("schema")
+                != "goldflow_qwen_incomplete_unit_resume_provenance_v1"
+                or provenance.get("resume_mode")
+                != INCOMPLETE_UNIT_RESUME_MODE
+                or provenance.get("unit_id") != str(job["unit_id"])
+                or provenance.get("spoken_text_sha256")
+                != job.get("spoken_text_sha256")
+                or provenance.get("batch_plan_sha256")
+                != batch_plan_sha256
+                or provenance.get("origin_cohort_id")
+                != (cohort or {}).get("cohort_id")
+                or provenance.get("origin_cohort_sha256")
+                != (cohort or {}).get("cohort_sha256")
+                or provenance.get("pre_synthesis_gate_sha256")
+                != gate.get("gate_sha256")
+            ):
+                raise ValueError(
+                    f"Incomplete-unit resume provenance is stale for "
+                    f"{job['unit_id']}"
+                )
     return mode, contract, batch_plan
 
 
@@ -954,7 +1196,10 @@ def synthesis_identity(
                         "per_unit_seed_preserved": False,
                     }
                 )
-            elif synthesis_mode == EXACT_UNIT_RECOVERY_MODE:
+            elif synthesis_mode in {
+                EXACT_UNIT_RECOVERY_MODE,
+                INCOMPLETE_UNIT_RESUME_MODE,
+            }:
                 origin_cohort = next(
                     (
                         row
@@ -976,6 +1221,9 @@ def synthesis_identity(
                             origin_cohort["members"],
                         "per_unit_serial_seed": int(job["seed"]),
                         "per_unit_seed_preserved": True,
+                        "interrupted_incomplete_resume":
+                            synthesis_mode
+                            == INCOMPLETE_UNIT_RESUME_MODE,
                     }
                 )
     return value
@@ -1068,11 +1316,6 @@ def collect_batch_audio(
 
 def main() -> None:
     args = parse_args()
-    if package_version("mlx-audio") != MLX_AUDIO_VERSION:
-        raise RuntimeError(
-            f"Expected mlx-audio {MLX_AUDIO_VERSION}; "
-            f"found {package_version('mlx-audio')!r}"
-        )
     jobs_path = Path(args.jobs).resolve()
     output_dir = Path(args.output_dir).resolve()
     report_path = Path(args.report).resolve()
@@ -1081,6 +1324,12 @@ def main() -> None:
         events_path.unlink()
     jobs_manifest = json.loads(jobs_path.read_text(encoding="utf-8"))
     jobs = validate_jobs(jobs_manifest)
+    preserved_artifacts = validate_pre_synthesis_gate(jobs_manifest, jobs)
+    if package_version("mlx-audio") != MLX_AUDIO_VERSION:
+        raise RuntimeError(
+            f"Expected mlx-audio {MLX_AUDIO_VERSION}; "
+            f"found {package_version('mlx-audio')!r}"
+        )
     synthesis_mode = SERIAL_SYNTHESIS_MODE
     synthesis_contract = SERIAL_SYNTHESIS_CONTRACT
     batch_plan: dict[str, Any] | None = None
@@ -1103,11 +1352,6 @@ def main() -> None:
             != KOKORO_VOICES[kokoro_voice_id]
         ):
             raise ValueError("Kokoro voice hash lock mismatch in jobs manifest")
-    pin, snapshot = resolve_snapshot(
-        args.route,
-        args.local_files_only,
-        kokoro_voice_id,
-    )
     reference_audio = (
         Path(args.qwen_reference_audio).resolve()
         if args.qwen_reference_audio
@@ -1156,6 +1400,12 @@ def main() -> None:
                 qwen_reference_contract["metadata_sha256"],
             )
 
+    load_synthesis_dependencies()
+    pin, snapshot = resolve_snapshot(
+        args.route,
+        args.local_files_only,
+        kokoro_voice_id,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     load_started = time.perf_counter()
     # MLX Audio derives the model family from the repo name when passed a
@@ -1684,7 +1934,10 @@ def main() -> None:
                     sidecar_path,
                 ) = output_spec(job, identity)
                 require_token_evidence = (
-                    synthesis_mode == EXACT_UNIT_RECOVERY_MODE
+                    synthesis_mode in {
+                        EXACT_UNIT_RECOVERY_MODE,
+                        INCOMPLETE_UNIT_RESUME_MODE,
+                    }
                 )
                 cached = exact_cached_row(
                     output_path,
@@ -1773,6 +2026,10 @@ def main() -> None:
                     "synthesis_mode": synthesis_mode,
                     "batch_plan_sha256":
                         jobs_manifest.get("batch_plan_sha256"),
+                    "cohort_id":
+                        (job.get("synthesis_cohort") or {}).get("cohort_id"),
+                    "cohort_sha256":
+                        (job.get("synthesis_cohort") or {}).get("cohort_sha256"),
                     "recovery_provenance":
                         job.get("recovery_provenance"),
                     "synthesis_identity": identity,
@@ -1931,6 +2188,13 @@ def main() -> None:
         ),
         "jobs_path": str(jobs_path),
         "jobs_sha256": sha256_file(jobs_path),
+        "pre_synthesis_gate_path": jobs_manifest["pre_synthesis_gate"]["path"],
+        "pre_synthesis_gate_file_sha256": jobs_manifest["pre_synthesis_gate"]["file_sha256"],
+        "pre_synthesis_gate_sha256": jobs_manifest["pre_synthesis_gate"]["gate_sha256"],
+        "preserved_unit_count": len(preserved_artifacts),
+        "preserved_unit_ids": [
+            str(row["unit_id"]) for row in preserved_artifacts
+        ],
         "model_load_time_sec": round(load_seconds, 6),
         "effective_concurrency": 1,
         "model_load_count": 1,
@@ -1991,6 +2255,7 @@ def main() -> None:
         "failed_result_count": failure_count,
         "results": results,
     }
+    verify_preserved_artifacts_unchanged(preserved_artifacts)
     atomic_json(report_path, report)
     print(
         json.dumps(

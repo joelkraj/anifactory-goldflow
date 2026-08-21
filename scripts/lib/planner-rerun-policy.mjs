@@ -7,6 +7,7 @@ export const PLANNER_STAGE_IDS = Object.freeze(new Set([
   "visual_reference_plan",
   "visual_prompt_plan",
   "visual_prompt_blocker_repair",
+  "transition_edit_plan",
 ]));
 
 const SCOPED_FLAGS = Object.freeze([
@@ -32,6 +33,8 @@ const SCOPED_FLAGS = Object.freeze([
   "proof-start-sec",
   "proof-end-sec",
   "blockers-only",
+  "boundary-ids",
+  "boundary-id",
 ]);
 
 function isTrue(value) {
@@ -105,19 +108,24 @@ export function plannerRerunDecision({
     };
   }
   if (
-    stage === "visual_prompt_plan"
+    ["visual_prompt_plan", "transition_edit_plan"].includes(stage)
     && scope.resumes_incomplete_chunks
     && (latestAttemptFailed || interruptedAttempt || unresolvedIds.length > 0)
   ) {
+    const isTransition = stage === "transition_edit_plan";
     return {
       allowed: false,
-      reason: "visual_prompt_resume_requires_exact_failed_scope",
+      reason: isTransition
+        ? "transition_resume_requires_exact_failed_scope"
+        : "visual_prompt_resume_requires_exact_failed_scope",
       prior_attempt_count: priorAttempts.length,
       unresolved_expected_ids: unresolvedIds,
       ...scope,
-      required_recovery: unresolvedIds.length
-        ? `Retry only the failed visual beats/cuts: ${unresolvedIds.join(", ")}. Preserve the complete blocked base plan and every passed content-addressed chunk.`
-        : "Inspect the blocked visual prompt plan and planner_chunk_ledger.json, then pass exact --cut-ids or --beat-ids. Whole-stage visual prompt retries are not automatic recovery.",
+      required_recovery: isTransition
+        ? "Inspect transition_edit_plan and retry only its failed_boundary_ids with --boundary-ids. Accepted transition chunks remain immutable."
+        : unresolvedIds.length
+          ? `Retry only the failed visual beats/cuts: ${unresolvedIds.join(", ")}. Preserve the complete blocked base plan and every passed content-addressed chunk.`
+          : "Inspect the blocked visual prompt plan and planner_chunk_ledger.json, then pass exact --cut-ids or --beat-ids. Whole-stage visual prompt retries are not automatic recovery.",
     };
   }
   if (
@@ -182,6 +190,15 @@ function unresolvedPlannerIds(episodeDir, stage) {
 }
 
 export function plannerRerunDecisionForEpisode({ stage, flags = {}, episodeDir }) {
+  if (PLANNER_STAGE_IDS.has(stage) && !episodeDir) {
+    return {
+      allowed: false,
+      reason: "episode_identity_required_for_planner_rerun_guard",
+      prior_attempt_count: 0,
+      failed_expected_ids: [],
+      required_recovery: "Pass --episode-dir <absolute-episode-dir> or the complete --channel/--week/--episode identity so Goldflow can inspect planner history before authoring.",
+    };
+  }
   const priorEvents = episodeDir
     ? readJsonLines(path.join(episodeDir, "execution_events.jsonl"))
     : [];

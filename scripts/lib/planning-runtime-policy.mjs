@@ -232,9 +232,14 @@ export function webPlannerEffortForStage(stageName, {
   fallback = DEFAULT_WEB_PLANNING_REASONING_EFFORT,
 } = {}) {
   if (explicitEffort != null) return normalizePlanningEffort(explicitEffort, fallback);
-  if (normalizePlanningEffortPolicy(policy) === DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY) {
+  const normalizedPolicy = normalizePlanningEffortPolicy(policy);
+  if (normalizedPolicy === DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY) {
     return normalizePlanningEffort(fallback);
   }
+  // Planning-room Web assignments are bounded premium/advisory work. Medium
+  // is the locked latency/quality point; critical structured work routes to
+  // Codex rather than escalating Web effort on the production path.
+  if (normalizedPolicy === DEFAULT_PLANNING_ROOM_EFFORT_POLICY) return "medium";
   const stage = String(stageName ?? "").trim().toLowerCase();
   if (/goldflow_(?:codex|planner)_doctor_probe/.test(stage)) return "medium";
   if (/(?:global_reconciliation|visual_reference_plan_merge|reference_plan_merge|winner_|source_(?:ideate|script)|full_dependent|retention_review|enhancement_judge)/.test(stage)) {

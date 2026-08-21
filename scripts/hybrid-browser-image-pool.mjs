@@ -28,8 +28,11 @@ import {
 } from "./lib/chatgpt-web-throttle-state.mjs";
 import {
   CHATGPT_WEB_IMAGE_PROVIDER,
+  FEDERATED_WEB_IMAGE_ROUTING_POLICY,
   FEDERATED_WEB_IMAGE_PROVIDER,
   federatedWebImageAutomaticChatGptEnabled,
+  FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+  FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
   GOOGLE_FLOW_BROWSER_PROVIDER,
   GOOGLE_GEMINI_BROWSER_PROVIDER,
   GOOGLE_GEMINI_IMAGE_CONCURRENCY,
@@ -38,6 +41,8 @@ import {
   HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
   HYBRID_WEB_FLOW_PROVIDER,
   GOOGLE_FLOW_IMAGE_PROVIDER,
+  PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+  PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
   federatedWebImageIdentityStatus,
   googleFlowPrimaryIdentityStatus,
   hybridWebFlowIdentityStatus,
@@ -693,6 +698,7 @@ export function hybridManifestDispatchOptions({
   federatedChatGptEnabled = false,
   mode = "scene",
   flowConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+  persistentWorkerPool = false,
 } = {}) {
   const effectiveFlowConcurrency = validateFlowRuntimeConcurrency(flowConcurrency);
   const hybridTotalConcurrency = effectiveFlowConcurrency + HYBRID_CHATGPT_IMAGE_CONCURRENCY;
@@ -708,6 +714,11 @@ export function hybridManifestDispatchOptions({
       allowedBrowserProviders: [GOOGLE_FLOW_BROWSER_PROVIDER],
       browserProviderConcurrency: { [GOOGLE_FLOW_BROWSER_PROVIDER]: effectiveFlowConcurrency },
       browserProviderMaxOrderedReferences: { [GOOGLE_FLOW_BROWSER_PROVIDER]: 4 },
+      browserProviderWorkerSessionPolicy: {
+        [GOOGLE_FLOW_BROWSER_PROVIDER]: persistentWorkerPool
+          ? PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY
+          : FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
+      },
       browserProviderReceiptRequired: true,
       recommendedConcurrency: effectiveFlowConcurrency,
       maxConcurrency: effectiveFlowConcurrency,
@@ -720,9 +731,27 @@ export function hybridManifestDispatchOptions({
       allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
       browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
       browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
+      browserProviderWorkerSessionPolicy: {
+        [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
+          ? PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY
+          : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+      },
       browserProviderReceiptRequired: true,
       recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
       maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+    };
+  }
+  if (chatgptOnly) {
+    return {
+      workProvider: federated ? FEDERATED_WEB_IMAGE_PROVIDER : HYBRID_WEB_FLOW_PROVIDER,
+      dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
+      allowedBrowserProviders: ["chatgpt"],
+      browserProviderConcurrency: { chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY },
+      browserProviderMaxOrderedReferences: { chatgpt: 4 },
+      browserProviderWorkerSessionPolicy: { chatgpt: FRESH_BROWSER_SESSION_PER_JOB_POLICY },
+      browserProviderReceiptRequired: true,
+      recommendedConcurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
+      maxConcurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
     };
   }
   if (federated) {
@@ -733,6 +762,11 @@ export function hybridManifestDispatchOptions({
         allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
         browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
         browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
+        browserProviderWorkerSessionPolicy: {
+          [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
+            ? PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY
+            : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+        },
         browserProviderReceiptRequired: true,
         recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
         maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
@@ -756,18 +790,28 @@ export function hybridManifestDispatchOptions({
         [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4,
         ...(federatedChatGptEnabled ? { chatgpt: 4 } : {}),
       },
+      browserProviderWorkerSessionPolicy: {
+        [GOOGLE_FLOW_BROWSER_PROVIDER]: persistentWorkerPool
+          ? PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY
+          : FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
+        [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
+          ? PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY
+          : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+        ...(federatedChatGptEnabled ? { chatgpt: FRESH_BROWSER_SESSION_PER_JOB_POLICY } : {}),
+      },
       browserProviderReceiptRequired: true,
       recommendedConcurrency: federatedTotalConcurrency,
       maxConcurrency: federatedTotalConcurrency,
     };
   }
-  return styleOnly || chatgptOnly
+  return styleOnly
     ? {
         workProvider: HYBRID_WEB_FLOW_PROVIDER,
         dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
         allowedBrowserProviders: ["chatgpt"],
         browserProviderConcurrency: { chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY },
         browserProviderMaxOrderedReferences: { chatgpt: 4 },
+        browserProviderWorkerSessionPolicy: { chatgpt: FRESH_BROWSER_SESSION_PER_JOB_POLICY },
         browserProviderReceiptRequired: true,
         recommendedConcurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
         maxConcurrency: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
@@ -783,6 +827,10 @@ export function hybridManifestDispatchOptions({
         browserProviderMaxOrderedReferences: {
           chatgpt: 4,
           [GOOGLE_FLOW_BROWSER_PROVIDER]: 4,
+        },
+        browserProviderWorkerSessionPolicy: {
+          chatgpt: FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+          [GOOGLE_FLOW_BROWSER_PROVIDER]: FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
         },
         browserProviderReceiptRequired: true,
         recommendedConcurrency: hybridTotalConcurrency,
@@ -855,6 +903,7 @@ async function providerPhaseSummary(manifestPath, status) {
     completed_by_browser_provider: status.completed_by_browser_provider,
     allowed_browser_providers: status.allowed_browser_providers,
     browser_provider_concurrency: status.browser_provider_concurrency,
+    browser_provider_worker_session_policy: status.browser_provider_worker_session_policy,
     validation_status: validation?.status ?? "not_applicable_no_completions",
   };
 }
@@ -1025,6 +1074,8 @@ async function createAndRunPhase({
     federatedChatGptEnabled,
     mode,
     flowConcurrency: flowRuntimeConcurrency,
+    persistentWorkerPool: federated
+      && identity.image_provider_options?.routing_policy === FEDERATED_WEB_IMAGE_ROUTING_POLICY,
   });
   const created = await createCodexWorkManifest({
     mode,

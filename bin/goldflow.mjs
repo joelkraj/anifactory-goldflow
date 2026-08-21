@@ -14,6 +14,7 @@ import {
   episodeDirForFlags,
   finishStageExecution,
 } from "../scripts/lib/execution-provenance.mjs";
+import { creativeStageRerunDecisionForEpisode } from "../scripts/lib/creative-stage-rerun-policy.mjs";
 import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -103,10 +104,11 @@ function run(script, scriptArgs = []) {
   enforceWorkflowGuard(command, subcommand, scriptArgs);
   const parsedFlags = parseFlags(scriptArgs);
   const stage = commandStage(command, subcommand, parsedFlags);
+  const episodeDir = episodeDirForFlags(parsedFlags, process.env);
   const plannerRerunDecision = plannerRerunDecisionForEpisode({
     stage,
     flags: parsedFlags,
-    episodeDir: episodeDirForFlags(parsedFlags, process.env),
+    episodeDir,
   });
   if (!plannerRerunDecision.allowed) {
     console.error(`Planner rerun blocked: ${command} ${subcommand}`);
@@ -115,6 +117,24 @@ function run(script, scriptArgs = []) {
       console.error(`Failed planner units: ${plannerRerunDecision.failed_expected_ids.slice(0, 40).join(", ")}`);
     }
     console.error(plannerRerunDecision.required_recovery);
+    process.exit(1);
+  }
+  const creativeRerunDecision = creativeStageRerunDecisionForEpisode({
+    command,
+    subcommand,
+    stage,
+    flags: parsedFlags,
+    episodeDir,
+  });
+  if (!creativeRerunDecision.allowed) {
+    console.error(`Full-stage rerun blocked: ${command} ${subcommand}`);
+    console.error(`Reason: ${creativeRerunDecision.reason}.`);
+    if (creativeRerunDecision.command_lane) {
+      console.error(`Command lane: ${creativeRerunDecision.command_lane}.`);
+    }
+    if (creativeRerunDecision.required_recovery) {
+      console.error(creativeRerunDecision.required_recovery);
+    }
     process.exit(1);
   }
   void (async () => {

@@ -75,7 +75,23 @@ const characterStateRefsPath = flags.characterStateRefs ?? flags["character-stat
 const outputPath = flags.output ?? path.join(episodeDir, "section_image_prompts.json");
 const basePromptPlanPath = flags["base-prompts"] ?? flags["base-prompt-plan"] ?? outputPath;
 const correctionFindingsPath = flags["correction-findings"] ?? flags.correctionFindings ?? null;
-const promptMaxChars = Number(flags["visual-prompt-max-chars"] ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_CHARS ?? 900_000);
+export const VISUAL_PROMPT_SAFE_MAX_BYTES = 48_000;
+export const VISUAL_PROMPT_SAFE_MAX_CHARS = VISUAL_PROMPT_SAFE_MAX_BYTES;
+const requestedPromptMaxBytes = Number(
+  flags["visual-prompt-max-bytes"]
+    ?? flags["visual-prompt-max-chars"]
+    ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_BYTES
+    ?? process.env.ANIFACTORY_VISUAL_PLAN_MAX_PROMPT_CHARS
+    ?? VISUAL_PROMPT_SAFE_MAX_BYTES,
+);
+// Operator/env configuration may lower the production ceiling, never raise it.
+// A larger diagnostic packet must be built outside the guarded production path.
+const promptMaxBytes = Math.min(
+  VISUAL_PROMPT_SAFE_MAX_BYTES,
+  Number.isFinite(requestedPromptMaxBytes) && requestedPromptMaxBytes > 0
+    ? requestedPromptMaxBytes
+    : VISUAL_PROMPT_SAFE_MAX_BYTES,
+);
 const runIdentityPath = path.join(episodeDir, "run_identity.json");
 const allowLongLocationSpans = flags["allow-long-location-spans"] === "true" || process.env.ANIFACTORY_ALLOW_LONG_LOCATION_SPANS === "true";
 const maxSameLocationSpanSec = Number(flags["max-same-location-span-sec"] ?? process.env.ANIFACTORY_VISUAL_MAX_SAME_LOCATION_SPAN_SEC ?? 150);
@@ -462,7 +478,12 @@ function compactSceneForPrompt(scene, stateRefIndex = new Map()) {
     background_population: sanitizeBackgroundPopulation(scene.background_population),
     primary_subject: scene.primary_subject ?? null,
     visual_intent: truncateText(scene.visual_intent ?? "", 360),
-    character_state_refs: sceneCharacterStateRefs(scene, stateRefIndex).map(compactSceneCharacterRef),
+    // Full state anchors live once in the packet reference dictionary. Beat
+    // rows carry only stable ids so the same 300-900 character anchor is not
+    // repeated for every nearby cut.
+    character_state_ref_ids: sceneCharacterStateRefs(scene, stateRefIndex)
+      .map((ref) => ref.state_ref_id ?? ref.ref_id ?? null)
+      .filter(Boolean),
     ui_text_on_screen: scene.local_ui_elements ?? scene.ui_text_on_screen ?? [],
     character_states: compactList(scene.character_states ?? [], 4),
     wardrobe: scene.wardrobe ?? null,
@@ -484,12 +505,9 @@ function compactNeighborContext(scene) {
     beat_index: scene.beat_index ?? null,
     visual_beat_focus: scene.visual_beat_focus ?? null,
     visual_beat_action: scene.visual_beat_action ?? null,
-    visual_beat_script_excerpt: scene.visual_beat_script_excerpt ?? null,
     visual_job: scene.visual_job ?? null,
-    editorial_cues: scene.editorial_cues ?? [],
     suggested_shot_job: scene.suggested_shot_job ?? null,
     location_timeline_label: scene.location_timeline_label ?? null,
-    visual_beat_quality_findings: compactList(scene.visual_beat_quality_findings ?? [], 3, 220),
     location: scene.location ?? null,
     visible_subjects: scene.visible_subjects ?? [],
     primary_subject: scene.primary_subject ?? null,
@@ -679,7 +697,7 @@ function compactAuthorRiskRules(compactTimedPlan) {
   return rules;
 }
 
-function buildCompactAuthorPrompt({ compactTimedPlan, compactSemanticPlan, correctionDirectives, activeProvider, activeProviderOptions, contentProfile }) {
+export function buildCompactAuthorPromptForTests({ compactTimedPlan, compactSemanticPlan, correctionDirectives, activeProvider, activeProviderOptions, contentProfile }) {
   const unitLabel = compactTimedPlan.source_unit === "visual_beats" ? "visual beat" : "timed scene";
   const riskRules = compactAuthorRiskRules(compactTimedPlan);
   const animationEnabled = Boolean(compactTimedPlan.animation_direction?.enabled);
@@ -737,13 +755,13 @@ ${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete anim
 ${riskRules.map((rule) => `- ${rule}`).join("\n")}
 
 TIMED LOCAL UNITS AND SCOPED REFS:
-${JSON.stringify(compactTimedPlan, null, 2)}
+${JSON.stringify(compactTimedPlan)}
 
-BROAD SEMANTIC CONTEXT:
-${JSON.stringify(compactSemanticPlan, null, 2)}
+EPISODE STYLE CONTEXT:
+${JSON.stringify(compactSemanticPlan)}
 
 CORRECTION DIRECTIVES:
-${JSON.stringify(correctionDirectives, null, 2)}
+${JSON.stringify(correctionDirectives)}
 
 Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
 {
@@ -783,8 +801,11 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
   }],
   "warnings": []
 }
+
 Return that object as one minified JSON line. Do not use markdown fences or commentary.`;
 }
+
+const buildCompactAuthorPrompt = buildCompactAuthorPromptForTests;
 
 function locationContractsForUnit(unit, locationContractLedger) {
   const contracts = Array.isArray(locationContractLedger?.contracts) ? locationContractLedger.contracts : [];
@@ -841,26 +862,30 @@ function promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows = [])
 }
 
 function promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows = []) {
-  const localContractIds = new Set(sourceRows.flatMap((scene) => locationContractsForUnit(scene, locationContractLedger)
-    .map((contract) => String(contract.location_contract_id ?? ""))).filter(Boolean));
+  const localContracts = sourceRows.flatMap((scene) => locationContractsForUnit(scene, locationContractLedger));
+  const localContractIds = new Set(localContracts.map((contract) => String(contract.location_contract_id ?? "")).filter(Boolean));
   if (!localContractIds.size) return [];
   const targets = (visualReferencePlan?.reference_targets ?? []).filter((target) => String(target.kind ?? "").toLowerCase() === "location");
-  return (storyFactLedger?.canonical_locations ?? []).map((location) => ({
-    location_id: location.location_id,
-    display_name: location.display_name ?? location.label ?? location.location_id,
-    aliases: location.aliases ?? [],
-    contracts: (locationContractLedger?.contracts ?? []).filter((contract) => {
-      if (!localContractIds.has(String(contract.location_contract_id ?? ""))) return false;
-      const labels = [contract.description, contract.prompt_anchor, ...(contract.local_location_labels ?? [])].map(normalizeLabel);
-      return labels.some((label) => label && (label.includes(normalizeLabel(location.display_name ?? location.label)) || normalizeLabel(location.display_name ?? location.label).includes(label)));
-    }).map((contract) => ({
-      location_contract_id: contract.location_contract_id,
-      scene_ids: localPromptPackets ? [] : (contract.scene_ids ?? []),
+  const canonicalLocations = storyFactLedger?.canonical_locations ?? [];
+  return [...new Map(localContracts.map((contract) => {
+    const contractId = String(contract.location_contract_id ?? "");
+    const labels = [contract.description, contract.prompt_anchor, ...(contract.local_location_labels ?? [])].map(normalizeLabel);
+    const canonical = canonicalLocations.find((location) => {
+      const names = [location.location_id, location.display_name, location.label, ...(location.aliases ?? [])].map(normalizeLabel).filter(Boolean);
+      return names.some((name) => labels.some((label) => label && (label.includes(name) || name.includes(label))));
+    });
+    const attachableRefIds = targets
+      .filter((target) => (target.location_contract_ids ?? []).map(String).includes(contractId))
+      .map((target) => target.ref_id)
+      .filter(Boolean);
+    return [contractId, {
+      location_contract_id: contractId,
+      location_id: canonical?.location_id ?? null,
+      display_name: canonical?.display_name ?? canonical?.label ?? contract.local_location_labels?.[0] ?? null,
       prompt_anchor: truncateText(contract.prompt_anchor ?? contract.description ?? "", localPromptPackets ? 360 : 900),
-    })),
-    attachable_refs: localPromptPackets ? [] : targets.filter((target) => (target.location_contract_ids ?? []).some((id) => localContractIds.has(String(id))))
-      .map((target) => ({ ref_id: target.ref_id, scene_ids: target.scene_ids ?? [], prompt_anchor: target.prompt_anchor ?? null })),
-  })).filter((location) => location.contracts.length || location.attachable_refs.length);
+      attachable_ref_ids: attachableRefIds,
+    }];
+  })).values()];
 }
 
 function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateRefIndex = new Map(), visualBeatPlan = null, correctionDirectives = [], activeProvider = "modelslab", activeProviderOptions = {}, locationContractLedger = null, storyFactLedger = null, runIdentity = null) {
@@ -882,6 +907,11 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
       referenceTargetsByScene[sceneId] = relevantReferenceTargets(scene, visualReferencePlan, stateRefIndex);
     }
   }
+  const referenceDictionary = [...new Map(
+    Object.values(referenceTargetsByUnit)
+      .flat()
+      .map((target) => [String(target.ref_id ?? ""), target]),
+  ).values()].filter((target) => target.ref_id);
   const compactTimedPlan = {
     source_script_hash: timedPlan.source_script_hash,
     image_provider: normalizeImageProvider(activeProvider),
@@ -910,6 +940,7 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
     },
     entity_dictionary: promptEntityDictionary(storyFactLedger, stateRefIndex, sourceRows),
     location_dictionary: promptLocationDictionary(storyFactLedger, locationContractLedger, visualReferencePlan, sourceRows),
+    ...(localPromptPackets ? { reference_dictionary: referenceDictionary } : {}),
     scenes: (sourceRows ?? []).map((scene, index, rows) => {
       const unitId = scene.visual_beat_id ?? scene.scene_id;
       const targets = localPromptPackets
@@ -921,19 +952,15 @@ function buildPrompt(timedPlan, semanticPlan, visualReferencePlan = null, stateR
         previous_beat_context: scene.__previous_visual_context ?? compactNeighborContext(rows[index - 1]),
         next_beat_context: scene.__next_visual_context ?? compactNeighborContext(rows[index + 1]),
         reference_target_ids: targets.map((target) => target.ref_id),
-        location_contracts: locationContractsForUnit(scene, locationContractLedger),
+        location_contract_ids: locationContractsForUnit(scene, locationContractLedger)
+          .map((contract) => contract.location_contract_id)
+          .filter(Boolean),
       };
     }),
-    ...(localPromptPackets
-      ? { reference_targets_by_unit: referenceTargetsByUnit }
-      : { reference_targets_by_scene: referenceTargetsByScene }),
-    correction_directives: correctionDirectives,
+    ...(!localPromptPackets ? { reference_targets_by_scene: referenceTargetsByScene } : {}),
   };
   const compactSemanticPlan = {
-    episode_summary: semanticPlan.episode_summary ?? "",
-    global_reference_requirements: semanticPlan.global_reference_requirements ?? [],
     style_summary: semanticPlan.style_summary ?? "",
-    warnings: semanticPlan.warnings ?? [],
   };
   if (flags["legacy-author-instructions"] !== "true") {
     return buildCompactAuthorPrompt({
@@ -1400,10 +1427,10 @@ async function findLatestCodexOutput(callDir, stageName, expectedBeatIds = null,
 }
 
 function assertPromptSize(prompt, stageName) {
-  const length = String(prompt ?? "").length;
-  console.error(`visual ${stageName}: prompt chars ${length}`);
-  if (Number.isFinite(promptMaxChars) && promptMaxChars > 0 && length > promptMaxChars) {
-    throw new Error(`Visual planner prompt for ${stageName} is ${length} chars, above limit ${promptMaxChars}. Use a smaller batch or compact upstream artifacts.`);
+  const bytes = Buffer.byteLength(String(prompt ?? ""), "utf8");
+  console.error(`visual ${stageName}: prompt bytes ${bytes}`);
+  if (Number.isFinite(promptMaxBytes) && promptMaxBytes > 0 && bytes > promptMaxBytes) {
+    throw new Error(`Visual planner prompt for ${stageName} is ${bytes} bytes, above limit ${promptMaxBytes}. Use a smaller batch or compact upstream artifacts.`);
   }
 }
 
@@ -2220,6 +2247,47 @@ function adaptivePromptChunks(items, visualReferencePlan, stateRefIndex, options
   return chunks;
 }
 
+function copyChunkMetadata(rows, source) {
+  return Object.assign([...rows], {
+    risk_class: source?.risk_class ?? "mixed",
+    target_chunk_size: Math.min(Number(source?.target_chunk_size ?? rows.length), rows.length),
+    size_split: source?.size_split === true,
+  });
+}
+
+export function sizeBoundVisualPromptChunksForTests(chunks, {
+  maxBytes = VISUAL_PROMPT_SAFE_MAX_BYTES,
+  maxChars = null,
+  promptForRows,
+} = {}) {
+  if (typeof promptForRows !== "function") throw new Error("size-bound visual chunks require promptForRows");
+  const requestedCeiling = maxChars ?? maxBytes;
+  const ceiling = Math.min(
+    VISUAL_PROMPT_SAFE_MAX_BYTES,
+    Number.isFinite(Number(requestedCeiling)) && Number(requestedCeiling) > 0
+      ? Number(requestedCeiling)
+      : VISUAL_PROMPT_SAFE_MAX_BYTES,
+  );
+  const fitted = [];
+  const visit = (chunk) => {
+    const promptBytes = Buffer.byteLength(String(promptForRows(chunk) ?? ""), "utf8");
+    if (promptBytes <= ceiling) {
+      fitted.push(Object.assign(copyChunkMetadata(chunk, chunk), { prompt_bytes: promptBytes }));
+      return;
+    }
+    if (chunk.length <= 1) {
+      const row = chunk[0] ?? {};
+      const exactId = row.visual_beat_id ?? row.image_id_hint ?? row.scene_id ?? "unknown_unit";
+      throw new Error(`Visual planner packet for exact unit ${exactId} is ${promptBytes} bytes, above the production ceiling ${ceiling}. Compact that unit's local evidence; do not submit or widen the packet.`);
+    }
+    const midpoint = Math.ceil(chunk.length / 2);
+    visit(Object.assign(copyChunkMetadata(chunk.slice(0, midpoint), chunk), { size_split: true }));
+    visit(Object.assign(copyChunkMetadata(chunk.slice(midpoint), chunk), { size_split: true }));
+  };
+  for (const chunk of chunks) visit(chunk);
+  return fitted;
+}
+
 export function adaptivePromptChunksForTests(items, options = {}) {
   return adaptivePromptChunks(items, options.visualReferencePlan ?? { reference_targets: [] }, options.stateRefIndex ?? new Map(), options)
     .map((chunk) => ({
@@ -2740,6 +2808,42 @@ async function main() {
     planningProvider: requestedPlannerProvider,
     telemetryTuning: plannerChunkTuning,
   };
+  const chunkingRequested = flags["visual-chunking"] !== "false"
+    && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
+  const initialSceneChunks = chunkingRequested
+    ? adaptivePromptChunks(
+        visualSourceRows,
+        enrichedVisualReferencePlan,
+        stateRefIndex,
+        adaptivePromptChunkOptions,
+      )
+    : [Object.assign([...visualSourceRows], {
+        risk_class: "mixed",
+        target_chunk_size: visualSourceRows.length,
+      })];
+  const sceneChunks = sizeBoundVisualPromptChunksForTests(initialSceneChunks, {
+    maxBytes: promptMaxBytes,
+    promptForRows: (rows) => {
+      const chunkTimedPlan = { ...timedPlan, scenes: rows, scene_count: rows.length };
+      const chunkVisualBeatPlan = visualBeatPlan?.status === "passed"
+        ? { ...visualBeatPlan, beats: rows, visual_beat_count: rows.length }
+        : null;
+      return buildPrompt(
+        chunkTimedPlan,
+        semanticPlan,
+        enrichedVisualReferencePlan,
+        stateRefIndex,
+        chunkVisualBeatPlan,
+        correctionDirectives,
+        activeImageProvider,
+        activeImageProviderOptions,
+        locationContractLedger,
+        storyFactLedger,
+        promptRunIdentity,
+      );
+    },
+  });
+  const useChunking = sceneChunks.length > 1;
   const wavefrontChunkFiles = [];
   async function emitWavefrontChunk({ chunkIndex, chunkId, inputHash, sourceRows, rawPrompts, styleSummary = "" }) {
     if (!wavefrontOutputDir) return null;
@@ -2778,16 +2882,8 @@ async function main() {
     return filePath;
   }
   if (dryRunPrompt) {
-    const useChunkingForDryRun = flags["visual-chunking"] !== "false"
-      && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
     const promptSizes = [];
-    if (useChunkingForDryRun) {
-      const sceneChunks = adaptivePromptChunks(
-        visualSourceRows,
-        enrichedVisualReferencePlan,
-        stateRefIndex,
-        adaptivePromptChunkOptions,
-      );
+    if (useChunking) {
       for (let index = 0; index < sceneChunks.length; index += 1) {
         const chunkTimedPlan = { ...timedPlan, scenes: sceneChunks[index], scene_count: sceneChunks[index].length };
         const chunkVisualBeatPlan = visualBeatPlan?.status === "passed" ? { ...visualBeatPlan, beats: sceneChunks[index], visual_beat_count: sceneChunks[index].length } : null;
@@ -2797,16 +2893,18 @@ async function main() {
           risk_class: sceneChunks[index].risk_class,
           risk_reasons: [...new Set(sceneChunks[index].flatMap((row) => visualUnitRiskAssessment(row, enrichedVisualReferencePlan, stateRefIndex).reasons))],
           target_chunk_size: sceneChunks[index].target_chunk_size,
+          size_split: sceneChunks[index].size_split === true,
           visual_unit_count: sceneChunks[index].length,
           reference_target_count: sceneChunks[index].reduce((sum, row) => sum + relevantReferenceTargets(row, enrichedVisualReferencePlan, stateRefIndex).length, 0),
           reference_packet_chars: sceneChunks[index].reduce((sum, row) => sum + JSON.stringify(relevantReferenceTargets(row, enrichedVisualReferencePlan, stateRefIndex)).length, 0),
           compact_unit_chars: sceneChunks[index].reduce((sum, row) => sum + JSON.stringify(compactSceneForPrompt(row, stateRefIndex)).length, 0),
           prompt_chars: chunkPrompt.length,
+          prompt_bytes: Buffer.byteLength(chunkPrompt, "utf8"),
         });
       }
     } else {
       const prompt = buildPrompt(scopedTimedPlan, semanticPlan, enrichedVisualReferencePlan, stateRefIndex, scopedVisualBeatPlan, correctionDirectives, activeImageProvider, activeImageProviderOptions, locationContractLedger, storyFactLedger, promptRunIdentity);
-      promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length });
+      promptSizes.push({ chunk_index: null, visual_unit_count: visualSourceRows.length, prompt_chars: prompt.length, prompt_bytes: Buffer.byteLength(prompt, "utf8") });
     }
     await writeJson(outputPath, {
       schema: "goldflow_section_image_prompts_v1",
@@ -2912,8 +3010,6 @@ async function main() {
   let styleSummary = "";
   let adaptiveChunkTelemetry = [];
   const manualRecoveryOutputFiles = parseListFlag(flags["manual-recovery-output-files"]);
-  const useChunking = flags["visual-chunking"] !== "false"
-    && visualSourceRows.length > Number(flags["visual-single-call-max-scenes"] ?? 4);
   if (manualRecoveryOutputFiles.length) {
     if (!scopedRepair) {
       throw new Error("--manual-recovery-output-files is allowed only with exact --cut-ids or --beat-ids recovery scope.");
@@ -2973,12 +3069,6 @@ async function main() {
       parsed: { prompts: parsedPrompts, style_summary: styleSummary, warnings: manualWarnings },
     };
   } else if (useChunking) {
-    const sceneChunks = adaptivePromptChunks(
-      visualSourceRows,
-      enrichedVisualReferencePlan,
-      stateRefIndex,
-      adaptivePromptChunkOptions,
-    );
     if (wavefrontOutputDir) {
       await writeJsonAtomic(path.join(wavefrontOutputDir, "manifest.json"), {
         schema: "goldflow_visual_prompt_wavefront_manifest_v1",
@@ -2997,6 +3087,7 @@ async function main() {
       risk_class: chunk.risk_class,
       risk_reasons: [...new Set(chunk.flatMap((row) => visualUnitRiskAssessment(row, enrichedVisualReferencePlan, stateRefIndex).reasons))],
       target_chunk_size: chunk.target_chunk_size,
+      size_split: chunk.size_split === true,
       visual_unit_count: chunk.length,
       beat_ids: chunk.map((row) => row.visual_beat_id ?? null).filter(Boolean),
     }));
@@ -3035,6 +3126,7 @@ async function main() {
         model: chunkLlm?.model ?? null,
         reasoning_effort: chunkLlm?.reasoning_effort ?? requestedPlannerEffort,
         prompt_chars: chunkPrompt.length,
+        prompt_bytes: Buffer.byteLength(chunkPrompt, "utf8"),
         output_chars: String(chunkLlm?.content ?? "").length,
         duration_ms: durationMs,
         queue_wait_ms: queueWaitMs,

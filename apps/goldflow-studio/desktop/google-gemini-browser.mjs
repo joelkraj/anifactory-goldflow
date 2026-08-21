@@ -8,6 +8,7 @@ import { findReferenceEcho, normalizedImagePixels } from "../lib/image-pixel-con
 import { clearLoginMarker, markLoginVerified } from "./browser-login.mjs";
 
 const GEMINI_IMAGES_URL = "https://gemini.google.com/images";
+const PERSISTENT_GEMINI_WORKER_POLICY = "persistent_tab_per_worker_slot_v1";
 const GEMINI_APP_URL = "https://gemini.google.com/app";
 const PROMPT_SELECTOR = '[contenteditable="true"][aria-label="Enter a prompt for Gemini"]';
 const SIGNED_OUT_SELECTOR = 'a:has-text("Sign in"), button:has-text("Sign in")';
@@ -242,6 +243,8 @@ export class GoogleGeminiBrowser {
     this.context = null;
     this.loginPage = null;
     this.llmJobsStarted = 0;
+    this.workerPages = new Map();
+    this.workerPagePromises = new Map();
   }
 
   async start() {
@@ -281,7 +284,94 @@ export class GoogleGeminiBrowser {
   async close() {
     const context = this.context;
     this.context = null;
+    this.workerPages.clear();
+    this.workerPagePromises.clear();
     if (context) await context.close().catch(() => {});
+  }
+
+  workerPoolState() {
+    return {
+      policy: PERSISTENT_GEMINI_WORKER_POLICY,
+      configured_slots: this.concurrency,
+      ready_slots: [...this.workerPages.entries()]
+        .filter(([, page]) => page && !page.isClosed())
+        .map(([slot, page]) => ({ slot, surface_url: page.url() })),
+    };
+  }
+
+  assertWorkerSlot(slot) {
+    const value = Number(slot);
+    if (!Number.isInteger(value) || value < 0 || value >= this.concurrency) {
+      throw codedError("ui_contract_mismatch", `Google Gemini worker slot must be an integer from 0 through ${this.concurrency - 1}.`);
+    }
+    return value;
+  }
+
+  async createPersistentWorkerPage(slot) {
+    if (!this.context) throw new Error("Goldflow Google Gemini browser is not running.");
+    const page = slot === 0 && this.loginPage && !this.loginPage.isClosed()
+      ? this.loginPage
+      : await this.context.newPage();
+    try {
+      await page.goto(GEMINI_IMAGES_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
+      if (!isGeminiImageSurfaceUrl(page.url())) {
+        throw codedError("ui_contract_mismatch", `Gemini persistent image-worker tab routed to ${page.url()} instead of ${GEMINI_IMAGES_URL}.`);
+      }
+      if (await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
+        throw codedError("auth_required", `Gemini Images is not authenticated at ${page.url()}.`);
+      }
+      if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
+        throw codedError("ui_contract_mismatch", "Gemini persistent image-worker tab did not expose its prompt composer.");
+      }
+      return page;
+    } catch (caught) {
+      if (page !== this.loginPage) await page.close().catch(() => {});
+      throw caught;
+    }
+  }
+
+  async ensurePersistentWorkerPage(slotValue) {
+    const slot = this.assertWorkerSlot(slotValue);
+    const existing = this.workerPages.get(slot);
+    if (existing && !existing.isClosed()) return existing;
+    const pending = this.workerPagePromises.get(slot);
+    if (pending) return pending;
+    const promise = this.createPersistentWorkerPage(slot)
+      .then((page) => {
+        this.workerPages.set(slot, page);
+        this.workerPagePromises.delete(slot);
+        return page;
+      })
+      .catch((error) => {
+        this.workerPagePromises.delete(slot);
+        throw error;
+      });
+    this.workerPagePromises.set(slot, promise);
+    return promise;
+  }
+
+  async prepareWorkerSlots() {
+    await Promise.all(Array.from({ length: this.concurrency }, (_, slot) => this.ensurePersistentWorkerPage(slot)));
+    this.log(`Google Gemini persistent worker pool ready: ${this.concurrency} tabs.`);
+    return this.workerPoolState();
+  }
+
+  async persistentJobPage(type, slotValue) {
+    const slot = this.assertWorkerSlot(slotValue);
+    const page = await this.ensurePersistentWorkerPage(slot);
+    const expectedUrl = type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL;
+    await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
+      throw codedError("ui_contract_mismatch", `Gemini persistent worker slot ${slot + 1} lost its ${type} composer.`);
+    }
+    const routedCorrectly = type === "llm"
+      ? /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/i.test(page.url())
+      : isGeminiImageSurfaceUrl(page.url());
+    if (!routedCorrectly) throw codedError("ui_contract_mismatch", `Gemini persistent ${type} worker routed to ${page.url()} instead of ${expectedUrl}.`);
+    if (type === "image" && await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
+      throw codedError("auth_required", `Gemini Images is not authenticated at ${page.url()}.`);
+    }
+    return page;
   }
 
   async newJobPage(type = "image") {
@@ -327,8 +417,11 @@ export class GoogleGeminiBrowser {
     return page.locator("message-content");
   }
 
-  async runLlmJob({ job, onPhase = async () => {} }) {
-    const page = await this.newJobPage("llm");
+  async runLlmJob({ slot = 0, job, onPhase = async () => {} }) {
+    const persistentWorker = job.worker_session_policy === PERSISTENT_GEMINI_WORKER_POLICY;
+    const page = persistentWorker
+      ? await this.persistentJobPage("llm", slot)
+      : await this.newJobPage("llm");
     try {
       await onPhase("verifying_ui_contract");
       const textModel = await this.selectTextModel(page);
@@ -391,7 +484,7 @@ export class GoogleGeminiBrowser {
       }
       throw codedError("ui_contract_mismatch", "Timed out waiting for a complete Gemini text response.");
     } finally {
-      if (page !== this.loginPage) await page.close().catch(() => {});
+      if (!persistentWorker && page !== this.loginPage) await page.close().catch(() => {});
     }
   }
 
@@ -715,10 +808,13 @@ export class GoogleGeminiBrowser {
     return { ...receipt.reference_binding, evidence: { receipt_path: receiptPath, receipt_sha256: await sha256File(receiptPath), screenshot_path: screenshotPath, screenshot_sha256: receipt.screenshot_sha256 } };
   }
 
-  async runJob({ job, client, onPhase = async () => {} }) {
-    if (job.type === "llm") return this.runLlmJob({ job, onPhase });
+  async runJob({ slot = 0, job, client, onPhase = async () => {} }) {
+    if (job.type === "llm") return this.runLlmJob({ slot, job, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
-    const page = await this.newJobPage("image");
+    const persistentWorker = job.worker_session_policy === PERSISTENT_GEMINI_WORKER_POLICY;
+    const page = persistentWorker
+      ? await this.persistentJobPage("image", slot)
+      : await this.newJobPage("image");
     let preservePage = false;
     try {
       await onPhase("verifying_ui_contract");
@@ -759,14 +855,19 @@ export class GoogleGeminiBrowser {
         downloadPath,
         sourceUrl: generated.sourceUrl,
         conversationUrl: page.url(),
-        uiContract: { ...uiContract, reference_binding: referenceBinding },
+        uiContract: {
+          ...uiContract,
+          reference_binding: referenceBinding,
+          worker_session_policy: job.worker_session_policy ?? "fresh_session_per_job_v1",
+          worker_slot: slot,
+        },
         browserProvider: "google-gemini",
       };
     } catch (error) {
       preservePage = ["auth_required", "ui_contract_mismatch"].includes(error?.code);
       throw error;
     } finally {
-      if (!preservePage) await page.close().catch(() => {});
+      if (!persistentWorker && !preservePage) await page.close().catch(() => {});
     }
   }
 }

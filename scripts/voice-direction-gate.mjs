@@ -5038,10 +5038,14 @@ async function main() {
         sourceScriptSha256: sourceScriptHash,
         episodeDir,
         repoRoot,
-        provider: flags["performance-planner-provider"] ?? null,
+        provider: "codex_cli",
         model: flags["performance-planner-model"] ?? flags.model ?? flags["llm-model"] ?? null,
-        reasoningEffort: flags["performance-reasoning-effort"] ?? "medium",
-        concurrency: Number(flags["performance-concurrency"] ?? 3),
+        reasoningEffort: "medium",
+        concurrency: Number(flags["performance-concurrency"] ?? 8),
+        repairPacketIds: String(
+          flags["performance-packet-ids"] ?? flags["performance-packet-id"] ?? "",
+        ).split(",").map((value) => value.trim()).filter(Boolean),
+        repairReason: flags["performance-repair-reason"] ?? null,
       });
       effectiveActionableDirection = authored.artifact;
       effectiveActionableDirection.artifact_path = authored.artifactPath;

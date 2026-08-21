@@ -22,6 +22,8 @@ import {
 import {
   FEDERATED_TOTAL_IMAGE_CONCURRENCY,
   FEDERATED_WEB_IMAGE_PROVIDER,
+  FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+  FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
   GOOGLE_FLOW_BROWSER_PROVIDER,
   GOOGLE_GEMINI_BROWSER_PROVIDER,
   GOOGLE_GEMINI_IMAGE_CONCURRENCY,
@@ -29,6 +31,8 @@ import {
   HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
   HYBRID_TOTAL_IMAGE_CONCURRENCY,
   HYBRID_WEB_FLOW_PROVIDER,
+  PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+  PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
 } from "../../../scripts/lib/image-provider-policy.mjs";
 import {
   assertHostRuntime,
@@ -48,8 +52,8 @@ import {
   parseDesktopFlags,
   PRODUCTION_BROWSER_CONCURRENCY_CEILING,
 } from "../desktop/config.mjs";
-import { browserFailureDisposition } from "../desktop/worker-host.mjs";
-import { flowBlockingCode, flowModelLabelMatches, flowReferenceUploadOrder, GoogleFlowBrowser, identifyNewFlowComposerChip, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
+import { browserFailureDisposition, GoldflowDesktopHost } from "../desktop/worker-host.mjs";
+import { flowBlockingCode, flowModelLabelMatches, flowReferenceUploadOrder, GoogleFlowBrowser, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
 import { DesktopRuntimeState } from "../desktop/runtime-state.mjs";
 import { validReferenceRoute } from "../desktop/worker-client.mjs";
 import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldflow-bridge.mjs";
@@ -65,8 +69,9 @@ const originalEnvironment = { ...process.env };
 assert.equal(providerFailurePausesDispatch("content_policy_rejected"), false, "one asset rejection must not pause its provider queue");
 assert.equal(providerFailurePausesDispatch("rate_limited"), false, "rate limits use the desktop worker's timed cooldown instead of an indefinite controller pause");
 assert.equal(providerFailurePausesDispatch("ui_contract_mismatch"), true, "a provider UI-contract break must pause dispatch");
-assert.equal(providerFailurePausesDispatch("google_gemini_generation_error"), true, "a Gemini service-generation failure must pause before it can deadletter a batch");
-assert.equal(providerFailurePausesDispatch("chatgpt_generation_error"), true, "a ChatGPT service-generation failure must pause before it can deadletter a batch");
+assert.equal(providerFailurePausesDispatch("google_gemini_generation_error"), false, "one transient Gemini failure must preserve its exact ID without stopping healthy unleased work");
+assert.equal(providerFailurePausesDispatch("chatgpt_generation_error"), false, "one transient ChatGPT failure must preserve its exact ID without stopping healthy unleased work");
+assert.equal(providerFailurePausesDispatch("provider_transient_circuit_open"), true, "the controller must stop a provider after its three-strike transient circuit opens");
 assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [1, 2, 3, 4], "Flow must upload in canonical order because its composer appends newly added chips");
 assert.equal(identifyNewFlowComposerChip([], [{ media_id: "composer-1" }]).media_id, "composer-1");
 assert.equal(identifyNewFlowComposerChip(["composer-2"], [{ media_id: "composer-1" }, { media_id: "composer-2" }]).media_id, "composer-1");
@@ -78,6 +83,8 @@ assert.equal(flowModelLabelMatches("Veo 3.1 - Fast arrow_drop_down", "Veo 3.1 Fa
 assert.equal(flowModelLabelMatches("Veo 3.1 - Lite [Lower Priority]", "Veo 3.1 Lite"), false);
 assert.equal(nearestFlowVideoDuration(5, [4, 6, 8]), 6);
 assert.equal(nearestFlowVideoDuration(9, [4, 6, 8]), 8);
+assert.equal(isFlowProjectWorkspaceUrl("https://labs.google/fx/tools/flow/project/worker-1"), true);
+assert.equal(isFlowProjectWorkspaceUrl("https://labs.google/fx/tools/flow"), false);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "rate_limited", attempt: 1 }), false);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "TimeoutError", errorMessage: "locator.click: Timeout 30000ms exceeded; element was detached from the DOM", attempt: 1 }), true);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "TimeoutError", errorMessage: "locator.click: Timeout 30000ms exceeded; element was detached from the DOM", creativeSubmissionStarted: true, attempt: 1 }), false);
@@ -99,6 +106,27 @@ assert.equal((await flowDownloadFallbackBrowser.imageBytes(flowDownloadFallbackP
 assert.equal((await flowDownloadFallbackBrowser.mediaBytes(flowDownloadFallbackPage, "https://example.test/video")).toString(), "page-session-fallback");
 assert.deepEqual(browserFailureDisposition(Object.assign(new Error("requesting generations too quickly"), { code: "rate_limited" })), { kind: "rate_limit", pausesDispatch: true });
 assert.deepEqual(browserFailureDisposition(new Error("Upload files element is not enabled")), { kind: "transport", pausesDispatch: true });
+assert.deepEqual(browserFailureDisposition(Object.assign(new Error("Generation failed"), { code: "google_flow_generation_error" })), { kind: "transport", pausesDispatch: true });
+assert.deepEqual(
+  browserFailureDisposition(Object.assign(new Error("Timed out waiting for a completed ChatGPT response."), { code: "ui_contract_mismatch" })),
+  { kind: "transport", pausesDispatch: true },
+  "a completed-response timeout must be transient even when the browser encoded it as a UI-contract error",
+);
+assert.deepEqual(
+  browserFailureDisposition(Object.assign(new Error("Expected model GPT-5.6; visible control was GPT-5.5."), { code: "ui_contract_mismatch" })),
+  { kind: "ui_contract_mismatch", pausesDispatch: true },
+  "a true model UI mismatch must remain fatal",
+);
+assert.deepEqual(
+  browserFailureDisposition(Object.assign(new Error("Expected effort Pro; visible control was Medium."), { code: "ui_contract_mismatch" })),
+  { kind: "ui_contract_mismatch", pausesDispatch: true },
+  "a true effort UI mismatch must remain fatal",
+);
+assert.deepEqual(
+  browserFailureDisposition(Object.assign(new Error("Signed into the wrong account."), { code: "account_mismatch" })),
+  { kind: "account_mismatch", pausesDispatch: true },
+  "an account mismatch must remain fatal",
+);
 assert.deepEqual(browserFailureDisposition(new Error("one malformed image")), { kind: "asset", pausesDispatch: false });
 
 async function jsonRequest(url, { method = "GET", token = null, body = null } = {}) {
@@ -163,11 +191,17 @@ async function flowReferenceBindingFixture(downloadsRoot, fixtureId, references)
 
 async function testLlmStore() {
   const store = await new LlmJobStore({ stateDir: path.join(temporaryRoot, "llm") }).init();
-  const first = await store.createOrGet({ model: "gpt-test", messages: [{ role: "user", content: "Return one word." }] });
-  const duplicate = await store.createOrGet({ model: "gpt-test", messages: [{ role: "user", content: "Return one word." }] });
+  const first = await store.createOrGet({ model: "gpt-test", messages: [{ role: "user", content: "Return one word." }], timeout_ms: 1_800_000 });
+  const duplicate = await store.createOrGet({ model: "gpt-test", messages: [{ role: "user", content: "Return one word." }], timeout_ms: 5_400_000 });
   assert.equal(first.created, true);
   assert.equal(duplicate.created, false);
   assert.equal(first.job.job_id, duplicate.job.job_id);
+  assert.equal(duplicate.job.response_timeout_ms, 5_400_000, "a later longer timeout must raise the existing job's execution window");
+  const shorterDuplicate = await store.createOrGet({ model: "gpt-test", messages: [{ role: "user", content: "Return one word." }], timeout_ms: 60_000 });
+  assert.equal(shorterDuplicate.job.job_id, first.job.job_id, "timeout changes must not duplicate the creative job");
+  assert.equal(shorterDuplicate.job.response_timeout_ms, 5_400_000, "a later shorter timeout must not reduce the existing execution window");
+  assert.equal((await store.get(first.job.job_id)).response_timeout_ms, 5_400_000, "the raised timeout must be atomically persisted");
+  assert.equal((await store.list()).length, 1, "timeout reconciliation must retain exactly one content-addressed job");
   const leased = await store.leaseNext({ workerId: "worker-a" });
   assert.equal(leased.job.attempt_count, 1);
   const sameLease = await store.leaseNext({ workerId: "worker-a" });
@@ -436,6 +470,7 @@ async function testProviderAttributedSharedImageManifest() {
   const downloadsRoot = path.join(temporaryRoot, "shared-provider-downloads");
   const chatStateDir = path.join(temporaryRoot, "shared-provider-chat-state");
   const flowStateDir = path.join(temporaryRoot, "shared-provider-flow-state");
+  const geminiStateDir = path.join(temporaryRoot, "shared-provider-gemini-state");
   await fs.mkdir(episodeDir, { recursive: true });
 
   const chatBridge = await new GoldflowBridge({
@@ -451,6 +486,13 @@ async function testProviderAttributedSharedImageManifest() {
     stateDir: flowStateDir,
     downloadsRoot,
     browserProvider: GOOGLE_FLOW_BROWSER_PROVIDER,
+  }).init();
+  const geminiBridge = await new GoldflowBridge({
+    repoRoot,
+    dataRoot,
+    stateDir: geminiStateDir,
+    downloadsRoot,
+    browserProvider: GOOGLE_GEMINI_BROWSER_PROVIDER,
   }).init();
 
   const referencePlanPath = path.join(episodeDir, "visual_reference_plan.json");
@@ -556,6 +598,11 @@ async function testProviderAttributedSharedImageManifest() {
     chatBridge.activateManifest(sharedManifest.manifest.manifest_path),
     flowBridge.activateManifest(sharedManifest.manifest.manifest_path),
   ]);
+  assert.deepEqual(
+    await flowBridge.activeWorkerSessionPolicies(),
+    [FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY],
+    "an active legacy manifest must advertise only its fresh-project policy",
+  );
 
   const chatAttempts = [];
   for (let index = 0; index <= HYBRID_CHATGPT_IMAGE_CONCURRENCY; index += 1) {
@@ -650,6 +697,65 @@ async function testProviderAttributedSharedImageManifest() {
     chatgpt: 1,
     [GOOGLE_FLOW_BROWSER_PROVIDER]: 1,
   });
+
+  const persistentManifest = await createCodexWorkManifest({
+    mode: "scene",
+    episodeDir,
+    promptsPath,
+    imageIds: sceneIds.slice(0, 2),
+    ...hybridManifestDispatchOptions({ federated: true, persistentWorkerPool: true }),
+    maxAttempts: 1,
+    leaseSeconds: 300,
+  });
+  assert.deepEqual(persistentManifest.manifest.policy.browser_provider_worker_session_policy, {
+    [GOOGLE_FLOW_BROWSER_PROVIDER]: PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
+    [GOOGLE_GEMINI_BROWSER_PROVIDER]: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+  });
+  const persistentFlowLease = await leaseNextWorkItem({
+    manifestPath: persistentManifest.manifest.manifest_path,
+    workerId: "persistent-flow-slot-0",
+    browserProvider: GOOGLE_FLOW_BROWSER_PROVIDER,
+  });
+  const persistentGeminiLease = await leaseNextWorkItem({
+    manifestPath: persistentManifest.manifest.manifest_path,
+    workerId: "persistent-gemini-slot-0",
+    browserProvider: GOOGLE_GEMINI_BROWSER_PROVIDER,
+  });
+  assert.equal(persistentFlowLease.assignment.worker_session_policy, PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY);
+  assert.equal(persistentGeminiLease.assignment.worker_session_policy, PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY);
+  await geminiBridge.activateManifest(persistentManifest.manifest.manifest_path);
+  assert.deepEqual(
+    await geminiBridge.activeWorkerSessionPolicies(),
+    [PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY],
+    "an unresolved v3 manifest must advertise persistent Gemini startup warmup",
+  );
+  const persistentGeminiDownloadPath = path.join(downloadsRoot, "persistent-gemini-result.webp");
+  await sharp({ create: { width: 1600, height: 900, channels: 3, background: "#526ea8" } }).webp().toFile(persistentGeminiDownloadPath);
+  await assert.rejects(() => geminiBridge.completeImage({
+    manifestId: persistentGeminiLease.assignment.manifest_id,
+    assetId: persistentGeminiLease.assignment.asset_id,
+    leaseToken: persistentGeminiLease.assignment.lease_token,
+    workerId: "persistent-gemini-slot-0",
+    downloadPath: persistentGeminiDownloadPath,
+    uiContract: {},
+  }), (error) => error.code === "ui_contract_mismatch" && /worker_session_policy/.test(error.message));
+  await geminiBridge.completeImage({
+    manifestId: persistentGeminiLease.assignment.manifest_id,
+    assetId: persistentGeminiLease.assignment.asset_id,
+    leaseToken: persistentGeminiLease.assignment.lease_token,
+    workerId: "persistent-gemini-slot-0",
+    downloadPath: persistentGeminiDownloadPath,
+    uiContract: {
+      worker_session_policy: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+      worker_slot: 0,
+    },
+  });
+  const persistentGeminiReceipt = JSON.parse(await fs.readFile(
+    path.join(persistentGeminiLease.assignment.attempt_dir, "google_gemini_receipt.json"),
+    "utf8",
+  ));
+  assert.equal(persistentGeminiReceipt.ui_contract.worker_session_policy, PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY);
+  assert.equal(persistentGeminiReceipt.ui_contract.worker_slot, 0);
 }
 
 async function testServerAndRunner() {
@@ -665,6 +771,7 @@ async function testServerAndRunner() {
   try {
     const health = await jsonRequest(`${studio.url}/v1/health`);
     assert.equal(health.response.status, 200);
+    assert.deepEqual(health.value.active_image_worker_session_policies, []);
     const unauthorized = await jsonRequest(`${studio.url}/v1/dashboard/state`);
     assert.equal(unauthorized.response.status, 401);
     const wrongPair = await jsonRequest(`${studio.url}/v1/pair`, { method: "POST", body: { code: "999999" } });
@@ -682,11 +789,12 @@ async function testServerAndRunner() {
     const completionPromise = jsonRequest(`${studio.url}/v1/chat/completions`, {
       method: "POST",
       token: studio.adminToken,
-      body: { model: "gpt-5.6-sol", messages: [{ role: "user", content: "Return TEST_OK." }], metadata: { stage_name: "server-test", reasoning_effort: "max" } },
+      body: { model: "gpt-5.6-sol", messages: [{ role: "user", content: "Return TEST_OK." }], timeout_ms: 5_400_000, metadata: { stage_name: "server-test", reasoning_effort: "max" } },
     });
     const lease = await waitForLease(studio.url, workerToken);
     assert.match(lease.job.prompt, /Return TEST_OK/);
     assert.equal(lease.ui_contract.effort_label, "Pro");
+    assert.equal(lease.job.response_timeout_ms, 5_400_000, "the request timeout must reach the leased browser job");
     const completed = await jsonRequest(`${studio.url}/v1/worker/complete`, {
       method: "POST",
       token: workerToken,
@@ -802,6 +910,7 @@ async function testProviderIsolation() {
     const health = await jsonRequest(`${studio.url}/v1/health`);
     assert.equal(health.value.browser_provider, "google-flow");
     assert.equal(health.value.worker_slot_ceiling, 19);
+    assert.deepEqual(health.value.active_image_worker_session_policies, []);
     const wrongProvider = await jsonRequest(`${studio.url}/v1/pair`, {
       method: "POST",
       body: { code: "654321", label: "wrong worker", browserProvider: "chatgpt" },
@@ -906,7 +1015,7 @@ async function testDesktopHostContract() {
   assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "1" }, {}).submissionStaggerMs, 5_000);
   assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 8_000);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, types: ["llm", "image"] }), /image or video work/);
-  assert.throws(() => assertDesktopConfig({ ...flowConfig, concurrency: 2, flowProjectUrl: "https://labs.google/fx/tools/flow/project/example" }), /fresh project per job/);
+  assert.throws(() => assertDesktopConfig({ ...flowConfig, concurrency: 2, flowProjectUrl: "https://labs.google/fx/tools/flow/project/example" }), /dedicated project per persistent worker slot/);
   assert.equal(flowBlockingCode("Requesting generations too quickly. Try again later."), "rate_limited");
   assert.equal(flowBlockingCode("Unusual activity has been detected."), "usage_limited");
   assert.equal(flowBlockingCode("Generation failed"), "google_flow_generation_error");
@@ -1036,6 +1145,308 @@ async function testDesktopHostContract() {
   assert.match(launcher, /desktop\/main\.mjs/, "Finder launcher must start the supervised desktop host");
 }
 
+async function testPersistentFlowWorkerPool() {
+  const createdSlots = [];
+  const pages = new Map();
+  const projectUrl = (slot) => `https://labs.google/fx/tools/flow/project/persistent-slot-${slot}/edit`;
+  const makePage = (slot) => {
+    let closed = false;
+    const navigations = [];
+    const page = {
+      slot,
+      navigations,
+      async goto(url) { navigations.push(url); },
+      url() { return projectUrl(slot); },
+      isClosed() { return closed; },
+      async close() { closed = true; },
+      locator(selector) {
+        const visible = !/Sign in/i.test(selector);
+        return {
+          async count() { return visible ? 1 : 0; },
+          nth() { return this; },
+          async isVisible() { return visible; },
+        };
+      },
+    };
+    pages.set(slot, page);
+    return page;
+  };
+  const browser = new GoogleFlowBrowser({ concurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY });
+  browser.createPersistentWorkerPage = async (slot) => {
+    createdSlots.push(slot);
+    const page = makePage(slot);
+    return { slot, page, projectUrl: projectUrl(slot), preparedAt: new Date().toISOString() };
+  };
+  const ready = await browser.prepareWorkerSlots();
+  assert.deepEqual(createdSlots.sort((left, right) => left - right), [0, 1, 2, 3, 4], "Flow must prewarm exactly five stable worker projects");
+  assert.equal(ready.ready_slots.length, HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  const firstSlotTwo = await browser.persistentJobPage(2);
+  const secondSlotTwo = await browser.persistentJobPage(2);
+  assert.equal(firstSlotTwo, secondSlotTwo, "successive jobs on one Flow slot must reuse the same page object");
+  assert.deepEqual(firstSlotTwo.navigations, [projectUrl(2), projectUrl(2)], "successive jobs must return to the same slot-bound Flow project URL");
+  assert.equal(createdSlots.filter((slot) => slot === 2).length, 1, "slot reuse must not create another Flow project");
+  await assert.rejects(() => browser.ensurePersistentWorkerPage(5), /integer from 0 through 4/);
+
+  let creativeSubmissions = 0;
+  browser.verifyUiContract = async () => ({ model_label: "Nano Banana Pro" });
+  browser.pastePrompt = async () => {};
+  browser.attachReferences = async () => ({ referenceInputs: [], boundReferences: [] });
+  browser.waitForVisibleImagesToSettle = async () => [];
+  browser.baselineImageFingerprints = async () => new Map();
+  browser.recordReferenceBindingEvidence = async () => ({
+    create: { async click() { creativeSubmissions += 1; } },
+    referenceBinding: { status: "verified", expected_count: 0, observed_count: 0 },
+  });
+  browser.waitForGeneratedImage = async () => ({ sourceUrl: "blob:persistent-flow-success", bytes: Buffer.from("image") });
+  browser.saveGeneratedImage = async () => "/tmp/persistent-flow-success.img";
+  const baseJob = {
+    type: "image",
+    manifest_id: "persistent-flow-manifest",
+    asset_id: "cut_persistent_success",
+    lease_token: "persistent-flow-lease-success",
+    worker_session_policy: PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
+    prompt: "A single test landscape.",
+    references: [],
+  };
+  await browser.runJob({ slot: 2, job: baseJob, client: {} });
+  assert.equal(creativeSubmissions, 1, "one successful asset must receive exactly one creative submission");
+  assert.equal(firstSlotTwo.isClosed(), false, "a successful persistent Flow job must leave its slot page open");
+
+  browser.waitForGeneratedImage = async () => {
+    const error = new Error("Generation failed after submission");
+    error.code = "google_flow_generation_error";
+    throw error;
+  };
+  await assert.rejects(
+    () => browser.runJob({
+      slot: 2,
+      job: { ...baseJob, asset_id: "cut_persistent_failure", lease_token: "persistent-flow-lease-failure" },
+      client: {},
+    }),
+    (error) => error.code === "google_flow_generation_error",
+  );
+  assert.equal(creativeSubmissions, 2, "a post-submit provider failure must not trigger a second creative submission for that asset");
+  assert.equal(firstSlotTwo.isClosed(), false, "a failed persistent Flow job must remain inspectable in its stable slot page");
+
+  const legacyPage = makePage(99);
+  let legacyPageCreations = 0;
+  const legacyBrowser = new GoogleFlowBrowser({ concurrency: 1 });
+  legacyBrowser.workerPages.set(0, { slot: 0, page: makePage(0), projectUrl: projectUrl(0) });
+  legacyBrowser.newJobPage = async () => { legacyPageCreations += 1; return legacyPage; };
+  legacyBrowser.verifyUiContract = browser.verifyUiContract;
+  legacyBrowser.pastePrompt = browser.pastePrompt;
+  legacyBrowser.attachReferences = browser.attachReferences;
+  legacyBrowser.waitForVisibleImagesToSettle = browser.waitForVisibleImagesToSettle;
+  legacyBrowser.baselineImageFingerprints = browser.baselineImageFingerprints;
+  legacyBrowser.recordReferenceBindingEvidence = async () => ({
+    create: { async click() {} },
+    referenceBinding: { status: "verified", expected_count: 0, observed_count: 0 },
+  });
+  legacyBrowser.waitForGeneratedImage = async () => ({ sourceUrl: "blob:legacy-flow-success", bytes: Buffer.from("image") });
+  legacyBrowser.saveGeneratedImage = async () => "/tmp/legacy-flow-success.img";
+  await legacyBrowser.runJob({
+    slot: 0,
+    job: { ...baseJob, asset_id: "cut_legacy", lease_token: "legacy-lease", worker_session_policy: FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY },
+    client: {},
+  });
+  assert.equal(legacyPageCreations, 1, "legacy identities must continue to create a fresh Flow job page");
+  assert.equal(legacyPage.isClosed(), true, "legacy fresh Flow pages must still close after successful work");
+}
+
+async function testDesktopProviderCircuitBreaker() {
+  const config = assertDesktopConfig(desktopConfig({
+    "server-url": "http://127.0.0.1:4317",
+    provider: "google-flow",
+    concurrency: "1",
+    types: "image",
+    "state-dir": path.join(temporaryRoot, "circuit-state"),
+    "profile-dir": path.join(temporaryRoot, "circuit-profile"),
+    "downloads-root": path.join(temporaryRoot, "circuit-downloads"),
+  }, {}));
+  const browser = {
+    async runJob() {
+      const error = new Error("Generation failed transiently");
+      error.code = "google_flow_generation_error";
+      throw error;
+    },
+  };
+  const reportedCodes = [];
+  const host = new GoldflowDesktopHost({ config, browser, log: () => {} });
+  host.persistRuntime = async () => {};
+  host.schedule = () => {};
+  host.client = {
+    async heartbeat() {},
+    async complete() { throw new Error("unexpected completion"); },
+    async fail(_job, _slot, error) { reportedCodes.push(error.code); },
+  };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await host.runSlot(0, { job: { type: "image", job_id: `circuit-cut-${attempt}` } });
+  }
+  assert.deepEqual(reportedCodes, [
+    "google_flow_generation_error",
+    "google_flow_generation_error",
+    "provider_transient_circuit_open",
+  ], "only the third consecutive transient failure may open the provider circuit");
+  assert.equal(host.consecutiveTransportFailures, 3);
+  assert.equal(host.providerCircuit?.status, "open");
+  assert.equal(host.providerCircuit?.failure_count, 3);
+  assert.ok(host.dispatchCooldownUntil > Date.now(), "an open provider circuit must halt new local leases during triage");
+
+  const chatConfig = assertDesktopConfig(desktopConfig({
+    "server-url": "http://127.0.0.1:4317",
+    provider: "chatgpt",
+    concurrency: "1",
+    types: "llm",
+    "state-dir": path.join(temporaryRoot, "response-timeout-state"),
+    "profile-dir": path.join(temporaryRoot, "response-timeout-profile"),
+    "downloads-root": path.join(temporaryRoot, "response-timeout-downloads"),
+  }, {}));
+  const responseTimeoutBrowser = {
+    async runJob() {
+      const error = new Error("Timed out waiting for a completed ChatGPT response.");
+      error.code = "ui_contract_mismatch";
+      throw error;
+    },
+  };
+  const responseTimeoutCodes = [];
+  const responseTimeoutHost = new GoldflowDesktopHost({ config: chatConfig, browser: responseTimeoutBrowser, log: () => {} });
+  responseTimeoutHost.persistRuntime = async () => {};
+  responseTimeoutHost.schedule = () => {};
+  responseTimeoutHost.client = {
+    async heartbeat() {},
+    async complete() { throw new Error("unexpected completion"); },
+    async fail(_job, _slot, error) { responseTimeoutCodes.push(error.code); },
+  };
+  await responseTimeoutHost.runSlot(0, { job: { type: "llm", job_id: "response-timeout" } });
+  assert.deepEqual(responseTimeoutCodes, ["provider_response_timeout"], "a response timeout must not reach the server as a fatal UI-contract code");
+  assert.equal(responseTimeoutHost.consecutiveTransportFailures, 1);
+  assert.equal(responseTimeoutHost.providerCircuit, null, "one response timeout must not open the provider circuit");
+  assert.equal(responseTimeoutHost.dispatchCooldownUntil, 0, "one response timeout must not halt local dispatch");
+}
+
+async function testDesktopTopOffScheduling() {
+  const config = assertDesktopConfig(desktopConfig({
+    "server-url": "http://127.0.0.1:4317",
+    provider: "google-flow",
+    concurrency: "5",
+    types: "image",
+    "state-dir": path.join(temporaryRoot, "top-off-state"),
+    "profile-dir": path.join(temporaryRoot, "top-off-profile"),
+    "downloads-root": path.join(temporaryRoot, "top-off-downloads"),
+  }, {}));
+  const host = new GoldflowDesktopHost({ config, browser: {}, log: () => {} });
+  host.running = true;
+  host.activeJobs.set(0, { slot: 0, job: { job_id: "already-running" } });
+  const leaseCalls = [];
+  const startedSlots = [];
+  host.client = {
+    async lease(_types, slot) {
+      leaseCalls.push(slot);
+      return { status: "leased", job: { type: "image", job_id: `top-off-${slot}` } };
+    },
+  };
+  host.runSlot = (slot, lease) => {
+    startedSlots.push(slot);
+    host.activeJobs.set(slot, { slot, job: lease.job });
+    return Promise.resolve();
+  };
+  host.schedule = () => {};
+
+  await host.tick();
+  host.nextLeaseAt = 0;
+  await host.tick();
+  host.activeJobs.delete(1);
+  host.nextLeaseAt = 0;
+  await host.tick();
+  assert.deepEqual(leaseCalls, [1, 2, 1], "the scheduler must immediately top off the first free stable slot instead of waiting for a whole wave");
+  assert.deepEqual(startedSlots, [1, 2, 1]);
+}
+
+async function testConditionalPersistentWorkerWarmup() {
+  const providerCases = [
+    {
+      provider: GOOGLE_FLOW_BROWSER_PROVIDER,
+      freshPolicy: FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
+      persistentPolicy: PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
+    },
+    {
+      provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
+      freshPolicy: FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+      persistentPolicy: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+    },
+  ];
+  const hostFixture = (providerCase, suffix, activePolicies) => {
+    let prepareCalls = 0;
+    const browser = {
+      async start() {},
+      async waitForAuthentication() {},
+      async prepareWorkerSlots() { prepareCalls += 1; },
+      async runJob() { return { uiContract: {} }; },
+      async close() {},
+      workerPoolState() { return { policy: providerCase.persistentPolicy, ready_slots: [] }; },
+    };
+    const config = assertDesktopConfig(desktopConfig({
+      "server-url": "http://127.0.0.1:4317",
+      provider: providerCase.provider,
+      concurrency: "1",
+      types: "image",
+      "state-dir": path.join(temporaryRoot, `warmup-${providerCase.provider}-${suffix}-state`),
+      "profile-dir": path.join(temporaryRoot, `warmup-${providerCase.provider}-${suffix}-profile`),
+      "downloads-root": path.join(temporaryRoot, `warmup-${providerCase.provider}-${suffix}-downloads`),
+    }, {}));
+    const host = new GoldflowDesktopHost({ config, browser, log: () => {} });
+    host.ensureCredentials = async () => {};
+    host.reconcileInterruptedJobs = async () => {};
+    host.persistRuntime = async () => {};
+    host.schedule = () => {};
+    host.client = {
+      async health() {
+        return {
+          browser_provider: providerCase.provider,
+          active_image_worker_session_policies: activePolicies,
+        };
+      },
+      async heartbeat() {},
+      async complete() {},
+      async fail() { throw new Error("unexpected warmup fixture failure"); },
+    };
+    return { host, prepareCalls: () => prepareCalls };
+  };
+
+  for (const providerCase of providerCases) {
+    const legacy = hostFixture(providerCase, "legacy", [providerCase.freshPolicy]);
+    await legacy.host.start();
+    assert.equal(legacy.prepareCalls(), 0, `${providerCase.provider} must not prewarm for an active legacy fresh-session manifest`);
+    await legacy.host.runSlot(0, {
+      job: {
+        type: "image",
+        job_id: `${providerCase.provider}-legacy-image`,
+        worker_session_policy: providerCase.freshPolicy,
+      },
+    });
+    assert.equal(legacy.prepareCalls(), 0, `${providerCase.provider} must not warm persistent pages for a leased legacy item`);
+    await legacy.host.runSlot(0, {
+      job: {
+        type: "image",
+        job_id: `${providerCase.provider}-persistent-image-1`,
+        worker_session_policy: providerCase.persistentPolicy,
+      },
+    });
+    await legacy.host.runSlot(0, {
+      job: {
+        type: "image",
+        job_id: `${providerCase.provider}-persistent-image-2`,
+        worker_session_policy: providerCase.persistentPolicy,
+      },
+    });
+    assert.equal(legacy.prepareCalls(), 1, `${providerCase.provider} must lazily warm its pool once when a v3 lease first arrives`);
+
+    const startupV3 = hostFixture(providerCase, "startup-v3", [providerCase.persistentPolicy]);
+    await startupV3.host.start();
+    assert.equal(startupV3.prepareCalls(), 1, `${providerCase.provider} must prewarm at startup when an unresolved v3 persistent manifest is already active`);
+  }
+}
+
 async function testHybridAcceptedReferencePreservation() {
   const referenceDir = path.join(temporaryRoot, "accepted-reference-preservation");
   await fs.mkdir(referenceDir, { recursive: true });
@@ -1085,6 +1496,9 @@ async function testHybridAcceptedReferencePreservation() {
     [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
   });
   assert.equal(flowOnly.maxConcurrency, HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  assert.deepEqual(flowOnly.browserProviderWorkerSessionPolicy, {
+    [GOOGLE_FLOW_BROWSER_PROVIDER]: FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
+  }, "legacy Flow-only identities must retain their fresh-project contract");
   assert.equal(validateFlowRuntimeConcurrency(), HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
   assert.equal(validateFlowRuntimeConcurrency("4"), 4);
   assert.throws(() => validateFlowRuntimeConcurrency("0"), /integer from 1 to 5/);
@@ -1099,6 +1513,9 @@ async function testHybridAcceptedReferencePreservation() {
     chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY,
   });
   assert.equal(chatgptOnly.maxConcurrency, HYBRID_CHATGPT_IMAGE_CONCURRENCY);
+  assert.deepEqual(chatgptOnly.browserProviderWorkerSessionPolicy, {
+    chatgpt: FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+  });
   const federated = hybridManifestDispatchOptions({ federated: true });
   assert.equal(federated.workProvider, FEDERATED_WEB_IMAGE_PROVIDER);
   assert.deepEqual(federated.allowedBrowserProviders, [GOOGLE_FLOW_BROWSER_PROVIDER, GOOGLE_GEMINI_BROWSER_PROVIDER]);
@@ -1115,6 +1532,25 @@ async function testHybridAcceptedReferencePreservation() {
     [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4,
   });
   assert.equal(federated.maxConcurrency, FEDERATED_TOTAL_IMAGE_CONCURRENCY);
+  assert.deepEqual(federated.browserProviderWorkerSessionPolicy, {
+    [GOOGLE_FLOW_BROWSER_PROVIDER]: FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
+    [GOOGLE_GEMINI_BROWSER_PROVIDER]: FRESH_BROWSER_SESSION_PER_JOB_POLICY,
+  }, "legacy federated manifests must remain replay-compatible");
+  const persistentFederated = hybridManifestDispatchOptions({ federated: true, persistentWorkerPool: true });
+  assert.deepEqual(persistentFederated.browserProviderWorkerSessionPolicy, {
+    [GOOGLE_FLOW_BROWSER_PROVIDER]: PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
+    [GOOGLE_GEMINI_BROWSER_PROVIDER]: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+  }, "new fast-premium manifests must bind five persistent Flow projects and three persistent Gemini tabs");
+  assert.deepEqual(
+    hybridManifestDispatchOptions({ federated: true, styleOnly: true, persistentWorkerPool: true }).browserProviderWorkerSessionPolicy,
+    { [GOOGLE_GEMINI_BROWSER_PROVIDER]: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY },
+    "the Gemini style barrier must use the same persistent slot pool",
+  );
+  assert.deepEqual(
+    hybridManifestDispatchOptions({ federated: true, chatgptOnly: true, persistentWorkerPool: true }).allowedBrowserProviders,
+    ["chatgpt"],
+    "an approved federated ChatGPT exact-ID fallback must not reopen the full Google queue",
+  );
   const cappedFederated = hybridManifestDispatchOptions({ federated: true, flowConcurrency: 4 });
   assert.equal(cappedFederated.browserProviderConcurrency[GOOGLE_FLOW_BROWSER_PROVIDER], 4);
   assert.equal(cappedFederated.maxConcurrency, FEDERATED_TOTAL_IMAGE_CONCURRENCY - 1);
@@ -1207,6 +1643,10 @@ const tests = [
   ["provider-bound worker isolation", testProviderIsolation],
   ["extension permission boundary", testExtensionPermissions],
   ["desktop browser host contract", testDesktopHostContract],
+  ["persistent Flow worker pool", testPersistentFlowWorkerPool],
+  ["desktop provider circuit breaker", testDesktopProviderCircuitBreaker],
+  ["desktop topped-off scheduling", testDesktopTopOffScheduling],
+  ["conditional persistent worker warmup", testConditionalPersistentWorkerWarmup],
   ["hybrid accepted-reference preservation", testHybridAcceptedReferencePreservation],
   ["ChatGPT shared verification and pacing", testChatGptSharedVerificationAndPacing],
   ["production runtime regression guards", testProductionRuntimeRegressions],

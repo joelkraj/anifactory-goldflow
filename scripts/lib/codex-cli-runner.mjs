@@ -10,7 +10,11 @@ import {
   planningEffortForStage,
   planningRuntimeFromProcessContext,
 } from "./planning-runtime-policy.mjs";
-import { federatedPlanningRoomEnabled, plannerStageClass } from "./planner-provider-registry.mjs";
+import {
+  federatedPlanningRoomEnabled,
+  plannerStageClass,
+  plannerStageExecutionPolicy,
+} from "./planner-provider-registry.mjs";
 import { plannerRouteFromRegistry } from "../../apps/goldflow-studio/lib/planning-route-registry.mjs";
 
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
@@ -202,6 +206,19 @@ function compactProviderError(value, maxChars = 4000) {
   return raw.length <= maxChars ? raw : `${raw.slice(-maxChars)}\n[truncated from ${raw.length} chars]`;
 }
 
+function localStudioRequestError(providerLabel, response) {
+  const payload = response?.payload;
+  const payloadError = payload?.error;
+  const errorMessage = typeof payloadError === "string" && payloadError.trim()
+    ? payloadError
+    : payloadError && typeof payloadError === "object" && String(payloadError.message ?? "").trim()
+      ? payloadError.message
+      : String(payload?.message ?? "").trim() || "unknown error";
+  const error = new Error(`Local ${providerLabel} Studio request failed (${response?.status}): ${compactProviderError(errorMessage)}`);
+  if (payload?.code != null && String(payload.code).trim()) error.code = payload.code;
+  return error;
+}
+
 async function writeMetadata(outputPath, metadata) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(codexCallMetadataPath(outputPath), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
@@ -293,7 +310,7 @@ async function runChatGptWebLocalApi({
       }, timeoutMs);
     const payload = response.payload;
     if (!response.ok) {
-      throw new Error(`Local ChatGPT Web Studio request failed (${response.status}): ${compactProviderError(payload?.error?.message ?? payload?.message ?? "unknown error")}`);
+      throw localStudioRequestError("ChatGPT Web", response);
     }
     const content = String(payload?.choices?.[0]?.message?.content ?? "");
     if (!content.trim()) throw new Error("Local ChatGPT Web Studio returned an empty completion.");
@@ -318,7 +335,7 @@ async function runGeminiWebLocalApi({ prompt, stageName, resolvedModel, resolved
       }, timeoutMs);
     const payload = response.payload;
     if (!response.ok) {
-      throw new Error(`Local Gemini Web Studio request failed (${response.status}): ${compactProviderError(payload?.error?.message ?? payload?.message ?? "unknown error")}`);
+      throw localStudioRequestError("Gemini Web", response);
     }
     const content = String(payload?.choices?.[0]?.message?.content ?? "");
     if (!content.trim()) throw new Error("Local Gemini Web Studio returned an empty completion.");
@@ -387,6 +404,7 @@ async function runGeminiWebCompletion({
       output_path: outputPath,
       started_at: startedAt,
       failed_at: new Date().toISOString(),
+      error_code: error?.code ?? null,
       error: error instanceof Error ? error.message : String(error),
     }).catch(() => {});
     throw error;
@@ -661,6 +679,7 @@ async function runChatGptWebCompletion({
       output_path: outputPath,
       started_at: startedAt,
       failed_at: new Date().toISOString(),
+      error_code: normalized?.code ?? null,
       error: normalized instanceof Error ? normalized.message : String(normalized),
     }).catch(() => {});
     throw normalized;
@@ -690,6 +709,10 @@ async function runCodexCliWithResolvedProvider({
   });
   const resolvedModel = planningRuntime.model;
   const resolvedEffort = planningEffortForStage(stageName, { explicitEffort: reasoningEffort, runtime: planningRuntime });
+  const executionPolicy = plannerStageExecutionPolicy(stageName);
+  const effectiveTimeoutMs = planningRuntime.provider === "chatgpt_web" && executionPolicy.advisory
+    ? Math.min(Number(timeoutMs) || executionPolicy.max_timeout_ms, executionPolicy.max_timeout_ms)
+    : timeoutMs;
   const promptHash = createHash("sha256").update(String(prompt ?? "")).digest("hex");
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   const startedAt = new Date().toISOString();
@@ -701,7 +724,7 @@ async function runCodexCliWithResolvedProvider({
       resolvedModel,
       resolvedEffort,
       verbosity,
-      timeoutMs,
+      timeoutMs: effectiveTimeoutMs,
       promptHash,
       startedAt,
       extraArgs,
@@ -858,6 +881,39 @@ export async function runCodexCli(options = {}) {
     throw error;
   } finally {
     slot?.release();
+  }
+}
+
+export async function runOptionalPlannerAdvisory(options = {}) {
+  const executionPolicy = plannerStageExecutionPolicy(options.stageName);
+  if (!executionPolicy.advisory) {
+    throw new Error(`Stage ${options.stageName ?? "unknown"} is not registered as an optional planner advisory.`);
+  }
+  try {
+    const result = await runCodexCli({
+      ...options,
+      provider: "chatgpt_web",
+      reasoningEffort: "medium",
+      timeoutMs: Math.min(
+        Number(options.timeoutMs) || executionPolicy.max_timeout_ms,
+        executionPolicy.max_timeout_ms,
+      ),
+    });
+    return { ...result, status: "passed", advisory: true, blocking: false };
+  } catch (error) {
+    return {
+      schema: "goldflow_optional_planner_advisory_v1",
+      status: "omitted",
+      advisory: true,
+      blocking: false,
+      stage_name: options.stageName ?? null,
+      provider: "chatgpt_web",
+      reasoning_effort: "medium",
+      timeout_ms: executionPolicy.max_timeout_ms,
+      disposition: executionPolicy.timeout_disposition,
+      content: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 

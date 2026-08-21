@@ -33,6 +33,9 @@ export const QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT = Object.freeze({
 export const QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE =
   "serial_exact_unit_recovery_v1";
 
+export const QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE =
+  "serial_incomplete_unit_resume_v1";
+
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value && typeof value === "object") {

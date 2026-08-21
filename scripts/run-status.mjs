@@ -744,6 +744,18 @@ export function semanticRecoveryCommandForTests(artifact, identity) {
   return `${base} --semantic-chunk-ids ${failedIds.join(",")}`;
 }
 
+export function transitionRecoveryCommandForTests(artifact, identity) {
+  const failedBoundaryIds = String(artifact?.status ?? "").toLowerCase() === "blocked"
+    && Array.isArray(artifact?.failed_boundary_ids)
+    ? [...new Set(artifact.failed_boundary_ids.map(String).filter(Boolean))]
+    : [];
+  if (!failedBoundaryIds.length) return null;
+  const base = commandFor("transition_edit_plan", identity)
+    .replace(/\s+--boundary-ids?\s+\S+/g, "")
+    .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+  return `${base} --boundary-ids ${failedBoundaryIds.join(",")}`;
+}
+
 function inferredState(validation = {}) {
   if (validation.state) return validation.state;
   if (validation.done) return "passed";
@@ -3417,6 +3429,21 @@ async function qwenTtsStitchComplete(episodeDir, episode, currentScriptHash, ide
 async function narrationVoicePlanComplete(episodeDir, currentScriptHash, identity) {
   const label = "narration_generation_plan.json";
   const planPath = path.join(episodeDir, label);
+  const actionableDirection = await readJson(
+    path.join(episodeDir, "narration_actionable_direction.json"),
+    null,
+  );
+  const failedPerformancePackets = Array.isArray(actionableDirection?.repair_scope?.failed_packet_ids)
+    ? [...new Set(actionableDirection.repair_scope.failed_packet_ids.map(String).filter(Boolean))]
+    : [];
+  if (actionableDirection?.status === "blocked" && failedPerformancePackets.length) {
+    return {
+      done: false,
+      state: "blocked",
+      evidence: `narration_actionable_direction.json blocked on exact performance packets: ${failedPerformancePackets.join(", ")}`,
+      next_command_shape: `${commandFor("voice_plan", identity)} --performance-packet-ids ${failedPerformancePackets.join(",")} --performance-repair-reason "<reviewed packet evidence>"`,
+    };
+  }
   const base = await jsonArtifactHashComplete(planPath, currentScriptHash, label);
   if (!base.done) return base;
   const plan = await readJson(planPath, null);
@@ -4270,7 +4297,21 @@ async function main() {
   }));
   const hardenReport = await readJson(path.join(episodeDir, `visual_prompt_hardening_${episode}.json`), null);
   const hardenStatus = String(hardenReport?.status ?? "").toLowerCase();
-  const transitionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `transition_edit_plan_${episode}.json`), `transition_edit_plan_${episode}.json`);
+  const transitionPlanPath = path.join(episodeDir, `transition_edit_plan_${episode}.json`);
+  const transitionPlanArtifact = await readJson(transitionPlanPath, null);
+  const transitionRecoveryCommand = transitionRecoveryCommandForTests(
+    transitionPlanArtifact,
+    identity,
+  );
+  const transitionPlan = {
+    ...await jsonStatusWithSourceHashesComplete(
+      transitionPlanPath,
+      `transition_edit_plan_${episode}.json`,
+    ),
+    ...(transitionRecoveryCommand
+      ? { next_command_shape: transitionRecoveryCommand }
+      : {}),
+  };
   const motionPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, `motion_edit_plan_${episode}.json`), `motion_edit_plan_${episode}.json`);
   const semanticValidation = legacyIdentity
     ? {

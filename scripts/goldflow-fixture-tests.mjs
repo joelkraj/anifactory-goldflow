@@ -31,7 +31,18 @@ import {
   routedProviderForPrompt,
   routedProviderForReference,
 } from "./lib/image-provider-routing.mjs";
-import { HYBRID_WEB_FLOW_PROVIDER } from "./lib/image-provider-policy.mjs";
+import {
+  DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH,
+  FEDERATED_WEB_IMAGE_PROVIDER,
+  FEDERATED_WEB_IMAGE_ROUTING_POLICY_V2,
+  FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY,
+  HYBRID_WEB_FLOW_PROVIDER,
+  PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+  PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
+  federatedWebImageIdentityOptions,
+  federatedWebImageIdentityStatus,
+  federatedWebImageProviderLocks,
+} from "./lib/image-provider-policy.mjs";
 import { stripEmbeddedProviderExclusionPayloadSyntax } from "./lib/prompt-payload-sanitize.mjs";
 import { namedCharacterDuplicationFindings } from "./lib/prompt-prose-findings.mjs";
 import {
@@ -228,6 +239,7 @@ import {
 import {
   DEFAULT_PRODUCTION_PROFILE,
   normalizeProductionProfile,
+  productionProfileById,
   productionProfileForIdentity,
 } from "./lib/production-profiles.mjs";
 import {
@@ -275,12 +287,14 @@ import {
   runIdentityTtsCompleteForTests,
   runIdentityWhisperCompleteForTests,
   selectedNarratorVoiceIdForTests,
+  transitionRecoveryCommandForTests,
   ttsStatusIdentityFieldsForTests,
 } from "./run-status.mjs";
 import { plannerChunkIdentityFindings } from "./lib/planner-chunk-ledger.mjs";
 import {
   plannerInvocationScope,
   plannerRerunDecision,
+  plannerRerunDecisionForEpisode,
 } from "./lib/planner-rerun-policy.mjs";
 import {
   combineWavefrontPlansForTests,
@@ -437,6 +451,7 @@ function testParallelStageDependenciesAndOwnedOutputs() {
   assert.equal(stageOutputPathMatches("semantic_scene_plan", "semantic_scene_plan.json"), true);
   assert.equal(stageOutputPathMatches("semantic_scene_plan", "modelslab_qwen_tts_report_ep_01.json"), false);
   assert.equal(stageOutputPathMatches("qwen_tts_stitch", "modelslab_qwen_tts_report_ep_01.json"), true);
+  assert.equal(stageOutputPathMatches("qwen_tts_stitch", "narration_tts_pre_synthesis_gate_ep_01.json"), true);
   assert.equal(stageOutputPathMatches("qwen_tts_stitch", "narration_tts_report_ep_01.json"), true);
   assert.equal(stageOutputPathMatches("qwen_tts_stitch", "semantic_scene_plan.json"), false);
   assert.equal(stageOutputPathMatches("local_whisper_word_timing", "narration_word_timing_ep_01.json"), true);
@@ -1276,6 +1291,9 @@ function testNarrationTtsSelectionAndQaContracts() {
 }
 
 function testScopedOnlyPlannerRerunPolicy() {
+  assert.equal(plannerRerunDecisionForEpisode({
+    stage: "visual_prompt_plan",
+  }).reason, "episode_identity_required_for_planner_rerun_guard");
   const priorEvents = [{
     event_type: "stage_completed",
     stage: "visual_prompt_plan",
@@ -1324,6 +1342,36 @@ function testScopedOnlyPlannerRerunPolicy() {
     flags: { "resume-incomplete-chunks": "true" },
     priorEvents,
   }).reason, "visual_prompt_resume_requires_exact_failed_scope");
+  const priorTransitionEvents = [{
+    event_type: "stage_completed",
+    stage: "transition_edit_plan",
+    status: "failed",
+  }];
+  assert.equal(plannerRerunDecision({
+    stage: "transition_edit_plan",
+    flags: {},
+    priorEvents: priorTransitionEvents,
+  }).reason, "unscoped_planner_rerun_forbidden");
+  assert.equal(plannerRerunDecision({
+    stage: "transition_edit_plan",
+    flags: { "boundary-ids": "boundary_002" },
+    priorEvents: priorTransitionEvents,
+  }).reason, "scoped_planner_recovery");
+  assert.equal(plannerRerunDecision({
+    stage: "transition_edit_plan",
+    flags: { "resume-incomplete-chunks": "true" },
+    priorEvents: priorTransitionEvents,
+  }).reason, "transition_resume_requires_exact_failed_scope");
+  assert.match(transitionRecoveryCommandForTests({
+    status: "blocked",
+    failed_boundary_ids: ["boundary_003", "boundary_002", "boundary_003"],
+  }, {
+    channel: "test",
+    series_slug: "series",
+    week: "week",
+    episode: "ep_01",
+    audio_target: "narrator_only",
+  }), /--boundary-ids boundary_003,boundary_002$/);
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
     flags: { "resume-incomplete-chunks": "true" },
@@ -1557,18 +1605,45 @@ function testRunIdentityV2Policies() {
   assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
   assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v1");
   assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v1");
-  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 11);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 8);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.parallel_audio_semantic, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.visual_wavefront_prefetch, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_image_qa, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.incremental_motion_clip_prefetch, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.planner_recovery_policy, "scoped_only");
+  assert.equal(
+    productionProfileForIdentity({ production_profile: "fast_premium_v1" }).media.google_flow_worker_session_policy,
+    PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY,
+  );
+  assert.equal(
+    productionProfileForIdentity({ production_profile: "fast_premium_v1" }).media.google_gemini_worker_session_policy,
+    PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
+  );
+  assert.equal(
+    productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.google_flow_worker_pool_policy,
+    "five_persistent_projects_top_off_v1",
+  );
+  assert.equal(
+    productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.google_gemini_worker_pool_policy,
+    "three_persistent_tabs_top_off_v1",
+  );
   assert.deepEqual(
     productionProfileForIdentity({
       production_profile: "fast_premium_v1",
     }).audio.local_whisper_timing,
     PRODUCTION_LOCAL_WHISPER_CONTRACT,
   );
+  const recordedLegacyFastProfile = productionProfileById("fast_premium_v1");
+  recordedLegacyFastProfile.planner.visual_chunk_concurrency = 11;
+  recordedLegacyFastProfile.planner.antigravity_cli_structured_concurrency = 3;
+  recordedLegacyFastProfile.media.google_flow_worker_session_policy = "fresh_project_per_job";
+  const preservedLegacyFastProfile = productionProfileForIdentity({
+    production_profile: "fast_premium_v1",
+    production_profile_config: recordedLegacyFastProfile,
+  });
+  assert.equal(preservedLegacyFastProfile.planner.visual_chunk_concurrency, 11);
+  assert.equal(preservedLegacyFastProfile.planner.antigravity_cli_structured_concurrency, 3);
+  assert.equal(preservedLegacyFastProfile.media.google_flow_worker_session_policy, "fresh_project_per_job");
   assert.equal(productionProfileForIdentity({}).planner.visual_chunk_concurrency, 6);
 }
 
@@ -1972,6 +2047,8 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
   }), {
     cut_ids: ["cut_001", "cut_002"],
     scene_ids: ["scene_001"],
+    beat_ids: [],
+    planner_chunk_ids: [],
     reference_ids: ["ref_001"],
     proof_start_sec: null,
     proof_end_sec: null,
@@ -1987,6 +2064,8 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
   }), {
     cut_ids: ["cut_001", "cut_002"],
     scene_ids: ["scene_001"],
+    beat_ids: [],
+    planner_chunk_ids: [],
     reference_ids: ["ref_001"],
     tts_unit_ids: ["tts_001", "tts_002"],
     tts_speakers: ["NARRATOR", "SYSTEM"],
@@ -2000,8 +2079,39 @@ async function testExecutionProvenanceScopesAndTruthfulCompletion() {
   }), {
     cut_ids: [],
     scene_ids: [],
+    beat_ids: [],
+    planner_chunk_ids: [],
     reference_ids: [],
     tts_unit_ids: ["tts_001", "tts_002"],
+    proof_start_sec: null,
+    proof_end_sec: null,
+    references_only: false,
+  });
+  assert.deepEqual(executionScopeForTests({
+    "episode-dir": "/tmp/episode",
+    "stitch-repair-tail-unit-ids": "tts_003,tts_002",
+  }), {
+    cut_ids: [],
+    scene_ids: [],
+    beat_ids: [],
+    planner_chunk_ids: [],
+    reference_ids: [],
+    tts_unit_ids: ["tts_002", "tts_003"],
+    proof_start_sec: null,
+    proof_end_sec: null,
+    references_only: false,
+  });
+  assert.deepEqual(executionScopeForTests({
+    "episode-dir": "/tmp/episode",
+    "boundary-id": "boundary_003",
+    "boundary-ids": "boundary_002,boundary_003",
+  }), {
+    cut_ids: [],
+    scene_ids: [],
+    beat_ids: [],
+    planner_chunk_ids: [],
+    reference_ids: [],
+    boundary_ids: ["boundary_002", "boundary_003"],
     proof_start_sec: null,
     proof_end_sec: null,
     references_only: false,
@@ -2131,10 +2241,10 @@ function testPlannerJsonRepairHandlesQuotedProseBeforeComma() {
 }
 
 function testVisualReferencePlannerSplitsOnlyOversizedChunks() {
-  assert.equal(shouldSplitReferenceChunkForTests(950_001, 8), true);
-  assert.equal(shouldSplitReferenceChunkForTests(950_000, 8), false);
+  assert.equal(shouldSplitReferenceChunkForTests(48_001, 8), true);
+  assert.equal(shouldSplitReferenceChunkForTests(48_000, 8), false);
   assert.equal(shouldSplitReferenceChunkForTests(1_200_000, 1), false);
-  assert.equal(shouldSplitReferenceChunkForTests(700_000, 8), false);
+  assert.equal(shouldSplitReferenceChunkForTests(47_000, 8), false);
 }
 
 async function testCumulativeImagegenHistoryAndEpisodeTruth() {
@@ -4791,10 +4901,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(identity.planning_room.stage_routes.structured_planning[0], "codex_cli");
   assert.deepEqual(identity.planning_room.structured_pool.providers, {
     codex_cli: { concurrency: 8 },
-    antigravity_cli: { concurrency: 3 },
+    antigravity_cli: { concurrency: 0 },
   });
-  assert.equal(identity.provider_locks.planning_default_reasoning_effort, "high");
-  assert.equal(identity.model_versions.planning_reasoning_effort, "high");
+  assert.equal(identity.provider_locks.planning_default_reasoning_effort, "medium");
+  assert.equal(identity.model_versions.planning_reasoning_effort, "medium");
   assert.equal(runIdentityPlanningCompleteForTests(identity).done, true);
   const incompleteWebPlanningIdentity = structuredClone(identity);
   delete incompleteWebPlanningIdentity.provider_locks.planning_default_reasoning_effort;
@@ -4804,15 +4914,16 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     /provider_locks\.planning_default_reasoning_effort/,
   );
   assert.equal(planningProviderForIdentity(identity), "planning_room");
-  assert.equal(identity.production_profile_config.target_wall_clock_minutes, null);
+  assert.equal(identity.production_profile_config.target_wall_clock_minutes, 420);
+  assert.deepEqual(identity.production_profile_config.target_wall_clock_band_minutes, { minimum: 300, maximum: 420 });
   assert.equal(identity.production_profile_config.target_wall_clock_policy, "episode_size_aware_p50_p90_v1");
-  assert.equal(identity.production_profile_config.stretch_target_wall_clock_minutes, 180);
-  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 11);
-  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 11);
-  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 11);
-  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 11);
+  assert.equal(identity.production_profile_config.stretch_target_wall_clock_minutes, 300);
+  assert.equal(identity.production_profile_config.planner.semantic_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.editorial_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.visual_ref_chunk_concurrency, 8);
+  assert.equal(identity.production_profile_config.planner.visual_chunk_concurrency, 8);
   assert.equal(identity.production_profile_config.planner.codex_cli_structured_concurrency, 8);
-  assert.equal(identity.production_profile_config.planner.antigravity_cli_structured_concurrency, 3);
+  assert.equal(identity.production_profile_config.planner.antigravity_cli_structured_concurrency, 0);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_semantic_concurrency, 10);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_visual_chunk_concurrency, 10);
   assert.equal(identity.production_profile_config.planner.chatgpt_web_deep_text_concurrency, 1);
@@ -4963,11 +5074,11 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     buildStageCommand("local_whisper_word_timing", identity),
     /--engine faster_whisper --model small\.en --device cpu --compute-type int8_float32 --omp-num-threads 12 --cpu-threads 0/,
   );
-  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 11\b/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 11\b/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8\b/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8\b/);
   const chatGptWebImageIdentity = structuredClone(identity);
   chatGptWebImageIdentity.image_provider = "chatgpt_web_gpt_image";
-  assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 11\b/);
+  assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 8\b/);
   assert.match(buildStageCommand("reference_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--concurrency 3\b/);
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
@@ -4981,7 +5092,7 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   delete legacyPlanningIdentity.provider_locks.planning_default_reasoning_effort;
   assert.equal(planningProviderForIdentity(legacyPlanningIdentity), "codex_cli");
   assert.equal(runIdentityPlanningCompleteForTests(legacyPlanningIdentity).done, true);
-  assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 11\b/);
+  assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 8\b/);
   const legacySerialQwenIdentity = structuredClone(identity);
   legacySerialQwenIdentity.stage_registry_version = "2026-07-27.1";
   delete legacySerialQwenIdentity.voice_provider_options.synthesis_contract;
@@ -5017,10 +5128,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--concurrency 1/);
   assert.match(buildStageCommand("qwen_tts_stitch", identity), /--batch-size 4/);
   assert.match(buildStageCommand("image_generation", identity), /--image-model gpt-image-2-t2i/);
-  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 11/);
-  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 11/);
-  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 11/);
-  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 11 .*--visual-chunk-validation-attempts 1/);
+  assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 8/);
+  assert.match(buildStageCommand("visual_beat_plan", identity), /--editorial-concurrency 8/);
+  assert.match(buildStageCommand("visual_reference_plan", identity), /--visual-ref-chunk-concurrency 8/);
+  assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 8 .*--visual-chunk-validation-attempts 1/);
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
@@ -7310,6 +7421,36 @@ function testHybridImageProviderRouting() {
     start_sec: 300,
     shot_manifest: { visible_characters: ["Joey", "Mira"], character_state_ref_ids: ["joey_ref", "mira_ref"] },
   }, "hybrid_modelslab_refs_codex_opening_modelslab_rest", { codexOpeningSec: 300 }), "modelslab");
+}
+
+async function testPersistentFederatedImageIdentityPolicy() {
+  const healthProof = {
+    path: DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH,
+    sha256: await sha256File(DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH),
+  };
+  const options = federatedWebImageIdentityOptions({ healthProof });
+  const identity = {
+    image_provider: FEDERATED_WEB_IMAGE_PROVIDER,
+    image_provider_options: options,
+    provider_locks: federatedWebImageProviderLocks(options),
+  };
+  assert.equal(options.google_flow.project_policy, PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY);
+  assert.equal(options.google_flow.worker_session_policy, PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY);
+  assert.equal(options.google_gemini.worker_session_policy, PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY);
+  assert.equal(identity.provider_locks.google_flow_worker_session_policy, PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY);
+  assert.equal(identity.provider_locks.google_gemini_worker_session_policy, PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY);
+  assert.equal((await federatedWebImageIdentityStatus(identity)).done, true, "the current fast-premium identity must require persistent browser workers");
+
+  const legacyV2 = structuredClone(identity);
+  legacyV2.image_provider_options.routing_policy = FEDERATED_WEB_IMAGE_ROUTING_POLICY_V2;
+  legacyV2.image_provider_options.google_flow.project_policy = FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY;
+  delete legacyV2.image_provider_options.google_flow.worker_session_policy;
+  delete legacyV2.image_provider_options.google_gemini.worker_session_policy;
+  legacyV2.provider_locks.image_routing_policy = FEDERATED_WEB_IMAGE_ROUTING_POLICY_V2;
+  legacyV2.provider_locks.google_flow_project_policy = FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY;
+  delete legacyV2.provider_locks.google_flow_worker_session_policy;
+  delete legacyV2.provider_locks.google_gemini_worker_session_policy;
+  assert.equal((await federatedWebImageIdentityStatus(legacyV2)).done, true, "existing v2 fresh-project identities must remain valid and reproducible");
 }
 
 async function testHybridOpeningWindowPersistsInRunIdentity() {
@@ -12885,6 +13026,7 @@ const FIXTURE_SUITES = {
     testPostTempoRequiresEmergencyApproval,
     testPostTempoScalesPreparedStitchTimeline,
     testHybridImageProviderRouting,
+    testPersistentFederatedImageIdentityPolicy,
     testHybridOpeningWindowPersistsInRunIdentity,
     testRunStatusResumesBlockedVisualReviewWithoutFullReplan,
     testRunStatusBlocksLegacyScriptPaceHookWarnings,

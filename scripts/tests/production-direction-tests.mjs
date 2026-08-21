@@ -227,8 +227,9 @@ assert.deepEqual(requiredGeneratedMotionCoverageFindings({
 
 const room = planningRoomContract({ planning_provider: PLANNING_ROOM_PROVIDER });
 assert.equal(room.deterministic_local_reconciliation_provider, "codex_cli");
-assert.ok(room.stage_routes.structured_planning.includes("antigravity_cli"));
-assert.equal(room.stage_routes.structured_planning[0], "codex_cli");
+assert.deepEqual(room.stage_routes.structured_planning, ["codex_cli"]);
+assert.deepEqual(room.stage_routes.global_reasoning, ["codex_cli"]);
+assert.deepEqual(room.stage_routes.premium_creative, ["chatgpt_web", "codex_cli"]);
 
 const federatedIdentity = {
   planning_provider: PLANNING_ROOM_PROVIDER,
@@ -236,13 +237,13 @@ const federatedIdentity = {
     planner: {
       federated_structured_pool: true,
       codex_cli_structured_concurrency: 8,
-      antigravity_cli_structured_concurrency: 3,
+      antigravity_cli_structured_concurrency: 0,
     },
   },
 };
 federatedIdentity.planning_room = planningRoomContract(federatedIdentity);
 assert.equal(federatedIdentity.planning_room.schema, FEDERATED_PLANNING_ROOM_SCHEMA);
-const plannerSlots = await Promise.all(Array.from({ length: 11 }, () => acquireFederatedPlannerSlot({
+const plannerSlots = await Promise.all(Array.from({ length: 8 }, () => acquireFederatedPlannerSlot({
   identity: federatedIdentity,
   stageName: "ep_01_visual_prompt_chunk",
   env: {
@@ -253,14 +254,29 @@ const plannerSlots = await Promise.all(Array.from({ length: 11 }, () => acquireF
 })));
 assert.deepEqual(
   plannerSlots.reduce((counts, slot) => ({ ...counts, [slot.provider]: (counts[slot.provider] ?? 0) + 1 }), {}),
-  { codex_cli: 8, antigravity_cli: 3 },
+  { codex_cli: 8 },
 );
-assert.deepEqual(federatedPlannerPoolSnapshotForTests().active, { codex_cli: 8, antigravity_cli: 3 });
+assert.deepEqual(federatedPlannerPoolSnapshotForTests().active, { codex_cli: 8 });
 for (const slot of plannerSlots) slot.release();
 resetFederatedPlannerPoolForTests();
 
+const legacyFederatedIdentity = {
+  planning_provider: PLANNING_ROOM_PROVIDER,
+  production_profile_config: {
+    planner: {
+      federated_structured_pool: true,
+      codex_cli_structured_concurrency: 8,
+      antigravity_cli_structured_concurrency: 3,
+    },
+  },
+  planning_room: {
+    schema: FEDERATED_PLANNING_ROOM_SCHEMA,
+    stage_routes: { structured_planning: ["codex_cli", "antigravity_cli"] },
+  },
+};
+legacyFederatedIdentity.planning_room = planningRoomContract(legacyFederatedIdentity);
 const circuitProbeSlots = await Promise.all(Array.from({ length: 11 }, () => acquireFederatedPlannerSlot({
-  identity: federatedIdentity,
+  identity: legacyFederatedIdentity,
   stageName: "ep_01_visual_prompt_chunk",
   env: {
     ...process.env,
@@ -274,7 +290,7 @@ failedAntigravitySlot.recordFailure(new Error("Authentication required. Authenti
 for (const slot of circuitProbeSlots) slot.release();
 assert.equal(federatedPlannerPoolSnapshotForTests().health.antigravity_cli.open, true);
 const postCircuitSlots = await Promise.all(Array.from({ length: 8 }, () => acquireFederatedPlannerSlot({
-  identity: federatedIdentity,
+  identity: legacyFederatedIdentity,
   stageName: "ep_01_visual_prompt_chunk",
   env: {
     ...process.env,

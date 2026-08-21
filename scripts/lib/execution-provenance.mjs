@@ -33,16 +33,29 @@ function scopeFromFlags(flags = {}) {
     "confirmed-retry-unit-ids",
     "regenerate-unit-ids",
     "unit-ids",
+    "stitch-repair-tail-unit-ids",
   );
   const ttsSpeakers = [...new Set(
     list("regenerate-speakers").map((value) => value.toUpperCase()),
   )].sort();
+  const boundaryIds = list("boundary-ids", "boundary-id");
   return {
     cut_ids: list("cut-ids", "cut-id", "image-ids", "image-id", "only-cut-ids"),
     scene_ids: list("only-scenes", "scene-ids", "scene-id"),
+    beat_ids: list("beat-ids", "beat-id"),
+    planner_chunk_ids: list(
+      "chunk-ids",
+      "chunk-id",
+      "semantic-chunk-ids",
+      "semantic-chunk-id",
+      "repair-chunk-ids",
+      "performance-packet-ids",
+      "performance-packet-id",
+    ),
     reference_ids: list("reference-ids", "reference-id"),
     ...(ttsUnitIds.length ? { tts_unit_ids: ttsUnitIds } : {}),
     ...(ttsSpeakers.length ? { tts_speakers: ttsSpeakers } : {}),
+    ...(boundaryIds.length ? { boundary_ids: boundaryIds } : {}),
     proof_start_sec: Number.isFinite(Number(flags["proof-start-sec"] ?? flags["scope-start-sec"]))
       ? Number(flags["proof-start-sec"] ?? flags["scope-start-sec"])
       : null,
@@ -370,6 +383,8 @@ export async function materializeProductionManifest(episodeDir) {
       scoped_execution_calls: completed.filter((row) => [
         ...(row.scope?.cut_ids ?? []),
         ...(row.scope?.scene_ids ?? []),
+        ...(row.scope?.beat_ids ?? []),
+        ...(row.scope?.planner_chunk_ids ?? []),
         ...(row.scope?.reference_ids ?? []),
         ...(row.scope?.tts_unit_ids ?? []),
         ...(row.scope?.tts_speakers ?? []),

@@ -177,9 +177,9 @@ export function buildEpisodeProductionForecast({
   );
   const promptPlanning = workstream(
     "prompt_planning",
-    Math.ceil(stills / 11) * 1.35,
-    Math.ceil(stills / 11) * 2.25,
-    `${stills} cuts through the eleven-slot structured planning pool`,
+    Math.ceil(stills / 8) * 1.35,
+    Math.ceil(stills / 8) * 2.25,
+    `${stills} cuts through the eight-slot Codex Medium structured planning pool`,
   );
   const stillGeneration = workstream(
     "still_generation",

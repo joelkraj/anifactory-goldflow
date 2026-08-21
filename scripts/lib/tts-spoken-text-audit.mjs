@@ -8,6 +8,18 @@ const APPROVED_INITIALISMS = new Set([
   "PR", "SEC", "UI", "UX", "XP",
 ]);
 
+const COMPACT_INITIALISMS_REQUIRING_EXPLICIT_SPEECH = new Set([
+  ...APPROVED_INITIALISMS,
+  "DNA", "GPS", "ID", "IPO", "IT", "MC", "PDF", "URL", "USB", "VIP",
+]);
+
+const CONTEXTUAL_INITIALISM_PATTERN = new RegExp(
+  `\\b(?:${[...COMPACT_INITIALISMS_REQUIRING_EXPLICIT_SPEECH]
+    .sort((left, right) => right.length - left.length)
+    .join("|")}|SSS|SS)\\b`,
+  "g",
+);
+
 function sha256(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
@@ -66,6 +78,20 @@ function expandedInitialisms(value) {
     rendered: match[0],
     compact: match[0].replace(/\s+/g, ""),
   }));
+}
+
+function unresolvedKnownInitialisms(sourceText, spokenText) {
+  const source = String(sourceText ?? "");
+  const spoken = String(spokenText ?? "");
+  const risks = [];
+  for (const match of source.matchAll(CONTEXTUAL_INITIALISM_PATTERN)) {
+    const compact = match[0];
+    if (compact === "IT" && !/\bIT\s+(?:department|team|support|system|systems|staff|manager|worker|workers|specialist|specialists|infrastructure|security|network|networks|operations|services?|industry|career|job|jobs)\b/i.test(source)) {
+      continue;
+    }
+    if (new RegExp(`\\b${compact}\\b`, "i").test(spoken)) risks.push(compact);
+  }
+  return [...new Set(risks)].sort();
 }
 
 const HOMOGRAPH_RISK_PATTERN = /\b(?:live|content|read|lead|wind|tear|close|minute|record|object|present|project|refuse|separate|invalid|entrance)\b/gi;
@@ -155,6 +181,9 @@ export function buildTtsSpokenTextAudit({
     }
     if (ordinaryItPronounAppears(sourceText) && /\bI\s+T\b/.test(spokenText)) {
       unitBlockers.push("ordinary_it_pronoun_expanded_as_initialism");
+    }
+    for (const initialism of unresolvedKnownInitialisms(sourceText, spokenText)) {
+      unitBlockers.push(`unresolved_known_initialism_in_spoken_text:${initialism}`);
     }
     for (const initialism of expandedInitialisms(spokenText)) {
       if (initialism.compact === "IT" && !ordinaryItPronounAppears(sourceText)) continue;

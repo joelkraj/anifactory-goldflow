@@ -5,7 +5,9 @@ import { createHash } from "node:crypto";
 
 import {
   CHATGPT_INLINE_PROMPT_MAX_CHARS,
+  DEFAULT_CHATGPT_LLM_RESPONSE_TIMEOUT_MS,
   ChatGptBrowser,
+  chatGptLlmResponseTimeoutMs,
   createChatGptLlmPromptDelivery,
   createChatGptLlmUiContract,
   isChatGptTransientAssistantStatus,
@@ -206,6 +208,52 @@ async function serializesOnlyTheLlmSubmissionCriticalSection() {
   assert.deepEqual(events, ["first-start", "first-end", "second"]);
 }
 
+async function routesTheRequestTimeoutOnlyToLlmResponseWaiting() {
+  assert.equal(chatGptLlmResponseTimeoutMs({ response_timeout_ms: 5_400_000 }), 5_400_000);
+  assert.equal(
+    chatGptLlmResponseTimeoutMs({}),
+    DEFAULT_CHATGPT_LLM_RESPONSE_TIMEOUT_MS,
+    "legacy jobs without timeout metadata must not undercut a 90-minute source writer",
+  );
+
+  const browser = new ChatGptBrowser();
+  let observedTimeoutMs = null;
+  const page = {
+    locator() { return { async count() { return 0; } }; },
+    url() { return "https://chatgpt.com/c/test-timeout"; },
+    async close() {},
+  };
+  browser.newJobPage = async () => page;
+  browser.blockingAlert = async () => {};
+  browser.verifyUiContractOnce = async () => ({ provider: "chatgpt-web" });
+  browser.composer = async () => ({});
+  browser.prepareLlmPromptSubmission = async () => ({
+    delivery: {
+      mode: "inline",
+      source_sha256: "a".repeat(64),
+      source_utf8_bytes: 4,
+      attachment: null,
+    },
+    composer_receipt: {
+      expected_sha256: "a".repeat(64),
+      observed_sha256: "a".repeat(64),
+    },
+    attachment_receipt: null,
+  });
+  browser.submitPreparedLlm = async () => {};
+  browser.waitForAssistant = async (_page, _startCount, timeoutMs) => {
+    observedTimeoutMs = timeoutMs;
+    return "DONE";
+  };
+  const result = await browser.runJob({
+    job: { type: "llm", prompt: "test", response_timeout_ms: 5_400_000 },
+    uiContract: {},
+    client: {},
+  });
+  assert.equal(observedTimeoutMs, 5_400_000, "the leased request timeout must control only the LLM response wait");
+  assert.equal(result.content, "DONE");
+}
+
 function stripsOnlyStandaloneAttachmentCitationChrome() {
   const input = `Observed fact.\n\ngoldflow-prompt-1d2aa9c16682f17…\n\nAuthored analysis remains.\n\ngoldflow-prompt-1d2aa9c16682f17… +1\n\nA legitimate sentence naming evidence remains.`;
   assert.equal(
@@ -230,6 +278,7 @@ await acceptsOneRetainedAttachmentControlWhenFilenameIsVisuallyTruncated();
 await restabilizesAComposerBeforeSubmission();
 await acceptsAnExactLexicalBlockSerialization();
 await serializesOnlyTheLlmSubmissionCriticalSection();
+await routesTheRequestTimeoutOnlyToLlmResponseWaiting();
 stripsOnlyStandaloneAttachmentCitationChrome();
 refusesTransientThinkingChromeAsACompletedAnswer();
 

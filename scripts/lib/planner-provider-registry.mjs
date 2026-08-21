@@ -15,13 +15,39 @@ export const PLANNER_PROVIDER_IDS = Object.freeze([
 
 export const DEFAULT_PLANNING_ROOM_ROUTES = Object.freeze({
   source_research: Object.freeze(["gemini_web", "chatgpt_web", "codex_cli"]),
-  premium_creative: Object.freeze(["chatgpt_web", "gemini_web", "codex_cli"]),
-  global_reasoning: Object.freeze(["gemini_web", "chatgpt_web", "codex_cli"]),
-  // Antigravity moves ahead of Codex only after its task-class benchmark is
-  // explicitly promoted into a future route lock.
-  structured_planning: Object.freeze(["codex_cli", "antigravity_cli", "gemini_web", "chatgpt_web"]),
+  premium_creative: Object.freeze(["chatgpt_web", "codex_cli"]),
+  global_reasoning: Object.freeze(["codex_cli"]),
+  // Production structured planning is intentionally Codex-only. Antigravity
+  // may re-enter only through a future identity lock after its task-class
+  // benchmark, permissions, and schema-output reliability are promoted.
+  structured_planning: Object.freeze(["codex_cli"]),
   local_reconciliation: Object.freeze(["codex_cli"]),
 });
+
+export const PREMIUM_WEB_ADVISORY_MAX_TIMEOUT_MS = 180_000;
+const PREMIUM_WEB_ADVISORY_STAGE_PATTERN = /(?:global_creative_direction|opening_animation_direction|difficult_hero_scene|visual_prompt_audit|youtube_(?:upload_)?packag|thumbnail|title_package)/;
+
+export function plannerStageExecutionPolicy(stageName = "") {
+  const stage = String(stageName ?? "").trim().toLowerCase();
+  if (PREMIUM_WEB_ADVISORY_STAGE_PATTERN.test(stage)) {
+    return Object.freeze({
+      blocking: false,
+      advisory: true,
+      provider: "chatgpt_web",
+      reasoning_effort: "medium",
+      max_timeout_ms: PREMIUM_WEB_ADVISORY_MAX_TIMEOUT_MS,
+      timeout_disposition: "omit_advisory_and_continue",
+    });
+  }
+  return Object.freeze({
+    blocking: true,
+    advisory: false,
+    provider: null,
+    reasoning_effort: "medium",
+    max_timeout_ms: null,
+    timeout_disposition: "fail_exact_stage_scope",
+  });
+}
 
 export const PLANNER_PROVIDER_REGISTRY = Object.freeze({
   codex_cli: Object.freeze({
@@ -75,6 +101,10 @@ export function normalizePlannerProviderId(value, fallback = PLANNING_ROOM_PROVI
 export function plannerStageClass(stageName = "") {
   const stage = String(stageName ?? "").trim().toLowerCase();
   if (/(?:source_(?:deep_)?research|market_research|fact_research|research_dossier)/.test(stage)) return "source_research";
+  // Web work is bounded to deliberately named premium/advisory assignments.
+  if (/(?:global_creative_direction|opening_animation_direction|difficult_hero_scene|visual_prompt_audit|youtube_(?:upload_)?packag|thumbnail|title_package)/.test(stage)) {
+    return "premium_creative";
+  }
   if (/(?:global_reconciliation|global_reasoning|continuity|reference_plan_merge|full_dependent|retention_review|retention_map|longform_draft_selection|diagnostic|enhancement_judge|audit)/.test(stage)) return "global_reasoning";
   if (/(?:winner_(?:ideation|story_blueprint|opening_generation|script_generation|integrated_revision|line_flow_polish)|source_(?:ideate|blueprint|opening|script|revise|polish)|package|thumbnail|title|premise|creative)/.test(stage)) return "premium_creative";
   if (/(?:semantic|narration_performance|visual_beat|editorial_beat|visual_reference|reference_anchor|visual_plan|visual_prompt|visual_review|transition|audio|sfx|score|engagement|overlay)/.test(stage)) return "structured_planning";
@@ -152,11 +182,16 @@ export function planningProvidersForStage(identity, stageName, { env = process.e
 
 function structuredPoolContract(identity = {}) {
   const planner = identity?.production_profile_config?.planner ?? {};
+  const configuredConcurrency = (provider, fallback) => {
+    const raw = planner[`${provider}_structured_concurrency`];
+    const parsed = Number(raw);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+  };
   return {
     assignment_policy: String(planner.structured_pool_assignment_policy ?? "weighted_least_utilized_v1"),
     providers: {
-      codex_cli: { concurrency: Math.max(1, Number(planner.codex_cli_structured_concurrency) || 8) },
-      antigravity_cli: { concurrency: Math.max(1, Number(planner.antigravity_cli_structured_concurrency) || 3) },
+      codex_cli: { concurrency: configuredConcurrency("codex_cli", 8) },
+      antigravity_cli: { concurrency: configuredConcurrency("antigravity_cli", 0) },
     },
   };
 }

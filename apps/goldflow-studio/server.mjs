@@ -65,8 +65,7 @@ export function providerFailurePausesDispatch(code) {
     "account_mismatch",
     "ui_contract_mismatch",
     "auth_required",
-    "google_gemini_generation_error",
-    "chatgpt_generation_error",
+    "provider_transient_circuit_open",
   ]
     .includes(String(code ?? ""));
 }
@@ -139,6 +138,7 @@ function publicJob(job) {
     model: job.request.model,
     reasoning_effort: job.request.reasoning_effort,
     stage_name: job.request.stage_name,
+    response_timeout_ms: job.response_timeout_ms ?? null,
   };
 }
 
@@ -257,6 +257,7 @@ export async function createStudioServer(options = {}) {
     const url = new URL(request.url, `http://${host}`);
     try {
       if (request.method === "GET" && url.pathname === "/v1/health") {
+        const activeImageWorkerSessionPolicies = await bridge.activeWorkerSessionPolicies();
         sendJson(response, 200, {
           status: "ok",
           service: "goldflow-studio",
@@ -264,6 +265,7 @@ export async function createStudioServer(options = {}) {
           started_at: runtime.started_at,
           browser_provider: browserProvider,
           worker_slot_ceiling: workerSlotCeiling,
+          active_image_worker_session_policies: activeImageWorkerSessionPolicies,
           ui_contract: expectedUiContract,
         }, origin);
         return;

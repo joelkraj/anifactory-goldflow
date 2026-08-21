@@ -4,7 +4,12 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildOperatorReviewTelemetry, buildRunPerformanceAudit, renderRunPerformanceAuditMarkdown } from "../lib/run-performance-audit.mjs";
+import {
+  buildOperatorReviewTelemetry,
+  buildRepeatInvocationTelemetry,
+  buildRunPerformanceAudit,
+  renderRunPerformanceAuditMarkdown,
+} from "../lib/run-performance-audit.mjs";
 import {
   buildEpisodeProductionForecast,
   stageLatencyPercentiles,
@@ -45,6 +50,25 @@ assert.equal(report.largest_gaps[0].classification, "blocker_recovery");
 assert.equal(report.largest_gaps.at(-1).classification, "out_of_order_rework");
 assert.ok(report.findings.some((finding) => finding.code === "target_wall_clock_exceeded"));
 assert.match(renderRunPerformanceAuditMarkdown(report), /Goldflow Run Performance Audit/);
+
+const repeatTelemetry = buildRepeatInvocationTelemetry([
+  { ...event("img-1", "image_generation", "failed", 0, 2), command: "imagegen browser-pool", scope_sha256: "full", scope: {} },
+  { ...event("img-2", "image_generation", "passed", 3, 5), command: "imagegen start", scope_sha256: "full", scope: {} },
+  { ...event("img-repair-1", "image_generation", "failed", 6, 7), command: "imagegen browser-pool", scope_sha256: "cut-7", scope: { cut_ids: ["cut_007"] } },
+  { ...event("img-repair-2", "image_generation", "passed", 8, 9), command: "imagegen browser-pool", scope_sha256: "cut-7", scope: { cut_ids: ["cut_007"] } },
+]);
+assert.equal(repeatTelemetry.repeated_same_scope_invocation_count, 2);
+assert.equal(repeatTelemetry.repeated_full_scope_invocation_count, 1);
+assert.equal(repeatTelemetry.costly_repeated_active_minutes, 3);
+assert.equal(repeatTelemetry.groups.find((row) => row.scope_sha256 === "full")?.repeated_active_minutes, 2);
+assert.equal(repeatTelemetry.groups.find((row) => row.scope_sha256 === "cut-7")?.exact_scope, true);
+
+const narratorWideRepeatTelemetry = buildRepeatInvocationTelemetry([
+  { ...event("tts-1", "qwen_tts_stitch", "failed", 0, 2), command: "tts qwen", scope_sha256: "narrator", scope: { tts_speakers: ["NARRATOR"] } },
+  { ...event("tts-2", "qwen_tts_stitch", "passed", 3, 5), command: "tts qwen", scope_sha256: "narrator", scope: { tts_speakers: ["NARRATOR"] } },
+]);
+assert.equal(narratorWideRepeatTelemetry.repeated_full_scope_invocation_count, 1);
+assert.equal(narratorWideRepeatTelemetry.groups[0]?.exact_scope, false);
 
 const approvalTelemetry = buildOperatorReviewTelemetry([
   event("source", "source_ingest", "passed", 0, 2),

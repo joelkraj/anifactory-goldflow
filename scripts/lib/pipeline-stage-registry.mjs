@@ -111,6 +111,7 @@ const stages = [
     validator: "narration_report_audio_qa_hashes",
     depends_on: ["voice_plan"],
     output_patterns: [
+      /^narration_tts_pre_synthesis_gate_.*\.json$/,
       /^narration_tts_report_.*\.json$/,
       /^narration_tts_unit_qa_.*\.json$/,
       /^narration_full_stream_qa_.*\.json$/,

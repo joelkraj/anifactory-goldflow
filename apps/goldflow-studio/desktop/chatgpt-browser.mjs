@@ -30,6 +30,14 @@ const HISTORY_RATE_LIMIT_SELECTOR = '#modal-conversation-history-rate-limit, [da
 const CHATGPT_UPLOAD_PENDING_SELECTOR = '[aria-busy="true"][data-testid*="upload" i], [aria-label*="upload" i][aria-busy="true"], [class*="uploading" i], [role="progressbar"]';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 export const CHATGPT_INLINE_PROMPT_MAX_CHARS = 24_000;
+export const DEFAULT_CHATGPT_LLM_RESPONSE_TIMEOUT_MS = 90 * 60_000;
+
+export function chatGptLlmResponseTimeoutMs(job) {
+  const requested = Number(job?.response_timeout_ms);
+  return Number.isFinite(requested) && requested > 0
+    ? Math.max(1_000, Math.round(requested))
+    : DEFAULT_CHATGPT_LLM_RESPONSE_TIMEOUT_MS;
+}
 
 function codedError(code, message) {
   const error = new Error(message);
@@ -787,8 +795,11 @@ export class ChatGptBrowser {
     return stripChatGptAttachmentCitationArtifacts(await turn.innerText().catch(() => ""));
   }
 
-  async waitForAssistant(page, startCount) {
-    const deadline = Date.now() + 45 * 60_000;
+  async waitForAssistant(page, startCount, timeoutMs = DEFAULT_CHATGPT_LLM_RESPONSE_TIMEOUT_MS) {
+    const effectiveTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? Math.max(1_000, Math.round(Number(timeoutMs)))
+      : DEFAULT_CHATGPT_LLM_RESPONSE_TIMEOUT_MS;
+    const deadline = Date.now() + effectiveTimeoutMs;
     let lastText = "";
     let stableSince = 0;
     while (Date.now() < deadline) {
@@ -904,7 +915,7 @@ export class ChatGptBrowser {
         await this.submitPreparedLlm(page, prepared, { onPhase });
         return prepared;
       });
-      const content = await this.waitForAssistant(page, startCount);
+      const content = await this.waitForAssistant(page, startCount, chatGptLlmResponseTimeoutMs(job));
       await onPhase("result_ready");
       return {
         content,

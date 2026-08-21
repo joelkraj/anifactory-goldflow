@@ -58,6 +58,14 @@ function normalizedRequest(request) {
     response_format: request?.response_format ?? null,
   };
 }
+
+function normalizedResponseTimeoutMs(value) {
+  const timeoutMs = Number(value);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? Math.max(1_000, Math.round(timeoutMs))
+    : null;
+}
+
 export function renderChatGptWebPrompt(request) {
   const sections = request.messages.map((message, index) => {
     const heading = String(message.role || "user").toUpperCase();
@@ -105,11 +113,26 @@ export class LlmJobStore {
 
   async createOrGet(rawRequest) {
     const request = normalizedRequest(rawRequest);
+    const responseTimeoutMs = normalizedResponseTimeoutMs(rawRequest?.timeout_ms);
     const requestSha256 = sha256(stableStringify(request));
     const filePath = this.jobPath(requestSha256);
     return this.withQueueLock(async () => {
       const existing = await readJson(filePath);
-      if (existing) return { job: existing, created: false };
+      if (existing) {
+        const existingTimeoutMs = normalizedResponseTimeoutMs(existing.response_timeout_ms);
+        if (existing.status !== "completed"
+          && responseTimeoutMs != null
+          && (existingTimeoutMs == null || responseTimeoutMs > existingTimeoutMs)) {
+          const updated = {
+            ...existing,
+            response_timeout_ms: responseTimeoutMs,
+            updated_at: nowIso(),
+          };
+          await writeJsonAtomic(filePath, updated);
+          return { job: updated, created: false };
+        }
+        return { job: existing, created: false };
+      }
       const job = {
         schema: LLM_JOB_SCHEMA,
         job_id: requestSha256,
@@ -117,6 +140,7 @@ export class LlmJobStore {
         status: "queued",
         attempt_count: 0,
         request,
+        response_timeout_ms: responseTimeoutMs,
         web_prompt: renderChatGptWebPrompt(request),
         lease: null,
         result: null,

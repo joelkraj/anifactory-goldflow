@@ -66,7 +66,7 @@ export function desktopConfig(flags = {}, environment = process.env) {
       MIN_BROWSER_SUBMISSION_STAGGER_MS,
       MAX_BROWSER_SUBMISSION_STAGGER_MS,
     ),
-    transportFailureThreshold: 2,
+    transportFailureThreshold: 3,
     transportCooldownMs: 5 * 60_000,
     rateLimitCooldownMs: 10 * 60_000,
     types: parseWorkerTypes(flags.types ?? environment.GOLDFLOW_DESKTOP_TYPES ?? (
@@ -104,7 +104,7 @@ export function assertDesktopConfig(config) {
     throw new Error(`${config.browserProvider} accepts only ${[...allowedTypes].join(" or ")} work.`);
   }
   if (config.browserProvider === "google-flow" && config.concurrency > 1 && config.flowProjectUrl) {
-    throw new Error("Concurrent Google Flow work requires one fresh project per job; omit --flow-project-url when concurrency is above one.");
+    throw new Error("Concurrent Google Flow work requires one dedicated project per persistent worker slot; omit the single shared --flow-project-url when concurrency is above one.");
   }
   return config;
 }

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { runCodexCli } from "./codex-cli-runner.mjs";
+import {
+  isCodexCacheCompatible,
+  readCodexCallMetadata,
+  runCodexCli,
+} from "./codex-cli-runner.mjs";
 import {
   NARRATION_BOUNDARY_CLASSES,
   narrationSourceRefKey,
@@ -47,7 +51,9 @@ function segmentChunks(atomicUnits, maximumAtoms = 54) {
     }
     if (segment.units.length > maximumAtoms) {
       if (current.length) chunks.push(current);
-      chunks.push(segment.units);
+      for (let index = 0; index < segment.units.length; index += maximumAtoms) {
+        chunks.push(segment.units.slice(index, index + maximumAtoms));
+      }
       current = [];
       continue;
     }
@@ -57,7 +63,7 @@ function segmentChunks(atomicUnits, maximumAtoms = 54) {
   return chunks;
 }
 
-function promptForChunk(units, chunkIndex, chunkCount, chapterProsody = []) {
+function promptForChunk(units, chunkIndex, chunkCount) {
   const atoms = units.map((unit) => ({
     source_ref_key: narrationSourceRefKey(unit.source_unit_refs?.[0]),
     segment_id: unit.segment_id,
@@ -75,7 +81,7 @@ function promptForChunk(units, chunkIndex, chunkCount, chapterProsody = []) {
 The output will be compiled through a capability adapter. Every model receives exact spoken text, punctuation, sentence-complete grouping, semantic boundary timing, and a locked voice. Models with an instruction channel also receive your restrained performance intent. Models without one still benefit from your punctuation, grouping, and boundary classes.
 
 Return JSON only in this exact shape:
-{"units":[{"source_ref_keys":["voice_seg_01:u001"],"spoken_text":"Exact same spoken words with authored punctuation.","dialogue_separation":"preserve","boundary_after":"sentence","performance_intent":{"energy":"controlled","tension":"neutral","intimacy":"standard","pace":"steady_forward","emphasis":[],"pause_strategy":"punctuation_led","style_tags":[]}}]}
+{"chapters":[{"segment_id":"voice_seg_01","dramatic_function":"concise function","audience_effect":"concise effect","energy_start":2,"energy_end":3,"tension_peak":3,"intimacy":2,"pace":"steady_forward","reveal_weight":2,"transition_from_previous":"concise handoff","avoidance":"likely bad read"}],"units":[{"source_ref_keys":["voice_seg_01:u001"],"spoken_text":"Exact same spoken words with authored punctuation.","dialogue_separation":"preserve","boundary_after":"sentence","performance_intent":{"energy":"controlled","tension":"neutral","intimacy":"standard","pace":"steady_forward","emphasis":[],"pause_strategy":"punctuation_led","style_tags":[]}}]}
 
 Binding rules:
 - Preserve every source_ref_key exactly once and in the supplied order.
@@ -90,48 +96,11 @@ Binding rules:
 - performance_intent enums: energy=restrained|low|controlled|high|urgent; tension=neutral|warm|cold|social_pressure|high; intimacy=distant|standard|close; pace=measured|steady|steady_forward|precise|fast; pause_strategy=minimal|punctuation_led|short_precise|reveal_weighted.
 - emphasis may contain at most eight short phrases copied exactly from spoken_text. style_tags may contain at most six terse non-spoken descriptors. Do not write dialogue or stage directions into either field.
 - Do not emit stage directions, emotion tags, SSML, instructions, commentary, or unsupported controls.
+- Return exactly one chapters row for every distinct segment_id present in this packet, in first-seen order. Numeric fields are integers 1-5; pace is measured, steady, steady_forward, precise, or fast. Keep all chapter text fields terse. When a long segment spans packets, describe only this packet's local movement while preserving the same segment_id.
 
 Packet ${chunkIndex + 1} of ${chunkCount}:
-Episode-level chapter prosody for the segment(s) in this packet. Treat this as the global arc; unit direction should realize it without adding words or theatrical stage directions:
-${JSON.stringify(chapterProsody)}
-
 Atomic spoken units:
 ${JSON.stringify(atoms)}`;
-}
-
-function prosodySpinePrompt(atomicUnits) {
-  const segments = [];
-  for (const unit of atomicUnits) {
-    const segmentId = String(unit.segment_id ?? "");
-    let row = segments.at(-1);
-    if (!row || row.segment_id !== segmentId) {
-      row = { segment_id: segmentId, texts: [], kinds: new Set() };
-      segments.push(row);
-    }
-    row.texts.push(String(unit.spoken_text ?? "").trim());
-    row.kinds.add(String(unit.kind ?? "narration"));
-  }
-  const packet = segments.map((row) => ({
-    segment_id: row.segment_id,
-    word_count: punctuationInsensitiveTokens(row.texts.join(" ")).length,
-    opening_text: row.texts.slice(0, 2).join(" ").slice(0, 600),
-    ending_text: row.texts.slice(-2).join(" ").slice(-600),
-    content_kinds: [...row.kinds],
-  }));
-  return `You are the global narration director for a fast, emotionally controlled YouTube manhwa recap. Plan one coherent episode-level delivery arc before local unit direction.
-
-Return JSON only: {"chapters":[{"segment_id":"voice_seg_01","dramatic_function":"...","audience_effect":"...","energy_start":1,"energy_end":2,"tension_peak":3,"intimacy":2,"pace":"steady_forward","reveal_weight":2,"transition_from_previous":"...","avoidance":"..."}]}
-
-Rules:
-- Return exactly one row per supplied segment_id, in exact order, with no omissions or additions.
-- All five numeric fields are integers 1-5. pace is measured, steady, steady_forward, precise, or fast.
-- Shape contrast across the whole episode. Do not make every segment urgent, high-energy, intimate, or reveal-weighted.
-- Preserve restrained authority. Use energy changes for actual pressure, reversals, intimacy, strategy, and payoff rather than arbitrary excitement.
-- transition_from_previous explains the audible handoff. avoidance names the most likely bad read, such as flat exposition, rushed grief, fake suspense, or melodrama.
-- No replacement narration and no stage directions.
-
-Segments:
-${JSON.stringify(packet)}`;
 }
 
 function validateProsodySpine(parsed, atomicUnits) {
@@ -168,6 +137,7 @@ function validateProsodySpine(parsed, atomicUnits) {
 }
 
 function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount) {
+  const chapters = validateProsodySpine(parsed, atomicUnits);
   const expected = atomicUnits.map((unit) => narrationSourceRefKey(unit.source_unit_refs?.[0]));
   const rows = Array.isArray(parsed?.units) ? parsed.units : [];
   const actual = rows.flatMap((row) => Array.isArray(row.source_ref_keys) ? row.source_ref_keys.map(String) : []);
@@ -218,15 +188,18 @@ function validateChunkResult(parsed, atomicUnits, chunkIndex, chunkCount) {
       }
     }
   }
-  return rows.map((row) => ({
-    source_ref_keys: row.source_ref_keys.map(String),
-    spoken_text: String(row.spoken_text).trim(),
-    dialogue_separation: String(row.dialogue_separation ?? "preserve").trim() || "preserve",
-    boundary_after: String(row.boundary_after),
-    performance_intent: normalizeNarrationPerformanceIntent(
-      row.performance_intent,
-    ),
-  }));
+  return {
+    chapters,
+    units: rows.map((row) => ({
+      source_ref_keys: row.source_ref_keys.map(String),
+      spoken_text: String(row.spoken_text).trim(),
+      dialogue_separation: String(row.dialogue_separation ?? "preserve").trim() || "preserve",
+      boundary_after: String(row.boundary_after),
+      performance_intent: normalizeNarrationPerformanceIntent(
+        row.performance_intent,
+      ),
+    })),
+  };
 }
 
 async function runPool(items, concurrency, worker) {
@@ -252,66 +225,152 @@ async function authoredChunk({
   provider,
   model,
   reasoningEffort,
-  chapterProsody,
+  repairReason = null,
+  allowCreativeSubmission = true,
+  plannerExecutor = runCodexCli,
 }) {
-  const segmentIds = new Set(chunk.map((unit) => String(unit.segment_id ?? "")));
-  const basePrompt = promptForChunk(
-    chunk,
-    index,
-    chunkCount,
-    chapterProsody.filter((row) => segmentIds.has(row.segment_id)),
-  );
-  const basePath = path.join(
+  const packetPrompt = promptForChunk(chunk, index, chunkCount);
+  const prompt = repairReason
+    ? `${packetPrompt}\n\nEXACT-PACKET REPAIR: The operator reviewed the failed packet and requested one replacement submission for this packet only. Review note: ${String(repairReason).trim()} Preserve the exact source-ref and word contract above; return the complete packet once.`
+    : packetPrompt;
+  const promptBytes = Buffer.byteLength(prompt, "utf8");
+  const promptHash = sha256(prompt);
+  const packetId = `performance_packet_${String(index + 1).padStart(3, "0")}_${sha256(packetPrompt).slice(0, 12)}`;
+  const outputPath = path.join(
     callDir,
-    `performance_${String(index + 1).padStart(3, "0")}_${sha256(basePrompt).slice(0, 12)}.json`,
+    `${packetId}${repairReason ? `.repair_${promptHash.slice(0, 12)}` : ""}.json`,
   );
-  const attempts = [
-    { prompt: basePrompt, outputPath: basePath, recovery: false },
-    {
-      prompt: `${basePrompt}\n\nRECOVERY: The prior packet violated exact spoken-word preservation. You may only insert, delete, or replace punctuation characters and regroup adjacent supplied atoms. Do not insert, delete, replace, contract, or reorder any word. In particular, do not add connective words between sentences. Return the complete packet again.`,
-      outputPath: `${basePath}.recovery-1.json`,
-      recovery: true,
-    },
-  ];
-  let priorError = null;
-  for (const attempt of attempts) {
-    let content = await fs.readFile(attempt.outputPath, "utf8").catch(() => null);
-    let call = null;
+  const stageName = "narration_performance";
+  const metadata = await readCodexCallMetadata(outputPath);
+  let content = isCodexCacheCompatible(metadata, {
+    model,
+    reasoningEffort,
+    promptHash,
+    provider,
+    stageName,
+    planningOverrideStage: "voice_plan",
+  })
+    ? await fs.readFile(outputPath, "utf8").catch(() => null)
+    : null;
+  let call = null;
+  try {
+    if (promptBytes > NARRATION_PERFORMANCE_SAFE_MAX_BYTES) {
+      throw new Error(
+        `${packetId} final serialized prompt is ${promptBytes} bytes; safe ceiling is ${NARRATION_PERFORMANCE_SAFE_MAX_BYTES} bytes.`,
+      );
+    }
     if (!content) {
-      call = await runCodexCli({
-        prompt: attempt.prompt,
-        stageName: attempt.recovery
-          ? "narration_performance_authoring_recovery"
-          : "narration_performance_authoring",
+      if (!allowCreativeSubmission) {
+        throw new Error(`${packetId} has no compatible passed cache and is outside the exact repair scope.`);
+      }
+      const requestedTimeoutMs = Number(process.env.ANIFACTORY_NARRATION_PERFORMANCE_TIMEOUT_MS ?? 480_000);
+      const timeoutMs = Math.min(
+        480_000,
+        Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0 ? requestedTimeoutMs : 480_000,
+      );
+      call = await plannerExecutor({
+        prompt,
+        stageName,
         repoRoot,
-        outputPath: attempt.outputPath,
+        outputPath,
         provider,
         model,
-        reasoningEffort,
-        timeoutMs: Number(process.env.ANIFACTORY_NARRATION_PERFORMANCE_TIMEOUT_MS ?? 1_200_000),
+        reasoningEffort: "medium",
+        timeoutMs,
       });
       content = call.content;
     }
-    try {
-      return {
-        units: validateChunkResult(
-          extractJson(content),
-          chunk,
-          index,
-          chunkCount,
-        ),
-        provider: call?.provider ?? "content_addressed_cache",
-        model: call?.model ?? model ?? "identity_locked_model",
-        output_path: attempt.outputPath,
-        prompt_sha256: sha256(attempt.prompt),
-        reused: call === null,
-        recovery: attempt.recovery,
-      };
-    } catch (error) {
-      priorError = error;
-    }
+    const result = validateChunkResult(extractJson(content), chunk, index, chunkCount);
+    return {
+      packet_id: packetId,
+      packet_index: index,
+      status: "passed",
+      chapters: result.chapters,
+      units: result.units,
+      source_ref_keys: chunk.map((unit) => narrationSourceRefKey(unit.source_unit_refs?.[0])),
+      provider: call?.provider ?? metadata?.provider ?? "content_addressed_cache",
+      model: call?.model ?? metadata?.model ?? model ?? "identity_locked_model",
+      reasoning_effort: "medium",
+      output_path: outputPath,
+      prompt_sha256: promptHash,
+      prompt_bytes: promptBytes,
+      reused: call === null,
+      exact_repair: Boolean(repairReason),
+    };
+  } catch (error) {
+    return {
+      packet_id: packetId,
+      packet_index: index,
+      status: "failed",
+      chapters: [],
+      units: [],
+      source_ref_keys: chunk.map((unit) => narrationSourceRefKey(unit.source_unit_refs?.[0])),
+      provider: call?.provider ?? metadata?.provider ?? provider ?? "codex_cli",
+      model: call?.model ?? metadata?.model ?? model ?? "identity_locked_model",
+      reasoning_effort: "medium",
+      output_path: outputPath,
+      prompt_sha256: promptHash,
+      prompt_bytes: promptBytes,
+      reused: call === null && Boolean(content),
+      exact_repair: Boolean(repairReason),
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
-  throw priorError ?? new Error(`Narration performance packet ${index + 1} failed.`);
+}
+
+export const NARRATION_PERFORMANCE_SAFE_MAX_BYTES = 48_000;
+
+export function narrationPerformancePacketPlanForTests(
+  atomicUnits,
+  { maximumAtoms = 54, maxPromptBytes = NARRATION_PERFORMANCE_SAFE_MAX_BYTES } = {},
+) {
+  const ceiling = Math.min(
+    NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+    Math.max(1_000, Number(maxPromptBytes) || NARRATION_PERFORMANCE_SAFE_MAX_BYTES),
+  );
+  let chunks = segmentChunks(atomicUnits, maximumAtoms);
+  for (;;) {
+    const chunkCount = chunks.length;
+    let changed = false;
+    const next = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const promptBytes = Buffer.byteLength(promptForChunk(chunk, index, chunkCount), "utf8");
+      if (promptBytes <= ceiling) {
+        next.push(chunk);
+        continue;
+      }
+      if (chunk.length < 2) {
+        const sourceRef = narrationSourceRefKey(chunk[0]?.source_unit_refs?.[0]) ?? "unknown";
+        throw new Error(`Narration performance packet for ${sourceRef} is ${promptBytes} bytes; safe ceiling is ${ceiling} bytes.`);
+      }
+      const midpoint = Math.ceil(chunk.length / 2);
+      next.push(chunk.slice(0, midpoint), chunk.slice(midpoint));
+      changed = true;
+    }
+    chunks = next;
+    if (!changed) break;
+  }
+  return chunks.map((chunk, index) => {
+    const prompt = promptForChunk(chunk, index, chunks.length);
+    return {
+      packet_id: `performance_packet_${String(index + 1).padStart(3, "0")}_${sha256(prompt).slice(0, 12)}`,
+      packet_index: index,
+      prompt,
+      prompt_sha256: sha256(prompt),
+      prompt_bytes: Buffer.byteLength(prompt, "utf8"),
+      source_ref_keys: chunk.map((unit) => narrationSourceRefKey(unit.source_unit_refs?.[0])),
+      chunk,
+    };
+  });
+}
+
+function narrationPacketManifestSha256(packets) {
+  return sha256(JSON.stringify(packets.map((packet) => ({
+    packet_id: packet.packet_id,
+    prompt_sha256: packet.prompt_sha256,
+    source_ref_keys: packet.source_ref_keys,
+  }))));
 }
 
 export async function authorNarrationPerformanceDirection({
@@ -322,52 +381,99 @@ export async function authorNarrationPerformanceDirection({
   provider = null,
   model = null,
   reasoningEffort = "medium",
-  concurrency = 3,
+  concurrency = 8,
+  repairPacketIds = [],
+  repairReason = null,
+  plannerExecutor = runCodexCli,
 } = {}) {
   if (!Array.isArray(atomicUnits) || !atomicUnits.length) {
     throw new Error("Narration performance author requires atomic spoken units.");
   }
-  const chunks = segmentChunks(atomicUnits);
+  const packets = narrationPerformancePacketPlanForTests(atomicUnits);
+  const packetIds = new Set(packets.map((packet) => packet.packet_id));
+  const requestedRepairs = [...new Set(
+    (Array.isArray(repairPacketIds) ? repairPacketIds : [])
+      .map(String)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  )];
+  const unknownRepairs = requestedRepairs.filter((packetId) => !packetIds.has(packetId));
+  if (unknownRepairs.length) {
+    throw new Error(`Unknown narration performance packet IDs: ${unknownRepairs.join(", ")}.`);
+  }
+  if (requestedRepairs.length && !String(repairReason ?? "").trim()) {
+    throw new Error("Exact narration performance repair requires repairReason evidence.");
+  }
   const callDir = path.join(episodeDir, "_codex_calls", "narration-performance-author");
   await fs.mkdir(callDir, { recursive: true });
-  const spinePrompt = prosodySpinePrompt(atomicUnits);
-  const spinePath = path.join(callDir, `chapter_prosody_${sha256(spinePrompt).slice(0, 12)}.json`);
-  let spineContent = await fs.readFile(spinePath, "utf8").catch(() => null);
-  let spineCall = null;
-  if (!spineContent) {
-    spineCall = await runCodexCli({
-      prompt: spinePrompt,
-      stageName: "narration_chapter_prosody_spine",
-      repoRoot,
-      outputPath: spinePath,
-      provider,
-      model,
-      reasoningEffort,
-      timeoutMs: Number(process.env.ANIFACTORY_NARRATION_PERFORMANCE_TIMEOUT_MS ?? 1_200_000),
-    });
-    spineContent = spineCall.content;
+  const artifactPath = path.join(episodeDir, "narration_actionable_direction.json");
+  const existing = await fs.readFile(artifactPath, "utf8")
+    .then((content) => JSON.parse(content))
+    .catch(() => null);
+  if (existing?.status === "blocked" && !requestedRepairs.length) {
+    const failedPacketIds = existing?.repair_scope?.failed_packet_ids ?? [];
+    throw new Error(
+      `Narration performance author is blocked on exact packets: ${failedPacketIds.join(", ") || "unknown"}. `
+      + "Pass exact repairPacketIds with reviewed repairReason; unscoped resubmission is forbidden.",
+    );
   }
-  const chapterProsody = validateProsodySpine(extractJson(spineContent), atomicUnits);
+  if (existing?.status === "blocked"
+    && existing?.source_script_sha256 !== sourceScriptSha256) {
+    throw new Error("Blocked narration performance artifact belongs to a different script hash.");
+  }
+  if (requestedRepairs.length) {
+    if (existing?.status !== "blocked") {
+      throw new Error("Exact narration performance repair requires an existing blocked artifact.");
+    }
+    const packetManifestSha256 = narrationPacketManifestSha256(packets);
+    if (existing?.repair_scope?.packet_manifest_sha256 !== packetManifestSha256) {
+      throw new Error("Blocked narration performance repair scope does not match the current packet manifest.");
+    }
+    const failedPacketIds = new Set(
+      (Array.isArray(existing?.repair_scope?.failed_packet_ids)
+        ? existing.repair_scope.failed_packet_ids
+        : [])
+        .map(String),
+    );
+    const unauthorizedRepairs = requestedRepairs.filter((packetId) => !failedPacketIds.has(packetId));
+    if (unauthorizedRepairs.length) {
+      throw new Error(
+        `Narration performance repair IDs were not failed in the blocked artifact: ${unauthorizedRepairs.join(", ")}. Passed packets are immutable.`,
+      );
+    }
+  }
+  const repairSet = new Set(requestedRepairs);
   const calls = await runPool(
-    chunks,
-    Math.max(1, Math.min(3, Number(concurrency) || 3)),
-    (chunk, index) => authoredChunk({
-      chunk,
+    packets,
+    Math.max(1, Math.min(8, Number(concurrency) || 8)),
+    (packet, index) => authoredChunk({
+      chunk: packet.chunk,
       index,
-      chunkCount: chunks.length,
+      chunkCount: packets.length,
       callDir,
       repoRoot,
       provider,
       model,
-      reasoningEffort,
-      chapterProsody,
+      reasoningEffort: "medium",
+      repairReason: repairSet.has(packet.packet_id) ? repairReason : null,
+      allowCreativeSubmission: existing?.status !== "blocked" || repairSet.has(packet.packet_id),
+      plannerExecutor,
     }),
   );
-  const providers = [...new Set(calls.map((call) => call.provider))];
-  const models = [...new Set(calls.map((call) => call.model))];
+  const failedCalls = calls.filter((call) => call.status !== "passed");
+  const passedCalls = calls.filter((call) => call.status === "passed");
+  const providers = [...new Set(passedCalls.map((call) => call.provider))];
+  const models = [...new Set(passedCalls.map((call) => call.model))];
+  const chapterBySegment = new Map();
+  for (const call of passedCalls.sort((left, right) => left.packet_index - right.packet_index)) {
+    for (const chapter of call.chapters) {
+      if (!chapterBySegment.has(chapter.segment_id)) chapterBySegment.set(chapter.segment_id, chapter);
+    }
+  }
+  const chapterProsody = [...chapterBySegment.values()];
   const artifact = {
     schema: "goldflow_narration_actionable_direction_v3",
-    status: "approved",
+    status: failedCalls.length ? "blocked" : "approved",
     generated_at: new Date().toISOString(),
     source_script_sha256: sourceScriptSha256,
     authoring: {
@@ -382,22 +488,42 @@ export async function authorNarrationPerformanceDirection({
         "performance_intent",
       ],
       capability_compilation_required: true,
-      calls: calls.map(({ units: _units, ...call }) => call),
-      chapter_prosody_call: {
-        provider: spineCall?.provider ?? "content_addressed_cache",
-        model: spineCall?.model ?? model ?? "identity_locked_model",
-        output_path: spinePath,
-        prompt_sha256: sha256(spinePrompt),
-        reused: spineCall === null,
+      packet_policy: {
+        one_creative_submission_per_packet: true,
+        automatic_creative_retry: false,
+        automatic_cross_provider_failover: false,
+        content_addressed_reuse: true,
+        exact_packet_repair_only: true,
+        safe_max_prompt_bytes: NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+        concurrency: Math.max(1, Math.min(8, Number(concurrency) || 8)),
+        reasoning_effort: "medium",
       },
+      calls: calls.map(({ units: _units, chapters: _chapters, ...call }) => call),
     },
     chapter_prosody_spine: {
       schema: "goldflow_narration_chapter_prosody_spine_v1",
-      status: "approved",
+      status: failedCalls.length ? "blocked" : "approved",
       chapters: chapterProsody,
     },
-    units: calls.flatMap((call) => call.units),
+    units: passedCalls
+      .sort((left, right) => left.packet_index - right.packet_index)
+      .flatMap((call) => call.units),
+    repair_scope: {
+      packet_manifest_sha256: narrationPacketManifestSha256(packets),
+      failed_packet_ids: failedCalls.map((call) => call.packet_id),
+      failed_source_ref_keys: failedCalls.flatMap((call) => call.source_ref_keys),
+      submitted_repair_packet_ids: requestedRepairs,
+      repair_reason: requestedRepairs.length ? String(repairReason).trim() : null,
+      unscoped_resubmission_forbidden: true,
+    },
   };
+  await fs.writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+  if (failedCalls.length) {
+    throw new Error(
+      `Narration performance author failed exact packet scope: ${failedCalls.map((call) => call.packet_id).join(", ")}. `
+      + `Passed packets were preserved in ${artifactPath}; no automatic creative retry was submitted.`,
+    );
+  }
   const validation = validateActionableNarrationDirection({
     artifact,
     atomicUnits,
@@ -407,7 +533,5 @@ export async function authorNarrationPerformanceDirection({
   if (validation.status !== "passed") {
     throw new Error(`Authored narration performance map failed final validation: ${JSON.stringify(validation.findings)}`);
   }
-  const artifactPath = path.join(episodeDir, "narration_actionable_direction.json");
-  await fs.writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
   return { artifact, artifactPath, callCount: calls.length };
 }

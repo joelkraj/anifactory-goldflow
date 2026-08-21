@@ -20,6 +20,12 @@ export const DEFAULT_RECOMMENDED_CONCURRENCY = 8;
 export const DEFAULT_MAX_CONCURRENCY = 12;
 const LEASE_DISPATCH_LOCK_TIMEOUT_MS = 30_000;
 const LEASE_DISPATCH_LOCK_STALE_MS = 60_000;
+const BROWSER_WORKER_SESSION_POLICIES = new Set([
+  "fresh_session_per_job_v1",
+  "fresh_project_per_job",
+  "persistent_tab_per_worker_slot_v1",
+  "persistent_project_per_worker_slot_v1",
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -73,6 +79,19 @@ function browserProviderReferenceLimits(value, allowedProviders) {
       throw new Error(`${provider} ordered-reference limit must be an integer from zero through four.`);
     }
     result[provider] = parsed;
+  }
+  return result;
+}
+
+function browserProviderWorkerSessionPolicies(value, allowedProviders) {
+  if (!allowedProviders.length || !value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const provider of allowedProviders) {
+    const policy = cleanText(value[provider]);
+    if (!BROWSER_WORKER_SESSION_POLICIES.has(policy)) {
+      throw new Error(`${provider} worker-session policy is missing or unsupported: ${policy || "missing"}.`);
+    }
+    result[provider] = policy;
   }
   return result;
 }
@@ -564,6 +583,10 @@ export async function createCodexWorkManifest(options) {
     options.browserProviderMaxOrderedReferences,
     allowedBrowserProviders,
   );
+  const providerWorkerSessionPolicies = browserProviderWorkerSessionPolicies(
+    options.browserProviderWorkerSessionPolicy,
+    allowedBrowserProviders,
+  );
   const browserProviderReceiptRequired = options.browserProviderReceiptRequired === true;
   const repairReason = cleanText(options.repairReason);
   if (repairReason && !explicitScope.length) throw new Error("A repair manifest requires an exact asset/image/reference ID scope.");
@@ -759,6 +782,7 @@ export async function createCodexWorkManifest(options) {
         allowed_browser_providers: allowedBrowserProviders,
         browser_provider_concurrency: providerConcurrency,
         ...(providerReferenceLimits ? { browser_provider_max_ordered_references: providerReferenceLimits } : {}),
+        ...(providerWorkerSessionPolicies ? { browser_provider_worker_session_policy: providerWorkerSessionPolicies } : {}),
         browser_provider_receipt_required: browserProviderReceiptRequired,
       } : {}),
       ...(sharedReferenceIds.length ? { shared_reference_ids: sharedReferenceIds } : {}),
@@ -1222,6 +1246,9 @@ export async function leaseNextWorkItem(options) {
         schema: "goldflow_codex_image_assignment_v1",
         status: "assigned",
         ...lease,
+        worker_session_policy: browserProvider
+          ? manifest.policy?.browser_provider_worker_session_policy?.[browserProvider] ?? null
+          : null,
         item: assignmentItem,
         expected_output_path: path.join(attemptDir, item.expected_output.filename),
       };
@@ -1648,6 +1675,7 @@ export async function getCodexWorkStatus(options) {
     dispatch_policy: manifest.policy?.dispatch_policy ?? null,
     allowed_browser_providers: manifest.policy?.allowed_browser_providers ?? [],
     browser_provider_concurrency: manifest.policy?.browser_provider_concurrency ?? null,
+    browser_provider_worker_session_policy: manifest.policy?.browser_provider_worker_session_policy ?? null,
     completed_by_browser_provider: Object.fromEntries(
       (manifest.policy?.allowed_browser_providers ?? []).map((provider) => [
         provider,

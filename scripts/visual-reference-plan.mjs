@@ -67,6 +67,8 @@ const generationModes = new Set([
   "source_only",
 ]);
 const referenceCleanlinessContractVersion = "empty_hands_no_detachable_props_v1";
+export const VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES = 48_000;
+export const VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES = 96 * 1024;
 
 function parseFlags(parts) {
   const parsed = {};
@@ -142,6 +144,19 @@ function extractJson(text) {
 }
 
 function compactScene(scene) {
+  const visualBeats = scene.visual_beats ?? [];
+  const beatReferenceHints = new Map();
+  for (const need of visualBeats.flatMap((beat) => beat.ref_needs ?? beat.beat_ref_requirements ?? [])) {
+    const refId = String(need?.ref_id ?? need?.subject ?? "").trim();
+    if (!refId || beatReferenceHints.has(refId)) continue;
+    beatReferenceHints.set(refId, [
+      refId,
+      need.kind ?? null,
+      need.subject ?? null,
+      need.generation_mode ?? null,
+      need.suggested_required_before_imagegen === true ? 1 : 0,
+    ]);
+  }
   return {
     scene_id: scene.scene_id,
     title: scene.title,
@@ -154,41 +169,65 @@ function compactScene(scene) {
     props: scene.props ?? [],
     ref_requirements: scene.ref_requirements ?? [],
     action_staging: scene.action_staging ?? "",
-    continuity_notes: scene.continuity_notes ?? [],
-    visual_beats: (scene.visual_beats ?? []).map((beat) => ({
-      visual_beat_id: beat.visual_beat_id ?? null,
-      start_sec: beat.start_sec ?? null,
-      visual_job: beat.visual_job ?? null,
-      suggested_shot_job: beat.suggested_shot_job ?? null,
-      visual_beat_script_excerpt: String(beat.visual_beat_script_excerpt ?? beat.script_excerpt ?? "").slice(0, 500),
-      visual_beat_action: String(beat.visual_beat_action ?? beat.action ?? "").slice(0, 360),
-      visible_subjects: beat.visible_subjects ?? [],
-      visible_characters: beat.visible_characters ?? [],
-      mentioned_only_characters: beat.mentioned_only_characters ?? [],
-      primary_subject: beat.primary_subject ?? null,
-      location: beat.location ?? null,
-      local_location: beat.local_location ?? beat.location ?? null,
-      local_props: beat.local_props ?? beat.props ?? [],
-      local_ui_elements: beat.local_ui_elements ?? beat.ui_text_on_screen ?? [],
-      ref_needs: beat.ref_needs ?? beat.beat_ref_requirements ?? [],
-    })),
+    continuity_notes: (scene.continuity_notes ?? []).slice(0, 8),
+    visual_beat_fields: [
+      "visual_beat_id",
+      "start_sec",
+      "visual_job",
+      "depiction_mode",
+      "evidence_excerpt",
+      "visible_subjects",
+      "local_location",
+      "local_props",
+      "local_ui_elements",
+      "active_entity_ids",
+    ],
+    visual_beat_rows: visualBeats.map((beat) => [
+      beat.visual_beat_id ?? null,
+      beat.start_sec ?? null,
+      beat.visual_job ?? beat.suggested_shot_job ?? null,
+      beat.depiction_mode ?? null,
+      String(beat.visual_beat_script_excerpt ?? beat.script_excerpt ?? "").slice(0, 84),
+      beat.visible_subjects ?? [],
+      beat.local_location ?? beat.location ?? null,
+      beat.local_props ?? beat.props ?? [],
+      beat.local_ui_elements ?? beat.ui_text_on_screen ?? [],
+      Object.keys(beat.active_state_constraints?.entities ?? {}),
+    ]),
+    beat_reference_hint_fields: ["ref_id", "kind", "subject", "suggested_mode", "suggested_required_1_or_0"],
+    beat_reference_hint_rows: [...beatReferenceHints.values()],
   };
 }
 
-export function compactStoryFactLedgerForPromptForTests(storyFactLedger) {
+export function compactStoryFactLedgerForPromptForTests(storyFactLedger, evidence = null) {
   if (!storyFactLedger || typeof storyFactLedger !== "object") return null;
-  const compactNamedRows = (rows, idField) => (Array.isArray(rows) ? rows : []).map((row) => ({
+  const evidenceText = evidence == null ? null : JSON.stringify(evidence).toLowerCase();
+  const relevant = (row, idField) => !evidenceText || [
+    row?.[idField],
+    row?.display_name,
+    ...(row?.aliases ?? []),
+  ].map((value) => String(value ?? "").trim().toLowerCase()).filter((value) => value.length >= 3)
+    .some((value) => evidenceText.includes(value));
+  const compactNamedRows = (rows, idField) => (Array.isArray(rows) ? rows : [])
+    .filter((row) => relevant(row, idField))
+    .slice(0, evidenceText ? 32 : 60)
+    .map((row) => ({
     [idField]: row?.[idField] ?? null,
     display_name: row?.display_name ?? null,
     kind: row?.kind ?? null,
     aliases: row?.aliases ?? [],
   }));
+  const canonicalEntities = compactNamedRows(storyFactLedger.canonical_entities, "entity_id");
+  const selectedEntityIds = new Set(canonicalEntities.map((row) => row.entity_id));
   return {
-    canonical_entities: compactNamedRows(storyFactLedger.canonical_entities, "entity_id"),
+    canonical_entities: canonicalEntities,
     canonical_locations: compactNamedRows(storyFactLedger.canonical_locations, "location_id"),
     canonical_props: compactNamedRows(storyFactLedger.canonical_props, "prop_id"),
     canonical_ui_motifs: compactNamedRows(storyFactLedger.canonical_ui_motifs, "ui_id"),
-    state_transitions: (Array.isArray(storyFactLedger.state_transitions) ? storyFactLedger.state_transitions : []).map((row) => ({
+    state_transitions: (Array.isArray(storyFactLedger.state_transitions) ? storyFactLedger.state_transitions : [])
+      .filter((row) => !evidenceText || selectedEntityIds.has(row?.entity_id))
+      .slice(0, evidenceText ? 16 : 24)
+      .map((row) => ({
       entity_id: row?.entity_id ?? null,
       state_kind: row?.state_kind ?? null,
       from_state: row?.from_state ?? null,
@@ -198,13 +237,20 @@ export function compactStoryFactLedgerForPromptForTests(storyFactLedger) {
   };
 }
 
-function visualGuidanceBlock(guidance = {}) {
+function visualGuidanceBlock(guidance = {}, semanticEvidence = null) {
+  const bibleExcerpt = (value, maxChars) => {
+    if (!value) return null;
+    const serialized = JSON.stringify(value);
+    return serialized.length <= maxChars
+      ? value
+      : { source_sha256: sha256(serialized), compact_excerpt: serialized.slice(0, maxChars) };
+  };
   return JSON.stringify({
-    visual_style_bible: guidance.visualStyleBible ?? null,
-    character_bible: guidance.characterBible ?? null,
-    episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 5000),
-    story_fact_ledger: compactStoryFactLedgerForPromptForTests(guidance.storyFactLedger),
-  }, null, 2);
+    visual_style_bible: bibleExcerpt(guidance.visualStyleBible, 2_000),
+    character_bible: bibleExcerpt(guidance.characterBible, 3_000),
+    episode_visual_direction: String(guidance.episodeVisualDirection ?? "").slice(0, 1_200),
+    story_fact_ledger: compactStoryFactLedgerForPromptForTests(guidance.storyFactLedger, semanticEvidence),
+  });
 }
 
 function visualMergeGuidanceBlock(guidance = {}) {
@@ -1067,6 +1113,30 @@ export function compactInventoryForPromptForTests(inventoryLedger, sceneIds = nu
   return compactInventoryForPrompt(inventoryLedger, sceneIds, options);
 }
 
+export function compactSceneReferenceEvidenceForTests(inventoryLedger, sceneIds = null, options = {}) {
+  const compact = compactInventoryForPrompt(inventoryLedger, sceneIds, {
+    maxAssets: Number(options.maxAssets ?? 36),
+    evidenceLimit: 0,
+    sceneIdLimit: Number(options.sceneIdLimit ?? 4),
+  });
+  return {
+    schema: compact.schema,
+    summary: compact.summary,
+    chunk_scene_ids: compact.chunk_scene_ids,
+    asset_count: compact.assets.length,
+    asset_fields: ["asset_id", "kind", "subject", "entity_type", "scene_count", "beat_count", "semantic_ref_ids"],
+    asset_rows: compact.assets.map((asset) => [
+      asset.asset_id,
+      asset.kind,
+      String(asset.subject ?? "").slice(0, 90),
+      asset.entity_type ?? asset.entity_kind ?? null,
+      asset.distinct_scene_count ?? asset.scene_ids?.length ?? 0,
+      asset.beat_count ?? 0,
+      (asset.semantic_ref_ids ?? []).slice(0, 4),
+    ]),
+  };
+}
+
 export function compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, options = {}) {
   const compact = compactInventoryForPrompt(inventoryLedger, null, {
     referenceValueOnly: true,
@@ -1211,20 +1281,24 @@ Rules:
 - Return only valid JSON.
 
 VISUAL BIBLES AND OPERATOR DIRECTION:
-${visualGuidanceBlock(guidance)}
+${visualGuidanceBlock(guidance, compact)}
 
-REFERENCE EVIDENCE LEDGER:
-${JSON.stringify(compactInventoryForPrompt(inventoryLedger, (semanticPlan.scenes ?? []).map((scene) => scene.scene_id), { includeGlobalSelection: Boolean(chunkLabel) }), null, 2)}
+REFERENCE EVIDENCE LEDGER (scene-local; the global director receives the episode catalog later):
+${compactPromptJsonForTests(compactSceneReferenceEvidenceForTests(
+  inventoryLedger,
+  (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
+  { maxAssets: 36, sceneIdLimit: 4 },
+))}
 
 LOCATION CONTRACT LEDGER:
-${JSON.stringify({
+${compactPromptJsonForTests({
   contracts: (locationContractLedger?.contracts ?? []).filter((contract) =>
     (contract.scene_ids ?? []).some((sceneId) => (semanticPlan.scenes ?? []).some((scene) => scene.scene_id === sceneId))
   ),
-}, null, 2)}
+})}
 
 SEMANTIC PLAN:
-${JSON.stringify(compact, null, 2)}
+${compactPromptJsonForTests(compact)}
 
 Return:
 {
@@ -1291,6 +1365,10 @@ Return:
   ],
   "warnings": []
 	}`;
+}
+
+export function buildReferenceChunkPromptForTests(semanticPlan, options = {}) {
+  return buildPrompt(semanticPlan, options);
 }
 
 export function compactPromptJsonForTests(value) {
@@ -1446,7 +1524,7 @@ function readableTargetCandidateLine(targets) {
   ).slice(0, 2);
   const parts = [
     readableCardList(targets.map((target) => target.candidate_id)),
-    `ref=${readableCardValue(primary.ref_id, 80)}`,
+    `ref=${readableCardValue(primary.ref_id, 60)}`,
     `scenes=${readableScopeSummary(targets.flatMap((target) => target.scene_ids ?? []))}`,
     `beats=${beats.count}${beats.count ? `:${beats.first}->${beats.last}` : ""}`,
     `uses=${Math.max(...targets.map((target) => targetNumber(target.estimated_use_count ?? target.appearance_count)))}`,
@@ -1454,11 +1532,11 @@ function readableTargetCandidateLine(targets) {
     `mode=${readableCardValue(readableCardList(targets.map((target) => target.generation_mode)), 50) || "unspecified"}`,
     `required=${targets.some((target) => target.required_before_imagegen) ? 1 : 0}`,
   ];
-  if (visibleStates.length) parts.push(`states=${readableCardValue(visibleStates.join(" / "), 130)}`);
+  if (visibleStates.length) parts.push(`states=${readableCardValue(visibleStates.join(" / "), 90)}`);
   const bases = stableStringList(targets.map((target) => target.base_asset_id));
-  if (bases.length) parts.push(`bases=${readableCardValue(bases.join(","), 110)}`);
+  if (bases.length) parts.push(`bases=${readableCardValue(bases.join(","), 70)}`);
   if (!visibleStates.length && anchors.length) {
-    parts.push(`construction=${readableCardValue(anchors.join(" / "), 120)}`);
+    parts.push(`construction=${readableCardValue(anchors.join(" / "), 80)}`);
   }
   return parts.join(" | ");
 }
@@ -1471,11 +1549,11 @@ function readableCharacterStateCandidateLine(states, targetByCandidateId) {
   )));
   const parts = [
     readableCardList(states.map((state) => state.candidate_id)),
-    `state_ref=${readableCardValue(primary.state_ref_id, 80)}`,
-    `source_targets=${readableCardValue(readableCardList(states.map((state) => state.source_target_candidate_id)), 180) || "unlinked"}`,
+    `state_ref=${readableCardValue(primary.state_ref_id, 60)}`,
+    `source_targets=${readableCardValue(readableCardList(states.map((state) => state.source_target_candidate_id)), 120) || "unlinked"}`,
   ];
   const bases = stableStringList(states.map((state) => state.base_identity_ref_id));
-  if (bases.length) parts.push(`bases=${readableCardValue(bases.join(","), 120)}`);
+  if (bases.length) parts.push(`bases=${readableCardValue(bases.join(","), 80)}`);
   if (identityUsages.length) parts.push(`usage=${readableCardValue(identityUsages.join(","), 50)}`);
   const overrideScenes = states.flatMap((state) => state.scene_ids_override ?? []);
   if (overrideScenes.length) parts.push(`scene_overrides=${readableScopeSummary(overrideScenes)}`);
@@ -1541,7 +1619,7 @@ export function buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlan
         (count, option) => count + (statesByTargetCandidateId.get(option.candidate_id)?.length ?? 0),
         0,
       ),
-      subjects: readableCardValue(readableCardList(options.map((option) => option.subject)), 150),
+      subjects: readableCardValue(readableCardList(options.map((option) => option.subject)), 100),
       roles: readableCardList(options.map((option) => option.conditioning_asset_role)),
       union_scene_scope: readableScopeSummary(options.flatMap((option) => option.scene_ids ?? [])),
       union_beat_scope: (() => {
@@ -2080,12 +2158,44 @@ export function visualReferenceCodexCacheEnabledForTests(inputFlags = {}) {
   return visualReferenceCodexCacheEnabled(inputFlags);
 }
 
-function shouldSplitReferenceChunk(promptLength, sceneCount, maxPromptChars) {
-  return Number(sceneCount) > 1 && Number(promptLength) > Number(maxPromptChars);
+function shouldSplitReferenceChunk(promptBytes, sceneCount, maxPromptBytes) {
+  return Number(sceneCount) > 1 && Number(promptBytes) > Number(maxPromptBytes);
 }
 
-export function shouldSplitReferenceChunkForTests(promptLength, sceneCount, maxPromptChars = 950_000) {
-  return shouldSplitReferenceChunk(promptLength, sceneCount, maxPromptChars);
+export function shouldSplitReferenceChunkForTests(promptBytes, sceneCount, maxPromptBytes = VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES) {
+  return shouldSplitReferenceChunk(promptBytes, sceneCount, maxPromptBytes);
+}
+
+export function assertVisualReferencePromptBytesForTests(prompt, {
+  label = "visual-reference packet",
+  maxBytes = VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES,
+} = {}) {
+  const hardCeiling = label.includes("global")
+    ? VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES
+    : VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES;
+  const ceiling = Math.min(
+    hardCeiling,
+    Number.isFinite(Number(maxBytes)) && Number(maxBytes) > 0 ? Number(maxBytes) : hardCeiling,
+  );
+  const promptBytes = Buffer.byteLength(String(prompt ?? ""), "utf8");
+  if (promptBytes > ceiling) {
+    throw new Error(`${label} is ${promptBytes} bytes, above safe ceiling ${ceiling}; split or compact it before provider submission.`);
+  }
+  return promptBytes;
+}
+
+export function splitVisualReferenceChunkForTests(sceneChunk) {
+  if (sceneChunk.length > 1) {
+    const splitAt = Math.ceil(sceneChunk.length / 2);
+    return [sceneChunk.slice(0, splitAt), sceneChunk.slice(splitAt)].filter((rows) => rows.length);
+  }
+  const scene = sceneChunk[0];
+  const beats = scene?.visual_beats ?? [];
+  if (beats.length < 2) return [];
+  const splitAt = Math.ceil(beats.length / 2);
+  return [beats.slice(0, splitAt), beats.slice(splitAt)]
+    .filter((rows) => rows.length)
+    .map((visualBeats) => [{ ...scene, visual_beats: visualBeats }]);
 }
 
 function normalizedOptionalStringArray(value) {
@@ -3194,18 +3304,27 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
   }
   const partialChunked = Array.isArray(existingPartial?.passed_chunks) && existingPartial.passed_chunks.length > 0
     || Array.isArray(existingPartial?.failed_chunks) && existingPartial.failed_chunks.length > 0;
+  const directPrompt = buildPrompt(semanticPlan, { guidance, inventoryLedger: evidenceLedger, locationContractLedger });
+  const directPromptBytes = Buffer.byteLength(directPrompt, "utf8");
   const useChunking = repairRequested
     ? partialChunked
-    : flags["visual-ref-chunking"] !== "false"
-      && semanticPlan.scenes.length > Number(flags["visual-ref-single-call-max-scenes"] ?? 12);
+    : (
+      flags["visual-ref-chunking"] !== "false"
+        && semanticPlan.scenes.length > Number(flags["visual-ref-single-call-max-scenes"] ?? 12)
+    ) || directPromptBytes > VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES;
   if (!useChunking) {
-    const prompt = buildPrompt(semanticPlan, { guidance, inventoryLedger: evidenceLedger, locationContractLedger });
+    const prompt = directPrompt;
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
     if (repairRequested && !repair.repairGlobal) {
       throw new Error("This partial contains a single global-director call; repair it with --repair-global true.");
     }
     let result;
     const globalStartedMs = Date.now();
     try {
+      assertVisualReferencePromptBytesForTests(prompt, {
+        label: "visual-reference global packet",
+        maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES,
+      });
       result = useLocalRoute ? await callLocal(prompt, stageName) : await callCodex(prompt, stageName);
       await recordPlannerChunkCheckpoint({
         episodeDir,
@@ -3230,6 +3349,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           item_count: semanticPlan.scenes.length,
           scene_count: semanticPlan.scenes.length,
           prompt_chars: prompt.length,
+          prompt_bytes: promptBytes,
           output_chars: String(result.content ?? "").length,
           service_ms: Date.now() - globalStartedMs,
         },
@@ -3257,6 +3377,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           item_count: semanticPlan.scenes.length,
           scene_count: semanticPlan.scenes.length,
           prompt_chars: prompt.length,
+          prompt_bytes: promptBytes,
           service_ms: Date.now() - globalStartedMs,
         },
       });
@@ -3338,11 +3459,19 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     ? Number(existingPartial?.source_chunk_count ?? normalizePartialPassedChunks(existingPartial).length + (existingPartial?.failed_chunks?.length ?? 0))
     : initialChunkDescriptors.length;
   const chunkConcurrency = Math.max(1, Number(flags["visual-ref-chunk-concurrency"] ?? process.env.ANIFACTORY_VISUAL_REF_CHUNK_CONCURRENCY ?? 8));
-  const maxChunkPromptChars = Math.max(100_000, Number(
-    flags["visual-ref-max-prompt-chars"]
+  const requestedMaxChunkPromptBytes = Number(
+    flags["visual-ref-max-prompt-bytes"]
+      ?? flags["visual-ref-max-prompt-chars"]
+      ?? process.env.ANIFACTORY_VISUAL_REF_MAX_PROMPT_BYTES
       ?? process.env.ANIFACTORY_VISUAL_REF_MAX_PROMPT_CHARS
-      ?? 950_000,
-  ));
+      ?? VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES,
+  );
+  const maxChunkPromptBytes = Math.min(
+    VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES,
+    Number.isFinite(requestedMaxChunkPromptBytes) && requestedMaxChunkPromptBytes > 0
+      ? requestedMaxChunkPromptBytes
+      : VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES,
+  );
 
   const planChunk = async ({
     sceneChunk,
@@ -3363,10 +3492,20 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
       inventoryLedger: evidenceLedger,
       locationContractLedger,
     });
-    if (shouldSplitReferenceChunk(prompt.length, sceneChunk.length, maxChunkPromptChars)) {
-      const splitAt = Math.ceil(sceneChunk.length / 2);
-      const children = [sceneChunk.slice(0, splitAt), sceneChunk.slice(splitAt)].filter((rows) => rows.length);
-      console.error(`visual refs ${displayLabel}: prompt ${prompt.length} chars exceeds ${maxChunkPromptChars}; splitting ${sceneChunk.length} scenes into ${children.map((rows) => rows.length).join("+")}`);
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    if (promptBytes > maxChunkPromptBytes && (sceneChunk.length > 1 || (sceneChunk[0]?.visual_beats ?? []).length > 1)) {
+      let children;
+      let splitUnit;
+      if (sceneChunk.length > 1) {
+        children = splitVisualReferenceChunkForTests(sceneChunk);
+        splitUnit = `${sceneChunk.length} scenes`;
+      } else {
+        const scene = sceneChunk[0];
+        const beats = scene.visual_beats ?? [];
+        children = splitVisualReferenceChunkForTests(sceneChunk);
+        splitUnit = `${beats.length} local beats in ${scene.scene_id ?? "one scene"}`;
+      }
+      console.error(`visual refs ${displayLabel}: prompt ${promptBytes} bytes exceeds ${maxChunkPromptBytes}; splitting ${splitUnit} into ${children.map((rows) => rows.length > 1 ? `${rows.length} scenes` : `${rows[0]?.visual_beats?.length ?? 0} beats`).join("+")}`);
       const childResults = await mapWithConcurrency(children, Math.min(children.length, 2), async (child, childIndex) => planChunk({
         sceneChunk: child,
         chunkLabel: `${chunkLabel}, adaptive part ${childIndex + 1} of ${children.length}`,
@@ -3381,6 +3520,10 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     let llm = null;
     const chunkStartedMs = Date.now();
     try {
+      assertVisualReferencePromptBytesForTests(prompt, {
+        label: `visual-reference exact chunk ${stageSuffix}`,
+        maxBytes: maxChunkPromptBytes,
+      });
       llm = useLocalRoute
         ? await callLocal(prompt, chunkStageName, Number(flags["visual-ref-chunk-max-tokens"] ?? 7000))
         : await callCodex(prompt, chunkStageName);
@@ -3411,6 +3554,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           item_count: sceneChunk.length,
           scene_count: sceneChunk.length,
           prompt_chars: prompt.length,
+          prompt_bytes: promptBytes,
           output_chars: String(llm.content ?? "").length,
           service_ms: Date.now() - chunkStartedMs,
         },
@@ -3464,6 +3608,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           item_count: sceneChunk.length,
           scene_count: sceneChunk.length,
           prompt_chars: prompt.length,
+          prompt_bytes: promptBytes,
           output_chars: String(llm?.content ?? "").length,
           service_ms: Date.now() - chunkStartedMs,
         },
@@ -3525,9 +3670,34 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     prompt: mergePrompt,
     candidateCatalog,
   } = buildMergePrompt(semanticPlan, chunkPlans, guidance, evidenceLedger, locationContractLedger);
-  console.error(`visual refs merge prompt: ${mergePrompt.length} chars`);
   const mergeInputHash = sha256(mergePrompt);
   const globalExpectedSceneIds = (semanticPlan.scenes ?? []).map((scene) => String(scene.scene_id ?? "")).filter(Boolean);
+  let mergePromptBytes;
+  try {
+    mergePromptBytes = assertVisualReferencePromptBytesForTests(mergePrompt, {
+      label: "visual-reference global director merge",
+      maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES,
+    });
+  } catch (error) {
+    await writeJson(referencePartialPath, {
+      ...referencePartialArtifact({
+        semanticPlan,
+        passedChunks,
+        failedChunks: [],
+        status: "needs_global_repair",
+        globalDirector: {
+          status: "blocked_pre_submission",
+          input_sha256: mergeInputHash,
+          error: error instanceof Error ? error.message : String(error),
+          automatic_creative_retry_count: 0,
+          creative_submission_count: 0,
+        },
+      }),
+      source_chunk_count: sourceChunkCount,
+    });
+    throw new Error(`Global visual-reference director packet exceeded its byte ceiling before provider submission. Passed chunk candidates remain preserved in ${referencePartialPath}.`);
+  }
+  console.error(`visual refs merge prompt: ${mergePromptBytes} bytes`);
   const maxMergeAttempts = 1;
   let merged = null;
   let lastMergeError = null;
@@ -3573,6 +3743,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           item_count: globalExpectedSceneIds.length,
           scene_count: globalExpectedSceneIds.length,
           prompt_chars: attemptPrompt.length,
+          prompt_bytes: Buffer.byteLength(attemptPrompt, "utf8"),
           output_chars: String(candidate.content ?? "").length,
           service_ms: Date.now() - mergeStartedMs,
         },
@@ -3602,6 +3773,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           item_count: globalExpectedSceneIds.length,
           scene_count: globalExpectedSceneIds.length,
           prompt_chars: attemptPrompt.length,
+          prompt_bytes: Buffer.byteLength(attemptPrompt, "utf8"),
           service_ms: Date.now() - mergeStartedMs,
         },
       });

@@ -3,6 +3,21 @@ import { PIPELINE_STAGE_REGISTRY } from "./pipeline-stage-registry.mjs";
 const stageById = new Map(PIPELINE_STAGE_REGISTRY.map((stage) => [stage.id, stage]));
 const stageIndexById = new Map(PIPELINE_STAGE_REGISTRY.map((stage, index) => [stage.id, index]));
 
+const COSTLY_REPEAT_STAGES = new Set([
+  "semantic_scene_plan",
+  "voice_plan",
+  "qwen_tts_stitch",
+  "visual_beat_plan",
+  "visual_reference_plan",
+  "visual_prompt_plan",
+  "transition_edit_plan",
+  "reference_generation",
+  "image_generation",
+  "generated_video_motion",
+  "parallax_asset_generation",
+  "premium_render",
+]);
+
 function finiteDate(value) {
   const parsed = Date.parse(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : null;
@@ -108,6 +123,92 @@ function stageRows(intervals) {
       last_completed_at: new Date(last).toISOString(),
     };
   }).sort((left, right) => finiteDate(left.first_started_at) - finiteDate(right.first_started_at));
+}
+
+function scopeHasExactIds(scope = {}) {
+  return [
+    ...(scope.cut_ids ?? []),
+    ...(scope.scene_ids ?? []),
+    ...(scope.beat_ids ?? []),
+    ...(scope.planner_chunk_ids ?? []),
+    ...(scope.reference_ids ?? []),
+    ...(scope.tts_unit_ids ?? []),
+    ...(scope.boundary_ids ?? []),
+  ].length > 0;
+}
+
+function repeatInvocationCommandFamily(stage, command) {
+  if (["reference_generation", "image_generation"].includes(stage)
+    && ["imagegen browser-pool", "imagegen start", "imagegen codex-work"].includes(command)) {
+    return "imagegen creative";
+  }
+  if (stage === "qwen_tts_stitch"
+    && ["tts narrate", "tts qwen"].includes(command)) {
+    return "tts synthesis";
+  }
+  return command;
+}
+
+export function buildRepeatInvocationTelemetry(events = []) {
+  const completed = events.filter((event) => event?.event_type === "stage_completed");
+  const groups = new Map();
+  for (const event of completed) {
+    const stage = String(event.stage ?? "unknown");
+    const command = repeatInvocationCommandFamily(
+      stage,
+      String(event.command ?? "unknown"),
+    );
+    const scopeHash = String(event.scope_sha256 ?? JSON.stringify(event.scope ?? {}));
+    const key = `${stage}\u0000${command}\u0000${scopeHash}`;
+    const group = groups.get(key) ?? {
+      stage,
+      command,
+      scope_sha256: event.scope_sha256 ?? null,
+      exact_scope: scopeHasExactIds(event.scope),
+      invocation_count: 0,
+      failure_count: 0,
+      active_minutes: 0,
+      invocation_active_minutes: [],
+    };
+    group.invocation_count += 1;
+    if (event.status === "failed") group.failure_count += 1;
+    const recordedWallSec = Number(event.wall_time_sec);
+    const startedAt = finiteDate(event.started_at);
+    const completedAt = finiteDate(event.completed_at);
+    const activeMinutes = Number.isFinite(recordedWallSec)
+      ? Math.max(0, recordedWallSec / 60)
+      : startedAt !== null && completedAt !== null
+        ? Math.max(0, (completedAt - startedAt) / 60_000)
+        : 0;
+    group.active_minutes += activeMinutes;
+    group.invocation_active_minutes.push(activeMinutes);
+    groups.set(key, group);
+  }
+  const repeatedGroups = [...groups.values()]
+    .filter((group) => group.invocation_count > 1)
+    .map((group) => {
+      const { invocation_active_minutes: invocationMinutes, ...summary } = group;
+      return {
+        ...summary,
+        repeat_invocation_count: group.invocation_count - 1,
+        active_minutes: round(group.active_minutes),
+        repeated_active_minutes: round(invocationMinutes
+          .slice(1)
+          .reduce((sum, minutes) => sum + minutes, 0)),
+      };
+    })
+    .sort((left, right) => right.active_minutes - left.active_minutes);
+  const costlyGroups = repeatedGroups.filter((group) => COSTLY_REPEAT_STAGES.has(group.stage));
+  return {
+    schema: "goldflow_repeat_invocation_telemetry_v1",
+    repeated_same_scope_invocation_count: repeatedGroups.reduce((sum, group) => sum + group.repeat_invocation_count, 0),
+    repeated_full_scope_invocation_count: repeatedGroups
+      .filter((group) => !group.exact_scope)
+      .reduce((sum, group) => sum + group.repeat_invocation_count, 0),
+    costly_repeated_invocation_count: costlyGroups.reduce((sum, group) => sum + group.repeat_invocation_count, 0),
+    costly_repeated_active_minutes: round(costlyGroups.reduce((sum, group) => sum + group.repeated_active_minutes, 0)),
+    groups: repeatedGroups,
+  };
 }
 
 function prerequisiteStageIds(stageId) {
@@ -235,6 +336,7 @@ export function buildRunPerformanceAudit(events = [], {
   const operatorReviewTelemetry = buildOperatorReviewTelemetry(events, {
     reviewTollThresholdMinutes,
   });
+  const repeatInvocationTelemetry = buildRepeatInvocationTelemetry(events);
   const findings = [];
   if (target !== null && elapsedMinutes > target) {
     findings.push({
@@ -264,6 +366,13 @@ export function buildRunPerformanceAudit(events = [], {
       message: `${operatorReviewTelemetry.review_toll_candidate_count} approval checkpoint(s) waited at least ${reviewTollThresholdMinutes} minutes after their prerequisite was ready; inspect packet readiness, notifications, or agent delegation without weakening the approval itself.`,
     });
   }
+  if (repeatInvocationTelemetry.repeated_full_scope_invocation_count > 0) {
+    findings.push({
+      severity: "high",
+      code: "repeated_full_scope_stage_invocations",
+      message: `${repeatInvocationTelemetry.repeated_full_scope_invocation_count} repeated full-scope invocation(s) were recorded; recovery should name only exact failed IDs or reuse content-addressed passed chunks.`,
+    });
+  }
   return {
     schema: "goldflow_run_performance_audit_v1",
     status: "passed",
@@ -286,6 +395,7 @@ export function buildRunPerformanceAudit(events = [], {
     idle_by_classification_minutes: idleByClassification,
     largest_gaps: [...gaps].sort((left, right) => right.duration_minutes - left.duration_minutes).slice(0, 20),
     stages: stageRows(intervals),
+    repeat_invocation_telemetry: repeatInvocationTelemetry,
     operator_review_telemetry: operatorReviewTelemetry,
     findings,
   };
@@ -305,7 +415,11 @@ export function renderRunPerformanceAuditMarkdown(report) {
     `- Idle: ${observation.idle_minutes} minutes`,
     `- Utilization: ${observation.utilization_percent}%`,
     `- Target: ${observation.target_wall_clock_minutes ?? "not recorded"} minutes`,
+    `- Target band: ${report.target_wall_clock_band_minutes
+      ? `${report.target_wall_clock_band_minutes.minimum}-${report.target_wall_clock_band_minutes.maximum} minutes`
+      : "not recorded"}`,
     `- Failed invocations: ${report.execution.failed_invocation_count}`,
+    `- Repeated full-scope invocations: ${report.repeat_invocation_telemetry?.repeated_full_scope_invocation_count ?? 0}`,
     "",
     "## Findings",
     "",
@@ -326,6 +440,16 @@ export function renderRunPerformanceAuditMarkdown(report) {
     ...report.stages.map((stage) => `| ${stage.stage} | ${stage.invocation_count} | ${stage.failed_invocation_count} | ${stage.active_minutes} | ${stage.elapsed_span_minutes} |`),
     "",
   ];
+  if (report.repeat_invocation_telemetry?.groups?.length) {
+    lines.push(
+      "## Repeated Invocation Scope",
+      "",
+      "| Stage | Command | Invocations | Repeats | Exact scope | Total active min | Repeat active min |",
+      "| --- | --- | ---: | ---: | --- | ---: | ---: |",
+      ...report.repeat_invocation_telemetry.groups.map((group) => `| ${group.stage} | ${group.command} | ${group.invocation_count} | ${group.repeat_invocation_count} | ${group.exact_scope ? "yes" : "no"} | ${group.active_minutes} | ${group.repeated_active_minutes} |`),
+      "",
+    );
+  }
   if (report.operator_review_telemetry) {
     const review = report.operator_review_telemetry;
     lines.push(

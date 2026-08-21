@@ -81,6 +81,14 @@ Every accepted unit output binds:
 
 Missing, duplicate, unknown, or reordered units; stale hashes; identity drift; and token-limit output block import.
 
+## Pre-Synthesis Gate
+
+Local Qwen must write `narration_pre_synthesis_gate_<episode>.json` before it imports the QA helper, loads the resident model, or invokes the synthesis runner. The report hash-binds the current run identity, canonical narration plan and every source artifact, spoken-text IR and audit, source-component coverage, system/UI coverage, unit order and word limits, exact compiled provider requests, deterministic cohort plan, voice/model/reference identity, and authorized synthesis scope.
+
+A blocked gate retains `model_load_performed: false` and `synthesis_invoked: false`, exits before spend, and may be rerun after the named structural artifact is repaired. Immediately before actual synthesis, the same gate transitions atomically to both fields true. That distinction lets the cross-process rerun guard reject ambiguous creative resubmission without treating a proven zero-spend validation failure as a creative attempt.
+
+For an exact-unit repair, the gate authorizes only the listener-confirmed IDs. Every unaffected accepted unit must be hydrated from the prior narration report, unit-QA decision, synthesis sidecar, cohort identity, and exact WAV hash. Missing or stale preservation evidence blocks; the repair path never runs a full attempt-one synthesis before the scoped attempt.
+
 ## Blind Provider Promotion
 
 Fish Audio, ElevenLabs, and future challengers do not become production options because a short sample sounds impressive. `goldflow tts provider-bakeoff --action prepare` creates a blinded packet with a representative 8-10-minute sample, 20-30-minute fatigue sample, two repeatability takes, identity evidence, and latency/cost evidence for Qwen and one challenger. `--action approve` can write a promotion only when the challenger wins and passes representative quality, fatigue, repeatability, voice identity, drift veto, and cost/latency justification. A tie, incomplete evidence, or baseline win retains Qwen.

@@ -244,15 +244,15 @@ The benchmark should choose task-specific routing. It does not need to declare o
 
 ## Implementation Status
 
-The architecture is implemented behind hash-bound contracts. Antigravity installation, authentication, structured output, source fidelity, and concurrency three are measured; higher concurrency, sustained quota, and preferred task-class routing remain measurement gates rather than assumed facts.
+The architecture is implemented behind hash-bound contracts. Antigravity remains available for legacy identities and diagnostics, but new production identities assign it zero structured capacity until permissions, schema-output reliability, and a fresh task-class benchmark are explicitly approved.
 
 | Direction | Status | Production meaning |
 | --- | --- | --- |
-| Provider-neutral planner registry | Implemented | `planning_room` routes Codex, Antigravity CLI, Gemini Web, and ChatGPT Web by task class; Codex remains final local reconciler and artifact writer. |
-| Antigravity structured planner | Auxiliary route proven, preference benchmark-gated | Official `agy` 1.1.12 is authenticated on Google AI Ultra. Gemini 3.6 Flash Medium passed one source-bound runner proof and three concurrent semantic/beat/prompt jobs with zero validation findings. The route is capped at concurrency three and becomes preferred only after `goldflow benchmark planners` produces task-specific comparative evidence. Proof: `docs/proofs/antigravity_cli_worker_proof_v1.json`. |
+| Provider-neutral planner registry | Implemented | New `planning_room` identities route schema-bound production planning and reconciliation through eight Codex Medium workers. Gemini Web and ChatGPT Web are bounded to explicitly named research or premium/advisory tasks; Codex remains final local reconciler and artifact writer. |
+| Antigravity structured planner | Disabled for new production; legacy compatible | Earlier `agy` 1.1.12 proofs remain historical evidence, but observed permission and structured-output failures removed Antigravity from the new-production pool. Capacity remains zero until a fresh benchmark explicitly promotes it. |
 | Federated planner provider circuit | Implemented | Fatal authentication or eligibility failures open the affected provider immediately; three consecutive transient transport failures do the same. Already-leased failed chunks stay exact-scope repair work, while new leases use healthy capacity. |
-| Federated still-image pool | Implemented V2; V1 compatible | New `fast_premium_v1` identities default to five Flow plus three Gemini automatic slots. GPT Image is exact-ID fallback only, preserving premium text capacity. Existing V1 identities retain their original eleven-slot lock. |
-| Production performance audit | Implemented | `goldflow run performance-audit` reports active-union time, wall-clock idle, approval waits, blocker recovery, unexplained automatic-stage gaps, stage failures, provider failures, and target overrun. The agent director refreshes it automatically. |
+| Federated still-image pool | Implemented V3; V1/V2 compatible | New `fast_premium_v1` identities default to five persistent Flow projects plus three persistent Gemini tabs. GPT Image is exact-ID fallback only. Existing identities retain their recorded session and provider locks. |
+| Production performance audit | Implemented | `goldflow run performance-audit` reports active-union time, wall-clock idle, approval waits, blocker recovery, unexplained automatic-stage gaps, stage failures, provider failures, repeated full-scope invocations, and the 300-420 minute target band. The agent director refreshes it automatically. |
 | Gemini Web concurrent still pool | Implemented at bounded concurrency three; sustained soak pending | The authenticated Google Gemini browser generates reference-bound images, writes provider receipts, and participates automatically. Quota telemetry may lower future capacity, but an unmeasured limit fails the exact asset closed rather than silently moving it. |
 | Provider-neutral generated motion | Implemented | New artifacts and `visual generated-motion` commands use Flow video; legacy LTX identities dispatch through a compatibility adapter. |
 | Durable Flow video transport | Implemented, live-proof pending | The five-slot Flow host shares image/video work, requires exactly one first-frame reference, and records prompt/model/input/output hashes with no automatic creative retry. |
@@ -267,6 +267,12 @@ The architecture is implemented behind hash-bound contracts. Antigravity install
 Exact-ID recovery, append-only execution events, immutable passed outputs, provider selection before submission, and deterministic structural validation remain mandatory across every route.
 
 ## Decision Log
+
+### 2026-08-21 - Five-to-Seven-Hour Critical Path and Asset Afterlife
+
+The 33-hour production audit showed that repeated full-stage work, browser workspace churn, planner instability, and late TTS validation dominated elapsed time. New `fast_premium_v1` identities therefore target 300-420 minutes, use eight Codex Medium workers for every schema-bound critical-path planning task, and assign Antigravity zero production capacity. Web planners are limited to bounded named creative/advisory tasks and cannot become an implicit critical-path dependency.
+
+Creative-stage attempt history now survives CLI process boundaries. Once voice, Qwen, image, generated-motion, or parallax work has been submitted, a later unscoped invocation is refused; passed render output is likewise immutable. Repair names exact IDs, preserves every accepted hash, and requires explicit operator evidence for any exceptional full rerun. Qwen writes a complete pre-synthesis gate before model load, and exact-unit recovery hydrates accepted unit audio rather than synthesizing the episode first. The federated still pool now keeps five Flow projects and three Gemini tabs alive by worker slot instead of creating one browser workspace per job.
 
 ### 2026-08-19 - Direct Source Manufacturer Replaces the Default Story Room
 
@@ -290,7 +296,7 @@ New manhwa source development now uses six complete candidates rather than two: 
 
 Production should not serialize work through one model or one media surface. Codex and Antigravity run separate source-bound structured planning chunks through an eleven-slot weighted pool, while Gemini Web and ChatGPT Web receive distinct global, research, audit, packaging, or difficult-exception assignments. Flow remains continuously topped off with five slots for bulk stills and generated video. Gemini Web Imagen supplies three concurrent still slots. ChatGPT Web contributes up to three image slots only after premium text-planning demand is clear, or for an explicitly prioritized hero, repair, or thumbnail asset. No cut is submitted to two providers speculatively, and Codex remains the final reconciler and artifact writer.
 
-This image-capacity paragraph records the original V1 policy. The 2026-08-18 V2 decision supersedes it for new identities: ChatGPT Image is exact-ID fallback or deliberate comparison only and does not enter automatic bulk dispatch.
+This paragraph records the original V1 policy. The 2026-08-18 V2 image decision and 2026-08-21 critical-path decision supersede it for new identities: ChatGPT Image is exact-ID fallback or deliberate comparison only, structured production planning is Codex Medium with Antigravity capacity zero, and browser image workers persist by slot.
 
 ### 2026-08-11 - Qwen Remains Production Primary
 

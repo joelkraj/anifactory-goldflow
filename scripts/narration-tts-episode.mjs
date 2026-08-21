@@ -33,6 +33,7 @@ import {
 } from "./lib/narration-tts-policy.mjs";
 import {
   QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
+  QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE,
   buildQwenLiamBatchPlan,
   canonicalQwenBatchSha256,
   qwenBatchBindingByUnit,
@@ -58,6 +59,12 @@ import {
 import {
   buildNarrationProviderOutputManifest,
 } from "./lib/narration-provider-adapter.mjs";
+import {
+  authorizeNarrationPreSynthesisGate,
+  buildNarrationPreSynthesisBootstrapGate,
+  buildNarrationPreSynthesisGate,
+  narrationPreSynthesisGateSha256,
+} from "./lib/narration-pre-synthesis-gate.mjs";
 
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const DEFAULT_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
@@ -133,6 +140,283 @@ export function recoveryScopeForTests(rawUnitIds, units) {
       .map((unit) => String(unit.unit_id))
       .filter((unitId) => requestedSet.has(unitId)),
     requested_unit_count: requestedUnitIds.length,
+  };
+}
+
+export function preservedTtsSelectionsForTests({
+  units = [],
+  priorReport = null,
+  priorUnitQa = null,
+  policy = null,
+  canonicalPlanSha256 = null,
+  planFileSha256 = null,
+  requestedUnitIds = [],
+  requireAllUnrequested = false,
+} = {}) {
+  const findings = [];
+  const requested = new Set(requestedUnitIds.map(String));
+  const resultRows = priorReport?.results ?? [];
+  const selectedRows = priorUnitQa?.selected_units ?? [];
+  const reportResults = new Map(
+    resultRows.map((row) => [String(row?.unit_id ?? ""), row]),
+  );
+  const selectedQaRows = new Map(
+    selectedRows.map((row) => [String(row?.unit_id ?? ""), row]),
+  );
+  const currentUnitIds = new Set(units.map((unit) => String(unit?.unit_id ?? "")));
+  if (reportResults.size !== resultRows.length) {
+    findings.push({ code: "preserved_tts_prior_report_duplicate_unit" });
+  }
+  if (selectedQaRows.size !== selectedRows.length) {
+    findings.push({ code: "preserved_tts_prior_unit_qa_duplicate_unit" });
+  }
+  if (resultRows.some((row) => !currentUnitIds.has(String(row?.unit_id ?? "")))) {
+    findings.push({ code: "preserved_tts_prior_report_unknown_unit" });
+  }
+  if (selectedRows.some((row) => !currentUnitIds.has(String(row?.unit_id ?? "")))) {
+    findings.push({ code: "preserved_tts_prior_unit_qa_unknown_unit" });
+  }
+  const expectedPlanHash = canonicalPlanSha256 ?? planFileSha256;
+  if (!priorReport
+    || priorReport.narration_generation_plan_sha256 !== expectedPlanHash
+    || (canonicalPlanSha256
+      && priorReport.narration_generation_plan_file_sha256 !== planFileSha256)) {
+    findings.push({ code: "preserved_tts_prior_report_plan_binding_stale" });
+  }
+  if (!priorUnitQa
+    || priorUnitQa.narration_generation_plan_sha256 !== expectedPlanHash
+    || (canonicalPlanSha256
+      && priorUnitQa.narration_generation_plan_file_sha256 !== planFileSha256)) {
+    findings.push({ code: "preserved_tts_prior_unit_qa_plan_binding_stale" });
+  }
+  const rows = [];
+  for (const unit of units) {
+    const unitId = String(unit?.unit_id ?? "");
+    if (requested.has(unitId)) continue;
+    const result = reportResults.get(unitId);
+    const selectedQa = selectedQaRows.get(unitId);
+    if (!result && !selectedQa) {
+      if (requireAllUnrequested) {
+        findings.push({
+          code: "preserved_tts_selection_missing_or_stale",
+          unit_id: unitId,
+        });
+      }
+      continue;
+    }
+    const qa = selectedQa?.qa ?? result?.selected_qa ?? null;
+    const accepted = candidateDisposition(qa, PRIMARY_TTS_PROVIDER).accepted;
+    if (!result
+      || !selectedQa
+      || !accepted
+      || !result.audio_path
+      || !result.audio_sha256
+      || result.audio_path !== selectedQa.audio_path
+      || result.audio_sha256 !== selectedQa.audio_sha256
+      || result.synthesis_identity_sha256
+        !== selectedQa.synthesis_identity_sha256
+      || result.spoken_text_sha256 !== unit.spoken_text_sha256
+      || selectedQa.spoken_text_sha256 !== unit.spoken_text_sha256
+      || result.provider !== policy?.primary?.provider
+      || result.model_id !== policy?.primary?.model_id
+      || result.voice_id !== policy?.primary?.voice_id
+      || (result.voice_sha256 ?? policy?.primary?.voice_sha256)
+        !== policy?.primary?.voice_sha256
+      || (result.voice_continuity_contract
+        ?? policy?.primary?.voice_continuity_contract)
+        !== policy?.primary?.voice_continuity_contract
+      || selectedQa.provider !== policy?.primary?.provider
+      || selectedQa.model_id !== policy?.primary?.model_id
+      || selectedQa.voice_id !== policy?.primary?.voice_id
+      || selectedQa.voice_sha256 !== policy?.primary?.voice_sha256
+      || selectedQa.voice_continuity_contract
+        !== policy?.primary?.voice_continuity_contract
+      || !result.synthesis_identity_sha256) {
+      findings.push({
+        code: "preserved_tts_selection_missing_or_stale",
+        unit_id: unitId,
+      });
+      continue;
+    }
+    rows.push({
+      unit,
+      result,
+      selected_qa: selectedQa,
+      qa,
+    });
+  }
+  return {
+    status: findings.length ? "blocked" : "passed",
+    findings,
+    rows,
+    preserved_unit_ids: rows.map((row) => String(row.unit.unit_id)),
+  };
+}
+
+export function narrationSynthesisScopeForTests({
+  units = [],
+  preservedCandidates = [],
+  requestedRecoveryScope = null,
+  manualReviewEvidencePath = null,
+  evidencePath = null,
+  evidenceSha256 = null,
+} = {}) {
+  const requestedIds = new Set(
+    requestedRecoveryScope?.requested_unit_ids?.map(String) ?? [],
+  );
+  const preserved = preservedCandidates.filter(
+    (candidate) => !requestedIds.has(String(candidate.unit_id)),
+  );
+  const preservedArtifacts = preserved.map((candidate) => ({
+    unit_id: String(candidate.unit_id),
+    spoken_text_sha256: candidate.spoken_text_sha256,
+    audio_path: candidate.audio_path,
+    audio_sha256: candidate.audio_sha256,
+    synthesis_sidecar_path:
+      candidate.preservation_provenance?.synthesis_sidecar_path,
+    synthesis_sidecar_sha256:
+      candidate.preservation_provenance?.synthesis_sidecar_sha256,
+    synthesis_identity_sha256: candidate.synthesis_identity_sha256,
+    selected_report_synthesis_identity_sha256:
+      candidate.selected_report_synthesis_identity_sha256,
+    attempt: candidate.attempt,
+    seed: candidate.seed,
+    synthesis_mode: candidate.synthesis_mode,
+    batch_plan_sha256: candidate.batch_plan_sha256,
+    cohort_id: candidate.cohort_id,
+    cohort_sha256: candidate.cohort_sha256,
+  }));
+  const common = {
+    preserved_unit_ids: preserved.map((candidate) => String(candidate.unit_id)),
+    preserved_artifacts: preservedArtifacts,
+  };
+  if (requestedRecoveryScope) {
+    return {
+      ...common,
+      mode: "confirmed_exact_unit_retry",
+      authorized_synthesis_unit_ids:
+        requestedRecoveryScope.requested_unit_ids.map(String),
+      evidence_path: evidencePath,
+      evidence_sha256: evidenceSha256,
+    };
+  }
+  if (manualReviewEvidencePath) {
+    return {
+      ...common,
+      mode: "hash_bound_manual_accept_first_take",
+      authorized_synthesis_unit_ids: [],
+      evidence_path: manualReviewEvidencePath,
+      evidence_sha256: evidenceSha256,
+    };
+  }
+  if (preserved.length === units.length && units.length > 0) {
+    return {
+      ...common,
+      mode: "already_complete_no_synthesis_authorized",
+      authorized_synthesis_unit_ids: [],
+    };
+  }
+  return {
+    ...common,
+    mode: preserved.length
+      ? "interrupted_full_synthesis_resume_preserving_accepted_units"
+      : "initial_full_synthesis",
+    authorized_synthesis_unit_ids: units
+      .map((unit) => String(unit.unit_id))
+      .filter((unitId) => !common.preserved_unit_ids.includes(unitId)),
+  };
+}
+
+function preservedSelectionRow(unit, candidate, unitQa, policy) {
+  return {
+    ...unit,
+    text: unit.spoken_text,
+    segment_id: unit.segment_id
+      ?? unit.source_segment_ids?.[0]
+      ?? unit.inherited_segment_id
+      ?? unit.unit_id,
+    speaker: unit.speaker ?? "NARRATOR",
+    voice_id: policy.primary.voice_id,
+    voice_sha256: policy.primary.voice_sha256,
+    voice_continuity_contract: policy.primary.voice_continuity_contract,
+    provider: candidate.provider,
+    model_id: candidate.model_id,
+    attempt: candidate.attempt,
+    wav: candidate.audio_path,
+    duration_sec: candidate.duration_sec,
+    synthesis_mode: candidate.synthesis_mode ?? null,
+    batch_plan_sha256: candidate.batch_plan_sha256 ?? null,
+    cohort_id: candidate.cohort_id ?? null,
+    cohort_sha256: candidate.cohort_sha256 ?? null,
+    generated_token_count: candidate.generated_token_count ?? null,
+    effective_token_limit: candidate.effective_token_limit ?? null,
+    token_limit_reached: candidate.token_limit_reached ?? null,
+    recovery_provenance: candidate.recovery_provenance ?? null,
+    synthesis_identity: candidate.synthesis_identity ?? null,
+    synthesis_identity_sha256: candidate.synthesis_identity_sha256,
+    unit_qa: unitQa,
+  };
+}
+
+export function preservedTtsFinalInputsForTests({
+  units = [],
+  candidatePool = [],
+  preservedForInvocation = [],
+  priorSynthesisRuns = [],
+  policy,
+} = {}) {
+  const candidateKeys = new Set();
+  const candidates = candidatePool.filter((candidate) => {
+    const key = `${candidate?.unit_id ?? ""}:${candidate?.attempt ?? ""}:${candidate?.audio_sha256 ?? ""}`;
+    if (candidateKeys.has(key)) return false;
+    candidateKeys.add(key);
+    return true;
+  });
+  const runKeys = new Set();
+  const synthesisRuns = (candidatePool.length ? priorSynthesisRuns : []).filter((runRow) => {
+    const key = String(
+      runRow?.report_sha256
+        ?? `${runRow?.attempt ?? ""}:${runRow?.report_path ?? ""}:${runRow?.jobs_sha256 ?? ""}`,
+    );
+    if (runKeys.has(key)) return false;
+    runKeys.add(key);
+    return true;
+  });
+  const unitById = new Map(
+    units.map((unit) => [String(unit.unit_id), unit]),
+  );
+  const selectedRows = preservedForInvocation.flatMap((candidate) => {
+    const unit = unitById.get(String(candidate.unit_id));
+    return unit
+      ? [preservedSelectionRow(unit, candidate, candidate.qa, policy)]
+      : [];
+  });
+  return { candidates, synthesisRuns, selectedRows };
+}
+
+export function incompleteUnitResumeProvenanceForTests({
+  unit,
+  cohortBinding,
+  batchPlanSha256,
+  preSynthesisGateSha256,
+} = {}) {
+  if (!unit?.unit_id
+    || !unit?.spoken_text_sha256
+    || !cohortBinding?.cohort_sha256
+    || cohortBinding.batch_plan_sha256 !== batchPlanSha256
+    || !preSynthesisGateSha256) {
+    throw new Error("Incomplete-unit resume lacks a current unit, cohort, or gate binding.");
+  }
+  return {
+    schema: "goldflow_qwen_incomplete_unit_resume_provenance_v1",
+    resume_mode: QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE,
+    reason: "unit_has_no_hash_verified_accepted_selection_after_interrupted_invocation",
+    unit_id: String(unit.unit_id),
+    spoken_text_sha256: unit.spoken_text_sha256,
+    batch_plan_sha256: batchPlanSha256,
+    origin_cohort_id: cohortBinding.cohort_id,
+    origin_cohort_sha256: cohortBinding.cohort_sha256,
+    pre_synthesis_gate_sha256: preSynthesisGateSha256,
   };
 }
 
@@ -264,6 +548,9 @@ export function validateConfirmedRetryEvidenceForTests({
       );
     }
     const current = currentById.get(unitId);
+    const currentSelectedIdentitySha256 = current
+      ?.selected_report_synthesis_identity_sha256
+      ?? current?.synthesis_identity_sha256;
     const expectedAttempt = Number(prior.attempt);
     if (!Number.isInteger(expectedAttempt)
       || Number(row.selected_attempt) !== expectedAttempt
@@ -275,7 +562,7 @@ export function validateConfirmedRetryEvidenceForTests({
     }
     if (!current
       || current.audio_sha256 !== prior.audio_sha256
-      || current.synthesis_identity_sha256 !== prior.synthesis_identity_sha256) {
+      || currentSelectedIdentitySha256 !== prior.synthesis_identity_sha256) {
       throw new Error(
         `Current cached attempt-one artifact does not match the listened pre-retry artifact for ${unitId}.`,
       );
@@ -631,6 +918,17 @@ async function readJson(filePath, fallback = null) {
   }
 }
 
+async function filesBelow(directory) {
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const rows = [];
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) rows.push(...await filesBelow(entryPath));
+    else if (entry.isFile()) rows.push(entryPath);
+  }
+  return rows;
+}
+
 async function atomicWriteJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temporary = path.join(
@@ -639,6 +937,105 @@ async function atomicWriteJson(filePath, value) {
   );
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporary, filePath);
+}
+
+async function hydratePreservedTtsSelections({
+  selectionValidation,
+  policy,
+  batchPlan,
+} = {}) {
+  if (selectionValidation?.status !== "passed") {
+    throw new Error(
+      `Passed TTS work cannot be preserved: ${JSON.stringify(selectionValidation?.findings ?? [])}`,
+    );
+  }
+  const bindingByUnit = qwenBatchBindingByUnit(batchPlan);
+  const candidates = [];
+  for (const row of selectionValidation.rows ?? []) {
+    const unit = row.unit;
+    const result = row.result;
+    const unitId = String(unit.unit_id);
+    const audioPath = path.resolve(result.audio_path);
+    const actualAudioSha256 = await sha256File(audioPath).catch(() => null);
+    if (!actualAudioSha256 || actualAudioSha256 !== result.audio_sha256) {
+      throw new Error(`Passed TTS audio is missing or stale for ${unitId}: ${audioPath}`);
+    }
+    const sidecarPath = audioPath.replace(/\.wav$/iu, ".json");
+    const sidecar = await readJson(sidecarPath, null);
+    const sidecarFileSha256 = await sha256File(sidecarPath).catch(() => null);
+    const synthesisIdentity = sidecar?.synthesis_identity;
+    const synthesisIdentitySha256 = sidecar?.synthesis_identity_sha256;
+    const expectedBinding = bindingByUnit.get(unitId);
+    if (!sidecar
+      || !sidecarFileSha256
+      || sidecar.unit_id !== unitId
+      || sidecar.output_sha256 !== result.audio_sha256
+      || sidecar.spoken_text_sha256 !== unit.spoken_text_sha256
+      || synthesisIdentitySha256 !== canonicalQwenBatchSha256(synthesisIdentity)
+      || synthesisIdentity?.provider !== policy.primary.provider
+      || synthesisIdentity?.model_id !== policy.primary.model_id
+      || synthesisIdentity?.model_revision !== policy.primary.model_revision
+      || synthesisIdentity?.voice !== policy.primary.voice_id
+      || synthesisIdentity?.voice_sha256 !== policy.primary.voice_sha256
+      || synthesisIdentity?.voice_continuity_contract
+        !== policy.primary.voice_continuity_contract
+      || synthesisIdentity?.batch_plan_sha256 !== batchPlan.batch_plan_sha256
+      || synthesisIdentity?.cohort_id !== expectedBinding?.cohort_id
+      || synthesisIdentity?.cohort_sha256 !== expectedBinding?.cohort_sha256) {
+      throw new Error(
+        `Passed TTS synthesis sidecar is missing or stale for ${unitId}: ${sidecarPath}`,
+      );
+    }
+    candidates.push({
+      unit_id: unitId,
+      provider: policy.primary.provider,
+      model_id: policy.primary.model_id,
+      voice_id: policy.primary.voice_id,
+      voice_sha256: policy.primary.voice_sha256,
+      voice_continuity_contract: policy.primary.voice_continuity_contract,
+      attempt: Number(result.attempt ?? sidecar.attempt ?? 1),
+      seed: Number(
+        sidecar.per_unit_serial_seed
+          ?? deterministicTtsSeed(unitId, policy.primary.provider, Number(result.attempt ?? 1)),
+      ),
+      batch_seed: Number(sidecar.seed ?? synthesisIdentity.seed),
+      spoken_text_sha256: unit.spoken_text_sha256,
+      synthesis_identity_sha256: synthesisIdentitySha256,
+      synthesis_identity: synthesisIdentity,
+      selected_report_synthesis_identity_sha256:
+        result.synthesis_identity_sha256,
+      synthesis_mode: sidecar.synthesis_mode
+        ?? synthesisIdentity.synthesis_mode,
+      batch_plan_sha256: sidecar.batch_plan_sha256
+        ?? synthesisIdentity.batch_plan_sha256,
+      cohort_id: sidecar.cohort_id ?? synthesisIdentity.cohort_id,
+      cohort_sha256: sidecar.cohort_sha256
+        ?? synthesisIdentity.cohort_sha256,
+      generated_token_count: sidecar.generated_token_count ?? null,
+      effective_token_limit: sidecar.effective_token_limit ?? null,
+      token_limit_reached: sidecar.token_limit_reached ?? false,
+      recovery_provenance: sidecar.recovery_provenance
+        ?? synthesisIdentity.recovery_provenance
+        ?? null,
+      runner_report_path: sidecarPath,
+      runner_report_sha256: sidecarFileSha256,
+      audio_path: audioPath,
+      audio_sha256: result.audio_sha256,
+      duration_sec: Number(sidecar.duration_sec ?? result.duration_sec),
+      voice_continuity: row.qa?.voice_continuity ?? null,
+      qa: row.qa,
+      disposition: candidateDisposition(row.qa, PRIMARY_TTS_PROVIDER),
+      preservation_provenance: {
+        schema: "goldflow_preserved_tts_unit_v1",
+        selected_report_synthesis_identity_sha256:
+          result.synthesis_identity_sha256,
+        synthesis_sidecar_path: sidecarPath,
+        synthesis_sidecar_sha256: sidecarFileSha256,
+        audio_sha256: result.audio_sha256,
+      },
+    });
+  }
+  return candidates;
 }
 
 function run(command, commandArgs, {
@@ -1816,6 +2213,16 @@ async function runSynthesis({
   python,
   runnerPath,
   invocationId,
+  preSynthesisGate,
+  preSynthesisGatePath,
+  preSynthesisGateFileSha256,
+  planPath,
+  planSha256,
+  planFileSha256,
+  identityPath,
+  identityFileSha256,
+  scriptPath,
+  scriptSha256,
   onCohortComplete = null,
 }) {
   if (route !== "qwen") {
@@ -1831,6 +2238,11 @@ async function runSynthesis({
       : "goldflow_narration_tts_jobs_v1",
     route,
     provider,
+    model_id: policy.primary.model_id,
+    model_revision: policy.primary.model_revision,
+    voice_id: policy.primary.voice_id,
+    voice_sha256: policy.primary.voice_sha256,
+    voice_continuity_contract: policy.primary.voice_continuity_contract,
     attempt,
     synthesis_contract: policy.synthesis_contract,
     synthesis_mode: synthesisMode,
@@ -1846,6 +2258,18 @@ async function runSynthesis({
     qwen_native_speed: null,
     qwen_post_tts_tempo_processing: false,
     continuous_longform_request: false,
+    pre_synthesis_gate: {
+      path: preSynthesisGatePath,
+      file_sha256: preSynthesisGateFileSha256,
+      gate_sha256: preSynthesisGate?.gate_sha256 ?? null,
+    },
+    narration_generation_plan_path: planPath,
+    narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    run_identity_path: identityPath,
+    run_identity_file_sha256: identityFileSha256,
+    source_script_path: scriptPath,
+    source_script_sha256: scriptSha256,
     jobs: units.map((unit) => ({
       unit_id: unit.unit_id,
       spoken_text: unit.spoken_text,
@@ -1899,6 +2323,8 @@ async function runSynthesis({
     || report.result_count !== units.length
     || report.synthesis_mode !== synthesisMode
     || report.batch_plan_sha256 !== batchPlan.batch_plan_sha256
+    || report.pre_synthesis_gate_sha256 !== preSynthesisGate.gate_sha256
+    || report.pre_synthesis_gate_file_sha256 !== preSynthesisGateFileSha256
     || JSON.stringify(report.synthesis_contract)
       !== JSON.stringify(policy.synthesis_contract)) {
     throw new Error(`Invalid ${route} production runner report: ${reportPath}`);
@@ -2259,6 +2685,28 @@ async function main() {
   const identityPath = path.resolve(
     flags.identity ?? path.join(episodeDir, "run_identity.json"),
   );
+  const preSynthesisGatePath = path.join(
+    episodeDir,
+    `narration_tts_pre_synthesis_gate_${episode}.json`,
+  );
+  const [episodeStat, identityStat] = await Promise.all([
+    fs.stat(episodeDir).catch(() => null),
+    fs.stat(identityPath).catch(() => null),
+  ]);
+  if (!episodeStat?.isDirectory() || !identityStat?.isFile()) {
+    throw new Error(
+      "Narration TTS requires an existing episode directory and run_identity.json before gate bootstrap.",
+    );
+  }
+  const priorPreSynthesisGate = await readJson(preSynthesisGatePath, null);
+  const bootstrapGate = buildNarrationPreSynthesisBootstrapGate({
+    episodeDir,
+    identityPath,
+    priorGate: priorPreSynthesisGate,
+  });
+  await atomicWriteJson(preSynthesisGatePath, bootstrapGate);
+  const historicalSynthesisAuthorized =
+    bootstrapGate.historical_synthesis_authorized;
   const scriptPath = path.resolve(
     flags.script ?? path.join(episodeDir, "script_clean.md"),
   );
@@ -2304,24 +2752,20 @@ async function main() {
     fs.readFile(scriptPath),
   ]);
   if (!identity || !plan) throw new Error("Missing locked run_identity.json or narration_generation_plan.json");
+  const [identityFileSha256, planFileSha256] = await Promise.all([
+    sha256File(identityPath),
+    sha256File(planPath),
+  ]);
+  const planSha256 = String(plan.plan_sha256 ?? planFileSha256);
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
   const narrationQualityV2 = Boolean(narrationQualityContract);
   const scriptHash = createHash("sha256").update(scriptBuffer).digest("hex");
-  if (plan.source_script_hash !== scriptHash) {
-    throw new Error(`Narration plan script hash ${plan.source_script_hash ?? "missing"} does not match ${scriptHash}`);
-  }
   const runIdentityBindingFinding = narrationPlanRunIdentityBindingFinding(
     plan,
     identity,
-    await sha256File(identityPath),
+    identityFileSha256,
   );
-  if (runIdentityBindingFinding) {
-    throw new Error(
-      `${runIdentityBindingFinding.message} `
-      + `Recorded ${runIdentityBindingFinding.actual ?? "missing"}; `
-      + `current ${runIdentityBindingFinding.expected ?? "missing"}.`,
-    );
-  }
+  const sourceArtifactHashes = {};
   if (plan.schema === "goldflow_tts_generation_plan_v2") {
     const planSourceHashes = plan.source_hashes ?? {};
     for (const [field, sourcePath] of [
@@ -2337,20 +2781,9 @@ async function main() {
     ]) {
       const expectedHash = String(planSourceHashes[field] ?? "").trim();
       const actualHash = await sha256File(sourcePath).catch(() => null);
-      if (!expectedHash || expectedHash !== actualHash) {
-        throw new Error(
-          `Narration plan source_hashes.${field} is missing or stale. `
-          + `Recorded ${expectedHash || "missing"}; current ${actualHash ?? "missing"}.`,
-        );
-      }
+      sourceArtifactHashes[field] = actualHash;
+      void expectedHash;
     }
-  }
-  if (plan.status !== "passed") throw new Error(`Narration plan status is ${plan.status ?? "missing"}`);
-  if (plan.text_integrity_coverage?.status !== "passed") {
-    throw new Error("Narration plan text_integrity_coverage is missing or blocked");
-  }
-  if (plan.system_ui_speech_coverage?.status !== "passed") {
-    throw new Error("Narration plan system_ui_speech_coverage is missing or blocked");
   }
   const performanceApprovalPath = path.resolve(
     flags["performance-bakeoff-approval"]
@@ -2361,43 +2794,27 @@ async function main() {
     plan,
     approval: performanceApproval,
   });
-  if (performanceGate.status === "blocked") {
-    throw new Error(
-      "Full narration synthesis requires a human-approved short performance "
-      + `bakeoff for this exact voice/reference/synthesis contract: ${JSON.stringify(performanceGate.findings)}. `
-      + `Expected ${performanceApprovalPath}`,
-    );
-  }
-  if (performanceGate.required) {
-    for (const sample of performanceApproval.samples ?? []) {
-      const samplePath = path.resolve(sample.audio_path);
-      const actualSampleSha256 = await sha256File(samplePath).catch(() => null);
-      if (!actualSampleSha256 || actualSampleSha256 !== sample.audio_sha256) {
-        throw new Error(
-          `Narration performance bakeoff sample is missing or stale: ${samplePath}`,
-        );
-      }
-    }
-  }
   const policy = validateNarrationTtsPolicyForTests(identity);
-  if (policy.status !== "passed") {
-    throw new Error(`Locked narration TTS policy failed: ${JSON.stringify(policy.findings)}`);
+  const planPolicy = policy.status === "passed"
+    ? validateNarrationPlanPolicyForTests(plan, policy)
+    : {
+        status: "blocked",
+        findings: policy.findings ?? [],
+      };
+  const referenceAssetHashes = {};
+  if (policy.status === "passed") {
+    referenceAssetHashes.reference_audio = {
+      path: policy.primary.reference_audio_path,
+      expected: policy.primary.reference_audio_sha256,
+      actual: await sha256File(policy.primary.reference_audio_path).catch(() => null),
+    };
+    referenceAssetHashes.reference_text = {
+      path: null,
+      expected: policy.primary.reference_text_sha256,
+      actual: sha256Text(policy.primary.reference_text),
+    };
   }
-  const planPolicy = validateNarrationPlanPolicyForTests(plan, policy);
-  if (planPolicy.status !== "passed") {
-    throw new Error(`Narration plan provider policy failed: ${JSON.stringify(planPolicy.findings)}`);
-  }
-  const selectedVoiceLock = qwenPinForVoiceId(
-    policy.primary.voice_id,
-    policy.primary.reference_variant_id ?? null,
-  );
-  if (await sha256File(policy.primary.reference_audio_path) !== policy.primary.reference_audio_sha256) {
-    throw new Error("Locked local Qwen reference audio hash does not match");
-  }
-  if (sha256Text(policy.primary.reference_text) !== policy.primary.reference_text_sha256) {
-    throw new Error("Locked local Qwen reference text hash does not match");
-  }
-  for (const [assetPath, expectedSha256, label] of [
+  for (const [assetPath, expectedSha256, label] of policy.status === "passed" ? [
     [
       policy.primary.reference_manifest_path,
       policy.primary.reference_manifest_sha256,
@@ -2418,12 +2835,14 @@ async function main() {
       policy.primary.speaker_similarity_calibration_sha256,
       "speaker-similarity calibration",
     ],
-  ]) {
-    if (await sha256File(assetPath) !== expectedSha256) {
-      throw new Error(`Locked local Qwen ${label} hash does not match`);
-    }
+  ] : []) {
+    referenceAssetHashes[label.replaceAll(/[^a-z0-9]+/giu, "_")] = {
+      path: assetPath,
+      expected: expectedSha256,
+      actual: await sha256File(assetPath).catch(() => null),
+    };
   }
-  const calibratedSimilarityLockValid = narrationQualityContract
+  const calibratedSimilarityLockValid = policy.status === "passed" && (narrationQualityContract
     ? policy.primary.minimum_cosine_similarity == null
       && policy.primary.warning_below_cosine_similarity == null
       && policy.primary.warning_floor_cosine_similarity == null
@@ -2436,13 +2855,119 @@ async function main() {
       && Number(policy.primary.warning_below_cosine_similarity)
         === QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY
       && Number(policy.primary.warning_floor_cosine_similarity)
-        === QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY;
-  if (policy.primary.reference_voice_id !== policy.primary.voice_id
+        === QWEN_LIAM_WARNING_BELOW_COSINE_SIMILARITY);
+  const selectedVoiceLock = policy.status === "passed"
+    ? qwenPinForVoiceId(
+        policy.primary.voice_id,
+        policy.primary.reference_variant_id ?? null,
+      )
+    : null;
+  if (policy.status === "passed" && (policy.primary.reference_voice_id !== policy.primary.voice_id
     || policy.primary.reference_voice_sha256 !== policy.primary.voice_sha256
     || policy.primary.voice_continuity_contract
-      !== selectedVoiceLock.voice_continuity_contract
-    || !calibratedSimilarityLockValid) {
-    throw new Error("Qwen production is not locked to the selected voice-continuity contract");
+      !== selectedVoiceLock?.voice_continuity_contract
+    || !calibratedSimilarityLockValid)) {
+    planPolicy.findings.push({
+      code: "narration_tts_selected_voice_continuity_lock_mismatch",
+    });
+    planPolicy.status = "blocked";
+  }
+  if (runIdentityBindingFinding) {
+    planPolicy.findings.push(runIdentityBindingFinding);
+    planPolicy.status = "blocked";
+  }
+  const narrationTextIrPath = path.resolve(
+    plan?.narration_text_ir?.path
+      ?? path.join(episodeDir, "narration_text_ir.json"),
+  );
+  const spokenTextAuditPath = path.resolve(
+    plan?.tts_spoken_text_audit?.path
+      ?? path.join(episodeDir, `tts_spoken_text_audit_${episode}.json`),
+  );
+  const [narrationTextIr, narrationTextIrFileSha256, spokenTextAudit,
+    spokenTextAuditFileSha256] = await Promise.all([
+    readJson(narrationTextIrPath, null),
+    sha256File(narrationTextIrPath).catch(() => null),
+    readJson(spokenTextAuditPath, null),
+    sha256File(spokenTextAuditPath).catch(() => null),
+  ]);
+  const rawPlanUnits = Array.isArray(plan?.units) && plan.units.length
+    ? plan.units
+    : (plan?.segments ?? []).flatMap((segment) => (
+        segment?.generation_units
+        ?? segment?.narration_generation_units
+        ?? segment?.tts_generation_units
+        ?? segment?.qwen_generation_units
+        ?? []
+      ));
+  const rawRequestedUnitIds = String(
+    flags["confirmed-retry-unit-ids"] ?? flags["regenerate-unit-ids"] ?? "",
+  ).split(",").map((value) => value.trim()).filter(Boolean);
+  const preliminarySynthesisScope = {
+    mode: rawRequestedUnitIds.length
+      ? "confirmed_exact_unit_retry_pending_evidence_validation"
+      : String(flags["manual-review-evidence"] ?? "").trim()
+        ? "hash_bound_manual_accept_pending_evidence_validation"
+        : dryRun || planOnly
+          ? "plan_validation_only"
+          : "initial_or_interrupted_full_synthesis",
+    authorized_synthesis_unit_ids: rawRequestedUnitIds.length
+      ? rawRequestedUnitIds
+      : dryRun || planOnly || String(flags["manual-review-evidence"] ?? "").trim()
+        ? []
+        : rawPlanUnits.map((unit) => String(unit?.unit_id ?? "")),
+    preserved_unit_ids: [],
+  };
+  const gateInputs = {
+    plan,
+    planPath,
+    planFileSha256,
+    identityPath,
+    identityFileSha256,
+    scriptPath,
+    scriptSha256: scriptHash,
+    policy,
+    planPolicy,
+    sourceArtifactHashes,
+    textIr: narrationTextIr,
+    textIrPath: narrationTextIrPath,
+    textIrFileSha256: narrationTextIrFileSha256,
+    spokenTextAudit,
+    spokenTextAuditPath,
+    spokenTextAuditFileSha256,
+    overridesSha256: sourceArtifactHashes.tts_spoken_overrides_sha256 ?? null,
+    referenceAssetHashes,
+    historicalSynthesisAuthorized,
+  };
+  let preSynthesisGate = buildNarrationPreSynthesisGate({
+    ...gateInputs,
+    synthesisScope: preliminarySynthesisScope,
+  });
+  await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+  if (preSynthesisGate.gate_sha256
+      !== narrationPreSynthesisGateSha256(preSynthesisGate)
+    || preSynthesisGate.status !== "passed") {
+    throw new Error(
+      `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate.findings)}`,
+    );
+  }
+  if (performanceGate.status === "blocked") {
+    throw new Error(
+      "Full narration synthesis requires a human-approved short performance "
+      + `bakeoff for this exact voice/reference/synthesis contract: ${JSON.stringify(performanceGate.findings)}. `
+      + `Expected ${performanceApprovalPath}`,
+    );
+  }
+  if (performanceGate.required) {
+    for (const sample of performanceApproval.samples ?? []) {
+      const samplePath = path.resolve(sample.audio_path);
+      const actualSampleSha256 = await sha256File(samplePath).catch(() => null);
+      if (!actualSampleSha256 || actualSampleSha256 !== sample.audio_sha256) {
+        throw new Error(
+          `Narration performance bakeoff sample is missing or stale: ${samplePath}`,
+        );
+      }
+    }
   }
   const units = normalizeNarrationUnitsForTests(plan, {
     voiceId: policy.primary.voice_id,
@@ -2526,13 +3051,8 @@ async function main() {
       + "recording the audible skip, truncation, or stutter that was confirmed.",
     );
   }
-  const planSha256 = await sha256File(planPath);
-  const priorNarrationReportBuffer = requestedRecoveryScope || manualReviewEvidencePath
-    ? await fs.readFile(reportPath).catch(() => null)
-    : null;
-  const priorUnitQaBuffer = manualReviewEvidencePath
-    ? await fs.readFile(unitQaPath).catch(() => null)
-    : null;
+  const priorNarrationReportBuffer = await fs.readFile(reportPath).catch(() => null);
+  const priorUnitQaBuffer = await fs.readFile(unitQaPath).catch(() => null);
   const priorNarrationReport = priorNarrationReportBuffer
     ? JSON.parse(priorNarrationReportBuffer.toString("utf8"))
     : null;
@@ -2545,6 +3065,123 @@ async function main() {
   const priorUnitQaSha256 = priorUnitQaBuffer
     ? createHash("sha256").update(priorUnitQaBuffer).digest("hex")
     : null;
+  if (!priorNarrationReport || !priorUnitQa) {
+    const orphanedUnitFiles = (await filesBelow(
+      path.join(outputDir, "units"),
+    )).filter((filePath) => /\.(?:wav|json)$/iu.test(filePath));
+    if (orphanedUnitFiles.length) {
+      throw new Error(
+        "Found TTS unit outputs without the exact prior narration report and unit-QA report. "
+        + "Interrupted synthesis is fail-closed so accepted audio cannot be silently regenerated; "
+        + `triage these ${orphanedUnitFiles.length} artifacts before another model load.`,
+      );
+    }
+  }
+  let preservationValidation = null;
+  let preservedCandidates = [];
+  if (priorNarrationReport && priorUnitQa) {
+    preservationValidation = preservedTtsSelectionsForTests({
+      units,
+      priorReport: priorNarrationReport,
+      priorUnitQa,
+      policy,
+      canonicalPlanSha256: planSha256,
+      planFileSha256,
+      requestedUnitIds: [],
+      requireAllUnrequested: false,
+    });
+    if (preservationValidation.status !== "passed") {
+      throw new Error(
+        "Existing narration selections are stale; refusing to load Qwen or overwrite audio: "
+        + JSON.stringify(preservationValidation.findings),
+      );
+    }
+    preservedCandidates = await hydratePreservedTtsSelections({
+      selectionValidation: preservationValidation,
+      policy,
+      batchPlan,
+    });
+  }
+  if ((requestedRecoveryScope || manualReviewEvidencePath)
+    && (!priorNarrationReport || !priorUnitQa)) {
+    throw new Error(
+      "Scoped narration recovery requires the exact prior narration report and unit-QA report.",
+    );
+  }
+  const requestedRecoveryIds = new Set(
+    requestedRecoveryScope?.requested_unit_ids?.map(String) ?? [],
+  );
+  let confirmedRetryEvidencePath = null;
+  let confirmedRetryEvidenceSha256 = null;
+  let validatedConfirmedRetryEvidence = [];
+  if (requestedRecoveryScope) {
+    confirmedRetryEvidencePath = path.resolve(flags["confirmed-retry-evidence"]);
+    const evidenceBuffer = await fs.readFile(confirmedRetryEvidencePath);
+    const evidence = JSON.parse(evidenceBuffer.toString("utf8"));
+    confirmedRetryEvidenceSha256 = createHash("sha256")
+      .update(evidenceBuffer)
+      .digest("hex");
+    validatedConfirmedRetryEvidence = validateConfirmedRetryEvidenceForTests({
+      evidence,
+      requestedUnitIds: requestedRecoveryScope.requested_unit_ids,
+      planSha256,
+      priorReport: priorNarrationReport,
+      priorReportSha256: priorNarrationReportSha256,
+      currentCandidates: preservedCandidates,
+    });
+  }
+  const finalSynthesisScope = narrationSynthesisScopeForTests({
+    units,
+    preservedCandidates,
+    requestedRecoveryScope,
+    manualReviewEvidencePath,
+    evidencePath: requestedRecoveryScope
+      ? confirmedRetryEvidencePath
+      : manualReviewEvidencePath,
+    evidenceSha256: requestedRecoveryScope
+      ? confirmedRetryEvidenceSha256
+      : manualReviewEvidencePath
+        ? await sha256File(manualReviewEvidencePath).catch(() => null)
+        : null,
+  });
+  const preservedForInvocation = preservedCandidates.filter((candidate) => (
+    finalSynthesisScope.preserved_unit_ids.includes(String(candidate.unit_id))
+  ));
+  const alreadyComplete = finalSynthesisScope.mode
+    === "already_complete_no_synthesis_authorized";
+  if (finalSynthesisScope.mode
+    === "interrupted_full_synthesis_resume_preserving_accepted_units") {
+    const previouslySubmittedIds = new Set(
+      (priorUnitQa?.candidates ?? []).map((candidate) => String(candidate?.unit_id ?? "")),
+    );
+    const unsafeResumeIds = finalSynthesisScope.authorized_synthesis_unit_ids
+      .filter((unitId) => previouslySubmittedIds.has(String(unitId)));
+    if (unsafeResumeIds.length) {
+      throw new Error(
+        "Interrupted resume may synthesize only never-submitted units. "
+        + `These units already have candidate provenance and require exact repair triage: ${unsafeResumeIds.join(", ")}`,
+      );
+    }
+  }
+  preSynthesisGate = buildNarrationPreSynthesisGate({
+    ...gateInputs,
+    synthesisScope: finalSynthesisScope,
+  });
+  await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+  let preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
+  if (preSynthesisGate.gate_sha256
+      !== narrationPreSynthesisGateSha256(preSynthesisGate)
+    || preSynthesisGate.status !== "passed") {
+    throw new Error(
+      `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate.findings)}`,
+    );
+  }
+  if (alreadyComplete) {
+    throw new Error(
+      "Narration TTS already has an exact accepted selection for every current unit. "
+      + "An unscoped full rerun is forbidden; use exact unit or boundary repair evidence.",
+    );
+  }
   if (!manualReviewEvidencePath) {
     const [pythonStat, runnerStat, similarityPythonStat, similarityRunnerStat] = await Promise.all([
       fs.stat(python).catch(() => null),
@@ -2561,12 +3198,7 @@ async function main() {
       throw new Error(`Speaker-similarity runner is missing: ${similarityRunnerPath}`);
     }
   }
-  const initialRecoveryScope = manualReviewEvidencePath
-    ? {
-        mode: "hash_bound_manual_accept_first_take",
-        evidence_path: manualReviewEvidencePath,
-      }
-    : requestedRecoveryScope;
+  const initialRecoveryScope = finalSynthesisScope;
   const validation = {
     schema: "goldflow_narration_tts_plan_validation_v1",
     status: "validated_plan_only_not_synthesized",
@@ -2575,6 +3207,7 @@ async function main() {
     run_identity_path: identityPath,
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
     unit_count: units.length,
     unit_ids: units.map((unit) => unit.unit_id),
     effective_concurrency: EFFECTIVE_CONCURRENCY,
@@ -2601,6 +3234,9 @@ async function main() {
     plan_policy: planPolicy,
     performance_gate: performanceGate,
     performance_bakeoff_approval_path: performanceApprovalPath,
+    pre_synthesis_gate_path: preSynthesisGatePath,
+    pre_synthesis_gate_file_sha256: preSynthesisGateFileSha256,
+    pre_synthesis_gate_sha256: preSynthesisGate.gate_sha256,
   };
   if (dryRun || planOnly) {
     const validationPath = path.join(
@@ -2652,6 +3288,11 @@ async function main() {
     throw new Error("--unit-qa-whisper-model is production-locked to small");
   }
   ensureArg("--unit-qa-whisper-model", "small");
+  if (!manualReviewEvidencePath) {
+    preSynthesisGate = authorizeNarrationPreSynthesisGate(preSynthesisGate);
+    await atomicWriteJson(preSynthesisGatePath, preSynthesisGate);
+    preSynthesisGateFileSha256 = await sha256File(preSynthesisGatePath);
+  }
   const helpers = await import("./modelslab-qwen-episode-audio.mjs");
 
   const previousQa = priorUnitQa ?? await readJson(unitQaPath, null);
@@ -2666,32 +3307,23 @@ async function main() {
   const attemptEvents = [];
   const synthesisRuns = [];
   const selected = new Map();
-  const existingCandidateRow = (unit, candidate, unitQa) => ({
-    ...unit,
-    text: unit.spoken_text,
-    segment_id: unit.segment_id
-      ?? unit.source_segment_ids?.[0]
-      ?? unit.inherited_segment_id
-      ?? unit.unit_id,
-    speaker: unit.speaker ?? "NARRATOR",
-    voice_id: policy.primary.voice_id,
-    provider: candidate.provider,
-    model_id: candidate.model_id,
-    attempt: candidate.attempt,
-    wav: candidate.audio_path,
-    duration_sec: candidate.duration_sec,
-    synthesis_mode: candidate.synthesis_mode ?? null,
-    batch_plan_sha256: candidate.batch_plan_sha256 ?? null,
-    cohort_id: candidate.cohort_id ?? null,
-    cohort_sha256: candidate.cohort_sha256 ?? null,
-    generated_token_count: candidate.generated_token_count ?? null,
-    effective_token_limit: candidate.effective_token_limit ?? null,
-    token_limit_reached: candidate.token_limit_reached ?? null,
-    recovery_provenance: candidate.recovery_provenance ?? null,
-    synthesis_identity: candidate.synthesis_identity ?? null,
-    synthesis_identity_sha256: candidate.synthesis_identity_sha256,
-    unit_qa: unitQa,
-  });
+  const existingCandidateRow = (unit, candidate, unitQa) => (
+    preservedSelectionRow(unit, candidate, unitQa, policy)
+  );
+  if (!manualReviewEvidencePath) {
+    const preservedFinalInputs = preservedTtsFinalInputsForTests({
+      units,
+      candidatePool: preservedCandidates,
+      preservedForInvocation,
+      priorSynthesisRuns: priorNarrationReport?.synthesis_runs ?? [],
+      policy,
+    });
+    candidates.push(...preservedFinalInputs.candidates);
+    synthesisRuns.push(...preservedFinalInputs.synthesisRuns);
+    for (const row of preservedFinalInputs.selectedRows) {
+      selected.set(String(row.unit_id), row);
+    }
+  }
 
   const qaSynthesis = async (
     route,
@@ -2791,6 +3423,16 @@ async function main() {
         python,
         runnerPath,
         invocationId,
+        preSynthesisGate,
+        preSynthesisGatePath,
+        preSynthesisGateFileSha256,
+        planPath,
+        planSha256,
+        planFileSha256,
+        identityPath,
+        identityFileSha256,
+        scriptPath,
+        scriptSha256: scriptHash,
         onCohortComplete: prefetchCohortQa,
       });
     } catch (error) {
@@ -3028,7 +3670,13 @@ async function main() {
     return rows;
   };
 
-  let recoveryScope = requestedRecoveryScope;
+  let recoveryScope = {
+    ...finalSynthesisScope,
+    status: "pre_synthesis_gate_validated",
+    pre_synthesis_gate_path: preSynthesisGatePath,
+    pre_synthesis_gate_sha256: preSynthesisGate.gate_sha256,
+    pre_synthesis_gate_file_sha256: preSynthesisGateFileSha256,
+  };
   if (manualReviewEvidencePath) {
     const evidenceBuffer = await fs.readFile(manualReviewEvidencePath);
     const evidenceSha256 = createHash("sha256").update(evidenceBuffer).digest("hex");
@@ -3175,50 +3823,23 @@ async function main() {
       model_loaded: false,
       synthesis_invoked: false,
     };
-  } else {
-    const firstTakeSynthesisMode = policy.synthesis_contract.mode;
-    await qaSynthesis("qwen", 1, units, {
-      synthesisMode: firstTakeSynthesisMode,
-    });
-    // First-take structural failures stop with their exact unit IDs exposed.
-    // Only a later evidence-bound scoped repair invocation may resynthesize.
-    const scopedRecoveryIds = new Set();
-    const confirmedEvidenceById = new Map();
-    let confirmedEvidencePath = null;
-    let confirmedEvidenceSha256 = null;
-    if (requestedRecoveryScope) {
-      const requestedIds = requestedRecoveryScope.requested_unit_ids;
-      const evidencePath = path.resolve(flags["confirmed-retry-evidence"]);
-      const evidence = await readJson(evidencePath, null);
-      const validatedEvidence = validateConfirmedRetryEvidenceForTests({
-        evidence,
-        requestedUnitIds: requestedIds,
-        planSha256,
-        priorReport: priorNarrationReport,
-        priorReportSha256: priorNarrationReportSha256,
-        currentCandidates: candidates,
-      });
-      for (const unitId of requestedIds) selected.delete(unitId);
-      for (const unitId of requestedIds) scopedRecoveryIds.add(unitId);
-      for (const row of validatedEvidence) {
-        confirmedEvidenceById.set(String(row.unit_id), row);
-      }
-      confirmedEvidencePath = evidencePath;
-      confirmedEvidenceSha256 = await sha256File(evidencePath);
-      recoveryScope = {
-        ...requestedRecoveryScope,
-        status: "validated_against_confirmed_listen_evidence",
-        evidence_path: evidencePath,
-        evidence_sha256: confirmedEvidenceSha256,
-        pre_retry_narration_report_sha256: priorNarrationReportSha256,
-        confirmed_artifacts: validatedEvidence,
-      };
-    }
-    // Automated diagnostics never resubmit. This branch contains only an
-    // explicitly requested, hash-bound exact-unit recovery invocation.
-    const scopedRecoveryUnits = units.filter(
-      (unit) => scopedRecoveryIds.has(String(unit.unit_id)),
+  } else if (requestedRecoveryScope) {
+    // A recovery invocation never runs the full first-take batch. It hydrates
+    // and hash-verifies accepted audio, then submits only the confirmed IDs.
+    const confirmedEvidenceById = new Map(
+      validatedConfirmedRetryEvidence.map((row) => [String(row.unit_id), row]),
     );
+    const scopedRecoveryUnits = units.filter(
+      (unit) => requestedRecoveryIds.has(String(unit.unit_id)),
+    );
+    recoveryScope = {
+      ...recoveryScope,
+      status: "validated_against_confirmed_listen_evidence",
+      evidence_path: confirmedRetryEvidencePath,
+      evidence_sha256: confirmedRetryEvidenceSha256,
+      pre_retry_narration_report_sha256: priorNarrationReportSha256,
+      confirmed_artifacts: validatedConfirmedRetryEvidence,
+    };
     if (scopedRecoveryUnits.length) {
       if (policy.synthesis_contract.mode
         === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
@@ -3241,19 +3862,16 @@ async function main() {
               batchPlanSha256: batchPlan.batch_plan_sha256,
               confirmedDefect: confirmed?.defect_type ?? null,
               confirmedEvidencePath: confirmed
-                ? confirmedEvidencePath
+                ? confirmedRetryEvidencePath
                 : null,
               confirmedEvidenceSha256: confirmed
-                ? confirmedEvidenceSha256
+                ? confirmedRetryEvidenceSha256
                 : null,
             }),
           );
         }
         recoveryScope = {
-          ...(recoveryScope ?? {
-            mode: "objective_exact_unit_recovery",
-            status: "objective_truncation_or_synthesis_failure_confirmed",
-          }),
+          ...recoveryScope,
           synthesis_recovery_mode: QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
           batch_plan_sha256: batchPlan.batch_plan_sha256,
           exact_unit_ids: scopedRecoveryUnits.map((unit) => unit.unit_id),
@@ -3276,6 +3894,41 @@ async function main() {
         });
       }
     }
+  } else {
+    // A fresh invocation uses the fixed cohort manifest. An interrupted
+    // invocation switches to a source-ordered serial resume containing only
+    // units that have no hash-verified accepted selection; accepted IDs never
+    // enter the jobs manifest again.
+    const authorizedIds = new Set(
+      finalSynthesisScope.authorized_synthesis_unit_ids.map(String),
+    );
+    const targetUnits = units.filter(
+      (unit) => authorizedIds.has(String(unit.unit_id)),
+    );
+    const incompleteBatchResume = preservedForInvocation.length > 0
+      && policy.synthesis_contract.mode
+        === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode;
+    const recoveryProvenanceByUnit = new Map();
+    if (incompleteBatchResume) {
+      const bindingByUnit = qwenBatchBindingByUnit(batchPlan);
+      for (const unit of targetUnits) {
+        recoveryProvenanceByUnit.set(
+          String(unit.unit_id),
+          incompleteUnitResumeProvenanceForTests({
+            unit,
+            cohortBinding: bindingByUnit.get(String(unit.unit_id)),
+            batchPlanSha256: batchPlan.batch_plan_sha256,
+            preSynthesisGateSha256: preSynthesisGate.gate_sha256,
+          }),
+        );
+      }
+    }
+    await qaSynthesis("qwen", 1, targetUnits, {
+      synthesisMode: incompleteBatchResume
+        ? QWEN_LIAM_INCOMPLETE_UNIT_RESUME_MODE
+        : policy.synthesis_contract.mode,
+      recoveryProvenanceByUnit,
+    });
   }
   let unresolved = units.filter((unit) => !selected.has(unit.unit_id));
   if (recoveryScope) {
@@ -3302,7 +3955,7 @@ async function main() {
       voiceSha256: policy.primary.voice_sha256,
       voiceContinuityContract: policy.primary.voice_continuity_contract,
       generationPlanSha256: plan.plan_sha256 ?? planSha256,
-      generationPlanFileSha256: planSha256,
+      generationPlanFileSha256: planFileSha256,
       qualityContractSha256: narrationQualityContract.contract_sha256,
       providerExecution: {
         synthesis_contract: policy.synthesis_contract,
@@ -3470,7 +4123,7 @@ async function main() {
     const listenReviewPacket = exactNarrationListenReviewPacket({
       rows,
       generationPlanSha256: plan.plan_sha256 ?? planSha256,
-      generationPlanFileSha256: planSha256,
+      generationPlanFileSha256: planFileSha256,
       qualityContractSha256: narrationQualityContract.contract_sha256,
     });
     unitDeliveryQaV2 = {
@@ -3522,6 +4175,7 @@ async function main() {
   unitQaReport.source_script_hash = scriptHash;
   unitQaReport.narration_generation_plan_path = planPath;
   unitQaReport.narration_generation_plan_sha256 = planSha256;
+  unitQaReport.narration_generation_plan_file_sha256 = planFileSha256;
   unitQaReport.selection_policy_version = NARRATION_TTS_SELECTION_POLICY_VERSION;
   unitQaReport.recovery_scope = recoveryScope;
   unitQaReport.narration_quality_contract_sha256 =
@@ -3596,6 +4250,7 @@ async function main() {
       status: "not_run_due_to_unit_blockers",
       source_script_hash: scriptHash,
       narration_generation_plan_sha256: planSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
       recovery_scope: recoveryScope,
       blockers,
     });
@@ -3605,6 +4260,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
       recovery_scope: recoveryScope,
       stitch_repair_tail_unit_ids: stitchRepairTailUnitIds,
       skip_rendered_transcript_qa: skipRenderedTranscriptQa,
@@ -3632,6 +4288,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
       recovery_scope: recoveryScope,
       policy,
       ...statusContract,
@@ -3693,6 +4350,7 @@ async function main() {
       policy_version: QA_POLICY_VERSION,
       source_script_hash: scriptHash,
       narration_generation_plan_sha256: planSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
       recovery_scope: recoveryScope,
       blockers,
     });
@@ -3702,6 +4360,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
       recovery_scope: recoveryScope,
       stitch_repair_tail_unit_ids: stitchRepairTailUnitIds,
       skip_rendered_transcript_qa: skipRenderedTranscriptQa,
@@ -3732,6 +4391,7 @@ async function main() {
       source_script_hash: scriptHash,
       narration_generation_plan_path: planPath,
       narration_generation_plan_sha256: planSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
       recovery_scope: recoveryScope,
       policy,
       ...statusContract,
@@ -3815,6 +4475,7 @@ async function main() {
     policy_version: QA_POLICY_VERSION,
     source_script_hash: scriptHash,
     narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
     recovery_scope: recoveryScope,
     audio_path: finalWav,
     audio_sha256: await sha256File(finalWav),
@@ -3932,6 +4593,7 @@ async function main() {
     source_script_hash: scriptHash,
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
     narration_quality_contract_sha256:
       narrationQualityContract?.contract_sha256 ?? null,
     provider_output_manifest_path: providerOutputManifest
@@ -3985,6 +4647,7 @@ async function main() {
     run_identity_path: identityPath,
     narration_generation_plan_path: planPath,
     narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
     recovery_scope: recoveryScope,
     policy,
     ...statusContract,

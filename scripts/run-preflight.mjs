@@ -175,7 +175,7 @@ const planningEffortPolicy = normalizePlanningEffortPolicy(
 );
 const planningDefaultReasoningEffort = normalizePlanningEffort(
   explicitPlanningReasoningEffort
-    ?? (planningProvider === "chatgpt_web" || planningProvider === PLANNING_ROOM_PROVIDER
+    ?? (planningProvider === "chatgpt_web"
       ? DEFAULT_WEB_PLANNING_REASONING_EFFORT
       : DEFAULT_CODEX_REASONING_EFFORT),
 );

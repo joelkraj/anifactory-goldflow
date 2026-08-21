@@ -5,13 +5,22 @@ import {
   CHATGPT_WEB_PLANNER_MAX_CONCURRENCY,
   CHATGPT_WEB_PLANNING_MODEL,
   CHATGPT_WEB_WAVEFRONT_PLANNER_CONCURRENCY,
+  DEFAULT_PLANNING_ROOM_EFFORT_POLICY,
   DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY,
   DEFAULT_WEB_PLANNING_EFFORT_POLICY,
   plannerConcurrencyForIdentity,
   planningEffortForStage,
   planningProviderForIdentity,
   planningRuntimeFromProcessContext,
+  webPlannerEffortForStage,
 } from "../lib/planning-runtime-policy.mjs";
+import {
+  PLANNING_ROOM_PROVIDER,
+  PREMIUM_WEB_ADVISORY_MAX_TIMEOUT_MS,
+  plannerStageClass,
+  plannerStageExecutionPolicy,
+  planningProvidersForStage,
+} from "../lib/planner-provider-registry.mjs";
 import {
   chatGptWebConversationScope,
   normalizeChatGptWebProjectUrl,
@@ -235,6 +244,62 @@ assert.equal(planningEffortForStage("winner_script_generation", { runtime: webAd
 assert.equal(planningEffortForStage("ep_01_visual_plan_chunk_001", { runtime: webAdaptiveRuntime }), "high");
 assert.equal(planningEffortForStage("ep_01_score_drop_plan", { runtime: webAdaptiveRuntime }), "medium");
 
+const newPlanningRoomIdentity = { planning_provider: PLANNING_ROOM_PROVIDER };
+const planningRoomCodexRuntime = {
+  ...standaloneRuntime,
+  provider: "codex_cli",
+  effortPolicy: DEFAULT_PLANNING_ROOM_EFFORT_POLICY,
+  defaultEffort: "medium",
+};
+for (const criticalStage of [
+  "ep_01_semantic_scene_plan_chunk_001",
+  "ep_01_semantic_scene_plan_global_reconciliation",
+  "narration_performance",
+  "ep_01_visual_beat_chunk_001",
+  "ep_01_visual_reference_plan_chunk_001",
+  "ep_01_visual_reference_plan_merge",
+  "ep_01_visual_plan_chunk_001",
+  "ep_01_visual_prompt_validation",
+  "transition_edit_plan",
+]) {
+  assert.deepEqual(
+    planningProvidersForStage(newPlanningRoomIdentity, criticalStage, { availableOnly: false }),
+    ["codex_cli"],
+    `${criticalStage} must stay Codex-only on the critical path`,
+  );
+  assert.equal(planningEffortForStage(criticalStage, { runtime: planningRoomCodexRuntime }), "medium");
+}
+const legacyGlobalRouteIdentity = {
+  planning_provider: PLANNING_ROOM_PROVIDER,
+  planning_room: { stage_routes: { global_reasoning: ["gemini_web", "chatgpt_web", "codex_cli"] } },
+};
+assert.deepEqual(
+  planningProvidersForStage(legacyGlobalRouteIdentity, "ep_01_semantic_scene_plan_global_reconciliation", { availableOnly: false }),
+  ["gemini_web", "chatgpt_web", "codex_cli"],
+);
+for (const optionalWebStage of [
+  "global_creative_direction",
+  "opening_animation_direction",
+  "difficult_hero_scene",
+  "visual_prompt_audit",
+  "youtube_upload_packaging",
+]) {
+  assert.equal(plannerStageClass(optionalWebStage), "premium_creative");
+  assert.deepEqual(
+    planningProvidersForStage(newPlanningRoomIdentity, optionalWebStage, { availableOnly: false }),
+    ["chatgpt_web", "codex_cli"],
+  );
+  assert.equal(webPlannerEffortForStage(optionalWebStage, { policy: DEFAULT_PLANNING_ROOM_EFFORT_POLICY }), "medium");
+  assert.deepEqual(plannerStageExecutionPolicy(optionalWebStage), {
+    blocking: false,
+    advisory: true,
+    provider: "chatgpt_web",
+    reasoning_effort: "medium",
+    max_timeout_ms: PREMIUM_WEB_ADVISORY_MAX_TIMEOUT_MS,
+    timeout_disposition: "omit_advisory_and_continue",
+  });
+}
+
 const sourceContract = sourceModelContract({});
 assert.equal(sourceContract.provider, SOURCE_MODEL_PROVIDER);
 assert.equal(sourceContract.model, SOURCE_MODEL_MODEL);
@@ -272,7 +337,7 @@ const storyTruthMediumContract = sourceModelContract(
 );
 assert.equal(sourceResearchContract.provider, "gemini_web");
 assert.equal(sourceResearchContract.stage_class, "source_research");
-assert.equal(sourceAuditContract.provider, "gemini_web");
+assert.equal(sourceAuditContract.provider, "codex_cli");
 assert.equal(sourceAuditContract.stage_class, "global_reasoning");
 assert.equal(storyTruthContract.provider, "codex_cli");
 assert.equal(storyTruthContract.stage_class, "local_reconciliation");
@@ -328,6 +393,14 @@ assert.deepEqual(chatGptWebWorkerPoolForKind("reference"), { id: "image", limit:
 assert.deepEqual(chatGptWebWorkerPoolForKind("deep_text"), { id: "deep-text", limit: 1 });
 assert.deepEqual(chatGptWebWorkerPoolForKind("browser"), { id: "browser", limit: 10 });
 const fastPremiumProfile = productionProfileById("fast_premium_v1");
+assert.equal(fastPremiumProfile.target_wall_clock_minutes, 420);
+assert.deepEqual(fastPremiumProfile.target_wall_clock_band_minutes, { minimum: 300, maximum: 420 });
+assert.equal(fastPremiumProfile.stretch_target_wall_clock_minutes, 300);
+assert.equal(fastPremiumProfile.planner.semantic_concurrency, 8);
+assert.equal(fastPremiumProfile.planner.editorial_concurrency, 8);
+assert.equal(fastPremiumProfile.planner.visual_ref_chunk_concurrency, 8);
+assert.equal(fastPremiumProfile.planner.visual_chunk_concurrency, 8);
+assert.equal(fastPremiumProfile.planner.antigravity_cli_structured_concurrency, 0);
 assert.equal(fastPremiumProfile.planner.chatgpt_web_deep_text_concurrency, 1);
 assert.equal(fastPremiumProfile.planner.chatgpt_web_reasoning_starts_per_window, 2);
 assert.equal(fastPremiumProfile.planner.chatgpt_web_reasoning_window_ms, 900_000);

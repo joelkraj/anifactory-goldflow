@@ -1269,6 +1269,26 @@ async function testPersistentFlowWorkerPool() {
   assert.equal(creativeSubmissions, 1, "one successful asset must receive exactly one creative submission");
   assert.equal(firstSlotTwo.isClosed(), false, "a successful persistent Flow job must leave its slot page open");
 
+  const lostPage = makePage(1);
+  lostPage.locator = (selector) => {
+    const visible = !/Sign in/i.test(selector) && !selector.includes('data-slate-editor');
+    return {
+      async count() { return visible ? 1 : 0; },
+      nth() { return this; },
+      async isVisible() { return visible; },
+    };
+  };
+  browser.workerPages.set(1, { slot: 1, page: lostPage, projectUrl: projectUrl(1) });
+  let recoveredSlots = 0;
+  const originalCreatePersistentWorkerPage = browser.createPersistentWorkerPage.bind(browser);
+  browser.createPersistentWorkerPage = async (slot) => {
+    recoveredSlots += 1;
+    return originalCreatePersistentWorkerPage(slot);
+  };
+  const recoveredPage = await browser.persistentJobPage(1, { composerTimeoutMs: 1 });
+  assert.notEqual(recoveredPage, lostPage, "a persistent Flow slot without a composer must be replaced before submission");
+  assert.equal(recoveredSlots, 1, "only the broken persistent Flow slot may be recreated");
+
   browser.waitForGeneratedImage = async () => {
     const error = new Error("Generation failed after submission");
     error.code = "google_flow_generation_error";

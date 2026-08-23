@@ -407,7 +407,25 @@ export class GoogleFlowBrowser {
     return promise;
   }
 
-  async persistentJobPage(slotValue) {
+  async replacePersistentWorkerPage(slotValue, priorWorker, reason) {
+    const slot = this.assertWorkerSlot(slotValue);
+    if (priorWorker?.page && priorWorker.page !== this.loginPage) {
+      await priorWorker.page.close().catch(() => {});
+    }
+    this.workerPages.delete(slot);
+    this.workerPagePromises.delete(slot);
+    this.log(`Recreating Google Flow worker slot ${slot + 1}: ${reason}`, "warn");
+    try {
+      return await this.ensurePersistentWorkerPage(slot);
+    } catch (error) {
+      throw codedError(
+        "provider_response_timeout",
+        `Timed out recovering Google Flow persistent worker slot ${slot + 1}: ${redactBrowserDiagnostic(error.message)}`,
+      );
+    }
+  }
+
+  async persistentJobPage(slotValue, { composerTimeoutMs = 30_000 } = {}) {
     const slot = this.assertWorkerSlot(slotValue);
     let worker = await this.ensurePersistentWorkerPage(slot);
     if (worker.page.isClosed()) worker = await this.ensurePersistentWorkerPage(slot);
@@ -415,8 +433,12 @@ export class GoogleFlowBrowser {
     if (await visibleLocator(worker.page.locator(SIGNED_OUT_SELECTOR))) {
       throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
     }
-    if (!await waitForVisible(worker.page.locator(PROMPT_SELECTOR), { timeoutMs: 30_000 })) {
-      throw codedError("ui_contract_mismatch", `Google Flow persistent worker slot ${slot + 1} lost its project composer.`);
+    if (!await waitForVisible(worker.page.locator(PROMPT_SELECTOR), { timeoutMs: composerTimeoutMs })) {
+      worker = await this.replacePersistentWorkerPage(
+        slot,
+        worker,
+        "the slot-bound project no longer exposed its composer before submission",
+      );
     }
     return worker.page;
   }

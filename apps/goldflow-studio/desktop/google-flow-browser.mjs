@@ -184,6 +184,14 @@ export function flowModelLabelMatches(actual, expected) {
     && !actualLabel.includes("lowerpriority");
 }
 
+export function flowPlanVerificationEvidence(bodyText, expectedPlan, configuredModel) {
+  const text = String(bodyText ?? "");
+  const escape = (value) => String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (expectedPlan && new RegExp(`\\b${escape(expectedPlan)}\\b`, "i").test(text)) return "visible_plan_badge";
+  if (configuredModel && new RegExp(escape(configuredModel), "i").test(text)) return "visible_model_entitlement";
+  return null;
+}
+
 export function nearestFlowVideoDuration(requested, available = [4, 6, 8]) {
   const options = [...new Set(available.map(Number).filter((value) => Number.isFinite(value) && value > 0))]
     .sort((left, right) => left - right);
@@ -516,9 +524,6 @@ export class GoogleFlowBrowser {
     };
     try {
       let bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
-      if (!new RegExp(`\\b${this.flowPlanLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(bodyText)) {
-        throw codedError("account_mismatch", `Expected Google Flow plan badge ${this.flowPlanLabel}.`);
-      }
 
       let modelControl = await visibleLocator(page.getByRole("button", { name: /Nano Banana/i }));
       if (!modelControl) {
@@ -555,7 +560,11 @@ export class GoogleFlowBrowser {
       if (!/16:9|crop_16_9/.test(configuredText) || !/x1\b/.test(configuredText)) {
         throw codedError("ui_contract_mismatch", `Google Flow did not retain 16:9 x1 settings: ${configuredText}.`);
       }
-      return { ...contract, verified_at: new Date().toISOString() };
+      const accountPlanEvidence = flowPlanVerificationEvidence(bodyText, this.flowPlanLabel, this.flowModelLabel);
+      if (!accountPlanEvidence) {
+        throw codedError("account_mismatch", `Google Flow exposed neither plan ${this.flowPlanLabel} nor entitled model ${this.flowModelLabel}.`);
+      }
+      return { ...contract, account_plan_evidence: accountPlanEvidence, verified_at: new Date().toISOString() };
     } catch (caught) {
       const error = caught instanceof Error ? caught : new Error(String(caught));
       const diagnosticPath = await this.diagnostics(page, contract, error).catch(() => null);
@@ -1435,10 +1444,7 @@ export class GoogleFlowBrowser {
       input_binding: "first_frame",
     };
     try {
-      const bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
-      if (!new RegExp(`\\b${this.flowPlanLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(bodyText)) {
-        throw codedError("account_mismatch", `Expected Google Flow plan badge ${this.flowPlanLabel}.`);
-      }
+      let bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
       let mediaControl = await visibleLocator(page.getByRole("button", { name: FLOW_COMPOSER_MEDIA_CONTROL_PATTERN }));
       if (!mediaControl) {
         const agentToggle = await visibleLocator(page.getByRole("button", { name: "Agent", exact: true }));
@@ -1504,7 +1510,12 @@ export class GoogleFlowBrowser {
         }
         throw codedError("ui_contract_mismatch", "Google Flow did not retain Video Frames mode after configuration.");
       }
-      return { ...contract, verified_at: new Date().toISOString() };
+      bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
+      const accountPlanEvidence = flowPlanVerificationEvidence(bodyText, this.flowPlanLabel, contract.model_label);
+      if (!accountPlanEvidence) {
+        throw codedError("account_mismatch", `Google Flow exposed neither plan ${this.flowPlanLabel} nor entitled model ${contract.model_label}.`);
+      }
+      return { ...contract, account_plan_evidence: accountPlanEvidence, verified_at: new Date().toISOString() };
     } catch (caught) {
       const error = caught instanceof Error ? caught : new Error(String(caught));
       const diagnosticPath = await this.diagnostics(page, contract, error).catch(() => null);

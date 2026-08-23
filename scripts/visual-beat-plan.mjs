@@ -23,6 +23,10 @@ import {
   contentProfileForIdentity,
   contentProfilePlannerRole,
 } from "./lib/content-profiles.mjs";
+import {
+  CURRENT_VISUAL_BEAT_CONTRACT_VERSION,
+  LEGACY_VISUAL_BEAT_CONTRACT_VERSION,
+} from "./lib/visual-beat-contract.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -66,8 +70,9 @@ const blockVisualBeatQualityFindings = flags["block-visual-beat-quality-findings
 const scopeStartSec = flags["scope-start-sec"] == null ? null : Number(flags["scope-start-sec"]);
 const scopeEndSec = flags["scope-end-sec"] ?? flags["max-time-sec"] ?? flags["first-sec"];
 const scopeEndSecNumber = scopeEndSec == null ? null : Number(scopeEndSec);
-const VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
-const EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v4_quality_spine";
+const VISUAL_BEAT_CONTRACT_VERSION = LEGACY_VISUAL_BEAT_CONTRACT_VERSION;
+const EDITORIAL_VISUAL_BEAT_CONTRACT_VERSION =
+  CURRENT_VISUAL_BEAT_CONTRACT_VERSION;
 
 function parseFlags(parts) {
   const parsed = {};

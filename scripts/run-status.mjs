@@ -115,11 +115,13 @@ import {
   validateNarrationSubjectiveReviewDecision,
   validateNarrationSubjectiveReviewManifest,
 } from "./lib/narration-subjective-review.mjs";
+import {
+  CURRENT_VISUAL_BEAT_CONTRACT_VERSION,
+  LEGACY_VISUAL_BEAT_CONTRACT_VERSION,
+} from "./lib/visual-beat-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
-const CURRENT_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_editorial_v3";
-const LEGACY_VISUAL_BEAT_CONTRACT_VERSION = "visual_beat_ref_strategy_v2";
 // Legacy identities may omit pace targets. New preflights always bind the
 // current 180-195 contract explicitly, while missing historical values retain
 // their original compatibility defaults.

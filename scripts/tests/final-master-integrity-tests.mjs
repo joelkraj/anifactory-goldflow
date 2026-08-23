@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
+  buildFinalMasterIntegrity,
   parseFinalMasterDiagnosticsForTests,
   renderContractFindingsForTests,
+  resolvedGeneratedMotionSourceHashes,
 } from "../lib/final-master-integrity.mjs";
 
 const cleanReport = {
@@ -55,5 +61,64 @@ assert.deepEqual(new Set(diagnostics.review_findings.map((row) => row.code)), ne
   "long_frozen_span_detected",
   "interior_audio_silence_detected",
 ]));
+
+const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-master-integrity-"));
+const generatedVideoPath = path.join(tempDir, "generated.mp4");
+const generatedBytes = Buffer.from("generated-motion-fixture", "utf8");
+await fs.writeFile(generatedVideoPath, generatedBytes);
+const generatedSha256 = createHash("sha256").update(generatedBytes).digest("hex");
+const motionPlanPath = path.join(tempDir, "motion_edit_plan_ep_01.json");
+await fs.writeFile(motionPlanPath, JSON.stringify({
+  motion_intents: [{
+    image_id: "cut_legacy",
+    generated_video_treatment: { video_path: generatedVideoPath },
+  }],
+}));
+const legacyRenderReport = {
+  ...cleanReport,
+  source_hashes: { [motionPlanPath]: "fixture-motion-plan-hash" },
+  render_motion: {
+    ...cleanReport.render_motion,
+    planned_approved_generated_video_count: 1,
+    generated_video_clip_count: 1,
+    generated_video_clip_ids: ["cut_legacy"],
+    generated_video_source_hashes: { cut_legacy: generatedSha256 },
+  },
+};
+assert.deepEqual(await resolvedGeneratedMotionSourceHashes(legacyRenderReport), {
+  [generatedVideoPath]: generatedSha256,
+});
+const legacyIntegrity = await buildFinalMasterIntegrity({
+  videoPath: path.join(tempDir, "master.mp4"),
+  finalVideoSha256: "master-fixture-hash",
+  durationSec: 120,
+  renderReport: legacyRenderReport,
+  renderReportPath: null,
+  outputPath: null,
+  scanner: async () => ({ video_stderr: "", audio_stderr: "" }),
+});
+assert.equal(legacyIntegrity.status, "passed");
+assert.equal(legacyIntegrity.generated_motion_delivery.source_hash_checks[0].path, generatedVideoPath);
+
+const missingSourceIntegrity = await buildFinalMasterIntegrity({
+  videoPath: path.join(tempDir, "master.mp4"),
+  finalVideoSha256: "master-fixture-hash",
+  durationSec: 120,
+  renderReport: {
+    ...cleanReport,
+    render_motion: {
+      ...cleanReport.render_motion,
+      planned_approved_generated_video_count: 1,
+      generated_video_clip_count: 1,
+      generated_video_clip_ids: ["cut_missing"],
+      generated_video_source_hashes: { [path.join(tempDir, "missing.mp4")]: "missing-hash" },
+    },
+  },
+  renderReportPath: null,
+  outputPath: null,
+  scanner: async () => ({ video_stderr: "", audio_stderr: "" }),
+});
+assert.ok(missingSourceIntegrity.blockers.some((row) => row.code === "generated_motion_source_stale_or_missing"));
+await fs.rm(tempDir, { recursive: true, force: true });
 
 console.log("final master integrity tests passed");

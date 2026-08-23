@@ -2257,7 +2257,10 @@ async function buildMotionClips(
     planned_approved_generated_video_count: generatedVideoPlanCoverage.declared_count,
     generated_video_clip_count: consumedGeneratedVideoRows.length,
     generated_video_clip_ids: consumedGeneratedVideoRows.map((row) => row.prompt.image_id),
-    generated_video_source_hashes: Object.fromEntries(consumedGeneratedVideoRows.map((row) => [row.prompt.image_id, row.generatedVideoSha256])),
+    generated_video_source_hashes: Object.fromEntries(consumedGeneratedVideoRows.map((row) => [
+      row.generatedVideoTreatment.video_path,
+      row.generatedVideoSha256,
+    ])),
   };
 }
 

@@ -31,9 +31,28 @@ function unique(values) {
 }
 
 async function existingHash(filePath) {
-  return fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false)
-    ? sha256File(filePath)
-    : null;
+  const isFile = await fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false);
+  return isFile ? sha256File(filePath) : null;
+}
+
+export async function resolvedGeneratedMotionSourceHashes(renderReport) {
+  const configured = renderReport?.render_motion?.generated_video_source_hashes ?? {};
+  const entries = Object.entries(configured);
+  if (!entries.length || entries.every(([sourcePath]) => path.isAbsolute(sourcePath))) return configured;
+
+  const motionPlanPath = Object.keys(renderReport?.source_hashes ?? {})
+    .find((sourcePath) => /^motion_edit_plan_.*\.json$/i.test(path.basename(sourcePath)));
+  if (!motionPlanPath) return configured;
+
+  const motionPlan = await fs.readFile(motionPlanPath, "utf8").then(JSON.parse).catch(() => null);
+  const sourcePathByImageId = new Map((motionPlan?.motion_intents ?? []).map((intent) => [
+    String(intent?.image_id ?? ""),
+    intent?.generated_video_treatment?.video_path ?? null,
+  ]));
+  return Object.fromEntries(entries.map(([sourceIdOrPath, expectedSha256]) => [
+    sourcePathByImageId.get(sourceIdOrPath) ?? sourceIdOrPath,
+    expectedSha256,
+  ]));
 }
 
 function expectedGeneratedMotion(renderReport) {
@@ -133,7 +152,8 @@ export async function buildFinalMasterIntegrity({
   const blockers = [...contract.blockers];
   const reviewFindings = [...contract.review];
   const generatedSourceChecks = [];
-  for (const [sourcePath, expectedSha256] of Object.entries(contract.generated.source_hashes)) {
+  const generatedSourceHashes = await resolvedGeneratedMotionSourceHashes(renderReport);
+  for (const [sourcePath, expectedSha256] of Object.entries(generatedSourceHashes)) {
     const actualSha256 = await existingHash(sourcePath);
     generatedSourceChecks.push({ path: sourcePath, expected_sha256: expectedSha256, actual_sha256: actualSha256 });
     if (!actualSha256 || actualSha256 !== expectedSha256) blockers.push({ code: "generated_motion_source_stale_or_missing", path: sourcePath });

@@ -30,6 +30,7 @@ const FILLER_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_manuf
 const SELECTOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_manufacturing_selector_v1.md");
 const TOPIC_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_topic_manufacturer_v1.md");
 const TOPIC_SHORTLIST_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_topic_shortlist_v1.md");
+const SOURCE_EVIDENCE_SNAPSHOT_PATH = path.join(REPO_ROOT, "docs/channel_formulas/53rebirth_source_evidence_snapshot_v1.json");
 const DEFAULT_QWEN_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
 
 const CANDIDATES = Object.freeze([
@@ -86,6 +87,18 @@ function assertValid(label, validation) {
 
 function words(value) {
   return String(value ?? "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function mean(values) {
+  const numbers = values.map(Number).filter(Number.isFinite);
+  return numbers.length ? numbers.reduce((sum, value) => sum + value, 0) / numbers.length : null;
+}
+
+function median(values) {
+  const numbers = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
+  if (!numbers.length) return null;
+  const middle = Math.floor(numbers.length / 2);
+  return numbers.length % 2 ? numbers[middle] : (numbers[middle - 1] + numbers[middle]) / 2;
 }
 
 function runLocal(command, args) {
@@ -160,7 +173,7 @@ async function activeManufacturingTemplate(directory, flags) {
   assertValid("base manufacturing template", validateManufacturingTemplate(base));
   const currentPath = activeTemplateManifestPath(directory, flags);
   if (!await exists(currentPath)) {
-    return { content: base, path: BASE_TEMPLATE_PATH, sha256: sha256Text(base), version: "base_v1", currentPath: null };
+    return { content: base, path: BASE_TEMPLATE_PATH, sha256: sha256Text(base), version: "base_v1_reversal_v2", currentPath: null };
   }
   const current = JSON.parse(await fs.readFile(currentPath, "utf8"));
   if (current?.schema !== "goldflow_manhwa_manufacturing_active_template_v1" || current?.status !== "approved") {
@@ -622,7 +635,14 @@ async function selectCandidate(directory, flags) {
     return { portfolio, document, selectionPath, selectedScriptPath };
   }
   const selector = promptBody(await fs.readFile(SELECTOR_PROMPT_PATH, "utf8"));
-  const calibration = portfolio.prepared.brief.document.own_channel_apv_observations ?? [];
+  let calibration = portfolio.prepared.brief.document.own_channel_apv_observations ?? [];
+  if (calibration.length === 0) {
+    const evidenceSnapshot = JSON.parse(await fs.readFile(SOURCE_EVIDENCE_SNAPSHOT_PATH, "utf8"));
+    calibration = (evidenceSnapshot.own_channel_evidence ?? []).map((row) => ({
+      title: row.title,
+      average_percentage_viewed: row.average_percentage_viewed,
+    }));
+  }
   // Content-addressed ordering removes the fixed model/position pattern without exposing authorship.
   const selectorCandidates = [...portfolio.document.candidates]
     .sort((left, right) => left.output_sha256.localeCompare(right.output_sha256));
@@ -655,6 +675,169 @@ async function selectCandidate(directory, flags) {
   const winner = portfolio.document.candidates.find((row) => row.blind_id === document.selected_blind_id);
   await writeExclusive(selectedScriptPath, await fs.readFile(winner.output_path));
   return { portfolio, document, selectionPath, selectedScriptPath };
+}
+
+async function comparePromptVersions(directory, flags) {
+  if (!flags["legacy-manifest"]) throw new Error("Use --legacy-manifest <recovered-drafts-manifest.json>.");
+  const portfolio = await writeCandidates(directory, flags);
+  const legacyManifestPath = path.resolve(flags["legacy-manifest"]);
+  const legacyManifest = JSON.parse(await fs.readFile(legacyManifestPath, "utf8"));
+  if (legacyManifest?.schema !== "goldflow_recovered_web_drafts_v1" || legacyManifest?.status !== "recovered") {
+    throw new Error("Legacy comparison manifest is invalid.");
+  }
+  if (!Array.isArray(legacyManifest.candidates) || legacyManifest.candidates.length < 1) {
+    throw new Error("Legacy comparison manifest has no candidates.");
+  }
+
+  const compactCandidates = portfolio.document.candidates.map((row) => ({
+    candidate_id: row.id,
+    source_prompt_version: "compact_v2",
+    source_prompt_sha256: portfolio.document.filled_prompt_sha256,
+    provider: row.provider,
+    model: row.model,
+    output_path: row.output_path,
+    output_sha256: row.output_sha256,
+    word_count: row.word_count,
+  }));
+  const legacyCandidates = [];
+  for (const row of legacyManifest.candidates) {
+    const outputPath = path.resolve(row.output_path);
+    if (!await exists(outputPath)) throw new Error(`Legacy candidate is missing: ${row.id}.`);
+    const outputSha256 = await fileSha256(outputPath);
+    if (outputSha256 !== row.output_sha256) throw new Error(`Legacy candidate hash mismatch: ${row.id}.`);
+    legacyCandidates.push({
+      candidate_id: row.id,
+      source_prompt_version: row.source_prompt_version ?? "long_v1",
+      source_prompt_sha256: legacyManifest.source_prompt_sha256,
+      provider: row.provider,
+      model: row.model_slug,
+      output_path: outputPath,
+      output_sha256: outputSha256,
+      word_count: row.word_count ?? words(await fs.readFile(outputPath, "utf8")),
+    });
+  }
+
+  const candidates = [...compactCandidates, ...legacyCandidates]
+    .sort((left, right) => sha256Text(`prompt-ab\0${left.output_sha256}`).localeCompare(sha256Text(`prompt-ab\0${right.output_sha256}`)))
+    .map((row, index) => ({ ...row, blind_id: `candidate_${String.fromCharCode(97 + index)}` }));
+  if (candidates.length > 26) throw new Error("Prompt comparison supports at most 26 candidates.");
+
+  const decodeManifestPath = path.join(directory, "manufacturing_prompt_ab_decode_manifest.json");
+  const decodeManifest = {
+    schema: "goldflow_manhwa_prompt_ab_decode_manifest_v1",
+    status: "ready",
+    comparison_rule: "Candidate source prompt, provider, model, length, and original ID were hidden from the selector.",
+    current_portfolio_path: portfolio.portfolioPath,
+    current_portfolio_sha256: await fileSha256(portfolio.portfolioPath),
+    legacy_manifest_path: legacyManifestPath,
+    legacy_manifest_sha256: await fileSha256(legacyManifestPath),
+    candidates,
+    created_at: new Date().toISOString(),
+  };
+  if (!await exists(decodeManifestPath)) await writeJsonExclusive(decodeManifestPath, decodeManifest);
+  else {
+    const existing = JSON.parse(await fs.readFile(decodeManifestPath, "utf8"));
+    const existingInputs = (existing.candidates ?? []).map((row) => `${row.blind_id}:${row.output_sha256}`).join("|");
+    const currentInputs = candidates.map((row) => `${row.blind_id}:${row.output_sha256}`).join("|");
+    if (existingInputs !== currentInputs) throw new Error("Existing prompt comparison decode manifest is stale.");
+  }
+
+  const selector = promptBody(await fs.readFile(SELECTOR_PROMPT_PATH, "utf8"));
+  let calibration = portfolio.prepared.brief.document.own_channel_apv_observations ?? [];
+  if (calibration.length === 0) {
+    const evidenceSnapshot = JSON.parse(await fs.readFile(SOURCE_EVIDENCE_SNAPSHOT_PATH, "utf8"));
+    calibration = (evidenceSnapshot.own_channel_evidence ?? []).map((row) => ({
+      title: row.title,
+      average_percentage_viewed: row.average_percentage_viewed,
+    }));
+  }
+  let prompt = `${selector}\n\nBLIND PROMPT-STRATEGY EXPERIMENT\nThe scripts below were produced by more than one undisclosed instruction strategy. Do not guess, discuss, or reward a strategy, model, provider, manuscript length, or candidate family. Judge only the exact narration each viewer would hear. Apply the same standard independently to every candidate.\n\nAPPROVED TITLE, PREMISE, AND OPENING TARGET\n${JSON.stringify({
+    title: portfolio.prepared.brief.document.title,
+    core_premise: portfolio.prepared.brief.document.core_premise,
+    opening_target: portfolio.prepared.brief.document.opening_target,
+    reference_outlier: portfolio.prepared.brief.document.reference_outlier,
+    reference_opening_benchmark: portfolio.prepared.brief.document.reference_opening_benchmark ?? null,
+  }, null, 2)}\n\nOWN-CHANNEL APV CALIBRATION\n${JSON.stringify(calibration, null, 2)}\n\nBLIND MANIFEST\n${JSON.stringify(candidates.map((row) => ({ blind_id: row.blind_id, sha256: row.output_sha256 })), null, 2)}`;
+  for (const row of candidates) prompt += `\n\nBLIND CANDIDATE ${row.blind_id}\n${await fs.readFile(row.output_path, "utf8")}`;
+
+  const rawPath = path.join(directory, ".model_responses", "manufacturing_prompt_ab_selection.txt");
+  const selectionPath = path.join(directory, "manufacturing_prompt_ab_selection.json");
+  let selection;
+  let shouldWriteSelection = false;
+  if (await exists(selectionPath)) {
+    selection = JSON.parse(await fs.readFile(selectionPath, "utf8"));
+  } else {
+    const response = await modelCall({
+      outputPath: rawPath,
+      prompt,
+      provider: "chatgpt_web",
+      model: "gpt-5.6-sol",
+      effort: "medium",
+      stageName: "winner_source_prompt_strategy_ab_selection",
+      timeoutMs: Number(flags["selector-timeout-ms"] ?? 3_600_000),
+    });
+    try {
+      selection = parseJsonObjectFromPlannerOutput(response.content).value;
+    } catch (error) {
+      throw new Error(`Prompt comparison selector returned malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    shouldWriteSelection = true;
+  }
+  assertValid("prompt comparison selection", validateManufacturingSelection(selection, {
+    portfolio: { candidates: candidates.map((row) => ({ blind_id: row.blind_id })) },
+  }));
+  if (shouldWriteSelection) await writeJsonExclusive(selectionPath, selection);
+
+  const decodedRankings = [...selection.rankings]
+    .sort((left, right) => Number(left.rank) - Number(right.rank))
+    .map((row) => ({
+      ...row,
+      ...candidates.find((candidate) => candidate.blind_id === row.blind_id),
+    }));
+  const versions = [...new Set(candidates.map((row) => row.source_prompt_version))];
+  const promptVersionSummary = versions.map((version) => {
+    const rows = decodedRankings.filter((row) => row.source_prompt_version === version);
+    return {
+      source_prompt_version: version,
+      candidate_count: rows.length,
+      best_rank: Math.min(...rows.map((row) => Number(row.rank))),
+      top_three_count: rows.filter((row) => Number(row.rank) <= 3).length,
+      mean_predicted_apv: Number(mean(rows.map((row) => row.predicted_average_percentage_viewed)).toFixed(2)),
+      median_predicted_apv: Number(median(rows.map((row) => row.predicted_average_percentage_viewed)).toFixed(2)),
+      mean_opening_survival: Object.fromEntries(["thirty_seconds", "sixty_seconds", "two_minutes", "five_minutes"].map((checkpoint) => [
+        checkpoint,
+        Number(mean(rows.map((row) => row.opening_survival_curve?.[checkpoint])).toFixed(2)),
+      ])),
+    };
+  }).sort((left, right) => left.best_rank - right.best_rank);
+  const winner = decodedRankings[0];
+  const report = {
+    schema: "goldflow_manhwa_prompt_ab_report_v1",
+    status: "completed",
+    caution: "Predicted APV is a blinded pre-upload simulation, not measured audience behavior.",
+    ranking_metric: "predicted_average_percentage_viewed",
+    selected_candidate: {
+      blind_id: winner.blind_id,
+      candidate_id: winner.candidate_id,
+      source_prompt_version: winner.source_prompt_version,
+      provider: winner.provider,
+      model: winner.model,
+      output_path: winner.output_path,
+      output_sha256: winner.output_sha256,
+      predicted_average_percentage_viewed: winner.predicted_average_percentage_viewed,
+    },
+    prompt_version_summary: promptVersionSummary,
+    decoded_rankings: decodedRankings,
+    blind_decision_rationale: selection.decision_rationale,
+    selection_path: selectionPath,
+    selection_sha256: await fileSha256(selectionPath),
+    decode_manifest_path: decodeManifestPath,
+    decode_manifest_sha256: await fileSha256(decodeManifestPath),
+    completed_at: new Date().toISOString(),
+  };
+  const reportPath = path.join(directory, "manufacturing_prompt_ab_report.json");
+  if (!await exists(reportPath)) await writeJsonExclusive(reportPath, report);
+  return { report, reportPath, selectionPath, decodeManifestPath };
 }
 
 async function approveLearning(directory, flags) {
@@ -792,6 +975,19 @@ async function main() {
     }, null, 2));
     return;
   }
+  if (action === "compare-prompts") {
+    const result = await comparePromptVersions(directory, flags);
+    console.log(JSON.stringify({
+      status: "completed",
+      selected_candidate: result.report.selected_candidate,
+      prompt_version_summary: result.report.prompt_version_summary,
+      report_path: result.reportPath,
+      blind_selection_path: result.selectionPath,
+      decode_manifest_path: result.decodeManifestPath,
+      next_action: "operator reviews the blind comparison before promotion",
+    }, null, 2));
+    return;
+  }
   if (["select", "run"].includes(action)) {
     const result = await selectCandidate(directory, flags);
     const timing = await writeManufacturingTimingReport(directory);
@@ -806,7 +1002,7 @@ async function main() {
     }, null, 2));
     return;
   }
-  console.log(`Usage: goldflow source manufacture <ideate|prepare|write|select|audition|promote|run|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
+  console.log(`Usage: goldflow source manufacture <ideate|prepare|write|select|compare-prompts|audition|promote|run|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
 }
 
 main().catch((error) => {

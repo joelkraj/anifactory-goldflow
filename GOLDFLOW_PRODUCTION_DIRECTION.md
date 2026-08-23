@@ -13,7 +13,7 @@ This is not a frozen implementation specification. The latest explicit operator 
 
 ## Current Direction
 
-Last updated: 2026-08-19
+Last updated: 2026-08-22
 
 ### Operating Principle
 
@@ -71,13 +71,16 @@ Consumer Gemini CLI is not the planned route. Google moved individual Google AI 
 ### Source Story Direction
 
 - New manhwa source development defaults to `direct_manufacturer_v1`, not the V4 story room.
-- Ideation uses measured own-channel winners and external outlier titles in one GPT-5.6 Medium one-hundred-title pool, followed by one fresh GPT-5.6 Medium ten-title shortlist. The operator approves one exact title and plain-language premise.
+- Ideation uses measured own-channel winners and external outlier titles in one GPT-5.6 Medium thirty-title pool, followed by one fresh GPT-5.6 Medium ten-title shortlist. The operator approves one exact title and plain-language premise.
+- For 53rebirth, the primary premise lane is recognizable modern revenge drama with one numerical system powering money, ownership, career, status, influence, skill, or another concrete real-world climb. Romance betrayal and replacement love should materially drive the revenge and progression.
+- The secondary lane is isekai or system fantasy where the transported/reborn condition and system create the core movie. Generic guild, rank, gate, and dungeon fantasy is not the channel default and requires an explicit operator request or unusually strong measured evidence.
+- Do not modernize a completed fantasy story by swapping dungeon nouns for companies or money. Preserve the original asset and author a new modern causal movie from the emotional engine.
 - One Medium call fills the operator's versioned direct writer template. Do not create mandatory treatments, architecture, Story Truth, writer packets, diagnostics, revision, narration polish, or simulated-unanimity gates.
 - Drafting uses six complete independent candidates from the same filled prompt: three authenticated GPT-5.6 Sol Web Pro drafts and three authenticated GPT-5.5 Web Pro drafts selected through Advanced.
 - Every source-development call other than those six complete writers uses Medium.
 - Every browser page selects and verifies its exact GPT model and visible Pro effort before submission. Receipts must preserve the selected model; never substitute GPT-5.6 while labeling it 5.5 or vice versa.
 - A fresh Medium context uses one fixed twenty-viewer psychographic panel, predicted leave points, and opening survival checkpoints to select one complete blinded draft byte-for-byte using calibrated expected average percentage viewed only. Word count is a target, not a selection criterion or hard gate; a one-hundred-viewer synthetic panel is prohibited as false precision.
-- The operator's template binds first-40/80/120/300/600-word deadlines for betrayal, status, mechanic, forced use, and first proof. These direct deadlines replace inferred opening architecture.
+- The legacy-derived V1 operator template is again the production default because its first live comparison produced the strongest opening, middle architecture, character agency, and predicted APV. It preserves the first-40/80/120/300/600-word deadlines and now requires an escalating public-reversal ladder: recurring betrayers return with fresh confidence, Joey answers with a readable receipt, witnesses understand the proof, the betrayer breaks visibly, and an irreversible tangible loss creates the next opportunity. Occasional old-status challengers are permitted only when their short reversal advances the active plot. Compact V2 remains a rollback-safe experiment, not the active default.
 - Analytics at 24 hours, 72 hours, and 7 days may propose one controlled template addendum after enough distinct uploads support it. No upload or automation silently edits the prompt.
 - `first_class_story_room_v4` remains an explicit optional diagnostic/research mode for unusual cases and existing rooms; it is not the production default.
 
@@ -98,6 +101,8 @@ Consumer Gemini CLI is not the planned route. Google moved individual Google AI 
 - Replace `selective_ltx23` with a provider-neutral selective generated-motion policy.
 - Google Flow video models are the production primary.
 - Use generated motion selectively for the opening, major reveals, action peaks, emotional reversals, and climaxes.
+- When a run locks mandatory generated motion through the first three minutes, every opening cut must be animated with the run's exact highest-quality approved Flow model. Treat those cuts as one storyboarded anime sequence: preserve geography, eyelines, screen direction, prop state, and emotional state; never reset a subject to an earlier pose or substitute random ambient motion for story action.
+- Lock the episode's intended visual-beat density in `run_identity.json`. A production targeting 6-7 seconds average cut time uses a 6.5-second full-episode target, denser hook and opening-ramp targets, and verifies the achieved average from the final beat and render timelines.
 - Ordinary connective scenes retain directed single-plane motion or inspected parallax.
 - Plan motion intent while authoring the still so the accepted image is a viable first frame.
 - Start eligible Flow video work as soon as an important still passes image QA; do not wait for every episode image.
@@ -157,6 +162,7 @@ Optional hosted-upgrade bakeoff packet:
 - Package ideation begins during premise selection, not after render.
 - The script must introduce or preview the title-thumbnail promise early enough to satisfy the click.
 - Post-render packaging confirms the strongest truthful package using the finished story and current niche evidence.
+- For a deliberate ten-package launch competition, GPT Web authors ten paired title/thumbnail concepts and generates ten complete 16:9 thumbnail rasters from scratch with no image references. Every candidate must sell one truthful high-emotion moment, add information rather than merely restate its title, and use only evidence-backed text, labels, arrows, and focal subjects. A blinded simulated-viewer tournament ranks the ten complete packages; only the strongest two or three advance into the normal operator approval and native YouTube A/B contract.
 - Use native YouTube A/B testing when multiple strong packages remain.
 - Track the upload at 24 hours, 72 hours, and 7 days.
 - Classify each upload independently by `production_lineage` and `script_origin`. Pipeline-produced episodes with externally supplied narration are `pipeline_native` plus `external_ingest`; only a complete winner-source release is `goldflow_native` source-room evidence.
@@ -267,6 +273,14 @@ The architecture is implemented behind hash-bound contracts. Antigravity remains
 Exact-ID recovery, append-only execution events, immutable passed outputs, provider selection before submission, and deterministic structural validation remain mandatory across every route.
 
 ## Decision Log
+
+### 2026-08-22 - Dense Anime Opening and Ten-Package Competition
+
+The next 53rebirth production locks a 6.5-second full-episode beat target, mandatory generated motion through 180 seconds, and Flow's `Veo 3.1 Quality` model for that opening. Opening shots must form a coherent anime sequence rather than independent motion samples. After final QA, ten GPT Web title-thumbnail packages compete as complete phone-readable pairs; the ranked finalists feed the existing operator approval and native A/B path.
+
+### 2026-08-22 - Legacy Writer Prompt Restored With Reversal Ladder
+
+The blind prompt comparison and operator review both preferred the legacy GPT-5.6 Pro draft over the compact strategy. Goldflow restored the legacy-derived V1 template and filler as the default without deleting Compact V2. The active template now requires multiple increasingly costly reversals for central betrayers, fully dramatized public proof and visible collapse, and only premise-causal old-status challengers. This preserves the legacy prompt's stronger organic middle while increasing recurring revenge satisfaction without adding a new planning stage.
 
 ### 2026-08-21 - Five-to-Seven-Hour Critical Path and Asset Afterlife
 

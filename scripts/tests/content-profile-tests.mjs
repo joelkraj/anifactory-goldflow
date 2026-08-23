@@ -158,6 +158,26 @@ export async function runContentProfileTests() {
   const renderCommand = buildStageCommand("premium_render", standaloneProofIdentity);
   assert.match(renderCommand, /--diagnostic-proof true/);
   assert.match(renderCommand, /--proof-scope-end-sec 180/);
+  const denseBeatCommand = buildStageCommand("visual_beat_plan", {
+    ...standaloneProofIdentity,
+    visual_beat_timing_contract: {
+      target_beat_sec: 6.5,
+      max_beat_sec: 10,
+      min_beat_sec: 2.5,
+      hook_duration_sec: 30,
+      hook_target_beat_sec: 3,
+      hook_max_beat_sec: 4.2,
+      hook_min_beat_sec: 2.2,
+      retention_ramp_sec: 180,
+      ramp_target_beat_sec: 5.2,
+      ramp_max_beat_sec: 6.5,
+      ramp_min_beat_sec: 3.2,
+    },
+  });
+  assert.match(denseBeatCommand, /--target-beat-sec 6\.5/);
+  assert.match(denseBeatCommand, /--max-beat-sec 10/);
+  assert.match(denseBeatCommand, /--retention-ramp-sec 180/);
+  assert.match(denseBeatCommand, /--ramp-target-beat-sec 5\.2/);
   const baselineProofCommand = buildStageCommand("semantic_scene_plan", {
     ...standaloneProofIdentity,
     proof_source_mode: "audited_baseline_or_full_source",

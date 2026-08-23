@@ -303,6 +303,27 @@ async function openChatGptPowerMenu(page, powerButton) {
   return waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
 }
 
+async function expandChatGptAdvancedOptions(menu) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const control = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
+    if (!control || await control.getAttribute("aria-expanded") === "true") return;
+    try {
+      // ChatGPT re-renders this animated row before Playwright's stability wait
+      // completes. A DOM activation avoids the animation race; the next loop
+      // reacquires the row and verifies the expanded state.
+      await control.evaluate((node) => node.click());
+    } catch {
+      await control.press("Enter", { timeout: 5_000 })
+        .catch(() => control.click({ timeout: 5_000, force: true }));
+    }
+    await sleep(250);
+  }
+  const control = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
+  if (control && await control.getAttribute("aria-expanded") !== "true") {
+    throw codedError("ui_contract_mismatch", "ChatGPT Advanced options remained collapsed after bounded activation.");
+  }
+}
+
 export class ChatGptBrowser {
   constructor({ profileDir, downloadsRoot, chromeExecutable, headless = false, log = () => {}, imageStartIntervalMs = 90_000 } = {}) {
     this.profileDir = profileDir;
@@ -498,11 +519,7 @@ export class ChatGptBrowser {
       let menu = await openChatGptPowerMenu(page, powerButton);
       if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT did not expose its effort menu.");
 
-      const advancedControl = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
-      if (advancedControl && await advancedControl.getAttribute("aria-expanded") !== "true") {
-        await advancedControl.click();
-        await sleep(150);
-      }
+      await expandChatGptAdvancedOptions(menu);
       let modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
       if (!modelControl) throw codedError("ui_contract_mismatch", "ChatGPT Advanced options did not expose its model selector.");
       if (!chatGptModelControlMatches(await modelControl.innerText(), contract.model_label)) {
@@ -518,11 +535,7 @@ export class ChatGptBrowser {
           menu = await waitForVisible(page.locator('[role="menu"]:has([role="slider"]), [role="group"]:has([role="slider"])'), { timeoutMs: 10_000 });
         }
         if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT model selection closed the effort menu unexpectedly.");
-        const reopenedAdvanced = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
-        if (reopenedAdvanced && await reopenedAdvanced.getAttribute("aria-expanded") !== "true") {
-          await reopenedAdvanced.click();
-          await sleep(150);
-        }
+        await expandChatGptAdvancedOptions(menu);
         modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
       }
 
@@ -556,11 +569,7 @@ export class ChatGptBrowser {
           await page.keyboard.press("Escape").catch(() => {});
           menu = await openChatGptPowerMenu(page, powerButton);
           if (!menu) throw codedError("ui_contract_mismatch", "ChatGPT effort selection closed the power menu unexpectedly.");
-          const reopenedAdvanced = await visibleLocator(menu.getByRole("menuitem", { name: /advanced/i }));
-          if (reopenedAdvanced && await reopenedAdvanced.getAttribute("aria-expanded") !== "true") {
-            await reopenedAdvanced.click();
-            await sleep(150);
-          }
+          await expandChatGptAdvancedOptions(menu);
           modelControl = await visibleLocator(menu.getByRole("menuitem", { name: /^model\b/i }));
           menuText = (await menu.innerText()).replace(/\s+/g, " ").trim();
         }

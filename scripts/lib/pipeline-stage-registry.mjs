@@ -14,7 +14,7 @@ import {
   planningProviderForIdentity,
 } from "./planning-runtime-policy.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-08-11.2";
+export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-08-22.1";
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -547,6 +547,30 @@ function boundedProofScopeFlag(identity = {}) {
   return ` --scope-start-sec ${Number(scope.start_sec)} --scope-end-sec ${Number(scope.end_sec)}`;
 }
 
+function visualBeatTimingFlags(identity = {}) {
+  const contract = identity.visual_beat_timing_contract
+    ?? identity.provider_locks?.visual_beat_timing_contract
+    ?? null;
+  if (!contract) return "";
+  const fields = [
+    ["target-beat-sec", contract.target_beat_sec],
+    ["max-beat-sec", contract.max_beat_sec],
+    ["min-beat-sec", contract.min_beat_sec],
+    ["hook-duration-sec", contract.hook_duration_sec],
+    ["hook-target-beat-sec", contract.hook_target_beat_sec],
+    ["hook-max-beat-sec", contract.hook_max_beat_sec],
+    ["hook-min-beat-sec", contract.hook_min_beat_sec],
+    ["retention-ramp-sec", contract.retention_ramp_sec],
+    ["ramp-target-beat-sec", contract.ramp_target_beat_sec],
+    ["ramp-max-beat-sec", contract.ramp_max_beat_sec],
+    ["ramp-min-beat-sec", contract.ramp_min_beat_sec],
+  ];
+  return fields
+    .filter(([, value]) => Number.isFinite(Number(value)))
+    .map(([flag, value]) => ` --${flag} ${Number(value)}`)
+    .join("");
+}
+
 function codexReferences(identity = {}) {
   return new Set([
     "codex",
@@ -658,7 +682,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     longform_audio_mix: narratorOnly(identity)
       ? `node bin/goldflow.mjs audio longform-bed ${base} --narration-only true --narration-volume-db 0 --target-lufs -16 --true-peak-db -1.5`
       : `node bin/goldflow.mjs audio longform-bed ${base} --narration-volume-db 3 --target-lufs -13 --true-peak-db -1${narrationDuckingFlags(identity)}`,
-    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${editorialConcurrency} --editorial-attempts 1${boundedProofScopeFlag(identity)}`,
+    visual_beat_plan: `node bin/goldflow.mjs visual beats ${base} --editorial-concurrency ${editorialConcurrency} --editorial-attempts 1${visualBeatTimingFlags(identity)}${boundedProofScopeFlag(identity)}`,
     visual_reference_plan: `node bin/goldflow.mjs visual refs ${base} --visual-ref-chunk-concurrency ${referenceConcurrency} --visual-ref-json-attempts 1 --visual-ref-merge-validation-attempts 1`,
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --note "<reference plan review notes>"`,
     reference_generation: hybridBrowserPool

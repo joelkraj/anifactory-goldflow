@@ -49,6 +49,10 @@ assert.equal(validateManufacturingBrief(brief).done, true);
 const rawTitles = Array.from({ length: 30 }, (_, index) => `${index + 1}. Original premise title ${index + 1}`).join("\n");
 const parsedTitles = parseManufacturingTopicTitles(rawTitles);
 assert.equal(parsedTitles.length, 30);
+const rawUnnumberedTitles = Array.from({ length: 30 }, (_, index) => `Unnumbered original premise ${index + 1}`).join("\n\n");
+const parsedUnnumberedTitles = parseManufacturingTopicTitles(rawUnnumberedTitles);
+assert.deepEqual(parsedUnnumberedTitles[0], { number: 1, title: "Unnumbered original premise 1" });
+assert.deepEqual(parsedUnnumberedTitles[29], { number: 30, title: "Unnumbered original premise 30" });
 const topicPool = {
   schema: MANUFACTURING_TOPIC_POOL_SCHEMA,
   status: "completed",
@@ -73,7 +77,18 @@ const shortlist = {
 };
 assert.equal(validateManufacturingTopicShortlist(shortlist, { topicPool }).done, true);
 
-const baseTemplate = await readFile(path.join(ROOT, "docs/prompts/manhwa_recap_manufacturing_template_v1.txt"), "utf8");
+const legacyTemplate = await readFile(path.join(ROOT, "docs/prompts/manhwa_recap_manufacturing_template_v1.txt"), "utf8");
+assert.equal(validateManufacturingTemplate(legacyTemplate).done, true);
+assert.equal(legacyTemplate.includes("Treat these moments as an escalating reversal ladder"), true);
+assert.equal(legacyTemplate.includes("A major reversal is incomplete until it causes a tangible consequence"), true);
+assert.equal(legacyTemplate.includes("Omit any cameo whose only function is to act snide, look shocked, and disappear"), true);
+const filledLegacyPrompt = legacyTemplate
+  .replaceAll("[WORD COUNT]", "10000")
+  .replaceAll("[TITLE]", brief.title)
+  .replaceAll("[CORE PREMISE]", brief.core_premise)
+  .replaceAll(/\[[A-Z][A-Z0-9 ,/'-]{2,}\]/g, "a concrete story-specific answer");
+assert.equal(validateFilledManufacturingPrompt(filledLegacyPrompt, { brief, baseTemplate: legacyTemplate }).done, true);
+const baseTemplate = await readFile(path.join(ROOT, "docs/prompts/manhwa_recap_manufacturing_template_v2.txt"), "utf8");
 assert.equal(validateManufacturingTemplate(baseTemplate).done, true);
 const filledPrompt = baseTemplate
   .replaceAll("[WORD COUNT]", "10000")
@@ -81,6 +96,8 @@ const filledPrompt = baseTemplate
   .replaceAll("[CORE PREMISE]", brief.core_premise)
   .replaceAll(/\[[A-Z][A-Z0-9 ,/'-]{2,}\]/g, "a concrete story-specific answer");
 assert.equal(validateFilledManufacturingPrompt(filledPrompt, { brief, baseTemplate }).done, true);
+const bloatedPrompt = `${filledPrompt}\n${"retention filler ".repeat(2_100)}`;
+assert.equal(validateFilledManufacturingPrompt(bloatedPrompt, { brief, baseTemplate }).blockers.includes("manufacturing_prompt_compact_contract_exceeded"), true);
 
 const portfolio = {
   schema: MANUFACTURING_PORTFOLIO_SCHEMA,

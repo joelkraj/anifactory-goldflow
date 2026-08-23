@@ -28,6 +28,31 @@ export const MANUFACTURING_VIEWER_IDS = Object.freeze([
   "late_payoff_skeptic",
 ]);
 
+const MANUFACTURING_TEMPLATE_SENTINELS = Object.freeze([
+  Object.freeze([
+    "The first forty words must fully show",
+    "The first eighty words must clearly establish",
+    "The first one hundred twenty words must reveal",
+    "Within the first three hundred words",
+    "Within the first six hundred words",
+    "Every five hundred to eight hundred words",
+    "Output only the raw narration script.",
+  ]),
+  Object.freeze([
+    "The first twenty words must show",
+    "The first forty words must establish",
+    "The first sixty words must reveal",
+    "Within the first one hundred fifty words",
+    "Within the first three hundred words",
+    "Every two hundred fifty to four hundred words",
+    "Output only the raw narration script.",
+  ]),
+]);
+
+function matchingManufacturingSentinels(value) {
+  return MANUFACTURING_TEMPLATE_SENTINELS.find((sentinels) => sentinels.every((sentinel) => value.includes(sentinel))) ?? null;
+}
+
 export function sha256Text(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
@@ -54,11 +79,19 @@ export function validateManufacturingBrief(document) {
 }
 
 export function parseManufacturingTopicTitles(value) {
-  return String(value ?? "")
+  const lines = String(value ?? "")
     .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const numbered = lines
     .map((line) => line.match(/^\s*(\d{1,3})[.)]\s+(.+?)\s*$/))
     .filter(Boolean)
     .map((match) => ({ number: Number(match[1]), title: match[2] }));
+  if (numbered.length > 0) return numbered;
+
+  // Some otherwise valid planner responses omit only the requested ordinal prefix.
+  // Preserve the exact title text and let the 30-candidate validator police the shape.
+  return lines.map((title, index) => ({ number: index + 1, title }));
 }
 
 export function validateManufacturingTopicPool(document) {
@@ -82,17 +115,7 @@ export function validateManufacturingTemplate(template) {
   for (const placeholder of ["[WORD COUNT]", "[TITLE]", "[CORE PREMISE]"]) {
     if (!value.includes(placeholder)) blockers.push(`manufacturing_template_placeholder_missing_${sha256Text(placeholder).slice(0, 8)}`);
   }
-  for (const sentinel of [
-    "The first forty words must fully show",
-    "The first eighty words must clearly establish",
-    "The first one hundred twenty words must reveal",
-    "Within the first three hundred words",
-    "Within the first six hundred words",
-    "Every five hundred to eight hundred words",
-    "Output only the raw narration script.",
-  ]) {
-    if (!value.includes(sentinel)) blockers.push(`manufacturing_template_sentinel_missing_${sha256Text(sentinel).slice(0, 8)}`);
-  }
+  if (!matchingManufacturingSentinels(value)) blockers.push("manufacturing_template_deadline_contract_missing");
   return { done: blockers.length === 0, blockers };
 }
 
@@ -126,16 +149,10 @@ export function validateFilledManufacturingPrompt(prompt, { brief = null, baseTe
   if (brief?.title && !value.includes(brief.title)) blockers.push("manufacturing_prompt_title_missing");
   if (brief?.core_premise && !value.includes(brief.core_premise)) blockers.push("manufacturing_prompt_core_premise_missing");
   if (/\[[A-Z][A-Z0-9 ,/'-]{2,}\]/.test(value)) blockers.push("manufacturing_prompt_unfilled_placeholders");
-  for (const sentinel of [
-    "The first forty words must fully show",
-    "The first eighty words must clearly establish",
-    "The first one hundred twenty words must reveal",
-    "Within the first three hundred words",
-    "Within the first six hundred words",
-    "Every five hundred to eight hundred words",
-    "Output only the raw narration script.",
-  ]) {
-    if (!value.includes(sentinel)) blockers.push(`manufacturing_prompt_sentinel_missing_${sha256Text(sentinel).slice(0, 8)}`);
+  const matchingSentinels = matchingManufacturingSentinels(value);
+  if (!matchingSentinels) blockers.push("manufacturing_prompt_deadline_contract_missing");
+  if (matchingSentinels === MANUFACTURING_TEMPLATE_SENTINELS[1] && value.split(/\s+/).filter(Boolean).length > 2_000) {
+    blockers.push("manufacturing_prompt_compact_contract_exceeded");
   }
   if (baseTemplate && value.length < Math.floor(String(baseTemplate).length * 0.75)) blockers.push("manufacturing_prompt_template_truncated");
   return { done: blockers.length === 0, blockers };

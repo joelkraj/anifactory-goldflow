@@ -244,6 +244,28 @@ const generatedMotionRequiredThroughSec = boundedNumber(
   0,
   3600,
 );
+const visualBeatTimingContract = {
+  target_beat_sec: boundedNumber(flags["target-beat-sec"], 8.5, 2, 20),
+  max_beat_sec: boundedNumber(flags["max-beat-sec"], 15, 2, 30),
+  min_beat_sec: boundedNumber(flags["min-beat-sec"], 3, 1, 15),
+  hook_duration_sec: boundedNumber(flags["hook-duration-sec"], 30, 0, 180),
+  hook_target_beat_sec: boundedNumber(flags["hook-target-beat-sec"], 3.2, 1, 10),
+  hook_max_beat_sec: boundedNumber(flags["hook-max-beat-sec"], 4.2, 1, 15),
+  hook_min_beat_sec: boundedNumber(flags["hook-min-beat-sec"], 2.2, 0.5, 10),
+  retention_ramp_sec: boundedNumber(flags["retention-ramp-sec"], 180, 0, 1200),
+  ramp_target_beat_sec: boundedNumber(flags["ramp-target-beat-sec"], 5.2, 1, 15),
+  ramp_max_beat_sec: boundedNumber(flags["ramp-max-beat-sec"], 6.5, 1, 20),
+  ramp_min_beat_sec: boundedNumber(flags["ramp-min-beat-sec"], 3.2, 0.5, 15),
+};
+for (const [label, minimum, target, maximum] of [
+  ["episode", visualBeatTimingContract.min_beat_sec, visualBeatTimingContract.target_beat_sec, visualBeatTimingContract.max_beat_sec],
+  ["hook", visualBeatTimingContract.hook_min_beat_sec, visualBeatTimingContract.hook_target_beat_sec, visualBeatTimingContract.hook_max_beat_sec],
+  ["retention ramp", visualBeatTimingContract.ramp_min_beat_sec, visualBeatTimingContract.ramp_target_beat_sec, visualBeatTimingContract.ramp_max_beat_sec],
+]) {
+  if (!(minimum <= target && target <= maximum)) {
+    throw new Error(`Visual ${label} beat timing must satisfy min <= target <= max.`);
+  }
+}
 if (generatedMotionPolicy === "disabled" && generatedMotionRequiredThroughSec > 0) {
   throw new Error("--generated-motion-required-through-sec requires generated motion to be enabled.");
 }
@@ -1262,6 +1284,7 @@ async function main() {
     generated_motion_provider: generatedMotionProvider,
     generated_motion_model: generatedMotionModel,
     generated_motion_required_through_sec: generatedMotionRequiredThroughSec,
+    visual_beat_timing_contract: visualBeatTimingContract,
     ltx_video_policy: ltxVideoPolicy,
     ltx_video_provider: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_PROVIDER : null,
     ltx_video_model: generatedMotionProvider === GENERATED_MOTION_PROVIDER_LTX ? LTX_VIDEO_MODEL_ID : null,
@@ -1315,6 +1338,7 @@ async function main() {
       generated_motion_provider: generatedMotionProvider,
       generated_motion_model: generatedMotionModel,
       generated_motion_required_through_sec: generatedMotionRequiredThroughSec,
+      visual_beat_timing_contract: visualBeatTimingContract,
       generated_motion_candidates_per_moment: generatedMotionPolicy === "disabled" ? 0 : 1,
       generated_motion_automatic_retries: 0,
       generated_motion_failure_disposition: "accepted_still_fallback",

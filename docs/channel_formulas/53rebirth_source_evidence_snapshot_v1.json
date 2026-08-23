@@ -3,7 +3,7 @@
   "status": "active",
   "channel": "53rebirth",
   "channel_name": "Manhwa Joey",
-  "version": "2026-08-11.1",
+  "version": "2026-08-22.1",
   "observed_through": "2026-08-11",
   "research_scope": {
     "curated_channels": 51,
@@ -15,6 +15,15 @@
     "own_channel_uploads_scanned_for_comments": 61,
     "own_channel_uploads_with_comments": 34,
     "warning": "External views measure public demand and distribution, not private retention. Own-channel analytics measure viewing after the click. Comments are self-selected qualitative evidence and the counts below are conservative lower bounds, not audience prevalence estimates. Keep those evidence classes separate."
+  },
+  "operator_direction": {
+    "recorded_on": "2026-08-22",
+    "evidence_status": "Operator interpretation supported by the current own-channel winner mix; validate with future native-script uploads.",
+    "primary_lane": "Modern relationship revenge drama with one numerical system that drives a concrete money, ownership, career, status, influence, or skill climb.",
+    "secondary_lane": "Isekai or reincarnation stories where the system and transported condition are essential to the click movie.",
+    "not_default": "Generic guild, rank, gate, and dungeon fantasy.",
+    "romance_rule": "Betrayal and replacement love must materially alter Joey's choices, leverage, progression, and revenge rather than decorate a combat ladder.",
+    "adaptation_rule": "Do not reskin a completed fantasy script into a modern setting; preserve it and author a new causal premise."
   },
   "source_paths": [
     "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reverse_analysis/ultimate_winner_reverse_engineering_2026_07_27.md",

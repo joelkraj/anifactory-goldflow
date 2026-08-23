@@ -1,0 +1,101 @@
+Write one complete longform manhwa recap narration aimed around [WORD COUNT] words. Story completeness and YouTube retention matter more than hitting an exact word count.
+
+Title: [TITLE]
+
+Premise: [CORE PREMISE]
+
+## North Star
+
+Deliver [PRIMARY VIEWER FANTASY] through fast, concrete events. Joey should be calm, self-directed, strategically ruthless, and impossible to shame back into submission. Show this behavior; do not repeatedly call him sigma. His power must compound aggressively, and every major return by the people who wronged him must end in a more satisfying reversal and a larger tangible loss.
+
+## Opening Contract
+
+Open on one cold look into the future at [MOST ANTICIPATED LATE REVERSAL]. Choose the result viewers will most want to reach, not a vague teaser.
+
+The first twenty words must show [CONCRETE FUTURE POWER OR REVENGE RECEIPT].
+
+The first forty words must establish [BETRAYER DISBELIEF OR GROVELING AND JOEY'S CONTROL].
+
+The first sixty words must reveal [TITLE-MECHANIC RESULT OR SCALE PROOF] and complete one clean snap back to the beginning.
+
+Within the first one hundred fifty words, fully dramatize [ORIGINAL BETRAYAL, CONCRETE LOSS, AND WHY JOEY APPEARS POWERLESS].
+
+Within the first three hundred words, force Joey to use [CORE MECHANIC] and complete the first satisfying proof that it works.
+
+Do not preview several disconnected scenes. Use one future result, one decisive Joey response, and one rewind. When the timeline later reaches that moment, expand it with new pressure and consequences instead of replaying the opening word for word.
+
+## Story Engine
+
+Joey begins as [STARTING STATUS AND CONCRETE LOSS]. Once he has decisive proof of betrayal, he never begs, chases, repeatedly forgives, or gives the betrayers unchecked access again. His immediate boundary is [IRREVERSIBLE RESPONSE].
+
+The central betrayers are [BETRAYERS AND WHAT THEY TOOK]. They initially believe [WHY THEY THINK JOEY IS REPLACEABLE]. Their original gloat is [SHORT MEMORABLE INSULT OR CLAIM].
+
+Joey's one advantage is: [ONE-SENTENCE SYSTEM OR POWER].
+
+Keep it understandable through action and no more than four rules:
+
+1. [CORE RULE]
+2. [EARNING OR ACTIVATION RULE]
+3. [LIMIT THAT PRESERVES JOEY'S AGENCY]
+4. [VISIBLE PROOF OR RECEIPT]
+
+The system supplies leverage, not judgment. Joey chooses every goal, tactic, risk, boundary, use of power, and act of revenge.
+
+## Aggressive Scale
+
+Use this broad ladder without treating it as a mandatory scene list:
+
+1. [FIRST FAST PROOF]
+2. [FIRST PUBLIC DOMINANCE REVERSAL]
+3. [MIDPOINT SCALE EXPANSION]
+4. [LATE POWER OR OWNERSHIP TAKEOVER]
+5. [FINAL OVERWHELMING STATUS AND REVENGE PAYOFF]
+
+Let each result create the next enemy response, opportunity, danger, or scale frontier. Do not spend long stretches teaching procedure, law, finance, construction, business, or system terminology. Compress necessary logistics into the shortest causal bridge, then dramatize the confrontation, tactic, build, reveal, loss, or choice it enables.
+
+## Reversal Satisfaction
+
+Every major re-entry by a betrayer or arrogant rival should earn a complete viewer payoff:
+
+- They arrive confident, gloat, threaten, or publicly underestimate Joey.
+- Joey answers with a concrete display of power, ownership, competence, status, or prior preparation.
+- Briefly enter the wrongdoer's head so viewers hear denial turn into disbelief, recalculation, envy, fear, or desperation.
+- Their internal break becomes outwardly visible through silence, contradiction, panic, bargaining, apology, blame, or groveling.
+- The reversal removes something tangible: access, money, status, control, reputation, an ally, an asset, safety, or the ability to command Joey.
+- Joey does not linger for validation. He sets the next boundary or moves toward the larger opportunity.
+
+Vary the location, tactic, receipt, emotional reaction, and cost. Do not repeat the same confrontation with different numbers. The betrayers may rationalize early losses, but later proof must destroy those excuses until they understand exactly what they discarded.
+
+Required major reversals include [EARLY REVERSAL], [MIDPOINT REVERSAL], [LATE GROVELING REVERSAL], and [FINAL IRREVERSIBLE REVENGE].
+
+## POV And Narration
+
+Use controlled mixed POV for spoken YouTube narration. Narrate mostly through Joey in first person when his decisions, observations, risk, and satisfaction drive the moment. Use efficient third person for transitions, context, and scenes Joey cannot witness. At high-value reversals, shift briefly into close third person inside Claire, Marcus, or another wrongdoer so the audience experiences their private disbelief before their outward collapse.
+
+Re-anchor every POV switch with a clear name, place, action, or time cue. Never switch heads inside one paragraph without orientation. When first person is active, `I` means Joey. Do not let another character's internal monologue steal the decisive choice or extend beyond the reversal payoff.
+
+Dialogue should be selective and memorable. Recap routine exchanges indirectly. Use direct lines for betrayal, gloating, power reveals, refusals, groveling, and emotional consequences.
+
+## YouTube Retention
+
+Every two hundred fifty to four hundred words, materially change the situation through a new proof, threat, tactic, reveal, gain, loss, humiliation, reversal, objective, or scale frontier. Answer one live question while opening the next. Move through action, response, and consequence rather than promises about what will happen later.
+
+Pay the title in stages: spark it in the cold open, prove the mechanic by three hundred words, expand it repeatedly, and deliver the complete revenge and scale promise before the ending. After the first revenge win, open a larger premise-native conflict instead of recycling the original humiliation.
+
+The prose should sound like a sharp human narrator explaining irresistible manhwa panels, not a novelist, screenplay, motivational speech, system manual, legal summary, or AI-generated outline. Use varied sentence lengths and connected causal narration. Avoid strings of tiny fragments, repetitive reaction phrases, repetitive system messages, fake profundity, abstract identity claims, and constructions such as `it was not merely X, it was Y`.
+
+Do not use meta language about the story, audience, chapter, arc, trope, retention, title, thumbnail, or writer instructions. Do not say `little did he know`, `what happened next`, `for the first time in his life` as generic glue, `the arithmetic was done`, or that Joey's identity finally belonged to him. Do not invent an unrelated conspiracy, ancient force, secret god, second system, or world-ending escalation.
+
+Replacement romance is optional and never a required reward. If included, it must develop naturally and remain secondary to Joey's power, agency, scaling, and revenge.
+
+## Ending Contract
+
+The climax must combine [EARLY SETUPS THAT RETURN], the unchanged core mechanic, Joey's own strategy, and the betrayers' accumulated mistakes. Joey ends with [FINAL POWER, WEALTH, OWNERSHIP, OR STATUS]. The betrayers lose [EXACT EXTERNAL LOSSES], understand [EXACT REALIZATION], break outwardly, and receive no reconciliation.
+
+End on [FINAL CONCRETE IMAGE OR ACTION] rather than philosophy, a moral speech, an open-ended sequel advertisement, or a summary of lessons.
+
+## Output Contract
+
+Write TTS-friendly narration. Spell out numbers in spoken prose. Do not use markdown headings, chapter labels, timestamps, production notes, bullet lists, brackets, parentheses, hashtags, emojis, or meta commentary in the script.
+
+Output only the raw narration script.

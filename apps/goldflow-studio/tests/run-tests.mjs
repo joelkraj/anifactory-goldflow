@@ -54,7 +54,7 @@ import {
   PRODUCTION_BROWSER_CONCURRENCY_CEILING,
 } from "../desktop/config.mjs";
 import { browserFailureDisposition, GoldflowDesktopHost } from "../desktop/worker-host.mjs";
-import { flowBlockingCode, flowModelLabelMatches, flowPlanVerificationEvidence, flowReferenceUploadOrder, GoogleFlowBrowser, identifyAutoAttachedFlowComposerChip, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
+import { flowBlockingCode, flowModelLabelMatches, flowPlanVerificationEvidence, flowReferenceUploadOrder, FLOW_VIDEO_CONTROL_LABEL_PATTERN, GoogleFlowBrowser, identifyAutoAttachedFlowComposerChip, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
 import { DesktopRuntimeState } from "../desktop/runtime-state.mjs";
 import { validReferenceRoute } from "../desktop/worker-client.mjs";
 import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldflow-bridge.mjs";
@@ -91,6 +91,9 @@ assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mis
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", creativeSubmissionStarted: true, attempt: 1 }), false);
 assert.equal(flowModelLabelMatches("Veo 3.1 - Fast arrow_drop_down", "Veo 3.1 Fast"), true);
 assert.equal(flowModelLabelMatches("Veo 3.1 - Lite [Lower Priority]", "Veo 3.1 Lite"), false);
+assert.equal(FLOW_VIDEO_CONTROL_LABEL_PATTERN.test("Video · 8s x1"), true);
+assert.equal(FLOW_VIDEO_CONTROL_LABEL_PATTERN.test("Video · 720p · 8s x1"), true);
+assert.equal(FLOW_VIDEO_CONTROL_LABEL_PATTERN.test("Image · 16:9 · x1"), false);
 assert.equal(flowPlanVerificationEvidence("ULTRA Nano Banana Pro", "ULTRA", "Nano Banana Pro"), "visible_plan_badge");
 assert.equal(flowPlanVerificationEvidence("Agent Nano Banana Pro 16:9 x1", "ULTRA", "Nano Banana Pro"), "visible_model_entitlement");
 assert.equal(flowPlanVerificationEvidence("Agent Nano Banana 2 16:9 x1", "ULTRA", "Nano Banana Pro"), null);

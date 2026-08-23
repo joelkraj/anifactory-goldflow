@@ -15,7 +15,8 @@ const REFERENCE_BINDING_RECEIPT_SCHEMA = "goldflow_google_flow_reference_binding
 const FLOW_MEDIA_PATH_FRAGMENT = "media.getMediaUrlRedirect";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const FLOW_COMPOSER_MEDIA_CONTROL_PATTERN = /^(?:(?:🍌\s*)?Nano Banana\b|Veo\b|Video\s*·\s*\d+s\b)/i;
+export const FLOW_VIDEO_CONTROL_LABEL_PATTERN = /^Video\s*·\s*(?:\d+p\s*·\s*)?\d+s\b/i;
+const FLOW_COMPOSER_MEDIA_CONTROL_PATTERN = /^(?:(?:🍌\s*)?Nano Banana\b|Veo\b|Video\s*·\s*(?:\d+p\s*·\s*)?\d+s\b)/i;
 const PERSISTENT_FLOW_WORKER_POLICY = "persistent_project_per_worker_slot_v1";
 
 export function redactBrowserDiagnostic(value) {
@@ -1501,7 +1502,7 @@ export class GoogleFlowBrowser {
       contract.duration_sec = durationSec;
       contract.ui_model_label = String(await (await visibleLocator(menu.getByRole("button", { name: /Veo|Omni/i })))?.innerText() ?? contract.model_label).trim();
       await page.keyboard.press("Escape").catch(() => {});
-      const configuredVideoControl = await waitForVisible(page.getByRole("button", { name: /^Video\s*·\s*\d+s/i }), { timeoutMs: 5_000 });
+      const configuredVideoControl = await waitForVisible(page.getByRole("button", { name: FLOW_VIDEO_CONTROL_LABEL_PATTERN }), { timeoutMs: 5_000 });
       const configuredStartSlot = await waitForVisible(page.getByText("Start", { exact: true }), { timeoutMs: 5_000 });
       if (!configuredVideoControl || !configuredStartSlot) {
         if (configurationAttempt < 3) {

@@ -33,7 +33,10 @@ export function narrationExactListenReviewPacketSha256(packet) {
 }
 
 export function narrationExactListenReviewDecisionSha256(decision) {
-  return hashWithoutField(decision, "decision_sha256");
+  const canonicalDecision = structuredClone(decision ?? {});
+  delete canonicalDecision.decision_sha256;
+  delete canonicalDecision.validation;
+  return sha256(JSON.stringify(canonicalDecision));
 }
 
 function blocker(code, details = {}) {

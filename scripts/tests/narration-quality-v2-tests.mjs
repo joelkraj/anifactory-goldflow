@@ -1228,6 +1228,21 @@ assert.equal(
   validateNarrationExactListenReviewDecision(listenPacket, listenDecision).status,
   "approved",
 );
+const persistedListenDecision = {
+  ...listenDecision,
+  validation: validateNarrationExactListenReviewDecision(
+    listenPacket,
+    listenDecision,
+  ),
+};
+assert.equal(
+  validateNarrationExactListenReviewDecision(
+    listenPacket,
+    persistedListenDecision,
+  ).status,
+  "approved",
+  "persisted validation metadata must not invalidate the approved decision hash",
+);
 const staleListenDecision = structuredClone(listenDecision);
 staleListenDecision.decisions[0].audio_sha256 = "f".repeat(64);
 delete staleListenDecision.decision_sha256;

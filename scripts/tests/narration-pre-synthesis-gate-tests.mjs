@@ -404,6 +404,39 @@ const preservation = preservedTtsSelectionsForTests({
 assert.equal(preservation.status, "passed");
 assert.deepEqual(preservation.preserved_unit_ids, ["u1"]);
 
+const nestedQa = {
+  status: "passed",
+  acoustic: qa,
+};
+const nestedPreservation = preservedTtsSelectionsForTests({
+  units: preservationUnits,
+  priorReport: {
+    narration_generation_plan_sha256: "f".repeat(64),
+    narration_generation_plan_file_sha256: "0".repeat(64),
+    results: [{
+      ...priorResult,
+      audio_sha256: null,
+      selected_qa: nestedQa,
+    }],
+  },
+  priorUnitQa: {
+    narration_generation_plan_sha256: "f".repeat(64),
+    narration_generation_plan_file_sha256: "0".repeat(64),
+    selected_units: [{
+      ...priorResult,
+      audio_sha256: null,
+      model_id: undefined,
+      qa: nestedQa,
+    }],
+  },
+  policy: preservedPolicy,
+  canonicalPlanSha256: "f".repeat(64),
+  planFileSha256: "0".repeat(64),
+});
+assert.equal(nestedPreservation.status, "passed");
+assert.equal(nestedPreservation.rows[0].result.audio_sha256, "a".repeat(64));
+assert.equal(nestedPreservation.rows[0].selected_qa.model_id, "fixture-qwen-model");
+
 const preservedCandidate = {
   ...priorResult,
   seed: 17,
@@ -450,6 +483,16 @@ assert.deepEqual(
 assert.equal(preservedFinalInputs.selectedRows[0].wav, "/fixture/u1.wav");
 assert.equal(preservedFinalInputs.candidates.length, 1);
 assert.equal(preservedFinalInputs.synthesisRuns.length, 1);
+const nestedQaFinalInputs = preservedTtsFinalInputsForTests({
+  units: preservationUnits,
+  candidatePool: [{ ...preservedCandidate, qa: nestedQa }],
+  preservedForInvocation: [{ ...preservedCandidate, qa: nestedQa }],
+  policy: preservedPolicy,
+});
+assert.equal(
+  nestedQaFinalInputs.selectedRows[0].unit_qa.audio_sha256,
+  "a".repeat(64),
+);
 const resumeProvenance = incompleteUnitResumeProvenanceForTests({
   unit: preservationUnits[1],
   cohortBinding: {

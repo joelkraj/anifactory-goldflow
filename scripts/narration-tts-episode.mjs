@@ -206,14 +206,20 @@ export function preservedTtsSelectionsForTests({
       continue;
     }
     const qa = selectedQa?.qa ?? result?.selected_qa ?? null;
+    const resultAudioSha256 = result?.audio_sha256
+      ?? result?.selected_qa?.acoustic?.audio_sha256
+      ?? null;
+    const selectedQaAudioSha256 = selectedQa?.audio_sha256
+      ?? selectedQa?.qa?.acoustic?.audio_sha256
+      ?? null;
     const accepted = candidateDisposition(qa, PRIMARY_TTS_PROVIDER).accepted;
     if (!result
       || !selectedQa
       || !accepted
       || !result.audio_path
-      || !result.audio_sha256
+      || !resultAudioSha256
       || result.audio_path !== selectedQa.audio_path
-      || result.audio_sha256 !== selectedQa.audio_sha256
+      || resultAudioSha256 !== selectedQaAudioSha256
       || result.synthesis_identity_sha256
         !== selectedQa.synthesis_identity_sha256
       || result.spoken_text_sha256 !== unit.spoken_text_sha256
@@ -227,7 +233,7 @@ export function preservedTtsSelectionsForTests({
         ?? policy?.primary?.voice_continuity_contract)
         !== policy?.primary?.voice_continuity_contract
       || selectedQa.provider !== policy?.primary?.provider
-      || selectedQa.model_id !== policy?.primary?.model_id
+      || (selectedQa.model_id ?? result.model_id) !== policy?.primary?.model_id
       || selectedQa.voice_id !== policy?.primary?.voice_id
       || selectedQa.voice_sha256 !== policy?.primary?.voice_sha256
       || selectedQa.voice_continuity_contract
@@ -241,8 +247,15 @@ export function preservedTtsSelectionsForTests({
     }
     rows.push({
       unit,
-      result,
-      selected_qa: selectedQa,
+      result: {
+        ...result,
+        audio_sha256: resultAudioSha256,
+      },
+      selected_qa: {
+        ...selectedQa,
+        audio_sha256: selectedQaAudioSha256,
+        model_id: selectedQa.model_id ?? result.model_id,
+      },
       qa,
     });
   }
@@ -355,7 +368,7 @@ function preservedSelectionRow(unit, candidate, unitQa, policy) {
     recovery_provenance: candidate.recovery_provenance ?? null,
     synthesis_identity: candidate.synthesis_identity ?? null,
     synthesis_identity_sha256: candidate.synthesis_identity_sha256,
-    unit_qa: unitQa,
+    unit_qa: unitQa?.acoustic ?? unitQa,
   };
 }
 
@@ -967,6 +980,12 @@ async function hydratePreservedTtsSelections({
     const synthesisIdentity = sidecar?.synthesis_identity;
     const synthesisIdentitySha256 = sidecar?.synthesis_identity_sha256;
     const expectedBinding = bindingByUnit.get(unitId);
+    const identityCohortId = synthesisIdentity?.cohort_id
+      ?? synthesisIdentity?.recovery_provenance?.origin_cohort_id
+      ?? null;
+    const identityCohortSha256 = synthesisIdentity?.cohort_sha256
+      ?? synthesisIdentity?.recovery_provenance?.origin_cohort_sha256
+      ?? null;
     if (!sidecar
       || !sidecarFileSha256
       || sidecar.unit_id !== unitId
@@ -981,8 +1000,8 @@ async function hydratePreservedTtsSelections({
       || synthesisIdentity?.voice_continuity_contract
         !== policy.primary.voice_continuity_contract
       || synthesisIdentity?.batch_plan_sha256 !== batchPlan.batch_plan_sha256
-      || synthesisIdentity?.cohort_id !== expectedBinding?.cohort_id
-      || synthesisIdentity?.cohort_sha256 !== expectedBinding?.cohort_sha256) {
+      || identityCohortId !== expectedBinding?.cohort_id
+      || identityCohortSha256 !== expectedBinding?.cohort_sha256) {
       throw new Error(
         `Passed TTS synthesis sidecar is missing or stale for ${unitId}: ${sidecarPath}`,
       );
@@ -2306,6 +2325,13 @@ async function runSynthesis({
       !== JSON.stringify(policy.synthesis_contract)) {
     throw new Error(`Invalid ${route} production runner report: ${reportPath}`);
   }
+  if (synthesisMode === QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+    && Number(report.cohort_event_count) === 0) {
+    // The runner removes a stale event file at startup and exact-unit recovery
+    // intentionally emits no batch cohort events. Materialize that empty ledger
+    // so the run receipt can still bind its hash.
+    await fs.writeFile(cohortEventsPath, "", "utf8");
+  }
   const expectedModel = policy.primary;
   if (report.provider !== provider
     || report.model_id !== expectedModel.model_id
@@ -3126,6 +3152,10 @@ async function main() {
   ));
   const alreadyComplete = finalSynthesisScope.mode
     === "already_complete_no_synthesis_authorized";
+  const allowAlreadyCompleteFinalization = alreadyComplete
+    && workflowBypass
+    && boolFlag(flags["allow-full-stage-rerun"])
+    && String(flags["rerun-reason"] ?? "").trim().length > 0;
   if (finalSynthesisScope.mode
     === "interrupted_full_synthesis_resume_preserving_accepted_units") {
     const previouslySubmittedIds = new Set(
@@ -3153,10 +3183,11 @@ async function main() {
       `Narration pre-synthesis gate blocked before helper import/model load: ${JSON.stringify(preSynthesisGate.findings)}`,
     );
   }
-  if (alreadyComplete) {
+  if (alreadyComplete && !allowAlreadyCompleteFinalization) {
     throw new Error(
       "Narration TTS already has an exact accepted selection for every current unit. "
-      + "An unscoped full rerun is forbidden; use exact unit or boundary repair evidence.",
+      + "An unscoped full rerun is forbidden; use exact unit or boundary repair evidence, "
+      + "or an explicit no-synthesis finalization recovery override.",
     );
   }
   if (!manualReviewEvidencePath) {
@@ -3875,6 +3906,17 @@ async function main() {
         });
       }
     }
+  } else if (alreadyComplete) {
+    recoveryScope = {
+      mode: "hash_verified_preserved_finalize",
+      status: "validated_existing_candidates_no_synthesis",
+      preserved_unit_ids: finalSynthesisScope.preserved_unit_ids,
+      preserved_unit_count: finalSynthesisScope.preserved_unit_ids.length,
+      workflow_bypass: true,
+      rerun_reason: String(flags["rerun-reason"]).trim(),
+      model_loaded: false,
+      synthesis_invoked: false,
+    };
   } else {
     // A fresh invocation uses the fixed cohort manifest. An interrupted
     // invocation switches to a source-ordered serial resume containing only

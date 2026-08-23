@@ -201,9 +201,12 @@ async function main() {
     );
     await atomicWriteJson(retryEvidencePath, {
       schema: "goldflow_confirmed_tts_retry_evidence_v2",
+      // Retry validation binds creative plan identity, while the file hash is
+      // retained separately to prove the exact serialized artifact reviewed.
       narration_generation_plan_sha256:
-        packet.narration_generation_plan_file_sha256
-          ?? packet.narration_generation_plan_sha256,
+        packet.narration_generation_plan_sha256,
+      narration_generation_plan_file_sha256:
+        packet.narration_generation_plan_file_sha256 ?? null,
       canonical_narration_generation_plan_sha256:
         packet.narration_generation_plan_sha256,
       pre_retry_narration_report_sha256: sha256(reportBuffer),

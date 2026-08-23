@@ -107,6 +107,16 @@ export function identifyNewFlowComposerChip(previousMediaIds = [], observedChips
   return added[0];
 }
 
+export function identifyAutoAttachedFlowComposerChip(previousMediaIds = [], composerState = null) {
+  if (composerState?.busy !== false || !Array.isArray(composerState?.chips)) return null;
+  const previous = previousMediaIds.map(String);
+  const observed = composerState.chips;
+  if (observed.length !== previous.length + 1) return null;
+  if (!previous.every((mediaId, index) => String(observed[index]?.media_id ?? "") === mediaId)) return null;
+  if (!observed.every((chip) => chip?.loaded === true)) return null;
+  return identifyNewFlowComposerChip(previous, observed);
+}
+
 export function shouldRetryFlowPreSubmissionTransport({
   errorCode,
   errorName,
@@ -119,7 +129,7 @@ export function shouldRetryFlowPreSubmissionTransport({
   const transientBrowserAction = String(errorName ?? "") === "TimeoutError"
     || /locator\.(?:click|fill|setInputFiles)|Timeout \d+ms exceeded|element (?:was )?(?:detached|not stable)/i.test(String(errorMessage ?? ""));
   const terminalCode = ["account_mismatch", "rate_limited", "usage_limited", "content_policy_rejected"].includes(code);
-  return (code === "ui_contract_mismatch" || (!terminalCode && transientBrowserAction))
+  return (["ui_contract_mismatch", "provider_response_timeout"].includes(code) || (!terminalCode && transientBrowserAction))
     && creativeSubmissionStarted !== true
     && attempt < maxAttempts;
 }
@@ -743,7 +753,12 @@ export class GoogleFlowBrowser {
     }, FLOW_MEDIA_PATH_FRAGMENT, { timeout: 1_000 });
   }
 
-  async selectUploadedPreview(page, dialog, { filename, priorMediaIds, timeoutMs = 90_000 }) {
+  async selectUploadedPreview(page, dialog, {
+    filename,
+    priorMediaIds,
+    priorComposerMediaIds = [],
+    timeoutMs = 90_000,
+  }) {
     const deadline = Date.now() + timeoutMs;
     let lastParsedMedia = null;
     let lastProbe = null;
@@ -772,6 +787,15 @@ export class GoogleFlowBrowser {
           await sleep(300);
           continue;
         }
+      }
+      if (pageExactNameVisible && !pageAddToPrompt) {
+        // Flow can bypass the library-selection step and attach a freshly
+        // uploaded file directly to the composer. Accept that path only when
+        // the exact filename is visible and the ordered composer dock proves
+        // exactly one fully loaded chip was appended.
+        const composerState = await this.composerDockState(page).catch(() => null);
+        const autoAttached = identifyAutoAttachedFlowComposerChip(priorComposerMediaIds, composerState);
+        if (autoAttached) return { ...autoAttached, already_attached: true };
       }
       const marked = await dialog.evaluate((root, { filename: wanted, fragment }) => {
         root.querySelectorAll('[data-goldflow-upload-preview="true"]').forEach((element) => element.removeAttribute("data-goldflow-upload-preview"));
@@ -894,7 +918,7 @@ export class GoogleFlowBrowser {
       }
       await sleep(250);
     }
-    throw codedError("ui_contract_mismatch", `Google Flow did not expose an exact selected preview for uploaded file ${filename}. Probe: ${JSON.stringify(lastProbe)}.`);
+    throw codedError("provider_response_timeout", `Timed out waiting for Google Flow to expose an exact selected preview for uploaded file ${filename}. Probe: ${JSON.stringify(lastProbe)}.`);
   }
 
   async markComposerDock(page) {
@@ -1053,15 +1077,23 @@ export class GoogleFlowBrowser {
       }
       await this.acceptUploadNotice(page, { mediaDialogId: dialogId });
       ({ dialog, dialogId } = await this.openMediaDialog(page));
-      const selected = await this.selectUploadedPreview(page, dialog, { filename: uploadFilename, priorMediaIds });
-      const addToPrompt = await this.waitForAddToPromptControl(page, { timeoutMs: 30_000 });
-      if (!addToPrompt) throw codedError("ui_contract_mismatch", `Google Flow selected preview ${uploadFilename} has no Add to Prompt action.`);
-      const enabledDeadline = Date.now() + 30_000;
-      while (Date.now() < enabledDeadline && await addToPrompt.isDisabled().catch(() => true)) await sleep(200);
-      if (await addToPrompt.isDisabled().catch(() => true)) {
-        throw codedError("ui_contract_mismatch", `Google Flow Add to Prompt never enabled for ${uploadFilename}.`);
+      const selected = await this.selectUploadedPreview(page, dialog, {
+        filename: uploadFilename,
+        priorMediaIds,
+        priorComposerMediaIds: composerMediaIds,
+      });
+      if (selected.already_attached !== true) {
+        const addToPrompt = await this.waitForAddToPromptControl(page, { timeoutMs: 30_000 });
+        if (!addToPrompt) throw codedError("ui_contract_mismatch", `Google Flow selected preview ${uploadFilename} has no Add to Prompt action.`);
+        const enabledDeadline = Date.now() + 30_000;
+        while (Date.now() < enabledDeadline && await addToPrompt.isDisabled().catch(() => true)) await sleep(200);
+        if (await addToPrompt.isDisabled().catch(() => true)) {
+          throw codedError("ui_contract_mismatch", `Google Flow Add to Prompt never enabled for ${uploadFilename}.`);
+        }
+        await addToPrompt.click();
+      } else if (await dialog.isVisible().catch(() => false)) {
+        await page.keyboard.press("Escape");
       }
-      await addToPrompt.click();
       const closeDeadline = Date.now() + 10_000;
       while (Date.now() < closeDeadline && await dialog.isVisible().catch(() => false)) await sleep(100);
       if (await dialog.isVisible().catch(() => false)) {

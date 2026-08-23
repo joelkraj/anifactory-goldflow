@@ -54,7 +54,7 @@ import {
   PRODUCTION_BROWSER_CONCURRENCY_CEILING,
 } from "../desktop/config.mjs";
 import { browserFailureDisposition, GoldflowDesktopHost } from "../desktop/worker-host.mjs";
-import { flowBlockingCode, flowModelLabelMatches, flowReferenceUploadOrder, GoogleFlowBrowser, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
+import { flowBlockingCode, flowModelLabelMatches, flowReferenceUploadOrder, GoogleFlowBrowser, identifyAutoAttachedFlowComposerChip, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
 import { DesktopRuntimeState } from "../desktop/runtime-state.mjs";
 import { validReferenceRoute } from "../desktop/worker-client.mjs";
 import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldflow-bridge.mjs";
@@ -81,7 +81,12 @@ assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }
 assert.equal(identifyNewFlowComposerChip([], [{ media_id: "composer-1" }]).media_id, "composer-1");
 assert.equal(identifyNewFlowComposerChip(["composer-2"], [{ media_id: "composer-1" }, { media_id: "composer-2" }]).media_id, "composer-1");
 assert.throws(() => identifyNewFlowComposerChip(["composer-1"], [{ media_id: "composer-1" }]), /added 0 new reference chips/);
+assert.equal(identifyAutoAttachedFlowComposerChip([], { busy: false, chips: [{ media_id: "composer-1", loaded: true }] }).media_id, "composer-1");
+assert.equal(identifyAutoAttachedFlowComposerChip(["composer-1"], { busy: false, chips: [{ media_id: "composer-1", loaded: true }, { media_id: "composer-2", loaded: true }] }).media_id, "composer-2");
+assert.equal(identifyAutoAttachedFlowComposerChip(["composer-1"], { busy: true, chips: [{ media_id: "composer-1", loaded: true }, { media_id: "composer-2", loaded: true }] }), null);
+assert.equal(identifyAutoAttachedFlowComposerChip(["composer-1"], { busy: false, chips: [{ media_id: "different", loaded: true }, { media_id: "composer-2", loaded: true }] }), null);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", attempt: 1 }), true);
+assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "provider_response_timeout", attempt: 1 }), true);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", attempt: 2 }), false);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "ui_contract_mismatch", creativeSubmissionStarted: true, attempt: 1 }), false);
 assert.equal(flowModelLabelMatches("Veo 3.1 - Fast arrow_drop_down", "Veo 3.1 Fast"), true);

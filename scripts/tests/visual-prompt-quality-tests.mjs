@@ -166,7 +166,7 @@ assert.throws(() => transitionRepairScopeForTests({
 }), /not failed in the blocked artifact.*Passed boundaries are immutable/);
 
 assert.equal(VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES, 48_000);
-assert.equal(VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES, 96 * 1024);
+assert.equal(VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES, 224 * 1024);
 assert.deepEqual(
   splitVisualReferenceChunkForTests([{
     scene_id: "scene_dense",

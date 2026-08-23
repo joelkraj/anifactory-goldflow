@@ -68,7 +68,10 @@ const generationModes = new Set([
 ]);
 const referenceCleanlinessContractVersion = "empty_hands_no_detachable_props_v1";
 export const VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES = 48_000;
-export const VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES = 96 * 1024;
+// The global director receives compact selection rows rather than full reference
+// objects. A 224 KiB ceiling keeps large episodes in one creative selection call
+// while remaining well below the Codex planning context limit.
+export const VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES = 224 * 1024;
 
 function parseFlags(parts) {
   const parsed = {};

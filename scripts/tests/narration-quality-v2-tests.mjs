@@ -53,6 +53,7 @@ import {
   validateNarrationTtsPolicyForTests,
 } from "../narration-tts-episode.mjs";
 import {
+  narrationPlanUnitsForStatusForTests,
   narrationNativeSpeedLockFindingForTests,
 } from "../run-status.mjs";
 import {
@@ -662,6 +663,22 @@ assert.equal(validateNarrationProviderOutputManifest(providerOutput, providerUni
   generationPlanSha256: "b".repeat(64),
   qualityContractSha256: contract.contract_sha256,
 }).status, "passed");
+const statusProviderUnits = narrationPlanUnitsForStatusForTests({
+  units: providerUnits,
+});
+assert.deepEqual(
+  statusProviderUnits[0].provider_request,
+  instructionalRequest,
+  "run-status validation must preserve each compiled provider request",
+);
+assert.equal(validateNarrationProviderOutputManifest(
+  providerOutput,
+  statusProviderUnits,
+  {
+    generationPlanSha256: "b".repeat(64),
+    qualityContractSha256: contract.contract_sha256,
+  },
+).status, "passed");
 
 const providerSmallAsrContract = buildNarrationProviderUnitAsrContract({
   model: contract.delivery_qa.unit_screening_model,

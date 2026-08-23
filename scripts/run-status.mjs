@@ -2092,6 +2092,7 @@ function narrationPlanUnitsForStatus(plan) {
       spoken_text_aliases_equal: aliases.length > 0 && aliases.every((value) => value === spokenText),
       spoken_text_sha256: row?.spoken_text_sha256 ?? null,
       computed_spoken_text_sha256: spokenText ? sha256(spokenText) : null,
+      provider_request: row?.provider_request ?? null,
     };
   });
 }
@@ -4494,6 +4495,7 @@ export {
   runIdentityPlanningComplete as runIdentityPlanningCompleteForTests,
   runIdentityTtsComplete as runIdentityTtsCompleteForTests,
   runIdentityWhisperComplete as runIdentityWhisperCompleteForTests,
+  narrationPlanUnitsForStatus as narrationPlanUnitsForStatusForTests,
   selectedNarratorVoiceId as selectedNarratorVoiceIdForTests,
   ttsStatusIdentityFields as ttsStatusIdentityFieldsForTests,
 };

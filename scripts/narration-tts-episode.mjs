@@ -28,6 +28,7 @@ import {
   QWEN_LIAM_PRIMARY_LOCK,
   narrationPlanRunIdentityBindingFinding,
   narrationPlanVoiceIdentityFindings,
+  narrationTtsRetryReportPolicy,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
@@ -1715,34 +1716,10 @@ function ttsStatusContract({
     fallback_unit_ids: [],
     fallback_selected_unit_ids: [],
     fallback_usage: null,
-    retry_policy: {
+    retry_policy: narrationTtsRetryReportPolicy({
       provider: policy.primary.provider,
-      same_voice_reference_required: true,
-      exact_unit_only: true,
-      maximum_creative_submissions_per_invocation: 1,
-      maximum_attempts_per_unit_across_explicit_repair_invocations: 2,
-      retry_only_confirmed_skip_truncation_or_stutter: true,
-      automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio: false,
-      other_acoustic_or_voice_identity_blockers_require_review: true,
-      uncertain_asr_findings_are_warning_only: true,
-      automated_acoustic_findings_are_review_warnings: true,
-      automated_asr_findings_are_review_warnings: true,
-      confirmed_dual_asr_delivery_defects_block_stitching:
-        Boolean(policy.narration_quality_contract),
-      exact_suspect_confirmation_required:
-        Boolean(policy.narration_quality_contract),
-      automated_voice_continuity_findings_are_review_warnings: true,
-      automated_qa_warnings_block_stitching: false,
-      automated_qa_warnings_trigger_retry: false,
-      automatic_retry_limited_to_structural_audio_or_synthesis_process_failures: false,
-      structural_failure_action: "stop_and_emit_exact_unit_repair_scope",
-      structural_audio_hard_stops: [
-        "missing",
-        "unreadable",
-        "empty",
-        "corrupt",
-      ],
-    },
+      qualityContract: policy.narration_quality_contract,
+    }),
     results,
   };
 }

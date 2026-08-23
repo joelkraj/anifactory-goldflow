@@ -29,6 +29,7 @@ import {
   validateNarrationSubjectiveReviewManifest,
 } from "./lib/narration-subjective-review.mjs";
 import {
+  narrationTtsRetryReportPolicy,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "./lib/narration-tts-policy.mjs";
@@ -1983,6 +1984,10 @@ export async function finalizeNarrationProviderOutput(
     selected_unit_count: rows.length,
     fallback_unit_ids: [],
     fallback_usage: null,
+    retry_policy: narrationTtsRetryReportPolicy({
+      provider: manifest.provider,
+      qualityContract,
+    }),
     provider_output_manifest_path: manifestPath,
     provider_output_manifest_sha256: await sha256File(manifestPath),
     voice_continuity_report_path: continuityPath,

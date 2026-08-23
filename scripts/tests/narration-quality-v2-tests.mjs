@@ -46,6 +46,7 @@ import {
 } from "../lib/narration-mastering.mjs";
 import {
   defaultNarrationVoiceProviderOptions,
+  narrationTtsRetryReportPolicy,
   narrationTtsPolicyForIdentity,
   validateNarrationTtsPolicy,
 } from "../lib/narration-tts-policy.mjs";
@@ -629,6 +630,12 @@ const genericRequest = compileNarrationProviderRequest(units[0], {
   voiceContinuityContract: "owned-generic-continuity-v1",
   nativeSpeed: 1.02,
 });
+const qualityRetryPolicy = narrationTtsRetryReportPolicy({
+  qualityContract: contract,
+});
+assert.equal(qualityRetryPolicy.maximum_creative_submissions_per_invocation, 1);
+assert.equal(qualityRetryPolicy.confirmed_dual_asr_delivery_defects_block_stitching, true);
+assert.equal(qualityRetryPolicy.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures, false);
 assert.equal(genericRequest.request.instruction, undefined);
 assert.ok(genericRequest.capability_losses.some(
   (row) => row.control === "performance_intent",

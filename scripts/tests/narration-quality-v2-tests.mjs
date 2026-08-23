@@ -62,6 +62,9 @@ import {
   narrationAudioSampleCountForTests,
 } from "../narration-provider-output-finalize.mjs";
 import {
+  reusableCanonicalFullStreamQaForTiming,
+} from "../local-whisper-word-timing.mjs";
+import {
   planNarrationConfirmationWindows,
 } from "../lib/narration-confirmation-windows.mjs";
 import {
@@ -636,6 +639,61 @@ const qualityRetryPolicy = narrationTtsRetryReportPolicy({
 assert.equal(qualityRetryPolicy.maximum_creative_submissions_per_invocation, 1);
 assert.equal(qualityRetryPolicy.confirmed_dual_asr_delivery_defects_block_stitching, true);
 assert.equal(qualityRetryPolicy.automatic_retry_limited_to_structural_audio_or_synthesis_process_failures, false);
+const timingConsensusContract = {
+  contract_version: "local_whisper_word_timing_v2",
+  model: "small.en",
+};
+const timingConsensusWords = [{
+  word: "forty",
+  start_sec: 1,
+  end_sec: 1.2,
+  probability: 0.99,
+}];
+const reusableTimingConsensus = reusableCanonicalFullStreamQaForTiming({
+  artifact: {
+    schema: "goldflow_narration_full_stream_qa_v2",
+    status: "passed_with_warnings",
+    source_script_hash: "1".repeat(64),
+    audio_sha256: "2".repeat(64),
+    narration_quality_contract_sha256: contract.contract_sha256,
+    primary_model: "small.en",
+    primary_alignment_contract: timingConsensusContract,
+    primary_recognized_text: "forty",
+    primary_recognized_words: timingConsensusWords,
+    blockers: [],
+    decision: { status: "passed_with_warnings", blockers: [], warnings: [] },
+  },
+  sourceScriptHash: "1".repeat(64),
+  narrationAudioSha256: "2".repeat(64),
+  narrationQualityContractSha256: contract.contract_sha256,
+  runtimeContract: timingConsensusContract,
+  alignmentModel: "small.en",
+  recognizedText: "forty",
+  recognizedWords: timingConsensusWords,
+});
+assert.equal(reusableTimingConsensus.status, "reusable");
+assert.equal(reusableCanonicalFullStreamQaForTiming({
+  artifact: {
+    schema: "goldflow_narration_full_stream_qa_v2",
+    status: "passed_with_warnings",
+    source_script_hash: "1".repeat(64),
+    audio_sha256: "3".repeat(64),
+    narration_quality_contract_sha256: contract.contract_sha256,
+    primary_model: "small.en",
+    primary_alignment_contract: timingConsensusContract,
+    primary_recognized_text: "forty",
+    primary_recognized_words: timingConsensusWords,
+    blockers: [],
+    decision: { status: "passed_with_warnings", blockers: [], warnings: [] },
+  },
+  sourceScriptHash: "1".repeat(64),
+  narrationAudioSha256: "2".repeat(64),
+  narrationQualityContractSha256: contract.contract_sha256,
+  runtimeContract: timingConsensusContract,
+  alignmentModel: "small.en",
+  recognizedText: "forty",
+  recognizedWords: timingConsensusWords,
+}).status, "not_reusable");
 assert.equal(genericRequest.request.instruction, undefined);
 assert.ok(genericRequest.capability_losses.some(
   (row) => row.control === "performance_intent",

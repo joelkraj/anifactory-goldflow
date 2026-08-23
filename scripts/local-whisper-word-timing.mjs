@@ -70,6 +70,57 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+export function reusableCanonicalFullStreamQaForTiming({
+  artifact,
+  sourceScriptHash,
+  narrationAudioSha256,
+  narrationQualityContractSha256,
+  runtimeContract,
+  alignmentModel,
+  recognizedText,
+  recognizedWords,
+} = {}) {
+  const findings = [];
+  if (artifact?.schema !== "goldflow_narration_full_stream_qa_v2") {
+    findings.push("schema");
+  }
+  if (!String(artifact?.status ?? "").startsWith("passed")) {
+    findings.push("status");
+  }
+  if ((artifact?.blockers ?? []).length !== 0
+    || (artifact?.decision?.blockers ?? []).length !== 0) {
+    findings.push("blockers");
+  }
+  if (artifact?.source_script_hash !== sourceScriptHash) {
+    findings.push("source_script_hash");
+  }
+  if (artifact?.audio_sha256 !== narrationAudioSha256) {
+    findings.push("narration_audio_sha256");
+  }
+  if (artifact?.narration_quality_contract_sha256
+    !== narrationQualityContractSha256) {
+    findings.push("narration_quality_contract_sha256");
+  }
+  if (artifact?.primary_model !== alignmentModel) {
+    findings.push("alignment_model");
+  }
+  if (JSON.stringify(artifact?.primary_alignment_contract ?? null)
+    !== JSON.stringify(runtimeContract ?? null)) {
+    findings.push("alignment_contract");
+  }
+  if (artifact?.primary_recognized_text !== recognizedText) {
+    findings.push("recognized_text");
+  }
+  if (JSON.stringify(artifact?.primary_recognized_words ?? null)
+    !== JSON.stringify(recognizedWords ?? null)) {
+    findings.push("recognized_words");
+  }
+  return {
+    status: findings.length ? "not_reusable" : "reusable",
+    findings,
+  };
+}
+
 async function readJson(filePath, fallback = null) {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
@@ -552,6 +603,26 @@ async function main() {
     .filter((text) => String(text).trim())
     .join(" ");
   const recognizedText = words.map((word) => word.word).join(" ");
+  const canonicalFullStreamQaPath = path.join(
+    episodeDir,
+    `narration_full_stream_qa_${episode}.json`,
+  );
+  const canonicalFullStreamQa = narrationQualityContract
+    ? await readJson(canonicalFullStreamQaPath, null)
+    : null;
+  const canonicalFullStreamQaReuse = narrationQualityContract
+    ? reusableCanonicalFullStreamQaForTiming({
+        artifact: canonicalFullStreamQa,
+        sourceScriptHash: scriptHash,
+        narrationAudioSha256: audioHash,
+        narrationQualityContractSha256:
+          narrationQualityContract.contract_sha256,
+        runtimeContract,
+        alignmentModel: transcription.model,
+        recognizedText: transcription.text ?? recognizedText,
+        recognizedWords: transcription.words,
+      })
+    : { status: "not_applicable", findings: [] };
   const asrEquivalentPhrases = (qwenReport.segments ?? []).flatMap((segment) => [
     ...(Array.isArray(segment.asr_equivalent_phrases) ? segment.asr_equivalent_phrases : []),
     ...(Array.isArray(segment.tts_override_replacements_applied)
@@ -567,13 +638,15 @@ async function main() {
   let strictDeliveryDecision = null;
   let transcriptIntegrity;
   if (narrationQualityContract) {
-    strictDeliveryDecision = strictNarrationDeliveryDecision(rawTranscriptIntegrity, {
-      orderQa: { blockers: [] },
-      joinQa: qwenReport.join_qa
-        ?? qwenReport.boundary_qa
-        ?? { blockers: [], warnings: [] },
-      contract: narrationQualityContract,
-    });
+    strictDeliveryDecision = canonicalFullStreamQaReuse.status === "reusable"
+      ? canonicalFullStreamQa.decision
+      : strictNarrationDeliveryDecision(rawTranscriptIntegrity, {
+          orderQa: { blockers: [] },
+          joinQa: qwenReport.join_qa
+            ?? qwenReport.boundary_qa
+            ?? { blockers: [], warnings: [] },
+          contract: narrationQualityContract,
+        });
     transcriptIntegrity = {
       ...rawTranscriptIntegrity,
       findings: [
@@ -582,7 +655,9 @@ async function main() {
       ],
       delivery_first_gate: {
         status: strictDeliveryDecision.status,
-        policy: "narration_quality_v2_strict_delivery",
+        policy: canonicalFullStreamQaReuse.status === "reusable"
+          ? "narration_quality_v2_hash_identical_finalizer_consensus"
+          : "narration_quality_v2_strict_delivery",
         softened: false,
       },
     };
@@ -615,6 +690,15 @@ async function main() {
     ...transcriptIntegrity,
     blockers: fullStreamBlockers,
     strict_delivery_decision: strictDeliveryDecision,
+    canonical_full_stream_qa_reuse: {
+      ...canonicalFullStreamQaReuse,
+      path: canonicalFullStreamQaReuse.status === "reusable"
+        ? canonicalFullStreamQaPath
+        : null,
+      sha256: canonicalFullStreamQaReuse.status === "reusable"
+        ? await hashFile(canonicalFullStreamQaPath)
+        : null,
+    },
   };
   const report = {
     ...(!revalidateExisting || existingTiming?.schema
@@ -701,9 +785,12 @@ async function main() {
       quality_contract_sha256: narrationQualityContract.contract_sha256,
       narration_audio_path: audioPath,
       narration_audio_hash: audioHash,
+      source_script_hash: scriptHash,
       transcript_qa: fullStreamTranscriptQa,
       blockers: repairBlockers,
       warnings: strictDeliveryDecision?.warnings ?? [],
+      canonical_full_stream_qa_reuse:
+        fullStreamTranscriptQa.canonical_full_stream_qa_reuse,
     });
     await writeJson(
       path.join(episodeDir, `narration_final_exact_repair_packet_${episode}.json`),

@@ -659,7 +659,7 @@ export class GoogleFlowBrowser {
       return { dialog, dialogId };
     } catch (error) {
       if (error?.code !== "ui_contract_mismatch") throw error;
-      const videoModeControl = await visibleLocator(page.getByRole("button", { name: /^Video\s*·\s*\d+s/i }));
+      const videoModeControl = await visibleLocator(page.getByRole("button", { name: FLOW_VIDEO_CONTROL_LABEL_PATTERN }));
       const startSlot = videoModeControl
         ? await visibleLocator(page.locator('[role="button"][aria-label*="Start frame" i], [aria-label*="Start frame" i]'))
           ?? await visibleLocator(page.getByText("Start", { exact: true }))

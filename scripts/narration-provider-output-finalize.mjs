@@ -60,6 +60,10 @@ import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs"
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
+const NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA =
+  "goldflow_narration_delivery_manual_review_v1";
+const NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION =
+  "all_hash_bound_blocked_narration_units_listened_end_to_end";
 
 function parseFlags(parts) {
   const flags = {};
@@ -146,6 +150,198 @@ function mergeDecisionWarnings(decision, warnings = []) {
     warnings: merged,
     review_required: merged.length > 0,
   };
+}
+
+function normalizedFindingCodes(findings = []) {
+  return [...new Set((findings ?? [])
+    .map((finding) => String(finding?.code ?? finding ?? "").trim())
+    .filter(Boolean))]
+    .sort();
+}
+
+function exactStringSet(left = [], right = []) {
+  const normalizedLeft = [...new Set(left.map(String))].sort();
+  const normalizedRight = [...new Set(right.map(String))].sort();
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
+export async function validateNarrationDeliveryManualReviewEvidenceForTests({
+  evidence,
+  evidencePath,
+  canonicalPlanSha256,
+  manifestFileSha256,
+  priorUnitDeliveryPath,
+  priorUnitDeliverySha256,
+  rows = [],
+  deliveryRows = [],
+  blockers = [],
+} = {}) {
+  if (!evidence || typeof evidence !== "object"
+    || evidence.schema !== NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA
+    || evidence.status !== "approved") {
+    throw new Error(
+      `Narration delivery manual review requires ${NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA} with approved status.`,
+    );
+  }
+  if (!String(evidence.reviewer ?? "").trim()
+    || !String(evidence.reviewed_at ?? "").trim()
+    || !String(evidence.note ?? "").trim()
+    || evidence.attestation !== NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION) {
+    throw new Error(
+      "Narration delivery manual review requires reviewer, reviewed_at, note, and the exact listening attestation.",
+    );
+  }
+  if (evidence.narration_generation_plan_sha256 !== canonicalPlanSha256
+    || evidence.provider_output_manifest_sha256 !== manifestFileSha256
+    || evidence.pre_review_unit_delivery_qa_sha256 !== priorUnitDeliverySha256
+    || !priorUnitDeliveryPath) {
+    throw new Error(
+      "Narration delivery manual review is stale against the current plan, provider manifest, or blocked QA artifact.",
+    );
+  }
+  const evidencePriorUnitDeliveryPath = String(
+    evidence.pre_review_unit_delivery_qa_path ?? "",
+  ).trim();
+  if (!evidencePriorUnitDeliveryPath
+    || path.resolve(evidencePriorUnitDeliveryPath)
+      !== path.resolve(priorUnitDeliveryPath)) {
+    throw new Error(
+      "Narration delivery manual review does not bind the exact blocked QA artifact path.",
+    );
+  }
+  if (!await fileMatchesSha256(
+    priorUnitDeliveryPath,
+    evidence.pre_review_unit_delivery_qa_sha256,
+  )) {
+    throw new Error("Narration delivery manual review cannot verify the blocked QA artifact hash.");
+  }
+  if (evidence.review_reel_path || evidence.review_reel_sha256) {
+    if (!await fileMatchesSha256(
+      evidence.review_reel_path,
+      evidence.review_reel_sha256,
+    )) {
+      throw new Error("Narration delivery manual review reel is missing or hash-stale.");
+    }
+  }
+  const blockedIds = [...new Set(
+    blockers.map((finding) => String(finding?.unit_id ?? "")).filter(Boolean),
+  )];
+  if (!blockedIds.length) {
+    throw new Error("Narration delivery manual review has no current blocker scope.");
+  }
+  const acceptedUnits = Array.isArray(evidence.accepted_units)
+    ? evidence.accepted_units
+    : [];
+  const acceptedIds = acceptedUnits.map((row) => String(row?.unit_id ?? ""));
+  if (Number(evidence.accepted_unit_count) !== acceptedUnits.length
+    || !exactStringSet(acceptedIds, blockedIds)) {
+    throw new Error(
+      "Narration delivery manual review must cover every currently blocked unit exactly once.",
+    );
+  }
+  const sourceById = new Map(rows.map((row) => [String(row.unit_id), row]));
+  const deliveryById = new Map(
+    deliveryRows.map((row) => [String(row.unit_id), row]),
+  );
+  for (const accepted of acceptedUnits) {
+    const unitId = String(accepted?.unit_id ?? "");
+    const source = sourceById.get(unitId);
+    const delivery = deliveryById.get(unitId);
+    const audible = accepted?.audible_review ?? {};
+    if (!source || !delivery
+      || accepted.decision !== "accept_first_take"
+      || accepted.provider !== source.provider
+      || Number(accepted.attempt) !== Number(source.attempt ?? 1)
+      || accepted.audio_path !== source.wav
+      || accepted.audio_sha256 !== source.audio_sha256
+      || accepted.synthesis_identity_sha256 !== source.synthesis_identity_sha256
+      || !String(accepted.listen_note ?? "").trim()) {
+      throw new Error(`Narration delivery manual review is stale for ${unitId}.`);
+    }
+    for (const field of [
+      "speech_complete",
+      "no_skip",
+      "no_truncation",
+      "no_stutter",
+      "voice_identity_acceptable",
+      "endpoint_acceptable",
+    ]) {
+      if (audible[field] !== true) {
+        throw new Error(
+          `Narration delivery manual review for ${unitId} must confirm audible_review.${field}=true.`,
+        );
+      }
+    }
+    const actualCodes = normalizedFindingCodes(delivery.decision?.blockers);
+    if (!actualCodes.length
+      || !exactStringSet(actualCodes, accepted.reviewed_blocker_codes ?? [])) {
+      throw new Error(
+        `Narration delivery manual review for ${unitId} does not enumerate the exact blocker codes.`,
+      );
+    }
+    if (!await fileMatchesSha256(source.wav, source.audio_sha256)) {
+      throw new Error(`Narration delivery manual review audio is stale for ${unitId}.`);
+    }
+  }
+  return {
+    status: "approved",
+    reviewer: String(evidence.reviewer).trim(),
+    reviewed_at: String(evidence.reviewed_at).trim(),
+    note: String(evidence.note).trim(),
+    accepted_unit_ids: acceptedIds,
+    accepted_unit_count: acceptedIds.length,
+    evidence_path: evidencePath,
+  };
+}
+
+function applyNarrationDeliveryManualReview({
+  deliveryRows,
+  blockers,
+  review,
+  evidenceSha256,
+} = {}) {
+  const acceptedIds = new Set(review.accepted_unit_ids.map(String));
+  for (const row of deliveryRows) {
+    if (!acceptedIds.has(String(row.unit_id))) continue;
+    const originalBlockers = structuredClone(row.decision?.blockers ?? []);
+    const reviewedWarnings = [
+      ...(row.decision?.warnings ?? []).map((finding) => ({
+        ...finding,
+        review_required: false,
+        manual_review_completed: true,
+      })),
+      ...originalBlockers.map((finding) => ({
+        ...finding,
+        severity: "warning",
+        original_severity: finding.severity ?? "blocker",
+        review_required: false,
+        manual_review_completed: true,
+        manual_review_disposition: "accepted_first_take_after_exact_listen",
+      })),
+    ];
+    row.decision = {
+      ...row.decision,
+      status: "passed_with_warnings",
+      blockers: [],
+      warnings: reviewedWarnings,
+      review_required: false,
+      manual_review: {
+        status: "approved",
+        reviewer: review.reviewer,
+        reviewed_at: review.reviewed_at,
+        evidence_path: review.evidence_path,
+        evidence_sha256: evidenceSha256,
+        reviewed_blocker_codes: normalizedFindingCodes(originalBlockers),
+      },
+    };
+    if (row.acoustic_qa?.delivery_qa_v2) {
+      row.acoustic_qa.delivery_qa_v2 = structuredClone(row.decision);
+    }
+  }
+  return blockers.filter(
+    (finding) => !acceptedIds.has(String(finding?.unit_id ?? "")),
+  );
 }
 
 function waveformQaWithoutVoiceAggregate(value) {
@@ -992,7 +1188,7 @@ export async function finalizeNarrationProviderOutput(
     (voiceContinuity.units ?? []).map((row) => [String(row.unit_id), row]),
   );
   const deliveryRows = [];
-  const blockers = [
+  let blockers = [
     ...(acousticQa.blockers ?? []),
     ...(voiceContinuity.blockers ?? []),
   ];
@@ -1081,12 +1277,6 @@ export async function finalizeNarrationProviderOutput(
     };
   }
 
-  const listenPacket = exactNarrationListenReviewPacket({
-    rows: deliveryRows,
-    generationPlanSha256: canonicalPlanSha256,
-    generationPlanFileSha256: planFileSha256,
-    qualityContractSha256: qualityContract.contract_sha256,
-  });
   const unitDeliveryPath = path.join(
     episodeDir,
     `narration_unit_delivery_qa_${episode}.json`,
@@ -1103,6 +1293,66 @@ export async function finalizeNarrationProviderOutput(
     episodeDir,
     `narration_exact_repair_packet_${episode}.json`,
   );
+  const manualReviewEvidencePath = String(
+    flags["manual-review-evidence"] ?? "",
+  ).trim()
+    ? path.resolve(flags["manual-review-evidence"])
+    : null;
+  let manualReview = null;
+  let manualReviewEvidenceSha256 = null;
+  if (manualReviewEvidencePath) {
+    const evidence = await readJson(manualReviewEvidencePath, null);
+    const evidencePriorUnitDeliveryPath = String(
+      evidence?.pre_review_unit_delivery_qa_path ?? "",
+    ).trim();
+    const priorUnitDeliveryPath = evidencePriorUnitDeliveryPath
+      ? path.resolve(evidencePriorUnitDeliveryPath)
+      : unitDeliveryPath;
+    const priorUnitDeliverySha256 = await sha256File(priorUnitDeliveryPath)
+      .catch(() => null);
+    manualReviewEvidenceSha256 = await sha256File(manualReviewEvidencePath);
+    manualReview = await validateNarrationDeliveryManualReviewEvidenceForTests({
+      evidence,
+      evidencePath: manualReviewEvidencePath,
+      canonicalPlanSha256,
+      manifestFileSha256,
+      priorUnitDeliveryPath,
+      priorUnitDeliverySha256,
+      rows,
+      deliveryRows,
+      blockers,
+    });
+    blockers = applyNarrationDeliveryManualReview({
+      deliveryRows,
+      blockers,
+      review: manualReview,
+      evidenceSha256: manualReviewEvidenceSha256,
+    });
+    checkpoint.stages.delivery_manual_review = {
+      input_key: narrationFinalizationStageKey(
+        "delivery_manual_review",
+        {
+          evidence_sha256: manualReviewEvidenceSha256,
+          accepted_unit_ids: manualReview.accepted_unit_ids,
+          provider_output_manifest_sha256: manifestFileSha256,
+        },
+      ),
+      status: "passed",
+      payload: {
+        evidence_path: manualReviewEvidencePath,
+        evidence_sha256: manualReviewEvidenceSha256,
+        reviewer: manualReview.reviewer,
+        reviewed_at: manualReview.reviewed_at,
+        accepted_unit_ids: manualReview.accepted_unit_ids,
+      },
+    };
+  }
+  const listenPacket = exactNarrationListenReviewPacket({
+    rows: deliveryRows,
+    generationPlanSha256: canonicalPlanSha256,
+    generationPlanFileSha256: planFileSha256,
+    qualityContractSha256: qualityContract.contract_sha256,
+  });
   const unitDeliveryArtifact = {
     schema: "goldflow_narration_unit_delivery_qa_v2",
     status: blockers.length
@@ -1124,6 +1374,9 @@ export async function finalizeNarrationProviderOutput(
     voice_continuity_report_sha256: continuityArtifactSha256,
     speaker_similarity_evidence_path: similarityEvidencePath,
     speaker_similarity_evidence_sha256: voiceContinuity.report_sha256 ?? null,
+    manual_review_evidence_path: manualReviewEvidencePath,
+    manual_review_evidence_sha256: manualReviewEvidenceSha256,
+    manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
     blockers,
     units: deliveryRows,
   };
@@ -1186,6 +1439,9 @@ export async function finalizeNarrationProviderOutput(
       embeddedPrimaryMap.size,
     fresh_finalizer_small_asr_unit_count: primaryNeeds.length,
     provider_small_asr_reuse_decisions: embeddedPrimaryReuseDecisions,
+    manual_review_evidence_path: manualReviewEvidencePath,
+    manual_review_evidence_sha256: manualReviewEvidenceSha256,
+    manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
     selected_blocker_count: selectedBlockers.length,
     selected_blockers: selectedBlockers,
     selected_units: selectedUnits,
@@ -1625,6 +1881,9 @@ export async function finalizeNarrationProviderOutput(
     voice_continuity_report_sha256: continuityArtifactSha256,
     speaker_similarity_evidence_path: similarityEvidencePath,
     speaker_similarity_evidence_sha256: voiceContinuity.report_sha256 ?? null,
+    manual_review_evidence_path: manualReviewEvidencePath,
+    manual_review_evidence_sha256: manualReviewEvidenceSha256,
+    manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
     listen_review_packet_path: listenPacketPath,
     listen_review_packet_sha256: listenPacket.packet_sha256,
     listen_review_status: listenPacket.item_count === 0

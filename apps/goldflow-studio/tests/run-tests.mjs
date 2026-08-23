@@ -39,6 +39,7 @@ import {
   chatGptImageFailureDisposition,
   hybridManifestDispatchOptions,
   materializedReferenceState,
+  resolveManualProviderAuthRecoveryEvidence,
   validateFlowRuntimeConcurrency,
   validateRepairSharedReferenceScope,
 } from "../../../scripts/hybrid-browser-image-pool.mjs";
@@ -1631,6 +1632,68 @@ async function testHybridAcceptedReferencePreservation() {
   assert.throws(
     () => validateRepairSharedReferenceScope({ ids: ["approved_style_ref"], repairReason: "repair", referencesOnly: false }),
     /only for exact reference repairs/,
+  );
+
+  const recoveryEpisodeDir = path.join(temporaryRoot, "manual-provider-auth-recovery");
+  const recoveryRows = [{
+    ref_id: "pending_ref",
+    generation_mode: "standalone_ref",
+    reference_image_path: null,
+  }];
+  const runIdentityPath = path.join(recoveryEpisodeDir, "run_identity.json");
+  const referencePlanPath = path.join(recoveryEpisodeDir, "visual_reference_plan.json");
+  const stageReportPath = path.join(recoveryEpisodeDir, "reports", "stages", "reference_generation", "blocked.json");
+  const triagePath = path.join(recoveryEpisodeDir, "manual_blocker_triage_reference_generation_ep_01.json");
+  await fs.mkdir(path.dirname(stageReportPath), { recursive: true });
+  await fs.writeFile(runIdentityPath, `${JSON.stringify({ schema: "goldflow_run_identity_v2", episode: "ep_01" }, null, 2)}\n`);
+  await fs.writeFile(referencePlanPath, `${JSON.stringify({ status: "passed", reference_targets: recoveryRows }, null, 2)}\n`);
+  await fs.writeFile(stageReportPath, `${JSON.stringify({
+    status: "failed",
+    command: "imagegen browser-pool",
+    stdout_tail: JSON.stringify({
+      status: "blocked",
+      mode: "reference",
+      unsubmitted_asset_ids: ["pending_ref"],
+    }),
+  }, null, 2)}\n`);
+  await fs.writeFile(triagePath, `${JSON.stringify({
+    schema: "goldflow_manual_image_provider_auth_recovery_v1",
+    status: "approved",
+    episode_dir: recoveryEpisodeDir,
+    mode: "reference",
+    target_provider: "chatgpt",
+    preserve_existing_assets: true,
+    automatic_cross_provider_failover: false,
+    creative_submission_count_per_authorized_asset: 0,
+    operator_authorization: "Continue autonomously through exact-ID ChatGPT fallback.",
+    authorized_asset_ids: ["pending_ref"],
+    run_identity_sha256: await sha256File(runIdentityPath),
+    source_artifact_sha256: await sha256File(referencePlanPath),
+    blocked_stage_report_path: stageReportPath,
+    blocked_stage_report_sha256: await sha256File(stageReportPath),
+    supporting_evidence: [],
+  }, null, 2)}\n`);
+  const recoveryEvidence = await resolveManualProviderAuthRecoveryEvidence({
+    episodeDir: recoveryEpisodeDir,
+    mode: "reference",
+    currentRows: recoveryRows,
+    requestedIds: new Set(["pending_ref"]),
+    evidencePath: triagePath,
+    targetProvider: "chatgpt",
+  });
+  assert.equal(recoveryEvidence.kind, "manual_provider_auth_unsubmitted_assets");
+  assert.deepEqual(recoveryEvidence.authorized_asset_ids, ["pending_ref"]);
+  await fs.mkdir(path.join(recoveryEpisodeDir, "assets", "images", "codex_worker_staging", "prior", "attempts", "pending_ref", "attempt-001"), { recursive: true });
+  await assert.rejects(
+    () => resolveManualProviderAuthRecoveryEvidence({
+      episodeDir: recoveryEpisodeDir,
+      mode: "reference",
+      currentRows: recoveryRows,
+      requestedIds: new Set(["pending_ref"]),
+      evidencePath: triagePath,
+      targetProvider: "chatgpt",
+    }),
+    /prior creative attempt directory exists/,
   );
 }
 

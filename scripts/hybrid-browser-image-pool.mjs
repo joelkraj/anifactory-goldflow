@@ -99,6 +99,122 @@ export function validateRepairSharedReferenceScope({ ids = [], repairReason = ""
   return ids;
 }
 
+async function manifestAttemptExistsForAsset({ episodeDir, assetId }) {
+  const stagingRoot = path.join(episodeDir, "assets", "images", "codex_worker_staging");
+  const manifests = (await fs.readdir(stagingRoot, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isDirectory());
+  for (const entry of manifests) {
+    const attemptRoot = path.join(stagingRoot, entry.name, "attempts", assetId);
+    const attempts = await fs.readdir(attemptRoot, { withFileTypes: true }).catch(() => []);
+    if (attempts.some((attempt) => attempt.isDirectory())) return true;
+  }
+  return false;
+}
+
+function parseBlockedPoolReport(stageReport) {
+  const stdout = String(stageReport?.stdout_tail ?? "").trim();
+  if (!stdout) return null;
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveManualProviderAuthRecoveryEvidence({
+  episodeDir,
+  mode,
+  currentRows,
+  requestedIds,
+  evidencePath,
+  targetProvider,
+}) {
+  if (!evidencePath) return null;
+  if (targetProvider !== "chatgpt") {
+    throw new Error("Manual provider-auth recovery is restricted to the operator-approved ChatGPT fallback route.");
+  }
+  const triagePath = path.resolve(evidencePath);
+  const triage = await readJson(triagePath, null);
+  if (triage?.schema !== "goldflow_manual_image_provider_auth_recovery_v1" || triage?.status !== "approved") {
+    throw new Error("Manual provider-auth recovery requires an approved goldflow_manual_image_provider_auth_recovery_v1 artifact.");
+  }
+  if (path.resolve(triage.episode_dir ?? "") !== path.resolve(episodeDir) || triage.mode !== mode) {
+    throw new Error("Manual provider-auth recovery does not match the current episode and image mode.");
+  }
+  if (triage.target_provider !== "chatgpt"
+    || triage.preserve_existing_assets !== true
+    || triage.automatic_cross_provider_failover !== false
+    || triage.creative_submission_count_per_authorized_asset !== 0
+    || !String(triage.operator_authorization ?? "").trim()) {
+    throw new Error("Manual provider-auth recovery is missing its exact operator and one-submission safeguards.");
+  }
+  const authorizedIds = parseIdScope(triage.authorized_asset_ids);
+  const requested = [...requestedIds].map(String);
+  if (authorizedIds.length !== requested.length || requested.some((assetId) => !authorizedIds.includes(assetId))) {
+    throw new Error("Manual provider-auth recovery must authorize exactly the requested asset IDs.");
+  }
+  const rowById = new Map(currentRows.map((row) => [assetIdForMode(row, mode), row]));
+  const unknown = requested.filter((assetId) => !rowById.has(assetId));
+  if (unknown.length) throw new Error(`Manual provider-auth recovery contains unknown current assets: ${unknown.join(", ")}.`);
+
+  const identityPath = path.join(episodeDir, "run_identity.json");
+  const sourcePath = mode === "reference"
+    ? path.join(episodeDir, "visual_reference_plan.json")
+    : path.join(episodeDir, "section_image_prompts_hardened.json");
+  const exactRecords = [
+    ["run_identity", identityPath, triage.run_identity_sha256],
+    ["source_artifact", sourcePath, triage.source_artifact_sha256],
+    ["blocked_stage_report", path.resolve(triage.blocked_stage_report_path ?? ""), triage.blocked_stage_report_sha256],
+  ];
+  const records = [{ path: triagePath, sha256: await sha256File(triagePath) }];
+  let stageReport = null;
+  for (const [label, recordPath, expectedSha256] of exactRecords) {
+    if (!recordPath || !/^[a-f0-9]{64}$/.test(String(expectedSha256 ?? "")) || !await exists(recordPath)) {
+      throw new Error(`Manual provider-auth recovery has invalid ${label} evidence.`);
+    }
+    const actualSha256 = await sha256File(recordPath);
+    if (actualSha256 !== expectedSha256) throw new Error(`Manual provider-auth recovery ${label} hash mismatch.`);
+    records.push({ path: recordPath, sha256: actualSha256 });
+    if (label === "blocked_stage_report") stageReport = await readJson(recordPath, null);
+  }
+  const blockedPool = parseBlockedPoolReport(stageReport);
+  const unsubmittedIds = new Set((blockedPool?.unsubmitted_asset_ids ?? []).map(String));
+  if (stageReport?.status !== "failed"
+    || stageReport?.command !== "imagegen browser-pool"
+    || blockedPool?.status !== "blocked"
+    || blockedPool?.mode !== mode) {
+    throw new Error("Manual provider-auth recovery stage evidence is not a failed blocked browser-pool report for this mode.");
+  }
+  const notProvenUnsubmitted = requested.filter((assetId) => !unsubmittedIds.has(assetId));
+  if (notProvenUnsubmitted.length) {
+    throw new Error(`Manual provider-auth recovery lacks immutable unsubmitted evidence for: ${notProvenUnsubmitted.join(", ")}.`);
+  }
+  for (const assetId of requested) {
+    if (await manifestAttemptExistsForAsset({ episodeDir, assetId })) {
+      throw new Error(`Manual provider-auth recovery refuses ${assetId}: a prior creative attempt directory exists.`);
+    }
+    if (mode === "reference" && await materializedReferenceState(rowById.get(assetId), { episodeDir })) {
+      throw new Error(`Manual provider-auth recovery refuses ${assetId}: an accepted reference already exists.`);
+    }
+  }
+  for (const [index, row] of (triage.supporting_evidence ?? []).entries()) {
+    const recordPath = path.resolve(row?.path ?? "");
+    const expectedSha256 = String(row?.sha256 ?? "");
+    if (!recordPath || !/^[a-f0-9]{64}$/.test(expectedSha256) || !await exists(recordPath)) {
+      throw new Error(`Manual provider-auth recovery supporting evidence ${index + 1} is invalid.`);
+    }
+    const actualSha256 = await sha256File(recordPath);
+    if (actualSha256 !== expectedSha256) throw new Error(`Manual provider-auth recovery supporting evidence hash mismatch: ${recordPath}.`);
+    records.push({ path: recordPath, sha256: actualSha256 });
+  }
+  return {
+    schema: "goldflow_hybrid_image_repair_evidence_v1",
+    kind: "manual_provider_auth_unsubmitted_assets",
+    authorized_asset_ids: requested,
+    records,
+  };
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -527,7 +643,26 @@ export async function findSourceCompatibleHybridCompletions({
   return selectedById;
 }
 
-async function resolveRepairEvidence({ episodeDir, episode, mode, currentRows, requestedIds, qaRecovery, providerMigration }) {
+async function resolveRepairEvidence({
+  episodeDir,
+  episode,
+  mode,
+  currentRows,
+  requestedIds,
+  qaRecovery,
+  providerMigration,
+  manualProviderAuthEvidencePath,
+  targetProvider,
+}) {
+  const manualRecovery = await resolveManualProviderAuthRecoveryEvidence({
+    episodeDir,
+    mode,
+    currentRows,
+    requestedIds,
+    evidencePath: manualProviderAuthEvidencePath,
+    targetProvider,
+  });
+  if (manualRecovery) return manualRecovery;
   if (providerMigration) {
     if (mode !== "scene") throw new Error("Provider migration is valid only for scene cuts.");
     const ledgerPath = path.join(episodeDir, "cut_execution_ledger.json");
@@ -1714,6 +1849,7 @@ export async function runHybridBrowserImagePool(flags) {
   const referencesOnly = boolFlag(flags["references-only"]) || flags.mode === "reference";
   const qaRecovery = boolFlag(flags["qa-recovery"]);
   const providerMigration = boolFlag(flags["provider-migration"]);
+  const manualProviderAuthEvidencePath = String(flags["manual-provider-auth-evidence"] ?? "").trim();
   const wavefrontPrefetch = boolFlag(flags["wavefront-prefetch"]);
   const reconcileOnly = boolFlag(flags["reconcile-only"]);
   const flowOnly = flowPrimary || boolFlag(flags["flow-only"]);
@@ -1748,6 +1884,9 @@ export async function runHybridBrowserImagePool(flags) {
     throw new Error("--provider-migration true requires an exact scene --image-ids scope and --repair-reason.");
   }
   if (providerMigration && qaRecovery) throw new Error("--provider-migration and --qa-recovery are mutually exclusive.");
+  if (manualProviderAuthEvidencePath && (!repairReason || !requestedIds.size || !chatgptOnly || qaRecovery || providerMigration)) {
+    throw new Error("--manual-provider-auth-evidence requires an exact ChatGPT-only repair and cannot be combined with QA recovery or provider migration.");
+  }
   if (reconcileOnly && (repairReason || qaRecovery || wavefrontPrefetch)) {
     throw new Error("--reconcile-only true cannot be combined with repair, QA-recovery, or wavefront-prefetch flags.");
   }
@@ -1903,6 +2042,8 @@ export async function runHybridBrowserImagePool(flags) {
         requestedIds,
         qaRecovery,
         providerMigration,
+        manualProviderAuthEvidencePath,
+        targetProvider: chatgptOnly ? "chatgpt" : null,
       })
     : null;
   const reconciledRepairAssetIds = new Set();

@@ -46,7 +46,7 @@ export function narrationSubjectiveReviewManifestSha256(value) {
 }
 
 export function narrationSubjectiveReviewDecisionSha256(value) {
-  return canonicalSha256(value, ["decision_sha256"]);
+  return canonicalSha256(value, ["decision_sha256", "validation"]);
 }
 
 function unitsFromPlan(plan = {}) {

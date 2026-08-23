@@ -1324,6 +1324,21 @@ assert.equal(
   ).status,
   "approved",
 );
+const persistedSubjectiveDecision = {
+  ...subjectiveDecision,
+  validation: validateNarrationSubjectiveReviewDecision(
+    subjectiveManifest,
+    subjectiveDecision,
+  ),
+};
+assert.equal(
+  validateNarrationSubjectiveReviewDecision(
+    subjectiveManifest,
+    persistedSubjectiveDecision,
+  ).status,
+  "approved",
+  "persisted subjective validation metadata must not invalidate the decision hash",
+);
 const subjectiveDecisionWithoutAttestation = buildNarrationSubjectiveReviewDecision({
   manifest: subjectiveManifest,
   reviewer: "fixture-reviewer",

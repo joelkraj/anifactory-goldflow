@@ -291,6 +291,12 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
     note: String(evidence.note).trim(),
     accepted_unit_ids: acceptedIds,
     accepted_unit_count: acceptedIds.length,
+    accepted_blocker_codes_by_unit: Object.fromEntries(
+      acceptedUnits.map((row) => [
+        String(row.unit_id),
+        normalizedFindingCodes(row.reviewed_blocker_codes ?? []),
+      ]),
+    ),
     evidence_path: evidencePath,
   };
 }
@@ -342,6 +348,96 @@ function applyNarrationDeliveryManualReview({
   return blockers.filter(
     (finding) => !acceptedIds.has(String(finding?.unit_id ?? "")),
   );
+}
+
+function manualReviewMatchesFullStreamFinding({
+  finding,
+  defaultUnitIds = [],
+  review,
+} = {}) {
+  const code = String(finding?.code ?? "").trim();
+  if (!code) return [];
+  const scopedUnitIds = [...new Set([
+    String(finding?.unit_id ?? "").trim(),
+    ...(finding?.unit_ids ?? []).map(String),
+    ...defaultUnitIds.map(String),
+  ].filter(Boolean))];
+  return scopedUnitIds.filter((unitId) => (
+    review?.accepted_blocker_codes_by_unit?.[unitId]?.includes(code)
+  ));
+}
+
+function applyManualReviewToFullStreamDecision({
+  decision,
+  defaultUnitIds = [],
+  review,
+  evidenceSha256,
+} = {}) {
+  const remainingBlockers = [];
+  const reviewedWarnings = [];
+  for (const finding of decision?.blockers ?? []) {
+    const matchedUnitIds = manualReviewMatchesFullStreamFinding({
+      finding,
+      defaultUnitIds,
+      review,
+    });
+    if (!matchedUnitIds.length) {
+      remainingBlockers.push(finding);
+      continue;
+    }
+    reviewedWarnings.push({
+      ...finding,
+      severity: "warning",
+      original_severity: finding.severity ?? "blocker",
+      review_required: false,
+      manual_review_completed: true,
+      manual_review_disposition:
+        "accepted_first_take_after_exact_listen",
+      manual_review_matched_unit_ids: matchedUnitIds,
+      manual_review_evidence_sha256: evidenceSha256,
+    });
+  }
+  const warnings = [...(decision?.warnings ?? []), ...reviewedWarnings];
+  return {
+    ...decision,
+    status: statusFor({ blockers: remainingBlockers, warnings }),
+    blockers: remainingBlockers,
+    warnings,
+    review_required: warnings.some((finding) => finding.review_required === true),
+    manual_review: reviewedWarnings.length ? {
+      status: "approved",
+      reviewer: review.reviewer,
+      reviewed_at: review.reviewed_at,
+      evidence_path: review.evidence_path,
+      evidence_sha256: evidenceSha256,
+      matched_finding_count: reviewedWarnings.length,
+    } : null,
+  };
+}
+
+export function applyNarrationFullStreamManualReviewForTests({
+  fullStream,
+  review,
+  evidenceSha256,
+} = {}) {
+  const reviewed = structuredClone(fullStream);
+  reviewed.confirmation_windows = (reviewed.confirmation_windows ?? []).map(
+    (window) => ({
+      ...window,
+      decision: applyManualReviewToFullStreamDecision({
+        decision: window.decision,
+        defaultUnitIds: window.unit_ids ?? [],
+        review,
+        evidenceSha256,
+      }),
+    }),
+  );
+  reviewed.decision = applyManualReviewToFullStreamDecision({
+    decision: reviewed.decision,
+    review,
+    evidenceSha256,
+  });
+  return reviewed;
 }
 
 function waveformQaWithoutVoiceAggregate(value) {
@@ -1649,11 +1745,13 @@ export async function finalizeNarrationProviderOutput(
       join_qa: joinQa,
     },
   );
-  const cachedFullStreamStage = reusableNarrationFinalizationStage(
-    checkpoint,
-    "full_stream_delivery_qa",
-    fullStreamInputKey,
-  );
+  const checkpointFullStreamStage = checkpoint?.stages
+    ?.full_stream_delivery_qa ?? null;
+  const cachedFullStreamStage = checkpointFullStreamStage?.input_key
+      === fullStreamInputKey
+      && checkpointFullStreamStage?.payload?.full_stream
+    ? structuredClone(checkpointFullStreamStage)
+    : null;
   let cachedFullStream = cachedFullStreamStage?.payload?.full_stream ?? null;
   if (cachedFullStream) {
     const confirmationEvidenceValid = (await Promise.all(
@@ -1663,7 +1761,7 @@ export async function finalizeNarrationProviderOutput(
     )).every(Boolean);
     if (!confirmationEvidenceValid) cachedFullStream = null;
   }
-  const fullStream = cachedFullStream
+  const rawFullStream = cachedFullStream
     ?? await runFullStreamDeliveryQa({
       helpers,
       audioPath: canonicalWav,
@@ -1676,10 +1774,17 @@ export async function finalizeNarrationProviderOutput(
       workDir,
       localWhisperContract: officialLocalWhisperContract,
     });
+  const fullStream = manualReview
+    ? applyNarrationFullStreamManualReviewForTests({
+        fullStream: rawFullStream,
+        review: manualReview,
+        evidenceSha256: manualReviewEvidenceSha256,
+      })
+    : rawFullStream;
   checkpoint.stages.full_stream_delivery_qa = {
     input_key: fullStreamInputKey,
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
-    payload: { full_stream: fullStream },
+    payload: { full_stream: rawFullStream },
   };
   const fullStreamPath = path.join(
     episodeDir,
@@ -1711,6 +1816,9 @@ export async function finalizeNarrationProviderOutput(
     confirmation_window_plan: fullStream.confirmation_window_plan,
     confirmation_windows: fullStream.confirmation_windows,
     primary_alignment_contract: fullStream.primary_alignment_contract,
+    manual_review_evidence_path: manualReviewEvidencePath,
+    manual_review_evidence_sha256: manualReviewEvidenceSha256,
+    manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
     decision: fullStream.decision,
     blockers: fullStream.decision.blockers,
     warnings: fullStream.decision.warnings,

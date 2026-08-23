@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  applyNarrationFullStreamManualReviewForTests,
   validateNarrationDeliveryManualReviewEvidenceForTests,
 } from "../narration-provider-output-finalize.mjs";
 
@@ -88,6 +89,59 @@ try {
   });
   assert.equal(valid.status, "approved");
   assert.deepEqual(valid.accepted_unit_ids, ["unit_001"]);
+  assert.deepEqual(valid.accepted_blocker_codes_by_unit, {
+    unit_001: ["narration_confirmed_word_omission"],
+  });
+
+  const reviewedFullStream = applyNarrationFullStreamManualReviewForTests({
+    fullStream: {
+      confirmation_windows: [{
+        unit_ids: ["unit_001", "unit_002"],
+        decision: {
+          status: "blocked",
+          blockers: [blocker],
+          warnings: [],
+        },
+      }],
+      decision: {
+        status: "blocked",
+        blockers: [{ ...blocker, unit_ids: ["unit_001", "unit_002"] }],
+        warnings: [],
+      },
+    },
+    review: valid,
+    evidenceSha256: "d".repeat(64),
+  });
+  assert.equal(reviewedFullStream.decision.status, "passed_with_warnings");
+  assert.equal(reviewedFullStream.decision.blockers.length, 0);
+  assert.equal(reviewedFullStream.decision.warnings.length, 1);
+  assert.deepEqual(
+    reviewedFullStream.decision.warnings[0].manual_review_matched_unit_ids,
+    ["unit_001"],
+  );
+  assert.equal(
+    reviewedFullStream.confirmation_windows[0].decision.status,
+    "passed_with_warnings",
+  );
+
+  const unrelatedFullStream = applyNarrationFullStreamManualReviewForTests({
+    fullStream: {
+      confirmation_windows: [],
+      decision: {
+        status: "blocked",
+        blockers: [{
+          unit_id: "unit_002",
+          code: "narration_confirmed_word_omission",
+          severity: "blocker",
+        }],
+        warnings: [],
+      },
+    },
+    review: valid,
+    evidenceSha256: "d".repeat(64),
+  });
+  assert.equal(unrelatedFullStream.decision.status, "blocked");
+  assert.equal(unrelatedFullStream.decision.blockers.length, 1);
 
   await assert.rejects(
     validateNarrationDeliveryManualReviewEvidenceForTests({

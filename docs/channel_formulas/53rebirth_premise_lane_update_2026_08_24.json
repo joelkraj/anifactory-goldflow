@@ -1,0 +1,185 @@
+{
+  "schema": "goldflow_53rebirth_premise_lane_update_v1",
+  "status": "active_controlled_test",
+  "channel": "53rebirth",
+  "channel_name": "Manhwa Joey",
+  "observed_at": "2026-08-24",
+  "source_type": "operator_supplied_channel_catalog_analysis",
+  "evidence_limitations": [
+    "Raw views are affected by impressions, upload age, packaging, release timing, and suggested distribution, so this comparison does not isolate premise causality.",
+    "The categorical gap is large and consistent enough to set a temporary premise prior, not a permanent genre law.",
+    "The Anti-Simp and Goddess of Death winners show that supernatural or identity mechanics can work when the human status fantasy is immediately legible; the negative signal is abstract rank-ladder progression, not fantasy itself."
+  ],
+  "distribution_context": {
+    "ads_first_active_date": "2026-07-29",
+    "first_ad_impressions": 6667,
+    "watch_minutes_per_view_with_ads_first_three_days": [
+      22.6,
+      22.5,
+      23.0
+    ],
+    "interpretation": "Ads are not supported as the primary cause of the August watch-time decline because viewing remained at the pre-ad level for the first three monetized days.",
+    "weekly_watch_minutes_per_view": [
+      { "week_start": "2026-06-15", "minutes": 8.6 },
+      { "week_start": "2026-06-22", "minutes": 9.2 },
+      { "week_start": "2026-06-29", "minutes": 10.6 },
+      { "week_start": "2026-07-06", "minutes": 19.5 },
+      { "week_start": "2026-07-13", "minutes": 22.5 },
+      { "week_start": "2026-07-20", "minutes": 22.1 },
+      { "week_start": "2026-07-27", "minutes": 22.3 },
+      { "week_start": "2026-08-03", "minutes": 7.3 },
+      { "week_start": "2026-08-10", "minutes": 10.9 },
+      { "week_start": "2026-08-17", "minutes": 7.2 }
+    ],
+    "suggested_views": {
+      "july": 75250,
+      "august": 5660,
+      "change_percent": -92
+    },
+    "subscriber_apv_percent": {
+      "july": 18.3,
+      "august": 11.5
+    },
+    "suggested_apv_percent": {
+      "july": 26.1,
+      "august": 19.8
+    },
+    "shorts_contamination": {
+      "august_views": 3542,
+      "average_view_duration_sec": 11,
+      "watch_minutes": 198,
+      "rule": "Exclude Shorts from every longform premise, retention, and duration comparison."
+    }
+  },
+  "premise_cohorts": {
+    "real_world_money_and_status": [
+      { "label": "$1 System bought his company", "views": 18255 },
+      { "label": "100X Learning System", "views": 15949 },
+      { "label": "$184,730 / 10X System", "views": 13277 },
+      { "label": "Uber, $10,000 per mile", "views": 6467 },
+      { "label": "Bought the company paying for the car", "views": 4999 },
+      { "label": "10X Producer System", "views": 4825 },
+      { "label": "Married his mother, took his company", "views": 4450 }
+    ],
+    "fantasy_rank_ladders": [
+      { "label": "My Party Sold 10 Years of My SKILLS", "views": 55 },
+      { "label": "F-Rank Underdog / 10,000 attempts", "views": 58 },
+      { "label": "F-Rank Hunter / Unlimited Skill Points", "views": 87 },
+      { "label": "Mageless Servant / SSS Crystal", "views": 158 },
+      { "label": "Story Reading Ability", "views": 180 },
+      { "label": "Fiancee Chose SSS Hero / S-Rank Healer", "views": 215 },
+      { "label": "F-Rank Storage Part 2", "views": 268 },
+      { "label": "Dumped F-Rank Fiance / 99 Gates", "views": 673 }
+    ],
+    "non_rank_exceptions": [
+      { "label": "Anti-Simp System", "views": 29223, "reason": "Immediately legible identity comedy and corrective social fantasy." },
+      { "label": "Goddess of Death", "views": 23220, "reason": "Immediately legible supernatural romance and intimate status reversal." }
+    ]
+  },
+  "derived_observations": {
+    "real_world_money_and_status_median_views": 6467,
+    "fantasy_rank_ladder_median_views": 169,
+    "median_view_ratio": 38.27,
+    "weakest_real_world_example_vs_strongest_rank_example_ratio": 6.61,
+    "working_thesis": "This audience currently buys recognizable status reversal more reliably than abstract power progression."
+  },
+  "active_test": {
+    "window": "next_10_longform_premise_selections",
+    "default_lane": "A personally legible modern betrayal followed by one simple numerical or impossible advantage that compounds into familiar money, ownership, career, business, property, influence, reputation, or skill proof.",
+    "suppressed_as_default": [
+      "F-rank",
+      "S-rank",
+      "SSS-rank",
+      "gates",
+      "hunters",
+      "dungeons",
+      "guilds",
+      "academies",
+      "raid parties",
+      "crystals used as a rank ladder"
+    ],
+    "allowed_challengers": [
+      "Identity comedy with an instantly understandable corrective mechanic.",
+      "Supernatural romance with a concrete human betrayal and visible social reversal.",
+      "Isekai or reincarnation only when the transported condition creates a one-breath human movie rather than a rank ladder."
+    ],
+    "high_fit_unused_assets": [
+      "inheritance or will",
+      "restaurant",
+      "car dealership",
+      "hotel",
+      "wedding venue",
+      "patent",
+      "debt or loan",
+      "insurance payout",
+      "franchise"
+    ],
+    "selection_rule": "Prefer a familiar social or financial receipt a cold viewer can value immediately. Do not select abstract rank progression unless the operator explicitly requests it or new measured evidence overturns this cohort result.",
+    "package_shape_rule": "Treat asset-theft-plus-unit-multiplier as a reliable floor, not the whole channel. In the next three-upload slate, use that skeleton no more than twice and reserve one slot for a materially different, evidence-backed identity-comedy, hidden-status, supernatural-romance, or equivalent challenger.",
+    "rollback_rule": "Reassess after ten longform selections using impression-normalized CTR, APV, AVD, traffic source, subscriber status, duration cohort, and packaging quality rather than raw views alone."
+  },
+  "recommended_next_three_slate": {
+    "status": "editorial_recommendation_pending_operator_premise_approval",
+    "slot_1": {
+      "role": "proven-money-lane control",
+      "title": "My Wife Left Me $500K in Debt. Every $1 Became $100 | Manhwa Recap",
+      "thumbnail_text": "$1 -> $100",
+      "thumbnail_proof": "A single debt statement visibly changes into acquisition capital; do not use an abstract bank skyline as the only proof."
+    },
+    "slot_2": {
+      "role": "emotional-object acquisition challenger",
+      "title": "My Fiancee Pawned Mom's Ring. Every Junk Item Made Me Rich | Manhwa Recap",
+      "thumbnail_text": "$1 -> $12M",
+      "thumbnail_proof": "The mother's ring is the dominant object, with the pawn receipt and auction value readable as one transformation."
+    },
+    "slot_3": {
+      "role": "package-shape breaker",
+      "preferred_title": "My Wife Chose Her CEO. The Anti-Simp System Returned Everything I Gave Her | Manhwa Recap",
+      "preferred_thumbnail_text": "$12M REFUND",
+      "viewer_desire": "Directly test transfer from the channel's 29,223-view Anti-Simp winner while retaining modern money, romantic betrayal, restitution, and public revenge without another per-unit multiplier title.",
+      "alternate_challengers": [
+        {
+          "title": "My Wife Left Me at the Altar. The Goddess of Wealth Took Her Seat | Manhwa Recap",
+          "thumbnail_text": "SHE CHOSE HIM",
+          "evidence_transfer": "Tests whether the 23,220-view Goddess of Death appetite repeats through a materially different modern wealth-and-wedding movie."
+        },
+        {
+          "title": "My Wife Left Me for a Billionaire. His Black Card Died When I Walked Away | Manhwa Recap",
+          "thumbnail_text": "DECLINED",
+          "evidence_transfer": "Most original hidden-status challenger, but less directly supported than the two measured non-multiplier winners."
+        }
+      ],
+      "rule": "Do not replace this slot with a third asset-theft-plus-unit-multiplier package without an explicit operator decision."
+    },
+    "held_control": {
+      "title": "My Wife Sold Dad's Hotel. Each Ruined Room Paid $10K | Manhwa Recap",
+      "reason": "Proven and useful, but its per-unit payout grammar is closer to the channel's mid-tier Uber shape and would make the three-upload slate too repetitive."
+    }
+  },
+  "analytics_protocol": {
+    "longform_only_learning": true,
+    "required_segments": [
+      "content type",
+      "traffic source",
+      "subscriber versus non-subscriber",
+      "new versus returning viewer",
+      "duration cohort",
+      "impressions and CTR",
+      "AVD and APV"
+    ],
+    "matched_ad_test": {
+      "status": "active_operator_approved",
+      "experiment_id": "manhwa_joey_75min_manual_midroll_v1",
+      "experiment_path": "docs/channel_experiments/manhwa_joey_75min_manual_midroll_test_v1.json",
+      "uploads": 3,
+      "target_duration_minutes": 75,
+      "acceptable_duration_minutes": [70, 80],
+      "manual_midroll_count": 3,
+      "automatic_midrolls": false,
+      "decision_metric": "Subscriber APV relative to the prior 18.3 percent level and current 11.5 percent level, plus ad-aligned local retention drops around the exact three insertions.",
+      "within_video_control": "At 24h, 72h, and 7d, attempt to capture audience_retention by elapsedVideoTimeRatio and compare each insertion-centered drop with equal-width adjacent segments. This local control is premise-independent, but an aligned cliff remains evidence of possible ad friction rather than proof of total causal impact.",
+      "reason": "Duration mix and ad load remain confounded at the whole-video level."
+    }
+  },
+  "provenance_policy": "This is an explicit operator-supplied aggregate channel directive, not an automatic source-room promotion inferred from one external-ingest script. It may steer future premise ideation across script origins. Automatic prompt self-learning remains subject to the existing lineage, sample-size, approval, and rollback rules."
+}

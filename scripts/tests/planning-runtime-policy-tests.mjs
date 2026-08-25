@@ -409,6 +409,14 @@ assert.equal(fastPremiumProfile.planner.chatgpt_web_reasoning_window_ms, 900_000
 assert.equal(fastPremiumProfile.media.chatgpt_web_image_concurrency, 0);
 assert.equal(fastPremiumProfile.media.chatgpt_web_image_fallback_concurrency, 3);
 assert.equal(fastPremiumProfile.orchestration.chatgpt_web_browser_host_concurrency, 10);
+const fastStillProfile = productionProfileById("fast_premium_v2");
+assert.equal(fastStillProfile.target_wall_clock_minutes, 360);
+assert.equal(fastStillProfile.defaults.generated_motion_policy, "disabled");
+assert.equal(fastStillProfile.defaults.visual_beat_timing_contract.target_beat_sec, 6.5);
+assert.equal(fastStillProfile.media.generated_motion_concurrency, 0);
+assert.equal(fastStillProfile.orchestration.incremental_generated_motion_prefetch, false);
+assert.equal(fastStillProfile.orchestration.provider_readiness_gate.flow_minimum_accepted_images_per_hour, 180);
+assert.equal(fastStillProfile.orchestration.wall_clock_contract.hard_ceiling_minutes, 420);
 
 const projectHome = "https://chatgpt.com/g/g-p-697e4bb9fad48191be862e32e1789064/project";
 assert.equal(normalizeChatGptWebProjectUrl(`${projectHome}?ignored=true#fragment`), projectHome);

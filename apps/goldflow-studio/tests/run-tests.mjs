@@ -973,7 +973,7 @@ async function testProviderIsolation() {
     const health = await jsonRequest(`${studio.url}/v1/health`);
     assert.equal(health.value.browser_provider, "google-flow");
     assert.equal(health.value.worker_slot_ceiling, 19);
-    assert.deepEqual(health.value.active_image_worker_session_policies, []);
+    assert.deepEqual(health.value.active_image_worker_session_policies, [PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY]);
     const wrongProvider = await jsonRequest(`${studio.url}/v1/pair`, {
       method: "POST",
       body: { code: "654321", label: "wrong worker", browserProvider: "chatgpt" },

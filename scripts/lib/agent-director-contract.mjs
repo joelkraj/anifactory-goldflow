@@ -63,7 +63,10 @@ export const AGENT_DIRECTOR_CHECKPOINTS = Object.freeze([
 ]);
 
 const satisfiedStates = new Set(["passed", "skipped_with_waiver"]);
-const explicitBoundaryCheckpoints = new Set(["opening_audiovisual_proof"]);
+// V2 advances through agent-reviewed creative checkpoints by default. A human
+// can still hold exact stages with --human-checkpoints; the director no longer
+// imposes an unrelated opening-proof pause on every production.
+const explicitBoundaryCheckpoints = new Set();
 
 function unresolvedBoundaryCheckpoints(currentPhase, checkpoints = {}) {
   if (currentPhase.id !== "motion_and_audio_design") return [];

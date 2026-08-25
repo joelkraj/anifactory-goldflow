@@ -3,13 +3,14 @@
   "status": "active",
   "channel": "53rebirth",
   "channel_name": "Manhwa Joey",
-  "version": "2026-08-11.1",
-  "observed_at": "2026-08-01T12:00:00-04:00",
+  "version": "2026-08-24.2",
+  "observed_at": "2026-08-24T12:00:00-04:00",
   "research_basis": {
     "path": "/Users/joel/AniFactoryData/channels/53rebirth/source_development/research/2026-08-01-winner-concepts-v1/ranked_premise_research_pool.json",
     "supporting_paths": [
       "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/reports/recent_top_title_formula_2026_06_28.md",
-      "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/exports/chatbot_handoff_2026_07_27/ultimate_winner_research_handoff.md"
+      "/Users/joel/youtube-niche-research/manhwa-webtoon-recap/exports/chatbot_handoff_2026_07_27/ultimate_winner_research_handoff.md",
+      "docs/channel_formulas/53rebirth_premise_lane_update_2026_08_24.json"
     ],
     "role": "directional_hypothesis_pool",
     "limits": "The one hundred concept scores are comparative editorial estimates, not predicted CTR. The vidIQ figures are directional snapshots, and the pasted citation tokens are not reusable source links. Operator decisions and measured upload outcomes outrank this pool.",
@@ -17,8 +18,13 @@
       "own-channel demand and immediate emotional clarity deserve the largest package weights",
       "betrayal or humiliation is the mandatory premise chassis for every candidate, never a competing idea lane",
       "the healthy mix comes from changing the reversal engine after the betrayal: explicit systems, fortune, genius, supernatural partners, magical boons, or original high-scaling mechanics",
-      "recent niche winners materially support forbidden mechanics, measurable multipliers, visible rank or institution tests, and human betrayal paired with a corrective reversal engine",
+      "recent niche winners materially support forbidden mechanics, measurable multipliers, and human betrayal paired with a corrective reversal engine; current own-channel evidence decides whether rank or institution shorthand transfers to this channel",
       "the reversal engine is secondary to the plain human betrayal and visible loss, but every candidate still needs one clear engine",
+      "the current own-channel catalog shows a 38.27-times median raw-view advantage for familiar money and status mechanics over abstract rank ladders; use that as a controlled ten-premise prior while retaining impression and distribution caveats",
+      "identity comedy and supernatural romance remain valid challengers when the social reversal is instantly legible; the suppressed default is rank-ladder abstraction, not fantasy itself",
+      "the repeated asset-theft-plus-multiplier package is a reliable floor rather than proven ceiling; do not mistake one working grammar for the whole channel",
+      "acquisition, ownership, and public status transfer more directly from the strongest money videos than self-improvement alone",
+      "the first mobile-visible title phrase must expose both the wound and the reversal engine rather than spending scarce characters on a redundant lover clause",
       "one proof object or relationship should make the reversal phone-readable",
       "documentary proof may enable an active reversal but must not become a procedural climax"
     ],
@@ -26,7 +32,7 @@
       "a rigid fifty-percent AI-generated supernatural quota",
       "treating ranked concepts as a release queue",
       "assuming Queen, Goddess, Empress, Spirit, or other fantasy-title substitution creates useful absurdity by itself",
-      "treating systems, ranks, regression, or measurable manhwa mechanics as inherently harmful because one lore-heavy gate story failed"
+      "treating all systems, regression, or supernatural mechanics as inherently harmful; the current negative evidence applies specifically to abstract rank, gate, hunter, dungeon, guild, academy, and raid-party ladders"
     ]
   },
   "formula_name": "concrete_betrayal_explained_power_reversal",
@@ -43,6 +49,37 @@
     ],
     "non_negotiable": "The title, thumbnail, opening, middle engine, climax, and final boundary must all express the same viewer fantasy."
   },
+  "current_channel_premise_prior": {
+    "status": "active_controlled_test",
+    "window": "next_10_longform_premise_selections",
+    "default_lane": "A personally legible modern betrayal followed by one simple numerical or impossible advantage that compounds into familiar money, ownership, career, business, property, influence, reputation, or skill proof.",
+    "suppress_as_default": [
+      "F-rank, S-rank, or SSS-rank progression",
+      "gates and hunters",
+      "dungeons and guilds",
+      "academies and raid parties",
+      "crystals used mainly as rank labels"
+    ],
+    "allowed_challengers": [
+      "identity comedy with a clear corrective mechanic",
+      "supernatural romance with a concrete human betrayal and visible social reversal",
+      "isekai or reincarnation with a one-breath human contradiction rather than a rank ladder"
+    ],
+    "high_fit_unused_assets": [
+      "inheritance or will",
+      "restaurant",
+      "car dealership",
+      "hotel",
+      "wedding venue",
+      "patent",
+      "debt or loan",
+      "insurance payout",
+      "franchise"
+    ],
+    "selection_rule": "Prefer a familiar social or financial receipt that a cold viewer can value instantly. An explicit operator request or new measured evidence is required to promote a rank-ladder premise during this test window.",
+    "three_upload_shape_rule": "For the active three-upload duration and ad test, use no more than two asset-theft-plus-unit-multiplier packages. The third upload should test a materially different proven channel desire such as identity comedy, hidden status, or supernatural romance while preserving immediate betrayal and readable revenge.",
+    "measurement_rule": "Exclude Shorts and compare longform packages using impressions, CTR, APV, AVD, traffic source, subscriber status, duration cohort, and release age rather than raw views alone."
+  },
   "candidate_policy": {
     "raw_idea_pool_count": 12,
     "requested_candidate_count": 6,
@@ -52,13 +89,14 @@
       "own_channel",
       "niche_outlier"
     ],
-    "target_runtime_minutes": 60,
-    "target_runtime_min_minutes": 55,
-    "target_runtime_max_minutes": 65,
+    "target_runtime_minutes": 75,
+    "target_runtime_min_minutes": 70,
+    "target_runtime_max_minutes": 80,
     "target_spoken_wpm": 187.5,
     "narration_profile": "CONVERSATIONAL WINNER",
     "title_suffix": "| Manhwa Recap",
     "title_max_characters": 100,
+    "mobile_title_preview_characters": 55,
     "thumbnail_main_text_words_max": 4,
     "thumbnail_total_overlay_words_max": 8,
     "thumbnail_subjects_max": 3,
@@ -70,7 +108,7 @@
     "mandatory_betrayal_spine": "Every candidate must name who betrayed, rejected, abandoned, stole from, cursed, framed, cheated on, fired, disowned, or publicly humiliated Joey; state the literal act and concrete loss; then launch Joey into one primary reversal engine and a visible transformation.",
     "sequence": "CONCRETE BETRAYAL OR HUMILIATION -> ONE REVERSAL ENGINE -> EARLY VISIBLE PROOF -> HYPER-SCALING BUT CAUSALLY EXPLAINED ASCENT -> VISIBLE PAYBACK",
     "discovery_rule": "There are no fixed reversal-engine lanes, quotas, allowed-family enum, power ceiling, or mandatory nerf. Search freely for the strongest clear mechanic that can launch Joey's post-betrayal ascent. Systems, lotteries, genius, hidden identity, supernatural spouses, demons, gods, devils, ghosts, vampires, genies, wishing willows, curses, jobs, skills, objects, contracts, luck, status, and unfamiliar original mechanics are examples rather than boxes to fill.",
-    "batch_diversity_rule": "The private raw pool should explore materially different mechanics and avoid six reskins of the same system, spouse title, fantasy noun, or windfall. Diversity breaks ties; it never outranks click strength, operator judgment, or a genuinely better premise.",
+    "batch_diversity_rule": "The private raw pool should explore materially different mechanics and title movies. Never return six reskins of 'my wife or fiancee took one asset, then every unit became a multiplier,' one system, one spouse title, one fantasy noun, or one windfall. During the active three-upload test, at most two recommendations may use the same asset-theft-plus-unit-multiplier skeleton; include at least one evidence-backed shape-breaker from identity comedy, hidden status, supernatural romance, or another materially different viewer desire. Diversity breaks ties; it never outranks click strength, operator judgment, or a genuinely better premise.",
     "selection_rule": "Select finalists by package strength and story runway, not quota compliance. Preserve operator seeds. Do not reject an original mechanic because it does not fit a predefined family.",
     "grounded_explanation_standard": {
       "definition": "Grounded means every decisive result is explained through observable cause and effect inside the story's fictional rules. It does not mean realistic power limits.",
@@ -170,6 +208,7 @@
     ],
     "title": [
       "Use one plain causal sentence.",
+      "Assume mobile browse may expose only the first fifty-five characters. Put the concrete wound and enough of the reversal engine inside that visible prefix; remove redundant clauses such as 'for her lover' when the thumbnail already supplies the affair.",
       "Name the relationship or institution that betrayed Joey.",
       "State the concrete betrayal.",
       "State the concrete reversal, takeback, exposure, alliance, or new status.",

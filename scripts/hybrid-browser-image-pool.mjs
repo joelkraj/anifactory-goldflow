@@ -804,6 +804,7 @@ function processIsLive(pid) {
 export async function assertHostRuntime(runtimePath, expectedProvider, {
   expectedPlanLabel = null,
   expectedModelLabel = null,
+  requirePreparedWorkerPool = false,
 } = {}) {
   const providerLabel = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
     ? "Google Flow"
@@ -822,6 +823,46 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
     const runtimeModelLabel = String(runtime.ui_contract?.model_label ?? "").trim();
     if (runtimePlanLabel !== planLabel || runtimeModelLabel !== modelLabel) {
       throw new Error(`${providerLabel} host identity mismatch: expected plan=${planLabel}, model=${modelLabel}; runtime plan=${runtimePlanLabel || "missing"}, model=${runtimeModelLabel || "missing"}.`);
+    }
+    if (requirePreparedWorkerPool) {
+      const endpoint = `http://${runtime.host ?? "127.0.0.1"}:${runtime.port}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5_000);
+      let health;
+      try {
+        const response = await fetch(`${endpoint}/v1/health`, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        health = await response.json();
+      } catch (error) {
+        throw new Error(`${providerLabel} health endpoint is unavailable at ${endpoint}: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (health?.browser_provider !== expectedProvider
+        || String(health?.ui_contract?.account_plan ?? "") !== planLabel
+        || String(health?.ui_contract?.model_label ?? "") !== modelLabel) {
+        throw new Error(`${providerLabel} live health does not match its identity-locked provider, plan, and model.`);
+      }
+      const stateRoot = path.resolve(path.dirname(runtimePath), "..", "..");
+      const workerRuntimePath = path.join(stateRoot, `${expectedProvider}-desktop-worker-runtime.json`);
+      const workerRuntime = await readJson(workerRuntimePath, null);
+      const expectedConcurrency = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
+        ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
+        : GOOGLE_GEMINI_IMAGE_CONCURRENCY;
+      const expectedPolicy = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
+        ? PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY
+        : PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY;
+      const readySlots = workerRuntime?.worker_pool?.ready_slots ?? [];
+      if (workerRuntime?.status !== "running"
+        || workerRuntime?.browser_provider !== expectedProvider
+        || !processIsLive(workerRuntime?.pid)
+        || Number(workerRuntime?.concurrency) !== expectedConcurrency
+        || workerRuntime?.worker_pool?.policy !== expectedPolicy
+        || !(workerRuntime?.worker_pool?.prepared_session_policies ?? []).includes(expectedPolicy)
+        || readySlots.length !== expectedConcurrency
+        || workerRuntime?.dispatch_policy?.provider_circuit) {
+        throw new Error(`${providerLabel} persistent worker pool is not production-ready (${readySlots.length}/${expectedConcurrency} slots). Run goldflow run media-ready before dispatch.`);
+      }
     }
   }
   return runtime;
@@ -1004,6 +1045,7 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
         await assertHostRuntime(runtime.path, runtime.provider, {
           expectedPlanLabel: runtime.planLabel,
           expectedModelLabel: runtime.modelLabel,
+          requirePreparedWorkerPool: true,
         });
       }
       lastRuntimeCheck = Date.now();
@@ -1047,6 +1089,7 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
         await assertHostRuntime(runtime.path, runtime.provider, {
           expectedPlanLabel: runtime.planLabel,
           expectedModelLabel: runtime.modelLabel,
+          requirePreparedWorkerPool: true,
         });
       }
       lastRuntimeCheck = Date.now();
@@ -1282,6 +1325,7 @@ async function createAndRunPhase({
       .map((runtime) => assertHostRuntime(runtime.path, runtime.provider, {
         expectedPlanLabel: runtime.planLabel,
         expectedModelLabel: runtime.modelLabel,
+        requirePreparedWorkerPool: true,
       })));
   }
   const dispatch = hybridManifestDispatchOptions({
@@ -1615,6 +1659,7 @@ export async function openWavefrontBrowserImageStream({
     await Promise.all(activeRuntimes.map((runtime) => assertHostRuntime(runtime.path, runtime.provider, {
       expectedPlanLabel: runtime.planLabel,
       expectedModelLabel: runtime.modelLabel,
+      requirePreparedWorkerPool: true,
     })));
   }
   const bridgeByProvider = new Map([

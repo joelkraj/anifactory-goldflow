@@ -189,12 +189,129 @@ const profiles = {
   },
 };
 
+// New production identities use a still-first contract. The complete profile is
+// recorded in run_identity.json, so historical fast_premium_v1 runs keep their
+// original generated-motion and timing behavior.
+profiles.fast_premium_v2 = mergeProfileConfig(profiles.fast_premium_v1, {
+  id: "fast_premium_v2",
+  label: "Fast premium still-first",
+  target_wall_clock_minutes: 360,
+  target_wall_clock_band_minutes: Object.freeze({ minimum: 300, maximum: 420 }),
+  target_wall_clock_policy: "approved_script_to_private_ready_slo_v2",
+  stretch_target_wall_clock_minutes: 300,
+  forecast: {
+    expected_operator_checkpoint_count: 2,
+    expected_minutes_per_checkpoint: 5,
+  },
+  defaults: {
+    generated_motion_policy: "disabled",
+    generated_motion_required_through_sec: 0,
+    visual_beat_timing_contract: {
+      target_beat_sec: 6.5,
+      max_beat_sec: 12,
+      min_beat_sec: 3,
+      hook_duration_sec: 30,
+      hook_target_beat_sec: 3.2,
+      hook_max_beat_sec: 4.2,
+      hook_min_beat_sec: 2.2,
+      retention_ramp_sec: 180,
+      ramp_target_beat_sec: 5.2,
+      ramp_max_beat_sec: 6.5,
+      ramp_min_beat_sec: 3.2,
+    },
+  },
+  media: {
+    generated_motion_concurrency: 0,
+  },
+  orchestration: {
+    agent_director: {
+      contract: "eight_macro_phases_still_first_slo_v2",
+      routine_stage_advancement: "automatic_until_human_flag_or_material_blocker_v2",
+      persistent_watch_policy: "state_change_resume_agent_approvals_v2",
+    },
+    incremental_generated_motion_prefetch: false,
+    generated_motion_coherence_prefetch: false,
+    provider_readiness_gate: {
+      required: true,
+      prepare_after_script_approval: true,
+      revalidate_before_reference_and_scene_generation: true,
+      auto_start_missing_hosts: true,
+      persistent_worker_slots_required: true,
+      flow_deadline_bearing_primary: true,
+      gemini_top_off_nonblocking: true,
+      gemini_required_through_style_reference_barrier: true,
+      flow_minimum_accepted_images_per_hour: 180,
+      flow_minimum_first_pass_acceptance_percent: 90,
+      production_soak_scene_image_count: 100,
+      missing_primary_action: "hold_before_bulk_spend",
+      missing_top_off_before_style_action: "hold_before_style_reference_spend",
+      missing_top_off_after_style_action: "continue_flow_without_waiting",
+    },
+    reference_direction_policy: {
+      selector: "global_llm_consistency_complete_reference_library_v2",
+      deterministic_cap: false,
+      numeric_advisory_range: null,
+      selection_rule: "generate_every_distinct_recurring_identity_state_location_prop_ui_faction_action_or_style_anchor_needed_for_episode_consistency",
+    },
+    image_qa_policy: {
+      all_cut_structural_qa: true,
+      deep_semantic_scope: "opening_hero_contact_reversal_identity_critical_plus_sample_v1",
+      aesthetic_findings_blocking: false,
+      uncertain_semantic_findings_blocking: false,
+      material_story_or_identity_failure_scope: "exact_id_only",
+    },
+    approval_policy: {
+      mode: "agent_led_unless_human_flag_v1",
+      human_checkpoint_flag: "human-checkpoints",
+      material_blockers_only: true,
+      aesthetic_findings_blocking: false,
+      exact_scope_repair_only: true,
+    },
+    wall_clock_contract: {
+      clock_scope: "locked_approved_script_and_health_gate_to_private_ready",
+      normal_episode_envelope: {
+        maximum_narration_minutes: 80,
+        maximum_new_scene_stills: 700,
+        generated_references: "director_selected_consistency_complete_no_numeric_cap",
+      },
+      target_minutes: 360,
+      hard_ceiling_minutes: 420,
+      checkpoints: [
+        { id: "health_ready", deadline_minutes: 10 },
+        { id: "audio_semantic_join", deadline_minutes: 60 },
+        { id: "visual_direction_complete", deadline_minutes: 100 },
+        { id: "first_scene_wave_leased", deadline_minutes: 120 },
+        { id: "first_100_scene_images_measured", deadline_minutes: 155 },
+        { id: "scene_images_and_incremental_qa_complete", deadline_minutes: 345 },
+        { id: "master_render_complete", deadline_minutes: 395 },
+        { id: "private_ready", deadline_minutes: 420 },
+      ],
+      predicted_miss_action: "drop_optional_work_preserve_quality_gates_and_exact_scope_only",
+      silent_overrun_allowed: false,
+    },
+  },
+  advance: {
+    agent_validated_stages: [
+      "visual_beat_plan",
+      "reference_plan_approval",
+      "reference_image_approval",
+      "image_output_qa",
+      "generated_video_motion_approval",
+      "parallax_asset_approval",
+      "final_qa",
+    ],
+  },
+});
+
 const aliases = new Map([
-  ["fast", "fast_premium_v1"],
-  ["fast_premium", "fast_premium_v1"],
-  ["fast-premium", "fast_premium_v1"],
+  ["fast", "fast_premium_v2"],
+  ["fast_premium", "fast_premium_v2"],
+  ["fast-premium", "fast_premium_v2"],
+  ["fast_premium_v2", "fast_premium_v2"],
+  ["fast-premium-v2", "fast_premium_v2"],
   ["fast_premium_v1", "fast_premium_v1"],
-  ["premium", "fast_premium_v1"],
+  ["fast-premium-v1", "fast_premium_v1"],
+  ["premium", "fast_premium_v2"],
   ["balanced", "balanced_v1"],
   ["balanced_v1", "balanced_v1"],
   ["legacy", "balanced_v1"],
@@ -218,13 +335,13 @@ function mergeProfileConfig(base, override) {
   return result;
 }
 
-export const DEFAULT_PRODUCTION_PROFILE = "fast_premium_v1";
+export const DEFAULT_PRODUCTION_PROFILE = "fast_premium_v2";
 export const LEGACY_PRODUCTION_PROFILE = "balanced_v1";
 
 export function normalizeProductionProfile(value, fallback = DEFAULT_PRODUCTION_PROFILE) {
   const normalized = String(value ?? fallback).trim().toLowerCase().replace(/\s+/g, "_");
   const profileId = aliases.get(normalized);
-  if (!profileId) throw new Error(`Unknown production profile: ${value}. Expected fast-premium or balanced.`);
+  if (!profileId) throw new Error(`Unknown production profile: ${value}. Expected fast-premium, fast-premium-v1, or balanced.`);
   return profileId;
 }
 
@@ -270,6 +387,7 @@ export function productionProfileSummary(value = DEFAULT_PRODUCTION_PROFILE) {
     target_wall_clock_policy: profile.target_wall_clock_policy ?? null,
     stretch_target_wall_clock_minutes: profile.stretch_target_wall_clock_minutes ?? null,
     forecast: profile.forecast ?? null,
+    defaults: profile.defaults ?? null,
     planner: profile.planner,
     media: profile.media,
     audio: profile.audio,

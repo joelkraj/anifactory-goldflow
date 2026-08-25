@@ -83,6 +83,7 @@ export class GoldflowDesktopHost {
   runtimeRecord() {
     return {
       status: this.running ? "running" : "stopped",
+      pid: process.pid,
       worker_id: this.workerId,
       server_url: this.config.serverUrl,
       concurrency: this.config.concurrency,

@@ -227,8 +227,19 @@ const targetWpmMin = positiveNumber(flags["target-wpm-min"] ?? flags["wpm-min"] 
 const targetWpmMax = positiveNumber(flags["target-wpm-max"] ?? flags["wpm-max"] ?? null, 195);
 const renderProfile = normalizeRenderProfile(flags["render-profile"] ?? flags.render ?? "premium");
 const motionPolicy = normalizeMotionPolicy(flags["motion-policy"] ?? "selective_editorial_v1");
+const productionDefaults = productionProfileConfig.defaults ?? {};
+const humanCheckpointValue = String(flags["human-checkpoints"] ?? "").trim();
+const humanCheckpoints = humanCheckpointValue
+  ? humanCheckpointValue.toLowerCase() === "all"
+    ? ["all"]
+    : [...new Set(humanCheckpointValue.split(",").map((value) => value.trim()).filter(Boolean))]
+  : [];
 const generatedMotionPolicy = normalizeGeneratedMotionPolicy(
-  flags["generated-motion-policy"] ?? flags["animation-policy"] ?? flags["ltx-video-policy"] ?? DEFAULT_GENERATED_MOTION_POLICY,
+  flags["generated-motion-policy"]
+    ?? flags["animation-policy"]
+    ?? flags["ltx-video-policy"]
+    ?? productionDefaults.generated_motion_policy
+    ?? DEFAULT_GENERATED_MOTION_POLICY,
 );
 const generatedMotionProvider = generatedMotionPolicy === "disabled"
   ? null
@@ -240,22 +251,23 @@ const generatedMotionModel = generatedMotionPolicy === "disabled"
     )).trim();
 const generatedMotionRequiredThroughSec = boundedNumber(
   flags["generated-motion-required-through-sec"],
-  0,
+  productionDefaults.generated_motion_required_through_sec ?? 0,
   0,
   3600,
 );
+const visualBeatTimingDefaults = productionDefaults.visual_beat_timing_contract ?? {};
 const visualBeatTimingContract = {
-  target_beat_sec: boundedNumber(flags["target-beat-sec"], 8.5, 2, 20),
-  max_beat_sec: boundedNumber(flags["max-beat-sec"], 15, 2, 30),
-  min_beat_sec: boundedNumber(flags["min-beat-sec"], 3, 1, 15),
-  hook_duration_sec: boundedNumber(flags["hook-duration-sec"], 30, 0, 180),
-  hook_target_beat_sec: boundedNumber(flags["hook-target-beat-sec"], 3.2, 1, 10),
-  hook_max_beat_sec: boundedNumber(flags["hook-max-beat-sec"], 4.2, 1, 15),
-  hook_min_beat_sec: boundedNumber(flags["hook-min-beat-sec"], 2.2, 0.5, 10),
-  retention_ramp_sec: boundedNumber(flags["retention-ramp-sec"], 180, 0, 1200),
-  ramp_target_beat_sec: boundedNumber(flags["ramp-target-beat-sec"], 5.2, 1, 15),
-  ramp_max_beat_sec: boundedNumber(flags["ramp-max-beat-sec"], 6.5, 1, 20),
-  ramp_min_beat_sec: boundedNumber(flags["ramp-min-beat-sec"], 3.2, 0.5, 15),
+  target_beat_sec: boundedNumber(flags["target-beat-sec"], visualBeatTimingDefaults.target_beat_sec ?? 8.5, 2, 20),
+  max_beat_sec: boundedNumber(flags["max-beat-sec"], visualBeatTimingDefaults.max_beat_sec ?? 15, 2, 30),
+  min_beat_sec: boundedNumber(flags["min-beat-sec"], visualBeatTimingDefaults.min_beat_sec ?? 3, 1, 15),
+  hook_duration_sec: boundedNumber(flags["hook-duration-sec"], visualBeatTimingDefaults.hook_duration_sec ?? 30, 0, 180),
+  hook_target_beat_sec: boundedNumber(flags["hook-target-beat-sec"], visualBeatTimingDefaults.hook_target_beat_sec ?? 3.2, 1, 10),
+  hook_max_beat_sec: boundedNumber(flags["hook-max-beat-sec"], visualBeatTimingDefaults.hook_max_beat_sec ?? 4.2, 1, 15),
+  hook_min_beat_sec: boundedNumber(flags["hook-min-beat-sec"], visualBeatTimingDefaults.hook_min_beat_sec ?? 2.2, 0.5, 10),
+  retention_ramp_sec: boundedNumber(flags["retention-ramp-sec"], visualBeatTimingDefaults.retention_ramp_sec ?? 180, 0, 1200),
+  ramp_target_beat_sec: boundedNumber(flags["ramp-target-beat-sec"], visualBeatTimingDefaults.ramp_target_beat_sec ?? 5.2, 1, 15),
+  ramp_max_beat_sec: boundedNumber(flags["ramp-max-beat-sec"], visualBeatTimingDefaults.ramp_max_beat_sec ?? 6.5, 1, 20),
+  ramp_min_beat_sec: boundedNumber(flags["ramp-min-beat-sec"], visualBeatTimingDefaults.ramp_min_beat_sec ?? 3.2, 0.5, 15),
 };
 for (const [label, minimum, target, maximum] of [
   ["episode", visualBeatTimingContract.min_beat_sec, visualBeatTimingContract.target_beat_sec, visualBeatTimingContract.max_beat_sec],
@@ -1268,6 +1280,11 @@ async function main() {
     factual_evidence: factualEvidence,
     production_profile: productionProfile,
     production_profile_config: productionProfileConfig,
+    approval_control: {
+      mode: productionProfileConfig.orchestration?.approval_policy?.mode ?? "profile_default",
+      human_checkpoints: humanCheckpoints,
+      human_checkpoint_flag: "human-checkpoints",
+    },
     pace_policy: pacePolicy,
     target_wpm_min: targetWpmMin,
     target_wpm_max: targetWpmMax,

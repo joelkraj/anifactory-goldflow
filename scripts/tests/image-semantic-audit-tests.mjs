@@ -11,7 +11,7 @@ import {
   buildImageSemanticAudit,
   semanticAuditSelectionForTests,
 } from "../lib/image-semantic-audit.mjs";
-import { structuralAuditForTests } from "../image-output-qa.mjs";
+import { semanticAuditHasMaterialFailure, structuralAuditForTests } from "../image-output-qa.mjs";
 
 const heroPrompt = {
   image_id: "cut_hero",
@@ -65,15 +65,23 @@ const identityCriticalPrompt = {
     visible_props: [],
   },
 };
+const reversalPrompt = {
+  image_id: "cut_reversal",
+  start_sec: 900,
+  visual_job: "public revenge payoff",
+  quality_budget: { tier: "connective", image_candidate_count: 1 },
+  shot_manifest: { shot_job: "reaction", foreground_action: "the betrayer grovels", visible_characters: ["Joey", "Betrayer"] },
+};
 
 assert.equal(semanticAuditSelectionForTests(heroPrompt, { ordinarySampleRate: 0 }).selected, true);
 assert.equal(semanticAuditSelectionForTests(heroPrompt, { ordinarySampleRate: 0 }).reasons.includes("hero_beat"), true);
 assert.equal(semanticAuditSelectionForTests(ordinaryPrompt, { ordinarySampleRate: 0 }).selected, false);
 assert.equal(
   semanticAuditSelectionForTests(locationUiPriorityPrompt, { ordinarySampleRate: 0 }).selected,
-  false,
-  "priority, opening, location, and UI contracts must not alone spend an image-semantic call",
+  true,
+  "the retention opening is an essential semantic-review surface",
 );
+assert.equal(semanticAuditSelectionForTests(locationUiPriorityPrompt, { ordinarySampleRate: 0 }).reasons.includes("opening_retention"), true);
 assert.equal(
   semanticAuditSelectionForTests(locationUiPriorityPrompt, { ordinarySampleRate: 0 }).required_dimensions.includes("location_continuity"),
   true,
@@ -88,6 +96,9 @@ assert.deepEqual(
   semanticAuditSelectionForTests(identityCriticalPrompt, { ordinarySampleRate: 0 }).reasons,
   ["identity_critical"],
 );
+assert.equal(semanticAuditSelectionForTests(reversalPrompt, { ordinarySampleRate: 0 }).reasons.includes("major_reversal_or_payoff"), true);
+assert.equal(semanticAuditHasMaterialFailure({ status: "audited", checks: [{ verdict: "uncertain" }], critical_discrepancies: [] }), false);
+assert.equal(semanticAuditHasMaterialFailure({ status: "audited", checks: [{ verdict: "fail" }], critical_discrepancies: [] }), true);
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-image-semantic-audit-"));
 try {

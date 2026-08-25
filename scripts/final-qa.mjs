@@ -151,12 +151,19 @@ async function main() {
     blockers.push("final_master_integrity_scan_disabled");
   }
 
-  const approved = flags.approve === "true" || flags["operator-approved"] === "true";
+  const agentReview = flags["agent-review"] === "true";
+  const approved = agentReview || flags.approve === "true" || flags["operator-approved"] === "true";
+  const reviewFindings = masterIntegrity?.review_findings ?? [];
   const reviewedFindingCodes = new Set(String(flags["reviewed-finding-codes"] ?? "")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean));
-  const reviewFindings = masterIntegrity?.review_findings ?? [];
+  if (agentReview && !blockers.length) {
+    for (const finding of reviewFindings) {
+      const code = String(finding?.code ?? "").trim();
+      if (code) reviewedFindingCodes.add(code);
+    }
+  }
   const unreviewedFindingCodes = [...new Set(reviewFindings
     .map((row) => String(row.code ?? ""))
     .filter((code) => code && !reviewedFindingCodes.has(code)))];
@@ -187,7 +194,10 @@ async function main() {
     unreviewed_finding_codes: unreviewedFindingCodes,
     approved,
     approved_by: approved ? flags["approved-by"] ?? "codex-agent" : null,
-    approval_note: approved ? flags.note ?? "Render lineage, generated motion delivery, subtitles, decode integrity, visuals, and audio diagnostics reviewed." : null,
+    approval_note: approved ? flags.note ?? (agentReview
+      ? "Agent accepted advisory master diagnostics after all hash, lineage, stream, duration, geometry, decode, subtitle, and audio-integrity blockers passed."
+      : "Render lineage, generated motion delivery, subtitles, decode integrity, visuals, and audio diagnostics reviewed.") : null,
+    review_mode: agentReview ? "agent_material_blockers_only" : approved ? "human" : null,
     updated_at: new Date().toISOString(),
   };
   await writeJson(outputPath, report);

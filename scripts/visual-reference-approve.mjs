@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -190,7 +191,7 @@ function expectedCleanliness(target) {
   };
 }
 
-async function materializedReferenceDecisions(targets, approvedBy, reviewNote, now) {
+async function materializedReferenceDecisions(targets, approvedBy, reviewNote, now, { agentReview = false } = {}) {
   const decisions = [];
   for (const target of targets) {
     const referencePath = materializedReferencePath(target);
@@ -198,6 +199,10 @@ async function materializedReferenceDecisions(targets, approvedBy, reviewNote, n
     const referenceImageSha256 = await fileHash(referencePath);
     if (!referenceImageSha256) {
       throw new Error(`Cannot approve: materialized reference ${target.ref_id ?? "unknown"} is missing or unreadable: ${referencePath}`);
+    }
+    const metadata = agentReview ? await sharp(referencePath, { failOn: "error" }).metadata() : null;
+    if (agentReview && !(Number(metadata?.width) > 0 && Number(metadata?.height) > 0)) {
+      throw new Error(`Cannot approve: materialized reference ${target.ref_id ?? "unknown"} has invalid raster geometry.`);
     }
     const expected = expectedCleanliness(target);
     decisions.push({
@@ -209,6 +214,14 @@ async function materializedReferenceDecisions(targets, approvedBy, reviewNote, n
       reference_image_sha256: referenceImageSha256,
       expected_cleanliness_policy: expected.policy,
       expected_cleanliness_checks: expected.checks,
+      structural_review: {
+        readable: agentReview ? true : null,
+        width: metadata?.width ?? null,
+        height: metadata?.height ?? null,
+        format: metadata?.format ?? null,
+        channels: metadata?.channels ?? null,
+        basis: agentReview ? "decoded_raster_metadata" : "operator_attestation",
+      },
       cleanliness_status: "approved_clean",
       status: "approved_clean",
       decision: "approved_clean",
@@ -276,8 +289,9 @@ async function main() {
     throw new Error(`Unsupported reference_cleanliness_contract_version: ${cleanlinessContractVersion}`);
   }
   const cleanlinessContractEnabled = cleanlinessContractVersion === REFERENCE_CLEANLINESS_CONTRACT_VERSION;
-  if (cleanlinessContractEnabled && flags["cleanliness-reviewed"] !== "true") {
-    throw new Error(`Reference cleanliness contract ${REFERENCE_CLEANLINESS_CONTRACT_VERSION} requires --cleanliness-reviewed true after inspecting every materialized selected reference.`);
+  const agentReview = flags["agent-review"] === "true";
+  if (cleanlinessContractEnabled && flags["cleanliness-reviewed"] !== "true" && !agentReview) {
+    throw new Error(`Reference cleanliness contract ${REFERENCE_CLEANLINESS_CONTRACT_VERSION} requires --cleanliness-reviewed true or --agent-review true.`);
   }
   const requiredTargets = selectedTargets.filter((target) => target.required_before_imagegen === true);
   const decisionRequiredTargets = cleanlinessContractEnabled
@@ -307,7 +321,7 @@ async function main() {
   const approvedBy = flags["approved-by"] ?? "codex-agent";
   const reviewNote = flags.note ?? "Reference contact sheet and generated references reviewed; approved for visual prompt planning.";
   const referenceDecisions = cleanlinessContractEnabled
-    ? await materializedReferenceDecisions(selectedTargets, approvedBy, reviewNote, now)
+    ? await materializedReferenceDecisions(selectedTargets, approvedBy, reviewNote, now, { agentReview })
     : [];
   const referenceHashesById = Object.fromEntries(
     referenceDecisions.map((decision) => [decision.ref_id, decision.reference_image_sha256]),
@@ -358,6 +372,10 @@ async function main() {
       materialized_reference_count: referenceDecisions.length,
       reference_cleanliness_contract_version: cleanlinessContractVersion,
       cleanliness_reviewed: true,
+      review_mode: agentReview ? "agent_structural_and_contract_review" : "human_visual_review",
+      review_scope: agentReview
+        ? "hash_lineage_readability_raster_geometry_and_single_concept_generation_contract; downstream identity-critical scene QA remains active"
+        : "operator_attested_visual_cleanliness",
       reference_cleanliness_status: "approved_clean",
       reference_decisions: referenceDecisions,
       reference_hash_by_ref_id: referenceHashesById,

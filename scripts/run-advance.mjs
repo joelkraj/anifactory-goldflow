@@ -8,6 +8,7 @@ import { buildStageCommand, stageDefinition, stageIsSatisfied } from "./lib/pipe
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import { isBrowserPoolImageProvider } from "./lib/image-provider-policy.mjs";
 import { productionProfileById, productionProfileForIdentity } from "./lib/production-profiles.mjs";
+import { buildProductionSloState } from "./lib/production-slo.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -23,6 +24,15 @@ const explicitAllowMediaSpend = allowSpend || isTrue(flags["allow-media-spend"])
 const explicitAllowRender = allowSpend || isTrue(flags["allow-render"]);
 const ignoreProfileAuthorizations = isTrue(flags["ignore-profile-authorizations"]);
 const untilStage = String(flags.until ?? "").trim() || null;
+const AGENT_APPROVAL_STAGES = new Set([
+  "visual_beat_plan",
+  "reference_plan_approval",
+  "reference_image_approval",
+  "image_output_qa",
+  "generated_video_motion_approval",
+  "parallax_asset_approval",
+  "final_qa",
+]);
 
 const PLANNER_SPEND_STAGES = new Set(["semantic_scene_plan", "visual_beat_plan", "visual_reference_plan", "visual_prompt_plan", "visual_prompt_blocker_repair"]);
 const MEDIA_SPEND_STAGES = new Set(["qwen_tts_stitch", "reference_generation", "image_generation", "generated_video_motion", "parallax_asset_generation"]);
@@ -123,6 +133,9 @@ export function autoAdvanceDecisionForTests(stageId, stageState, options = {}) {
   if (["blocked", "failed", "stale"].includes(String(stageState ?? ""))) {
     return { executable: false, reason: "stage_blocker_triage_and_scoped_recovery_required" };
   }
+  if (new Set(options.humanCheckpointStages ?? []).has(stageId)) {
+    return { executable: false, reason: "human_checkpoint_requested" };
+  }
   if (definition.approval === "operator") return { executable: false, reason: "approval_required" };
   if (definition.approval === "operator_or_agent") {
     const agentValidatedStages = new Set(options.agentValidatedStages ?? []);
@@ -133,6 +146,25 @@ export function autoAdvanceDecisionForTests(stageId, stageState, options = {}) {
   if (MEDIA_SPEND_STAGES.has(stageId) && !options.allowMediaSpend) return { executable: false, reason: "media_spend_not_approved" };
   if (RENDER_STAGES.has(stageId) && !options.allowRender) return { executable: false, reason: "render_not_approved" };
   return { executable: true, reason: "automatic_stage" };
+}
+
+export function parseHumanCheckpointStagesForTests(value, agentStages = AGENT_APPROVAL_STAGES) {
+  const entries = String(value ?? "").split(",").map((row) => row.trim()).filter(Boolean);
+  if (entries.some((row) => row.toLowerCase() === "all")) return new Set(agentStages);
+  return new Set(entries);
+}
+
+export function agentApprovalCommandForTests(stageId, episodeDir) {
+  const base = `--episode-dir ${episodeDir}`;
+  const commands = {
+    reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --approved-by codex-agent --note "Agent verified the selected consistency-complete reference library, evidence scopes, source bindings, and one-concept conditioning contracts."`,
+    reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --agent-review true --approved-by codex-agent --note "Agent verified every selected reference hash, readable raster geometry, approved source binding, and conditioning contract; identity-critical scene QA remains active."`,
+    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium --semantic-audit-sample-rate 0.02 --agent-review true`,
+    generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --agent-review true`,
+    parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --agent-review true`,
+    final_qa: `node bin/goldflow.mjs final qa ${base} --master-scan true --agent-review true --approved-by codex-agent`,
+  };
+  return commands[stageId] ?? null;
 }
 
 export function advanceCommandTokensForTests(command, episodeDir, sourcePath = null) {
@@ -149,6 +181,22 @@ async function writeAdvanceState(episodeDir, payload) {
   if (dryRun) return;
   const filePath = path.join(episodeDir, "run_advance_state.json");
   await fs.writeFile(filePath, `${JSON.stringify({ schema: "goldflow_run_advance_state_v1", ...payload, updated_at: new Date().toISOString() }, null, 2)}\n`, "utf8");
+}
+
+async function writeSloState(episodeDir, runStatus, profile, startedAt) {
+  if (!startedAt || dryRun) return null;
+  const imageReport = await fs.readFile(path.join(episodeDir, `imagegen_report_${runStatus.identity?.episode ?? "ep_01"}.json`), "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => null);
+  const completedSceneImages = (imageReport?.results ?? []).filter((row) => row?.image_path).length;
+  const state = buildProductionSloState({
+    runStatus,
+    profile,
+    startedAt,
+    firstHundredMeasured: completedSceneImages >= Number(profile.orchestration?.provider_readiness_gate?.production_soak_scene_image_count ?? 100),
+  });
+  if (state) await fs.writeFile(path.join(episodeDir, "production_slo_state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  return state;
 }
 
 async function main() {
@@ -168,7 +216,17 @@ async function main() {
   const allowPlannerSpend = explicitAllowPlannerSpend || profileAdvance.authorize_planner_spend === true;
   const allowMediaSpend = explicitAllowMediaSpend || profileAdvance.authorize_media_spend === true;
   const allowRender = explicitAllowRender || profileAdvance.authorize_render === true;
-  const agentValidatedStages = profileAdvance.agent_validated_stages ?? [];
+  const configuredHumanCheckpoints = flags["human-checkpoints"]
+    ?? status.identity?.approval_control?.human_checkpoints?.join(",")
+    ?? "";
+  const humanCheckpointStages = parseHumanCheckpointStagesForTests(configuredHumanCheckpoints);
+  const agentValidatedStages = (profileAdvance.agent_validated_stages ?? [])
+    .filter((stageId) => !humanCheckpointStages.has(stageId));
+  const readinessChecked = new Set();
+  const priorSlo = await fs.readFile(path.join(episodeDir, "production_slo_state.json"), "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => null);
+  let sloStartedAt = priorSlo?.started_at ?? null;
   for (let step = 0; step < maxSteps; step += 1) {
     const stageId = status.current_stage;
     const stageState = status.current_stage_state ?? status.stage_ledger?.find((row) => row.stage === stageId)?.state ?? "missing";
@@ -189,8 +247,61 @@ async function main() {
       allowMediaSpend,
       allowRender,
       agentValidatedStages,
+      humanCheckpointStages: [...humanCheckpointStages],
     });
     let command = status.next_command_shape ?? buildStageCommand(stageId, commandIdentity);
+    const readinessPhase = ["script_pace_check", "targeted_speakability", "semantic_scene_plan"].includes(stageId)
+      ? "early"
+      : stageId === "reference_generation" ? "reference_generation"
+        : stageId === "image_generation" ? "image_generation" : null;
+    if (readinessPhase
+      && decision.executable
+      && profile.orchestration?.provider_readiness_gate?.required === true
+      && !readinessChecked.has(readinessPhase)) {
+      if (dryRun) {
+        steps.push({ stage: "provider_readiness", phase: readinessPhase, status: "would_run" });
+      } else {
+        const readinessResult = await runNode([
+          path.join(repoRoot, "scripts", "run-media-readiness.mjs"),
+          "--episode-dir", episodeDir,
+          "--phase", readinessPhase,
+          "--prepare", "true",
+        ]);
+        steps.push({
+          stage: "provider_readiness",
+          phase: readinessPhase,
+          status: readinessResult.code === 0 ? "passed" : "failed",
+          exit_code: readinessResult.code,
+          completed_at: new Date().toISOString(),
+        });
+        if (readinessResult.code !== 0) {
+          await writeAdvanceState(episodeDir, {
+            status: "held",
+            production_profile: profile.id,
+            current_stage: stageId,
+            current_stage_state: stageState,
+            stop_reason: "provider_readiness_required",
+            next_command: `node bin/goldflow.mjs run media-ready --episode-dir ${episodeDir} --phase ${readinessPhase} --prepare true`,
+            steps,
+          });
+          console.log(JSON.stringify({
+            status: "held",
+            production_profile: profile.id,
+            current_stage: stageId,
+            stop_reason: "provider_readiness_required",
+            readiness_phase: readinessPhase,
+            steps,
+          }, null, 2));
+          return;
+        }
+        if (readinessPhase === "early" && !sloStartedAt) sloStartedAt = new Date().toISOString();
+      }
+      readinessChecked.add(readinessPhase);
+    }
+    await writeSloState(episodeDir, status, profile, sloStartedAt);
+    if (agentValidatedStages.includes(stageId)) {
+      command = agentApprovalCommandForTests(stageId, episodeDir) ?? command;
+    }
     if ((useParallelAudioSemantic || useVisualWavefront) && !allowMediaSpend) {
       await writeAdvanceState(episodeDir, {
         status: "held",
@@ -245,6 +356,10 @@ async function main() {
     const result = await runNode(invocation);
     steps.push({ ...stepRow, status: result.code === 0 ? "passed_command" : "failed_command", exit_code: result.code, signal: result.signal ?? null, completed_at: new Date().toISOString() });
     status = await readStatus();
+    const sloState = await writeSloState(episodeDir, status, profile, sloStartedAt);
+    if (sloState?.state === "breached") {
+      process.stderr.write(`[goldflow-slo] Hard ceiling exceeded at ${sloState.elapsed_minutes} minutes; continuing only the existing critical path.\n`);
+    }
     if (result.code !== 0 || ["blocked", "failed", "stale"].includes(String(status.current_stage_state ?? ""))) {
       const stopReason = result.code !== 0 ? "command_failed" : `stage_${status.current_stage_state}`;
       await writeAdvanceState(episodeDir, { status: "held", current_stage: status.current_stage, current_stage_state: status.current_stage_state, stop_reason: stopReason, next_command: status.next_command_shape, resume_after_resolution_command: resumeAfterResolutionCommand, steps });

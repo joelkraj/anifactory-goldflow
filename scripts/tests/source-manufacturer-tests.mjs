@@ -77,6 +77,38 @@ const shortlist = {
 };
 assert.equal(validateManufacturingTopicShortlist(shortlist, { topicPool }).done, true);
 
+const premiseLaneUpdate = JSON.parse(await readFile(
+  path.join(ROOT, "docs/channel_formulas/53rebirth_premise_lane_update_2026_08_24.json"),
+  "utf8",
+));
+assert.equal(premiseLaneUpdate.status, "active_controlled_test");
+assert.equal(premiseLaneUpdate.active_test.window, "next_10_longform_premise_selections");
+assert.equal(premiseLaneUpdate.derived_observations.median_view_ratio, 38.27);
+assert.ok(premiseLaneUpdate.active_test.suppressed_as_default.includes("F-rank"));
+assert.ok(premiseLaneUpdate.active_test.high_fit_unused_assets.includes("inheritance or will"));
+assert.equal(premiseLaneUpdate.analytics_protocol.longform_only_learning, true);
+assert.equal(premiseLaneUpdate.analytics_protocol.matched_ad_test.status, "active_operator_approved");
+
+const winnerFormula = JSON.parse(await readFile(
+  path.join(ROOT, "docs/channel_formulas/53rebirth_winner_formula_v1.json"),
+  "utf8",
+));
+assert.equal(winnerFormula.current_channel_premise_prior.status, "active_controlled_test");
+assert.equal(winnerFormula.current_channel_premise_prior.window, "next_10_longform_premise_selections");
+assert.equal(winnerFormula.candidate_policy.target_runtime_minutes, 75);
+
+for (const promptFile of [
+  "manhwa_recap_packaging_first_ideation_v1.md",
+  "manhwa_recap_premise_selector_v2.md",
+  "manhwa_recap_premise_blind_selector_v3.md",
+  "manhwa_recap_topic_manufacturer_v1.md",
+  "manhwa_recap_topic_shortlist_v1.md",
+]) {
+  const prompt = await readFile(path.join(ROOT, "docs/prompts", promptFile), "utf8");
+  assert.equal(/rank(?:-| )ladder|abstract rank|rank progression/i.test(prompt), true, `${promptFile} must apply the active rank-ladder prior`);
+  assert.equal(prompt.includes("supernatural romance"), true, `${promptFile} must preserve the non-rank fantasy exception`);
+}
+
 const legacyTemplate = await readFile(path.join(ROOT, "docs/prompts/manhwa_recap_manufacturing_template_v1.txt"), "utf8");
 assert.equal(validateManufacturingTemplate(legacyTemplate).done, true);
 assert.equal(legacyTemplate.includes("Treat these moments as an escalating reversal ladder"), true);

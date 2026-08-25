@@ -23,6 +23,8 @@ async function main() {
     browserProvider: preliminaryConfig.browserProvider,
     flowPlanLabel: preliminaryConfig.flowPlanLabel,
     flowModelLabel: preliminaryConfig.flowModelLabel,
+    geminiPlanLabel: preliminaryConfig.geminiPlanLabel,
+    geminiModelLabel: preliminaryConfig.geminiModelLabel,
   });
   const config = desktopConfig({
     ...flags,

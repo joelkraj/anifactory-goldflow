@@ -18,6 +18,7 @@ import {
 import {
   YOUTUBE_ANALYTICS_SNAPSHOT_SCHEMA,
   analyticsDirectorFeedback,
+  buildMidrollRetentionCliffAnalysis,
   buildYoutubeAnalyticsFollowupPlan,
   validateYoutubeAnalyticsSnapshot,
 } from "../lib/youtube-analytics-followup-contract.mjs";
@@ -183,6 +184,86 @@ const snapshot = {
 assert.equal(validateYoutubeAnalyticsSnapshot(snapshot, { plan: followupPlan, planSha256: "followup-hash" }).status, "passed");
 assert.equal(analyticsDirectorFeedback(metrics).opening.first_30_sec_retention_percent, 74);
 
+const experimentId = "manhwa_joey_75min_manual_midroll_v1";
+const experimentPlan = buildYoutubeAnalyticsFollowupPlan({
+  episode: "ep_02",
+  uploadReceiptPath: "/tmp/upload-experiment.json",
+  uploadReceiptSha256: "upload-experiment-hash",
+  uploadReceipt: {
+    video_id: "experiment123",
+    visibility: "scheduled",
+    schedule_at: "2026-08-12T12:00:00.000Z",
+    channel_experiment: { experiment_id: experimentId, config_sha256: "config-hash", ordinal: 1 },
+  },
+  publishManifest: {
+    publish_settings: { manual_mid_roll_positions_sec: [1125, 2250, 3375] },
+    channel_experiment: {
+      experiment_id: experimentId,
+      config_sha256: "config-hash",
+      ordinal: 1,
+      eligible_upload_count: 3,
+      final_duration_sec: 4500,
+      measurement: {
+        within_video_ad_cliff_control: {
+          enabled: true,
+          curve_metric: "audience_retention",
+          curve_x_dimension: "elapsedVideoTimeRatio",
+          curve_y_metric: "audienceWatchRatio",
+          sample_offsets_seconds: [-135, -45, 0, 45, 135],
+        },
+      },
+    },
+  },
+});
+assert.equal(experimentPlan.channel_experiment.experiment_id, experimentId);
+assert.ok(experimentPlan.required_metrics.includes("audience_retention"));
+const experimentMetrics = {
+  ...metrics,
+  audience_retention: {
+    status: "available",
+    source: "youtube_analytics_elapsedVideoTimeRatio",
+    points: Array.from({ length: 101 }, (_, index) => {
+      const elapsedVideoTimeRatio = index / 100;
+      const adAlignedPenalty = [0.25, 0.5, 0.75]
+        .filter((position) => elapsedVideoTimeRatio >= position)
+        .length * 0.03;
+      return {
+        elapsedVideoTimeRatio,
+        audienceWatchRatio: 1 - (elapsedVideoTimeRatio * 0.4) - adAlignedPenalty,
+      };
+    }),
+  },
+};
+const midrollAnalysis = buildMidrollRetentionCliffAnalysis({ metrics: experimentMetrics, plan: experimentPlan });
+assert.equal(midrollAnalysis.status, "available");
+assert.equal(midrollAnalysis.insertions.length, 3);
+assert.ok(midrollAnalysis.insertions.every((row) => row.excess_local_drop_percentage_points > 0));
+const experimentSnapshot = {
+  schema: YOUTUBE_ANALYTICS_SNAPSHOT_SCHEMA,
+  status: "passed",
+  video_id: "experiment123",
+  window: "24h",
+  captured_at: "2026-08-13T12:05:00.000Z",
+  captured_by: "operator",
+  followup_plan_sha256: "experiment-followup-hash",
+  upload_receipt_sha256: "upload-experiment-hash",
+  metrics: experimentMetrics,
+  midroll_retention_cliff_analysis: midrollAnalysis,
+};
+assert.equal(validateYoutubeAnalyticsSnapshot(experimentSnapshot, {
+  plan: experimentPlan,
+  planSha256: "experiment-followup-hash",
+}).status, "passed");
+const unavailableMetrics = {
+  ...metrics,
+  audience_retention: {
+    status: "unavailable",
+    reason: "YouTube has not exposed a retention curve yet.",
+  },
+};
+const unavailableAnalysis = buildMidrollRetentionCliffAnalysis({ metrics: unavailableMetrics, plan: experimentPlan });
+assert.equal(unavailableAnalysis.status, "unavailable");
+
 assert.equal(AGENT_DIRECTOR_PHASES.length, 8);
 const stageLedger = AGENT_DIRECTOR_PHASES.flatMap((phase) => phase.stages.map((stage) => ({ stage, state: "passed" })));
 const director = agentDirectorStatus(
@@ -207,7 +288,7 @@ const proofHeldDirector = agentDirectorStatus({
   current_stage_state: "missing",
   stage_ledger: motionStageLedger,
 });
-assert.deepEqual(proofHeldDirector.checkpoint_hold, ["opening_audiovisual_proof"]);
+assert.deepEqual(proofHeldDirector.checkpoint_hold, [], "V2 does not impose an opening-proof pause unless a human stage flag requests one");
 const proofApprovedDirector = agentDirectorStatus({
   current_stage: "animation_direction_plan",
   current_stage_state: "missing",
@@ -283,6 +364,11 @@ assert.deepEqual(directorWatchDecision({
   runStatus: watchStatus,
   director: { checkpoint_hold: ["reference_plan_review"] },
 }), { action: "wait", reason: "operator_checkpoint_required" });
+assert.deepEqual(directorWatchDecision({
+  runStatus: watchStatus,
+  director: { checkpoint_hold: [] },
+  humanCheckpointStages: ["semantic_scene_plan"],
+}), { action: "wait", reason: "human_checkpoint_requested" });
 
 const persistedWatchState = {
   schema: DIRECTOR_WATCH_SCHEMA,

@@ -30,7 +30,14 @@ import {
   youtubeAbPlanSha256,
 } from "./lib/youtube-ab-test-contract.mjs";
 import { createAnalyticsFollowupPlanForUpload } from "./youtube-analytics-followup.mjs";
+import {
+  activeChannelUploadExperiment,
+  channelUploadExperimentUsage,
+  validateChannelUploadExperimentSpec,
+  verifyChannelUploadExperimentIdentity,
+} from "./lib/channel-upload-experiment.mjs";
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const action = process.argv[2] ?? "";
 const flags = parseFlags(process.argv.slice(3));
@@ -153,6 +160,36 @@ async function packagingInputs(episodeDir, episode) {
   };
 }
 
+async function channelExperimentContext({ episodeDir, identity, episode, spec }) {
+  const channelRoot = path.join(path.resolve(dataRoot), "channels", clean(identity.channel));
+  const relativeEpisodePath = path.relative(channelRoot, path.resolve(episodeDir));
+  if (relativeEpisodePath.startsWith("..") || path.isAbsolute(relativeEpisodePath)) return null;
+  const active = await activeChannelUploadExperiment({ repoRoot, channel: identity.channel });
+  if (!active) return null;
+  const identityVerification = await verifyChannelUploadExperimentIdentity({
+    dataRoot,
+    channel: identity.channel,
+    experiment: active.document,
+  });
+  if (identityVerification.status === "blocked") {
+    throw new Error(`Channel upload experiment identity mismatch: ${identityVerification.blockers.join(", ")}`);
+  }
+  const usage = await channelUploadExperimentUsage({
+    dataRoot,
+    channel: identity.channel,
+    experimentId: active.document.experiment_id,
+  });
+  const finalQa = await readJson(path.join(episodeDir, `final_qa_${episode}.json`));
+  const durationSec = Number(finalQa?.media_probe?.duration_sec ?? finalQa?.final_duration_sec);
+  const validation = validateChannelUploadExperimentSpec({
+    experiment: active.document,
+    spec,
+    durationSec,
+    usedCount: usage.count,
+  });
+  return { ...active, identityVerification, usage, durationSec, validation };
+}
+
 function packagingValidation(inputs, options = {}) {
   return validateYoutubePackagingSpec(inputs.spec, {
     markdown: inputs.markdown,
@@ -163,7 +200,7 @@ function packagingValidation(inputs, options = {}) {
 }
 
 async function approvePackaging() {
-  const { episodeDir, episode } = await episodeContext();
+  const { episodeDir, identity, episode } = await episodeContext();
   if (!isTrue(flags.approve)) throw new Error("Packaging approval requires --approve true.");
   requiredFlag("approved-by", flags["approved-by"]);
   const inputs = await packagingInputs(episodeDir, episode);
@@ -179,6 +216,11 @@ async function approvePackaging() {
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
   });
+  const experiment = await channelExperimentContext({ episodeDir, identity, episode, spec: approvedSpec });
+  if (experiment?.validation.applies && experiment.validation.blockers.length) {
+    validation.blockers.push(...experiment.validation.blockers);
+    validation.status = "blocked";
+  }
   if (validation.status !== "passed") {
     console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
     process.exitCode = 2;
@@ -190,6 +232,11 @@ async function approvePackaging() {
     packaging_spec_path: inputs.specPath,
     selected_title: approvedSpec.selected_title,
     selected_thumbnail_candidate_id: approvedSpec.selected_thumbnail_candidate_id,
+    channel_experiment: experiment?.validation.applies ? {
+      experiment_id: experiment.document.experiment_id,
+      ordinal: experiment.validation.ordinal,
+      eligible_upload_count: experiment.document.eligible_upload_count,
+    } : null,
   }, null, 2));
 }
 
@@ -287,6 +334,10 @@ async function prepareManifest() {
   if (!finalQa || clean(finalQa.status) !== "passed") {
     throw new Error(`Passed final QA required: ${finalQaPath}`);
   }
+  const experiment = await channelExperimentContext({ episodeDir, identity, episode, spec: inputs.spec });
+  if (experiment?.validation.applies && experiment.validation.blockers.length) {
+    throw new Error(`Active channel upload experiment blocked packaging: ${experiment.validation.blockers.join(", ")}`);
+  }
   const videoPath = path.resolve(finalQa.final_video_path ?? "");
   if (!(await exists(videoPath))) throw new Error(`Final upload video missing: ${videoPath}`);
   const [videoStat, videoSha256] = await Promise.all([
@@ -322,6 +373,7 @@ async function prepareManifest() {
     inputs.packagePath,
     inputs.specPath,
     inputs.thumbnailPath,
+    ...(experiment?.validation.applies ? [experiment.path] : []),
     ...(abPlan ? [abPlanPath, ...abPlan.variants.map((row) => row.thumbnail_path)] : []),
   ];
   const sourceHashes = Object.fromEntries(await Promise.all(
@@ -377,6 +429,19 @@ async function prepareManifest() {
       betrayal_choice: clean(inputs.spec.pinned_comment?.betrayal_choice),
     },
     publish_settings: inputs.spec.publish_settings,
+    channel_experiment: experiment?.validation.applies ? {
+      experiment_id: experiment.document.experiment_id,
+      channel_identity: experiment.document.channel_identity ?? null,
+      channel_identity_verification: experiment.identityVerification ?? null,
+      config_path: experiment.path,
+      config_sha256: experiment.sha256,
+      ordinal: experiment.validation.ordinal,
+      eligible_upload_count: experiment.document.eligible_upload_count,
+      final_duration_sec: experiment.durationSec,
+      runtime: experiment.document.runtime,
+      advertising: experiment.document.advertising,
+      measurement: experiment.document.measurement,
+    } : null,
     native_ab_test: abPlan ? {
       required: true,
       plan_path: abPlanPath,
@@ -493,6 +558,7 @@ async function recordUpload() {
       thumbnail: isTrue(flags["thumbnail-verified"]),
       audience: isTrue(flags["audience-verified"]),
       monetization: isTrue(flags["monetization-verified"]),
+      mid_rolls: isTrue(flags["mid-rolls-verified"]),
       comments: isTrue(flags["comments-verified"]),
       checks_complete: isTrue(flags["checks-complete"]),
     },
@@ -502,6 +568,12 @@ async function recordUpload() {
       approved_by: nonPrivate ? clean(flags["publish-approved-by"]) || null : null,
       approved_at: nonPrivate && isTrue(flags["publish-approved"]) ? new Date().toISOString() : null,
     },
+    channel_experiment: manifest.channel_experiment ? {
+      experiment_id: manifest.channel_experiment.experiment_id,
+      config_sha256: manifest.channel_experiment.config_sha256,
+      ordinal: manifest.channel_experiment.ordinal,
+      eligible_upload_count: manifest.channel_experiment.eligible_upload_count,
+    } : null,
     recorded_by: clean(flags["recorded-by"]),
     recorded_at: new Date().toISOString(),
     note: clean(flags.note) || null,

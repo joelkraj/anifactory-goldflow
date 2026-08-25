@@ -361,7 +361,12 @@ import {
   proofBaselineArtifactContractForTests,
   scopedBaselineWordsForTests,
 } from "./proof-baseline-import.mjs";
-import { advanceCommandTokensForTests, autoAdvanceDecisionForTests } from "./run-advance.mjs";
+import {
+  advanceCommandTokensForTests,
+  agentApprovalCommandForTests,
+  autoAdvanceDecisionForTests,
+  parseHumanCheckpointStagesForTests,
+} from "./run-advance.mjs";
 import { buildRetentionAttributionForTests, normalizeRetentionRowsForTests } from "./youtube-analytics-feedback.mjs";
 import {
   closeVisualBeatTimelineForTests,
@@ -1642,8 +1647,11 @@ function testRunIdentityV2Policies() {
     label: "proof_0_300",
   });
   assert.throws(() => parseProofScopeForTests({}, "proof"), /requires --proof-scope/i);
-  assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v1");
-  assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v1");
+  assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v2");
+  assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v2");
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.generated_motion_policy, "disabled");
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.visual_beat_timing_contract.target_beat_sec, 6.5);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).orchestration.wall_clock_contract.hard_ceiling_minutes, 420);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 12);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.parallel_audio_semantic, true);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.visual_wavefront_prefetch, true);
@@ -1865,6 +1873,18 @@ function testGuardedRunAdvancePolicies() {
     allowPlannerSpend: true,
     agentValidatedStages: ["visual_beat_plan"],
   }).executable, true);
+  assert.deepEqual(
+    autoAdvanceDecisionForTests("visual_beat_plan", "missing", {
+      allowPlannerSpend: true,
+      agentValidatedStages: ["visual_beat_plan"],
+      humanCheckpointStages: ["visual_beat_plan"],
+    }),
+    { executable: false, reason: "human_checkpoint_requested" },
+  );
+  assert.equal(parseHumanCheckpointStagesForTests("all").has("final_qa"), true);
+  assert.equal(parseHumanCheckpointStagesForTests("reference_plan_approval,final_qa").has("image_output_qa"), false);
+  assert.match(agentApprovalCommandForTests("reference_image_approval", "/tmp/episode"), /--agent-review true/);
+  assert.match(agentApprovalCommandForTests("final_qa", "/tmp/episode"), /--master-scan true --agent-review true/);
   const tokens = advanceCommandTokensForTests(
     "node bin/goldflow.mjs visual harden --episode-dir <episode-dir> --prompts <episode-dir>/section_image_prompts.json",
     "/tmp/episode",
@@ -4947,7 +4967,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     identity.voice_provider_options.synthesis_contract,
     QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   );
-  assert.equal(identity.production_profile, "fast_premium_v1");
+  assert.equal(identity.production_profile, "fast_premium_v2");
+  assert.equal(identity.generated_motion_policy, "disabled");
+  assert.equal(identity.visual_beat_timing_contract.target_beat_sec, 6.5);
   assert.equal(identity.planning_provider, "planning_room");
   assert.equal(identity.planning_effort_policy, DEFAULT_PLANNING_ROOM_EFFORT_POLICY);
   assert.equal(identity.provider_locks.planning_provider, "planning_room");
@@ -4977,9 +4999,9 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
     /provider_locks\.planning_default_reasoning_effort/,
   );
   assert.equal(planningProviderForIdentity(identity), "planning_room");
-  assert.equal(identity.production_profile_config.target_wall_clock_minutes, 420);
+  assert.equal(identity.production_profile_config.target_wall_clock_minutes, 360);
   assert.deepEqual(identity.production_profile_config.target_wall_clock_band_minutes, { minimum: 300, maximum: 420 });
-  assert.equal(identity.production_profile_config.target_wall_clock_policy, "episode_size_aware_p50_p90_v1");
+  assert.equal(identity.production_profile_config.target_wall_clock_policy, "approved_script_to_private_ready_slo_v2");
   assert.equal(identity.production_profile_config.stretch_target_wall_clock_minutes, 300);
   assert.equal(identity.production_profile_config.planner.semantic_concurrency, 12);
   assert.equal(identity.production_profile_config.planner.editorial_concurrency, 12);
@@ -5140,7 +5162,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   );
   assert.match(buildStageCommand("semantic_scene_plan", identity), /--concurrency 12\b/);
   assert.match(buildStageCommand("visual_prompt_plan", identity), /--visual-chunk-concurrency 12\b/);
-  assert.match(buildStageCommand("generated_video_motion", identity), /--prefetch-coherence-cache true\b/);
+  assert.match(buildStageCommand("generated_video_motion", identity), /--concurrency 0\b/);
+  assert.doesNotMatch(buildStageCommand("generated_video_motion", identity), /--prefetch-coherence-cache true\b/);
   const chatGptWebImageIdentity = structuredClone(identity);
   chatGptWebImageIdentity.image_provider = "chatgpt_web_gpt_image";
   assert.match(buildStageCommand("visual_prompt_plan", chatGptWebImageIdentity), /--visual-chunk-concurrency 12\b/);

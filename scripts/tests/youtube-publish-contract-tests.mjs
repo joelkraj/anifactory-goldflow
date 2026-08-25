@@ -8,6 +8,10 @@ import { promisify } from "node:util";
 import sharp from "sharp";
 import { sha256File } from "../lib/file-hash.mjs";
 import {
+  validateChannelUploadExperimentSpec,
+  verifyChannelUploadExperimentIdentity,
+} from "../lib/channel-upload-experiment.mjs";
+import {
   LEGACY_YOUTUBE_PACKAGING_ADAPTER_WARNING,
   LEGACY_YOUTUBE_PACKAGING_SPEC_SCHEMA,
   YOUTUBE_PACKAGING_SPEC_SCHEMA,
@@ -226,6 +230,82 @@ export async function runYoutubePublishContractTests() {
   assert.deepEqual(valid.warnings, []);
   assert.equal(valid.schema_mode, "current");
 
+  const uploadExperiment = JSON.parse(await fs.readFile(
+    path.join(repoRoot, "docs/channel_experiments/manhwa_joey_75min_manual_midroll_test_v1.json"),
+    "utf8",
+  ));
+  const identityDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-channel-experiment-identity-"));
+  try {
+    const identityChannelRoot = path.join(identityDataRoot, "channels", "53rebirth");
+    await fs.mkdir(path.join(identityChannelRoot, "channel_brand"), { recursive: true });
+    await Promise.all([
+      fs.writeFile(path.join(identityChannelRoot, "channel.json"), `${JSON.stringify({
+        slug: "53rebirth",
+        name: "Manhwa Joey",
+      }, null, 2)}\n`, "utf8"),
+      fs.writeFile(path.join(identityChannelRoot, "channel_brand", "channel_brand_contract.json"), `${JSON.stringify({
+        channel_slug: "53rebirth",
+        display_name: "Manhwa Joey",
+        youtube_channel_id: "UCZah1gv3wyUfEIvJdTacWjw",
+        handle: "@ManhwaJoey",
+      }, null, 2)}\n`, "utf8"),
+    ]);
+    const identityValidation = await verifyChannelUploadExperimentIdentity({
+      dataRoot: identityDataRoot,
+      channel: "53rebirth",
+      experiment: uploadExperiment,
+    });
+    assert.equal(identityValidation.status, "passed");
+    const wrongIdentityExperiment = structuredClone(uploadExperiment);
+    wrongIdentityExperiment.channel_identity.youtube_channel_id = "wrong-channel";
+    const wrongIdentityValidation = await verifyChannelUploadExperimentIdentity({
+      dataRoot: identityDataRoot,
+      channel: "53rebirth",
+      experiment: wrongIdentityExperiment,
+    });
+    assert.equal(wrongIdentityValidation.blockers.includes("channel_experiment_youtube_channel_id_mismatch"), true);
+  } finally {
+    await fs.rm(identityDataRoot, { recursive: true, force: true });
+  }
+  const manualExperimentSpec = structuredClone(spec);
+  Object.assign(manualExperimentSpec.publish_settings, {
+    experiment_id: uploadExperiment.experiment_id,
+    mid_roll_mode: "manual",
+    automatic_mid_rolls: false,
+    manual_mid_roll_count: 3,
+    manual_mid_roll_positions_sec: [1125, 2250, 3375],
+  });
+  const manualPackagingValidation = validateYoutubePackagingSpec(manualExperimentSpec, {
+    markdown: packagingMarkdown(manualExperimentSpec),
+    thumbnailMetadata: { width: 1280, height: 720, format: "png" },
+    thumbnailBytes: 1000,
+    now,
+  });
+  assert.deepEqual(manualPackagingValidation.blockers, []);
+  assert.deepEqual(validateChannelUploadExperimentSpec({
+    experiment: uploadExperiment,
+    spec: manualExperimentSpec,
+    durationSec: 4500,
+    usedCount: 0,
+  }), { applies: true, complete: false, ordinal: 1, blockers: [] });
+  assert.equal(validateChannelUploadExperimentSpec({
+    experiment: uploadExperiment,
+    spec: manualExperimentSpec,
+    durationSec: 4500,
+    usedCount: 3,
+  }).complete, true);
+  const badExperimentSpec = structuredClone(manualExperimentSpec);
+  badExperimentSpec.publish_settings.automatic_mid_rolls = true;
+  badExperimentSpec.publish_settings.manual_mid_roll_positions_sec = [800, 1600];
+  const badExperimentValidation = validateChannelUploadExperimentSpec({
+    experiment: uploadExperiment,
+    spec: badExperimentSpec,
+    durationSec: 4500,
+    usedCount: 0,
+  });
+  assert.equal(badExperimentValidation.blockers.includes("channel_experiment_automatic_mid_roll_setting_mismatch"), true);
+  assert.equal(badExperimentValidation.blockers.includes("channel_experiment_manual_mid_roll_positions_missing"), true);
+
   const invalidThumbnailGenerationContract = structuredClone(spec);
   Object.assign(invalidThumbnailGenerationContract.thumbnail_candidates[0], {
     provider: "modelslab",
@@ -410,6 +490,29 @@ export async function runYoutubePublishContractTests() {
     const unsafeValidation = validateYoutubeUploadReceipt(unsafeReceipt, { manifest, manifestHash });
     assert.equal(unsafeValidation.blockers.includes("youtube_upload_receipt_did_not_start_private"), true);
     assert.equal(unsafeValidation.blockers.includes("youtube_upload_receipt_publish_approval_missing"), true);
+
+    const manualManifest = {
+      ...manifest,
+      publish_settings: manualExperimentSpec.publish_settings,
+      channel_experiment: {
+        experiment_id: uploadExperiment.experiment_id,
+        config_sha256: "a".repeat(64),
+        ordinal: 1,
+      },
+    };
+    const manualReceipt = uploadReceipt(manualManifest, manifestHash);
+    manualReceipt.channel_experiment = {
+      experiment_id: uploadExperiment.experiment_id,
+      config_sha256: "a".repeat(64),
+      ordinal: 1,
+    };
+    const missingMidRollVerification = validateYoutubeUploadReceipt(manualReceipt, {
+      manifest: manualManifest,
+      manifestHash,
+    });
+    assert.equal(missingMidRollVerification.blockers.includes("youtube_upload_receipt_fields_not_all_verified"), true);
+    manualReceipt.field_verification.mid_rolls = true;
+    assert.deepEqual(validateYoutubeUploadReceipt(manualReceipt, { manifest: manualManifest, manifestHash }).blockers, []);
 
     const uploadReceiptPath = path.join(episodeDir, `youtube_upload_receipt_${episode}.json`);
     await fs.writeFile(uploadReceiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");

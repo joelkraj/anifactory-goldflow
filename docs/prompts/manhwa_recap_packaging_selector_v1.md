@@ -16,6 +16,7 @@ Judge likely viewer behavior:
 - Judge the click hypothesis and watch hypothesis separately before combining them. Public views or CTR support packaging; retention, AVD, causal delivery, and comment evidence support viewing. Do not use one as proof of the other.
 
 - Can a cold viewer understand the wound and reversal in one breath?
+- Does the first roughly fifty-five characters expose the wound and enough of the mechanic or reversal on mobile, or does a redundant lover clause hide the actual click reason?
 - Is the title's ending literal, complete, and more desirable than the alternatives?
 - Does the thumbnail prove or judge the title in one phone-size scene?
 - Does every candidate begin with a concrete betrayal or humiliation and then move clearly into one desirable reversal engine? The engine need not counter or mirror the wound.
@@ -30,6 +31,8 @@ Judge likely viewer behavior:
 - Could the procedural risk be compressed while the human conflict remains compelling, or would removing the paperwork, ranking, transfers, hearings, and UI leave no story?
 - Does the antagonist lose the exact access, status, relationship, property, or public story abused in the opening?
 - Does the chosen mechanic create distinctive progression, visuals, decisions, and escalation rather than functioning as a replaceable fantasy noun?
+- Is this an acquisition, ownership, hidden-status, or public-control fantasy, or merely self-improvement wearing the language of the channel's stronger winners?
+- Does the finalist set repeat one asset-theft-plus-unit-multiplier sentence skeleton, and if so, which evidence-backed identity-comedy, hidden-status, supernatural-romance, or other shape-breaker is stronger?
 - What is the strongest evidence-based failure analogue for this candidate, and what observed upload result would disconfirm the selection hypothesis?
 
 Use scores from one to ten. A score of eight means genuinely approvable before scripting. Do not award eight merely because all fields exist. A ten is exceptional relative to both the evidence and the other finalists.

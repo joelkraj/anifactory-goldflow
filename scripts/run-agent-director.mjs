@@ -333,7 +333,8 @@ async function babysit(initialRunStatus) {
       poll_ms: pollMs,
       idle_timeout_ms: idleTimeoutMs,
       max_runtime_ms: maxRuntimeMs,
-      approval_policy: "observe_hash_bound_approvals_never_auto_approve",
+      approval_policy: "agent_led_material_blockers_only_unless_human_checkpoint_flag",
+      human_checkpoints: String(flags["human-checkpoints"] ?? runStatus.identity?.approval_control?.human_checkpoints?.join(",") ?? ""),
     });
     lastPersistAtMs = now;
     lastPersistedReason = decision.reason;
@@ -417,6 +418,12 @@ async function babysit(initialRunStatus) {
         await persistDirectorSnapshot({ runStatus, checkpoints, analyticsFeedback, checkpointPath });
       }
       const profile = productionProfileForIdentity(runStatus.identity ?? {});
+      const humanCheckpointValue = String(flags["human-checkpoints"]
+        ?? runStatus.identity?.approval_control?.human_checkpoints?.join(",")
+        ?? "");
+      const humanCheckpointStages = humanCheckpointValue.toLowerCase() === "all"
+        ? profile.advance?.agent_validated_stages ?? []
+        : humanCheckpointValue.split(",").map((value) => value.trim()).filter(Boolean);
       const decision = directorWatchDecision({
         runStatus,
         director,
@@ -427,6 +434,7 @@ async function babysit(initialRunStatus) {
         lastActionedDispatchKey,
         idleElapsedMs: now - lastProgressAtMs,
         idleTimeoutMs,
+        humanCheckpointStages,
       });
       await persistWatchState({ decision, signature, dispatchKey, director, force: decision.action !== "wait" });
 
@@ -461,6 +469,7 @@ async function babysit(initialRunStatus) {
           path.join(repoRoot, "scripts", "run-advance.mjs"),
           ...identityArgs(),
           "--max-steps", maxSteps,
+          ...(flags["human-checkpoints"] ? ["--human-checkpoints", flags["human-checkpoints"]] : []),
         ], {
           capture: true,
           onSpawn: async ({ pid, spawned_at: spawnedAt }) => {
@@ -571,6 +580,7 @@ async function main() {
       return;
     }
     const args = [path.join(repoRoot, "scripts", "run-advance.mjs"), ...identityArgs(), "--max-steps", String(flags["max-steps"] ?? 50)];
+    if (flags["human-checkpoints"]) args.push("--human-checkpoints", flags["human-checkpoints"]);
     if (next?.stages?.[0]) args.push("--until", next.stages[0]);
     if (boolFlag(flags["dry-run"])) args.push("--dry-run", "true");
     const advanced = await runNode(args, { capture: true });

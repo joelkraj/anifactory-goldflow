@@ -218,6 +218,12 @@ export async function createStudioServer(options = {}) {
     started_at: nowIso(),
   };
 
+  const defaultImageWorkerSessionPolicy = browserProvider === "google-flow"
+    ? "persistent_project_per_worker_slot_v1"
+    : browserProvider === "google-gemini"
+      ? "persistent_tab_per_worker_slot_v1"
+      : null;
+
   function routeEnvironment(actualPort) {
     if (browserProvider === "google-gemini") {
       return {
@@ -257,7 +263,11 @@ export async function createStudioServer(options = {}) {
     const url = new URL(request.url, `http://${host}`);
     try {
       if (request.method === "GET" && url.pathname === "/v1/health") {
-        const activeImageWorkerSessionPolicies = await bridge.activeWorkerSessionPolicies();
+        const activeImageWorkerSessionPolicies = [
+          ...(defaultImageWorkerSessionPolicy ? [defaultImageWorkerSessionPolicy] : []),
+          ...await bridge.activeWorkerSessionPolicies(),
+        ].filter((value, index, values) => values.indexOf(value) === index);
+        const registeredWorkers = await workers.list();
         sendJson(response, 200, {
           status: "ok",
           service: "goldflow-studio",
@@ -265,6 +275,7 @@ export async function createStudioServer(options = {}) {
           started_at: runtime.started_at,
           browser_provider: browserProvider,
           worker_slot_ceiling: workerSlotCeiling,
+          registered_workers: registeredWorkers,
           active_image_worker_session_policies: activeImageWorkerSessionPolicies,
           ui_contract: expectedUiContract,
         }, origin);

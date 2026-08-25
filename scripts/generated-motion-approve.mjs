@@ -98,8 +98,18 @@ async function main() {
     }, null, 2));
     return;
   }
-  const approve = idSet(flags["approve-ids"]);
-  const reject = idSet(flags["reject-ids"] ?? flags["decline-ids"]);
+  const agentReview = String(flags["agent-review"] ?? "false") === "true";
+  const coherenceByCandidate = new Map((coherenceAudit.rows ?? []).map((row) => [String(row.candidate_id), row]));
+  const approve = agentReview
+    ? new Set((report.clips ?? [])
+      .map((row) => String(row.candidate_id ?? row.image_id ?? ""))
+      .filter((id) => coherenceByCandidate.get(id)?.overall_verdict === "pass"))
+    : idSet(flags["approve-ids"]);
+  const reject = agentReview
+    ? new Set((report.clips ?? [])
+      .map((row) => String(row.candidate_id ?? row.image_id ?? ""))
+      .filter((id) => !approve.has(id)))
+    : idSet(flags["reject-ids"] ?? flags["decline-ids"]);
   const coherenceReviewed = idSet(flags["coherence-reviewed-ids"]);
   const clipId = (row) => String(row.candidate_id ?? row.image_id ?? "");
   const known = new Set((report.clips ?? []).map(clipId));
@@ -118,10 +128,11 @@ async function main() {
   if (rejectedRequired.length) {
     throw new Error(`Required opening Flow clips cannot fall back to stills; repair these cuts instead: ${rejectedRequired.join(", ")}`);
   }
-  const reviewer = String(flags.reviewer ?? "").trim();
-  const note = String(flags.note ?? "").trim();
+  const reviewer = String(flags.reviewer ?? (agentReview ? "codex-agent" : "")).trim();
+  const note = String(flags.note ?? (agentReview
+    ? "Agent accepted only clips whose hash-bound coherence audit passed; all nonpassing optional clips retain the accepted still treatment."
+    : "")).trim();
   if (!reviewer || !note) throw new Error("--reviewer and --note are required.");
-  const coherenceByCandidate = new Map((coherenceAudit.rows ?? []).map((row) => [String(row.candidate_id), row]));
   const acceptedCoherenceExceptions = [...approve].filter((id) => coherenceByCandidate.get(id)?.overall_verdict !== "pass");
   const unreviewedCoherenceExceptions = acceptedCoherenceExceptions.filter((id) => !coherenceReviewed.has(id));
   if (unreviewedCoherenceExceptions.length) {
@@ -167,6 +178,7 @@ async function main() {
     coherence_audit_sha256: await hashFile(coherenceAuditPath),
     coherence_audit_summary: coherenceAudit.summary,
     coherence_review_policy: "every_clip_sampled; nonpass_acceptance_requires_exact_candidate_override",
+    review_mode: agentReview ? "agent_coherence_pass_only" : "human",
     production_eligible: report.proof !== true,
     accepted_count: decisions.filter((row) => row.decision === "accepted").length,
     rejected_count: decisions.filter((row) => row.decision === "rejected").length,

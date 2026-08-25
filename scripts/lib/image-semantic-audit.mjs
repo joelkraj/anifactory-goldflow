@@ -106,6 +106,8 @@ function semanticRiskReasons(prompt, { openingSec = 120, ordinarySampleRate = 0.
   const manifest = prompt?.shot_manifest ?? {};
   const reasons = [];
   const tier = qualityTier(prompt);
+  const startSec = Number(prompt?.start_sec ?? Number.POSITIVE_INFINITY);
+  if (Number.isFinite(startSec) && startSec >= 0 && startSec < openingSec) reasons.push("opening_retention");
   if (tier === "hero" || Number(prompt?.quality_budget?.image_candidate_count ?? 1) > 1) reasons.push("hero_beat");
   const shotClass = cleanText(manifest.shot_job);
   const foregroundAction = cleanText(manifest.foreground_action);
@@ -114,6 +116,16 @@ function semanticRiskReasons(prompt, { openingSec = 120, ordinarySampleRate = 0.
     reasons.push("action_contact_geometry");
   }
   if (identityCritical(prompt)) reasons.push("identity_critical");
+  const reversalText = [
+    prompt?.visual_job,
+    prompt?.visual_information_delta?.kind,
+    prompt?.visual_information_delta?.description,
+    prompt?.sequence_grammar?.sequence_role,
+    manifest?.foreground_action,
+  ].map(cleanText).join(" ");
+  if (/\b(?:reversal|revenge|payoff|grovel|humiliat|betrayal reveal|status reveal|power reveal|public defeat|public victory|shocked reaction)\b/i.test(reversalText)) {
+    reasons.push("major_reversal_or_payoff");
+  }
   if (!reasons.length && deterministicSampleSelected(prompt?.image_id, ordinarySampleRate)) reasons.push("deterministic_ordinary_sample");
   return [...new Set(reasons)];
 }
@@ -436,7 +448,7 @@ export async function buildImageSemanticAudit({
     audit_cache_identity: cacheIdentity,
     selection_identity: selectionIdentity,
     policy: {
-      selection: "hero_contact_or_identity_critical_plus_deterministic_ordinary_sample",
+      selection: "opening_hero_contact_reversal_identity_critical_plus_deterministic_ordinary_sample",
       opening_sec: openingSec,
       ordinary_sample_rate: ordinarySampleRate,
       concurrency,

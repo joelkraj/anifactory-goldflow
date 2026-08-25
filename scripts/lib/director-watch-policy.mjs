@@ -325,6 +325,7 @@ export function directorWatchDecision({
   lastActionedDispatchKey = null,
   idleElapsedMs = 0,
   idleTimeoutMs = 0,
+  humanCheckpointStages = [],
 } = {}) {
   const stageId = clean(runStatus?.current_stage) || "complete";
   const stageState = clean(
@@ -345,6 +346,9 @@ export function directorWatchDecision({
 
   const definition = stageDefinition(stageId);
   if (!definition) return { action: "stop", reason: "unknown_stage" };
+  if (new Set(humanCheckpointStages).has(stageId)) {
+    return { action: "wait", reason: "human_checkpoint_requested" };
+  }
   if (definition.approval === "operator") {
     return { action: "wait", reason: "operator_stage_approval_required" };
   }

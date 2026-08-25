@@ -2,7 +2,7 @@
 
 Living speed-and-quality roadmap for the next Goldflow production cycle.
 
-Last updated: 2026-08-18
+Last updated: 2026-08-23
 
 ## North Star
 
@@ -18,6 +18,46 @@ Quality and speed are not opposing goals when the workflow:
 - measures audience-facing results rather than model confidence
 
 Real YouTube behavior remains the final judge. Synthetic scores are useful only after calibration against CTR, 30-second retention, one-minute retention, AVD, APV, and watch-time share.
+
+## Next-Run Fast Production Contract
+
+The next production is a still-first speed proof. Its measured commitment is six hours target and seven hours hard ceiling from a locked, approved script and successful production-health gate to a private-ready master, final QA receipt, and upload package. Network-dependent YouTube processing is measured separately. This commitment applies to a normal episode envelope of at most 80 narration minutes, at most 700 newly generated scene stills, and at most 50 globally selected standalone references. A larger episode receives a new forecast before spend rather than inheriting a false seven-hour promise.
+
+The 2026-W34 home-rebuild run is the baseline failure to correct. It consumed 1,226.842 elapsed minutes, but only 527.235 active-union minutes. The audit found 699.607 idle minutes, 325.326 minutes of avoidable automatic-stage idle, 38 failed invocations, and 25 repeated full-scope invocations. Healthy Flow production still accepted 500 images in about 2.63 hours, roughly 190 accepted images per hour. Existing capacity was therefore sufficient; orchestration, provider readiness, repeated work, and optional motion were the dominant problems.
+
+### Locked Operating Rules
+
+- Use one persistent agent director from preflight through private-ready. Do not manually launch parallel copies of stages or use workflow bypass as ordinary recovery.
+- Start and verify the persistent five-slot Flow pool and three-slot Gemini pool before the production clock begins. Flow is the deadline-bearing primary capacity; healthy Gemini capacity tops off the same queue but never becomes a barrier that pauses Flow.
+- Run one small all-slot provider health probe before spend. During production, use the first 100 real scene images as the throughput soak. The required Flow floor is 180 accepted scene images per hour with at least 90 percent first-pass acceptance. If the floor is missed, stop and triage immediately rather than discovering the miss after the full queue.
+- Run semantic extraction and the complete narration/TTS/Whisper branch concurrently. Join only at timing bind.
+- Keep reference selection creative and LLM-owned, but direct the global reference director to select only genuinely recurring identity, state, location, prop, UI, or style anchors. There is no deterministic reference cap and no per-chunk target restoration.
+- Stream every accepted prompt chunk directly into one append-only Flow/Gemini image queue. Keep each free provider slot topped off while later prompts are authored. Do not run Flow and Gemini as sequential batches.
+- Disable generated video on the default critical path until matched upload analytics show a repeatable retention lift. Preserve 6-7 second editorial shot density with deliberate still selection, reframes, inserts, crops, smooth Ken Burns, and inspected parallax. Generated video remains an explicit experiment, not a production requirement.
+- Run deterministic geometry, readability, corruption, hash, duplicate, and final-master integrity checks across the complete episode. Limit expensive semantic/aesthetic review to the opening, hero moments, contact, reversals, identity-critical cuts, and a small deterministic sample.
+- Freeze every passed artifact. A failure opens the provider circuit and creates exact-ID repair scope. Never rerun a passed full stage, never submit one asset to two providers, and never reopen a public release for an unpromoted repair.
+- Start package research and thumbnail ideation during the image/render tail. Bind the final selected package to the finished master only after final QA.
+
+### Wall-Clock Rails
+
+| Deadline | Required state |
+| ---: | --- |
+| T+0:10 | Browser pools, Qwen, disk, source hashes, and run identity healthy |
+| T+1:00 | Narration/Whisper and semantic branches complete or on a measured path that preserves the ceiling |
+| T+1:40 | Visual beats and global reference direction complete |
+| T+2:00 | Approved references materialized and first scene prompt wave leased |
+| T+2:35 | First 100 production scene images measured; Flow floor confirmed |
+| T+5:45 | Scene images complete, incremental QA drained, ordinary motion cache warm |
+| T+6:35 | Master render complete; package candidates ready |
+| T+7:00 | Final QA passed and private-ready package complete |
+
+Any checkpoint that predicts a miss triggers one bounded response: remove optional generated motion, optional alternatives, and nonessential deep review; preserve accepted stills; use exact-scope repair only; and have the editorial director intentionally cover remaining timeline cuts with accepted adjacent imagery and distinct motion treatments when that is truthful. It never triggers lower narration quality, skipped structural QA, fabricated imagery, or an unbounded retry loop.
+
+### Account-Scaling Gate
+
+Do not add an account to compensate for idle workers. Admit a second account only after the one-account scheduler keeps the existing pool continuously fed and either two production runs meet this contract or a controlled capacity bakeoff proves the current account is saturated. The second account must improve accepted image throughput by at least 60 percent without reducing first-pass acceptance by more than five percentage points. Add a third account only when two admitted accounts are both materially utilized or simultaneous channel productions create a measured queue. Additional accounts are scaling capacity for more channels, not a substitute for a working scheduler.
+
+Asset Afterlife, crime documentary, financial stories, and other future lanes should share this production engine through content profiles. They may add factual claim ledgers, source and rights controls, real-footage or diagram routes, and advertiser-safety checks without forking the scheduler or duplicating the artifact chain.
 
 ## Implementation Ledger
 

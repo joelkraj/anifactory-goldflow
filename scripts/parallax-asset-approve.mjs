@@ -53,14 +53,29 @@ async function main() {
   if (!Number(report.candidate_count ?? 0)) {
     throw new Error("No parallax candidates require approval; the accepted still/single-plane fallback is already complete.");
   }
-  const reviewer = String(flags.reviewer ?? "").trim();
-  const note = String(flags.note ?? "").trim();
+  const agentReview = isTrue(flags["agent-review"]);
+  const reviewer = String(flags.reviewer ?? (agentReview ? "codex-agent" : "")).trim();
+  const note = String(flags.note ?? (agentReview
+    ? "Agent applied the hash-bound local separation classification; strong layers approved, marginal layers limited to low motion, and unsafe layers declined without retry."
+    : "")).trim();
   if (!reviewer || !note) throw new Error("Parallax approval requires --reviewer and --note.");
   const candidateIds = new Set((report.candidates ?? []).map((row) => String(row.image_id)));
-  const approvedIds = new Set(isTrue(flags["approve-all"]) ? [...candidateIds] : parseList(flags["approve-ids"]));
-  const approvedLowMotionIds = new Set(parseList(flags["approved-low-motion-ids"]));
-  const repairableIds = new Set(parseList(flags["repairable-ids"]));
-  const declinedIds = new Set(parseList(flags["decline-ids"]));
+  const agentDisposition = new Map((report.candidates ?? []).map((candidate) => [
+    String(candidate.image_id),
+    String(candidate.separation_evidence_classification?.recommended_disposition ?? "declined"),
+  ]));
+  const approvedIds = new Set(agentReview
+    ? [...agentDisposition].filter(([, disposition]) => disposition === "approved").map(([id]) => id)
+    : isTrue(flags["approve-all"]) ? [...candidateIds] : parseList(flags["approve-ids"]));
+  const approvedLowMotionIds = new Set(agentReview
+    ? [...agentDisposition].filter(([, disposition]) => disposition === "approved_low_motion").map(([id]) => id)
+    : parseList(flags["approved-low-motion-ids"]));
+  const repairableIds = new Set(agentReview
+    ? []
+    : parseList(flags["repairable-ids"]));
+  const declinedIds = new Set(agentReview
+    ? [...agentDisposition].filter(([, disposition]) => !["approved", "approved_low_motion"].includes(disposition)).map(([id]) => id)
+    : parseList(flags["decline-ids"]));
   const dispositionSets = [approvedIds, approvedLowMotionIds, repairableIds, declinedIds];
   const overlap = [...candidateIds].filter((id) => dispositionSets.filter((set) => set.has(id)).length > 1);
   if (overlap.length) throw new Error(`Parallax ids can have only one disposition: ${overlap.join(", ")}`);
@@ -91,6 +106,7 @@ async function main() {
     asset_contract_sha256: parallaxAssetContractSha256(report),
     reviewer,
     note,
+    review_mode: agentReview ? "agent_local_separation_policy" : "human_review",
     approved_image_ids: [...approvedIds],
     approved_low_motion_image_ids: [...approvedLowMotionIds],
     repairable_image_ids: [...repairableIds],

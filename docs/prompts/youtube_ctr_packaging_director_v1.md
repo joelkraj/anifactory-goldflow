@@ -119,6 +119,8 @@ Set initial visibility to private.
 
 Record the intended audience, age restriction, altered-content choice, monetization choice, mid-roll mode, comment setting, and desired final visibility.
 
+When an active channel upload experiment applies, copy its exact `experiment_id` and advertising contract into `publish_settings`. For `manhwa_joey_75min_manual_midroll_v1`, set monetization on, `mid_roll_mode` to `manual`, `automatic_mid_rolls` to false, and `manual_mid_roll_count` to three. Calculate targets at 25, 50, and 75 percent of the final video, then move each to the nearest clean story or movement boundary within ninety seconds. Record the three exact `manual_mid_roll_positions_sec` in ascending order. Never place one inside a sentence, reveal, confrontation, action exchange, or emotional payoff.
+
 If the operator has not chosen final visibility or a schedule, write operator_decides. Never infer permission to publish.
 
 OUTPUT ARTIFACTS

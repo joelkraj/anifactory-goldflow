@@ -1,0 +1,80 @@
+{
+  "schema": "goldflow_channel_upload_experiment_v1",
+  "status": "active",
+  "experiment_id": "manhwa_joey_75min_manual_midroll_v1",
+  "channel": "53rebirth",
+  "channel_identity": {
+    "internal_slug": "53rebirth",
+    "display_name": "Manhwa Joey",
+    "youtube_channel_id": "UCZah1gv3wyUfEIvJdTacWjw",
+    "handle": "@ManhwaJoey",
+    "binding_note": "The internal slug is retained because existing production artifacts and commands use it. This experiment applies only to the listed Manhwa Joey YouTube identity."
+  },
+  "approved_by": "operator",
+  "approved_at": "2026-08-24",
+  "eligible_upload_count": 3,
+  "eligibility": {
+    "content_type": "longform",
+    "script_origin": "any",
+    "exclude_shorts": true,
+    "starts_with_next_eligible_upload": true
+  },
+  "runtime": {
+    "target_minutes": 75,
+    "acceptable_min_minutes": 70,
+    "acceptable_max_minutes": 80,
+    "source_brief_target_word_count_guidance": 14000,
+    "word_count_is_selection_gate": false,
+    "rule": "Aim through story scope and narration pace. Do not select or reject a completed draft merely because of word count."
+  },
+  "advertising": {
+    "monetization": "on",
+    "mid_roll_mode": "manual",
+    "automatic_mid_rolls": false,
+    "manual_mid_roll_count": 3,
+    "target_fractions": [
+      0.25,
+      0.5,
+      0.75
+    ],
+    "placement_rule": "Move each target to the nearest clean scene or movement boundary within 90 seconds. Never place a break inside a sentence, reveal, confrontation, action exchange, or emotional payoff."
+  },
+  "measurement": {
+    "checkpoints": [
+      "24h",
+      "72h",
+      "7d"
+    ],
+    "primary_metric": "subscriber_average_percentage_viewed",
+    "comparison_levels_percent": {
+      "july": 18.3,
+      "august": 11.5
+    },
+    "supporting_metrics": [
+      "subscriber_average_view_duration",
+      "suggested_average_percentage_viewed",
+      "browse_average_percentage_viewed",
+      "overall_average_percentage_viewed",
+      "overall_average_view_duration",
+      "impressions",
+      "browse_ctr",
+      "suggested_ctr",
+      "traffic_source_mix"
+    ],
+    "within_video_ad_cliff_control": {
+      "enabled": true,
+      "attempt_at_every_checkpoint": true,
+      "curve_metric": "audience_retention",
+      "curve_x_dimension": "elapsedVideoTimeRatio",
+      "curve_y_metric": "audienceWatchRatio",
+      "ad_positions_source": "the exact three manual_mid_roll_positions_sec values bound into the publish manifest",
+      "sample_offsets_seconds": [-135, -45, 0, 45, 135],
+      "calculation": "For each ad position, compare the 90-second retention drop centered on the insertion with equal-width adjacent 90-second drops. Record the excess local drop in percentage points; do not infer causality from the whole-video APV change.",
+      "availability_rule": "Attempt the curve capture at 24h, 72h, and 7d. If YouTube has not exposed a usable curve, record unavailable with a reason rather than fabricating values, and try again at the next checkpoint.",
+      "interpretation_rule": "An ad-aligned excess drop is evidence of possible interruption friction. It is not proof that every viewer received an ad or that ads explain the video's total retention."
+    },
+    "segmentation_rule": "Exclude Shorts and compare longform by traffic source, subscriber status, duration, release age, impressions, and packaging. Use the within-video ad-aligned cliff control to separate local interruption signals from premise-level performance as far as the available YouTube data permits."
+  },
+  "completion_rule": "After three eligible uploads have mature 72-hour snapshots, compare the cohort before changing the ad policy. Keep collecting the 7-day snapshots after the initial decision.",
+  "rollback_rule": "Deactivate this experiment after its third eligible upload. Do not silently extend it to a fourth upload."
+}

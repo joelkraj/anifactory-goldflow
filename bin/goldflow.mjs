@@ -200,6 +200,7 @@ Commands:
 ${registryCommands}
   goldflow run codex-doctor        Inspect the identity-locked Web/Codex planning runtime
   goldflow run status              Print the artifact-backed stage ledger
+  goldflow run media-ready         Prepare and verify persistent Flow/Gemini image lanes
   goldflow run advance             Advance automatic stages continuously using the locked production profile
   goldflow run director            Show, advance, or persistently babysit the eight-phase production view
   goldflow run audio-semantic-fork Run semantic planning and the voice/TTS/Whisper branch concurrently
@@ -354,6 +355,8 @@ if (command === "help" || command === "--help" || command === "-h" || helpReques
   run("run-performance-audit.mjs", flags);
 } else if (command === "run" && subcommand === "reference-roi") {
   run("reference-roi-audit.mjs", flags);
+} else if (command === "run" && subcommand === "media-ready") {
+  run("run-media-readiness.mjs", flags);
 } else if (command === "run" && subcommand === "advance") {
   run("run-advance.mjs", flags);
 } else if (command === "run" && subcommand === "director") {

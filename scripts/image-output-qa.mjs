@@ -40,10 +40,13 @@ const reviewDecisionsPath = flags.decisions
 const runIdentityPath = flags["run-identity"] ?? path.join(episodeDir, "run_identity.json");
 const focalAnalysisPath = flags["focal-analysis"] ?? path.join(episodeDir, `image_focal_analysis_${episode}.json`);
 const reviewDir = flags["review-dir"] ?? path.join(episodeDir, "review_samples", "image_output_qa");
+const agentReview = flags["agent-review"] === "true";
 const approve = flags.approve === "true" || flags["approve-risk"] === "true";
 const legacyBulkApproval = flags["legacy-bulk-approval"] === "true";
-const reviewer = String(flags.reviewer ?? "").trim();
-const reviewNote = String(flags.note ?? "").trim();
+const reviewer = String(flags.reviewer ?? (agentReview ? "codex-agent" : "")).trim();
+const reviewNote = String(flags.note ?? (agentReview
+  ? "Agent accepted structurally valid cuts and advisory or uncertain semantic findings; only concrete material story or identity failures block exact IDs."
+  : "")).trim();
 const rejectedIds = new Set(parseList(flags["reject-cut-ids"] ?? flags["reject-image-ids"]));
 const acceptedIds = new Set(parseList(flags["accept-cut-ids"] ?? flags["accept-image-ids"]));
 const criticalRejectedIds = new Set(parseList(
@@ -483,6 +486,12 @@ export function imageQaNeedsRecovery(structuralBlockers = [], rejectedDecisionId
   return structuralBlockers.length > 0;
 }
 
+export function semanticAuditHasMaterialFailure(row) {
+  if (!row || row.status !== "audited") return false;
+  if (Array.isArray(row.critical_discrepancies) && row.critical_discrepancies.some((value) => String(value ?? "").trim())) return true;
+  return (row.checks ?? []).some((check) => String(check?.verdict ?? "").toLowerCase() === "fail");
+}
+
 export function acceptedImageHashesForRows(rows = [], structuralBlockerIds = new Set()) {
   return Object.fromEntries(
     rows
@@ -541,11 +550,17 @@ async function main() {
   if (unknownCriticalIds.length) {
     throw new Error(`Critical rejection ids are not current readable cuts: ${unknownCriticalIds.join(", ")}`);
   }
+  if (agentReview) {
+    for (const row of audit.rows.filter((candidate) => candidate.requires_manual_risk_review)) {
+      if (semanticAuditHasMaterialFailure(row.semantic_audit)) criticalRejectedIds.add(row.image_id);
+      else acceptedIds.add(row.image_id);
+    }
+  }
   for (const imageId of criticalRejectedIds) {
     audit.findings.push({
       image_id: imageId,
       severity: "blocker",
-      code: "operator_confirmed_story_or_identity_failure",
+      code: agentReview ? "agent_confirmed_story_or_identity_failure" : "operator_confirmed_story_or_identity_failure",
       message: `${imageId} was explicitly classified as a story-critical or identity-critical failure by ${reviewer}: ${reviewNote}`,
     });
   }
@@ -628,6 +643,7 @@ async function main() {
     advisory_risk_cut_count: audit.rows.filter((row) => row.qa_tier === "advisory_review_log").length,
     qa_policy: {
       mode: "exception_driven_v1",
+      review_mode: agentReview ? "agent_material_blockers_only" : "human_exception_review",
       opening_review_sec: openingReviewSec,
       integration_sample_rate: integrationSampleRate,
       full_contact_sheets_enabled: writeFullContactSheets,

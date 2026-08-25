@@ -306,12 +306,34 @@ function validateDescriptionAndComment(spec, blockers) {
 function validatePublishSettings(spec, blockers) {
   const channel = spec?.youtube_channel ?? {};
   const settings = spec?.publish_settings ?? {};
+  const midRollMode = clean(settings.mid_roll_mode);
+  const manualMidRollCount = Number(settings.manual_mid_roll_count);
+  const manualMidRollPositions = Array.isArray(settings.manual_mid_roll_positions_sec)
+    ? settings.manual_mid_roll_positions_sec.map(Number)
+    : [];
   push(blockers, !clean(channel.expected_name) && !clean(channel.expected_handle), "youtube_expected_channel_missing");
   push(blockers, clean(settings.initial_visibility) !== "private", "youtube_upload_must_start_private");
   push(blockers, !["operator_decides", "public", "unlisted", "private", "scheduled"].includes(clean(settings.desired_visibility)), "youtube_desired_visibility_invalid");
   push(blockers, clean(settings.desired_visibility) === "scheduled" && !clean(settings.schedule_at), "youtube_schedule_time_missing");
   push(blockers, !["on", "off"].includes(clean(settings.monetization)), "youtube_monetization_setting_missing");
-  push(blockers, clean(settings.monetization) === "on" && !["automatic", "manual", "off"].includes(clean(settings.mid_roll_mode)), "youtube_mid_roll_mode_missing");
+  push(blockers, clean(settings.monetization) === "on" && !["automatic", "manual", "off"].includes(midRollMode), "youtube_mid_roll_mode_missing");
+  if (clean(settings.monetization) === "on" && midRollMode === "manual") {
+    push(blockers, settings.automatic_mid_rolls !== false, "youtube_manual_mid_rolls_require_automatic_off");
+    push(blockers, !Number.isInteger(manualMidRollCount) || manualMidRollCount < 1, "youtube_manual_mid_roll_count_invalid");
+    push(blockers, manualMidRollPositions.length !== manualMidRollCount, "youtube_manual_mid_roll_positions_count_mismatch");
+    push(blockers, manualMidRollPositions.some((value) => !Number.isFinite(value) || value <= 0), "youtube_manual_mid_roll_position_invalid");
+    push(
+      blockers,
+      manualMidRollPositions.some((value, index) => index > 0 && value <= manualMidRollPositions[index - 1]),
+      "youtube_manual_mid_roll_positions_not_strictly_ascending",
+    );
+  }
+  if (clean(settings.experiment_id) === "manhwa_joey_75min_manual_midroll_v1") {
+    push(blockers, midRollMode !== "manual", "youtube_manhwa_joey_ad_test_requires_manual_mid_rolls");
+    push(blockers, settings.automatic_mid_rolls !== false, "youtube_manhwa_joey_ad_test_requires_automatic_mid_rolls_off");
+    push(blockers, manualMidRollCount !== 3, "youtube_manhwa_joey_ad_test_requires_three_mid_rolls");
+    push(blockers, manualMidRollPositions.length !== 3, "youtube_manhwa_joey_ad_test_requires_three_positions");
+  }
   push(blockers, typeof settings.made_for_kids !== "boolean", "youtube_audience_setting_missing");
   push(blockers, typeof settings.age_restricted !== "boolean", "youtube_age_restriction_setting_missing");
   push(blockers, typeof settings.altered_content !== "boolean", "youtube_altered_content_setting_missing");
@@ -494,6 +516,8 @@ export function validateYoutubeUploadReceipt(receipt, options = {}) {
   const watchUrl = clean(receipt?.watch_url);
   const videoId = clean(receipt?.video_id);
   const verification = receipt?.field_verification ?? {};
+  const requiredVerifications = [...REQUIRED_UPLOAD_FIELD_VERIFICATIONS];
+  if (clean(manifest?.publish_settings?.mid_roll_mode) === "manual") requiredVerifications.push("mid_rolls");
   push(blockers, receipt?.schema !== YOUTUBE_UPLOAD_RECEIPT_SCHEMA, "youtube_upload_receipt_schema_invalid");
   push(blockers, clean(receipt?.status) !== "passed", "youtube_upload_receipt_not_passed");
   push(blockers, !manifest || receipt?.manifest_sha256 !== manifestHash, "youtube_upload_receipt_manifest_hash_stale");
@@ -507,9 +531,26 @@ export function validateYoutubeUploadReceipt(receipt, options = {}) {
   push(blockers, visibility !== "private" && !clean(receipt?.publish_approval?.approved_by), "youtube_upload_receipt_publish_approver_missing");
   push(blockers, !clean(receipt?.recorded_by), "youtube_upload_receipt_recorder_missing");
   push(blockers, !clean(receipt?.recorded_at), "youtube_upload_receipt_time_missing");
+  if (manifest?.channel_experiment) {
+    push(
+      blockers,
+      clean(receipt?.channel_experiment?.experiment_id) !== clean(manifest.channel_experiment.experiment_id),
+      "youtube_upload_receipt_channel_experiment_id_mismatch",
+    );
+    push(
+      blockers,
+      clean(receipt?.channel_experiment?.config_sha256) !== clean(manifest.channel_experiment.config_sha256),
+      "youtube_upload_receipt_channel_experiment_config_mismatch",
+    );
+    push(
+      blockers,
+      Number(receipt?.channel_experiment?.ordinal) !== Number(manifest.channel_experiment.ordinal),
+      "youtube_upload_receipt_channel_experiment_ordinal_mismatch",
+    );
+  }
   push(
     blockers,
-    REQUIRED_UPLOAD_FIELD_VERIFICATIONS.some((field) => verification[field] !== true),
+    requiredVerifications.some((field) => verification[field] !== true),
     "youtube_upload_receipt_fields_not_all_verified",
   );
   return { status: blockers.length ? "blocked" : "passed", blockers: uniqueStrings(blockers) };

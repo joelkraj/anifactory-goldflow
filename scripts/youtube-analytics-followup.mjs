@@ -10,6 +10,7 @@ import {
   YOUTUBE_ANALYTICS_SNAPSHOT_SCHEMA,
   analyticsDirectorFeedback,
   analyticsSnapshotContentSha256,
+  buildMidrollRetentionCliffAnalysis,
   buildYoutubeAnalyticsFollowupPlan,
   validateYoutubeAnalyticsSnapshot,
 } from "./lib/youtube-analytics-followup-contract.mjs";
@@ -83,11 +84,13 @@ export async function createAnalyticsFollowupPlanForUpload({ episodeDir, episode
   const snapshots = (await fs.readdir(episodeDir).catch(() => []))
     .filter((name) => name.startsWith(`youtube_analytics_snapshot_${episode}_`));
   if (snapshots.length) throw new Error("Refusing to replace the analytics follow-up plan after snapshots exist.");
+  const publishManifest = uploadReceipt?.manifest_path ? await readJson(uploadReceipt.manifest_path) : null;
   const plan = buildYoutubeAnalyticsFollowupPlan({
     episode,
     uploadReceiptPath,
     uploadReceiptSha256,
     uploadReceipt,
+    publishManifest,
     anchorAt,
   });
   await writeJson(planPath, plan);
@@ -132,6 +135,7 @@ async function recordSnapshot() {
   if (!checkpoint) throw new Error(`Unknown analytics window: ${windowId}`);
   const capturedAt = clean(flags["captured-at"]) || new Date().toISOString();
   const snapshotPath = path.join(episodeDir, `youtube_analytics_snapshot_${episode}_${windowId}.json`);
+  const midrollRetentionCliffAnalysis = buildMidrollRetentionCliffAnalysis({ metrics, plan });
   const snapshot = {
     schema: YOUTUBE_ANALYTICS_SNAPSHOT_SCHEMA,
     status: "passed",
@@ -148,7 +152,8 @@ async function recordSnapshot() {
     metrics_source_path: metricsPath,
     metrics_source_sha256: metricsSha256,
     metrics,
-    director_feedback: analyticsDirectorFeedback(metrics),
+    midroll_retention_cliff_analysis: midrollRetentionCliffAnalysis,
+    director_feedback: analyticsDirectorFeedback(metrics, { midrollRetentionCliffAnalysis }),
     captured_by: clean(flags["captured-by"]),
     note: clean(flags.note) || null,
   };

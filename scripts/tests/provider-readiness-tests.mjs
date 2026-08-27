@@ -15,12 +15,14 @@ const identity = {
   },
 };
 const profile = productionProfileById("fast_premium_v2");
+const nowMs = Date.parse("2026-08-27T12:00:00.000Z");
 const specs = providerLaneSpecs(identity, profile, { stateRoot: "/tmp/goldflow-readiness-test" });
 assert.equal(specs.length, 2);
 assert.equal(specs[0].provider, "google-flow");
 assert.equal(specs[0].concurrency, 5);
 assert.equal(specs[1].provider, "google-gemini");
 assert.equal(specs[1].concurrency, 3);
+assert.equal(specs[1].runtime_freshness_max_ms, 60_000);
 
 function passedRuntime(spec, filePath) {
   if (filePath === spec.studio_runtime_path) {
@@ -37,10 +39,13 @@ function passedRuntime(spec, filePath) {
       pid: 102,
       browser_provider: spec.provider,
       concurrency: spec.concurrency,
+      updated_at: new Date(nowMs - 15_000).toISOString(),
       worker_pool: {
         policy: spec.worker_session_policy,
         prepared_session_policies: [spec.worker_session_policy],
-        ready_slots: Array.from({ length: spec.concurrency }, (_, slot) => ({ slot })),
+        ready_slots: Array.from({ length: spec.concurrency }, (_, slot) => spec.provider === "google-flow"
+          ? { slot, project_url: `https://labs.google/fx/tools/flow/project/slot-${slot}/edit` }
+          : { slot, surface_url: "https://gemini.google.com/images" }),
       },
       dispatch_policy: { provider_circuit: null },
     };
@@ -59,6 +64,7 @@ for (const spec of specs) {
       ui_contract: { account_plan: spec.plan_label, model_label: spec.model_label },
       active_image_worker_session_policies: [spec.worker_session_policy],
     }),
+    nowMs,
   });
   assert.equal(lane.status, "passed");
   assert.equal(lane.findings.length, 0);
@@ -73,9 +79,29 @@ const blockedGemini = await inspectProviderLane(specs[1], {
     browser_provider: "google-gemini",
     ui_contract: { account_plan: "Ultra", model_label: "wrong-model" },
   }),
+  nowMs,
 });
 assert.equal(blockedGemini.status, "blocked");
 assert.equal(blockedGemini.findings.some((row) => row.code === "health_model_mismatch"), true);
+
+const staleFlow = await inspectProviderLane(specs[0], {
+  readJsonImpl: async (filePath) => {
+    const value = passedRuntime(specs[0], filePath);
+    return filePath === specs[0].worker_runtime_path
+      ? { ...value, updated_at: new Date(nowMs - 61_000).toISOString() }
+      : value;
+  },
+  processLiveImpl: () => true,
+  fetchHealthImpl: async () => ({
+    status: "ok",
+    service: "goldflow-studio",
+    browser_provider: "google-flow",
+    ui_contract: { account_plan: "ULTRA", model_label: "Nano Banana Pro" },
+  }),
+  nowMs,
+});
+assert.equal(staleFlow.status, "blocked");
+assert.equal(staleFlow.findings.some((row) => row.code === "worker_runtime_stale"), true);
 
 const flowPassed = { provider: "google-flow", status: "passed" };
 const geminiBlocked = { provider: "google-gemini", status: "blocked" };
@@ -106,10 +132,21 @@ const slo = buildProductionSloState({
   profile,
   startedAt: "2026-08-23T12:00:00.000Z",
   now: new Date("2026-08-23T13:50:00.000Z"),
+  healthReady: true,
 });
 assert.equal(slo.elapsed_minutes, 110);
 assert.equal(slo.checkpoints.find((row) => row.id === "audio_semantic_join").state, "passed");
 assert.equal(slo.checkpoints.find((row) => row.id === "first_scene_wave_leased").state, "pending");
 assert.equal(slo.state, "on_track");
+
+const slowHealthSlo = buildProductionSloState({
+  runStatus: { current_stage: "semantic_scene_plan", stage_ledger: [] },
+  profile,
+  startedAt: "2026-08-23T12:00:00.000Z",
+  now: new Date("2026-08-23T12:11:00.000Z"),
+  healthReady: false,
+});
+assert.equal(slowHealthSlo.checkpoints.find((row) => row.id === "health_ready").state, "missed");
+assert.equal(slowHealthSlo.state, "at_risk");
 
 console.log("provider readiness tests passed");

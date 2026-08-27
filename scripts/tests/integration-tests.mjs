@@ -47,7 +47,8 @@ async function runProviderFreeSyntheticE2e() {
   const statusAfterIngest = JSON.parse(statusStdout);
   assert.equal(statusAfterIngest.identity.production_profile, "fast_premium_v2");
   assert.equal(statusAfterIngest.identity.production_profile_config.defaults.generated_motion_policy, "disabled");
-  assert.equal(statusAfterIngest.identity.production_profile_config.defaults.visual_beat_timing_contract.target_beat_sec, 6.5);
+  assert.equal(statusAfterIngest.identity.production_profile_config.defaults.visual_beat_timing_contract.target_beat_sec, 7.5);
+  assert.equal(statusAfterIngest.identity.production_profile_config.defaults.visual_beat_timing_contract.max_beat_sec, 8);
   assert.equal(
     statusAfterIngest.identity.provider_locks.local_whisper_timing.model,
     "small.en",

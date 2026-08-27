@@ -22,6 +22,11 @@ const PERSISTENT_WORKER_SESSION_POLICIES = new Set([
   "persistent_tab_per_worker_slot_v1",
 ]);
 
+const DEFAULT_PERSISTENT_IMAGE_POLICY_BY_PROVIDER = Object.freeze({
+  "google-flow": "persistent_project_per_worker_slot_v1",
+  "google-gemini": "persistent_tab_per_worker_slot_v1",
+});
+
 export function browserFailureDisposition(error) {
   const code = String(error?.code ?? "").toLowerCase();
   const message = String(error?.message ?? error ?? "").toLowerCase();
@@ -61,6 +66,7 @@ export class GoldflowDesktopHost {
     this.stopStarted = false;
     this.schedulerBusy = false;
     this.schedulerTimer = null;
+    this.runtimeHeartbeatTimer = null;
     this.lastPauseMessage = null;
     this.lastPauseLoggedAt = 0;
     this.nextLeaseAt = 0;
@@ -196,11 +202,24 @@ export class GoldflowDesktopHost {
     await this.browser.start();
     await this.browser.waitForAuthentication();
     const health = await this.client.health();
-    for (const policy of health.active_image_worker_session_policies ?? []) {
-      await this.preparePersistentWorkerPool(policy, "active manifest at startup");
+    const startupPolicies = new Set(health.active_image_worker_session_policies ?? []);
+    if (this.config.prewarmPersistentWorkerPool === true && this.config.types.includes("image")) {
+      const defaultPolicy = DEFAULT_PERSISTENT_IMAGE_POLICY_BY_PROVIDER[this.config.browserProvider];
+      if (defaultPolicy) startupPolicies.add(defaultPolicy);
+    }
+    for (const policy of startupPolicies) {
+      const reason = (health.active_image_worker_session_policies ?? []).includes(policy)
+        ? "active manifest at startup"
+        : "production media preflight";
+      await this.preparePersistentWorkerPool(policy, reason);
     }
     this.running = true;
     await this.persistRuntime();
+    clearInterval(this.runtimeHeartbeatTimer);
+    this.runtimeHeartbeatTimer = setInterval(() => {
+      if (this.running) this.persistRuntime().catch(() => {});
+    }, 15_000);
+    this.runtimeHeartbeatTimer.unref?.();
     this.log(`Desktop worker ready with ${this.config.concurrency} browser slot(s): ${this.config.types.join(", ")}.`);
     this.schedule(0);
     return this;
@@ -362,6 +381,8 @@ export class GoldflowDesktopHost {
     this.stopStarted = true;
     this.running = false;
     clearTimeout(this.schedulerTimer);
+    clearInterval(this.runtimeHeartbeatTimer);
+    this.runtimeHeartbeatTimer = null;
     const deadline = Date.now() + drainMs;
     while (this.activeJobs.size && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 250));
     await this.browser.close();

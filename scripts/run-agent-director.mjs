@@ -286,7 +286,7 @@ async function babysit(initialRunStatus) {
   const episode = initialRunStatus.identity?.episode ?? flags.episode ?? "ep_01";
   const checkpointPath = path.join(episodeDir, `agent_director_checkpoints_${episode}.json`);
   const statePath = path.join(episodeDir, "agent_director_watch_state.json");
-  const pollMs = boundedNumberFlag(flags["poll-ms"], 5_000, { minimum: 1_000, maximum: 60_000 });
+  const pollMs = boundedNumberFlag(flags["poll-ms"], 1_000, { minimum: 1_000, maximum: 60_000 });
   const idleTimeoutMs = boundedNumberFlag(flags["idle-timeout-minutes"], 480, { minimum: 1, maximum: 2_880 }) * 60_000;
   const maxRuntimeMs = boundedNumberFlag(flags["max-runtime-minutes"], 1_440, { minimum: 1, maximum: 4_320 }) * 60_000;
   const maxSteps = String(flags["max-steps"] ?? 50);

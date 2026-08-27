@@ -221,6 +221,17 @@ export function isFlowProjectWorkspaceUrl(value) {
   }
 }
 
+export function isSameFlowProjectWorkspaceUrl(currentValue, expectedValue) {
+  try {
+    const projectId = (value) => new URL(String(value ?? "")).pathname
+      .match(/^\/fx\/tools\/flow\/project\/([^/]+)/)?.[1] ?? null;
+    const currentProjectId = projectId(currentValue);
+    return Boolean(currentProjectId) && currentProjectId === projectId(expectedValue);
+  } catch {
+    return false;
+  }
+}
+
 export class GoogleFlowBrowser {
   constructor({
     profileDir,
@@ -438,11 +449,20 @@ export class GoogleFlowBrowser {
     const slot = this.assertWorkerSlot(slotValue);
     let worker = await this.ensurePersistentWorkerPage(slot);
     if (worker.page.isClosed()) worker = await this.ensurePersistentWorkerPage(slot);
-    await worker.page.goto(worker.projectUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    let composer = null;
+    if (isSameFlowProjectWorkspaceUrl(worker.page.url(), worker.projectUrl)) {
+      composer = await waitForVisible(worker.page.locator(PROMPT_SELECTOR), {
+        timeoutMs: Math.min(2_000, composerTimeoutMs),
+      });
+    }
+    if (!composer) {
+      await worker.page.goto(worker.projectUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+      composer = await waitForVisible(worker.page.locator(PROMPT_SELECTOR), { timeoutMs: composerTimeoutMs });
+    }
     if (await visibleLocator(worker.page.locator(SIGNED_OUT_SELECTOR))) {
       throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
     }
-    if (!await waitForVisible(worker.page.locator(PROMPT_SELECTOR), { timeoutMs: composerTimeoutMs })) {
+    if (!composer) {
       worker = await this.replacePersistentWorkerPage(
         slot,
         worker,
@@ -1058,6 +1078,23 @@ export class GoogleFlowBrowser {
     }
     const chips = latest.chips.map((row) => `${row.media_id}:${row.loaded === true ? "loaded" : "pending"}`).join(", ") || "none";
     throw codedError("ui_contract_mismatch", `Google Flow composer reference chip count did not settle at ${expectedCount} (busy=${latest.busy}; ${chips}).`);
+  }
+
+  async ensureCleanImageComposer(page, { slot = 0, persistentWorker = false } = {}) {
+    const clean = await this.waitForComposerChips(page, [], { timeoutMs: 1_500 }).catch(() => null);
+    if (clean) return page;
+    if (!persistentWorker) {
+      throw codedError("ui_contract_mismatch", "Google Flow fresh image composer started with stale reference chips.");
+    }
+    const workerSlot = this.assertWorkerSlot(slot);
+    const priorWorker = this.workerPages.get(workerSlot);
+    const replacement = await this.replacePersistentWorkerPage(
+      workerSlot,
+      priorWorker,
+      "the prior completed job left stale reference chips in the composer",
+    );
+    await this.waitForComposerChips(replacement.page, [], { timeoutMs: 15_000 });
+    return replacement.page;
   }
 
   async attachReferences(page, job, client, onPhase) {
@@ -1691,6 +1728,7 @@ export class GoogleFlowBrowser {
       try {
         const persistentWorker = job.worker_session_policy === PERSISTENT_FLOW_WORKER_POLICY;
         page = persistentWorker ? await this.persistentJobPage(slot) : await this.newJobPage();
+        page = await this.ensureCleanImageComposer(page, { slot, persistentWorker });
         const verified = await this.verifyUiContract(page);
         const prompt = [
           "Create exactly one original landscape still image in a 16:9 frame.",

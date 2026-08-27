@@ -186,6 +186,7 @@ async function main() {
         "profile-dir": googleFlowConfig.profileDir,
         "server-url": googleFlowStudio.url,
         "pairing-code": googleFlowStudio.pairingCode,
+        "prewarm-persistent": "true",
       }),
     });
     googleGeminiHost = new GoldflowDesktopHost({
@@ -197,6 +198,7 @@ async function main() {
         "profile-dir": googleGeminiConfig.profileDir,
         "server-url": googleGeminiStudio.url,
         "pairing-code": googleGeminiStudio.pairingCode,
+        "prewarm-persistent": "true",
       }),
     });
 

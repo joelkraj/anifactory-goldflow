@@ -1650,7 +1650,9 @@ function testRunIdentityV2Policies() {
   assert.equal(DEFAULT_PRODUCTION_PROFILE, "fast_premium_v2");
   assert.equal(normalizeProductionProfile("fast-premium"), "fast_premium_v2");
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.generated_motion_policy, "disabled");
-  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.visual_beat_timing_contract.target_beat_sec, 6.5);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.visual_beat_timing_contract.target_beat_sec, 7.5);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.visual_beat_timing_contract.max_beat_sec, 8);
+  assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).defaults.visual_beat_timing_contract.retention_ramp_sec, 1200);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v2" }).orchestration.wall_clock_contract.hard_ceiling_minutes, 420);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).planner.visual_chunk_concurrency, 12);
   assert.equal(productionProfileForIdentity({ production_profile: "fast_premium_v1" }).orchestration.parallel_audio_semantic, true);
@@ -1885,6 +1887,13 @@ function testGuardedRunAdvancePolicies() {
   assert.equal(parseHumanCheckpointStagesForTests("reference_plan_approval,final_qa").has("image_output_qa"), false);
   assert.match(agentApprovalCommandForTests("reference_image_approval", "/tmp/episode"), /--agent-review true/);
   assert.match(agentApprovalCommandForTests("final_qa", "/tmp/episode"), /--master-scan true --agent-review true/);
+  const leanImageQaCommand = agentApprovalCommandForTests(
+    "image_output_qa",
+    "/tmp/episode",
+    productionProfileById("fast_premium_v2"),
+  );
+  assert.match(leanImageQaCommand, /--semantic-audit-sample-rate 0\.01/);
+  assert.match(leanImageQaCommand, /--integration-sample-rate 0\.02/);
   const tokens = advanceCommandTokensForTests(
     "node bin/goldflow.mjs visual harden --episode-dir <episode-dir> --prompts <episode-dir>/section_image_prompts.json",
     "/tmp/episode",
@@ -4969,7 +4978,10 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   );
   assert.equal(identity.production_profile, "fast_premium_v2");
   assert.equal(identity.generated_motion_policy, "disabled");
-  assert.equal(identity.visual_beat_timing_contract.target_beat_sec, 6.5);
+  assert.equal(identity.visual_beat_timing_contract.enforcement, "hard_max");
+  assert.equal(identity.visual_beat_timing_contract.target_beat_sec, 7.5);
+  assert.equal(identity.visual_beat_timing_contract.max_beat_sec, 8);
+  assert.equal(identity.visual_beat_timing_contract.retention_ramp_sec, 1200);
   assert.equal(identity.planning_provider, "planning_room");
   assert.equal(identity.planning_effort_policy, DEFAULT_PLANNING_ROOM_EFFORT_POLICY);
   assert.equal(identity.provider_locks.planning_provider, "planning_room");

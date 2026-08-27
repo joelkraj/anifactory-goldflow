@@ -29,6 +29,7 @@ import {
 } from "./lib/shot-manifest-risk-contracts.mjs";
 import { sanitizeAnimationIntent } from "./lib/ltx-video-contract.mjs";
 import { stripEmbeddedProviderExclusionPayloadSyntax } from "./lib/prompt-payload-sanitize.mjs";
+import { sanitizeNarrativeOverlays } from "./lib/narrative-overlay-contract.mjs";
 
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
 const flags = parseFlags(process.argv.slice(2));
@@ -812,6 +813,9 @@ function sanitizePrompt(prompt, indexes) {
   )));
   const rawMotionIntent = prompt?.shot_manifest?.motion_intent;
   const shotManifest = sanitizeShotManifest(prompt.shot_manifest);
+  const uiTextOnScreen = Array.isArray(prompt.ui_text_on_screen)
+    ? prompt.ui_text_on_screen.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : (shotManifest?.ui_elements ?? []);
   if (rawMotionIntent !== undefined && rawMotionIntent !== null && !shotManifest?.motion_intent) {
     findings.push({
       image_id: prompt.image_id,
@@ -869,6 +873,14 @@ function sanitizePrompt(prompt, indexes) {
     (value) => normalizePromptFormatting(value),
     { prompt }
   );
+  const narrativeOverlayResult = sanitizeNarrativeOverlays(prompt.narrative_overlays, {
+    imageId: prompt.image_id,
+    sceneId: prompt.scene_id,
+    narrationText: prompt.visual_beat_script_excerpt ?? "",
+    providerPrompt: promptTextValue,
+    uiTextOnScreen,
+  });
+  findings.push(...narrativeOverlayResult.findings);
   let codexPromptTextValue = activeProviderRoute === "codex_imagegen" ? promptTextValue : null;
   findings.push(...backgroundPopulationFindings({
     ...prompt,
@@ -1423,6 +1435,9 @@ function sanitizePrompt(prompt, indexes) {
       modelslab_image_prompt: activeProviderRoute === "modelslab" ? promptTextValue : "",
       codex_image_prompt: codexPromptTextValue,
       prompt_hash: sha256(promptTextValue),
+      narrative_overlays: narrativeOverlayResult.overlays,
+      narrative_overlay_findings: narrativeOverlayResult.findings,
+      ui_text_on_screen: uiTextOnScreen,
       shot_manifest: shotManifest ? {
         ...shotManifest,
         reference_slots: selectedRequirements.map((req, index) => ({

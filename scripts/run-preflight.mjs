@@ -257,6 +257,11 @@ const generatedMotionRequiredThroughSec = boundedNumber(
 );
 const visualBeatTimingDefaults = productionDefaults.visual_beat_timing_contract ?? {};
 const visualBeatTimingContract = {
+  enforcement: normalizeVisualBeatTimingEnforcement(
+    flags["beat-timing-enforcement"]
+      ?? visualBeatTimingDefaults.enforcement
+      ?? "advisory",
+  ),
   target_beat_sec: boundedNumber(flags["target-beat-sec"], visualBeatTimingDefaults.target_beat_sec ?? 8.5, 2, 20),
   max_beat_sec: boundedNumber(flags["max-beat-sec"], visualBeatTimingDefaults.max_beat_sec ?? 15, 2, 30),
   min_beat_sec: boundedNumber(flags["min-beat-sec"], visualBeatTimingDefaults.min_beat_sec ?? 3, 1, 15),
@@ -269,6 +274,9 @@ const visualBeatTimingContract = {
   ramp_max_beat_sec: boundedNumber(flags["ramp-max-beat-sec"], visualBeatTimingDefaults.ramp_max_beat_sec ?? 6.5, 1, 20),
   ramp_min_beat_sec: boundedNumber(flags["ramp-min-beat-sec"], visualBeatTimingDefaults.ramp_min_beat_sec ?? 3.2, 0.5, 15),
 };
+if (visualBeatTimingContract.enforcement === "hard_max" && visualBeatTimingContract.max_beat_sec > 8) {
+  throw new Error("Hard visual-beat timing caps may not exceed 8 seconds.");
+}
 for (const [label, minimum, target, maximum] of [
   ["episode", visualBeatTimingContract.min_beat_sec, visualBeatTimingContract.target_beat_sec, visualBeatTimingContract.max_beat_sec],
   ["hook", visualBeatTimingContract.hook_min_beat_sec, visualBeatTimingContract.hook_target_beat_sec, visualBeatTimingContract.hook_max_beat_sec],
@@ -512,6 +520,12 @@ function normalizeParallaxPolicy(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (["selective_inspected", "disabled"].includes(normalized)) return normalized;
   throw new Error(`Unknown parallax policy: ${value}`);
+}
+
+function normalizeVisualBeatTimingEnforcement(value) {
+  const normalized = String(value ?? "advisory").trim().toLowerCase();
+  if (["advisory", "hard_max"].includes(normalized)) return normalized;
+  throw new Error(`Unknown visual beat timing enforcement: ${value}. Expected advisory or hard_max.`);
 }
 
 function normalizeParallaxBackgroundProvider(value) {
@@ -1165,6 +1179,7 @@ async function main() {
     provider: ttsProvider,
     modelId: lockedModelVersions().tts_model,
     modelRevision: lockedModelVersions().tts_model_revision,
+    deliveryQaPolicy: productionProfileConfig.audio?.narration_delivery_qa ?? null,
   });
   const resolvedImageProviderOptions = imageProviderOptions(imageProvider);
   const resolvedVoiceProviderOptions = voiceProviderOptions(

@@ -33,6 +33,7 @@ export function buildNarrationQualityContract({
   provider = "qwen_local",
   modelId = null,
   modelRevision = null,
+  deliveryQaPolicy = null,
 } = {}) {
   const contract = {
     schema: NARRATION_QUALITY_CONTRACT_SCHEMA,
@@ -114,7 +115,12 @@ export function buildNarrationQualityContract({
       confirm_any_unit_transcript_difference: true,
       confirmed_isolated_deletion_is_blocking: true,
       confirmed_isolated_insertion_is_blocking: true,
-      substitution_only_asr_disagreement_requires_exact_listen: true,
+      substitution_only_asr_disagreement_requires_exact_listen:
+        deliveryQaPolicy?.substitution_only_asr_disagreement_requires_exact_listen ?? true,
+      unconfirmed_primary_asr_requires_exact_listen:
+        deliveryQaPolicy?.unconfirmed_primary_asr_requires_exact_listen ?? true,
+      substitution_only_high_wer_requires_exact_listen:
+        deliveryQaPolicy?.substitution_only_high_wer_requires_exact_listen ?? true,
       hard_block_opening_deletion_run: 1,
       hard_block_trailing_deletion_run: 1,
       hard_block_contiguous_deletion_run: 2,

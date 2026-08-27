@@ -313,7 +313,7 @@ async function reusesThreePersistentImageWorkerTabsBySlot() {
   const first = await browser.persistentJobPage("image", 1);
   const second = await browser.persistentJobPage("image", 1);
   assert.equal(first, second, "successive image jobs on one Gemini slot must reuse the same tab object");
-  assert.deepEqual(first.navigations, ["https://gemini.google.com/images", "https://gemini.google.com/images"]);
+  assert.deepEqual(first.navigations, [], "healthy Gemini Images tabs must not reload between jobs");
   assert.equal(createdSlots.filter((slot) => slot === 1).length, 1, "Gemini slot reuse must not create a replacement tab");
   await assert.rejects(() => browser.ensurePersistentWorkerPage(3), /integer from 0 through 2/);
 }
@@ -336,6 +336,8 @@ async function keepsPersistentImageTabOpenAfterSingleSubmission() {
     },
   };
   browser.workerPages.set(1, page);
+  let cleanComposerChecks = 0;
+  browser.ensureCleanImageComposer = async (candidate) => { cleanComposerChecks += 1; return candidate; };
   browser.verifyUiContract = async () => ({ model_label: "Nano Banana 2" });
   browser.visibleImageUrls = async () => [];
   browser.attachReferences = async () => ({ referenceInputs: [], orderedReferences: [] });
@@ -357,9 +359,30 @@ async function keepsPersistentImageTabOpenAfterSingleSubmission() {
     client: {},
   });
   assert.equal(sendClicks, 1, "one Gemini asset must receive exactly one creative submission");
+  assert.equal(cleanComposerChecks, 1, "every Gemini image lease must verify a clean composer before submission");
   assert.equal(closeCalls, 0, "a successful persistent Gemini image job must leave its slot tab open");
   assert.equal(result.uiContract.worker_slot, 1);
   assert.equal(result.uiContract.worker_session_policy, "persistent_tab_per_worker_slot_v1");
+}
+
+async function resetsOnlyAContaminatedGeminiComposer() {
+  const browser = new GoogleGeminiBrowser({ concurrency: 3 });
+  let attachmentCounts = [2, 0];
+  let navigations = 0;
+  const page = {
+    async goto(url) {
+      assert.equal(url, "https://gemini.google.com/images");
+      navigations += 1;
+    },
+    locator() { return visibleMockLocator({ visible: true }); },
+  };
+  browser.visibleImageComposerAttachmentCount = async () => attachmentCounts.shift() ?? 0;
+  assert.equal(await browser.ensureCleanImageComposer(page), page);
+  assert.equal(navigations, 1, "a contaminated Gemini composer must receive exactly one local reset before submission");
+
+  attachmentCounts = [0];
+  assert.equal(await browser.ensureCleanImageComposer(page), page);
+  assert.equal(navigations, 1, "a clean Gemini composer must not reload");
 }
 
 function recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel() {
@@ -382,6 +405,7 @@ await routesImageJobsOnlyToDedicatedImagesSurface();
 await blocksUnauthenticatedImagesSurfaceWithoutFallingBackToApp();
 await reusesThreePersistentImageWorkerTabsBySlot();
 await keepsPersistentImageTabOpenAfterSingleSubmission();
+await resetsOnlyAContaminatedGeminiComposer();
 recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 
 console.log("google-gemini-browser tests passed");

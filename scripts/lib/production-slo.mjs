@@ -30,6 +30,7 @@ export function buildProductionSloState({
   startedAt,
   now = new Date(),
   firstHundredMeasured = false,
+  healthReady = false,
 } = {}) {
   const contract = profile?.orchestration?.wall_clock_contract ?? null;
   if (!contract || !startedAt) return null;
@@ -41,7 +42,7 @@ export function buildProductionSloState({
   const checkpoints = (contract.checkpoints ?? []).map((checkpoint) => {
     const targetStage = CHECKPOINT_STAGE[checkpoint.id] ?? null;
     const reached = checkpoint.id === "health_ready"
-      ? true
+      ? healthReady === true
       : checkpoint.id === "first_100_scene_images_measured"
         ? firstHundredMeasured
         : stageReached(runStatus, targetStage);

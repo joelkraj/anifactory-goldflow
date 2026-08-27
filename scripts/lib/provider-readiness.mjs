@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 export const PROVIDER_READINESS_SCHEMA = "goldflow_provider_readiness_v1";
-export const PROVIDER_READINESS_VERSION = "2026-08-23.1";
+export const PROVIDER_READINESS_VERSION = "2026-08-27.1";
 
 export const PROVIDER_LANE_DEFAULTS = Object.freeze({
   "google-flow": Object.freeze({
@@ -90,6 +90,9 @@ export function providerLaneSpecs(identity, profile, { stateRoot = null } = {}) 
       ...settings,
       ...paths,
       endpoint: `http://127.0.0.1:${base.port}`,
+      runtime_freshness_max_ms: Math.max(15_000, Number(
+        readiness.worker_runtime_freshness_max_ms ?? 60_000,
+      )),
       required_role: provider === "google-flow" ? "deadline_primary" : "style_barrier_then_top_off",
     };
   });
@@ -114,8 +117,9 @@ export async function inspectProviderLane(spec, {
   readJsonImpl = readJson,
   processLiveImpl = processIsLive,
   fetchHealthImpl = fetchHealth,
+  nowMs = Date.now(),
 } = {}) {
-  const checkedAt = new Date().toISOString();
+  const checkedAt = new Date(nowMs).toISOString();
   const [studioRuntime, workerRuntime, healthResult] = await Promise.all([
     readJsonImpl(spec.studio_runtime_path, null),
     readJsonImpl(spec.worker_runtime_path, null),
@@ -151,7 +155,40 @@ export async function inspectProviderLane(spec, {
   require(Number(workerRuntime?.concurrency) === spec.concurrency, "worker_concurrency_mismatch", `${workerRuntime?.concurrency ?? "missing"} != ${spec.concurrency}`);
   require(workerRuntime?.worker_pool?.policy === spec.worker_session_policy, "worker_policy_mismatch", cleanText(workerRuntime?.worker_pool?.policy) || "missing");
   require(preparedPolicies.includes(spec.worker_session_policy), "worker_policy_not_prepared", spec.worker_session_policy);
-  require(readySlots.length === spec.concurrency, "worker_slots_not_ready", `${readySlots.length}/${spec.concurrency}`);
+  const observedSlotIds = readySlots
+    .map((row) => Number(row?.slot))
+    .filter((slot) => Number.isInteger(slot))
+    .sort((left, right) => left - right);
+  const expectedSlotIds = Array.from({ length: spec.concurrency }, (_, slot) => slot);
+  require(
+    readySlots.length === spec.concurrency
+      && new Set(observedSlotIds).size === spec.concurrency
+      && JSON.stringify(observedSlotIds) === JSON.stringify(expectedSlotIds),
+    "worker_slots_not_ready",
+    `${JSON.stringify(observedSlotIds)}/${JSON.stringify(expectedSlotIds)}`,
+  );
+  const slotSurfacesReady = readySlots.every((row) => {
+    const surface = cleanText(spec.provider === "google-flow" ? row?.project_url : row?.surface_url);
+    if (!surface) return false;
+    try {
+      const url = new URL(surface);
+      return spec.provider === "google-flow"
+        ? url.origin === "https://labs.google" && /\/fx\/tools\/flow\/project\//.test(url.pathname)
+        : url.origin === "https://gemini.google.com" && /^\/images(?:[/?#]|$)/.test(url.pathname);
+    } catch {
+      return false;
+    }
+  });
+  require(slotSurfacesReady, "worker_slot_surface_not_ready", spec.provider);
+  const workerUpdatedAtMs = Date.parse(cleanText(workerRuntime?.updated_at));
+  const workerRuntimeAgeMs = Number.isFinite(workerUpdatedAtMs)
+    ? Math.max(0, nowMs - workerUpdatedAtMs)
+    : null;
+  require(
+    workerRuntimeAgeMs != null && workerRuntimeAgeMs <= spec.runtime_freshness_max_ms,
+    "worker_runtime_stale",
+    workerRuntimeAgeMs == null ? "missing updated_at" : `${workerRuntimeAgeMs}ms > ${spec.runtime_freshness_max_ms}ms`,
+  );
   require(!workerRuntime?.dispatch_policy?.provider_circuit, "provider_circuit_open", JSON.stringify(workerRuntime?.dispatch_policy?.provider_circuit ?? null));
   return {
     provider: spec.provider,
@@ -164,6 +201,7 @@ export async function inspectProviderLane(spec, {
       plan_label: spec.plan_label,
       model_label: spec.model_label,
       worker_session_policy: spec.worker_session_policy,
+      runtime_freshness_max_ms: spec.runtime_freshness_max_ms,
     },
     observed: {
       health: health ? {
@@ -185,6 +223,8 @@ export async function inspectProviderLane(spec, {
         pid: workerRuntime.pid ?? null,
         browser_provider: workerRuntime.browser_provider ?? null,
         concurrency: workerRuntime.concurrency ?? null,
+        updated_at: workerRuntime.updated_at ?? null,
+        runtime_age_ms: workerRuntimeAgeMs,
         worker_pool: workerRuntime.worker_pool ?? null,
         provider_circuit: workerRuntime.dispatch_policy?.provider_circuit ?? null,
       } : null,
@@ -217,4 +257,3 @@ export function providerReadinessDecision(lanes, {
       : "dispatch_held",
   };
 }
-

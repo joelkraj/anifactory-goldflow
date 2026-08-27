@@ -310,12 +310,58 @@ function evidenceTransitionAtomIds(atoms, factLedger) {
   return barriers;
 }
 
-export function retentionRailForTime(startSec) {
+function finiteTimingValue(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizedBeatTimingContract(input = {}) {
+  const contract = input?.timingContract ?? input?.visualBeatTimingContract ?? input ?? {};
+  return {
+    enforcement: String(input?.beatTimingEnforcement ?? contract.enforcement ?? "advisory").trim().toLowerCase(),
+    target_beat_sec: finiteTimingValue(contract.target_beat_sec, 8.5),
+    max_beat_sec: finiteTimingValue(contract.max_beat_sec, 15),
+    min_beat_sec: finiteTimingValue(contract.min_beat_sec, 7),
+    hook_duration_sec: finiteTimingValue(contract.hook_duration_sec, 30),
+    hook_target_beat_sec: finiteTimingValue(contract.hook_target_beat_sec, 3.2),
+    hook_max_beat_sec: finiteTimingValue(contract.hook_max_beat_sec, 4.5),
+    hook_min_beat_sec: finiteTimingValue(contract.hook_min_beat_sec, 2.2),
+    retention_ramp_sec: finiteTimingValue(contract.retention_ramp_sec, 180),
+    ramp_target_beat_sec: finiteTimingValue(contract.ramp_target_beat_sec, 5.2),
+    ramp_max_beat_sec: finiteTimingValue(contract.ramp_max_beat_sec, 7),
+    ramp_min_beat_sec: finiteTimingValue(contract.ramp_min_beat_sec, 3.2),
+  };
+}
+
+export function retentionRailForTime(startSec, timingOptions = {}) {
   const start = Number(startSec ?? 0);
-  if (start < 30) return { band: "0_30", min_sec: 2.2, max_sec: 4.5 };
-  if (start < 180) return { band: "30_180", min_sec: 3.2, max_sec: 7 };
-  if (start < 1200) return { band: "180_1200", min_sec: 5, max_sec: 12 };
-  return { band: "1200_plus", min_sec: 7, max_sec: 15 };
+  const timing = normalizedBeatTimingContract(timingOptions);
+  if (start < timing.hook_duration_sec) {
+    return {
+      band: `0_${timing.hook_duration_sec}`,
+      min_sec: timing.hook_min_beat_sec,
+      max_sec: Math.min(timing.hook_max_beat_sec, timing.max_beat_sec),
+    };
+  }
+  if (start < timing.retention_ramp_sec) {
+    return {
+      band: `${timing.hook_duration_sec}_${timing.retention_ramp_sec}`,
+      min_sec: timing.ramp_min_beat_sec,
+      max_sec: Math.min(timing.ramp_max_beat_sec, timing.max_beat_sec),
+    };
+  }
+  if (start < 1200) {
+    return {
+      band: `${timing.retention_ramp_sec}_1200`,
+      min_sec: 5,
+      max_sec: Math.min(12, timing.max_beat_sec),
+    };
+  }
+  return {
+    band: "1200_plus",
+    min_sec: timing.min_beat_sec,
+    max_sec: timing.max_beat_sec,
+  };
 }
 
 export function buildTranscriptAtoms(script, words, timedScenes = [], factLedger = {}, options = {}) {
@@ -478,6 +524,11 @@ function canonicalAssetId(value, rows, idField) {
 export function buildEditorialDirectorPrompt(atoms, factLedger, timedScenes = [], options = {}) {
   const animationEnabled = Boolean(options.animationEnabled);
   const requiredMotionThroughSec = Math.max(0, Number(options.requiredMotionThroughSec ?? 0));
+  const timing = normalizedBeatTimingContract(options);
+  const hardTimingCap = timing.enforcement === "hard_max";
+  const timingInstruction = hardTimingCap
+    ? `- Visual hold duration is a structural validity gate. Measure each beat from its first atom start through the next unmerged atom start because the image remains visible during narration pauses. From 0-${timing.hook_duration_sec}s, aim for ${timing.hook_target_beat_sec}s and NEVER exceed ${Math.min(timing.hook_max_beat_sec, timing.max_beat_sec)}s. From ${timing.hook_duration_sec}-${timing.retention_ramp_sec}s, aim for ${timing.ramp_target_beat_sec}s and NEVER exceed ${Math.min(timing.ramp_max_beat_sec, timing.max_beat_sec)}s. After ${timing.retention_ramp_sec}s, aim for ${timing.target_beat_sec}s and NEVER exceed ${timing.max_beat_sec}s. Do not merge atoms when that would cross the active maximum. There is no timing exception.`
+    : "- Retention timing is an editorial goal, never a validity gate: aim for 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s when the narration and visual idea support it. Measure a beat from its first atom start through the next unmerged atom start because the image remains visible during narration pauses. Prefer the strongest truthful grouping even when it is shorter or longer; a 4-second beat is valid in any band and no timing exception is required.";
   const contentProfile = options.contentProfile ?? {};
   const plannerRole = contentProfile.planner_roles?.editorial
     ?? "editorial beat director for timed manhwa recap narration";
@@ -519,7 +570,7 @@ Structural requirements:
 - Use every atom_id exactly once and in order. You may merge adjacent atoms into one beat.
 - Never reorder, overlap, omit, duplicate, or invent atoms.
 - Never merge across an atom with transition_barrier_before=true.
-- Retention timing is an editorial goal, never a validity gate: aim for 0-30s 2.2-4.5s; 30-180s 3.2-7s; 180-1200s 5-12s; after 1200s 7-15s when the narration and visual idea support it. Measure a beat from its first atom start through the next unmerged atom start because the image remains visible during narration pauses. Prefer the strongest truthful grouping even when it is shorter or longer; a 4-second beat is valid in any band and no timing exception is required.
+${timingInstruction}
 - Current reality, screen/replay, preview/hypothetical, memory/flashback, and mentioned-only are distinct depiction modes.
 - Mentioned-only entities stay offscreen. Every visible entity needs an exact evidence excerpt from the grouped atoms.
 - Identity-bearing actors include people, creatures, bosses, guardians, constructs, summons, and recurring creature systems. A nonhuman actor that moves, attacks, reacts, is fought, or is physically contacted belongs in the appropriate visible entity list, never in props.
@@ -743,15 +794,21 @@ function groupingFindings(rows, atoms, factLedger, options = {}) {
     const nextRowFirstId = rows[rowIndex + 1]?.source_atom_ids?.[0];
     const nextRowFirst = nextRowFirstId ? atomMap.get(String(nextRowFirstId))?.atom : null;
     const duration = (nextRowFirst?.start_sec ?? last.end_sec) - first.start_sec;
-    const rail = retentionRailForTime(first.start_sec);
+    const timing = normalizedBeatTimingContract(options);
+    const rail = retentionRailForTime(first.start_sec, timing);
     if (duration < rail.min_sec - 0.05 || duration > rail.max_sec + 0.05) {
+      const hardMaximumExceeded = timing.enforcement === "hard_max" && duration > rail.max_sec;
       findings.push({
-        severity: "warning",
-        code: "editorial_retention_timing_goal_miss",
+        severity: hardMaximumExceeded ? "blocker" : "warning",
+        code: hardMaximumExceeded
+          ? "editorial_visual_beat_hard_max_exceeded"
+          : "editorial_retention_timing_goal_miss",
         row_index: rowIndex,
         duration_sec: Number(duration.toFixed(3)),
         rail,
-        message: "Beat duration is outside the retention timing goal; grouping remains valid when story structure supports it.",
+        message: hardMaximumExceeded
+          ? `Visual hold exceeds the active ${rail.max_sec}s production ceiling.`
+          : "Beat duration is outside the retention timing goal; grouping remains valid when story structure supports it.",
       });
     }
   }
@@ -765,6 +822,7 @@ function groupingFindings(rows, atoms, factLedger, options = {}) {
 export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, options = {}) {
   const animationEnabled = Boolean(options.animationEnabled);
   const requiredMotionThroughSec = Math.max(0, Number(options.requiredMotionThroughSec ?? 0));
+  const timing = normalizedBeatTimingContract(options);
   const rows = Array.isArray(raw?.beats) ? raw.beats.map((row) => ({
     ...row,
     ...normalizeVisualBeatQuality(row),
@@ -887,28 +945,34 @@ export function normalizeEditorialGrouping(raw, atoms, factLedger, episode, opti
       quality_budget: row.quality_budget,
       ...(animationEnabled ? { animation_intent: row.animation_intent ?? null } : {}),
       rail_exception: normalizeText(row.rail_exception) || null,
-      retention_rail: retentionRailForTime(first.start_sec),
-      hook_visual: first.start_sec < 30,
-      retention_ramp_visual: first.start_sec >= 30 && first.start_sec < 180,
+      retention_rail: retentionRailForTime(first.start_sec, timing),
+      hook_visual: first.start_sec < timing.hook_duration_sec,
+      retention_ramp_visual: first.start_sec >= timing.hook_duration_sec && first.start_sec < timing.retention_ramp_sec,
     };
   });
   return { beats, findings };
 }
 
-export function editorialRetentionRailFindings(beats) {
+export function editorialRetentionRailFindings(beats, options = {}) {
+  const timing = normalizedBeatTimingContract(options);
   return (beats ?? []).flatMap((beat, index) => {
-    const rail = beat.retention_rail ?? retentionRailForTime(beat.start_sec);
+    const rail = retentionRailForTime(beat.start_sec, timing);
     const duration = Number(beat.duration_sec ?? (Number(beat.end_sec ?? 0) - Number(beat.start_sec ?? 0)));
-    if (duration >= rail.min_sec - 0.75 && duration <= rail.max_sec + 0.75) return [];
+    const hardMaximumExceeded = timing.enforcement === "hard_max" && duration > rail.max_sec;
+    if (!hardMaximumExceeded && duration >= rail.min_sec - 0.75 && duration <= rail.max_sec + 0.75) return [];
     return [{
-      severity: "warning",
-      code: "editorial_applied_hold_timing_goal_miss",
+      severity: hardMaximumExceeded ? "blocker" : "warning",
+      code: hardMaximumExceeded
+        ? "editorial_applied_hold_hard_max_exceeded"
+        : "editorial_applied_hold_timing_goal_miss",
       beat_index: index,
       visual_beat_id: beat.visual_beat_id ?? null,
       start_sec: Number(beat.start_sec ?? 0),
       duration_sec: Number(duration.toFixed(3)),
       rail,
-      message: "Applied hold is outside the retention timing goal; this is diagnostic only.",
+      message: hardMaximumExceeded
+        ? `Closed visual timeline exceeds the active ${rail.max_sec}s production ceiling.`
+        : "Applied hold is outside the retention timing goal; this is diagnostic only.",
     }];
   });
 }

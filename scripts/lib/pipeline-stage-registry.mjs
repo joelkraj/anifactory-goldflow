@@ -552,6 +552,7 @@ function visualBeatTimingFlags(identity = {}) {
     ?? identity.provider_locks?.visual_beat_timing_contract
     ?? null;
   if (!contract) return "";
+  const enforcement = String(contract.enforcement ?? "").trim();
   const fields = [
     ["target-beat-sec", contract.target_beat_sec],
     ["max-beat-sec", contract.max_beat_sec],
@@ -565,10 +566,11 @@ function visualBeatTimingFlags(identity = {}) {
     ["ramp-max-beat-sec", contract.ramp_max_beat_sec],
     ["ramp-min-beat-sec", contract.ramp_min_beat_sec],
   ];
-  return fields
+  const numericFlags = fields
     .filter(([, value]) => Number.isFinite(Number(value)))
     .map(([flag, value]) => ` --${flag} ${Number(value)}`)
     .join("");
+  return `${enforcement ? ` --beat-timing-enforcement ${enforcement}` : ""}${numericFlags}`;
 }
 
 function codexReferences(identity = {}) {

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { GoogleGeminiBrowser } from "../apps/goldflow-studio/desktop/google-gemini-browser.mjs";
+import { GoogleFlowBrowser } from "../apps/goldflow-studio/desktop/google-flow-browser.mjs";
 import { defaultChromeExecutable } from "../apps/goldflow-studio/desktop/config.mjs";
 
 function parseFlags(parts) {
@@ -41,25 +42,39 @@ async function runPool(items, concurrency, worker) {
   return results;
 }
 
-export async function generateGoogleGeminiThumbnails({
+async function generateGoogleBrowserImages({
   jobs,
+  provider = "google-gemini",
   concurrency = 3,
-  profileDir = path.join(os.homedir(), ".goldflow-studio", "google-flow-browser-profile"),
-  downloadsRoot = path.join(os.homedir(), "Downloads", "GoldflowStudio", "thumbnail-gemini"),
+  profileDir = path.join(os.homedir(), ".goldflow-studio", `${provider}-browser-profile`),
+  downloadsRoot = path.join(os.homedir(), "Downloads", "GoldflowStudio", `image-proof-${provider}`),
   chromeExecutable = defaultChromeExecutable(),
 } = {}) {
-  if (!Array.isArray(jobs) || !jobs.length) throw new Error("At least one Gemini thumbnail job is required.");
+  if (!Array.isArray(jobs) || !jobs.length) throw new Error("At least one Google image job is required.");
   if (jobs.some((job) => (job.referenceImagePaths ?? []).length)) {
-    throw new Error("The thumbnail helper is zero-reference only. Use the guarded hybrid browser pool for referenced production images.");
+    throw new Error("The direct Google image helper is zero-reference only. Use the guarded hybrid browser pool for referenced production images.");
   }
-  const browser = new GoogleGeminiBrowser({
-    profileDir,
-    downloadsRoot,
-    chromeExecutable,
-    concurrency: Math.max(1, Math.min(5, Number(concurrency) || 3)),
-    geminiPlanLabel: "Ultra",
-    geminiModelLabel: "Nano Banana 2",
-  });
+  if (!new Set(["google-gemini", "google-flow"]).has(provider)) {
+    throw new Error("--provider must be google-gemini or google-flow.");
+  }
+  const resolvedConcurrency = Math.max(1, Math.min(provider === "google-flow" ? 5 : 3, Number(concurrency) || 1));
+  const browser = provider === "google-flow"
+    ? new GoogleFlowBrowser({
+      profileDir,
+      downloadsRoot,
+      chromeExecutable,
+      concurrency: resolvedConcurrency,
+      flowPlanLabel: "ULTRA",
+      flowModelLabel: "Nano Banana Pro",
+    })
+    : new GoogleGeminiBrowser({
+      profileDir,
+      downloadsRoot,
+      chromeExecutable,
+      concurrency: resolvedConcurrency,
+      geminiPlanLabel: "Ultra",
+      geminiModelLabel: "Nano Banana 2",
+    });
   await browser.start();
   try {
     await browser.waitForAuthentication();
@@ -68,8 +83,8 @@ export async function generateGoogleGeminiThumbnails({
       const result = await browser.runJob({
         job: {
           type: "image",
-          manifest_id: `thumbnail-gemini-${Date.now()}-${index}`,
-          asset_id: String(job.workId ?? `thumbnail-${index}`),
+          manifest_id: `google-image-proof-${Date.now()}-${index}`,
+          asset_id: String(job.workId ?? `image-proof-${index}`),
           lease_token: `direct-${Date.now()}-${index}`,
           prompt: String(job.prompt ?? ""),
           references: [],
@@ -84,10 +99,12 @@ export async function generateGoogleGeminiThumbnails({
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
       await fs.copyFile(result.downloadPath, outputPath);
       const receipt = {
-        schema: "goldflow_google_gemini_thumbnail_receipt_v1",
+        schema: provider === "google-flow"
+          ? "goldflow_google_flow_image_proof_receipt_v1"
+          : "goldflow_google_gemini_image_proof_receipt_v1",
         status: "completed",
-        provider: "google-gemini",
-        model: result.uiContract?.model_label ?? "Nano Banana 2",
+        provider,
+        model: result.uiContract?.model_label ?? (provider === "google-flow" ? "Nano Banana Pro" : "Nano Banana 2"),
         reference_count: 0,
         work_id: job.workId,
         output_path: outputPath,
@@ -105,21 +122,31 @@ export async function generateGoogleGeminiThumbnails({
   }
 }
 
+export async function generateGoogleGeminiThumbnails(options = {}) {
+  return generateGoogleBrowserImages({ ...options, provider: "google-gemini" });
+}
+
+export async function generateGoogleFlowImages(options = {}) {
+  return generateGoogleBrowserImages({ ...options, provider: "google-flow" });
+}
+
 async function main() {
   const flags = parseFlags(process.argv.slice(2));
-  if (!flags.manifest) throw new Error("Usage: google-gemini-thumbnail-helper --manifest <jobs.json> [--indices 5,6,7,8,9] [--concurrency 3]");
+  if (!flags.manifest) throw new Error("Usage: google-gemini-thumbnail-helper --manifest <jobs.json> [--provider google-gemini|google-flow] [--indices 5,6,7,8,9] [--concurrency 3]");
   const manifestPath = path.resolve(flags.manifest);
   const jobs = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const indices = selectedIndices(flags.indices, jobs.length);
   const selected = indices.map((index) => jobs[index]);
-  const results = await generateGoogleGeminiThumbnails({
+  const provider = String(flags.provider ?? "google-gemini");
+  const generate = provider === "google-flow" ? generateGoogleFlowImages : generateGoogleGeminiThumbnails;
+  const results = await generate({
     jobs: selected,
     concurrency: Number(flags.concurrency ?? 3),
     profileDir: flags["profile-dir"] ? path.resolve(flags["profile-dir"]) : undefined,
     downloadsRoot: flags["downloads-root"] ? path.resolve(flags["downloads-root"]) : undefined,
     chromeExecutable: flags["chrome-executable"] ? path.resolve(flags["chrome-executable"]) : undefined,
   });
-  process.stdout.write(`${JSON.stringify({ status: "passed", manifest_path: manifestPath, indices, results }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "passed", provider, manifest_path: manifestPath, indices, results }, null, 2)}\n`);
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

@@ -53,6 +53,10 @@ import {
 import { isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
+import {
+  narrativeOverlayAuthoringRules,
+  sanitizeNarrativeOverlays,
+} from "./lib/narrative-overlay-contract.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -707,6 +711,7 @@ export function buildCompactAuthorPromptForTests({ compactTimedPlan, compactSema
   const shotJobContract = shotJobs.length
     ? shotJobs.join("|")
     : "environment_establishing|body_state_proof|object_insert|interaction|physical_action|emotional_reaction|consequence|ui_reveal|transition";
+  const narrativeOverlayRules = narrativeOverlayAuthoringRules();
   return `Author one production image prompt for every ${unitLabel} below.
 
 ${providerPromptGuidance(activeProvider, activeProviderOptions)}
@@ -752,6 +757,7 @@ ${animationEnabled ? `- ANIMATION MODE IS LOCKED. Copy each beat's complete anim
 - Editorial reuse is a late-video efficiency tool for stable explanation, analysis, aftermath, or low-risk dialogue. Never use it for the opening, action, a new location, a state change, UI/system reveal, status turn, payoff, threat, or cliffhanger.
 - Do not create standalone negative_prompt, avoid_list, or exclude_list fields. Normal story-faithful prose may freely state absences, refusals, and contrast.
 - Correction directives are binding only for their matching image_id or scene_id.
+${narrativeOverlayRules.map((rule) => `- ${rule}`).join("\n")}
 ${riskRules.map((rule) => `- ${rule}`).join("\n")}
 
 TIMED LOCAL UNITS AND SCOPED REFS:
@@ -776,6 +782,7 @@ Return JSON only with exactly ${compactTimedPlan.scene_count} prompts:
     "reuse_source_image_id": null,
     "provider_prompt": "one production prompt optimized for target_provider_route",
     "image_provider_route": "copy target_provider_route",
+    "narrative_overlays": [{"kind":"rpg_game_text|speech_bubble|thought_bubble|manhwa_reaction","text":"2-10 additive words or null for a text-free reaction treatment","speaker":null,"information_delta":"new information not spoken by narration","placement":"composition-aware placement","attachment_target":"speaker or affected subject","style":"system_cyan|rank_gold|danger_red|success_green|speech_white|speech_black|whisper_gray|reaction_shock|reaction_rage|reaction_comedy|reaction_dread","visual_treatment":"exact bubble, RPG panel, typography, speed-line, expression, or reaction styling also written into provider_prompt"}],
     "shot_manifest": {
       "shot_job": "${shotJobContract}",
       "visible_characters": [],
@@ -1027,6 +1034,7 @@ ${providerPromptGuidance(activeProvider, activeProviderOptions)}
 - UI text policy for image generation: request clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Put exact multi-line system text, captions, lists, and long labels in ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
 - If a mission/UI label contains refusal or absence wording, put the exact wording in ui_text_on_screen. In modelslab_image_prompt, describe the visible UI design naturally and concretely, but do not add a separate provider-exclusion payload.
 - If the story beat depends on chat, system panels, viewer counts, receipts, scoreboards, livestream status, or labels, include concise readable UI text in ui_text_on_screen and visually stage the screen/panel as a key story object. Text can be sparse and large; it should serve the beat instead of filling the frame.
+${narrativeOverlayAuthoringRules().map((rule) => `- ${rule}`).join("\n")}
 - Shot scale must be intentional and beat-specific. The planner should choose the most useful composition for the cut instead of using a global wide or close-up default.
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Character references are identity and wardrobe evidence. Use them to match face, hair, age, body type, and outfit while placing the character in the new pose/action required by this beat.
@@ -1211,6 +1219,7 @@ Return JSON only:
       "modelslab_image_prompt": "production scene prompt optimized for the active ModelsLab image model when the active route needs ModelsLab, else empty string",
       "codex_image_prompt": "production scene prompt optimized for Codex/OpenAI when the active route needs Codex, else empty string",
       "image_provider_route": "modelslab|codex_imagegen",
+      "narrative_overlays": [{"kind":"rpg_game_text|speech_bubble|thought_bubble|manhwa_reaction","text":"2-10 additive words or null for a text-free reaction treatment","speaker":null,"information_delta":"new information not spoken by narration","placement":"composition-aware placement","attachment_target":"speaker or affected subject","style":"system_cyan|rank_gold|danger_red|success_green|speech_white|speech_black|whisper_gray|reaction_shock|reaction_rage|reaction_comedy|reaction_dread","visual_treatment":"exact bubble, RPG panel, typography, speed-line, expression, or reaction styling also written into provider_prompt"}],
       "reference_requirements": [{"ref_id":"style_ref","kind":"style","required":true,"slot_order":1,"slot_purpose":"anime manhwa style language","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [{"ref_id":"...","usage":"attach_existing_ref|derive_from_cut|no_ref_needed|missing_reference_coverage","reason":"..."}],
@@ -1519,6 +1528,16 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     ...(manifest?.character_state_ref_ids ?? []),
     manifest?.protagonist_state_ref_id,
   ].filter(Boolean))];
+  const uiTextOnScreen = Array.isArray(row.ui_text_on_screen)
+    ? row.ui_text_on_screen.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : (manifest?.ui_elements ?? []);
+  const narrativeOverlayResult = sanitizeNarrativeOverlays(row.narrative_overlays, {
+    imageId,
+    sceneId: row.scene_id ?? sourceUnit?.scene_id ?? null,
+    narrationText: sourceUnit?.visual_beat_script_excerpt ?? row.visual_beat_script_excerpt ?? "",
+    providerPrompt,
+    uiTextOnScreen,
+  });
   const basePrompt = {
     image_id: imageId,
     scene_id: row.scene_id ?? null,
@@ -1557,6 +1576,8 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     prompt_hash: sha256(providerPrompt),
     image_provider_route: route,
     image_model_route: process.env.ANIFACTORY_IMAGE_MODEL ?? "flux-klein",
+    narrative_overlays: narrativeOverlayResult.overlays,
+    narrative_overlay_findings: narrativeOverlayResult.findings,
     reference_requirements: referenceRequirements,
     required_reference_paths: [],
     reference_usage: referenceRequirements.map((requirement) => ({ ref_id: requirement.ref_id, usage: "attach_existing_ref", reason: requirement.reason })),
@@ -1566,7 +1587,7 @@ function normalizePrompt(row, index, episodeId, sourceUnit = null, scope = {}) {
     character_state_refs_used: characterRefIds,
     primary_subject: manifest?.primary_character ?? null,
     location: sourceUnit?.local_location ?? sourceUnit?.location ?? null,
-    ui_text_on_screen: manifest?.ui_elements ?? [],
+    ui_text_on_screen: uiTextOnScreen,
     image_generation_required: true,
   };
   const scene = sourceUnit ?? row;
@@ -1926,6 +1947,7 @@ function promptSearchText(prompt) {
     prompt.shot_manifest?.mentioned_only_characters,
     prompt.visible_subjects,
     prompt.ui_text_on_screen,
+    (prompt.narrative_overlays ?? []).flatMap((overlay) => [overlay?.text, overlay?.speaker]),
   ].flat(Infinity).filter(Boolean).join(" ").toLowerCase();
 }
 
@@ -3558,6 +3580,19 @@ async function main() {
   const promptVarietyWarnings = assertPromptVariety(prompts);
   const locationSpanWarnings = assertLocationSpanVariety(prompts);
   const retentionShotJobWarnings = assertRetentionShotJobVarietySoft(prompts);
+  const narrativeOverlayPromptFindings = prompts.flatMap((prompt) => prompt.narrative_overlay_findings ?? []);
+  const narrativeOverlayPromptCount = prompts.filter((prompt) => (prompt.narrative_overlays ?? []).length > 0).length;
+  const narrativeOverlayCoverageShare = prompts.length ? narrativeOverlayPromptCount / prompts.length : 0;
+  const narrativeOverlayCoverageWarnings = visualSourceRows.length === allVisualSourceRows.length
+    && prompts.length
+    && narrativeOverlayCoverageShare <= 0.5
+    ? [{
+        severity: "warning",
+        code: "narrative_overlay_episode_coverage_below_most_cuts",
+        message: `Only ${narrativeOverlayPromptCount} of ${prompts.length} cuts author an image-native narrative graphic. The standard asks for additive RPG text, bubbles, or manhwa reaction styling on most cuts while preserving purposeful clean frames.`,
+        resolved: false,
+      }]
+    : [];
   const expectedPromptCount = allVisualSourceRows.length;
   if (prompts.length !== expectedPromptCount) throw new Error(`Visual planner returned ${prompts.length} prompts for ${expectedPromptCount} visual units.`);
   const duplicateImageIds = [...new Set(prompts.map((prompt) => prompt.image_id).filter((imageId, index, all) => all.indexOf(imageId) !== index))];
@@ -3614,6 +3649,14 @@ async function main() {
       manual_recovery_output_files: manualRecoveryOutputFiles,
     },
     editorial_reuse_policy: editorialReuse.policy,
+    narrative_overlay_policy: {
+      rendering: "image_provider_baked_into_still",
+      target: "most_cuts_with_one_additive_graphic",
+      prompt_count: narrativeOverlayPromptCount,
+      total_prompt_count: prompts.length,
+      coverage_share: Number(narrativeOverlayCoverageShare.toFixed(4)),
+      deterministic_post_render_overlay: false,
+    },
     style_summary: styleSummary,
     prompt_policy: "shot_manifest-authoritative provider-aware prompt packets; the LLM authors one active provider_prompt and deterministic compatibility fields are derived without changing depicted content",
     image_provider: activeImageProvider,
@@ -3631,7 +3674,7 @@ async function main() {
     prompts,
     active_state_findings: activeStateFindings,
     motion_editorial_findings: motionEditorialAdvisories,
-    findings: [...activeStateFindings, ...motionEditorialAdvisories, ...plannerRecoveryFindings],
+    findings: [...activeStateFindings, ...motionEditorialAdvisories, ...plannerRecoveryFindings, ...narrativeOverlayPromptFindings],
     warnings: [
       ...(llm.parsed.warnings ?? []),
       ...providerExclusionPayloadWarnings,
@@ -3644,6 +3687,8 @@ async function main() {
       ...editorialReuse.findings,
       ...motionEditorialAdvisories,
       ...adaptiveTelemetryWarnings,
+      ...narrativeOverlayPromptFindings,
+      ...narrativeOverlayCoverageWarnings,
     ],
     updated_at: new Date().toISOString(),
   };

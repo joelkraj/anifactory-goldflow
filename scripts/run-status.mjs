@@ -4242,6 +4242,30 @@ async function main() {
         state: contract !== CURRENT_VISUAL_BEAT_CONTRACT_VERSION ? "stale" : "missing",
         evidence: `visual_beat_plan.json requires ${CURRENT_VISUAL_BEAT_CONTRACT_VERSION} and current visual_beat_approval.json`,
       };
+    } else {
+      const timing = identity.visual_beat_timing_contract
+        ?? identity.provider_locks?.visual_beat_timing_contract
+        ?? {};
+      if (String(timing.enforcement ?? "advisory") === "hard_max") {
+        const globalMax = Number(timing.max_beat_sec ?? 8);
+        const hookEnd = Number(timing.hook_duration_sec ?? 30);
+        const hookMax = Math.min(globalMax, Number(timing.hook_max_beat_sec ?? globalMax));
+        const rampEnd = Number(timing.retention_ramp_sec ?? 1200);
+        const rampMax = Math.min(globalMax, Number(timing.ramp_max_beat_sec ?? globalMax));
+        const overlong = (beatArtifact?.beats ?? []).filter((beat) => {
+          const start = Number(beat.start_sec ?? 0);
+          const duration = Number(beat.duration_sec ?? (Number(beat.end_sec ?? 0) - start));
+          const activeMax = start < hookEnd ? hookMax : start < rampEnd ? rampMax : globalMax;
+          return Number.isFinite(duration) && duration > activeMax;
+        });
+        if (overlong.length) {
+          visualBeatPlan = {
+            done: false,
+            state: "blocked",
+            evidence: `visual_beat_plan.json violates hard visual density: ${overlong.length} beat(s) exceed their active ceiling; first=${overlong[0].visual_beat_id ?? overlong[0].image_id_hint ?? "unknown"}`,
+          };
+        }
+      }
     }
   }
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);

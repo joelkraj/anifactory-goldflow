@@ -132,6 +132,30 @@ const prompt = buildEditorialDirectorPrompt([atom], ledger, [atom.semantic_scene
 assert.match(prompt, /Retention timing is an editorial goal, never a validity gate/i);
 assert.match(prompt, /a 4-second beat is valid in any band/i);
 assert.match(prompt, /State exactly what new visual information each beat adds/i);
+const hardTimingOptions = {
+  beatTimingEnforcement: "hard_max",
+  timingContract: {
+    enforcement: "hard_max",
+    target_beat_sec: 7.5,
+    max_beat_sec: 8,
+    min_beat_sec: 3,
+    hook_duration_sec: 30,
+    hook_target_beat_sec: 3.2,
+    hook_max_beat_sec: 4.2,
+    hook_min_beat_sec: 2.2,
+    retention_ramp_sec: 1200,
+    ramp_target_beat_sec: 6,
+    ramp_max_beat_sec: 7,
+    ramp_min_beat_sec: 3.2,
+  },
+};
+const hardPrompt = buildEditorialDirectorPrompt([atom], ledger, [atom.semantic_scene], hardTimingOptions);
+assert.match(hardPrompt, /structural validity gate/i);
+assert.match(hardPrompt, /NEVER exceed 8s/i);
+const overlongClosedBeat = [{ ...normalized.beats[0], start_sec: 1300, end_sec: 1308.1, duration_sec: 8.1 }];
+const hardFindings = editorialRetentionRailFindings(overlongClosedBeat, hardTimingOptions);
+assert.equal(hardFindings[0].severity, "blocker");
+assert.equal(hardFindings[0].code, "editorial_applied_hold_hard_max_exceeded");
 assert.equal(normalized.beats[0].quality_budget.tier, "priority");
 const analyticsEvidence = retentionResetEvidenceForTests({
   video_id: "video_1",

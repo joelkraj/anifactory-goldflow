@@ -30,7 +30,7 @@
     "test:narration-quality": "node scripts/tests/narration-quality-v2-tests.mjs && node scripts/tests/narration-delivery-manual-review-tests.mjs && node scripts/tests/narration-pre-synthesis-gate-tests.mjs && python3 scripts/tests/tts-pre-synthesis-runner-tests.py",
     "test:analytics-quality": "node scripts/tests/youtube-analytics-winner-lineage-tests.mjs && node scripts/tests/youtube-script-origin-tests.mjs && node scripts/tests/youtube-analytics-monitor-tests.mjs && node scripts/tests/analytics-learning-policy-tests.mjs && node scripts/tests/analytics-learning-proposal-tests.mjs && node scripts/tests/analytics-imessage-notification-tests.mjs",
     "test:source-quality": "node scripts/tests/first-class-story-contract-tests.mjs && node scripts/tests/source-opening-audio-audition-tests.mjs && node scripts/tests/source-mixed-viewer-shadow-tests.mjs",
-    "test:audiovisual-quality": "node scripts/tests/audiovisual-quality-tests.mjs",
+    "test:audiovisual-quality": "node scripts/tests/audiovisual-quality-tests.mjs && node scripts/tests/narrative-overlay-tests.mjs",
     "test:quality": "npm run test:source-quality && npm run test:narration-quality && npm run test:visual-prompt && npm run test:motion-quality && npm run test:master-quality && npm run test:scheduler-quality && npm run test:telemetry-quality && npm run test:analytics-quality && npm run test:audiovisual-quality",
     "test:integration": "node scripts/tests/integration-tests.mjs",
     "test:fixtures": "npm run test:stage-contract && npm run test:planner && npm run test:voice-boundary && npm run test:media && npm run test:production-direction && npm run test:performance && npm run test:narration-quality && npm run test:analytics-quality && npm run test:integration",

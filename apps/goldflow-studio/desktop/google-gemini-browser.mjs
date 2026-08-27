@@ -360,16 +360,44 @@ export class GoogleGeminiBrowser {
     const slot = this.assertWorkerSlot(slotValue);
     const page = await this.ensurePersistentWorkerPage(slot);
     const expectedUrl = type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL;
-    await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
-    if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
+    const isCorrectSurface = () => (type === "llm"
+      ? /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/i.test(page.url())
+      : isGeminiImageSurfaceUrl(page.url()));
+    let composer = isCorrectSurface()
+      ? await waitForVisible(page.locator(PROMPT_SELECTOR), 2_000)
+      : null;
+    if (!composer) {
+      await page.goto(expectedUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+      composer = await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000);
+    }
+    if (!composer) {
       throw codedError("ui_contract_mismatch", `Gemini persistent worker slot ${slot + 1} lost its ${type} composer.`);
     }
-    const routedCorrectly = type === "llm"
-      ? /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/i.test(page.url())
-      : isGeminiImageSurfaceUrl(page.url());
-    if (!routedCorrectly) throw codedError("ui_contract_mismatch", `Gemini persistent ${type} worker routed to ${page.url()} instead of ${expectedUrl}.`);
+    if (!isCorrectSurface()) throw codedError("ui_contract_mismatch", `Gemini persistent ${type} worker routed to ${page.url()} instead of ${expectedUrl}.`);
     if (type === "image" && await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
       throw codedError("auth_required", `Gemini Images is not authenticated at ${page.url()}.`);
+    }
+    return page;
+  }
+
+  async visibleImageComposerAttachmentCount(page) {
+    const attachments = page.locator("gem-attachment");
+    let visibleCount = 0;
+    for (let index = 0; index < await attachments.count(); index += 1) {
+      if (await attachments.nth(index).isVisible().catch(() => false)) visibleCount += 1;
+    }
+    return visibleCount;
+  }
+
+  async ensureCleanImageComposer(page) {
+    if (await this.visibleImageComposerAttachmentCount(page) === 0) return page;
+    this.log("Resetting a Gemini Images composer that retained stale attachments before submission.", "warn");
+    await page.goto(GEMINI_IMAGES_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    if (!await waitForVisible(page.locator(PROMPT_SELECTOR), 30_000)) {
+      throw codedError("ui_contract_mismatch", "Gemini Images composer did not return while clearing stale attachments.");
+    }
+    if (await this.visibleImageComposerAttachmentCount(page) !== 0) {
+      throw codedError("ui_contract_mismatch", "Gemini Images composer retained stale attachments after one local reset.");
     }
     return page;
   }
@@ -812,11 +840,12 @@ export class GoogleGeminiBrowser {
     if (job.type === "llm") return this.runLlmJob({ slot, job, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
     const persistentWorker = job.worker_session_policy === PERSISTENT_GEMINI_WORKER_POLICY;
-    const page = persistentWorker
+    let page = persistentWorker
       ? await this.persistentJobPage("image", slot)
       : await this.newJobPage("image");
     let preservePage = false;
     try {
+      page = await this.ensureCleanImageComposer(page);
       await onPhase("verifying_ui_contract");
       const uiContract = await this.verifyUiContract(page);
       const baseline = new Set(await this.visibleImageUrls(page));

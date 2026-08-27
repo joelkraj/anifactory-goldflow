@@ -104,7 +104,7 @@ Consumer Gemini CLI is not the planned route. Google moved individual Google AI 
 - Google Flow video models are the production primary.
 - Use generated motion selectively for the opening, major reveals, action peaks, emotional reversals, and climaxes.
 - When a run locks mandatory generated motion through the first three minutes, every opening cut must be animated with the run's exact highest-quality approved Flow model. Treat those cuts as one storyboarded anime sequence: preserve geography, eyelines, screen direction, prop state, and emotional state; never reset a subject to an earlier pose or substitute random ambient motion for story action.
-- Lock the episode's intended visual-beat density in `run_identity.json`. A production targeting 6-7 seconds average cut time uses a 6.5-second full-episode target, denser hook and opening-ramp targets, and verifies the achieved average from the final beat and render timelines.
+- Lock the episode's intended visual-beat density in `run_identity.json`. New production uses a hard 8.0-second maximum on every closed visual hold, targets 3.2 seconds in the first 30 seconds, targets 6.0 seconds through 20:00, and targets 7.5 seconds afterward. Verify both average density and the maximum hold from the final beat and render timelines.
 - Ordinary connective scenes retain directed single-plane motion or inspected parallax.
 - Plan motion intent while authoring the still so the accepted image is a viable first frame.
 - Start eligible Flow video work as soon as an important still passes image QA; do not wait for every episode image.
@@ -279,9 +279,23 @@ Exact-ID recovery, append-only execution events, immutable passed outputs, provi
 
 ## Decision Log
 
+### 2026-08-27 - Persistent Browser Lanes and Material-Risk QA
+
+New `fast_premium_v2` runs retain the 360-minute target and 420-minute hard ceiling, with twelve hours treated as an escalation boundary rather than a normal production duration. Flow's five projects and Gemini's three Images tabs now remain on their healthy slot-bound workspaces between assets; navigation occurs only after route drift or a missing composer. Desktop workers write a 15-second runtime heartbeat, and provider readiness rejects stale workers, incomplete slot identities, wrong surfaces, open circuits, or mismatched plan/model state before media spend.
+
+Google media startup is now hidden behind useful work. Immediately after script approval, the early readiness pass launches Flow and Gemini concurrently and explicitly prewarms all eight persistent slots even before an image manifest exists, then returns without making semantic/audio planning wait for browser startup. Reference generation revalidates and waits for the complete pool before spending. Healthy composers never reload; a slot that retained stale attachments receives one local pre-submission reset, preserving the one-creative-submission rule and preventing stale UI state from opening a provider circuit. Agent-director handoff polling is one second rather than five seconds.
+
+QA is reduced to work that can protect the upload. Every image still receives structural and provenance checks; opening, hero, contact, reversal, and identity-critical cuts still receive semantic inspection. Ordinary random semantic sampling is one percent and integration sampling is two percent. Dual-ASR opening/final truncation, omitted or inserted words, sequence failures, and confirmed edge corruption remain blockers. Substitution-only spelling or pronunciation disagreements and unconfirmed single-model findings remain recorded advisories and no longer create large exact-listen packets in the fast profile. One creative submission and one stage attempt remain the default; any recovery names only the exact failed IDs and passed artifacts remain immutable.
+
 ### 2026-08-22 - Dense Anime Opening and Ten-Package Competition
 
-The next 53rebirth production locks a 6.5-second full-episode beat target, mandatory generated motion through 180 seconds, and Flow's `Veo 3.1 Quality` model for that opening. Opening shots must form a coherent anime sequence rather than independent motion samples. After final QA, ten GPT Web title-thumbnail packages compete as complete phone-readable pairs; the ranked finalists feed the existing operator approval and native A/B path.
+That generated-motion direction is superseded for default production. New `fast_premium_v2` runs are still-first unless a hash-locked analytics experiment explicitly enables Flow video. Opening shots still require coherent sequential direction, but ordinary production does not spend generated-motion time without measured retention evidence. After final QA, title-thumbnail packages compete as complete phone-readable pairs; ranked finalists feed the existing operator approval and native A/B path.
+
+### 2026-08-27 - Hard Visual Density and Handoff Policy
+
+Visual density is protected while other quality costs are reduced. New production caps every closed cut at 8.0 seconds, caps 30-1200 seconds at 7.0 seconds, and retains the existing 4.2-second cold-open ceiling. The first 20 minutes target 6.0-second holds; the tail may target 7.5 seconds but can never cross 8.0. The editorial prompt, chunk validation, closed-timeline validation, run identity, and `run status` all enforce the same contract.
+
+Do not add a local Qwen orchestration agent. `run advance` already awaits each automatic stage and dispatches the next one immediately, every stage emits durable execution events, and the singleton agent-director babysitter resumes from those artifacts on a one-second loop. A second model in the control path would add startup, context, and reliability cost without shortening the critical path. Keep Qwen resident only inside its TTS invocation. Speed work should reduce optional workload, browser failures, retries, and approval latency rather than insert another planner between stages.
 
 ### 2026-08-22 - Legacy Writer Prompt Restored With Reversal Ladder
 

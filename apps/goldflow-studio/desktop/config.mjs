@@ -45,6 +45,11 @@ function boundedNumber(value, fallback, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Number.isFinite(parsed) ? parsed : fallback));
 }
 
+function booleanValue(value, fallback = false) {
+  if (value == null || value === "") return fallback;
+  return /^(?:true|1|yes)$/i.test(String(value));
+}
+
 export function desktopConfig(flags = {}, environment = process.env) {
   const stateDir = path.resolve(flags["state-dir"] ?? environment.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"));
   const browserProvider = normalizeBrowserProvider(flags.provider ?? environment.GOLDFLOW_DESKTOP_PROVIDER ?? "chatgpt");
@@ -84,6 +89,10 @@ export function desktopConfig(flags = {}, environment = process.env) {
     flowVideoModelLabel: String(flags["flow-video-model"] ?? environment.GOLDFLOW_FLOW_VIDEO_MODEL ?? "Veo 3.1 Fast"),
     geminiPlanLabel: String(flags["gemini-plan"] ?? environment.GOLDFLOW_GEMINI_PLAN ?? "Ultra"),
     geminiModelLabel: String(flags["gemini-model"] ?? environment.GOLDFLOW_GEMINI_MODEL ?? "Nano Banana 2"),
+    prewarmPersistentWorkerPool: booleanValue(
+      flags["prewarm-persistent"] ?? environment.GOLDFLOW_PREWARM_PERSISTENT,
+      false,
+    ),
   };
 }
 

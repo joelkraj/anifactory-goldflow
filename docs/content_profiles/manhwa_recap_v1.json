@@ -1,7 +1,7 @@
 {
   "schema": "goldflow_content_profile_v1",
   "id": "manhwa_recap_v1",
-  "version": "2026-08-01.1",
+  "version": "2026-08-26.2",
   "label": "Longform manhwa recap",
   "content_family": "fictional_manhwa_recap",
   "planner_roles": {
@@ -54,7 +54,8 @@
     ],
     "planner_directives": [
       "Use one coherent anime/manhwa frame rather than a collage or reference sheet.",
-      "Treat recurring character identity and visible state as the primary continuity problem."
+      "Treat recurring character identity and visible state as the primary continuity problem.",
+      "For every cut, author narrative_overlays and materialize the chosen graphic inside provider_prompt. Most cuts should integrate one short additive RPG/game text panel, manhwa speech or thought bubble, or manhwa reaction treatment; reserve [] for purposeful clean frames where lettering would weaken the image."
     ]
   },
   "factuality": {

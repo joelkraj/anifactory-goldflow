@@ -412,10 +412,17 @@ assert.equal(fastPremiumProfile.orchestration.chatgpt_web_browser_host_concurren
 const fastStillProfile = productionProfileById("fast_premium_v2");
 assert.equal(fastStillProfile.target_wall_clock_minutes, 360);
 assert.equal(fastStillProfile.defaults.generated_motion_policy, "disabled");
-assert.equal(fastStillProfile.defaults.visual_beat_timing_contract.target_beat_sec, 6.5);
+assert.equal(fastStillProfile.defaults.visual_beat_timing_contract.enforcement, "hard_max");
+assert.equal(fastStillProfile.defaults.visual_beat_timing_contract.target_beat_sec, 7.5);
+assert.equal(fastStillProfile.defaults.visual_beat_timing_contract.max_beat_sec, 8);
+assert.equal(fastStillProfile.defaults.visual_beat_timing_contract.retention_ramp_sec, 1200);
 assert.equal(fastStillProfile.media.generated_motion_concurrency, 0);
 assert.equal(fastStillProfile.orchestration.incremental_generated_motion_prefetch, false);
 assert.equal(fastStillProfile.orchestration.provider_readiness_gate.flow_minimum_accepted_images_per_hour, 180);
+assert.equal(fastStillProfile.orchestration.provider_readiness_gate.worker_runtime_freshness_max_ms, 60_000);
+assert.equal(fastStillProfile.orchestration.image_qa_policy.ordinary_semantic_sample_rate, 0.01);
+assert.equal(fastStillProfile.orchestration.image_qa_policy.integration_sample_rate, 0.02);
+assert.equal(fastStillProfile.audio.narration_delivery_qa.policy, "material_delivery_risk_only_v1");
 assert.equal(fastStillProfile.orchestration.wall_clock_contract.hard_ceiling_minutes, 420);
 
 const projectHome = "https://chatgpt.com/g/g-p-697e4bb9fad48191be862e32e1789064/project";

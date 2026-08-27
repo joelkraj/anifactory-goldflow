@@ -1060,6 +1060,8 @@ async function testDesktopHostContract() {
   }, {}));
   assert.equal(config.concurrency, PRODUCTION_BROWSER_CONCURRENCY_CEILING);
   assert.equal(config.submissionStaggerMs, 6_000);
+  assert.equal(config.prewarmPersistentWorkerPool, false);
+  assert.equal(desktopConfig({ ...flags, "prewarm-persistent": "true" }, {}).prewarmPersistentWorkerPool, true);
   assert.deepEqual(config.types, ["llm", "image"]);
   assert.throws(() => assertDesktopConfig({ ...config, serverUrl: "https://example.com" }), /127\.0\.0\.1/);
   assert.equal(normalizeBrowserProvider("nano banana pro"), "google-flow");
@@ -1214,12 +1216,14 @@ async function testPersistentFlowWorkerPool() {
   const projectUrl = (slot) => `https://labs.google/fx/tools/flow/project/persistent-slot-${slot}/edit`;
   const makePage = (slot) => {
     let closed = false;
+    let currentUrl = projectUrl(slot);
     const navigations = [];
     const page = {
       slot,
       navigations,
-      async goto(url) { navigations.push(url); },
-      url() { return projectUrl(slot); },
+      async goto(url) { currentUrl = url; navigations.push(url); },
+      setUrl(url) { currentUrl = url; },
+      url() { return currentUrl; },
       isClosed() { return closed; },
       async close() { closed = true; },
       locator(selector) {
@@ -1246,11 +1250,16 @@ async function testPersistentFlowWorkerPool() {
   const firstSlotTwo = await browser.persistentJobPage(2);
   const secondSlotTwo = await browser.persistentJobPage(2);
   assert.equal(firstSlotTwo, secondSlotTwo, "successive jobs on one Flow slot must reuse the same page object");
-  assert.deepEqual(firstSlotTwo.navigations, [projectUrl(2), projectUrl(2)], "successive jobs must return to the same slot-bound Flow project URL");
+  assert.deepEqual(firstSlotTwo.navigations, [], "healthy slot-bound Flow projects must not reload between jobs");
+  firstSlotTwo.setUrl("https://labs.google/fx/tools/flow/project/wrong-project/edit");
+  await browser.persistentJobPage(2);
+  assert.deepEqual(firstSlotTwo.navigations, [projectUrl(2)], "a drifted Flow slot must return to its own project exactly once");
   assert.equal(createdSlots.filter((slot) => slot === 2).length, 1, "slot reuse must not create another Flow project");
   await assert.rejects(() => browser.ensurePersistentWorkerPage(5), /integer from 0 through 4/);
 
   let creativeSubmissions = 0;
+  let cleanComposerChecks = 0;
+  browser.ensureCleanImageComposer = async (page) => { cleanComposerChecks += 1; return page; };
   browser.verifyUiContract = async () => ({ model_label: "Nano Banana Pro" });
   browser.pastePrompt = async () => {};
   browser.attachReferences = async () => ({ referenceInputs: [], boundReferences: [] });
@@ -1273,6 +1282,7 @@ async function testPersistentFlowWorkerPool() {
   };
   await browser.runJob({ slot: 2, job: baseJob, client: {} });
   assert.equal(creativeSubmissions, 1, "one successful asset must receive exactly one creative submission");
+  assert.equal(cleanComposerChecks, 1, "every Flow image lease must verify a clean composer before submission");
   assert.equal(firstSlotTwo.isClosed(), false, "a successful persistent Flow job must leave its slot page open");
 
   const lostPage = makePage(1);
@@ -1316,6 +1326,7 @@ async function testPersistentFlowWorkerPool() {
   const legacyBrowser = new GoogleFlowBrowser({ concurrency: 1 });
   legacyBrowser.workerPages.set(0, { slot: 0, page: makePage(0), projectUrl: projectUrl(0) });
   legacyBrowser.newJobPage = async () => { legacyPageCreations += 1; return legacyPage; };
+  legacyBrowser.ensureCleanImageComposer = async (page) => page;
   legacyBrowser.verifyUiContract = browser.verifyUiContract;
   legacyBrowser.pastePrompt = browser.pastePrompt;
   legacyBrowser.attachReferences = browser.attachReferences;
@@ -1458,7 +1469,7 @@ async function testConditionalPersistentWorkerWarmup() {
       persistentPolicy: PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY,
     },
   ];
-  const hostFixture = (providerCase, suffix, activePolicies) => {
+  const hostFixture = (providerCase, suffix, activePolicies, { prewarmPersistent = false } = {}) => {
     let prepareCalls = 0;
     const browser = {
       async start() {},
@@ -1476,6 +1487,7 @@ async function testConditionalPersistentWorkerWarmup() {
       "state-dir": path.join(temporaryRoot, `warmup-${providerCase.provider}-${suffix}-state`),
       "profile-dir": path.join(temporaryRoot, `warmup-${providerCase.provider}-${suffix}-profile`),
       "downloads-root": path.join(temporaryRoot, `warmup-${providerCase.provider}-${suffix}-downloads`),
+      "prewarm-persistent": String(prewarmPersistent),
     }, {}));
     const host = new GoldflowDesktopHost({ config, browser, log: () => {} });
     host.ensureCredentials = async () => {};
@@ -1527,6 +1539,10 @@ async function testConditionalPersistentWorkerWarmup() {
     const startupV3 = hostFixture(providerCase, "startup-v3", [providerCase.persistentPolicy]);
     await startupV3.host.start();
     assert.equal(startupV3.prepareCalls(), 1, `${providerCase.provider} must prewarm at startup when an unresolved v3 persistent manifest is already active`);
+
+    const productionPreflight = hostFixture(providerCase, "production-preflight", [], { prewarmPersistent: true });
+    await productionPreflight.host.start();
+    assert.equal(productionPreflight.prepareCalls(), 1, `${providerCase.provider} production preflight must warm the persistent pool before an image manifest exists`);
   }
 }
 

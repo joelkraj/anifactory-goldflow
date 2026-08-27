@@ -154,12 +154,19 @@ export function parseHumanCheckpointStagesForTests(value, agentStages = AGENT_AP
   return new Set(entries);
 }
 
-export function agentApprovalCommandForTests(stageId, episodeDir) {
+export function agentApprovalCommandForTests(stageId, episodeDir, profile = null) {
   const base = `--episode-dir ${episodeDir}`;
+  const imageQaPolicy = profile?.orchestration?.image_qa_policy ?? {};
+  const semanticSampleRate = Number.isFinite(Number(imageQaPolicy.ordinary_semantic_sample_rate))
+    ? Number(imageQaPolicy.ordinary_semantic_sample_rate)
+    : 0.02;
+  const integrationSampleRate = Number.isFinite(Number(imageQaPolicy.integration_sample_rate))
+    ? Number(imageQaPolicy.integration_sample_rate)
+    : 0.08;
   const commands = {
     reference_plan_approval: `node bin/goldflow.mjs visual approve-ref-plan ${base} --approved-by codex-agent --note "Agent verified the selected consistency-complete reference library, evidence scopes, source bindings, and one-concept conditioning contracts."`,
     reference_image_approval: `node bin/goldflow.mjs visual approve-refs ${base} --agent-review true --approved-by codex-agent --note "Agent verified every selected reference hash, readable raster geometry, approved source binding, and conditioning contract; identity-critical scene QA remains active."`,
-    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium --semantic-audit-sample-rate 0.02 --agent-review true`,
+    image_output_qa: `node bin/goldflow.mjs imagegen qa ${base} --semantic-audit true --semantic-audit-concurrency 8 --semantic-audit-effort medium --semantic-audit-sample-rate ${semanticSampleRate} --integration-sample-rate ${integrationSampleRate} --agent-review true`,
     generated_video_motion_approval: `node bin/goldflow.mjs visual approve-generated-motion ${base} --agent-review true`,
     parallax_asset_approval: `node bin/goldflow.mjs visual approve-parallax ${base} --agent-review true`,
     final_qa: `node bin/goldflow.mjs final qa ${base} --master-scan true --agent-review true --approved-by codex-agent`,
@@ -185,14 +192,31 @@ async function writeAdvanceState(episodeDir, payload) {
 
 async function writeSloState(episodeDir, runStatus, profile, startedAt) {
   if (!startedAt || dryRun) return null;
-  const imageReport = await fs.readFile(path.join(episodeDir, `imagegen_report_${runStatus.identity?.episode ?? "ep_01"}.json`), "utf8")
-    .then((text) => JSON.parse(text))
-    .catch(() => null);
+  const episode = runStatus.identity?.episode ?? "ep_01";
+  const [imageReport, readinessReport, priorSlo] = await Promise.all([
+    fs.readFile(path.join(episodeDir, `imagegen_report_${episode}.json`), "utf8")
+      .then((text) => JSON.parse(text))
+      .catch(() => null),
+    fs.readFile(path.join(episodeDir, `provider_readiness_${episode}.json`), "utf8")
+      .then((text) => JSON.parse(text))
+      .catch(() => null),
+    fs.readFile(path.join(episodeDir, "production_slo_state.json"), "utf8")
+      .then((text) => JSON.parse(text))
+      .catch(() => null),
+  ]);
   const completedSceneImages = (imageReport?.results ?? []).filter((row) => row?.image_path).length;
+  const healthPreviouslyReady = priorSlo?.checkpoints?.some((checkpoint) => (
+    checkpoint?.id === "health_ready" && checkpoint?.state === "passed"
+  ));
+  const healthReady = healthPreviouslyReady || (
+    readinessReport?.decision?.flow_ready === true
+    && readinessReport?.decision?.gemini_ready === true
+  );
   const state = buildProductionSloState({
     runStatus,
     profile,
     startedAt,
+    healthReady,
     firstHundredMeasured: completedSceneImages >= Number(profile.orchestration?.provider_readiness_gate?.production_soak_scene_image_count ?? 100),
   });
   if (state) await fs.writeFile(path.join(episodeDir, "production_slo_state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
@@ -266,11 +290,14 @@ async function main() {
           "--episode-dir", episodeDir,
           "--phase", readinessPhase,
           "--prepare", "true",
+          "--wait-for-ready", readinessPhase === "early" ? "false" : "true",
         ]);
         steps.push({
           stage: "provider_readiness",
           phase: readinessPhase,
-          status: readinessResult.code === 0 ? "passed" : "failed",
+          status: readinessResult.code === 0
+            ? readinessPhase === "early" ? "preparing_or_ready" : "passed"
+            : "failed",
           exit_code: readinessResult.code,
           completed_at: new Date().toISOString(),
         });
@@ -300,7 +327,7 @@ async function main() {
     }
     await writeSloState(episodeDir, status, profile, sloStartedAt);
     if (agentValidatedStages.includes(stageId)) {
-      command = agentApprovalCommandForTests(stageId, episodeDir) ?? command;
+      command = agentApprovalCommandForTests(stageId, episodeDir, profile) ?? command;
     }
     if ((useParallelAudioSemantic || useVisualWavefront) && !allowMediaSpend) {
       await writeAdvanceState(episodeDir, {

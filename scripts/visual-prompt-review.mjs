@@ -30,6 +30,10 @@ import {
   contentProfilePlannerDirective,
   contentProfileSceneStylePhrase,
 } from "./lib/content-profiles.mjs";
+import {
+  narrativeOverlayAuthoringRules,
+  sanitizeNarrativeOverlays,
+} from "./lib/narrative-overlay-contract.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -202,6 +206,8 @@ function compactPrompt(prompt) {
     image_prompt: prompt.image_prompt ?? prompt.modelslab_image_prompt,
     modelslab_image_prompt: prompt.modelslab_image_prompt ?? prompt.image_prompt,
     codex_image_prompt: prompt.codex_image_prompt ?? null,
+    narrative_overlays: prompt.narrative_overlays ?? [],
+    narrative_overlay_findings: prompt.narrative_overlay_findings ?? [],
     reference_requirements: prompt.reference_requirements ?? [],
     required_reference_paths: prompt.required_reference_paths ?? [],
     reference_usage: prompt.reference_usage ?? [],
@@ -399,6 +405,7 @@ Rules:
 - If the beat excerpt mentions a hand, object, UI line, shove, strike, gate, orb, phone, counter, or expression change, make that element the visible focus for that cut.
 - Let the visual beat choose the composition. Do not repair prompts toward a global wide, full-frame, medium-wide, full-body, or close-up default. Use close-up, insert, medium, over-shoulder, wide, manga panel, split-screen, or other framing only when that shot scale best serves the current visual_job, beat excerpt, emotion, object, UI, or transition.
 - UI text policy for image generation: keep modelslab_image_prompt focused on clean holographic panels, gauges, icons, simple labels, and at most one short large number or word when visually essential. Move exact multi-line system text, captions, lists, and long labels to ui_text_on_screen for render/subtitle overlay instead of asking the image model to draw dense readable text.
+${narrativeOverlayAuthoringRules().map((rule) => `- ${rule}`).join("\n")}
 - Scene cuts must not request contact sheets, reference panels, character sheets, turnarounds, or visible reference-image layouts.
 - Location references provide architecture, environment, lighting, and materials only.
 - Action/effect references provide effect shape, color, and interaction pattern only. Current scene location and current visible subjects stay authoritative.
@@ -453,6 +460,7 @@ Return JSON only:
       "image_prompt": "reviewed production scene prompt",
       "modelslab_image_prompt": "reviewed production scene prompt optimized for image model",
       "codex_image_prompt": "optional reviewed production scene prompt optimized for Codex/OpenAI image generation",
+      "narrative_overlays": [{"kind":"rpg_game_text|speech_bubble|thought_bubble|manhwa_reaction","text":"2-10 additive words or null for a text-free reaction treatment","speaker":null,"information_delta":"new information not spoken by narration","placement":"composition-aware placement","attachment_target":"speaker or affected subject","style":"system_cyan|rank_gold|danger_red|success_green|speech_white|speech_black|whisper_gray|reaction_shock|reaction_rage|reaction_comedy|reaction_dread","visual_treatment":"exact bubble, RPG panel, typography, speed-line, expression, or reaction styling also written into the reviewed image prompt"}],
       "reference_requirements": [{"ref_id":"...","kind":"character_state|location|style|ui|prop|action","required":true,"slot_order":1,"slot_purpose":"character identity and wardrobe for ...","reason":"..."}],
       "required_reference_paths": [],
       "reference_usage": [],
@@ -704,6 +712,17 @@ function normalizeReviewedPrompt(row, original) {
     : original.codex_image_prompt
       ? String(original.codex_image_prompt).trim()
       : null;
+  const uiTextOnScreen = Array.isArray(row.ui_text_on_screen) ? row.ui_text_on_screen : (original.ui_text_on_screen ?? []);
+  const narrativeOverlayResult = sanitizeNarrativeOverlays(
+    Array.isArray(row.narrative_overlays) ? row.narrative_overlays : original.narrative_overlays,
+    {
+      imageId: original.image_id,
+      sceneId: original.scene_id,
+      narrationText: original.visual_beat_script_excerpt ?? row.visual_beat_script_excerpt ?? "",
+      providerPrompt: modelslabPrompt || codexPrompt || imagePrompt,
+      uiTextOnScreen,
+    },
+  );
   return {
     ...original,
     image_id: original.image_id,
@@ -717,6 +736,8 @@ function normalizeReviewedPrompt(row, original) {
     modelslab_image_prompt: modelslabPrompt,
     codex_image_prompt: codexPrompt,
     prompt_hash: sha256(modelslabPrompt || imagePrompt),
+    narrative_overlays: narrativeOverlayResult.overlays,
+    narrative_overlay_findings: narrativeOverlayResult.findings,
     reference_requirements: Array.isArray(row.reference_requirements) ? row.reference_requirements : (original.reference_requirements ?? []),
     required_reference_paths: Array.isArray(row.required_reference_paths) ? row.required_reference_paths : (original.required_reference_paths ?? []),
     reference_usage: Array.isArray(row.reference_usage) ? row.reference_usage : (original.reference_usage ?? []),
@@ -730,7 +751,7 @@ function normalizeReviewedPrompt(row, original) {
     character_state_refs_used: Array.isArray(row.character_state_refs_used) ? row.character_state_refs_used : (original.character_state_refs_used ?? []),
     primary_subject: row.primary_subject ?? original.primary_subject ?? null,
     location: row.location ?? original.location ?? null,
-    ui_text_on_screen: Array.isArray(row.ui_text_on_screen) ? row.ui_text_on_screen : (original.ui_text_on_screen ?? []),
+    ui_text_on_screen: uiTextOnScreen,
     image_generation_required: original.image_generation_required !== false,
   };
 }

@@ -73,6 +73,7 @@ async function launchProviderHost(spec, logDir) {
     "--types", spec.worker_types,
     "--open-dashboard", "false",
     "--login-bootstrap", "false",
+    "--prewarm-persistent", "true",
     `--${spec.plan_flag}`, spec.plan_label,
     `--${spec.model_flag}`, spec.model_label,
   ];
@@ -87,7 +88,7 @@ async function launchProviderHost(spec, logDir) {
   return { launched: true, pid: child.pid, log_path: logPath, command: [process.execPath, ...args] };
 }
 
-async function waitForLanes(specs, { timeoutMs, pollMs = 2_000 } = {}) {
+async function waitForLanes(specs, { timeoutMs, pollMs = 1_000 } = {}) {
   const started = Date.now();
   let lanes = await Promise.all(specs.map((spec) => inspectProviderLane(spec)));
   while (lanes.some((lane) => lane.status !== "passed") && Date.now() - started < timeoutMs) {
@@ -113,30 +114,32 @@ async function main() {
   const specs = providerLaneSpecs(identity, profile, { stateRoot });
   const phase = String(flags.phase ?? "early");
   const prepare = isTrue(flags.prepare, true);
+  const waitForReady = isTrue(flags["wait-for-ready"], phase !== "early");
   const timeoutMs = Math.max(1_000, Number(flags["timeout-ms"] ?? 180_000));
   const initial = await Promise.all(specs.map((spec) => inspectProviderLane(spec)));
-  const launches = [];
-  if (prepare) {
-    for (let index = 0; index < specs.length; index += 1) {
-      if (initial[index].status === "passed") continue;
-      launches.push({ provider: specs[index].provider, ...await launchProviderHost(
-        specs[index],
-        path.join(stateRoot, "provider-host-logs"),
-      ) });
-    }
-  }
-  const lanes = prepare && launches.some((row) => row.launched)
+  const launches = prepare
+    ? (await Promise.all(specs.map(async (spec, index) => initial[index].status === "passed"
+      ? null
+      : ({ provider: spec.provider, ...await launchProviderHost(
+          spec,
+          path.join(stateRoot, "provider-host-logs"),
+        ) })))).filter(Boolean)
+    : [];
+  const lanes = prepare && waitForReady && initial.some((lane) => lane.status !== "passed")
     ? await waitForLanes(specs, { timeoutMs })
     : initial;
   const decision = providerReadinessDecision(lanes, {
     phase,
     geminiRequiredThroughStyleBarrier: readinessPolicy.gemini_required_through_style_reference_barrier !== false,
   });
+  const reportStatus = !waitForReady && decision.status === "blocked"
+    ? "preparing"
+    : decision.status;
   const generatedAt = new Date();
   const report = {
     schema: PROVIDER_READINESS_SCHEMA,
     version: PROVIDER_READINESS_VERSION,
-    status: decision.status,
+    status: reportStatus,
     generated_at: generatedAt.toISOString(),
     phase,
     episode_dir: episodeDir,
@@ -145,6 +148,7 @@ async function main() {
     production_profile: profile.id,
     policy: readinessPolicy,
     preparation_requested: prepare,
+    wait_for_ready: waitForReady,
     launches,
     decision,
     lanes,
@@ -159,7 +163,7 @@ async function main() {
   await writeJsonAtomic(immutablePath, report);
   await writeJsonAtomic(currentPath, { ...report, immutable_report_path: immutablePath });
   console.log(JSON.stringify({
-    status: decision.status,
+    status: reportStatus,
     report_path: currentPath,
     immutable_report_path: immutablePath,
     phase,
@@ -167,7 +171,7 @@ async function main() {
     dispatch_policy: decision.dispatch_policy,
     launches,
   }, null, 2));
-  if (decision.status === "blocked") process.exitCode = 2;
+  if (reportStatus === "blocked") process.exitCode = 2;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

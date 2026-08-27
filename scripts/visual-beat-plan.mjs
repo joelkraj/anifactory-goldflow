@@ -62,6 +62,31 @@ const retentionRampSec = Number(flags["retention-ramp-sec"] ?? process.env.ANIFA
 const rampTargetBeatSec = Number(flags["ramp-target-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_RAMP_TARGET_BEAT_SEC ?? 5.2);
 const rampMaxBeatSec = Number(flags["ramp-max-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_RAMP_MAX_BEAT_SEC ?? 6.5);
 const rampMinBeatSec = Number(flags["ramp-min-beat-sec"] ?? process.env.ANIFACTORY_VISUAL_RAMP_MIN_BEAT_SEC ?? 3.2);
+const beatTimingEnforcement = String(
+  flags["beat-timing-enforcement"]
+    ?? process.env.ANIFACTORY_VISUAL_BEAT_TIMING_ENFORCEMENT
+    ?? "advisory",
+).trim().toLowerCase();
+if (!["advisory", "hard_max"].includes(beatTimingEnforcement)) {
+  throw new Error(`Unknown visual beat timing enforcement: ${beatTimingEnforcement}.`);
+}
+if (beatTimingEnforcement === "hard_max" && maxBeatSec > 8) {
+  throw new Error(`Hard visual-beat timing cap ${maxBeatSec}s exceeds the 8-second production ceiling.`);
+}
+const beatTimingContract = {
+  enforcement: beatTimingEnforcement,
+  target_beat_sec: targetBeatSec,
+  max_beat_sec: maxBeatSec,
+  min_beat_sec: minBeatSec,
+  hook_duration_sec: hookDurationSec,
+  hook_target_beat_sec: hookTargetBeatSec,
+  hook_max_beat_sec: hookMaxBeatSec,
+  hook_min_beat_sec: hookMinBeatSec,
+  retention_ramp_sec: retentionRampSec,
+  ramp_target_beat_sec: rampTargetBeatSec,
+  ramp_max_beat_sec: rampMaxBeatSec,
+  ramp_min_beat_sec: rampMinBeatSec,
+};
 const allowEmptyBeatExcerpts = flags["allow-empty-beat-excerpts"] === "true" || process.env.ANIFACTORY_ALLOW_EMPTY_VISUAL_BEAT_EXCERPTS === "true";
 const allowUnderTargetRetentionBeats = flags["allow-under-target-retention-beats"] === "true"
   || process.env.ANIFACTORY_ALLOW_UNDER_TARGET_RETENTION_BEATS === "true";
@@ -983,7 +1008,7 @@ function splitScene(scene, scriptText, wordTiming, searchFrom = 0) {
         ? "fast opening retention cut: new information, new composition, and transition-ready motion"
         : null,
       retention_ramp_intent: beatStart >= hookDurationSec && beatStart < retentionRampSec
-        ? "first-three-minutes retention cut: keep visual novelty and story momentum without hook-level chaos"
+        ? "high-density retention cut: keep visual novelty and story momentum without hook-level chaos"
         : null,
       image_id_hint: `${episode}-cut-${String(beats.length + 1).padStart(3, "0")}`,
     });
@@ -1697,7 +1722,12 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, 
   }
   const boundedScope = Number.isFinite(scopeEndSecNumber);
   const scopedScript = boundedScope ? scriptPrefixForTimedWordsForTests(scriptText, wordTiming.words) : { script: scriptText, source_word_end_exclusive: null, matched_timing_tail_words: null, fallback: false };
-  const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger);
+  const timingContract = options.timingContract ?? {};
+  const hardTimingCap = String(options.beatTimingEnforcement ?? timingContract.enforcement ?? "advisory") === "hard_max";
+  const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger, {
+    maxWords: hardTimingCap ? 16 : 18,
+    maxAtomDurationSec: hardTimingCap ? Number(timingContract.max_beat_sec ?? 8) : 45,
+  });
   let directed;
   try {
     directed = regroupLockedTail && locked
@@ -1836,6 +1866,8 @@ async function main() {
       contentProfile,
       retentionResetEvidence,
       audiovisualEmphasis,
+      beatTimingEnforcement,
+      timingContract: beatTimingContract,
     });
     if (editorialResult.reused) {
       console.log(JSON.stringify({ status: "passed", output_path: outputPath, reused_grouping_lock: true, visual_beat_count: editorialResult.report.visual_beat_count }, null, 2));
@@ -1892,7 +1924,14 @@ async function main() {
       throw blockedError;
     }
     numberedBeatsAll = closeVisualBeatTimelineForTests(editorialResult.beats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
-    appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll);
+    appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll, {
+      beatTimingEnforcement,
+      timingContract: beatTimingContract,
+    });
+    const hardTimingBlockers = appliedRailFindings.filter((finding) => finding.severity === "blocker");
+    if (hardTimingBlockers.length) {
+      throw new Error(`Closed visual beat timeline violates the hard density contract: ${hardTimingBlockers.slice(0, 12).map((finding) => `${finding.visual_beat_id}:${finding.duration_sec}s>${finding.rail.max_sec}s`).join(", ")}`);
+    }
     whisperAlignmentSummary = {
       mode: "exact_whisper_word_span_atoms",
       atom_count: editorialResult.atoms.length,
@@ -2022,9 +2061,9 @@ async function main() {
     editorial_cue_counts: cueCounts,
     visual_beat_timing_findings: timingFindings,
     visual_beat_timing_summary: {
-      policy: "advisory_only",
+      policy: beatTimingEnforcement === "hard_max" ? "hard_max_with_advisory_minimums" : "advisory_only",
       finding_count: timingFindings.length,
-      blocker_count: 0,
+      blocker_count: timingFindings.filter((finding) => finding.severity === "blocker").length,
       codes: Object.fromEntries([...new Set(timingFindings.map((finding) => finding.code))].map((code) => [
         code,
         timingFindings.filter((finding) => finding.code === code).length,
@@ -2042,7 +2081,9 @@ async function main() {
     },
     location_timeline: locationTimeline,
     policy: useEditorialDirector
-      ? "LLM editorial direction over clause/sentence atoms bound to exact Whisper word spans. The LLM owns depiction, composition, and beat duration. Deterministic validation blocks only structural coverage, order, transition, identity, evidence, and state errors; timing and retention goals are advisory."
+      ? beatTimingEnforcement === "hard_max"
+        ? `LLM editorial direction over clause/sentence atoms bound to exact Whisper word spans. The LLM owns depiction and composition within deterministic coverage, evidence, state, and timing constraints. Every closed visual hold is structurally capped by its active timing rail and never exceeds ${maxBeatSec} seconds.`
+        : "LLM editorial direction over clause/sentence atoms bound to exact Whisper word spans. The LLM owns depiction, composition, and beat duration. Deterministic validation blocks only structural coverage, order, transition, identity, evidence, and state errors; timing and retention goals are advisory."
       : "Transcript-first editorial beat planning from final script text plus local Whisper word timing. Every beat must carry exact local narration excerpt, local location, visible characters, mentioned-only characters, props/UI, visual job, and beat-level advisory reference hints before reference or prompt authoring. Beat ref_needs are local evidence, not official locked reference targets.",
     whisper_excerpt_alignment: whisperAlignmentSummary,
     editorial_director: useEditorialDirector ? {
@@ -2052,14 +2093,14 @@ async function main() {
       active_state_projection: "binding_per_beat",
       timing_repair_retention_findings: flags["retime-locked-grouping"] === "true" ? appliedRailFindings : [],
       retention_timing_goals: {
-        enforcement: "advisory_only",
-        sec_0_30: [2.2, 4.5],
-        sec_30_180: [3.2, 7],
-        sec_180_1200: [5, 12],
-        sec_1200_plus: [7, 15],
+        enforcement: beatTimingEnforcement,
+        [`sec_0_${hookDurationSec}`]: [hookMinBeatSec, hookMaxBeatSec],
+        [`sec_${hookDurationSec}_${retentionRampSec}`]: [rampMinBeatSec, rampMaxBeatSec],
+        [`sec_${retentionRampSec}_plus`]: [minBeatSec, maxBeatSec],
       },
     } : null,
     beat_settings: {
+      enforcement: beatTimingEnforcement,
       target_beat_sec: targetBeatSec,
       max_beat_sec: maxBeatSec,
       min_beat_sec: minBeatSec,

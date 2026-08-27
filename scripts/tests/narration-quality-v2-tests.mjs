@@ -143,6 +143,15 @@ const contract = buildNarrationQualityContract({
   provider: "qwen_local",
   modelId: "Qwen3-TTS-12Hz-1.7B-Base-8bit",
 });
+const leanDeliveryContract = buildNarrationQualityContract({
+  provider: "qwen_local",
+  modelId: "Qwen3-TTS-12Hz-1.7B-Base-8bit",
+  deliveryQaPolicy: {
+    substitution_only_asr_disagreement_requires_exact_listen: false,
+    unconfirmed_primary_asr_requires_exact_listen: false,
+    substitution_only_high_wer_requires_exact_listen: false,
+  },
+});
 assert.equal(
   compileProviderSafeSpokenText("The IT team fixed it."),
   "The I T team fixed it.",
@@ -1251,6 +1260,41 @@ const lexicalUncertainty = adjudicateNarrationDeliveryConsensus({
 assert.equal(lexicalUncertainty.status, "passed_with_warnings");
 assert.equal(lexicalUncertainty.review_required, true);
 
+const leanLexicalUncertainty = adjudicateNarrationDeliveryConsensus({
+  primaryTranscriptQa: {
+    leading_deletion_run: 0,
+    trailing_deletion_run: 0,
+    longest_deletion_run: 0,
+    longest_insertion_run: 0,
+    deletions: 0,
+    insertions: 0,
+    substitutions: 1,
+    word_error_rate: 0.25,
+    operations: [{ type: "substitution", intended: "ruk", recognized: "rook" }],
+    findings: [{ severity: "blocker", code: "tts_transcript_wer_exceeded" }],
+  },
+  confirmationTranscriptQa: {
+    leading_deletion_run: 0,
+    trailing_deletion_run: 0,
+    longest_deletion_run: 0,
+    longest_insertion_run: 0,
+    deletions: 0,
+    insertions: 0,
+    substitutions: 1,
+    word_error_rate: 0.25,
+    operations: [{ type: "substitution", intended: "ruk", recognized: "rook" }],
+    findings: [{ severity: "blocker", code: "tts_transcript_wer_exceeded" }],
+  },
+  contract: leanDeliveryContract,
+});
+assert.equal(leanLexicalUncertainty.status, "passed_with_warnings");
+assert.equal(leanLexicalUncertainty.review_required, false);
+assert.equal(leanLexicalUncertainty.warnings.every((row) => row.review_required === false), true);
+assert.equal(exactNarrationListenReviewPacket({
+  rows: [{ unit_id: "u-lean-pronunciation", decision: leanLexicalUncertainty }],
+  qualityContractSha256: leanDeliveryContract.contract_sha256,
+}).item_count, 0);
+
 const confirmedFinalTokenCorruption = adjudicateNarrationDeliveryConsensus({
   primaryTranscriptQa: {
     leading_deletion_run: 0,
@@ -1284,6 +1328,33 @@ const confirmedFinalTokenCorruption = adjudicateNarrationDeliveryConsensus({
 });
 assert.equal(confirmedFinalTokenCorruption.status, "blocked");
 assert.ok(confirmedFinalTokenCorruption.blockers.some(
+  (row) => row.code === "narration_confirmed_final_token_mismatch",
+));
+const leanConfirmedFinalTokenCorruption = adjudicateNarrationDeliveryConsensus({
+  primaryTranscriptQa: {
+    deletions: 0,
+    insertions: 0,
+    substitutions: 1,
+    word_error_rate: 0.04,
+    first_token_ok: true,
+    last_token_ok: false,
+    operations: [{ type: "substitution", intended: "value", recognized: "val" }],
+    findings: [],
+  },
+  confirmationTranscriptQa: {
+    deletions: 0,
+    insertions: 0,
+    substitutions: 1,
+    word_error_rate: 0.04,
+    first_token_ok: true,
+    last_token_ok: false,
+    operations: [{ type: "substitution", intended: "value", recognized: "val" }],
+    findings: [],
+  },
+  contract: leanDeliveryContract,
+});
+assert.equal(leanConfirmedFinalTokenCorruption.status, "blocked");
+assert.ok(leanConfirmedFinalTokenCorruption.blockers.some(
   (row) => row.code === "narration_confirmed_final_token_mismatch",
 ));
 const listenPacket = exactNarrationListenReviewPacket({

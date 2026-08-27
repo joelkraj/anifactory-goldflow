@@ -47,6 +47,10 @@ function warning(code, details = {}) {
   return { ...details, code, severity: "warning", review_required: true };
 }
 
+function advisory(code, details = {}) {
+  return { ...details, code, severity: "warning", review_required: false };
+}
+
 const FINDING_FAMILY_ALIASES = new Map([
   ["narration_word_error_rate_exceeded", "word_error_rate_exceeded"],
   ["tts_transcript_wer_exceeded", "word_error_rate_exceeded"],
@@ -225,6 +229,7 @@ export function adjudicateNarrationDeliveryConsensus({
   primaryModel = "small.en",
   confirmationModel = "medium",
 } = {}) {
+  const deliveryPolicy = contract?.delivery_qa ?? {};
   const primary = strictNarrationDeliveryDecision(primaryTranscriptQa, {
     orderQa,
     joinQa,
@@ -354,12 +359,17 @@ export function adjudicateNarrationDeliveryConsensus({
     .map((row) => `${row.intended}->${row.recognized}`));
   const confirmedSubstitutions = intersection(primarySubstitutions, confirmationSubstitutions);
   if (confirmedSubstitutions.length) {
-    warnings.push(warning("narration_confirmed_lexical_or_pronunciation_difference", {
+    const finding = {
       operations: confirmedSubstitutions,
-      disposition: "exact_unit_listen_review_no_automatic_regeneration",
+      disposition: deliveryPolicy.substitution_only_asr_disagreement_requires_exact_listen === false
+        ? "advisory_no_retry"
+        : "exact_unit_listen_review_no_automatic_regeneration",
       primary_model: primaryModel,
       confirmation_model: confirmationModel,
-    }));
+    };
+    warnings.push(deliveryPolicy.substitution_only_asr_disagreement_requires_exact_listen === false
+      ? advisory("narration_confirmed_lexical_or_pronunciation_difference", finding)
+      : warning("narration_confirmed_lexical_or_pronunciation_difference", finding));
   }
 
   // A corrupted edge token can align as a substitution rather than a deletion
@@ -384,20 +394,31 @@ export function adjudicateNarrationDeliveryConsensus({
   const confirmationWerExceeded = confirmationFamilies.has("word_error_rate_exceeded");
   if (primaryWerExceeded && confirmationWerExceeded
     && !confirmedDeletedTokens.length && !confirmedInsertedTokens.length) {
-    warnings.push(warning("narration_asr_lexical_uncertainty_above_wer_threshold", {
+    const finding = {
       primary_word_error_rate: primaryTranscriptQa.word_error_rate,
       confirmation_word_error_rate: confirmationTranscriptQa.word_error_rate,
-      disposition: "sequence_intact_exact_unit_listen_review",
+      disposition: deliveryPolicy.substitution_only_high_wer_requires_exact_listen === false
+        ? "sequence_intact_advisory_no_retry"
+        : "sequence_intact_exact_unit_listen_review",
       primary_model: primaryModel,
       confirmation_model: confirmationModel,
-    }));
+    };
+    warnings.push(deliveryPolicy.substitution_only_high_wer_requires_exact_listen === false
+      ? advisory("narration_asr_lexical_uncertainty_above_wer_threshold", finding)
+      : warning("narration_asr_lexical_uncertainty_above_wer_threshold", finding));
   }
   if (primary.blockers.length && !confirmation.blockers.length) {
-    warnings.push(warning("narration_primary_asr_finding_not_confirmed", {
+    const finding = {
       primary_blocker_codes: primary.blockers.map((row) => row.code),
       primary_model: primaryModel,
       confirmation_model: confirmationModel,
-    }));
+      disposition: deliveryPolicy.unconfirmed_primary_asr_requires_exact_listen === false
+        ? "independent_confirmation_passed_advisory_no_retry"
+        : "exact_unit_listen_review_no_automatic_regeneration",
+    };
+    warnings.push(deliveryPolicy.unconfirmed_primary_asr_requires_exact_listen === false
+      ? advisory("narration_primary_asr_finding_not_confirmed", finding)
+      : warning("narration_primary_asr_finding_not_confirmed", finding));
   }
   return {
     schema: "goldflow_narration_delivery_consensus_v2",

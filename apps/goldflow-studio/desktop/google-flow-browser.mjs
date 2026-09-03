@@ -854,7 +854,7 @@ export class GoogleFlowBrowser {
         && getComputedStyle(element).visibility !== "hidden"
         && getComputedStyle(element).display !== "none";
       const controls = [...document.querySelectorAll("*")]
-        .filter((element) => visible(element) && element.textContent?.trim() === "Add to Prompt")
+        .filter((element) => visible(element) && element.textContent?.trim().toLowerCase() === "add to prompt")
         .map((element) => element.closest('button, [role="button"]') ?? element)
         .filter(visible)
         .filter((element, index, rows) => rows.indexOf(element) === index);
@@ -869,7 +869,8 @@ export class GoogleFlowBrowser {
     // Playwright text selectors pierce Flow's open shadow roots, while a page
     // evaluate query cannot. In the current picker the action label is exposed
     // only through that shadow-DOM path.
-    return visibleLocator(page.getByText("Add to Prompt", { exact: true }));
+    const button = await visibleLocator(page.getByRole("button", { name: /^Add to prompt$/i }));
+    return button ?? visibleLocator(page.getByText(/^Add to prompt$/i));
   }
 
   async waitForAddToPromptControl(page, { timeoutMs = 30_000 } = {}) {

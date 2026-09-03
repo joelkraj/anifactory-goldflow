@@ -216,6 +216,10 @@ The September 3 production queue was used as a live throughput soak without redu
 
 Current provisional production setting: a global 30-second continuous submission interval, a 15-minute usage-limit circuit, and one recovery probe. Three active Flow slots are sufficient at observed latency. The already-running five-tab host is retained to avoid another handoff, but no throughput benefit is attributed to its two unused slots. A full sustained production soak, not the short test alone, determines whether this becomes the next-run default.
 
+Important implementation finding: `submissionStaggerMs` currently spaces **lease admission**, before reference upload and composer preparation, not the final Generate click. Among the first 32 accepted outputs of the five-tab soak, pre-submit reference-binding receipt gaps ranged from 7.721 to 61.962 seconds, with a 29.758-second median; three gaps were under 20 seconds despite the nominal 30-second setting. These receipt timestamps are a close pre-click proxy, not network submission timestamps. Variable preparation time can therefore bunch real submissions and confound the nominal pacing test.
+
+Next durable fix: separate bounded preparation concurrency from one account-level Generate-click admission gate shared by Flow and Gemini. Record lease, references-ready, actual submit, result-ready, and completion timestamps independently. Queued prepared work must honor an open account circuit without another creative click, and a restart must restore the gate state rather than reset its clock. Validate that change in a bounded proof before replacing the currently productive live lane.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

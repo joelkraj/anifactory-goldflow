@@ -319,6 +319,8 @@ Next-run candidates, not yet promoted defaults:
 - Removed time-based idle completion. Pending work now continues after isolated failures; the controller still stops for drained work, failed required verification, a real provider circuit, runtime failure, or its overall timeout.
 - Four regression tests cover staggered pending work, terminal draining, failed verification, and verification bypass. No browser restart or provider-rate increase is needed.
 - Eighteen new rasters were visually reviewed on three replacement sheets. Eight exact IDs remain for recovery; no accepted assets will be resubmitted.
+- The next exact-eight attempt stopped correctly on the real provider circuit, not an idle interval: two Gemini 1095 failures and six unsubmitted. After the full cooldown and one failed-home tab reload, a single previously unsubmitted cut also returned 1095 at 22:51:57 UTC. No account quota, policy cause, or stale-response cause has been established from that generic error.
+- Provider submissions are stopped pending a changed condition or explicit exact-ID fallback approval. Asked the operator about Codex generation for only eight repairs and ten new thumbnails. Existing 790 usable scene rasters remain immutable; render is still gated by eight critical reference captures, not by aesthetic QA.
 
 Complete this section after the private-ready render exists.
 

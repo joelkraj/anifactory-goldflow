@@ -795,8 +795,16 @@ export class GoogleGeminiBrowser {
       .filter(Boolean))]);
   }
 
-  async generatedResponseImageUrls(page) {
-    const generatedImages = page.getByRole("img", { name: /AI generated/i });
+  async responseMessageIds(page) {
+    return page.locator('model-response message-content[id]').evaluateAll((nodes) => nodes.map((node) => node.id).filter(Boolean));
+  }
+
+  async generatedResponseImageUrls(page, priorResponseIds = new Set()) {
+    const response = page.locator("model-response").last();
+    if (!await response.count()) return [];
+    const responseId = await response.locator("message-content[id]").first().getAttribute("id").catch(() => null);
+    if (!responseId || priorResponseIds.has(responseId)) return [];
+    const generatedImages = response.getByRole("img", { name: /AI generated/i });
     const urls = [];
     for (let index = 0; index < await generatedImages.count(); index += 1) {
       const image = generatedImages.nth(index);
@@ -854,10 +862,9 @@ export class GoogleGeminiBrowser {
     return fingerprints;
   }
 
-  async waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints = new Map()) {
+  async waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints = new Map(), priorResponseIds = new Set()) {
     const deadline = Date.now() + 15 * 60_000;
     const baselinePixelSha256s = new Set(baselineFingerprints.values());
-    let nextExistingUrlFingerprintAt = 0;
     while (Date.now() < deadline) {
       const body = await page.locator("body").innerText();
       const blockingCode = geminiBlockingCode(body);
@@ -865,7 +872,7 @@ export class GoogleGeminiBrowser {
       // Gemini labels response rasters as "AI generated". That DOM contract is
       // stronger evidence than pixel dissimilarity: identity-preserving edits
       // can intentionally resemble their attached character reference closely.
-      for (const sourceUrl of (await this.generatedResponseImageUrls(page)).filter((url) => !baseline.has(url))) {
+      for (const sourceUrl of await this.generatedResponseImageUrls(page, priorResponseIds)) {
         try {
           const candidate = await this.imagePixelFingerprint(page, sourceUrl);
           if (baselinePixelSha256s.has(candidate.sha256)) {
@@ -888,56 +895,8 @@ export class GoogleGeminiBrowser {
           this.log(`Gemini generated response is not downloadable yet: ${error.message}`, "warn");
         }
       }
-      for (const sourceUrl of (await this.visibleImageUrls(page)).filter((url) => !baseline.has(url))) {
-        try {
-          const candidate = await this.imagePixelFingerprint(page, sourceUrl);
-          if (baselinePixelSha256s.has(candidate.sha256)) {
-            baseline.add(sourceUrl);
-            baselineFingerprints.set(sourceUrl, candidate.sha256);
-            this.log("Ignored a stale Gemini image whose blob URL changed but pixels did not.", "warn");
-            continue;
-          }
-          const echo = await findReferenceEcho(candidate.bytes, referenceInputs);
-          if (echo) {
-            baseline.add(sourceUrl);
-            baselineFingerprints.set(sourceUrl, candidate.sha256);
-            baselinePixelSha256s.add(candidate.sha256);
-            continue;
-          }
-          return { sourceUrl, bytes: candidate.bytes };
-        } catch (error) {
-          this.log(`Gemini image candidate is not downloadable yet: ${error.message}`, "warn");
-        }
-      }
-      if (baselineFingerprints.size && Date.now() >= nextExistingUrlFingerprintAt) {
-        nextExistingUrlFingerprintAt = Date.now() + 5_000;
-        const currentUrls = [...new Set([
-          ...await this.generatedResponseImageUrls(page),
-          ...await this.visibleImageUrls(page),
-        ])];
-        for (const sourceUrl of currentUrls) {
-          const baselineSha256 = baselineFingerprints.get(sourceUrl);
-          if (!baselineSha256) continue;
-          try {
-            const candidate = await this.imagePixelFingerprint(page, sourceUrl);
-            if (candidate.sha256 === baselineSha256) continue;
-            if (baselinePixelSha256s.has(candidate.sha256)) {
-              baselineFingerprints.set(sourceUrl, candidate.sha256);
-              continue;
-            }
-            const echo = await findReferenceEcho(candidate.bytes, referenceInputs);
-            if (echo) {
-              baselineFingerprints.set(sourceUrl, candidate.sha256);
-              baselinePixelSha256s.add(candidate.sha256);
-              continue;
-            }
-            this.log("Detected a completed Gemini image whose existing blob URL was reused.", "info");
-            return { sourceUrl, bytes: candidate.bytes };
-          } catch (error) {
-            this.log(`Gemini existing-image candidate could not be fingerprinted yet: ${error.message}`, "warn");
-          }
-        }
-      }
+      // Gallery cards and upload previews are never generated-output evidence,
+      // even when a new URL or JPEG recompression changes their pixel hash.
       await sleep(750);
     }
     throw codedError("ui_contract_mismatch", "Timed out waiting for a generated Gemini image.");
@@ -993,7 +952,7 @@ export class GoogleGeminiBrowser {
       page = await this.ensureCleanImageComposer(page);
       await onPhase("verifying_ui_contract");
       const uiContract = await this.verifyUiContract(page);
-      const baseline = new Set(await this.visibleImageUrls(page));
+      const baseline = new Set(await this.generatedResponseImageUrls(page));
       const { referenceInputs, orderedReferences } = await this.attachReferences(page, job, client, onPhase);
       await onPhase("entering_prompt");
       const referenceMap = orderedReferences.length
@@ -1014,17 +973,16 @@ export class GoogleGeminiBrowser {
       // Reacquire the enabled control instead of polling a stale disabled node.
       const send = await waitForVisibleEnabled(sendButtons, 90_000);
       if (!send) throw codedError("ui_contract_mismatch", "Gemini Send message remained disabled after reference processing.");
-      // Gemini's Images landing page lazy-loads prior gallery cards. Refresh the
-      // baseline immediately before submission so an old card cannot be mistaken
-      // for the new response merely because its blob URL appeared late.
+      // Bind output to a new model response, not a newly loaded gallery raster.
       await sleep(1_500);
-      for (const sourceUrl of await this.visibleImageUrls(page)) baseline.add(sourceUrl);
+      const priorResponseIds = new Set(await this.responseMessageIds(page));
+      for (const sourceUrl of await this.generatedResponseImageUrls(page)) baseline.add(sourceUrl);
       const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
       const referenceBinding = await this.recordEvidence(page, job, prompt, orderedReferences);
       await onPhase("submitting");
       await send.click();
       await onPhase("waiting_for_image");
-      const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints);
+      const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints, priorResponseIds);
       const downloadPath = await this.saveGeneratedImage(job, generated.bytes);
       return {
         downloadPath,

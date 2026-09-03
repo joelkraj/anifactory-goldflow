@@ -238,6 +238,10 @@ The repaired verifier counts visible legacy or modern attachment previews, check
 
 An upload-only live proof retained one reference in 0.967 seconds and four references in 2.878 seconds, in the correct order. Source bytes remained SHA-256 verified; pixel differences ranged from 0 to 0.397 in this proof. No prompt was submitted and no image quota was spent. Evidence: episode `review_samples/gemini_upload_retention_20260903/proof.json` and `four-reference-composer.png`. Unit tests cover changed extensions, wrong slot/hash/name rejection, both attachment layouts, and exclusion of unrelated or unloaded previews. Real-generation health must still pass before restoring three active workers.
 
+The subsequent two-reference production probe completed in 17.7 seconds and visually matched its scene. During the resumed three-slot queue, a spot-check found `ep_01-w004734-w004742` held an unrelated empty gym instead of Elaine at the expo dashboard. Its receipt had no `generated_result` and the page was still at `/app`, not a conversation. New dispatch was paused and active jobs drained. The cause was the old full-page image fallback, which could accept a lazily loaded gallery raster after its URL or compression changed. Faster apparent completion was not valid throughput.
+
+Result acquisition now accepts only AI-generated images inside the newest `model-response`, excluding message-content IDs present before submission. Full-page/gallery and upload-preview output fallbacks are removed. Receipt audit identified 12 earlier Gemini completions without response evidence, including this cut; those exact hashes need review before final QA, not an episode-wide regeneration. The other provider outputs remain untouched. Tests cover delayed real output, exclusion of old response IDs despite changed URLs, and never consulting gallery candidates.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

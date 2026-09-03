@@ -341,6 +341,8 @@ async function keepsPersistentImageTabOpenAfterSingleSubmission() {
   browser.ensureCleanImageComposer = async (candidate) => { cleanComposerChecks += 1; return candidate; };
   browser.verifyUiContract = async () => ({ model_label: "Nano Banana 2" });
   browser.visibleImageUrls = async () => [];
+  browser.generatedResponseImageUrls = async () => [];
+  browser.responseMessageIds = async () => [];
   browser.attachReferences = async () => ({ referenceInputs: [], orderedReferences: [] });
   browser.pastePrompt = async () => {};
   browser.recordEvidence = async () => ({ status: "verified", expected_count: 0, observed_count: 0 });
@@ -401,6 +403,42 @@ async function ignoresStaleGeminiPixelsAfterABlobUrlChange() {
   );
   assert.equal(result.sourceUrl, "blob:actual-result");
   assert.equal(result.bytes.toString(), "fresh");
+}
+
+async function acceptsOnlyNewModelResponseRasters() {
+  const browser = new GoogleGeminiBrowser();
+  let polls = 0;
+  browser.generatedResponseImageUrls = async (_page, priorIds) => {
+    assert.equal(priorIds.has("message-content-id-old"), true);
+    return ++polls === 1 ? [] : ["blob:real-response"];
+  };
+  browser.visibleImageUrls = async () => { throw new Error("Gallery must never be consulted"); };
+  browser.imagePixelFingerprint = async (_page, source) => {
+    assert.equal(source, "blob:real-response");
+    return { bytes: Buffer.from("real"), sha256: "new-pixels" };
+  };
+  const result = await browser.waitForGeneratedImage(
+    { locator() { return { async innerText() { return "Generating"; } }; } },
+    new Set(), [], new Map(), new Set(["message-content-id-old"]),
+  );
+  assert.equal(result.generatedResult.status, "verified");
+  assert.equal(polls, 2);
+}
+
+async function ignoresOldResponseEvenWhenItsImageUrlChanges() {
+  const browser = new GoogleGeminiBrowser();
+  const page = { locator(selector) {
+    assert.equal(selector, "model-response");
+    return { last() { return {
+      async count() { return 1; },
+      locator(selector) {
+        assert.equal(selector, "message-content[id]");
+        return { first() { return { async getAttribute() { return "old-response"; } }; } };
+      },
+      getByRole() { throw new Error("Old response images must never be read"); },
+    }; } };
+  } };
+  assert.deepEqual(await browser.generatedResponseImageUrls(page, new Set(["old-response"])), []);
 }
 
 function recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel() {
@@ -474,6 +512,8 @@ await reusesThreePersistentImageWorkerTabsBySlot();
 await keepsPersistentImageTabOpenAfterSingleSubmission();
 await resetsOnlyAContaminatedGeminiComposer();
 await ignoresStaleGeminiPixelsAfterABlobUrlChange();
+await acceptsOnlyNewModelResponseRasters();
+await ignoresOldResponseEvenWhenItsImageUrlChanges();
 recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 recognizesOnlyTheExactTranscodedReferenceFilename();
 await countsModernAndLegacyImageAttachmentsWithoutDoubleCounting();

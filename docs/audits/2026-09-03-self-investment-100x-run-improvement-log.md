@@ -282,6 +282,21 @@ At a global 30-second admission stagger, three slots are already sufficient for 
 
 Thumbnail benchmark hygiene also caught two English-titled videos whose fetched artwork says HINDI. Replaced them before evaluation. The shelf now uses five own-channel winners and three niche comparators, exact verified titles, and uniformly hidden age/view/runtime/channel metadata. Synthetic scores remain preference diagnostics, never CTR predictions.
 
+### Final image QA: reference captures versus aesthetic noise
+
+The completed 798-image reference comparison found 25 near-identical reference rasters after geometry normalization. Visual inspection confirmed those captures; adding the earlier wrong UI capture produces **26 exact critical replacements**, not nine. This expands the earlier receipt-only finding, not the full episode's generation scope. Evidence lives in `manual_blocker_triage_image_output_qa_ep_01_reference_captures.json` and `review_samples/gemini_upload_retention_20260903/reference-capture-candidates.json`. The 26-item Gemini repair uses the unchanged three persistent slots and 30-second admission delay.
+
+Official QA performed 393 cached semantic raster audits and produced 360 review rows. The first pass took approximately half an hour. Many findings concern visible-hand counts, hand laterality, object-edge contacts, background extras, exact framing, and inability to verify a reference that the audit did not receive. These are not equivalent to missing scenes or swapped principal identities. The parent reviewed all 393 verdict/discrepancy summaries plus selected sheets and exact ambiguous rasters; it did not claim to have separately opened all 798 full-resolution files. The hash-bound disposition retains those minor issues as advisories and repairs reference captures only.
+
+One upstream exception is explicitly retained: the approved board-chair reference appears masculine, while the script later uses she/her. The scene outputs follow the approved reference. Repeating those prompts with the same reference would not fix the disagreement. Record this continuity weakness instead of silently calling it a perfect match or triggering a multi-stage rebuild during the finish. Future reference approval should check explicit source pronouns before generation.
+
+Next-run candidates, not yet promoted defaults:
+
+- Add a cheap normalized-reference duplicate screen at collection, with manual confirmation before rejection. A changed PNG encoding must not hide a reference echo.
+- Audit real scene presence, decisive identity, critical object/action, and structural usability first. Do not turn every exact finger/hand/framing discrepancy into mandatory review.
+- Give identity audits the relevant approved identity evidence, or explicitly classify unverifiable identity as uncertainty rather than failure.
+- Keep successful semantic audits content-addressed. The expanded critical disposition reused all 393 audit rows without another model pass.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

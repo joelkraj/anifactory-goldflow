@@ -730,6 +730,20 @@ export class GoogleFlowBrowser {
 
   async composerAddButton(page) {
     const composer = await this.composer(page);
+    const currentAddButton = await visibleLocator(page.getByRole("button", {
+      name: /Add ingredients to the prompt box/i,
+    }));
+    if (currentAddButton) {
+      await currentAddButton.evaluate((button) => {
+        document.querySelectorAll('[data-goldflow-composer-add="true"]').forEach((element) => element.removeAttribute("data-goldflow-composer-add"));
+        button.setAttribute("data-goldflow-composer-add", "true");
+      });
+      return {
+        button: page.locator('[data-goldflow-composer-add="true"]'),
+        dialogId: await currentAddButton.getAttribute("aria-controls"),
+        popup: await currentAddButton.getAttribute("aria-haspopup"),
+      };
+    }
     const result = await composer.evaluate((node) => {
       document.querySelectorAll('[data-goldflow-composer-add="true"]').forEach((element) => element.removeAttribute("data-goldflow-composer-add"));
       const visible = (element) => Boolean(element?.getClientRects().length)
@@ -780,7 +794,7 @@ export class GoogleFlowBrowser {
     const visibleMediaDialog = async (timeoutMs = 0) => {
       const deadline = Date.now() + timeoutMs;
       do {
-        const dialogs = page.locator('[role="dialog"]');
+        const dialogs = page.locator('[role="dialog"], .add-menu-popover-container.flow-menu-panel');
         for (let index = 0; index < await dialogs.count(); index += 1) {
           const candidate = dialogs.nth(index);
           if (!await candidate.isVisible().catch(() => false)) continue;
@@ -797,12 +811,21 @@ export class GoogleFlowBrowser {
 
     try {
       const { button, dialogId } = await this.composerAddButton(page);
-      let dialog = this.controlledDialog(page, dialogId);
-      if (!await dialog.isVisible().catch(() => false)) {
+      let dialog = dialogId ? this.controlledDialog(page, dialogId) : null;
+      if (!dialog || !await dialog.isVisible().catch(() => false)) {
         await button.click();
-        dialog = await waitForVisible(this.controlledDialog(page, dialogId), { timeoutMs: 10_000 });
+        dialog = dialogId
+          ? await waitForVisible(this.controlledDialog(page, dialogId), { timeoutMs: 10_000 })
+          : await visibleMediaDialog(10_000);
       }
-      if (!dialog) throw codedError("ui_contract_mismatch", `Google Flow composer add button did not open its controlled dialog ${dialogId}.`);
+      if (!dialog) {
+        throw codedError(
+          "ui_contract_mismatch",
+          dialogId
+            ? `Google Flow composer add button did not open its controlled dialog ${dialogId}.`
+            : "Google Flow composer add button did not open its media picker.",
+        );
+      }
       return { dialog, dialogId };
     } catch (error) {
       if (error?.code !== "ui_contract_mismatch") throw error;

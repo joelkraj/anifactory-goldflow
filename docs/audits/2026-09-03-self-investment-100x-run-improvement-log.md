@@ -250,6 +250,8 @@ At 19:33-19:35 UTC three submissions returned to an empty Gemini home page witho
 
 The browser now waits for the exact attachment count and no visible upload spinner for 750 ms, then rechecks readiness immediately before submission. Modern `.gem-attachment-content.loading` indicators are included. An upload-only four-reference proof completed in 7.775 seconds with all four hashes and ordered slots retained and no pending uploads (`uploads-fully-processed.json`); no creative submission was made. Unit tests cover a visible preview that is still loading, missing attachments, and completed uploads. A submit that lands on an empty home page now fails after 60 seconds instead of consuming the full 15-minute image timeout, without automatic resubmission. The old three waiters drained before restarting the host.
 
+The one-cut live probe on commit `e11791b` passed: `ep_01-w007986-w008001` completed at 19:52:52 UTC, 24.1 seconds after its lease. Visual inspection confirmed the diligence folders, Joey's ringless hand/navy cuff, office setting, and requested system label. Two ordered references were retained. All 16 Studio suites and the Gemini-specific browser suite passed. This is recovery evidence, not a sustained throughput measurement. Restore three persistent Gemini slots at the existing 30-second lease stagger; leave the explicitly quota-limited Flow lane stopped.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

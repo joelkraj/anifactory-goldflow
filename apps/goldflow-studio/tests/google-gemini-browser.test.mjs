@@ -9,6 +9,7 @@ import {
   GoogleGeminiBrowser,
   isGeminiImageSurfaceUrl,
   normalizeGeminiPromptText,
+  observedGeminiImageFilename,
   verifyGeminiComposerPrompt,
   verifyGeminiTextAttachmentRetained,
 } from "../desktop/google-gemini-browser.mjs";
@@ -408,6 +409,55 @@ function recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel() {
   assert.equal(isGeminiImageSurfaceUrl("https://gemini.google.com/app"), false);
 }
 
+function recognizesOnlyTheExactTranscodedReferenceFilename() {
+  const expected = "01-character-state-abcdef012345.png";
+  assert.equal(observedGeminiImageFilename(`Image uploaded\n${expected}`, expected), expected);
+  assert.equal(observedGeminiImageFilename("Image uploaded\n01-character-state-abcdef012345.jpg", expected), "01-character-state-abcdef012345.jpg");
+  assert.equal(observedGeminiImageFilename("01-character-state-abcdef012345.jpeg", expected), "01-character-state-abcdef012345.jpeg");
+  for (const wrong of [
+    "02-character-state-abcdef012345.jpg",
+    "01-character-state-000000000000.jpg",
+    "01-other-state-abcdef012345.jpg",
+    "01-character-state-abcdef012345.png.jpg",
+    "Mentioned 01-character-state-abcdef012345.jpg in chat",
+  ]) assert.equal(observedGeminiImageFilename(wrong, expected), null);
+  assert.equal(observedGeminiImageFilename("prompt.jpg", "prompt.txt"), null);
+}
+
+async function countsModernAndLegacyImageAttachmentsWithoutDoubleCounting() {
+  const browser = new GoogleGeminiBrowser();
+  const collection = (visible) => ({
+    async count() { return visible.length; },
+    nth(index) { return visibleMockLocator({ visible: visible[index] }); },
+  });
+  for (const [legacy, modern, expected] of [
+    [[], [true, true, false], 2],
+    [[true, true], [true, true], 2],
+    [[false], [], 0],
+  ]) {
+    const page = { locator(selector) {
+      assert.ok(["gem-attachment", 'img[alt="attachment"]'].includes(selector));
+      return collection(selector === "gem-attachment" ? legacy : modern);
+    } };
+    assert.equal(await browser.visibleImageComposerAttachmentCount(page), expected);
+  }
+}
+
+async function scopesUploadPixelChecksToLoadedComposerPreviews() {
+  const browser = new GoogleGeminiBrowser();
+  const preview = { offsetParent: {}, complete: true, naturalWidth: 128, naturalHeight: 72, src: "blob:reference" };
+  const page = { locator(selector) {
+    assert.equal(selector, 'gem-attachment img, img[alt="attachment"]');
+    return { async evaluateAll(callback) {
+      return callback([preview, preview,
+        { ...preview, src: "blob:hidden", offsetParent: null },
+        { ...preview, src: "blob:pending", complete: false },
+      ]);
+    } };
+  } };
+  assert.deepEqual(await browser.imageComposerPreviewUrls(page), ["blob:reference"]);
+}
+
 await acceptsEditorNormalizationWithoutWeakeningContentBinding();
 await acceptsCompleteLongContenteditablePrompt();
 await stagesCompleteLongPromptAsAuditedUtf8Attachment();
@@ -425,5 +475,8 @@ await keepsPersistentImageTabOpenAfterSingleSubmission();
 await resetsOnlyAContaminatedGeminiComposer();
 await ignoresStaleGeminiPixelsAfterABlobUrlChange();
 recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
+recognizesOnlyTheExactTranscodedReferenceFilename();
+await countsModernAndLegacyImageAttachmentsWithoutDoubleCounting();
+await scopesUploadPixelChecksToLoadedComposerPreviews();
 
 console.log("google-gemini-browser tests passed");

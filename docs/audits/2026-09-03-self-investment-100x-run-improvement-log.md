@@ -230,6 +230,14 @@ The 18:53 UTC reconciliation materialized passed work but correctly rejected `ep
 
 Evidence: episode-local `manual_blocker_triage_image_generation_ep_01_20260903_reconcile.json`, original assignment/completion/provider receipt, and immutable reconcile-only stage reports. The episode remains incomplete with 183 missing cuts; a successful import batch is not image-stage completion.
 
+### Gemini reference-retention recovery after sign-in
+
+At 19:21 UTC the dedicated Gemini profile passed authentication and the actual Images composer check. The preceding one-cut probe had stopped before Generate because the local upload verifier did not recognize the new attachment UI. Gemini can display a JPEG filename for an uploaded PNG, and modern attachment previews no longer require a `gem-attachment` element. The old verifier also inspected unrelated gallery images, allowing slow downloads to consume its upload-check deadline.
+
+The repaired verifier counts visible legacy or modern attachment previews, checks only newly added composer previews, and retains the exact hash-bearing filename observation while pixels load. A converted filename permits bounded preview compression drift only when its exact slot/ref/hash stem and attachment count match. Generated-output reference-echo detection remains unchanged.
+
+An upload-only live proof retained one reference in 0.967 seconds and four references in 2.878 seconds, in the correct order. Source bytes remained SHA-256 verified; pixel differences ranged from 0 to 0.397 in this proof. No prompt was submitted and no image quota was spent. Evidence: episode `review_samples/gemini_upload_retention_20260903/proof.json` and `four-reference-composer.png`. Unit tests cover changed extensions, wrong slot/hash/name rejection, both attachment layouts, and exclusion of unrelated or unloaded previews. Real-generation health must still pass before restoring three active workers.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

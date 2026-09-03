@@ -26,6 +26,15 @@ function safeName(value) {
   return String(value ?? "asset").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
 }
 
+export function observedGeminiImageFilename(body, expectedFilename) {
+  const lines = new Set(String(body ?? "").split(/\r?\n/).map((line) => line.trim()));
+  if (lines.has(expectedFilename)) return expectedFilename;
+  if (!/\.(?:png|jpe?g|webp)$/i.test(expectedFilename)) return null;
+  const stem = expectedFilename.replace(/\.(?:png|jpe?g|webp)$/i, "");
+  // Gemini's image composer transcodes uploads while retaining the exact stem.
+  return [`${stem}.jpg`, `${stem}.jpeg`].find((name) => lines.has(name)) ?? null;
+}
+
 function sha256Bytes(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -389,6 +398,11 @@ export class GoogleGeminiBrowser {
     for (let index = 0; index < await attachments.count(); index += 1) {
       if (await attachments.nth(index).isVisible().catch(() => false)) visibleCount += 1;
     }
+    if (visibleCount) return visibleCount;
+    const previews = page.locator('img[alt="attachment"]');
+    for (let index = 0; index < await previews.count(); index += 1) {
+      if (await previews.nth(index).isVisible().catch(() => false)) visibleCount += 1;
+    }
     return visibleCount;
   }
 
@@ -673,7 +687,7 @@ export class GoogleGeminiBrowser {
     const verifiedReferenceIds = new Set();
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
-      const baselineImageUrls = new Set(await this.visibleImageUrls(page));
+      const baselineImageUrls = new Set(await this.imageComposerPreviewUrls(page));
       // The /images surface retains stale hidden/disabled menu rows after a
       // previous attachment. Reopen the active tools menu and target its
       // enabled menu item instead of clicking the first matching text node.
@@ -707,17 +721,32 @@ export class GoogleGeminiBrowser {
       }
       await chooser.setFiles([file]);
       const deadline = Date.now() + 90_000;
+      let observedFilename = null;
       while (Date.now() < deadline && !verifiedReferenceIds.has(orderedReferences[index].ref_id)) {
         const body = await page.locator("body").innerText();
-        if (body.includes(file.name)) {
+        // Upload-name notifications can disappear before preview pixels load.
+        observedFilename = observedGeminiImageFilename(body, file.name) ?? observedFilename;
+        const countMatches = await this.visibleImageComposerAttachmentCount(page) === index + 1;
+        if (observedFilename === file.name && countMatches) {
           verifiedReferenceIds.add(orderedReferences[index].ref_id);
+          orderedReferences[index].observed_upload_filename = observedFilename;
+          orderedReferences[index].verification_method = "exact_filename_and_attachment_count";
           break;
         }
-        for (const sourceUrl of (await this.visibleImageUrls(page)).filter((url) => !baselineImageUrls.has(url))) {
+        for (const sourceUrl of (await this.imageComposerPreviewUrls(page)).filter((url) => !baselineImageUrls.has(url))) {
+          if (!countMatches) break;
           try {
             const bytes = await this.imageBytes(page, sourceUrl);
-            if (await findReferenceEcho(bytes, [referenceInputs[index]])) {
+            const match = await findReferenceEcho(bytes, [referenceInputs[index]], {
+              // Allow only bounded lossy-preview drift when the hash-bearing
+              // filename stem also matches. Generated-output checks stay strict.
+              threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+            });
+            if (match) {
               verifiedReferenceIds.add(orderedReferences[index].ref_id);
+              orderedReferences[index].observed_upload_filename = observedFilename;
+              orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
+              orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
               break;
             }
           } catch {
@@ -756,6 +785,14 @@ export class GoogleGeminiBrowser {
       })
       .map((image) => image.currentSrc || image.src)
       .filter(Boolean));
+  }
+
+  async imageComposerPreviewUrls(page) {
+    // Never download unrelated gallery images while validating an upload.
+    return page.locator('gem-attachment img, img[alt="attachment"]').evaluateAll((images) => [...new Set(images
+      .filter((image) => image.offsetParent !== null && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0)
+      .map((image) => image.currentSrc || image.src)
+      .filter(Boolean))]);
   }
 
   async generatedResponseImageUrls(page) {
@@ -964,7 +1001,7 @@ export class GoogleGeminiBrowser {
             const source = (Array.isArray(job.references) ? job.references : [])
               .find((reference) => Number(reference.slot) === row.slot);
             const purpose = String(source?.purpose ?? "visual identity and continuity").trim();
-            return `Attachment ${row.slot} (${row.upload_filename}) = ${row.ref_id}. Purpose: ${purpose}.`;
+            return `Attachment ${row.slot} (${row.observed_upload_filename ?? row.upload_filename}) = ${row.ref_id}. Purpose: ${purpose}.`;
           }).join("\n")
         : "No reference images are attached.";
       const prompt = `Create exactly one original landscape still image in a 16:9 frame.\n\nUse the attached images only as ordered visual references. Do not create a collage, contact sheet, explanation, border, or multiple variants.\n\nREFERENCE MAP:\n${referenceMap}\nMatch each named subject or element in the scene prompt to its explicitly mapped attachment. Do not swap identities between attachments.\n\n${job.prompt}`;

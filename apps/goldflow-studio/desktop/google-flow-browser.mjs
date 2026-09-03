@@ -580,6 +580,82 @@ export class GoogleFlowBrowser {
     try {
       let bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
 
+      // Flow's current project UI opens in Video mode and exposes media
+      // settings through one overlay trigger. Keep this path ahead of the
+      // legacy Agent/Nano Banana menu without removing legacy compatibility.
+      const settingsTrigger = await visibleLocator(page.getByRole("button", {
+        name: "Settings trigger",
+        exact: true,
+      }));
+      if (settingsTrigger) {
+        await settingsTrigger.click().catch(() => settingsTrigger.click({ force: true }));
+        const imageRadio = await waitForVisible(
+          page.getByRole("radio", { name: /\bImage\b/i }),
+          { timeoutMs: 10_000 },
+        ) ?? await visibleLocator(
+          page.locator('button[role="radio"]').filter({ hasText: /\bImage\b/i }),
+        );
+        if (!imageRadio) throw codedError("ui_contract_mismatch", "Google Flow Image media-mode control is missing.");
+        await imageRadio.click({ force: true });
+
+        const landscapeRadio = await waitForVisible(
+          page.getByRole("radio", { name: /16:9/ }),
+          { timeoutMs: 10_000 },
+        ) ?? await visibleLocator(
+          page.locator('button[role="radio"]').filter({ hasText: /16:9/ }),
+        );
+        const oneOutputRadio = await waitForVisible(
+          page.getByRole("radio", { name: /^x1$/i }),
+          { timeoutMs: 10_000 },
+        ) ?? await visibleLocator(
+          page.locator('button[role="radio"]').filter({ hasText: /\bx1\b/i }),
+        );
+        if (!landscapeRadio || !oneOutputRadio) {
+          throw codedError("ui_contract_mismatch", "Google Flow 16:9 or x1 image setting is missing.");
+        }
+        await landscapeRadio.click({ force: true });
+        await oneOutputRadio.click({ force: true });
+
+        let currentModel = await visibleLocator(page.getByRole("button", {
+          name: "Select model family",
+          exact: true,
+        }));
+        if (!currentModel) {
+          currentModel = await visibleLocator(page.locator("button").filter({ hasText: /Nano Banana/i }));
+        }
+        if (!currentModel) throw codedError("ui_contract_mismatch", "Google Flow model dropdown is missing.");
+        const escapedModelLabel = this.flowModelLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (!new RegExp(escapedModelLabel, "i").test(await currentModel.innerText())) {
+          await currentModel.click({ force: true });
+          const wantedModel = await waitForVisible(
+            page.getByRole("menuitem").filter({ hasText: new RegExp(`^\\s*🍌?\\s*${escapedModelLabel}\\s*$`, "i") }),
+            { timeoutMs: 10_000 },
+          );
+          if (!wantedModel) throw codedError("ui_contract_mismatch", `Expected Google Flow model ${this.flowModelLabel}.`);
+          await wantedModel.click({ force: true });
+        }
+
+        await page.keyboard.press("Escape").catch(() => {});
+        bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ");
+        const configuredSettings = await visibleLocator(page.getByRole("button", {
+          name: "Settings trigger",
+          exact: true,
+        }));
+        if (!configuredSettings) throw codedError("ui_contract_mismatch", "Google Flow image settings trigger disappeared after configuration.");
+        const configuredText = (await configuredSettings.innerText()).replace(/\s+/g, " ");
+        if (!new RegExp(escapedModelLabel, "i").test(configuredText)) {
+          throw codedError("ui_contract_mismatch", `Google Flow did not retain model ${this.flowModelLabel}.`);
+        }
+        if (!/16:9|crop_16_9/.test(configuredText) || !/x1\b/.test(configuredText)) {
+          throw codedError("ui_contract_mismatch", `Google Flow did not retain 16:9 x1 settings: ${configuredText}.`);
+        }
+        const accountPlanEvidence = flowPlanVerificationEvidence(bodyText, this.flowPlanLabel, this.flowModelLabel);
+        if (!accountPlanEvidence) {
+          throw codedError("account_mismatch", `Google Flow exposed neither plan ${this.flowPlanLabel} nor entitled model ${this.flowModelLabel}.`);
+        }
+        return { ...contract, account_plan_evidence: accountPlanEvidence, verified_at: new Date().toISOString() };
+      }
+
       let modelControl = await visibleLocator(page.getByRole("button", { name: /Nano Banana/i }));
       if (!modelControl) {
         const agentToggle = await visibleLocator(page.getByRole("button", { name: "Agent", exact: true }));

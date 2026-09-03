@@ -588,6 +588,19 @@ export class GoogleFlowBrowser {
         exact: true,
       }));
       if (settingsTrigger) {
+        const escapedModelLabel = this.flowModelLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const currentSettingsText = (await settingsTrigger.innerText()).replace(/\s+/g, " ");
+        const alreadyConfigured = new RegExp(escapedModelLabel, "i").test(currentSettingsText)
+          && /16:9|crop_16_9/.test(currentSettingsText)
+          && /x1\b/.test(currentSettingsText);
+        if (alreadyConfigured) {
+          const accountPlanEvidence = flowPlanVerificationEvidence(bodyText, this.flowPlanLabel, this.flowModelLabel);
+          if (!accountPlanEvidence) {
+            throw codedError("account_mismatch", `Google Flow exposed neither plan ${this.flowPlanLabel} nor entitled model ${this.flowModelLabel}.`);
+          }
+          return { ...contract, account_plan_evidence: accountPlanEvidence, verified_at: new Date().toISOString() };
+        }
+
         await settingsTrigger.click().catch(() => settingsTrigger.click({ force: true }));
         const imageRadio = await waitForVisible(
           page.getByRole("radio", { name: /\bImage\b/i }),
@@ -624,7 +637,6 @@ export class GoogleFlowBrowser {
           currentModel = await visibleLocator(page.locator("button").filter({ hasText: /Nano Banana/i }));
         }
         if (!currentModel) throw codedError("ui_contract_mismatch", "Google Flow model dropdown is missing.");
-        const escapedModelLabel = this.flowModelLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         if (!new RegExp(escapedModelLabel, "i").test(await currentModel.innerText())) {
           await currentModel.click({ force: true });
           const wantedModel = await waitForVisible(
@@ -1439,7 +1451,8 @@ export class GoogleFlowBrowser {
   }
 
   async createButton(page) {
-    return visibleLocator(page.locator("button").filter({ hasText: "arrow_forward" }).filter({ hasText: "Create" }));
+    return await visibleLocator(page.getByRole("button", { name: /^(?:Start generation|Create|Generate)$/i }))
+      ?? visibleLocator(page.locator('button[type="submit"]').filter({ hasText: /arrow_forward|send/i }));
   }
 
   async generatedImageUrls(page) {

@@ -1151,7 +1151,19 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
     }
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for hybrid browser manifest ${manifestPath}.`);
     if (Date.now() - lastRuntimeCheck > 15_000) {
-      await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
+      try {
+        await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
+      } catch (error) {
+        if (!/provider circuit is open/i.test(String(error?.message ?? ""))) throw error;
+        if (status.counts.leased === 0) {
+          return {
+            ...status,
+            status: "blocked_provider_circuit",
+            provider_runtime_error: String(error.message),
+          };
+        }
+        process.stderr.write(`[browser-pool] Provider circuit opened; draining ${status.counts.leased} in-flight asset(s) before stopping.\n`);
+      }
       lastRuntimeCheck = Date.now();
     }
     await delay(2_000);
@@ -1190,7 +1202,22 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
     }
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for streaming browser assets in ${manifestPath}.`);
     if (Date.now() - lastRuntimeCheck > 15_000) {
-      await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
+      try {
+        await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
+      } catch (error) {
+        if (!/provider circuit is open/i.test(String(error?.message ?? ""))) throw error;
+        if (counts.leased === 0) {
+          return {
+            ...status,
+            status: "blocked_provider_circuit",
+            item_count: rows.length,
+            counts,
+            items: rows,
+            provider_runtime_error: String(error.message),
+          };
+        }
+        process.stderr.write(`[browser-pool-stream] Provider circuit opened; draining ${counts.leased} in-flight asset(s) before stopping.\n`);
+      }
       lastRuntimeCheck = Date.now();
     }
     await delay(2_000);

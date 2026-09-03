@@ -998,6 +998,15 @@ export class GoogleFlowBrowser {
         const composerState = await this.composerDockState(page).catch(() => null);
         const autoAttached = identifyAutoAttachedFlowComposerChip(priorComposerMediaIds, composerState);
         if (autoAttached) return { ...autoAttached, already_attached: true };
+        // The current asset-list picker first exposes the uploaded filename as
+        // an unselected row and does not render Add to Prompt until that exact
+        // row is selected.
+        const uploadedAsset = await this.uploadedAssetControl(page, filename);
+        if (uploadedAsset) {
+          await uploadedAsset.click({ force: true });
+          await sleep(300);
+          continue;
+        }
       }
       const marked = await dialog.evaluate((root, { filename: wanted, fragment }) => {
         root.querySelectorAll('[data-goldflow-upload-preview="true"]').forEach((element) => element.removeAttribute("data-goldflow-upload-preview"));
@@ -1110,6 +1119,14 @@ export class GoogleFlowBrowser {
         // enabled Add to Prompt action proves selection; the materialized
         // composer chip supplies the durable media identity immediately after.
         return lastParsedMedia ?? { media_id: null, media_url: null };
+      }
+      if (exactNameVisible && !addToPrompt) {
+        const uploadedAsset = await this.uploadedAssetControl(page, filename);
+        if (uploadedAsset) {
+          await uploadedAsset.click({ force: true });
+          await sleep(300);
+          continue;
+        }
       }
       if (exactNameVisible && fresh.length === 1) {
         const parsed = parseFlowMedia(fresh[0].media_url);

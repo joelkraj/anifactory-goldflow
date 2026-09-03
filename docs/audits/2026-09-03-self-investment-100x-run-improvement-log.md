@@ -242,6 +242,14 @@ The subsequent two-reference production probe completed in 17.7 seconds and visu
 
 Result acquisition now accepts only AI-generated images inside the newest `model-response`, excluding message-content IDs present before submission. Full-page/gallery and upload-preview output fallbacks are removed. Receipt audit identified 12 earlier Gemini completions without response evidence, including this cut; those exact hashes need review before final QA, not an episode-wide regeneration. The other provider outputs remain untouched. Tests cover delayed real output, exclusion of old response IDs despite changed URLs, and never consulting gallery candidates.
 
+The targeted review of those 12 unbound outputs confirmed nine wrong scene images and three usable images. The exact image hashes and decisions are preserved in `manual_blocker_triage_image_generation_ep_01_20260903_gemini.json`. The nine must be carried into official critical-cut QA and exact-ID recovery; the triage file alone does not invalidate them automatically.
+
+### Gemini upload completion, not just preview retention
+
+At 19:33-19:35 UTC three submissions returned to an empty Gemini home page without a retained request or response. Pre-submit evidence showed the attachment loading spinner even though Send was enabled. The earlier sub-three-second proof measured local preview retention, not completed uploads, and must not be treated as end-to-end upload readiness.
+
+The browser now waits for the exact attachment count and no visible upload spinner for 750 ms, then rechecks readiness immediately before submission. Modern `.gem-attachment-content.loading` indicators are included. An upload-only four-reference proof completed in 7.775 seconds with all four hashes and ordered slots retained and no pending uploads (`uploads-fully-processed.json`); no creative submission was made. Unit tests cover a visible preview that is still loading, missing attachments, and completed uploads. A submit that lands on an empty home page now fails after 60 seconds instead of consuming the full 15-minute image timeout, without automatic resubmission. The old three waiters drained before restarting the host.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

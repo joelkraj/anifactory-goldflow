@@ -13,7 +13,7 @@ const GEMINI_APP_URL = "https://gemini.google.com/app";
 const PROMPT_SELECTOR = '[contenteditable="true"][aria-label="Enter a prompt for Gemini"]';
 const SIGNED_OUT_SELECTOR = 'a:has-text("Sign in"), button:has-text("Sign in")';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const GEMINI_UPLOAD_PENDING_SELECTOR = 'gem-attachment[aria-busy="true"], gem-attachment [aria-busy="true"], gem-attachment [class*="uploading" i], gem-attachment [role="progressbar"]';
+const GEMINI_UPLOAD_PENDING_SELECTOR = 'gem-attachment[aria-busy="true"], gem-attachment [aria-busy="true"], gem-attachment [class*="uploading" i], gem-attachment [role="progressbar"], .gem-attachment-content.loading, .gem-attachment-loading-container [role="progressbar"]';
 export const GEMINI_INLINE_PROMPT_MAX_CHARS = 24_000;
 
 function codedError(code, message) {
@@ -419,6 +419,27 @@ export class GoogleGeminiBrowser {
     return page;
   }
 
+  async imageUploadState(page, expectedCount) {
+    const observedCount = await this.visibleImageComposerAttachmentCount(page);
+    const pending = Boolean(await visibleLocator(page.locator(GEMINI_UPLOAD_PENDING_SELECTOR)));
+    return { expected_count: expectedCount, observed_count: observedCount, no_pending_uploads: !pending,
+      ready: observedCount === expectedCount && !pending };
+  }
+
+  async waitForImageUploads(page, expectedCount, { timeoutMs = 90_000, stableMs = 750 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let readySince = null;
+    while (Date.now() < deadline) {
+      const state = await this.imageUploadState(page, expectedCount);
+      if (state.ready) {
+        readySince ??= Date.now();
+        if (Date.now() - readySince >= stableMs) return state;
+      } else readySince = null;
+      await sleep(250);
+    }
+    throw codedError("ui_contract_mismatch", "Gemini reference uploads did not finish processing before submission.");
+  }
+
   async newJobPage(type = "image") {
     const page = await this.context.newPage();
     const expectedUrl = type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL;
@@ -762,6 +783,7 @@ export class GoogleGeminiBrowser {
     if (!orderedReferences.every((row) => verifiedReferenceIds.has(row.ref_id))) {
       throw codedError("ui_contract_mismatch", "Gemini did not visibly retain every ordered reference filename before submission.");
     }
+    await this.waitForImageUploads(page, files.length);
     await onPhase("references_attached");
     return { referenceInputs, orderedReferences };
   }
@@ -863,12 +885,17 @@ export class GoogleGeminiBrowser {
   }
 
   async waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints = new Map(), priorResponseIds = new Set()) {
+    const startedAt = Date.now();
     const deadline = Date.now() + 15 * 60_000;
     const baselinePixelSha256s = new Set(baselineFingerprints.values());
     while (Date.now() < deadline) {
       const body = await page.locator("body").innerText();
       const blockingCode = geminiBlockingCode(body);
       if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
+      if (Date.now() - startedAt > 60_000 && /^https:\/\/gemini\.google\.com\/app\/?(?:[?#].*)?$/.test(page.url())
+        && await page.locator("user-query").count() === 0 && await page.locator("model-response").count() === 0) {
+        throw codedError("provider_response_timeout", "Gemini returned to an empty home page after submission; no request or response was retained. Do not resubmit automatically.");
+      }
       // Gemini labels response rasters as "AI generated". That DOM contract is
       // stronger evidence than pixel dissimilarity: identity-preserving edits
       // can intentionally resemble their attached character reference closely.
@@ -978,6 +1005,8 @@ export class GoogleGeminiBrowser {
       const priorResponseIds = new Set(await this.responseMessageIds(page));
       for (const sourceUrl of await this.generatedResponseImageUrls(page)) baseline.add(sourceUrl);
       const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
+      const uploadState = await this.imageUploadState(page, orderedReferences.length);
+      if (!uploadState.ready) throw codedError("ui_contract_mismatch", "Gemini attachments changed or are still uploading at the submission checkpoint.");
       const referenceBinding = await this.recordEvidence(page, job, prompt, orderedReferences);
       await onPhase("submitting");
       await send.click();

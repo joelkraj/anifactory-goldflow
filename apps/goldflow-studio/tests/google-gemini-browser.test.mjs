@@ -344,6 +344,7 @@ async function keepsPersistentImageTabOpenAfterSingleSubmission() {
   browser.generatedResponseImageUrls = async () => [];
   browser.responseMessageIds = async () => [];
   browser.attachReferences = async () => ({ referenceInputs: [], orderedReferences: [] });
+  browser.imageUploadState = async () => ({ready: true, expected_count: 0, observed_count: 0, no_pending_uploads: true});
   browser.pastePrompt = async () => {};
   browser.recordEvidence = async () => ({ status: "verified", expected_count: 0, observed_count: 0 });
   browser.waitForGeneratedImage = async () => ({ sourceUrl: "blob:persistent-gemini-success", bytes: Buffer.from("image") });
@@ -496,6 +497,23 @@ async function scopesUploadPixelChecksToLoadedComposerPreviews() {
   assert.deepEqual(await browser.imageComposerPreviewUrls(page), ["blob:reference"]);
 }
 
+async function waitsForUploadSpinnerEvenWithVisiblePreview() {
+  const browser = new GoogleGeminiBrowser();
+  browser.visibleImageComposerAttachmentCount = async () => 1;
+  let loading = true;
+  const page = { locator(selector) {
+    assert.match(selector, /gem-attachment-content\.loading/);
+    return visibleMockLocator({visible: loading});
+  } };
+  assert.deepEqual(await browser.imageUploadState(page, 1), {
+    ready: false, expected_count: 1, observed_count: 1, no_pending_uploads: false,
+  });
+  await assert.rejects(() => browser.waitForImageUploads(page, 1, {timeoutMs: 1, stableMs: 0}), /did not finish processing/);
+  loading = false;
+  assert.equal((await browser.waitForImageUploads(page, 1, {timeoutMs: 100, stableMs: 0})).ready, true);
+  assert.equal((await browser.imageUploadState(page, 2)).ready, false, "Missing attachments must still block");
+}
+
 await acceptsEditorNormalizationWithoutWeakeningContentBinding();
 await acceptsCompleteLongContenteditablePrompt();
 await stagesCompleteLongPromptAsAuditedUtf8Attachment();
@@ -518,5 +536,6 @@ recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 recognizesOnlyTheExactTranscodedReferenceFilename();
 await countsModernAndLegacyImageAttachmentsWithoutDoubleCounting();
 await scopesUploadPixelChecksToLoadedComposerPreviews();
+await waitsForUploadSpinnerEvenWithVisiblePreview();
 
 console.log("google-gemini-browser tests passed");

@@ -385,6 +385,23 @@ async function resetsOnlyAContaminatedGeminiComposer() {
   assert.equal(navigations, 1, "a clean Gemini composer must not reload");
 }
 
+async function ignoresStaleGeminiPixelsAfterABlobUrlChange() {
+  const browser = new GoogleGeminiBrowser();
+  browser.generatedResponseImageUrls = async () => ["blob:stale-renamed", "blob:actual-result"];
+  browser.visibleImageUrls = async () => [];
+  browser.imagePixelFingerprint = async (_page, sourceUrl) => sourceUrl === "blob:stale-renamed"
+    ? { bytes: Buffer.from("stale"), sha256: "stale-pixels" }
+    : { bytes: Buffer.from("fresh"), sha256: "fresh-pixels" };
+  const result = await browser.waitForGeneratedImage(
+    { locator() { return { async innerText() { return "Generating"; } }; } },
+    new Set(["blob:stale-original"]),
+    [],
+    new Map([["blob:stale-original", "stale-pixels"]]),
+  );
+  assert.equal(result.sourceUrl, "blob:actual-result");
+  assert.equal(result.bytes.toString(), "fresh");
+}
+
 function recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel() {
   assert.equal(isGeminiImageSurfaceUrl("https://gemini.google.com/images"), true);
   assert.equal(isGeminiImageSurfaceUrl("https://gemini.google.com/images?hl=en"), true);
@@ -406,6 +423,7 @@ await blocksUnauthenticatedImagesSurfaceWithoutFallingBackToApp();
 await reusesThreePersistentImageWorkerTabsBySlot();
 await keepsPersistentImageTabOpenAfterSingleSubmission();
 await resetsOnlyAContaminatedGeminiComposer();
+await ignoresStaleGeminiPixelsAfterABlobUrlChange();
 recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 
 console.log("google-gemini-browser tests passed");

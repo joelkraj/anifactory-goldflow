@@ -1275,6 +1275,22 @@ async function testPersistentFlowWorkerPool() {
   assert.equal(createdSlots.filter((slot) => slot === 2).length, 1, "slot reuse must not create another Flow project");
   await assert.rejects(() => browser.ensurePersistentWorkerPage(5), /integer from 0 through 4/);
 
+  const staleResultBrowser = new GoogleFlowBrowser({ concurrency: 1 });
+  staleResultBrowser.blockingAlert = async () => {};
+  staleResultBrowser.generatedOutputImageCandidates = async () => [];
+  staleResultBrowser.generatedImageUrls = async () => ["blob:stale-renamed", "blob:actual-result"];
+  staleResultBrowser.imagePixelFingerprint = async (_page, sourceUrl) => sourceUrl === "blob:stale-renamed"
+    ? { bytes: Buffer.from("stale"), sha256: "stale-pixels" }
+    : { bytes: Buffer.from("fresh"), sha256: "fresh-pixels" };
+  const freshResult = await staleResultBrowser.waitForGeneratedImage(
+    {},
+    new Set(["blob:stale-original"]),
+    [],
+    new Map([["blob:stale-original", "stale-pixels"]]),
+  );
+  assert.equal(freshResult.sourceUrl, "blob:actual-result", "Flow must ignore stale pixels even when their media URL changes");
+  assert.equal(freshResult.bytes.toString(), "fresh");
+
   let creativeSubmissions = 0;
   let cleanComposerChecks = 0;
   browser.ensureCleanImageComposer = async (page) => { cleanComposerChecks += 1; return page; };

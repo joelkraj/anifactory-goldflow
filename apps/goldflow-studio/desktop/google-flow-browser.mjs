@@ -1603,22 +1603,30 @@ export class GoogleFlowBrowser {
 
   async waitForGeneratedImage(page, baseline, referenceInputs = [], baselineFingerprints = new Map()) {
     const deadline = Date.now() + 30 * 60_000;
+    const baselinePixelSha256s = new Set(baselineFingerprints.values());
     let nextExistingUrlFingerprintAt = 0;
     while (Date.now() < deadline) {
       await this.blockingAlert(page);
-      for (const candidate of await this.generatedOutputImageCandidates(page, referenceInputs)) {
-        if (baseline.has(candidate.source_url)) continue;
+      for (const outputCandidate of await this.generatedOutputImageCandidates(page, referenceInputs)) {
+        if (baseline.has(outputCandidate.source_url)) continue;
         try {
+          const candidate = await this.imagePixelFingerprint(page, outputCandidate.source_url);
+          if (baselinePixelSha256s.has(candidate.sha256)) {
+            baseline.add(outputCandidate.source_url);
+            baselineFingerprints.set(outputCandidate.source_url, candidate.sha256);
+            this.log("Ignored a stale Google Flow result whose media URL changed but pixels did not.", "warn");
+            continue;
+          }
           return {
-            sourceUrl: candidate.source_url,
-            bytes: await this.imageBytes(page, candidate.source_url),
+            sourceUrl: outputCandidate.source_url,
+            bytes: candidate.bytes,
             generatedResult: {
               schema: "goldflow_browser_generated_result_v1",
               status: "verified",
               browser_provider: "google-flow",
-              source_url: candidate.source_url,
-              media_edit_url: candidate.media_edit_url,
-              caption: candidate.caption,
+              source_url: outputCandidate.source_url,
+              media_edit_url: outputCandidate.media_edit_url,
+              caption: outputCandidate.caption,
             },
           };
         } catch (error) {
@@ -1629,14 +1637,22 @@ export class GoogleFlowBrowser {
       const fresh = urls.filter((url) => !baseline.has(url));
       for (const sourceUrl of fresh) {
         try {
-          const bytes = await this.imageBytes(page, sourceUrl);
-          const echo = await findReferenceEcho(bytes, referenceInputs);
+          const candidate = await this.imagePixelFingerprint(page, sourceUrl);
+          if (baselinePixelSha256s.has(candidate.sha256)) {
+            baseline.add(sourceUrl);
+            baselineFingerprints.set(sourceUrl, candidate.sha256);
+            this.log("Ignored a stale Google Flow image whose media URL changed but pixels did not.", "warn");
+            continue;
+          }
+          const echo = await findReferenceEcho(candidate.bytes, referenceInputs);
           if (echo) {
             baseline.add(sourceUrl);
+            baselineFingerprints.set(sourceUrl, candidate.sha256);
+            baselinePixelSha256s.add(candidate.sha256);
             this.log(`Ignored a late Google Flow reference-media echo for slot ${echo.slot ?? "unknown"} (${echo.ref_id ?? "unknown"}; pixel MAE ${echo.mean_absolute_difference.toFixed(4)}).`, "warn");
             continue;
           }
-          return { sourceUrl, bytes };
+          return { sourceUrl, bytes: candidate.bytes };
         } catch (error) {
           this.log(`Google Flow fresh-image candidate was not downloadable yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
         }
@@ -1649,9 +1665,15 @@ export class GoogleFlowBrowser {
           try {
             const candidate = await this.imagePixelFingerprint(page, sourceUrl);
             if (candidate.sha256 === baselineSha256) continue;
+            if (baselinePixelSha256s.has(candidate.sha256)) {
+              baselineFingerprints.set(sourceUrl, candidate.sha256);
+              this.log("Ignored stale Google Flow pixels that moved onto an existing media URL.", "warn");
+              continue;
+            }
             const echo = await findReferenceEcho(candidate.bytes, referenceInputs);
             if (echo) {
               baselineFingerprints.set(sourceUrl, candidate.sha256);
+              baselinePixelSha256s.add(candidate.sha256);
               this.log(`Ignored a Google Flow reference-media replacement for slot ${echo.slot ?? "unknown"} (${echo.ref_id ?? "unknown"}; pixel MAE ${echo.mean_absolute_difference.toFixed(4)}).`, "warn");
               continue;
             }

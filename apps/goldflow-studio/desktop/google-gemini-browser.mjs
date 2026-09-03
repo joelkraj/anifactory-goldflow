@@ -796,8 +796,31 @@ export class GoogleGeminiBrowser {
     return Buffer.from(await response.body());
   }
 
-  async waitForGeneratedImage(page, baseline, referenceInputs) {
+  async imagePixelFingerprint(page, sourceUrl) {
+    const bytes = await this.imageBytes(page, sourceUrl);
+    return {
+      bytes,
+      sha256: sha256Bytes(await normalizedImagePixels(bytes)),
+    };
+  }
+
+  async baselineImageFingerprints(page, sourceUrls) {
+    const fingerprints = new Map();
+    for (const sourceUrl of sourceUrls) {
+      try {
+        const candidate = await this.imagePixelFingerprint(page, sourceUrl);
+        fingerprints.set(sourceUrl, candidate.sha256);
+      } catch (error) {
+        this.log(`Gemini baseline image could not be fingerprinted: ${error.message}`, "warn");
+      }
+    }
+    return fingerprints;
+  }
+
+  async waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints = new Map()) {
     const deadline = Date.now() + 15 * 60_000;
+    const baselinePixelSha256s = new Set(baselineFingerprints.values());
+    let nextExistingUrlFingerprintAt = 0;
     while (Date.now() < deadline) {
       const body = await page.locator("body").innerText();
       const blockingCode = geminiBlockingCode(body);
@@ -807,9 +830,16 @@ export class GoogleGeminiBrowser {
       // can intentionally resemble their attached character reference closely.
       for (const sourceUrl of (await this.generatedResponseImageUrls(page)).filter((url) => !baseline.has(url))) {
         try {
+          const candidate = await this.imagePixelFingerprint(page, sourceUrl);
+          if (baselinePixelSha256s.has(candidate.sha256)) {
+            baseline.add(sourceUrl);
+            baselineFingerprints.set(sourceUrl, candidate.sha256);
+            this.log("Ignored a stale Gemini result whose blob URL changed but pixels did not.", "warn");
+            continue;
+          }
           return {
             sourceUrl,
-            bytes: await this.imageBytes(page, sourceUrl),
+            bytes: candidate.bytes,
             generatedResult: {
               schema: "goldflow_browser_generated_result_v1",
               status: "verified",
@@ -823,15 +853,52 @@ export class GoogleGeminiBrowser {
       }
       for (const sourceUrl of (await this.visibleImageUrls(page)).filter((url) => !baseline.has(url))) {
         try {
-          const bytes = await this.imageBytes(page, sourceUrl);
-          const echo = await findReferenceEcho(bytes, referenceInputs);
-          if (echo) {
+          const candidate = await this.imagePixelFingerprint(page, sourceUrl);
+          if (baselinePixelSha256s.has(candidate.sha256)) {
             baseline.add(sourceUrl);
+            baselineFingerprints.set(sourceUrl, candidate.sha256);
+            this.log("Ignored a stale Gemini image whose blob URL changed but pixels did not.", "warn");
             continue;
           }
-          return { sourceUrl, bytes };
+          const echo = await findReferenceEcho(candidate.bytes, referenceInputs);
+          if (echo) {
+            baseline.add(sourceUrl);
+            baselineFingerprints.set(sourceUrl, candidate.sha256);
+            baselinePixelSha256s.add(candidate.sha256);
+            continue;
+          }
+          return { sourceUrl, bytes: candidate.bytes };
         } catch (error) {
           this.log(`Gemini image candidate is not downloadable yet: ${error.message}`, "warn");
+        }
+      }
+      if (baselineFingerprints.size && Date.now() >= nextExistingUrlFingerprintAt) {
+        nextExistingUrlFingerprintAt = Date.now() + 5_000;
+        const currentUrls = [...new Set([
+          ...await this.generatedResponseImageUrls(page),
+          ...await this.visibleImageUrls(page),
+        ])];
+        for (const sourceUrl of currentUrls) {
+          const baselineSha256 = baselineFingerprints.get(sourceUrl);
+          if (!baselineSha256) continue;
+          try {
+            const candidate = await this.imagePixelFingerprint(page, sourceUrl);
+            if (candidate.sha256 === baselineSha256) continue;
+            if (baselinePixelSha256s.has(candidate.sha256)) {
+              baselineFingerprints.set(sourceUrl, candidate.sha256);
+              continue;
+            }
+            const echo = await findReferenceEcho(candidate.bytes, referenceInputs);
+            if (echo) {
+              baselineFingerprints.set(sourceUrl, candidate.sha256);
+              baselinePixelSha256s.add(candidate.sha256);
+              continue;
+            }
+            this.log("Detected a completed Gemini image whose existing blob URL was reused.", "info");
+            return { sourceUrl, bytes: candidate.bytes };
+          } catch (error) {
+            this.log(`Gemini existing-image candidate could not be fingerprinted yet: ${error.message}`, "warn");
+          }
         }
       }
       await sleep(750);
@@ -915,11 +982,12 @@ export class GoogleGeminiBrowser {
       // for the new response merely because its blob URL appeared late.
       await sleep(1_500);
       for (const sourceUrl of await this.visibleImageUrls(page)) baseline.add(sourceUrl);
+      const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
       const referenceBinding = await this.recordEvidence(page, job, prompt, orderedReferences);
       await onPhase("submitting");
       await send.click();
       await onPhase("waiting_for_image");
-      const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs);
+      const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints);
       const downloadPath = await this.saveGeneratedImage(job, generated.bytes);
       return {
         downloadPath,

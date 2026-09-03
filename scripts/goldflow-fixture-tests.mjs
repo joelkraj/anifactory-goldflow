@@ -1454,9 +1454,9 @@ function testVisualWavefrontBatchPolicy() {
   assert.deepEqual(
     plannerTokensWithWavefrontOverridesForTests(
       ["node", "bin/goldflow.mjs", "visual", "plan", "--cut-ids", "old", "--visual-chunk-concurrency", "10"],
-      { "beat-ids": "beat_1,beat_2", "visual-chunk-concurrency": "1", "reasoning-effort": "medium", "workflow-bypass": "true" },
+      { "beat-ids": "beat_1,beat_2", "visual-chunk-concurrency": "1", "reasoning-effort": "medium", "workflow-bypass": "true", "allow-full-stage-rerun": "true", "rerun-reason": "Operator approved recovery." },
     ),
-    ["node", "bin/goldflow.mjs", "visual", "plan", "--beat-ids", "beat_1,beat_2", "--reasoning-effort", "medium", "--visual-chunk-concurrency", "1", "--workflow-bypass", "true"],
+    ["node", "bin/goldflow.mjs", "visual", "plan", "--beat-ids", "beat_1,beat_2", "--reasoning-effort", "medium", "--visual-chunk-concurrency", "1", "--workflow-bypass", "true", "--allow-full-stage-rerun", "true", "--rerun-reason", "Operator approved recovery."],
   );
   assert.equal(shouldFlushWavefrontBatchForTests({
     pendingCutCount: 14,

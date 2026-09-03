@@ -106,6 +106,8 @@ function plannerTokensWithWavefrontOverrides(tokens, inputFlags = {}) {
     "codex-call-attempts",
     "visual-chunk-validation-attempts",
     "workflow-bypass",
+    "allow-full-stage-rerun",
+    "rerun-reason",
   ];
   for (const name of forwarded) {
     if (inputFlags[name] === undefined) continue;

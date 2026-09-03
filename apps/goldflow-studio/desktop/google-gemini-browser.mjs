@@ -231,6 +231,10 @@ export function isGeminiImageSurfaceUrl(value) {
   return /^https:\/\/gemini\.google\.com\/images(?:[/?#]|$)/i.test(String(value ?? ""));
 }
 
+export function isGeminiConversationUrl(value) {
+  return /^https:\/\/gemini\.google\.com\/app\/[a-z0-9_-]+(?:[/?#]|$)/i.test(String(value ?? ""));
+}
+
 export class GoogleGeminiBrowser {
   constructor({
     profileDir,
@@ -375,7 +379,7 @@ export class GoogleGeminiBrowser {
     const expectedUrl = type === "llm" ? GEMINI_APP_URL : GEMINI_IMAGES_URL;
     const isCorrectSurface = () => (type === "llm"
       ? /^https:\/\/gemini\.google\.com\/app(?:[/?#]|$)/i.test(page.url())
-      : isGeminiImageSurfaceUrl(page.url()));
+      : isGeminiImageSurfaceUrl(page.url()) || isGeminiConversationUrl(page.url()));
     let composer = isCorrectSurface()
       ? await waitForVisible(page.locator(PROMPT_SELECTOR), 2_000)
       : null;

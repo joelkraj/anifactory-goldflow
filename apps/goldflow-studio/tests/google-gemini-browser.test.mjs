@@ -8,6 +8,7 @@ import {
   GEMINI_INLINE_PROMPT_MAX_CHARS,
   geminiBlockingCode,
   GoogleGeminiBrowser,
+  isGeminiConversationUrl,
   isGeminiImageSurfaceUrl,
   normalizeGeminiPromptText,
   observedGeminiImageFilename,
@@ -317,6 +318,19 @@ async function reusesThreePersistentImageWorkerTabsBySlot() {
   assert.equal(first, second, "successive image jobs on one Gemini slot must reuse the same tab object");
   assert.deepEqual(first.navigations, [], "healthy Gemini Images tabs must not reload between jobs");
   assert.equal(createdSlots.filter((slot) => slot === 1).length, 1, "Gemini slot reuse must not create a replacement tab");
+  await first.goto("https://gemini.google.com/app/92bd90b80ff7335c");
+  first.navigations.length = 0;
+  const continued = await browser.persistentJobPage("image", 1);
+  assert.equal(continued, first);
+  assert.equal(continued.url(), "https://gemini.google.com/app/92bd90b80ff7335c");
+  assert.deepEqual(first.navigations, [], "a successful generated-image conversation must not reset to Images home between cuts");
+  await first.goto("https://gemini.google.com/app");
+  first.navigations.length = 0;
+  await browser.persistentJobPage("image", 1);
+  assert.deepEqual(first.navigations, ["https://gemini.google.com/images"], "an empty home is not an existing conversation");
+  assert.equal(isGeminiConversationUrl("https://gemini.google.com/app/abc123?hl=en"), true);
+  assert.equal(isGeminiConversationUrl("https://gemini.google.com/app"), false);
+  assert.equal(isGeminiConversationUrl("https://gemini.google.com.evil.test/app/abc123"), false);
   await assert.rejects(() => browser.ensurePersistentWorkerPage(3), /integer from 0 through 2/);
 }
 

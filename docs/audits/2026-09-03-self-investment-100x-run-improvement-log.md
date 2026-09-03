@@ -21,8 +21,8 @@ Next-run target: private-ready in under 12 hours, with 6-7 hours as the stretch 
 - All 64 selected character, state, location, prop, and UI references were generated and approved.
 - Visual-prompt planning produced 373 chunks with 12 concurrent Codex Medium workers in approximately 33 minutes. One blocked cut was repaired exactly; no full planner rerun was needed.
 - Main still generation was configured as five persistent Flow projects plus three persistent Gemini image chats, but live testing showed that Flow and Gemini on the same Google account do not behave like eight independent throughput lanes. A Flow unusual-activity circuit coincided with immediate Gemini `1095` failures, so admission control must operate at the Google-account level.
-- At the latest snapshot, the active 793-item browser work manifest contains 549 completed cuts, 175 untouched cuts, and 69 exact deadletters. Completed work is split between 344 Flow and 205 Gemini outputs. These are moving counts, not the final run totals.
-- The live recovery experiment found that short submission bursts can trigger Google's unusual-activity circuit even when multiple tabs are healthy. A 15-minute circuit recovery allowed a clean probe and four clean completions; later bursts re-entered the rolling limit. The next active experiment is continuous human-paced dispatch at approximately one new submission per minute.
+- At the latest recorded snapshot, the active 793-item browser work manifest contains 588 completed cuts, 131 untouched cuts, two active leases, and 72 exact deadletters. Completed work is split between 383 Flow and 205 Gemini outputs. These are moving counts, not the final run totals.
+- Short submission bursts repeatedly triggered Google's unusual-activity circuit. Continuous 45-second and 30-second dispatch passed bounded soaks; a 20-second tier failed immediately after the preceding traffic. Production now continues at a 30-second global interval, with no further speed escalation during this run.
 - Generated video is intentionally disabled for this run. Accepted stills will use directed single-plane motion and safe parallax where available.
 
 ## Measured Comparison With Faster Runs
@@ -75,7 +75,7 @@ The current run proves that visible tab concurrency and durable accepted through
 Current-run decision:
 
 - Preserve all 798 planned cuts. Do not recover time by thinning this episode or extending visual holds.
-- Test continuous human-paced dispatch at approximately one new request every 60 seconds after a full 15-minute recovery window.
+- Use the provisionally proven 30-second continuous interval after a full 15-minute recovery window; evaluate sustained accepted throughput before promoting it as a next-run default.
 - Keep the same persistent projects and chats; do not create a new tab, project, or conversation per cut.
 - Treat Flow and Gemini as two surfaces behind one account-level admission controller until a controlled soak proves independent rate capacity.
 - Count only accepted, downloaded, hash-unique outputs when comparing strategies. Submitted jobs and occupied tabs are not throughput.
@@ -209,11 +209,12 @@ The September 3 production queue was used as a live throughput soak without redu
 
 - `45 seconds x 3 persistent Flow projects` passed 10 consecutive unique completions without an unusual-activity breaker. Observed accepted throughput was approximately 72-80 images per hour.
 - `30 seconds x 3 persistent Flow projects` passed 15 consecutive unique completions without a breaker or creative-generation failure. Observed accepted throughput was approximately 105-120 images per hour.
-- `20 seconds x 3 persistent Flow projects` opened Flow's unusual-activity circuit on its first completed submission after the preceding soak. A second request that was already in flight completed successfully, which points to submission-rate/account protection rather than prompt quality.
+- `20 seconds x 3 persistent Flow projects` opened Flow's unusual-activity circuit on its first completed submission after the preceding soak. A second request that was already in flight completed successfully. This tier was not isolated by a fresh account reset, so the result cannot separate the shorter interval from cumulative account traffic; it is sufficient evidence not to use 20 seconds during this production.
 - The 20-second failure requires the full 15-minute account recovery before another clean comparison. Gemini is not a valid no-wait overflow on the same login because earlier probes showed strongly coupled account throttling.
-- Additional tabs cannot raise the 30-second theoretical submission ceiling of 120 per hour. A five-tab test is useful only to determine whether long-tail generation latency leaves three slots saturated; it must not be interpreted as five independent provider lanes.
+- `30 seconds x 5 persistent Flow projects` passed 10 unique completions after full recovery. Only slots one through three were used; slots four and five remained idle. Accepted cadence matched the three-tab baseline, so the extra tabs produced no measured speed gain.
+- Additional tabs cannot raise the 30-second theoretical submission ceiling of 120 per hour. They help only when long-tail generation latency leaves the smaller pool saturated; they are not independent provider rate lanes.
 
-Current evidence-backed default: three persistent Flow projects with a global 30-second continuous submission interval, a 15-minute usage-limit circuit, and one recovery probe. Test five tabs at the same 30-second interval only after recovery and compare accepted throughput, active-slot occupancy, stale-output rate, and circuit incidence against the three-tab baseline.
+Current provisional production setting: a global 30-second continuous submission interval, a 15-minute usage-limit circuit, and one recovery probe. Three active Flow slots are sufficient at observed latency. The already-running five-tab host is retained to avoid another handoff, but no throughput benefit is attributed to its two unused slots. A full sustained production soak, not the short test alone, determines whether this becomes the next-run default.
 
 ## Proposed Next-Run Operating Sequence
 

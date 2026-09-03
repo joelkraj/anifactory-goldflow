@@ -79,7 +79,7 @@ assert.equal(providerFailurePausesDispatch("ui_contract_mismatch"), true, "a pro
 assert.equal(providerFailurePausesDispatch("google_gemini_generation_error"), false, "one transient Gemini failure must preserve its exact ID without stopping healthy unleased work");
 assert.equal(providerFailurePausesDispatch("chatgpt_generation_error"), false, "one transient ChatGPT failure must preserve its exact ID without stopping healthy unleased work");
 assert.equal(providerFailurePausesDispatch("provider_transient_circuit_open"), true, "the controller must stop a provider after its three-strike transient circuit opens");
-assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [1, 2, 3, 4], "Flow must upload in canonical order because its composer appends newly added chips");
+assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [4, 3, 2, 1], "Flow must upload in reverse slot order because its composer prepends newly added chips");
 assert.equal(identifyNewFlowComposerChip([], [{ media_id: "composer-1" }]).media_id, "composer-1");
 assert.equal(identifyNewFlowComposerChip(["composer-2"], [{ media_id: "composer-1" }, { media_id: "composer-2" }]).media_id, "composer-1");
 assert.throws(() => identifyNewFlowComposerChip(["composer-1"], [{ media_id: "composer-1" }]), /added 0 new reference chips/);

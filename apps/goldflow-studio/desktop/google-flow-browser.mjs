@@ -111,7 +111,9 @@ export function validateFlowReferenceDock({
 }
 
 export function flowReferenceUploadOrder(references = []) {
-  return [...references].sort((left, right) => Number(left.slot) - Number(right.slot));
+  // Flow currently prepends each newly attached chip. Upload the highest slot
+  // first so the settled left-to-right dock still matches canonical slot order.
+  return [...references].sort((left, right) => Number(right.slot) - Number(left.slot));
 }
 
 export function identifyNewFlowComposerChip(previousMediaIds = [], observedChips = []) {
@@ -1307,8 +1309,8 @@ export class GoogleFlowBrowser {
     if (expectedSlots.some((slot, index) => slot !== index + 1)) {
       throw codedError("ui_contract_mismatch", "Google Flow references are not assigned to contiguous ordered slots.");
     }
-    // Flow appends each newly materialized composer chip, so canonical upload
-    // order is also canonical visible dock order.
+    // Flow prepends each newly materialized composer chip, so upload in reverse
+    // slot order to preserve canonical visible dock order.
     for (const reference of flowReferenceUploadOrder(references)) {
       const expectedSlot = Number(reference.slot);
       const sourceSha256 = exactSha256(reference.sha256, `Google Flow reference ${reference.ref_id} assignment hash`);

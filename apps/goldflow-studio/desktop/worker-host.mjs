@@ -79,6 +79,8 @@ export class GoldflowDesktopHost {
     this.lastPauseLoggedAt = 0;
     this.nextLeaseAt = 0;
     this.dispatchCooldownUntil = 0;
+    this.submissionBurstCount = 0;
+    this.voluntaryBurstCooldownUntil = 0;
     this.consecutiveTransportFailures = 0;
     this.providerCircuit = null;
     this.providerRecoveryProbe = false;
@@ -121,6 +123,12 @@ export class GoldflowDesktopHost {
       dispatch_policy: {
         mode: "staggered_top_off_v1",
         submission_stagger_ms: this.config.submissionStaggerMs,
+        submission_burst_size: this.config.submissionBurstSize,
+        submission_burst_count: this.submissionBurstCount,
+        submission_burst_cooldown_ms: this.config.submissionBurstCooldownMs,
+        voluntary_burst_cooldown_until: this.voluntaryBurstCooldownUntil
+          ? new Date(this.voluntaryBurstCooldownUntil).toISOString()
+          : null,
         next_lease_at: this.nextLeaseAt ? new Date(this.nextLeaseAt).toISOString() : null,
         cooldown_until: this.dispatchCooldownUntil ? new Date(this.dispatchCooldownUntil).toISOString() : null,
         consecutive_transport_failures: this.consecutiveTransportFailures,
@@ -250,6 +258,12 @@ export class GoldflowDesktopHost {
         nextDelayMs = Math.min(5_000, this.dispatchCooldownUntil - now);
         return;
       }
+      if (this.voluntaryBurstCooldownUntil && now >= this.voluntaryBurstCooldownUntil) {
+        this.voluntaryBurstCooldownUntil = 0;
+        this.submissionBurstCount = 0;
+        this.log("Voluntary provider burst cooldown elapsed; resuming dispatch.");
+        await this.persistRuntime();
+      }
       if (this.providerCircuit?.status === "open") {
         this.providerCircuit = null;
         this.consecutiveTransportFailures = 0;
@@ -263,6 +277,15 @@ export class GoldflowDesktopHost {
       }
       if (now < this.nextLeaseAt) {
         nextDelayMs = Math.min(1_000, this.nextLeaseAt - now);
+        return;
+      }
+      if (this.config.submissionBurstSize > 0
+        && this.submissionBurstCount >= this.config.submissionBurstSize) {
+        this.voluntaryBurstCooldownUntil = now + this.config.submissionBurstCooldownMs;
+        this.dispatchCooldownUntil = Math.max(this.dispatchCooldownUntil, this.voluntaryBurstCooldownUntil);
+        this.log(`Voluntary provider burst limit reached after ${this.submissionBurstCount} submissions; cooling down until ${new Date(this.voluntaryBurstCooldownUntil).toISOString()}.`, "warn");
+        await this.persistRuntime();
+        nextDelayMs = Math.min(5_000, this.config.submissionBurstCooldownMs);
         return;
       }
       for (let slot = 0; slot < this.config.concurrency; slot += 1) {
@@ -293,6 +316,7 @@ export class GoldflowDesktopHost {
           continue;
         }
         this.nextLeaseAt = Date.now() + this.config.submissionStaggerMs;
+        this.submissionBurstCount += 1;
         this.runSlot(slot, lease).catch((error) => this.log(`Slot ${slot} crashed: ${error.message}`, "error"));
         nextDelayMs = this.config.submissionStaggerMs;
         break;
@@ -391,6 +415,8 @@ export class GoldflowDesktopHost {
       });
       this.log(`${lease.job.job_id} failed: ${error.message}`, "error");
       if (this.dispatchCooldownUntil > Date.now()) {
+        this.submissionBurstCount = 0;
+        this.voluntaryBurstCooldownUntil = 0;
         this.log(`Browser dispatch cooling down until ${new Date(this.dispatchCooldownUntil).toISOString()} after ${disposition.kind} failure.`, "warn");
       }
     } finally {

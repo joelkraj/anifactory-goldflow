@@ -39,6 +39,8 @@ export const GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING = 5;
 export const DEFAULT_BROWSER_SUBMISSION_STAGGER_MS = 6_000;
 export const MIN_BROWSER_SUBMISSION_STAGGER_MS = 5_000;
 export const MAX_BROWSER_SUBMISSION_STAGGER_MS = 60_000;
+export const DEFAULT_BROWSER_SUBMISSION_BURST_SIZE = 0;
+export const DEFAULT_BROWSER_SUBMISSION_BURST_COOLDOWN_MS = 5 * 60_000;
 
 function boundedNumber(value, fallback, minimum, maximum) {
   const parsed = Number(value);
@@ -70,6 +72,18 @@ export function desktopConfig(flags = {}, environment = process.env) {
       DEFAULT_BROWSER_SUBMISSION_STAGGER_MS,
       MIN_BROWSER_SUBMISSION_STAGGER_MS,
       MAX_BROWSER_SUBMISSION_STAGGER_MS,
+    ),
+    submissionBurstSize: Math.floor(boundedNumber(
+      flags["submission-burst-size"] ?? environment.GOLDFLOW_BROWSER_SUBMISSION_BURST_SIZE,
+      DEFAULT_BROWSER_SUBMISSION_BURST_SIZE,
+      0,
+      100,
+    )),
+    submissionBurstCooldownMs: boundedNumber(
+      flags["submission-burst-cooldown-ms"] ?? environment.GOLDFLOW_BROWSER_SUBMISSION_BURST_COOLDOWN_MS,
+      DEFAULT_BROWSER_SUBMISSION_BURST_COOLDOWN_MS,
+      60_000,
+      60 * 60_000,
     ),
     transportFailureThreshold: 3,
     transportCooldownMs: 5 * 60_000,

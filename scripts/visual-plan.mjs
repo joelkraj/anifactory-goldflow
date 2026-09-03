@@ -53,6 +53,7 @@ import {
 import { isChatGptWebRateLimitError } from "./lib/chatgpt-web-throttle-state.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
+import { planningRuntimeFromProcessContext } from "./lib/planning-runtime-policy.mjs";
 import {
   narrativeOverlayAuthoringRules,
   sanitizeNarrativeOverlays,
@@ -2792,13 +2793,17 @@ async function main() {
     ?? runIdentity?.provider_locks?.planning_provider
     ?? runIdentity?.planning_provider
     ?? "identity_locked";
+  const resolvedPlannerProvider = planningRuntimeFromProcessContext({
+    explicitProvider: flags["planning-provider"] ?? null,
+    overrideStage: "visual_prompt_plan",
+  }).provider;
   const requestedPlannerEffort = flags["reasoning-effort"]
     ?? runIdentity?.provider_locks?.planning_default_reasoning_effort
     ?? runIdentity?.model_versions?.planning_reasoning_effort
     ?? "medium";
   const baselineAdaptiveLimits = adaptivePromptChunkLimits({
     reasoningEffort: requestedPlannerEffort,
-    planningProvider: requestedPlannerProvider,
+    planningProvider: resolvedPlannerProvider,
   });
   const adaptiveTelemetryPath = plannerChunkTelemetryPath(dataRoot);
   const adaptiveTelemetryWarnings = [];
@@ -2827,7 +2832,7 @@ async function main() {
   }
   const adaptivePromptChunkOptions = {
     reasoningEffort: requestedPlannerEffort,
-    planningProvider: requestedPlannerProvider,
+    planningProvider: resolvedPlannerProvider,
     telemetryTuning: plannerChunkTuning,
   };
   const chunkingRequested = flags["visual-chunking"] !== "false"
@@ -3194,7 +3199,7 @@ async function main() {
     const chunkConcurrency = visualPromptConcurrencyForEffort(
       flags["visual-chunk-concurrency"] ?? 8,
       flags["reasoning-effort"] ?? null,
-      flags["planning-provider"] ?? null,
+      resolvedPlannerProvider,
     );
     let sharedPlannerCooldownError = null;
     const chunkResults = await mapWithConcurrency(sceneChunks, chunkConcurrency, async (sceneChunk, index) => {

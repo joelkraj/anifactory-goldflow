@@ -45,6 +45,19 @@ function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
 }
 
+function explicitFullPlannerRerunOverride(flags = {}) {
+  const requested = isTrue(flags["allow-full-stage-rerun"]) || hasValue(flags["rerun-reason"]);
+  const reason = String(flags["rerun-reason"] ?? "").trim();
+  return {
+    requested,
+    allowed: requested
+      && isTrue(flags["workflow-bypass"])
+      && isTrue(flags["allow-full-stage-rerun"])
+      && Boolean(reason),
+    reason,
+  };
+}
+
 export function plannerInvocationScope(flags = {}) {
   const scopeFlags = SCOPED_FLAGS.filter((name) => hasValue(flags[name]) && (
     name !== "blockers-only" || isTrue(flags[name])
@@ -104,6 +117,25 @@ export function plannerRerunDecision({
       allowed: true,
       reason: "scoped_planner_recovery",
       prior_attempt_count: priorAttempts.length,
+      ...scope,
+    };
+  }
+  const fullRerunOverride = explicitFullPlannerRerunOverride(flags);
+  if (fullRerunOverride.requested) {
+    if (!fullRerunOverride.allowed) {
+      return {
+        allowed: false,
+        reason: "full_planner_rerun_override_requires_bypass_and_reason",
+        prior_attempt_count: priorAttempts.length,
+        ...scope,
+        required_recovery: "A full planner rerun requires --workflow-bypass true --allow-full-stage-rerun true --rerun-reason <operator-approved-evidence>.",
+      };
+    }
+    return {
+      allowed: true,
+      reason: "explicit_operator_approved_full_planner_rerun",
+      prior_attempt_count: priorAttempts.length,
+      rerun_reason: fullRerunOverride.reason,
       ...scope,
     };
   }

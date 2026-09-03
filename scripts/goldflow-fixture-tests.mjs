@@ -1339,6 +1339,23 @@ function testScopedOnlyPlannerRerunPolicy() {
   }).allowed, false);
   assert.equal(plannerRerunDecision({
     stage: "visual_prompt_plan",
+    flags: {
+      "workflow-bypass": "true",
+      "allow-full-stage-rerun": "true",
+      "rerun-reason": "Operator approved replacing an interrupted serialized planner run.",
+    },
+    priorEvents,
+  }).reason, "explicit_operator_approved_full_planner_rerun");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
+    flags: {
+      "allow-full-stage-rerun": "true",
+      "rerun-reason": "Missing workflow bypass.",
+    },
+    priorEvents,
+  }).reason, "full_planner_rerun_override_requires_bypass_and_reason");
+  assert.equal(plannerRerunDecision({
+    stage: "visual_prompt_plan",
     flags: { "cut-ids": "cut_001" },
     priorEvents,
   }).reason, "scoped_planner_recovery");

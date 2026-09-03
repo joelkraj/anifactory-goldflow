@@ -1420,6 +1420,49 @@ async function testDesktopProviderCircuitBreaker() {
   assert.equal(host.providerCircuit?.failure_count, 3);
   assert.ok(host.dispatchCooldownUntil > Date.now(), "an open provider circuit must halt new local leases during triage");
 
+  const recoveryHost = new GoldflowDesktopHost({
+    config: { ...config, concurrency: 3 },
+    browser,
+    log: () => {},
+  });
+  recoveryHost.running = true;
+  recoveryHost.providerCircuit = { status: "open", reason: "consecutive_transient_provider_failures", opened_at: new Date().toISOString() };
+  recoveryHost.dispatchCooldownUntil = Date.now() - 1;
+  recoveryHost.consecutiveTransportFailures = 3;
+  recoveryHost.persistRuntime = async () => {};
+  recoveryHost.schedule = () => {};
+  const recoveryLeaseSlots = [];
+  recoveryHost.client = {
+    async lease(_types, slot) {
+      recoveryLeaseSlots.push(slot);
+      return { status: "leased", job: { type: "image", job_id: `recovery-${slot}` } };
+    },
+  };
+  recoveryHost.runSlot = async (slot, lease) => {
+    recoveryHost.activeJobs.set(slot, { slot, job: lease.job, recoveryProbe: true });
+  };
+  await recoveryHost.tick();
+  assert.deepEqual(recoveryLeaseSlots, [0], "an elapsed provider cooldown must permit exactly one recovery probe");
+  assert.equal(recoveryHost.providerCircuit, null, "the elapsed circuit must unlatch before the recovery lease");
+  assert.equal(recoveryHost.providerRecoveryProbe, true);
+  await recoveryHost.tick();
+  assert.deepEqual(recoveryLeaseSlots, [0], "no additional lease may start while the recovery probe is active");
+
+  const failedProbeCodes = [];
+  const failedProbeHost = new GoldflowDesktopHost({ config, browser, log: () => {} });
+  failedProbeHost.providerRecoveryProbe = true;
+  failedProbeHost.persistRuntime = async () => {};
+  failedProbeHost.schedule = () => {};
+  failedProbeHost.client = {
+    async heartbeat() {},
+    async complete() { throw new Error("unexpected completion"); },
+    async fail(_job, _slot, error) { failedProbeCodes.push(error.code); },
+  };
+  await failedProbeHost.runSlot(0, { job: { type: "image", job_id: "failed-recovery-probe" } });
+  assert.deepEqual(failedProbeCodes, ["provider_transient_circuit_open"], "a failed recovery probe must reopen the circuit immediately");
+  assert.equal(failedProbeHost.providerCircuit?.status, "open");
+  assert.ok(failedProbeHost.dispatchCooldownUntil > Date.now());
+
   const chatConfig = assertDesktopConfig(desktopConfig({
     "server-url": "http://127.0.0.1:4317",
     provider: "chatgpt",

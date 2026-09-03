@@ -81,6 +81,7 @@ export class GoldflowDesktopHost {
     this.dispatchCooldownUntil = 0;
     this.consecutiveTransportFailures = 0;
     this.providerCircuit = null;
+    this.providerRecoveryProbe = false;
     this.preparedWorkerSessionPolicies = new Set();
     this.workerPoolPreparation = null;
     this.stopPromise = new Promise((resolve) => { this.resolveStopped = resolve; });
@@ -249,6 +250,17 @@ export class GoldflowDesktopHost {
         nextDelayMs = Math.min(5_000, this.dispatchCooldownUntil - now);
         return;
       }
+      if (this.providerCircuit?.status === "open") {
+        this.providerCircuit = null;
+        this.consecutiveTransportFailures = 0;
+        this.providerRecoveryProbe = true;
+        this.log("Provider cooldown elapsed; allowing one recovery probe.");
+        await this.persistRuntime();
+      }
+      if (this.providerRecoveryProbe && this.activeJobs.size > 0) {
+        nextDelayMs = 1_000;
+        return;
+      }
       if (now < this.nextLeaseAt) {
         nextDelayMs = Math.min(1_000, this.nextLeaseAt - now);
         return;
@@ -305,6 +317,7 @@ export class GoldflowDesktopHost {
       uiContract: lease.ui_contract,
       phase: "leased",
       startedAt: nowIso(),
+      recoveryProbe: this.providerRecoveryProbe,
     };
     this.activeJobs.set(slot, active);
     await this.persistRuntime();
@@ -335,6 +348,7 @@ export class GoldflowDesktopHost {
         this.consecutiveTransportFailures = 0;
         this.providerCircuit = null;
       }
+      this.providerRecoveryProbe = false;
       this.log(`Completed ${lease.job.job_id}.`);
     } catch (caught) {
       const error = normalizeError(caught);
@@ -352,7 +366,7 @@ export class GoldflowDesktopHost {
           opened_at: nowIso(),
         };
       } else if (disposition.kind === "transport"
-        && this.consecutiveTransportFailures >= this.config.transportFailureThreshold) {
+        && (active.recoveryProbe || this.consecutiveTransportFailures >= this.config.transportFailureThreshold)) {
         const originalCode = String(error.code ?? "browser_worker_failure");
         error.code = "provider_transient_circuit_open";
         error.message = `${originalCode}: ${error.message}`;
@@ -367,9 +381,11 @@ export class GoldflowDesktopHost {
         this.dispatchCooldownUntil = Date.now() + this.config.rateLimitCooldownMs;
       } else if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(disposition.kind)) {
         this.dispatchCooldownUntil = Date.now() + this.config.transportCooldownMs;
-      } else if (disposition.kind === "transport" && this.consecutiveTransportFailures >= this.config.transportFailureThreshold) {
+      } else if (disposition.kind === "transport"
+        && (active.recoveryProbe || this.consecutiveTransportFailures >= this.config.transportFailureThreshold)) {
         this.dispatchCooldownUntil = Date.now() + this.config.transportCooldownMs;
       }
+      this.providerRecoveryProbe = false;
       await this.client.fail(lease.job, slot, error).catch((reportError) => {
         this.log(`Could not record failure for ${lease.job.job_id}: ${reportError.message}`, "error");
       });

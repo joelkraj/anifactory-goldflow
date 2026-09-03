@@ -2027,13 +2027,12 @@ export class GoogleFlowBrowser {
           creativeSubmissionStarted,
           attempt,
         })) {
-          if (job.worker_session_policy === PERSISTENT_FLOW_WORKER_POLICY
-            && /clipboard paste did not bind to the visible composer/i.test(String(error.message ?? ""))) {
+          if (job.worker_session_policy === PERSISTENT_FLOW_WORKER_POLICY) {
             const workerSlot = this.assertWorkerSlot(slot);
             await this.replacePersistentWorkerPage(
               workerSlot,
               this.workerPages.get(workerSlot),
-              "the slot-bound editor did not replace its prior prompt text",
+              "the pre-submission transport left the slot-bound editor in an uncertain UI state",
             );
           }
           this.log(`Google Flow image transport failed before submission; retrying once in the dedicated worker project: ${redactBrowserDiagnostic(error.message)}`, "warn");

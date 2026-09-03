@@ -1291,6 +1291,16 @@ async function testPersistentFlowWorkerPool() {
   assert.equal(freshResult.sourceUrl, "blob:actual-result", "Flow must ignore stale pixels even when their media URL changes");
   assert.equal(freshResult.bytes.toString(), "fresh");
 
+  const priorManifestResult = await staleResultBrowser.waitForGeneratedImage(
+    {},
+    new Set(),
+    [],
+    new Map(),
+    new Set(["stale-pixels"]),
+  );
+  assert.equal(priorManifestResult.sourceUrl, "blob:actual-result", "Flow must ignore a prior episode image even when it was never visible in the current project baseline");
+  assert.equal(priorManifestResult.pixelSha256, "fresh-pixels");
+
   let creativeSubmissions = 0;
   let cleanComposerChecks = 0;
   browser.ensureCleanImageComposer = async (page) => { cleanComposerChecks += 1; return page; };

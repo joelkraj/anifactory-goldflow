@@ -459,6 +459,7 @@ export class GoldflowBridge {
             type: "image",
             job_id: `image:${assignment.manifest_id}:${assignment.asset_id}`,
             manifest_id: assignment.manifest_id,
+            manifest_path: manifestPath,
             asset_id: assignment.asset_id,
             asset_kind: assignment.asset_kind,
             lease_token: assignment.lease_token,

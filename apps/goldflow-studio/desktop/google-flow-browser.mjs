@@ -53,6 +53,27 @@ function sha256Bytes(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+async function rasterFilesUnder(root) {
+  const files = [];
+  const queue = [root];
+  while (queue.length) {
+    const current = queue.shift();
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const entry of entries) {
+      const candidate = path.join(current, entry.name);
+      if (entry.isDirectory()) queue.push(candidate);
+      else if (/\.(?:png|jpe?g|webp)$/i.test(entry.name)) files.push(candidate);
+    }
+  }
+  return files;
+}
+
 async function sha256File(filePath) {
   return sha256Bytes(await fs.readFile(filePath));
 }
@@ -285,6 +306,7 @@ export class GoogleFlowBrowser {
     this.clipboardQueue = Promise.resolve();
     this.workerPages = new Map();
     this.workerPagePromises = new Map();
+    this.manifestPixelFingerprintPromises = new Map();
   }
 
   async start() {
@@ -1601,9 +1623,37 @@ export class GoogleFlowBrowser {
     return fingerprints;
   }
 
-  async waitForGeneratedImage(page, baseline, referenceInputs = [], baselineFingerprints = new Map()) {
+  async manifestPixelFingerprints(job) {
+    const manifestPath = String(job?.manifest_path ?? "").trim();
+    if (!manifestPath) return new Set();
+    let pending = this.manifestPixelFingerprintPromises.get(manifestPath);
+    if (!pending) {
+      pending = (async () => {
+        const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+        const roots = [
+          path.join(path.dirname(manifestPath), "attempts"),
+          path.join(manifest.episode_dir, "assets", "images", "references"),
+        ];
+        const files = (await Promise.all(roots.map((root) => rasterFilesUnder(root)))).flat();
+        const fingerprints = new Set();
+        for (const filePath of files) {
+          try {
+            fingerprints.add(sha256Bytes(await normalizedImagePixels(await fs.readFile(filePath))));
+          } catch (error) {
+            this.log(`Could not fingerprint prior Flow raster ${path.basename(filePath)}: ${redactBrowserDiagnostic(error.message)}`, "warn");
+          }
+        }
+        this.log(`Loaded ${fingerprints.size} prior episode image fingerprints for duplicate-safe Flow harvesting.`);
+        return fingerprints;
+      })();
+      this.manifestPixelFingerprintPromises.set(manifestPath, pending);
+    }
+    return pending;
+  }
+
+  async waitForGeneratedImage(page, baseline, referenceInputs = [], baselineFingerprints = new Map(), excludedPixelSha256s = new Set()) {
     const deadline = Date.now() + 30 * 60_000;
-    const baselinePixelSha256s = new Set(baselineFingerprints.values());
+    const baselinePixelSha256s = new Set([...baselineFingerprints.values(), ...excludedPixelSha256s]);
     let nextExistingUrlFingerprintAt = 0;
     while (Date.now() < deadline) {
       await this.blockingAlert(page);
@@ -1620,6 +1670,7 @@ export class GoogleFlowBrowser {
           return {
             sourceUrl: outputCandidate.source_url,
             bytes: candidate.bytes,
+            pixelSha256: candidate.sha256,
             generatedResult: {
               schema: "goldflow_browser_generated_result_v1",
               status: "verified",
@@ -1652,7 +1703,7 @@ export class GoogleFlowBrowser {
             this.log(`Ignored a late Google Flow reference-media echo for slot ${echo.slot ?? "unknown"} (${echo.ref_id ?? "unknown"}; pixel MAE ${echo.mean_absolute_difference.toFixed(4)}).`, "warn");
             continue;
           }
-          return { sourceUrl, bytes: candidate.bytes };
+          return { sourceUrl, bytes: candidate.bytes, pixelSha256: candidate.sha256 };
         } catch (error) {
           this.log(`Google Flow fresh-image candidate was not downloadable yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
         }
@@ -1678,7 +1729,7 @@ export class GoogleFlowBrowser {
               continue;
             }
             this.log("Detected a completed Google Flow image whose existing media URL was reused.", "info");
-            return { sourceUrl, bytes: candidate.bytes };
+            return { sourceUrl, bytes: candidate.bytes, pixelSha256: candidate.sha256 };
           } catch (error) {
             this.log(`Google Flow existing-image candidate could not be fingerprinted yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
           }
@@ -2020,12 +2071,14 @@ export class GoogleFlowBrowser {
         const { referenceInputs, boundReferences } = await this.attachReferences(page, job, client, onPhase);
         const baseline = new Set(await this.waitForVisibleImagesToSettle(page));
         const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
+        const manifestFingerprints = await this.manifestPixelFingerprints(job);
         const { create, referenceBinding } = await this.recordReferenceBindingEvidence(page, job, prompt, boundReferences);
         await onPhase("submitting");
         creativeSubmissionStarted = true;
         await create.click();
         await onPhase("submitted");
-        const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints);
+        const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints, manifestFingerprints);
+        if (generated.pixelSha256) manifestFingerprints.add(generated.pixelSha256);
         await onPhase("result_ready");
         const downloadPath = await this.saveGeneratedImage(page, job, generated.sourceUrl, generated.bytes);
         return {

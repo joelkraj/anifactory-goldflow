@@ -272,6 +272,16 @@ The recovered image was then imported through the guarded manual-import route wi
 
 At 21:08 UTC, a separate Gemini slot was observed waiting on the visible terminal response "I'm having a hard time fulfilling your request. Can I help you with something else instead?" No generated image existed. The detector now recognizes that refusal and "I seem to be encountering an error" as terminal generation errors, not quota evidence or proven policy violations. Regression fixtures cover both. An equivalent filtered-status wrapper may be applied to the live host to release this waiter without restarting other active jobs; failed IDs still require manual triage before any later resubmission.
 
+### Completed 30-second Gemini recovery lane
+
+The 74-item recovery manifest `codex-work-ffe9a4f8ff212df2b356d856` drained without restarting the host: 73 collected outputs, one terminal generation failure, no remaining leases or pending items. Successful leases ran from 20:57:28.960 to 21:34:52.925 UTC, 37.40 minutes: **117.1 collected outputs/hour**, with lease-to-completion p50 **21.37 seconds**, p90 **71.51 seconds**, and maximum **99.17 seconds**. The failed waiter is excluded from those success-latency percentiles but included in elapsed throughput. These are collection metrics, not final QA acceptance or future quota guarantees.
+
+The single failure `ep_01-w012654-w012670` was manually reviewed as a generic terminal error without a raster or explicit quota/policy evidence. Its one exact-ID repair completed at 21:35:56 UTC. All 798 scene images were then materialized; focal analysis passed immediately afterward. Nine previously inspected gallery-reference captures remain explicitly critical-rejected for official QA and replacement, not accepted scene truth.
+
+At a global 30-second admission stagger, three slots are already sufficient for most measured completions; faster admissions, not more idle tabs, are the likely next experimental variable. This is an inference from this soak, not approval to lower the current production delay. Test one variable at a time with collected unique images/hour, actual critical acceptance, error rate, and circuit count. Preserve the working lane during the current finish.
+
+Thumbnail benchmark hygiene also caught two English-titled videos whose fetched artwork says HINDI. Replaced them before evaluation. The shelf now uses five own-channel winners and three niche comparators, exact verified titles, and uniformly hidden age/view/runtime/channel metadata. Synthetic scores remain preference diagnostics, never CTR predictions.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

@@ -268,6 +268,10 @@ The detector now requires whole-word quota phrases and reads visible provider te
 
 Only this proven local false cooldown may be cleared when restarting patched code after all jobs have drained. Flow's separate explicit usage-limit evidence remains authoritative; leave that provider stopped.
 
+The recovered image was then imported through the guarded manual-import route with `browser_provider: google-gemini`, an exact original prompt/reference receipt and a separately labeled manual-collection receipt. The original failed lease/deadletter was not rewritten. This restored one cut with zero new creative requests.
+
+At 21:08 UTC, a separate Gemini slot was observed waiting on the visible terminal response "I'm having a hard time fulfilling your request. Can I help you with something else instead?" No generated image existed. The detector now recognizes that refusal and "I seem to be encountering an error" as terminal generation errors, not quota evidence or proven policy violations. Regression fixtures cover both. An equivalent filtered-status wrapper may be applied to the live host to release this waiter without restarting other active jobs; failed IDs still require manual triage before any later resubmission.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

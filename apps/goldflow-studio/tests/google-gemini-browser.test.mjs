@@ -559,6 +559,8 @@ async function excludesPromptsAndPreviousTurnsFromProviderErrors() {
   assert.equal(geminiBlockingCode("Rate limit reached. Try again later."), "rate_limited");
   assert.equal(geminiBlockingCode("You reached your daily limit"), "usage_limited");
   assert.equal(geminiBlockingCode("This violates our policies"), "content_policy_rejected");
+  assert.equal(geminiBlockingCode("I'm having a hard time fulfilling your request. Can I help you with something else instead?"), "google_gemini_generation_error");
+  assert.equal(geminiBlockingCode("I seem to be encountering an error. Can I try something else for you?"), "google_gemini_generation_error");
 }
 
 await excludesPromptsAndPreviousTurnsFromProviderErrors();

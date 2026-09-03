@@ -223,6 +223,7 @@ export function geminiBlockingCode(text) {
   if (/\b(?:too many requests|rate limit|try again later)\b/i.test(value)) return "rate_limited";
   if (/can.t help with that|violat(?:e|es|ed|ion).*polic/i.test(value)) return "content_policy_rejected";
   if (/something went wrong|failed to generate|couldn.t generate|encountered an error doing what you asked/i.test(value)) return "google_gemini_generation_error";
+  if (/\b(?:having a hard time fulfilling your request|seem to be encountering an error)\b/i.test(value)) return "google_gemini_generation_error";
   return null;
 }
 

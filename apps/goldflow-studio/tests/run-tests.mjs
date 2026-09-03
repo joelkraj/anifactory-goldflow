@@ -1093,7 +1093,7 @@ async function testDesktopHostContract() {
   assert.equal(desktopConfig({ ...flowConfig, provider: "google-flow", concurrency: "21" }, {}).concurrency, GOOGLE_FLOW_BROWSER_CONCURRENCY_CEILING);
   assert.equal(desktopConfig({ ...config, provider: "chatgpt", concurrency: "20" }, {}).concurrency, 3);
   assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "1" }, {}).submissionStaggerMs, 5_000);
-  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 8_000);
+  assert.equal(desktopConfig({ ...flowConfig, "submission-stagger-ms": "999999" }, {}).submissionStaggerMs, 60_000);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, types: ["llm", "image"] }), /image or video work/);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, concurrency: 2, flowProjectUrl: "https://labs.google/fx/tools/flow/project/example" }), /dedicated project per persistent worker slot/);
   assert.equal(flowBlockingCode("Requesting generations too quickly. Try again later."), "rate_limited");

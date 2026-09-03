@@ -254,6 +254,12 @@ The one-cut live probe on commit `e11791b` passed: `ep_01-w007986-w008001` compl
 
 The first three cuts after restoring the three-slot ceiling completed without transport failures: `ep_01-w008130-w008139` (two refs, 19.2 seconds), `ep_01-w008934-w008953` (four refs, 48.0 seconds), and `ep_01-w009001-w009015` (three refs, 18.6 seconds). All three were visually inspected and match their scene intent. Minor composition/count differences remain advisory. These short latencies do not prove three simultaneous generations: the 30-second admission stagger required only one or two occupied slots during this sample. The untouched queue remains running, with prior exact-ID failures preserved for later repair.
 
+### Post-fix Gemini soak
+
+From 19:54:37 to 20:21:04 UTC the unchanged three-slot/30-second lane collected 49 new outputs and recorded two terminal cut failures, over 26.44 minutes (111.2 collected outputs per hour). The failures were one disappearing Upload & tools control and one Gemini generation error; the next cut completed after the existing pre-submit stale-composer reset. No host restart, automatic cut resubmission, or pacing change was used during this interval. All three slots were occupied briefly when individual generations exceeded a minute. These counts measure successfully collected, hash-bound outputs, not final per-cut image-QA approval or a quota guarantee.
+
+The staged manifest stood at 669 completions, 80 deadletters, and 44 untouched queued/active items. The 78 older failures were individually reviewed and saved in `manual_blocker_triage_image_generation_ep_01_20260903_recovery.json`; the two new failures must be added after the live queue drains. Retain the separate nine confirmed wrong-scene hashes for official critical QA and scoped replacement.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

@@ -61,11 +61,9 @@ function bearerToken(request) {
 
 export function providerFailurePausesDispatch(code) {
   return [
-    "usage_limited",
     "account_mismatch",
     "ui_contract_mismatch",
     "auth_required",
-    "provider_transient_circuit_open",
   ]
     .includes(String(code ?? ""));
 }

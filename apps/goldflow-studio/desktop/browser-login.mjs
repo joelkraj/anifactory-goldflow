@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const CHATGPT_LOGIN_URL = "https://chatgpt.com/?temporary-chat=true";
-const GOOGLE_FLOW_LOGIN_URL = "https://labs.google/fx/tools/flow";
+const GOOGLE_FLOW_LOGIN_URL = "https://flow.google.com/";
 const GOOGLE_GEMINI_LOGIN_URL = "https://gemini.google.com/images";
 
 function providerName(provider) {

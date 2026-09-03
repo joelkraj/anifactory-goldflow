@@ -7,8 +7,9 @@ import { chromium } from "playwright-core";
 import { findReferenceEcho, normalizedImagePixels } from "../lib/image-pixel-contract.mjs";
 import { clearLoginMarker, markLoginVerified } from "./browser-login.mjs";
 
-const GOOGLE_FLOW_URL = "https://labs.google/fx/tools/flow";
-const PROMPT_SELECTOR = '[data-slate-editor="true"][role="textbox"]';
+const GOOGLE_FLOW_URL = "https://flow.google.com/";
+const FLOW_ORIGINS = new Set(["https://flow.google.com", "https://labs.google"]);
+const PROMPT_SELECTOR = '.ProseMirror[contenteditable="true"], [data-slate-editor="true"][role="textbox"]';
 const SIGNED_OUT_SELECTOR = 'a:has-text("Sign in"), button:has-text("Sign in")';
 const REFERENCE_BINDING_SCHEMA = "goldflow_google_flow_reference_binding_v1";
 const REFERENCE_BINDING_RECEIPT_SCHEMA = "goldflow_google_flow_reference_binding_receipt_v1";
@@ -223,8 +224,8 @@ export function nearestFlowVideoDuration(requested, available = [4, 6, 8]) {
 export function isFlowVideoDetailUrl(value) {
   try {
     const url = new URL(String(value ?? ""));
-    return url.origin === "https://labs.google"
-      && /^\/fx\/tools\/flow\/project\/[^/]+\/edit\/[^/]+\/?$/.test(url.pathname);
+    return FLOW_ORIGINS.has(url.origin)
+      && /^(?:\/fx\/tools\/flow)?\/project\/[^/]+\/edit\/[^/]+\/?$/.test(url.pathname);
   } catch {
     return false;
   }
@@ -233,8 +234,8 @@ export function isFlowVideoDetailUrl(value) {
 export function isFlowProjectWorkspaceUrl(value) {
   try {
     const url = new URL(String(value ?? ""));
-    return url.origin === "https://labs.google"
-      && /^\/fx\/tools\/flow\/project\/[^/]+(?:\/|$)/.test(url.pathname);
+    return FLOW_ORIGINS.has(url.origin)
+      && /^(?:\/fx\/tools\/flow)?\/project\/[^/]+(?:\/|$)/.test(url.pathname);
   } catch {
     return false;
   }
@@ -243,7 +244,7 @@ export function isFlowProjectWorkspaceUrl(value) {
 export function isSameFlowProjectWorkspaceUrl(currentValue, expectedValue) {
   try {
     const projectId = (value) => new URL(String(value ?? "")).pathname
-      .match(/^\/fx\/tools\/flow\/project\/([^/]+)/)?.[1] ?? null;
+      .match(/^(?:\/fx\/tools\/flow)?\/project\/([^/]+)/)?.[1] ?? null;
     const currentProjectId = projectId(currentValue);
     return Boolean(currentProjectId) && currentProjectId === projectId(expectedValue);
   } catch {
@@ -300,7 +301,9 @@ export class GoogleFlowBrowser {
       ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain"],
       args: ["--start-maximized", "--disable-features=Translate"],
     });
-    await this.context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://labs.google" });
+    await Promise.all([...FLOW_ORIGINS].map((origin) => (
+      this.context.grantPermissions(["clipboard-read", "clipboard-write"], { origin }).catch(() => {})
+    )));
     this.loginPage = this.context.pages()[0] ?? await this.context.newPage();
     await this.loginPage.goto(this.flowProjectUrl ?? GOOGLE_FLOW_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
     return this;
@@ -382,7 +385,10 @@ export class GoogleFlowBrowser {
   async prepareWorkerSlots() {
     await Promise.all(Array.from(
       { length: this.concurrency },
-      (_, slot) => this.ensurePersistentWorkerPage(slot),
+      async (_, slot) => {
+        if (slot > 0) await sleep(slot * 1_200);
+        return this.ensurePersistentWorkerPage(slot);
+      },
     ));
     this.log(`Google Flow persistent worker pool ready: ${this.concurrency} tabs/projects.`);
     return this.workerPoolState();

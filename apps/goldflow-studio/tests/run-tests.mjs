@@ -102,7 +102,9 @@ assert.equal(flowPlanVerificationEvidence("Agent Nano Banana 2 16:9 x1", "ULTRA"
 assert.equal(nearestFlowVideoDuration(5, [4, 6, 8]), 6);
 assert.equal(nearestFlowVideoDuration(9, [4, 6, 8]), 8);
 assert.equal(isFlowProjectWorkspaceUrl("https://labs.google/fx/tools/flow/project/worker-1"), true);
+assert.equal(isFlowProjectWorkspaceUrl("https://flow.google.com/project/worker-1"), true);
 assert.equal(isFlowProjectWorkspaceUrl("https://labs.google/fx/tools/flow"), false);
+assert.equal(isFlowProjectWorkspaceUrl("https://flow.google.com/"), false);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorCode: "rate_limited", attempt: 1 }), false);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "TimeoutError", errorMessage: "locator.click: Timeout 30000ms exceeded; element was detached from the DOM", attempt: 1 }), true);
 assert.equal(shouldRetryFlowPreSubmissionTransport({ errorName: "TimeoutError", errorMessage: "locator.click: Timeout 30000ms exceeded; element was detached from the DOM", creativeSubmissionStarted: true, attempt: 1 }), false);

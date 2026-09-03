@@ -351,7 +351,10 @@ export class GoogleGeminiBrowser {
   }
 
   async prepareWorkerSlots() {
-    await Promise.all(Array.from({ length: this.concurrency }, (_, slot) => this.ensurePersistentWorkerPage(slot)));
+    await Promise.all(Array.from({ length: this.concurrency }, async (_, slot) => {
+      if (slot > 0) await sleep(slot * 1_200);
+      return this.ensurePersistentWorkerPage(slot);
+    }));
     this.log(`Google Gemini persistent worker pool ready: ${this.concurrency} tabs.`);
     return this.workerPoolState();
   }

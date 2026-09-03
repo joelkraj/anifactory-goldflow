@@ -252,6 +252,8 @@ The browser now waits for the exact attachment count and no visible upload spinn
 
 The one-cut live probe on commit `e11791b` passed: `ep_01-w007986-w008001` completed at 19:52:52 UTC, 24.1 seconds after its lease. Visual inspection confirmed the diligence folders, Joey's ringless hand/navy cuff, office setting, and requested system label. Two ordered references were retained. All 16 Studio suites and the Gemini-specific browser suite passed. This is recovery evidence, not a sustained throughput measurement. Restore three persistent Gemini slots at the existing 30-second lease stagger; leave the explicitly quota-limited Flow lane stopped.
 
+The first three cuts after restoring the three-slot ceiling completed without transport failures: `ep_01-w008130-w008139` (two refs, 19.2 seconds), `ep_01-w008934-w008953` (four refs, 48.0 seconds), and `ep_01-w009001-w009015` (three refs, 18.6 seconds). All three were visually inspected and match their scene intent. Minor composition/count differences remain advisory. These short latencies do not prove three simultaneous generations: the 30-second admission stagger required only one or two occupied slots during this sample. The untouched queue remains running, with prior exact-ID failures preserved for later repair.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

@@ -883,6 +883,13 @@ export class GoogleFlowBrowser {
   }
 
   async uploadedAssetControl(page, filename) {
+    const optionRows = page.getByRole("option");
+    for (let index = 0; index < await optionRows.count(); index += 1) {
+      const candidate = optionRows.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const exactFilename = await candidate.locator(".asset-title").first().innerText().catch(() => "");
+      if (exactFilename.trim() === filename) return candidate;
+    }
     const selectors = [
       page.getByText(filename, { exact: true }),
       page.locator(`[alt=${JSON.stringify(filename)}], [aria-label=${JSON.stringify(filename)}], [title=${JSON.stringify(filename)}]`),

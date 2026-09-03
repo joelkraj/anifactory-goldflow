@@ -260,6 +260,14 @@ From 19:54:37 to 20:21:04 UTC the unchanged three-slot/30-second lane collected 
 
 The staged manifest stood at 669 completions, 80 deadletters, and 44 untouched queued/active items. The 78 older failures were individually reviewed and saved in `manual_blocker_triage_image_generation_ep_01_20260903_recovery.json`; the two new failures must be added after the live queue drains. Retain the separate nine confirmed wrong-scene hashes for official critical QA and scoped replacement.
 
+### False provider cooldown from prompt text
+
+The original queue drained at 20:42 UTC with 712 completions and 81 exact failures (five other cuts were already materialized outside that queue). A reviewed 81-ID Gemini-only recovery collected six more outputs before a local false rate-limit classification stopped it at 20:46 UTC. The detector searched the entire page, including our prompt, and `/rate limit/` matched the substring in "separate limitation notices". This was not evidence of a Gemini limit. The 74 unsubmitted repair items remain eligible without repeating the six completions.
+
+The detector now requires whole-word quota phrases and reads visible provider text excluding user prompts, editable composers, hidden content, and previous model responses. Regression tests preserve real rate/quota errors and cover the exact false-positive wording. All 16 Studio suites and the Gemini browser suite passed. The stopped cut's image actually completed in its existing conversation; it was retrieved without another creative request, with original prompt, ordered reference map, response ID, source URL, and raster saved under `review_samples/gemini_upload_retention_20260903/false-cooldown-retrieved-result.json`. Retrieval is not yet an accepted production import.
+
+Only this proven local false cooldown may be cleared when restarting patched code after all jobs have drained. Flow's separate explicit usage-limit evidence remains authoritative; leave that provider stopped.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

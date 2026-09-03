@@ -219,8 +219,8 @@ export async function verifyGeminiTextAttachmentRetained(page, attachment, {
 
 export function geminiBlockingCode(text) {
   const value = String(text ?? "");
-  if (/daily limit|limit resets|generation limit/i.test(value)) return "usage_limited";
-  if (/too many requests|rate limit|try again later/i.test(value)) return "rate_limited";
+  if (/\b(?:daily limit|limit resets|generation limit)\b/i.test(value)) return "usage_limited";
+  if (/\b(?:too many requests|rate limit|try again later)\b/i.test(value)) return "rate_limited";
   if (/can.t help with that|violat(?:e|es|ed|ion).*polic/i.test(value)) return "content_policy_rejected";
   if (/something went wrong|failed to generate|couldn.t generate|encountered an error doing what you asked/i.test(value)) return "google_gemini_generation_error";
   return null;
@@ -493,6 +493,7 @@ export class GoogleGeminiBrowser {
       const textModel = await this.selectTextModel(page);
       const composer = await this.composer(page);
       const baselineCount = await (await this.visibleModelResponses(page)).count();
+      const priorResponseIds = new Set(await this.responseMessageIds(page));
       await onPhase("entering_prompt");
       const prompt = String(job.prompt ?? "");
       const promptPreparation = await this.prepareLlmPromptSubmission(page, composer, prompt, onPhase);
@@ -508,7 +509,7 @@ export class GoogleGeminiBrowser {
       let previous = "";
       let stableSince = 0;
       while (Date.now() < deadline) {
-        const body = await page.locator("body").innerText();
+        const body = await this.providerStatusText(page, priorResponseIds);
         const blockingCode = geminiBlockingCode(body);
         if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
         const responses = await this.visibleModelResponses(page);
@@ -821,6 +822,29 @@ export class GoogleGeminiBrowser {
     return page.locator('model-response message-content[id]').evaluateAll((nodes) => nodes.map((node) => node.id).filter(Boolean));
   }
 
+  async providerStatusText(page, priorResponseIds = new Set()) {
+    return page.locator("body").evaluate((root, previousIds) => {
+      const prior = new Set(previousIds);
+      const document = root.ownerDocument;
+      const walker = document.createTreeWalker(root, 4);
+      const lines = [];
+      let node;
+      while ((node = walker.nextNode())) {
+        const parent = node.parentElement;
+        if (!parent || !node.textContent.trim()) continue;
+        // User prompts and old turns are content, never current provider status.
+        if (parent.closest('user-query, [data-message-author-role="user"], [contenteditable="true"], textarea, script, style, [hidden], [aria-hidden="true"]')) continue;
+        const response = parent.closest("model-response");
+        if (response && prior.has(response.querySelector("message-content[id]")?.id)) continue;
+        if (!parent.getClientRects().length) continue;
+        const style = document.defaultView.getComputedStyle(parent);
+        if (style.visibility === "hidden" || style.visibility === "collapse") continue;
+        lines.push(node.textContent.trim());
+      }
+      return lines.join("\n");
+    }, [...priorResponseIds]);
+  }
+
   async generatedResponseImageUrls(page, priorResponseIds = new Set()) {
     const response = page.locator("model-response").last();
     if (!await response.count()) return [];
@@ -889,7 +913,7 @@ export class GoogleGeminiBrowser {
     const deadline = Date.now() + 15 * 60_000;
     const baselinePixelSha256s = new Set(baselineFingerprints.values());
     while (Date.now() < deadline) {
-      const body = await page.locator("body").innerText();
+      const body = await this.providerStatusText(page, priorResponseIds);
       const blockingCode = geminiBlockingCode(body);
       if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
       if (Date.now() - startedAt > 60_000 && /^https:\/\/gemini\.google\.com\/app\/?(?:[?#].*)?$/.test(page.url())

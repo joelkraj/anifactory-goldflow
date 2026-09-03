@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import {
   createGeminiLlmPromptDelivery,
   GEMINI_INLINE_PROMPT_MAX_CHARS,
+  geminiBlockingCode,
   GoogleGeminiBrowser,
   isGeminiImageSurfaceUrl,
   normalizeGeminiPromptText,
@@ -391,6 +392,7 @@ async function resetsOnlyAContaminatedGeminiComposer() {
 
 async function ignoresStaleGeminiPixelsAfterABlobUrlChange() {
   const browser = new GoogleGeminiBrowser();
+  browser.providerStatusText = async () => "Generating";
   browser.generatedResponseImageUrls = async () => ["blob:stale-renamed", "blob:actual-result"];
   browser.visibleImageUrls = async () => [];
   browser.imagePixelFingerprint = async (_page, sourceUrl) => sourceUrl === "blob:stale-renamed"
@@ -408,6 +410,7 @@ async function ignoresStaleGeminiPixelsAfterABlobUrlChange() {
 
 async function acceptsOnlyNewModelResponseRasters() {
   const browser = new GoogleGeminiBrowser();
+  browser.providerStatusText = async () => "Generating";
   let polls = 0;
   browser.generatedResponseImageUrls = async (_page, priorIds) => {
     assert.equal(priorIds.has("message-content-id-old"), true);
@@ -514,6 +517,51 @@ async function waitsForUploadSpinnerEvenWithVisiblePreview() {
   assert.equal((await browser.imageUploadState(page, 2)).ready, false, "Missing attachments must still block");
 }
 
+async function excludesPromptsAndPreviousTurnsFromProviderErrors() {
+  const browser = new GoogleGeminiBrowser();
+  const fixtures = [
+    { text: "Rate limit reached", excluded: true },
+    { text: "Try again later", excluded: true },
+    { text: "Daily limit", responseId: "old" },
+    { text: "Failed to generate", hidden: true },
+    { text: "Something went wrong", visibility: "hidden" },
+    { text: "Generating image", responseId: "new" },
+    { text: "Too many requests. Try again later." },
+  ];
+  const nodes = fixtures.map((fixture) => ({ textContent: fixture.text, parentElement: {
+    closest(selector) {
+      if (selector === "model-response") return fixture.responseId
+        ? { querySelector() { return { id: fixture.responseId }; } } : null;
+      assert.match(selector, /user-query/);
+      assert.match(selector, /contenteditable/);
+      return fixture.excluded ? {} : null;
+    },
+    getClientRects() { return fixture.hidden ? [] : [{}]; },
+    visibility: fixture.visibility ?? "visible",
+  } }));
+  const page = { locator(selector) {
+    assert.equal(selector, "body");
+    return { async evaluate(callback, ids) {
+      let index = 0;
+      const root = { ownerDocument: {
+        createTreeWalker() { return { nextNode() { return nodes[index++] ?? null; } }; },
+        defaultView: { getComputedStyle(parent) { return { visibility: parent.visibility }; } },
+      } };
+      return callback(root, ids);
+    } };
+  } };
+  const status = await browser.providerStatusText(page, new Set(["old"]));
+  assert.equal(status, "Generating image\nToo many requests. Try again later.");
+  assert.equal(geminiBlockingCode(status), "rate_limited");
+  fixtures.pop(); nodes.pop();
+  assert.equal(geminiBlockingCode(await browser.providerStatusText(page, new Set(["old"]))), null);
+  assert.equal(geminiBlockingCode("two separate limitation notices aligned at right"), null);
+  assert.equal(geminiBlockingCode("Rate limit reached. Try again later."), "rate_limited");
+  assert.equal(geminiBlockingCode("You reached your daily limit"), "usage_limited");
+  assert.equal(geminiBlockingCode("This violates our policies"), "content_policy_rejected");
+}
+
+await excludesPromptsAndPreviousTurnsFromProviderErrors();
 await acceptsEditorNormalizationWithoutWeakeningContentBinding();
 await acceptsCompleteLongContenteditablePrompt();
 await stagesCompleteLongPromptAsAuditedUtf8Attachment();

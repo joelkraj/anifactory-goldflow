@@ -203,6 +203,18 @@ Next-run improvement:
 
 Success measure: every package communicates betrayal plus the status/power payoff at mobile size without merely repeating the title.
 
+### Measured continuous-dispatch pacing on the active Google account
+
+The September 3 production queue was used as a live throughput soak without reducing its 798-cut visual plan. Results are account-specific and should be revalidated after material provider changes.
+
+- `45 seconds x 3 persistent Flow projects` passed 10 consecutive unique completions without an unusual-activity breaker. Observed accepted throughput was approximately 72-80 images per hour.
+- `30 seconds x 3 persistent Flow projects` passed 15 consecutive unique completions without a breaker or creative-generation failure. Observed accepted throughput was approximately 105-120 images per hour.
+- `20 seconds x 3 persistent Flow projects` opened Flow's unusual-activity circuit on its first completed submission after the preceding soak. A second request that was already in flight completed successfully, which points to submission-rate/account protection rather than prompt quality.
+- The 20-second failure requires the full 15-minute account recovery before another clean comparison. Gemini is not a valid no-wait overflow on the same login because earlier probes showed strongly coupled account throttling.
+- Additional tabs cannot raise the 30-second theoretical submission ceiling of 120 per hour. A five-tab test is useful only to determine whether long-tail generation latency leaves three slots saturated; it must not be interpreted as five independent provider lanes.
+
+Current evidence-backed default: three persistent Flow projects with a global 30-second continuous submission interval, a 15-minute usage-limit circuit, and one recovery probe. Test five tabs at the same 30-second interval only after recovery and compare accepted throughput, active-slot occupancy, stale-output rate, and circuit incidence against the three-tab baseline.
+
 ## Proposed Next-Run Operating Sequence
 
 1. Preflight the episode and both provider profiles before script lock; verify authentication, model surface, three Gemini chats, five Flow projects, storage, and one harmless smoke generation.

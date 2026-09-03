@@ -86,8 +86,18 @@ export function desktopConfig(flags = {}, environment = process.env) {
       60 * 60_000,
     ),
     transportFailureThreshold: 3,
-    transportCooldownMs: 5 * 60_000,
-    rateLimitCooldownMs: 10 * 60_000,
+    transportCooldownMs: boundedNumber(
+      flags["transport-cooldown-ms"] ?? environment.GOLDFLOW_BROWSER_TRANSPORT_COOLDOWN_MS,
+      5 * 60_000,
+      60_000,
+      60 * 60_000,
+    ),
+    rateLimitCooldownMs: boundedNumber(
+      flags["rate-limit-cooldown-ms"] ?? environment.GOLDFLOW_BROWSER_RATE_LIMIT_COOLDOWN_MS,
+      10 * 60_000,
+      60_000,
+      60 * 60_000,
+    ),
     types: parseWorkerTypes(flags.types ?? environment.GOLDFLOW_DESKTOP_TYPES ?? (
       browserProvider === "chatgpt" ? "llm,image"
         : browserProvider === "google-gemini" ? "llm,image"

@@ -1077,6 +1077,8 @@ async function testDesktopHostContract() {
   assert.equal(config.submissionStaggerMs, 6_000);
   assert.equal(config.submissionBurstSize, 0);
   assert.equal(config.submissionBurstCooldownMs, 5 * 60_000);
+  assert.equal(config.transportCooldownMs, 5 * 60_000);
+  assert.equal(config.rateLimitCooldownMs, 10 * 60_000);
   assert.equal(config.prewarmPersistentWorkerPool, false);
   assert.equal(desktopConfig({ ...flags, "prewarm-persistent": "true" }, {}).prewarmPersistentWorkerPool, true);
   assert.deepEqual(config.types, ["llm", "image"]);
@@ -1099,6 +1101,8 @@ async function testDesktopHostContract() {
   assert.equal(desktopConfig({ ...flowConfig, "submission-burst-size": "9" }, {}).submissionBurstSize, 9);
   assert.equal(desktopConfig({ ...flowConfig, "submission-burst-size": "999" }, {}).submissionBurstSize, 100);
   assert.equal(desktopConfig({ ...flowConfig, "submission-burst-cooldown-ms": "300000" }, {}).submissionBurstCooldownMs, 300_000);
+  assert.equal(desktopConfig({ ...flowConfig, "transport-cooldown-ms": "900000" }, {}).transportCooldownMs, 900_000);
+  assert.equal(desktopConfig({ ...flowConfig, "rate-limit-cooldown-ms": "1200000" }, {}).rateLimitCooldownMs, 1_200_000);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, types: ["llm", "image"] }), /image or video work/);
   assert.throws(() => assertDesktopConfig({ ...flowConfig, concurrency: 2, flowProjectUrl: "https://labs.google/fx/tools/flow/project/example" }), /dedicated project per persistent worker slot/);
   assert.equal(flowBlockingCode("Requesting generations too quickly. Try again later."), "rate_limited");

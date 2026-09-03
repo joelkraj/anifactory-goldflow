@@ -543,6 +543,10 @@ async function repairEvidenceRecord(value, requestedAssetIds) {
     "reference_image_qa_blockers",
     "duplicate_output_hashes",
     "provider_deadletters_and_duplicate_output_hashes",
+    "approved_manual_prompt_repairs",
+    "provider_deadletters_and_approved_manual_prompt_repairs",
+    "approved_manual_prompt_repairs_and_duplicate_output_hashes",
+    "provider_deadletters_and_approved_manual_prompt_repairs_and_duplicate_output_hashes",
     "operator_provider_migration_from_modelslab",
     "manual_provider_auth_unsubmitted_assets",
   ]).has(kind)) {

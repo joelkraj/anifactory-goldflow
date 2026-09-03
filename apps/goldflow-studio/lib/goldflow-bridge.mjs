@@ -60,6 +60,16 @@ const PERSISTENT_BROWSER_WORKER_SESSION_POLICIES = new Set([
   "persistent_project_per_worker_slot_v1",
   "persistent_tab_per_worker_slot_v1",
 ]);
+const GENERATED_RESULT_SCHEMA = "goldflow_browser_generated_result_v1";
+
+function hasVerifiedGeneratedResult(uiContract, browserProvider, sourceUrl) {
+  const result = uiContract?.generated_result;
+  return result?.schema === GENERATED_RESULT_SCHEMA
+    && result.status === "verified"
+    && result.browser_provider === browserProvider
+    && typeof result.source_url === "string"
+    && result.source_url === sourceUrl;
+}
 
 function assertPersistentWorkerSessionReceipt(assignment, uiContract) {
   const expectedPolicy = String(assignment?.worker_session_policy ?? "");
@@ -521,7 +531,8 @@ export class GoldflowBridge {
       ref_id: reference.ref_id,
       path: reference.path,
     })));
-    if (referenceEcho) {
+    const generatedResultVerified = hasVerifiedGeneratedResult(uiContract, receiptProvider, sourceUrl);
+    if (referenceEcho && !generatedResultVerified) {
       const rejection = {
         schema: "goldflow_provider_reference_echo_rejection_v1",
         status: "rejected",
@@ -540,6 +551,19 @@ export class GoldflowBridge {
       error.code = "provider_reference_echo";
       error.statusCode = 422;
       throw error;
+    }
+    if (referenceEcho) {
+      await writeJsonAtomic(path.join(assignment.attempt_dir, "provider_reference_similarity_acceptance.json"), {
+        schema: "goldflow_provider_reference_similarity_acceptance_v1",
+        status: "accepted_generated_result",
+        browser_provider: receiptProvider,
+        manifest_id: manifestId,
+        asset_id: assetId,
+        prompt_sha256: assignment.item.prompt_sha256,
+        matched_reference: referenceEcho,
+        generated_result: uiContract.generated_result,
+        accepted_at: nowIso(),
+      });
     }
     await sharp(sourcePath, { failOn: "error" }).png().toFile(assignment.expected_output_path);
     const outputSha = await sha256File(assignment.expected_output_path);

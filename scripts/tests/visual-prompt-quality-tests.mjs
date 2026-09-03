@@ -165,7 +165,7 @@ assert.throws(() => transitionRepairScopeForTests({
   requestedBoundaryIds: ["boundary_3"],
 }), /not failed in the blocked artifact.*Passed boundaries are immutable/);
 
-assert.equal(VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES, 48_000);
+assert.equal(VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES, 52_000);
 assert.equal(VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES, 224 * 1024);
 assert.deepEqual(
   splitVisualReferenceChunkForTests([{
@@ -178,7 +178,7 @@ assert.equal(assertVisualReferencePromptBytesForTests("界".repeat(1_000), { max
 assert.throws(() => assertVisualReferencePromptBytesForTests("界".repeat(30_000), {
   label: "visual-reference exact chunk fixture",
   maxBytes: 1_000_000,
-}), /above safe ceiling 48000/);
+}), /above safe ceiling 52000/);
 
 const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-visual-prompt-quality-"));
 try {

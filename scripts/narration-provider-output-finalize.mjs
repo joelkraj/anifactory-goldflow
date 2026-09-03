@@ -85,6 +85,82 @@ function boolFlag(value, fallback = false) {
   return /^(?:1|true|yes|on)$/iu.test(String(value));
 }
 
+function assertOperatorNarrationWaiver({
+  requested,
+  workflowBypass,
+  reason,
+  label,
+}) {
+  if (!requested) return;
+  if (!workflowBypass) {
+    throw new Error(`${label} requires --workflow-bypass true.`);
+  }
+  if (!String(reason ?? "").trim()) {
+    throw new Error(`${label} requires --delivery-waiver-reason.`);
+  }
+}
+
+const FULL_STREAM_ASR_ONLY_CODES = new Set([
+  "narration_contiguous_words_missing",
+  "narration_confirmation_alignment_intended_coverage_mismatch",
+  "tts_transcript_isolated_insertion",
+  "tts_transcript_protected_value_mismatch",
+  "tts_transcript_protected_value_missing",
+]);
+
+function asrOnlyDeliveryFinding(finding) {
+  const code = String(finding?.code ?? "");
+  return code.startsWith("narration_confirmed_")
+    || FULL_STREAM_ASR_ONLY_CODES.has(code);
+}
+
+function operatorWaiveAsrDecision(decision, waiver) {
+  const blockers = decision?.blockers ?? [];
+  if (!blockers.length || !blockers.every(asrOnlyDeliveryFinding)) {
+    return decision;
+  }
+  return {
+    ...decision,
+    status: "passed_with_warnings",
+    blockers: [],
+    warnings: [
+      ...(decision?.warnings ?? []),
+      ...blockers.map((finding) => ({
+        ...finding,
+        severity: "warning",
+        review_required: false,
+        automatic_retry_allowed: false,
+        disposition: "operator_accepted_asr_diagnostic_without_resynthesis",
+        operator_waiver_id: waiver.waiver_id,
+      })),
+    ],
+    operator_asr_waiver: waiver,
+  };
+}
+
+function operatorWaiveReviewWarnings(decision, waiver) {
+  const warnings = (decision?.warnings ?? []).map((finding) => (
+    finding?.review_required === true
+      ? {
+          ...finding,
+          review_required: false,
+          automatic_retry_allowed: false,
+          disposition: "operator_accepted_advisory_without_resynthesis",
+          operator_waiver_id: waiver.waiver_id,
+        }
+      : finding
+  ));
+  return {
+    ...decision,
+    status: (decision?.blockers ?? []).length
+      ? "blocked"
+      : warnings.length ? "passed_with_warnings" : "passed",
+    review_required: false,
+    warnings,
+    operator_review_warning_waiver: waiver,
+  };
+}
+
 function sha256(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
@@ -899,6 +975,27 @@ export async function finalizeNarrationProviderOutput(
 ) {
   const flags = parseFlags(argv);
   if (!flags["episode-dir"]) throw new Error("--episode-dir is required.");
+  const workflowBypass = boolFlag(flags["workflow-bypass"]);
+  const acceptAsrDeliveryBlockers = boolFlag(
+    flags["accept-asr-delivery-blockers"],
+  );
+  const acceptReviewWarnings = boolFlag(flags["accept-review-warnings"]);
+  const skipSubjectiveReview = boolFlag(flags["skip-subjective-review"]);
+  const deliveryWaiverReason = String(
+    flags["delivery-waiver-reason"] ?? "",
+  ).trim();
+  for (const [requested, label] of [
+    [acceptAsrDeliveryBlockers, "ASR-only delivery waiver"],
+    [acceptReviewWarnings, "narration review-warning waiver"],
+    [skipSubjectiveReview, "subjective narration-review waiver"],
+  ]) {
+    assertOperatorNarrationWaiver({
+      requested,
+      workflowBypass,
+      reason: deliveryWaiverReason,
+      label,
+    });
+  }
   const episodeDir = path.resolve(flags["episode-dir"]);
   const identityPath = path.join(episodeDir, "run_identity.json");
   const identity = await readJson(identityPath, {});
@@ -947,6 +1044,28 @@ export async function finalizeNarrationProviderOutput(
     throw new Error("Narration quality contract differs from the identity-locked TTS policy.");
   }
   const canonicalPlanSha256 = plan.plan_sha256 ?? planFileSha256;
+  const operatorNarrationWaiver = {
+    schema: "goldflow_operator_narration_qa_waiver_v1",
+    waiver_id: sha256(JSON.stringify({
+      canonical_plan_sha256: canonicalPlanSha256,
+      provider_output_manifest_sha256: manifestFileSha256,
+      reason: deliveryWaiverReason,
+      accept_asr_delivery_blockers: acceptAsrDeliveryBlockers,
+      accept_review_warnings: acceptReviewWarnings,
+      skip_subjective_review: skipSubjectiveReview,
+    })),
+    status: "operator_authorized",
+    reason: deliveryWaiverReason || null,
+    workflow_bypass: workflowBypass,
+    human_listening_performed: false,
+    no_resynthesis_authorized: true,
+    accept_asr_delivery_blockers: acceptAsrDeliveryBlockers,
+    accept_review_warnings: acceptReviewWarnings,
+    skip_subjective_review: skipSubjectiveReview,
+    narration_generation_plan_sha256: canonicalPlanSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    provider_output_manifest_file_sha256: manifestFileSha256,
+  };
   const manifestValidation = validateNarrationProviderOutputManifest(
     manifest,
     units,
@@ -1321,6 +1440,18 @@ export async function finalizeNarrationProviderOutput(
       ...acousticReviewWarnings,
       ...(continuity?.warnings ?? []),
     ]);
+    if (acceptAsrDeliveryBlockers) {
+      decision = operatorWaiveAsrDecision(
+        decision,
+        operatorNarrationWaiver,
+      );
+    }
+    if (acceptReviewWarnings) {
+      decision = operatorWaiveReviewWarnings(
+        decision,
+        operatorNarrationWaiver,
+      );
+    }
     const sampleCount = Number(row.unit_qa?.metrics?.sample_count ?? 0);
     const alignment = conservativeNarrationEdgeAlignmentForTests({
       recognitions: [
@@ -1372,6 +1503,20 @@ export async function finalizeNarrationProviderOutput(
       confirmation_transcript_qa: confirmationQa,
       delivery_row: structuredClone(deliveryRow),
     };
+  }
+
+  const originalDeliveryBlockers = [...blockers];
+  if (acceptAsrDeliveryBlockers && blockers.length) {
+    const nonAsrBlockers = blockers.filter(
+      (finding) => !asrOnlyDeliveryFinding(finding),
+    );
+    if (nonAsrBlockers.length) {
+      throw new Error(
+        "ASR-only delivery waiver refused non-ASR blockers: "
+        + nonAsrBlockers.map((finding) => finding.code).join(", "),
+      );
+    }
+    blockers = [];
   }
 
   const unitDeliveryPath = path.join(
@@ -1474,6 +1619,13 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    operator_narration_qa_waiver:
+      acceptAsrDeliveryBlockers || acceptReviewWarnings
+        ? operatorNarrationWaiver
+        : null,
+    waived_blockers: acceptAsrDeliveryBlockers
+      ? originalDeliveryBlockers
+      : [],
     blockers,
     units: deliveryRows,
   };
@@ -1539,6 +1691,13 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    operator_narration_qa_waiver:
+      acceptAsrDeliveryBlockers || acceptReviewWarnings
+        ? operatorNarrationWaiver
+        : null,
+    waived_blockers: acceptAsrDeliveryBlockers
+      ? originalDeliveryBlockers.filter((finding) => finding.unit_id)
+      : [],
     selected_blocker_count: selectedBlockers.length,
     selected_blockers: selectedBlockers,
     selected_units: selectedUnits,
@@ -1698,7 +1857,8 @@ export async function finalizeNarrationProviderOutput(
   let subjectiveManifest = null;
   if (qualityContract.subjective_review?.hash_bound_sampling_manifest_required === true
     && mastering.status === "passed"
-    && deliveryAccepted) {
+    && deliveryAccepted
+    && !skipSubjectiveReview) {
     subjectiveManifest = buildNarrationSubjectiveReviewManifest({
       plan,
       stitch,
@@ -1721,6 +1881,15 @@ export async function finalizeNarrationProviderOutput(
     }
     await atomicWriteJson(subjectiveManifestPath, subjectiveManifest);
   }
+  const subjectiveReviewWaiver = skipSubjectiveReview
+    ? {
+        ...operatorNarrationWaiver,
+        status: "skipped_with_waiver",
+        narration_audio_path: canonicalWav,
+        narration_audio_sha256: canonicalWavSha256,
+        narration_quality_contract_sha256: qualityContract.contract_sha256,
+      }
+    : null;
 
   const expectedIds = rows.map((row) => String(row.unit_id));
   const actualIds = stitch.prepared_inputs.map((row) => String(row.unit_id));
@@ -1775,13 +1944,44 @@ export async function finalizeNarrationProviderOutput(
       workDir,
       localWhisperContract: officialLocalWhisperContract,
     });
-  const fullStream = manualReview
+  checkpoint.stages.full_stream_delivery_qa = {
+    input_key: fullStreamInputKey,
+    status: rawFullStream.decision.status === "blocked" ? "blocked" : "passed",
+    payload: { full_stream: rawFullStream },
+  };
+  await atomicWriteJson(checkpointPath, checkpoint);
+  let fullStream = manualReview
     ? applyNarrationFullStreamManualReviewForTests({
         fullStream: rawFullStream,
         review: manualReview,
         evidenceSha256: manualReviewEvidenceSha256,
       })
     : rawFullStream;
+  const originalFullStreamBlockers = [
+    ...(fullStream.decision?.blockers ?? []),
+  ];
+  if (acceptAsrDeliveryBlockers && originalFullStreamBlockers.length) {
+    const waivedDecision = operatorWaiveAsrDecision(
+      fullStream.decision,
+      operatorNarrationWaiver,
+    );
+    if ((waivedDecision?.blockers ?? []).length) {
+      throw new Error(
+        "ASR-only full-stream waiver refused non-ASR blockers: "
+        + waivedDecision.blockers.map((finding) => finding.code).join(", "),
+      );
+    }
+    fullStream = { ...fullStream, decision: waivedDecision };
+  }
+  if (acceptReviewWarnings) {
+    fullStream = {
+      ...fullStream,
+      decision: operatorWaiveReviewWarnings(
+        fullStream.decision,
+        operatorNarrationWaiver,
+      ),
+    };
+  }
   checkpoint.stages.full_stream_delivery_qa = {
     input_key: fullStreamInputKey,
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
@@ -1820,6 +2020,13 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    operator_narration_qa_waiver:
+      acceptAsrDeliveryBlockers || acceptReviewWarnings
+        ? operatorNarrationWaiver
+        : null,
+    waived_blockers: acceptAsrDeliveryBlockers
+      ? originalFullStreamBlockers
+      : [],
     decision: fullStream.decision,
     blockers: fullStream.decision.blockers,
     warnings: fullStream.decision.warnings,
@@ -1949,6 +2156,7 @@ export async function finalizeNarrationProviderOutput(
       : null,
     subjective_review_manifest_sha256:
       subjectiveManifest?.manifest_sha256 ?? null,
+    subjective_review_waiver: subjectiveReviewWaiver,
   };
   const ttsReport = {
     schema: "goldflow_provider_neutral_narration_tts_report_v2",
@@ -1997,6 +2205,10 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    operator_narration_qa_waiver:
+      acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview
+        ? operatorNarrationWaiver
+        : null,
     listen_review_packet_path: listenPacketPath,
     listen_review_packet_sha256: listenPacket.packet_sha256,
     listen_review_status: listenPacket.item_count === 0
@@ -2044,7 +2256,10 @@ export async function finalizeNarrationProviderOutput(
       subjectiveManifest?.manifest_sha256 ?? null,
     subjective_review_status: subjectiveManifest
       ? "pending"
-      : "not_required_or_not_materialized",
+      : subjectiveReviewWaiver
+        ? "skipped_with_waiver"
+        : "not_required_or_not_materialized",
+    subjective_review_waiver: subjectiveReviewWaiver,
   };
   const stitchReportPath = path.join(
     episodeDir,

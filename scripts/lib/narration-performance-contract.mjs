@@ -282,6 +282,7 @@ export function buildNarrationPerformanceContract({
   preferredWordsMax = 42,
   softWordMax = 48,
   hardWordMax = 60,
+  bakeoffRequiredBeforeFullSynthesis = true,
 } = {}) {
   const contract = {
     schema: NARRATION_PERFORMANCE_CONTRACT_VERSION,
@@ -320,7 +321,8 @@ export function buildNarrationPerformanceContract({
       hard_words_max: hardWordMax,
       continuous_requests: false,
     },
-    bakeoff_required_before_full_synthesis: true,
+    bakeoff_required_before_full_synthesis:
+      bakeoffRequiredBeforeFullSynthesis === true,
   };
   return {
     ...contract,

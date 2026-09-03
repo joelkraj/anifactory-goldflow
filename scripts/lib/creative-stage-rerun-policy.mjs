@@ -193,6 +193,9 @@ export function creativeStageRerunDecision({
     && String(flags.action ?? "create").trim().toLowerCase() !== "create") {
     return { allowed: true, reason: "codex_work_noncreative_control_action" };
   }
+  if (commandKey === "imagegen browser-pool" && isTrue(flags["reconcile-only"])) {
+    return { allowed: true, reason: "browser_pool_noncreative_reconciliation" };
+  }
   const oneShot = ONE_SHOT_CREATIVE_COMMANDS.get(commandKey) ?? null;
   const passedOnlyStage = PASSED_FULL_STAGE_COMMANDS.get(commandKey) ?? null;
   if (!oneShot && !passedOnlyStage) {

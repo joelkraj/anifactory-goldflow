@@ -39,7 +39,9 @@ import {
   chatGptImageFailureDisposition,
   hybridManifestDispatchOptions,
   materializedReferenceState,
+  monitoredProviderRuntimes,
   resolveManualProviderAuthRecoveryEvidence,
+  validateFlowModelOverride,
   validateFlowRuntimeConcurrency,
   validateRepairSharedReferenceScope,
 } from "../../../scripts/hybrid-browser-image-pool.mjs";
@@ -54,7 +56,7 @@ import {
   PRODUCTION_BROWSER_CONCURRENCY_CEILING,
 } from "../desktop/config.mjs";
 import { browserFailureDisposition, GoldflowDesktopHost } from "../desktop/worker-host.mjs";
-import { flowBlockingCode, flowModelLabelMatches, flowPlanVerificationEvidence, flowReferenceUploadOrder, FLOW_VIDEO_CONTROL_LABEL_PATTERN, GoogleFlowBrowser, identifyAutoAttachedFlowComposerChip, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
+import { flowBlockingCode, flowModelLabelMatches, flowPersistentComposerNeedsReplacement, flowPlanVerificationEvidence, flowReferenceUploadOrder, FLOW_VIDEO_CONTROL_LABEL_PATTERN, GoogleFlowBrowser, identifyAutoAttachedFlowComposerChip, identifyNewFlowComposerChip, isFlowProjectWorkspaceUrl, nearestFlowVideoDuration, normalizeFlowPromptText, redactBrowserDiagnostic, shouldRetryFlowPreSubmissionTransport, validateFlowReferenceDock } from "../desktop/google-flow-browser.mjs";
 import { DesktopRuntimeState } from "../desktop/runtime-state.mjs";
 import { validReferenceRoute } from "../desktop/worker-client.mjs";
 import { GoldflowBridge, validateGoogleFlowReferenceBinding } from "../lib/goldflow-bridge.mjs";
@@ -127,6 +129,16 @@ assert.deepEqual(
   browserFailureDisposition(Object.assign(new Error("Timed out waiting for a completed ChatGPT response."), { code: "ui_contract_mismatch" })),
   { kind: "transport", pausesDispatch: true },
   "a completed-response timeout must be transient even when the browser encoded it as a UI-contract error",
+);
+assert.deepEqual(
+  browserFailureDisposition(Object.assign(new Error("Google Flow clipboard paste did not bind to the visible composer."), { code: "ui_contract_mismatch" })),
+  { kind: "transport", pausesDispatch: true },
+  "an isolated Flow composer paste miss must fail only its exact cut rather than opening the provider-wide circuit",
+);
+assert.deepEqual(
+  browserFailureDisposition(Object.assign(new Error("Timed out waiting for a generated Gemini image."), { code: "ui_contract_mismatch" })),
+  { kind: "transport", pausesDispatch: true },
+  "an isolated generated-image timeout must fail only its exact cut rather than opening the provider-wide circuit",
 );
 assert.deepEqual(
   browserFailureDisposition(Object.assign(new Error("Expected model GPT-5.6; visible control was GPT-5.5."), { code: "ui_contract_mismatch" })),
@@ -1086,6 +1098,10 @@ async function testDesktopHostContract() {
   assert.equal(flowBlockingCode("Generation failed"), "google_flow_generation_error");
   assert.equal(flowBlockingCode("This generation might violate our policies. Please try a different prompt or send feedback"), "content_policy_rejected");
   assert.equal(normalizeFlowPromptText("first\n\n\uFEFF\nsecond"), "first second");
+  assert.equal(flowPersistentComposerNeedsReplacement(), false, "a blank Flow composer without terminal cards is reusable");
+  assert.equal(flowPersistentComposerNeedsReplacement({ promptText: "stale prompt" }), false, "Flow reuses a healthy project because prompt paste replaces prior text in place");
+  assert.equal(flowPersistentComposerNeedsReplacement({ referenceChipCount: 2 }), true, "stale Flow reference chips require a fresh persistent project");
+  assert.equal(flowPersistentComposerNeedsReplacement({ terminalCardText: "We noticed some unusual activity." }), true, "a persistent Flow failure card requires a fresh project");
   const threeReferenceDock = {
     expectedReferences: [{ media_id: "media-a" }, { media_id: "media-b" }, { media_id: "media-c" }],
     observedChips: [
@@ -1416,6 +1432,28 @@ async function testDesktopProviderCircuitBreaker() {
   assert.equal(responseTimeoutHost.consecutiveTransportFailures, 1);
   assert.equal(responseTimeoutHost.providerCircuit, null, "one response timeout must not open the provider circuit");
   assert.equal(responseTimeoutHost.dispatchCooldownUntil, 0, "one response timeout must not halt local dispatch");
+
+  const flowVideoTimeoutBrowser = {
+    async runJob() {
+      const error = new Error("Timed out waiting for a generated Google Flow video.");
+      error.code = "ui_contract_mismatch";
+      throw error;
+    },
+  };
+  const flowVideoTimeoutCodes = [];
+  const flowVideoTimeoutHost = new GoldflowDesktopHost({ config, browser: flowVideoTimeoutBrowser, log: () => {} });
+  flowVideoTimeoutHost.persistRuntime = async () => {};
+  flowVideoTimeoutHost.schedule = () => {};
+  flowVideoTimeoutHost.client = {
+    async heartbeat() {},
+    async complete() { throw new Error("unexpected completion"); },
+    async fail(_job, _slot, error) { flowVideoTimeoutCodes.push(error.code); },
+  };
+  await flowVideoTimeoutHost.runSlot(0, { job: { type: "video", job_id: "flow-video-timeout" } });
+  assert.deepEqual(flowVideoTimeoutCodes, ["provider_response_timeout"], "a Flow video response timeout must not reach the server as a fatal UI-contract code");
+  assert.equal(flowVideoTimeoutHost.consecutiveTransportFailures, 1);
+  assert.equal(flowVideoTimeoutHost.providerCircuit, null, "one Flow video response timeout must not open the provider circuit");
+  assert.equal(flowVideoTimeoutHost.dispatchCooldownUntil, 0, "one Flow video response timeout must not halt local dispatch");
 }
 
 async function testDesktopTopOffScheduling() {
@@ -1589,7 +1627,22 @@ async function testHybridAcceptedReferencePreservation() {
   }, { episodeDir });
   assert.equal(discovered?.imageSha256, discoveredSha256, "accepted references must be discovered from hash-bound sidecars when the director plan keeps paths null");
 
-  const flowOnly = hybridManifestDispatchOptions({ flowOnly: true });
+const runtimeMonitorFixture = [
+  { provider: GOOGLE_FLOW_BROWSER_PROVIDER },
+  { provider: GOOGLE_GEMINI_BROWSER_PROVIDER },
+];
+assert.deepEqual(
+  monitoredProviderRuntimes(runtimeMonitorFixture, { federated: true }),
+  [{ provider: GOOGLE_FLOW_BROWSER_PROVIDER }],
+  "a federated scene wave must keep Flow as the deadline-bearing runtime while Gemini remains optional top-off",
+);
+assert.deepEqual(
+  monitoredProviderRuntimes(runtimeMonitorFixture, { federated: true, styleOnly: true }),
+  runtimeMonitorFixture,
+  "the Gemini style-reference barrier must still require every active provider runtime",
+);
+
+const flowOnly = hybridManifestDispatchOptions({ flowOnly: true });
   assert.deepEqual(flowOnly.allowedBrowserProviders, [GOOGLE_FLOW_BROWSER_PROVIDER]);
   assert.deepEqual(flowOnly.browserProviderConcurrency, {
     [GOOGLE_FLOW_BROWSER_PROVIDER]: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
@@ -1603,6 +1656,21 @@ async function testHybridAcceptedReferencePreservation() {
   assert.throws(() => validateFlowRuntimeConcurrency("0"), /integer from 1 to 5/);
   assert.throws(() => validateFlowRuntimeConcurrency("6"), /integer from 1 to 5/);
   assert.throws(() => validateFlowRuntimeConcurrency("2.5"), /integer from 1 to 5/);
+  assert.equal(validateFlowModelOverride({
+    model: "Nano Banana 2",
+    flowOnly: true,
+    repairReason: "Pro quota exhausted",
+    requestedIdCount: 4,
+  }), "Nano Banana 2");
+  assert.equal(validateFlowModelOverride({ model: "" }), null);
+  assert.throws(
+    () => validateFlowModelOverride({ model: "Nano Banana 2", flowOnly: true, repairReason: "quota", requestedIdCount: 0 }),
+    /exact asset IDs/,
+  );
+  assert.throws(
+    () => validateFlowModelOverride({ model: "Nano Banana 2", flowOnly: true, repairReason: "quota", requestedIdCount: 1, wavefrontPrefetch: true }),
+    /exact repair generation/,
+  );
   const cappedFlowOnly = hybridManifestDispatchOptions({ flowOnly: true, flowConcurrency: 4 });
   assert.deepEqual(cappedFlowOnly.browserProviderConcurrency, { [GOOGLE_FLOW_BROWSER_PROVIDER]: 4 });
   assert.equal(cappedFlowOnly.maxConcurrency, 4);

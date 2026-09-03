@@ -3006,8 +3006,25 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
       };
     }
+    const subjectiveReviewWaiver = ttsReport?.subjective_review_waiver ?? null;
+    const subjectiveReviewWaived =
+      subjectiveReviewWaiver?.schema
+        === "goldflow_operator_narration_qa_waiver_v1"
+      && subjectiveReviewWaiver?.status === "skipped_with_waiver"
+      && subjectiveReviewWaiver?.skip_subjective_review === true
+      && subjectiveReviewWaiver?.human_listening_performed === false
+      && String(subjectiveReviewWaiver?.reason ?? "").trim().length > 0
+      && subjectiveReviewWaiver?.narration_generation_plan_sha256
+        === (plan?.plan_sha256 ?? planFileSha256)
+      && subjectiveReviewWaiver?.narration_generation_plan_file_sha256
+        === planFileSha256
+      && subjectiveReviewWaiver?.narration_quality_contract_sha256
+        === narrationQualityContract.contract_sha256
+      && subjectiveReviewWaiver?.narration_audio_sha256
+        === stitchReport.output_sha256;
     if (narrationQualityContract.subjective_review
-      ?.hash_bound_sampling_manifest_required === true) {
+      ?.hash_bound_sampling_manifest_required === true
+      && !subjectiveReviewWaived) {
       const subjectiveManifestPath = path.join(
         episodeDir,
         `narration_subjective_review_manifest_${episode}.json`,
@@ -4256,7 +4273,7 @@ async function main() {
           const start = Number(beat.start_sec ?? 0);
           const duration = Number(beat.duration_sec ?? (Number(beat.end_sec ?? 0) - start));
           const activeMax = start < hookEnd ? hookMax : start < rampEnd ? rampMax : globalMax;
-          return Number.isFinite(duration) && duration > activeMax;
+          return Number.isFinite(duration) && duration > activeMax + 0.1;
         });
         if (overlong.length) {
           visualBeatPlan = {

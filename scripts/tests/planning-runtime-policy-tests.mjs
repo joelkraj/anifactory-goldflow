@@ -373,7 +373,7 @@ assert.equal(validateSourceModelReceipt({
 assert.equal(planningProviderForIdentity(webIdentity), "chatgpt_web");
 assert.equal(CHATGPT_WEB_TEXT_WORKER_LIMIT, 10);
 assert.equal(CHATGPT_WEB_IMAGE_WORKER_LIMIT, 3);
-assert.equal(CHATGPT_WEB_DEEP_TEXT_WORKER_LIMIT, 1);
+assert.equal(CHATGPT_WEB_DEEP_TEXT_WORKER_LIMIT, 3);
 assert.equal(CHATGPT_WEB_BROWSER_WORKER_LIMIT, 10);
 assert.equal(CHATGPT_WEB_GLOBAL_START_INTERVAL_MS, 1_250);
 assert.equal(CHATGPT_WEB_TEXT_START_INTERVAL_MS, 1_250);
@@ -390,7 +390,7 @@ assert.equal(CHATGPT_WEB_MEDIUM_REASONING_WINDOW_MS, 360_000);
 assert.deepEqual(chatGptWebWorkerPoolForKind("planner"), { id: "text", limit: 10 });
 assert.deepEqual(chatGptWebWorkerPoolForKind("image"), { id: "image", limit: 3 });
 assert.deepEqual(chatGptWebWorkerPoolForKind("reference"), { id: "image", limit: 3 });
-assert.deepEqual(chatGptWebWorkerPoolForKind("deep_text"), { id: "deep-text", limit: 1 });
+assert.deepEqual(chatGptWebWorkerPoolForKind("deep_text"), { id: "deep-text", limit: 3 });
 assert.deepEqual(chatGptWebWorkerPoolForKind("browser"), { id: "browser", limit: 10 });
 const fastPremiumProfile = productionProfileById("fast_premium_v1");
 assert.equal(fastPremiumProfile.target_wall_clock_minutes, 420);

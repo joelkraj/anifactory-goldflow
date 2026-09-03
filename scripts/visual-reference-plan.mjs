@@ -67,7 +67,7 @@ const generationModes = new Set([
   "source_only",
 ]);
 const referenceCleanlinessContractVersion = "empty_hands_no_detachable_props_v1";
-export const VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES = 48_000;
+export const VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES = 52_000;
 // The global director receives compact selection rows rather than full reference
 // objects. A 224 KiB ceiling keeps large episodes in one creative selection call
 // while remaining well below the Codex planning context limit.
@@ -3432,7 +3432,19 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
   const initialChunkDescriptors = repairSelection?.mode === "chunks"
     ? repairSelection.selected_chunks.map((failed) => {
         const selectedSceneIds = (failed.repair_scene_ids ?? failed.scene_ids ?? []).map(String);
-        const selectedScenes = selectedSceneIds.map((sceneId) => semanticSceneById.get(sceneId)).filter(Boolean);
+        const repairBeatIds = new Set((failed.beat_ids ?? []).map(String));
+        const selectedScenes = selectedSceneIds
+          .map((sceneId) => semanticSceneById.get(sceneId))
+          .filter(Boolean)
+          .map((scene) => repairBeatIds.size
+            ? {
+                ...scene,
+                visual_beats: (scene.visual_beats ?? []).filter((beat) => (
+                  repairBeatIds.has(String(beat?.visual_beat_id ?? beat?.beat_id ?? ""))
+                )),
+              }
+            : scene)
+          .filter((scene) => !repairBeatIds.size || (scene.visual_beats ?? []).length > 0);
         if (selectedScenes.length !== selectedSceneIds.length) {
           throw new Error(`Reference partial names scene IDs missing from the current semantic plan: ${selectedSceneIds.filter((id) => !semanticSceneById.has(id)).join(", ")}`);
         }
@@ -3563,6 +3575,9 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
         },
       });
       console.error(`visual refs ${displayLabel}: proposed ${rawTargetCount} raw targets, retained ${candidatePlan.reference_targets.length} clean candidates`);
+      const beatIds = sceneChunk.flatMap((scene) => (
+        scene.visual_beats ?? []
+      )).map((beat) => String(beat?.visual_beat_id ?? beat?.beat_id ?? "")).filter(Boolean);
       return [{
         status: "passed",
         original_chunk_id: originalChunkId,
@@ -3571,6 +3586,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           chunk_id: stageSuffix,
           source_chunk_id: originalChunkId,
           scene_ids: sceneChunk.map((scene) => String(scene.scene_id ?? "")).filter(Boolean),
+          beat_ids: beatIds,
           input_sha256: sha256(prompt),
           raw_target_count: rawTargetCount,
           output_path: llm.output_path ?? null,
@@ -3580,6 +3596,9 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const sceneIds = sceneChunk.map((scene) => scene.scene_id).filter(Boolean);
+      const beatIds = sceneChunk.flatMap((scene) => (
+        scene.visual_beats ?? []
+      )).map((beat) => String(beat?.visual_beat_id ?? beat?.beat_id ?? "")).filter(Boolean);
       const referenceIds = (llm?.parsed?.reference_targets ?? []).map((target) => String(target?.ref_id ?? "").trim()).filter(Boolean);
       await recordPlannerChunkCheckpoint({
         episodeDir,
@@ -3625,6 +3644,7 @@ async function createReferencePlan(semanticPlan, stageName, guidance = {}, evide
           chunk_id: stageSuffix,
           source_chunk_id: originalChunkId,
           scene_ids: sceneIds,
+          beat_ids: beatIds,
           reference_ids: referenceIds,
           input_sha256: sha256(prompt),
           raw_output_path: llm?.output_path ?? error?.outputPath ?? null,

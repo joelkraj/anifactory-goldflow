@@ -18,7 +18,7 @@ export const CHATGPT_WEB_IMAGE_WORKER_LIMIT = boundedWorkerLimit(
 );
 export const CHATGPT_WEB_DEEP_TEXT_WORKER_LIMIT = boundedWorkerLimit(
   process.env.GOLDFLOW_CHATGPT_WEB_DEEP_TEXT_WORKER_LIMIT,
-  1,
+  3,
 );
 export const CHATGPT_WEB_BROWSER_WORKER_LIMIT = boundedWorkerLimit(
   process.env.GOLDFLOW_CHATGPT_BROWSER_TAB_LIMIT,

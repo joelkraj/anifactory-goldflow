@@ -111,7 +111,26 @@ async function main() {
     return;
   }
   const stateRoot = path.resolve(flags["state-root"] ?? process.env.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"));
-  const specs = providerLaneSpecs(identity, profile, { stateRoot });
+  const flowModelOverride = String(flags["flow-model-override"] ?? "").trim();
+  const flowConcurrencyOverrideRaw = String(flags["flow-concurrency-override"] ?? "").trim();
+  const flowConcurrencyOverride = flowConcurrencyOverrideRaw ? Number(flowConcurrencyOverrideRaw) : null;
+  const repairReason = String(flags["repair-reason"] ?? "").trim();
+  if ((flowModelOverride || flowConcurrencyOverride != null) && !repairReason) {
+    throw new Error("run media-ready Flow repair overrides require --repair-reason.");
+  }
+  if (flowConcurrencyOverride != null
+    && (!Number.isInteger(flowConcurrencyOverride) || flowConcurrencyOverride < 1 || flowConcurrencyOverride > 5)) {
+    throw new Error("run media-ready --flow-concurrency-override must be an integer from 1 through 5.");
+  }
+  const specs = providerLaneSpecs(identity, profile, { stateRoot }).map((spec) => (
+    spec.provider === "google-flow"
+      ? {
+          ...spec,
+          ...(flowModelOverride ? { model_label: flowModelOverride } : {}),
+          ...(flowConcurrencyOverride != null ? { concurrency: flowConcurrencyOverride } : {}),
+        }
+      : spec
+  ));
   const phase = String(flags.phase ?? "early");
   const prepare = isTrue(flags.prepare, true);
   const waitForReady = isTrue(flags["wait-for-ready"], phase !== "early");
@@ -147,6 +166,13 @@ async function main() {
     run_identity_sha256: sha256(identityBytes),
     production_profile: profile.id,
     policy: readinessPolicy,
+    provider_model_override: flowModelOverride || flowConcurrencyOverride != null ? {
+      provider: "google-flow",
+      identity_locked_model: identity.image_provider_options?.google_flow?.model_label ?? null,
+      repair_model: flowModelOverride || null,
+      repair_concurrency: flowConcurrencyOverride,
+      reason: repairReason,
+    } : null,
     preparation_requested: prepare,
     wait_for_ready: waitForReady,
     launches,

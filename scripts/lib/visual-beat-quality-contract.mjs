@@ -21,6 +21,7 @@ const SEQUENCE_ROLES = new Set([
   "react",
   "prove",
   "escalate",
+  "climax",
   "resolve",
   "bridge",
 ]);

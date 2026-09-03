@@ -1463,14 +1463,60 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
       : basePrompt;
     const inputHash = sha256(prompt);
     try {
-      const call = await callEditorialLlm(
-        prompt,
-        recoveryGeneration > 0
-          ? `${episode}_editorial_beats_${String(ordinal).padStart(3, "0")}_recovery_${recoveryGeneration}`
-          : `${episode}_editorial_beats_${String(ordinal).padStart(3, "0")}_attempt_1`,
-        options,
-      );
-      const normalized = normalizeEditorialGrouping(call.parsed, chunk, factLedger, episode, options);
+      let call = null;
+      let normalized = null;
+      if (recoveryGeneration > 0) {
+        const priorStageName = recoveryGeneration === 1
+          ? `${episode}_editorial_beats_${String(ordinal).padStart(3, "0")}_attempt_1`
+          : `${episode}_editorial_beats_${String(ordinal).padStart(3, "0")}_recovery_${recoveryGeneration - 1}`;
+        const priorOutputPath = path.join(
+          episodeDir,
+          "_codex_calls",
+          "visual-beat-director",
+          `${priorStageName}-output.txt`,
+        );
+        const priorRaw = await fs.readFile(priorOutputPath, "utf8").catch(() => null);
+        if (priorRaw) {
+          try {
+            const metadata = await readCodexCallMetadata(priorOutputPath);
+            call = {
+              parsed: extractJson(priorRaw),
+              provider: `${metadata?.provider ?? "codex_cli"}_prior_output_revalidation`,
+              model: metadata?.model ?? null,
+              reasoning_effort: metadata?.reasoning_effort ?? null,
+              output_path: priorOutputPath,
+              reused: true,
+              revalidated_prior_output: true,
+            };
+            normalized = normalizeEditorialGrouping(
+              call.parsed,
+              chunk,
+              factLedger,
+              episode,
+              options,
+            );
+          } catch {
+            call = null;
+            normalized = null;
+          }
+        }
+      }
+      if (!normalized) {
+        call = await callEditorialLlm(
+          prompt,
+          recoveryGeneration > 0
+            ? `${episode}_editorial_beats_${String(ordinal).padStart(3, "0")}_recovery_${recoveryGeneration}`
+            : `${episode}_editorial_beats_${String(ordinal).padStart(3, "0")}_attempt_1`,
+          options,
+        );
+        normalized = normalizeEditorialGrouping(
+          call.parsed,
+          chunk,
+          factLedger,
+          episode,
+          options,
+        );
+      }
       await recordPlannerChunkCheckpoint({
         episodeDir,
         plannerStage: "visual_beat_plan",
@@ -1486,6 +1532,7 @@ async function directEditorialBeats(atoms, factLedger, timedScenes, options = {}
           beat_count: normalized.beats.length,
           automatic_validation_attempts: 1,
           recovery_generation: recoveryGeneration,
+          revalidated_prior_output: call.revalidated_prior_output === true,
         },
         telemetry: {
           requested_provider: flags["editorial-provider"] ?? "identity_locked",

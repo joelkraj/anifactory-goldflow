@@ -1295,6 +1295,15 @@ export function validateNarrationPerformanceGateForTests({
       required: false,
     };
   }
+  if (plan.performance_contract.bakeoff_required_before_full_synthesis !== true) {
+    return {
+      status: "not_required",
+      findings: [],
+      required: false,
+      performance_contract_sha256:
+        plan.performance_contract.contract_sha256,
+    };
+  }
   const validation = validateNarrationPerformanceBakeoffApproval({
     approval,
     contract: plan.performance_contract,
@@ -4007,6 +4016,22 @@ async function main() {
       "--episode-dir", episodeDir,
       "--plan", planPath,
       "--manifest", providerOutputManifestPath,
+      ...(workflowBypass ? ["--workflow-bypass", "true"] : []),
+      ...(boolFlag(flags["accept-asr-delivery-blockers"])
+        ? ["--accept-asr-delivery-blockers", "true"]
+        : []),
+      ...(boolFlag(flags["accept-review-warnings"])
+        ? ["--accept-review-warnings", "true"]
+        : []),
+      ...(boolFlag(flags["skip-subjective-review"])
+        ? ["--skip-subjective-review", "true"]
+        : []),
+      ...(String(flags["delivery-waiver-reason"] ?? "").trim()
+        ? [
+            "--delivery-waiver-reason",
+            String(flags["delivery-waiver-reason"]).trim(),
+          ]
+        : []),
     ]);
     return;
   }

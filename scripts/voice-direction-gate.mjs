@@ -4158,6 +4158,10 @@ function buildQwenGenerationPlan(
       providerContext.narration_quality_contract?.unitization?.hard_words_max
         ?? 60,
     ),
+    // The locked provider/voice/reference contract is production-proven. Keep
+    // per-episode performance bakeoffs opt-in so narration can enter synthesis
+    // immediately; objective delivery QA still guards the generated stream.
+    bakeoffRequiredBeforeFullSynthesis: false,
   });
   const providerAdapter = narrationProviderAdapter(providerContext.primary_provider);
   for (const unit of unitRows) {

@@ -22,6 +22,12 @@ import {
   validateManufacturingTopicShortlist,
   sha256Text,
 } from "./lib/source-manufacturer-contract.mjs";
+import {
+  FAST_IMPROVEMENT_PANEL_COUNT,
+  FAST_IMPROVEMENT_MIN_APV_DELTA,
+  assessFastImprovementLength,
+  decideFastImprovement,
+} from "./lib/source-fast-improvement-contract.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const DATA_ROOT = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData";
@@ -30,6 +36,7 @@ const FILLER_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_manuf
 const SELECTOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_manufacturing_selector_v1.md");
 const TOPIC_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_topic_manufacturer_v1.md");
 const TOPIC_SHORTLIST_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_topic_shortlist_v1.md");
+const FAST_IMPROVEMENT_EDITOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_fast_improvement_editor_v1.md");
 const SOURCE_EVIDENCE_SNAPSHOT_PATH = path.join(REPO_ROOT, "docs/channel_formulas/53rebirth_source_evidence_snapshot_v1.json");
 const DEFAULT_QWEN_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
 
@@ -99,6 +106,26 @@ function median(values) {
   if (!numbers.length) return null;
   const middle = Math.floor(numbers.length / 2);
   return numbers.length % 2 ? numbers[middle] : (numbers[middle - 1] + numbers[middle]) / 2;
+}
+
+function canonicalizeSelectionArithmetic(document) {
+  if (!Array.isArray(document?.rankings)) return document;
+  const rankings = document.rankings.map((row) => {
+    const viewerPercentages = Array.isArray(row?.viewer_simulation)
+      ? row.viewer_simulation.map((viewer) => viewer?.predicted_percentage_viewed)
+      : [];
+    const computedAverage = mean(viewerPercentages);
+    return computedAverage === null
+      ? row
+      : { ...row, predicted_average_percentage_viewed: Number(computedAverage.toFixed(2)) };
+  }).sort((left, right) => Number(right.predicted_average_percentage_viewed) - Number(left.predicted_average_percentage_viewed)
+    || String(left.blind_id).localeCompare(String(right.blind_id)))
+    .map((row, index) => ({ ...row, rank: index + 1 }));
+  return {
+    ...document,
+    selected_blind_id: rankings[0]?.blind_id ?? document.selected_blind_id,
+    rankings,
+  };
 }
 
 function runLocal(command, args) {
@@ -289,10 +316,54 @@ async function modelCall({ outputPath, prompt, provider, model, effort, stageNam
 async function prepare(directory, flags) {
   await fs.mkdir(directory, { recursive: true });
   const brief = await loadBrief(directory, flags);
-  const template = await activeManufacturingTemplate(directory, flags);
   const outputPath = path.join(directory, ".model_responses", "manufacturing_prompt.txt");
   const finalPath = path.join(directory, "manufacturing_writer_prompt.txt");
   const manifestPath = path.join(directory, "manufacturing_prompt_manifest.json");
+  if (flags["writer-prompt"]) {
+    const sourcePath = path.resolve(flags["writer-prompt"]);
+    const sourceBytes = await fs.readFile(sourcePath);
+    const filled = sourceBytes.toString("utf8");
+    if (!filled.trim()) throw new Error("Imported manufacturing writer prompt is empty.");
+    const filledPromptSha256 = sha256Text(filled);
+    if (path.resolve(finalPath) !== sourcePath) {
+      if (!await exists(finalPath)) await writeExclusive(finalPath, sourceBytes);
+      else if (await fileSha256(finalPath) !== filledPromptSha256) throw new Error("Existing manufacturing writer prompt differs from the imported prompt.");
+    } else if (await fileSha256(finalPath) !== filledPromptSha256) {
+      throw new Error("Imported manufacturing writer prompt changed while it was being prepared.");
+    }
+    const manifest = {
+      schema: "goldflow_manhwa_manufacturing_prompt_manifest_v1",
+      status: "prepared",
+      prompt_source: "operator_supplied_exact_prompt",
+      brief_sha256: brief.sha256,
+      active_template_path: null,
+      active_template_sha256: null,
+      active_template_version: "operator_direct_prompt_v1",
+      active_template_manifest_path: null,
+      filler_provider: null,
+      filler_model: null,
+      filler_reasoning_effort: null,
+      filler_prompt_sha256: null,
+      raw_response_path: null,
+      raw_response_sha256: null,
+      imported_prompt_path: sourcePath,
+      imported_prompt_sha256: filledPromptSha256,
+      filled_prompt_path: finalPath,
+      filled_prompt_sha256: filledPromptSha256,
+      prepared_at: new Date().toISOString(),
+    };
+    if (!await exists(manifestPath)) await writeJsonExclusive(manifestPath, manifest);
+    else {
+      const existing = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+      if (existing.prompt_source !== manifest.prompt_source
+        || existing.brief_sha256 !== manifest.brief_sha256
+        || existing.filled_prompt_sha256 !== manifest.filled_prompt_sha256) {
+        throw new Error("Existing manufacturing prompt manifest differs from the imported prompt.");
+      }
+    }
+    return { brief, filled, finalPath, manifestPath, manifest };
+  }
+  const template = await activeManufacturingTemplate(directory, flags);
   const filler = promptBody(await fs.readFile(FILLER_PROMPT_PATH, "utf8"));
   const prompt = `${filler}\n\nAPPROVED PREMISE BRIEF\n${JSON.stringify(brief.document, null, 2)}\n\nOPERATOR TEMPLATE\n${template.content}`;
   const response = await modelCall({
@@ -751,35 +822,193 @@ async function comparePromptVersions(directory, flags) {
       average_percentage_viewed: row.average_percentage_viewed,
     }));
   }
-  let prompt = `${selector}\n\nBLIND PROMPT-STRATEGY EXPERIMENT\nThe scripts below were produced by more than one undisclosed instruction strategy. Do not guess, discuss, or reward a strategy, model, provider, manuscript length, or candidate family. Judge only the exact narration each viewer would hear. Apply the same standard independently to every candidate.\n\nAPPROVED TITLE, PREMISE, AND OPENING TARGET\n${JSON.stringify({
+  const experimentHeader = `${selector}\n\nBLIND PROMPT-STRATEGY EXPERIMENT\nThe scripts below were produced by more than one undisclosed instruction strategy. Do not guess, discuss, or reward a strategy, model, provider, manuscript length, or candidate family. Judge only the exact narration each viewer would hear. Apply the same standard independently to every candidate.\n\nAPPROVED TITLE, PREMISE, AND OPENING TARGET\n${JSON.stringify({
     title: portfolio.prepared.brief.document.title,
     core_premise: portfolio.prepared.brief.document.core_premise,
     opening_target: portfolio.prepared.brief.document.opening_target,
     reference_outlier: portfolio.prepared.brief.document.reference_outlier,
     reference_opening_benchmark: portfolio.prepared.brief.document.reference_opening_benchmark ?? null,
-  }, null, 2)}\n\nOWN-CHANNEL APV CALIBRATION\n${JSON.stringify(calibration, null, 2)}\n\nBLIND MANIFEST\n${JSON.stringify(candidates.map((row) => ({ blind_id: row.blind_id, sha256: row.output_sha256 })), null, 2)}`;
-  for (const row of candidates) prompt += `\n\nBLIND CANDIDATE ${row.blind_id}\n${await fs.readFile(row.output_path, "utf8")}`;
+  }, null, 2)}\n\nOWN-CHANNEL APV CALIBRATION\n${JSON.stringify(calibration, null, 2)}`;
+  const promptForCandidates = async (rows, roundInstruction = "") => {
+    let value = `${experimentHeader}${roundInstruction ? `\n\nROUND INSTRUCTION\n${roundInstruction}` : ""}\n\nBLIND MANIFEST\n${JSON.stringify(rows.map((row) => ({ blind_id: row.blind_id, sha256: row.output_sha256 })), null, 2)}`;
+    for (const row of rows) value += `\n\nBLIND CANDIDATE ${row.blind_id}\n${await fs.readFile(row.output_path, "utf8")}`;
+    return value;
+  };
+  const prompt = await promptForCandidates(candidates);
+  const estimatedInputTokens = Math.ceil(prompt.length / 4);
 
   const rawPath = path.join(directory, ".model_responses", "manufacturing_prompt_ab_selection.txt");
   const selectionPath = path.join(directory, "manufacturing_prompt_ab_selection.json");
   let selection;
   let shouldWriteSelection = false;
+  let comparisonMode = "single_pass";
+  let bracketManifestPath = null;
   if (await exists(selectionPath)) {
     selection = JSON.parse(await fs.readFile(selectionPath, "utf8"));
+    bracketManifestPath = path.join(directory, "manufacturing_prompt_ab_bracket_manifest.json");
+    if (await exists(bracketManifestPath)) comparisonMode = "two_round_context_safe_bracket";
   } else {
-    const response = await modelCall({
-      outputPath: rawPath,
-      prompt,
-      provider: "chatgpt_web",
-      model: "gpt-5.6-sol",
-      effort: "medium",
-      stageName: "winner_source_prompt_strategy_ab_selection",
-      timeoutMs: Number(flags["selector-timeout-ms"] ?? 3_600_000),
-    });
-    try {
-      selection = parseJsonObjectFromPlannerOutput(response.content).value;
-    } catch (error) {
-      throw new Error(`Prompt comparison selector returned malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+    if (estimatedInputTokens <= 140_000) {
+      const response = await modelCall({
+        outputPath: rawPath,
+        prompt,
+        provider: "chatgpt_web",
+        model: "gpt-5.6-sol",
+        effort: "medium",
+        stageName: "winner_source_prompt_strategy_ab_selection",
+        timeoutMs: Number(flags["selector-timeout-ms"] ?? 3_600_000),
+      });
+      try {
+        selection = canonicalizeSelectionArithmetic(parseJsonObjectFromPlannerOutput(response.content).value);
+      } catch (error) {
+        throw new Error(`Prompt comparison selector returned malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else {
+      if (candidates.length !== 8) {
+        throw new Error(`Prompt comparison needs a context-safe panel design for ${candidates.length} candidates (${estimatedInputTokens} estimated tokens).`);
+      }
+      comparisonMode = "two_round_context_safe_bracket";
+      const candidateByBlindId = new Map(candidates.map((row) => [row.blind_id, row]));
+      const sized = await Promise.all(candidates.map(async (row) => ({
+        row,
+        chars: (await fs.readFile(row.output_path, "utf8")).length,
+      })));
+      sized.sort((left, right) => right.chars - left.chars || left.row.blind_id.localeCompare(right.row.blind_id));
+      const qualifierGroups = [[], []];
+      const qualifierChars = [0, 0];
+      for (const item of sized) {
+        const eligible = [0, 1].filter((index) => qualifierGroups[index].length < 4);
+        const groupIndex = eligible.sort((left, right) => qualifierChars[left] - qualifierChars[right] || left - right)[0];
+        qualifierGroups[groupIndex].push(item.row);
+        qualifierChars[groupIndex] += item.chars;
+      }
+
+      const runRound = async (roundId, rows, roundInstruction) => {
+        const roundPrompt = await promptForCandidates(rows, roundInstruction);
+        const roundEstimatedTokens = Math.ceil(roundPrompt.length / 4);
+        if (roundEstimatedTokens > 140_000) {
+          throw new Error(`Prompt comparison round ${roundId} remains too large at ${roundEstimatedTokens} estimated tokens.`);
+        }
+        const roundRawPath = path.join(directory, ".model_responses", `manufacturing_prompt_ab_${roundId}.txt`);
+        const roundSelectionPath = path.join(directory, `manufacturing_prompt_ab_${roundId}.json`);
+        let roundSelection;
+        if (await exists(roundSelectionPath)) {
+          roundSelection = JSON.parse(await fs.readFile(roundSelectionPath, "utf8"));
+        } else {
+          const response = await modelCall({
+            outputPath: roundRawPath,
+            prompt: roundPrompt,
+            provider: "chatgpt_web",
+            model: "gpt-5.6-sol",
+            effort: "medium",
+            stageName: `winner_source_prompt_strategy_ab_${roundId}`,
+            timeoutMs: Number(flags["selector-timeout-ms"] ?? 3_600_000),
+          });
+          try {
+            roundSelection = canonicalizeSelectionArithmetic(parseJsonObjectFromPlannerOutput(response.content).value);
+          } catch (error) {
+            throw new Error(`Prompt comparison round ${roundId} returned malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          assertValid(`prompt comparison round ${roundId}`, validateManufacturingSelection(roundSelection, {
+            portfolio: { candidates: rows.map((row) => ({ blind_id: row.blind_id })) },
+          }));
+          await writeJsonExclusive(roundSelectionPath, roundSelection);
+        }
+        assertValid(`prompt comparison round ${roundId}`, validateManufacturingSelection(roundSelection, {
+          portfolio: { candidates: rows.map((row) => ({ blind_id: row.blind_id })) },
+        }));
+        return {
+          round_id: roundId,
+          candidate_blind_ids: rows.map((row) => row.blind_id),
+          estimated_input_tokens: roundEstimatedTokens,
+          selection: roundSelection,
+          selection_path: roundSelectionPath,
+          selection_sha256: await fileSha256(roundSelectionPath),
+          raw_response_path: roundRawPath,
+        };
+      };
+
+      const qualifiers = await Promise.all([
+        runRound("qualifier_a", qualifierGroups[0], "This is qualifier panel A. Rank only these four scripts by predicted APV. Every script advances to a second full-script evaluation; do not speculate about unseen candidates."),
+        runRound("qualifier_b", qualifierGroups[1], "This is qualifier panel B. Rank only these four scripts by predicted APV. Every script advances to a second full-script evaluation; do not speculate about unseen candidates."),
+      ]);
+      const orderedQualifierRows = qualifiers.map((round) => [...round.selection.rankings]
+        .sort((left, right) => Number(left.rank) - Number(right.rank)));
+      const championshipRows = [
+        ...orderedQualifierRows[0].slice(0, 2),
+        ...orderedQualifierRows[1].slice(0, 2),
+      ].map((row) => candidateByBlindId.get(row.blind_id));
+      const placementRows = [
+        ...orderedQualifierRows[0].slice(2),
+        ...orderedQualifierRows[1].slice(2),
+      ].map((row) => candidateByBlindId.get(row.blind_id));
+      const finals = await Promise.all([
+        runRound("championship", championshipRows, "This is the second full-script evaluation for the top two scripts from each qualifier. Re-evaluate every script independently from the complete narration and rank this panel by predicted APV."),
+        runRound("placement", placementRows, "This is the second full-script evaluation for the other two scripts from each qualifier. Re-evaluate every script independently from the complete narration and rank this panel by predicted APV."),
+      ]);
+      const qualifierRowById = new Map(qualifiers.flatMap((round) => round.selection.rankings)
+        .map((row) => [row.blind_id, row]));
+      const finalRows = finals.flatMap((round) => round.selection.rankings.map((row) => {
+        const qualifierRow = qualifierRowById.get(row.blind_id);
+        const qualifierViewerById = new Map((qualifierRow?.viewer_simulation ?? [])
+          .map((viewer) => [viewer.viewer_id, viewer]));
+        const viewerSimulation = row.viewer_simulation.map((viewer) => {
+          const qualifierViewer = qualifierViewerById.get(viewer.viewer_id);
+          const combinedPercentage = mean([
+            qualifierViewer?.predicted_percentage_viewed,
+            viewer.predicted_percentage_viewed,
+          ]);
+          return {
+            ...viewer,
+            predicted_percentage_viewed: Number(combinedPercentage.toFixed(2)),
+            qualifier_predicted_percentage_viewed: Number(qualifierViewer.predicted_percentage_viewed),
+            second_round_predicted_percentage_viewed: Number(viewer.predicted_percentage_viewed),
+          };
+        });
+        const openingSurvivalCurve = Object.fromEntries([
+          "thirty_seconds",
+          "sixty_seconds",
+          "two_minutes",
+          "five_minutes",
+        ].map((checkpoint) => [
+          checkpoint,
+          Number(mean([
+            qualifierRow?.opening_survival_curve?.[checkpoint],
+            row.opening_survival_curve?.[checkpoint],
+          ]).toFixed(2)),
+        ]));
+        return {
+          ...row,
+          opening_survival_curve: openingSurvivalCurve,
+          viewer_simulation: viewerSimulation,
+          predicted_average_percentage_viewed: Number(mean(viewerSimulation
+            .map((viewer) => viewer.predicted_percentage_viewed)).toFixed(2)),
+          qualifier_predicted_average_percentage_viewed: Number(qualifierRow.predicted_average_percentage_viewed),
+          second_round_predicted_average_percentage_viewed: Number(row.predicted_average_percentage_viewed),
+          second_round: round.round_id,
+        };
+      })).sort((left, right) => Number(right.predicted_average_percentage_viewed) - Number(left.predicted_average_percentage_viewed)
+        || left.blind_id.localeCompare(right.blind_id));
+      const rankings = finalRows.map((row, index) => ({ ...row, rank: index + 1 }));
+      selection = {
+        schema: "goldflow_manhwa_manufacturing_selection_v1",
+        status: "selected",
+        selected_blind_id: rankings[0].blind_id,
+        rankings,
+        decision_rationale: `Context-safe blind bracket. ${finals[0].selection.decision_rationale} ${finals[1].selection.decision_rationale}`,
+      };
+      bracketManifestPath = path.join(directory, "manufacturing_prompt_ab_bracket_manifest.json");
+      await writeJsonExclusive(bracketManifestPath, {
+        schema: "goldflow_manhwa_prompt_ab_bracket_v1",
+        status: "completed",
+        full_prompt_estimated_input_tokens: estimatedInputTokens,
+        direct_context_limit_tokens: 150_000,
+        safe_round_ceiling_tokens: 140_000,
+        rule: "Every candidate received one qualifier and one second full-script APV evaluation. Final order uses the arithmetic mean of each viewer's two predicted APV values.",
+        qualifiers: qualifiers.map(({ selection, ...round }) => round),
+        finals: finals.map(({ selection, ...round }) => round),
+        completed_at: new Date().toISOString(),
+      });
     }
     shouldWriteSelection = true;
   }
@@ -816,6 +1045,8 @@ async function comparePromptVersions(directory, flags) {
     status: "completed",
     caution: "Predicted APV is a blinded pre-upload simulation, not measured audience behavior.",
     ranking_metric: "predicted_average_percentage_viewed",
+    comparison_mode: comparisonMode,
+    full_prompt_estimated_input_tokens: estimatedInputTokens,
     selected_candidate: {
       blind_id: winner.blind_id,
       candidate_id: winner.candidate_id,
@@ -831,6 +1062,8 @@ async function comparePromptVersions(directory, flags) {
     blind_decision_rationale: selection.decision_rationale,
     selection_path: selectionPath,
     selection_sha256: await fileSha256(selectionPath),
+    bracket_manifest_path: bracketManifestPath,
+    bracket_manifest_sha256: bracketManifestPath ? await fileSha256(bracketManifestPath) : null,
     decode_manifest_path: decodeManifestPath,
     decode_manifest_sha256: await fileSha256(decodeManifestPath),
     completed_at: new Date().toISOString(),
@@ -927,6 +1160,284 @@ async function promoteCandidate(directory, flags) {
   return { receiptPath, selectedScriptPath, receipt };
 }
 
+async function resolveImprovementIncumbent(directory, flags) {
+  if (flags.script) {
+    const scriptPath = path.resolve(flags.script);
+    if (!await exists(scriptPath)) throw new Error(`Improvement script is missing: ${scriptPath}`);
+    return { path: scriptPath, source: "operator_script" };
+  }
+  const reportPath = path.join(directory, "manufacturing_prompt_ab_report.json");
+  if (await exists(reportPath)) {
+    const report = JSON.parse(await fs.readFile(reportPath, "utf8"));
+    const selectedOutputPath = String(report?.selected_candidate?.output_path ?? "").trim();
+    if (selectedOutputPath) {
+      const scriptPath = path.resolve(selectedOutputPath);
+      if (await exists(scriptPath)) return { path: scriptPath, source: "prompt_ab_winner" };
+    }
+  }
+  const selectedPath = path.join(directory, "manufacturing_selected_script.txt");
+  if (await exists(selectedPath)) return { path: selectedPath, source: "manufacturing_selection" };
+  throw new Error("No improvement incumbent found. Pass --script <complete-script.txt>.");
+}
+
+function compactWinnerFeedback(report, outputSha256) {
+  const row = (report?.decoded_rankings ?? []).find((candidate) => candidate?.output_sha256 === outputSha256)
+    ?? (report?.decoded_rankings ?? [])[0]
+    ?? null;
+  if (!row) return null;
+  const weakestViewers = [...(row.viewer_simulation ?? [])]
+    .sort((left, right) => Number(left.predicted_percentage_viewed) - Number(right.predicted_percentage_viewed))
+    .slice(0, 6)
+    .map((viewer) => ({
+      viewer_id: viewer.viewer_id,
+      predicted_percentage_viewed: viewer.predicted_percentage_viewed,
+      predicted_exit_point: viewer.predicted_exit_point,
+      reason: viewer.reason,
+    }));
+  return {
+    prior_predicted_average_percentage_viewed: row.predicted_average_percentage_viewed,
+    prior_retention_reason: row.retention_reason,
+    weakest_viewers: weakestViewers,
+  };
+}
+
+async function runFastImprovementJudge({ directory, roundDirectory, roundNumber, panelNumber, brief, calibration, incumbent, challenger, flags }) {
+  const selector = promptBody(await fs.readFile(SELECTOR_PROMPT_PATH, "utf8"));
+  const panelId = `panel_${String(panelNumber).padStart(2, "0")}`;
+  const challengerFirst = Number.parseInt(sha256Text(`${incumbent.sha256}\0${challenger.sha256}\0${panelId}`).slice(0, 2), 16) % 2 === 0;
+  const ordered = challengerFirst
+    ? [{ role: "challenger", ...challenger }, { role: "incumbent", ...incumbent }]
+    : [{ role: "incumbent", ...incumbent }, { role: "challenger", ...challenger }];
+  const labeled = ordered.map((row, index) => ({ ...row, blind_id: `candidate_${String.fromCharCode(97 + index)}` }));
+  let prompt = `${selector}\n\nFAST IMPROVEMENT BLIND A/B PANEL ${panelNumber} OF ${FAST_IMPROVEMENT_PANEL_COUNT}\nJudge only expected percentage viewed. One script is an edit of the other, but do not infer which one, reward change itself, or consider manuscript length. Treat this as a fresh independent panel.\n\nAPPROVED TITLE AND PREMISE\n${JSON.stringify({
+    title: brief.title,
+    core_premise: brief.core_premise,
+    opening_target: brief.opening_target,
+  }, null, 2)}\n\nOWN-CHANNEL APV CALIBRATION\n${JSON.stringify(calibration, null, 2)}\n\nBLIND MANIFEST\n${JSON.stringify(labeled.map((row) => ({ blind_id: row.blind_id, sha256: row.sha256 })), null, 2)}`;
+  for (const row of labeled) prompt += `\n\nBLIND CANDIDATE ${row.blind_id}\n${row.text}`;
+  const responsePath = path.join(roundDirectory, "comparisons", `${panelId}.txt`);
+  const selectionPath = path.join(roundDirectory, "comparisons", `${panelId}.json`);
+  const response = await modelCall({
+    outputPath: responsePath,
+    prompt,
+    provider: "chatgpt_web",
+    model: "gpt-5.6-sol",
+    effort: "medium",
+    stageName: `winner_source_script_improvement_judge_r${String(roundNumber).padStart(2, "0")}_p${String(panelNumber).padStart(2, "0")}`,
+    timeoutMs: Number(flags["judge-timeout-ms"] ?? 1_800_000),
+  });
+  let selection;
+  try {
+    selection = canonicalizeSelectionArithmetic(parseJsonObjectFromPlannerOutput(response.content).value);
+  } catch (error) {
+    throw new Error(`Fast improvement ${panelId} returned malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  assertValid(`fast improvement ${panelId}`, validateManufacturingSelection(selection, {
+    portfolio: { candidates: labeled.map((row) => ({ blind_id: row.blind_id })) },
+  }));
+  if (!await exists(selectionPath)) await writeJsonExclusive(selectionPath, selection);
+  const rowForRole = (role) => {
+    const blindId = labeled.find((row) => row.role === role).blind_id;
+    return selection.rankings.find((row) => row.blind_id === blindId);
+  };
+  const incumbentRow = rowForRole("incumbent");
+  const challengerRow = rowForRole("challenger");
+  const incumbentApv = Number(incumbentRow.predicted_average_percentage_viewed);
+  const challengerApv = Number(challengerRow.predicted_average_percentage_viewed);
+  return {
+    panel_id: panelId,
+    selection_path: selectionPath,
+    selection_sha256: await fileSha256(selectionPath),
+    response_path: responsePath,
+    response_sha256: await fileSha256(responsePath),
+    blind_decode: Object.fromEntries(labeled.map((row) => [row.blind_id, row.role])),
+    incumbent_predicted_apv: incumbentApv,
+    challenger_predicted_apv: challengerApv,
+    predicted_apv_delta: Number((challengerApv - incumbentApv).toFixed(2)),
+    winner: challengerApv > incumbentApv ? "challenger" : incumbentApv > challengerApv ? "incumbent" : "tie",
+    decision_rationale: selection.decision_rationale,
+  };
+}
+
+async function improveCandidate(directory, flags) {
+  const maxRounds = Math.max(1, Math.min(3, Number(flags["max-rounds"] ?? 1) || 1));
+  const minimumApvDelta = Math.max(0, Number(flags["minimum-apv-delta"] ?? FAST_IMPROVEMENT_MIN_APV_DELTA) || 0);
+  const loopDirectory = path.join(directory, "improvement_loop");
+  const v00Path = path.join(loopDirectory, "v00_incumbent.txt");
+  const currentWinnerPath = path.join(loopDirectory, "current_winner.txt");
+  await fs.mkdir(loopDirectory, { recursive: true });
+
+  const initial = await resolveImprovementIncumbent(directory, flags);
+  const initialBytes = await fs.readFile(initial.path);
+  if (!await exists(v00Path)) await writeExclusive(v00Path, initialBytes);
+  const v00Sha256 = await fileSha256(v00Path);
+  if (v00Sha256 !== sha256Text(initialBytes.toString("utf8"))) throw new Error("Existing improvement incumbent differs from the requested script.");
+  if (!await exists(currentWinnerPath)) await writeExclusive(currentWinnerPath, initialBytes);
+
+  const brief = await loadBrief(directory, flags);
+  let calibration = brief.document.own_channel_apv_observations ?? [];
+  if (calibration.length === 0) {
+    const evidenceSnapshot = JSON.parse(await fs.readFile(SOURCE_EVIDENCE_SNAPSHOT_PATH, "utf8"));
+    calibration = (evidenceSnapshot.own_channel_evidence ?? []).map((row) => ({
+      title: row.title,
+      average_percentage_viewed: row.average_percentage_viewed,
+    }));
+  }
+  const priorReportPath = path.join(directory, "manufacturing_prompt_ab_report.json");
+  const priorReport = await exists(priorReportPath) ? JSON.parse(await fs.readFile(priorReportPath, "utf8")) : null;
+  const editorInstruction = promptBody(await fs.readFile(FAST_IMPROVEMENT_EDITOR_PROMPT_PATH, "utf8"));
+  const decisions = [];
+
+  for (let roundNumber = 1; roundNumber <= maxRounds; roundNumber += 1) {
+    const roundDirectory = path.join(loopDirectory, `round_${String(roundNumber).padStart(2, "0")}`);
+    const decisionPath = path.join(roundDirectory, "decision.json");
+    if (await exists(decisionPath)) {
+      const existing = JSON.parse(await fs.readFile(decisionPath, "utf8"));
+      decisions.push(existing);
+      if (existing.status !== "challenger_promoted") break;
+      const promotedPath = path.resolve(existing.challenger.path);
+      if (await fileSha256(promotedPath) !== existing.challenger.sha256) throw new Error(`Round ${roundNumber} promoted challenger hash mismatch.`);
+      if (await fileSha256(currentWinnerPath) !== existing.challenger.sha256) {
+        await writeAtomic(currentWinnerPath, await fs.readFile(promotedPath));
+      }
+      continue;
+    }
+    await fs.mkdir(path.join(roundDirectory, "comparisons"), { recursive: true });
+    const startedAt = new Date().toISOString();
+    const incumbentText = await fs.readFile(currentWinnerPath, "utf8");
+    const roundIncumbentPath = path.join(roundDirectory, "incumbent.txt");
+    if (!await exists(roundIncumbentPath)) await writeExclusive(roundIncumbentPath, incumbentText);
+    else if (await fileSha256(roundIncumbentPath) !== sha256Text(incumbentText)) throw new Error(`Round ${roundNumber} incumbent hash mismatch.`);
+    const incumbent = {
+      path: roundIncumbentPath,
+      text: incumbentText,
+      sha256: sha256Text(incumbentText),
+      word_count: words(incumbentText),
+    };
+    const feedback = compactWinnerFeedback(priorReport, incumbent.sha256);
+    const editorBriefPath = path.join(roundDirectory, "editor_brief.json");
+    const editorBrief = {
+      schema: "goldflow_manhwa_fast_improvement_editor_brief_v1",
+      status: "ready",
+      round: roundNumber,
+      model: "gpt-5.6-sol",
+      reasoning_effort: "medium",
+      incumbent_path: incumbent.path,
+      incumbent_sha256: incumbent.sha256,
+      incumbent_word_count: incumbent.word_count,
+      approved_title: brief.document.title,
+      approved_premise: brief.document.core_premise,
+      prior_blind_feedback: feedback,
+      rule: "One Medium call privately diagnoses and writes one complete challenger; no separate critique call or deterministic prose edit.",
+    };
+    if (!await exists(editorBriefPath)) await writeJsonExclusive(editorBriefPath, editorBrief);
+    else {
+      const existingBrief = JSON.parse(await fs.readFile(editorBriefPath, "utf8"));
+      if (existingBrief.incumbent_sha256 !== incumbent.sha256) throw new Error(`Round ${roundNumber} editor brief is stale.`);
+    }
+    const editorPrompt = `${editorInstruction}\n\nAPPROVED TITLE AND PREMISE\n${JSON.stringify({
+      title: brief.document.title,
+      core_premise: brief.document.core_premise,
+      opening_target: brief.document.opening_target,
+    }, null, 2)}\n\nPRIOR BLIND RETENTION EVIDENCE\n${JSON.stringify(feedback, null, 2)}\n\nINCUMBENT WORD COUNT\n${incumbent.word_count}\n\nEXACT INCUMBENT NARRATION\n${incumbent.text}`;
+    const editorResponsePath = path.join(roundDirectory, "editor_response.txt");
+    const challengerPath = path.join(roundDirectory, "challenger.txt");
+    const editorResponse = await modelCall({
+      outputPath: editorResponsePath,
+      prompt: editorPrompt,
+      provider: "chatgpt_web",
+      model: "gpt-5.6-sol",
+      effort: "medium",
+      stageName: `winner_source_script_improvement_edit_r${String(roundNumber).padStart(2, "0")}`,
+      timeoutMs: Number(flags["edit-timeout-ms"] ?? 2_400_000),
+    });
+    const challengerText = stripFence(editorResponse.content);
+    const challengerBytes = `${challengerText}\n`;
+    if (!await exists(challengerPath)) await writeExclusive(challengerPath, challengerBytes);
+    else if (await fileSha256(challengerPath) !== sha256Text(challengerBytes)) throw new Error(`Round ${roundNumber} challenger differs from the recorded editor response.`);
+    const normalizedChallengerText = await fs.readFile(challengerPath, "utf8");
+    const challenger = {
+      path: challengerPath,
+      text: normalizedChallengerText,
+      sha256: sha256Text(normalizedChallengerText),
+      word_count: words(normalizedChallengerText),
+    };
+    const lengthAssessment = assessFastImprovementLength(incumbent.word_count, challenger.word_count);
+    if (lengthAssessment.ratio == null || lengthAssessment.ratio < 0.75 || lengthAssessment.ratio > 1.25) {
+      throw new Error(`Improvement challenger is probably incomplete or replaced the story (length ratio ${lengthAssessment.ratio}). No judge calls were spent.`);
+    }
+    const panels = await Promise.all(Array.from({ length: FAST_IMPROVEMENT_PANEL_COUNT }, (_, index) => runFastImprovementJudge({
+      directory,
+      roundDirectory,
+      roundNumber,
+      panelNumber: index + 1,
+      brief: brief.document,
+      calibration,
+      incumbent,
+      challenger,
+      flags,
+    })));
+    const result = decideFastImprovement({
+      panels,
+      incumbentWordCount: incumbent.word_count,
+      challengerWordCount: challenger.word_count,
+      minimumApvDelta,
+    });
+    const promoted = result.accepted;
+    const decision = {
+      schema: "goldflow_manhwa_fast_improvement_decision_v1",
+      status: promoted ? "challenger_promoted" : "incumbent_retained",
+      round: roundNumber,
+      editor_model: "gpt-5.6-sol",
+      editor_reasoning_effort: "medium",
+      judge_model: "gpt-5.6-sol",
+      judge_reasoning_effort: "medium",
+      incumbent: { path: incumbent.path, sha256: incumbent.sha256, word_count: incumbent.word_count },
+      challenger: { path: challenger.path, sha256: challenger.sha256, word_count: challenger.word_count },
+      editor_response: {
+        path: editorResponsePath,
+        sha256: await fileSha256(editorResponsePath),
+        receipt_path: `${editorResponsePath}.meta.json`,
+        receipt_sha256: await fileSha256(`${editorResponsePath}.meta.json`),
+      },
+      panels,
+      decision: result,
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+    };
+    await writeJsonExclusive(decisionPath, decision);
+    if (promoted) await writeAtomic(currentWinnerPath, normalizedChallengerText);
+    decisions.push(decision);
+    if (!promoted) break;
+  }
+
+  const finalText = await fs.readFile(currentWinnerPath, "utf8");
+  const reportPath = path.join(loopDirectory, "improvement_loop_report.json");
+  const report = {
+    schema: "goldflow_manhwa_fast_improvement_loop_v1",
+    status: "completed",
+    policy: "medium_only_one_editor_plus_three_blind_panels",
+    requested_max_rounds: maxRounds,
+    initial_source: initial.source,
+    v00_incumbent_path: v00Path,
+    v00_incumbent_sha256: v00Sha256,
+    final_script_path: currentWinnerPath,
+    final_script_sha256: sha256Text(finalText),
+    final_word_count: words(finalText),
+    accepted_rounds: decisions.filter((row) => row.status === "challenger_promoted").length,
+    stopped_on_rejection: decisions.some((row) => row.status === "incumbent_retained"),
+    rounds: decisions.map((row) => ({
+      round: row.round,
+      status: row.status,
+      decision_path: path.join(loopDirectory, `round_${String(row.round).padStart(2, "0")}`, "decision.json"),
+      predicted_apv_delta: row.decision?.predicted_apv_delta ?? null,
+    })),
+    completed_at: new Date().toISOString(),
+  };
+  await writeJsonAtomic(reportPath, report);
+  return { report, reportPath };
+}
+
 async function main() {
   const action = process.argv[2] ?? "help";
   const flags = flagsFrom(process.argv.slice(3));
@@ -975,6 +1486,21 @@ async function main() {
     }, null, 2));
     return;
   }
+  if (action === "improve") {
+    const result = await improveCandidate(directory, flags);
+    console.log(JSON.stringify({
+      status: result.report.status,
+      policy: result.report.policy,
+      accepted_rounds: result.report.accepted_rounds,
+      stopped_on_rejection: result.report.stopped_on_rejection,
+      final_script_path: result.report.final_script_path,
+      final_script_sha256: result.report.final_script_sha256,
+      final_word_count: result.report.final_word_count,
+      report_path: result.reportPath,
+      next_action: "operator reviews the exact retained winner before production ingest",
+    }, null, 2));
+    return;
+  }
   if (action === "compare-prompts") {
     const result = await comparePromptVersions(directory, flags);
     console.log(JSON.stringify({
@@ -1002,7 +1528,7 @@ async function main() {
     }, null, 2));
     return;
   }
-  console.log(`Usage: goldflow source manufacture <ideate|prepare|write|select|compare-prompts|audition|promote|run|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
+  console.log(`Usage: goldflow source manufacture <ideate|prepare|write|select|compare-prompts|improve|audition|promote|run|learn> --development-slug <slug> [--evidence <txt>] [--brief <json>] [--writer-prompt <operator-approved.txt>] [--script <incumbent.txt>] [--max-rounds 1] [--minimum-apv-delta 0.5] [--writer-concurrency 3] [--writer-stagger-ms 15000] [--legacy-manifest <recovered-drafts-manifest.json>] [--audition-candidate-count 3] [--candidate-id draft_56_2 --approved-by <name> --reason <text>] [--template <complete-template.txt>]`);
 }
 
 main().catch((error) => {

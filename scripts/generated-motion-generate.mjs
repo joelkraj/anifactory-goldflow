@@ -266,12 +266,19 @@ async function waitForMediaJob(jobId, token) {
   throw new Error(`Timed out waiting for Flow Studio media job ${jobId}; the durable job remains queued or leased.`);
 }
 
+export function selectGeneratedMotionDirections(directions = [], identityContract = {}, explicitIds = new Set()) {
+  if (explicitIds.size) return directions.filter((row) => explicitIds.has(String(row.image_id)));
+  const requiredThroughSec = Number(identityContract.required_through_sec ?? 0);
+  if (Number.isFinite(requiredThroughSec) && requiredThroughSec > 0) {
+    return directions.filter((row) => Number(row.start_sec ?? 0) < requiredThroughSec);
+  }
+  return directions;
+}
+
 function buildPlan(directionPlan, identityContract) {
   const explicitIds = new Set(requestedCutIds());
   const directions = directionPlan.directions ?? [];
-  const selected = explicitIds.size
-    ? directions.filter((row) => explicitIds.has(String(row.image_id)))
-    : directions;
+  const selected = selectGeneratedMotionDirections(directions, identityContract, explicitIds);
   if (explicitIds.size && selected.length !== explicitIds.size) {
     throw new Error("One or more requested --cut-ids are absent from the animation direction plan.");
   }

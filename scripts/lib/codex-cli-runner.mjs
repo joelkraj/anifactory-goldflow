@@ -612,6 +612,17 @@ async function runChatGptWebCompletion({
           ?? runtime.identity?.provider_locks?.chatgpt_web_project_url
           ?? null,
         timeoutMs,
+        rateClass: stageName.startsWith("winner_source_script_v3_")
+          || stageName.startsWith("winner_source_script_improvement_edit_")
+          ? "source_revision"
+          : stageName.startsWith("winner_source_script_improvement_judge_")
+            ? "audience_staggered"
+            : stageName.startsWith("winner_source_prompt_strategy_ab_")
+            ? "audience_evaluation"
+            : null,
+        minimumStartIntervalMs: stageName.startsWith("winner_source_script_improvement_judge_")
+          ? 15_000
+          : null,
       });
     const content = String(result.content ?? "");
     await fs.writeFile(outputPath, content, "utf8");

@@ -60,6 +60,13 @@ assert.equal(creativeStageRerunDecision({
 }).reason, "exact_scope_repair");
 assert.equal(creativeStageRerunDecision({
   command: "imagegen",
+  subcommand: "browser-pool",
+  stage: "image_generation",
+  flags: { "reconcile-only": "true" },
+  priorEvents: [failedSceneBatch],
+}).reason, "browser_pool_noncreative_reconciliation");
+assert.equal(creativeStageRerunDecision({
+  command: "imagegen",
   subcommand: "start",
   stage: "image_generation",
   priorEvents: [failedSceneBatch],

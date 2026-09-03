@@ -99,6 +99,26 @@ export function validateRepairSharedReferenceScope({ ids = [], repairReason = ""
   return ids;
 }
 
+export function validateFlowModelOverride({
+  model = "",
+  flowOnly = false,
+  repairReason = "",
+  requestedIdCount = 0,
+  reconcileOnly = false,
+  wavefrontPrefetch = false,
+  heroCandidateBakeoff = false,
+} = {}) {
+  const normalized = String(model).trim();
+  if (!normalized) return null;
+  if (!flowOnly || !String(repairReason).trim() || Number(requestedIdCount) < 1) {
+    throw new Error("--flow-model-override requires --flow-only true, exact asset IDs, and --repair-reason.");
+  }
+  if (reconcileOnly || wavefrontPrefetch || heroCandidateBakeoff) {
+    throw new Error("--flow-model-override is restricted to exact repair generation and cannot be combined with reconcile, wavefront, or hero-bakeoff modes.");
+  }
+  return normalized;
+}
+
 async function manifestAttemptExistsForAsset({ episodeDir, assetId }) {
   const stagingRoot = path.join(episodeDir, "assets", "images", "codex_worker_staging");
   const manifests = (await fs.readdir(stagingRoot, { withFileTypes: true }).catch(() => []))
@@ -525,6 +545,40 @@ export async function findSourceCompatibleHybridDeadletters({
   return compatibleById;
 }
 
+async function findApprovedManualPromptRepairEvidence({ episodeDir, episode, requestedIds }) {
+  const triagePath = path.join(episodeDir, `visual_manual_blocker_triage_${episode}.json`);
+  const triage = await readJson(triagePath, null);
+  if (triage?.status !== "approved") return new Map();
+  const approvedIds = new Set((triage.dispositions ?? [])
+    .filter((row) => row?.disposition === "manual_exact_cut_prompt_repair")
+    .map((row) => String(row?.image_id ?? ""))
+    .filter(Boolean));
+  const wanted = [...requestedIds].filter((assetId) => approvedIds.has(assetId));
+  if (!wanted.length) return new Map();
+
+  const stagingRoot = path.join(episodeDir, "assets", "images", "codex_worker_staging");
+  const entries = (await fs.readdir(stagingRoot, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isDirectory())
+    .sort((left, right) => right.name.localeCompare(left.name));
+  const evidenceById = new Map();
+  for (const assetId of wanted) {
+    for (const entry of entries) {
+      const deadletterPath = path.join(stagingRoot, entry.name, "deadletters", `${assetId}.json`);
+      const deadletter = await readJson(deadletterPath, null);
+      if (deadletter?.asset_id !== assetId || !/content_policy_rejected/i.test(String(deadletter?.details ?? ""))) continue;
+      evidenceById.set(assetId, {
+        asset_id: assetId,
+        records: [
+          { path: triagePath, sha256: await sha256File(triagePath) },
+          { path: deadletterPath, sha256: await sha256File(deadletterPath) },
+        ],
+      });
+      break;
+    }
+  }
+  return evidenceById;
+}
+
 function orderedReferenceHashes(rows = []) {
   return rows.map((row) => ({ ref_id: row?.ref_id ?? null, sha256: row?.sha256 ?? null }));
 }
@@ -719,6 +773,9 @@ async function resolveRepairEvidence({
     currentRows,
     requestedIds,
   });
+  const manualPromptRepairEvidenceById = mode === "scene"
+    ? await findApprovedManualPromptRepairEvidence({ episodeDir, episode, requestedIds })
+    : new Map();
   const duplicateEvidenceById = new Map();
   const duplicateRecords = [];
   const sourcePath = mode === "scene"
@@ -747,20 +804,30 @@ async function resolveRepairEvidence({
     }
     for (const row of group) duplicateRecords.push({ path: row.imagePath, sha256: row.imageSha256 });
   }
-  const authorizedIds = new Set([...evidenceById.keys(), ...duplicateEvidenceById.keys()]);
+  const authorizedIds = new Set([
+    ...evidenceById.keys(),
+    ...manualPromptRepairEvidenceById.keys(),
+    ...duplicateEvidenceById.keys(),
+  ]);
   const unauthorized = [...requestedIds].filter((assetId) => !authorizedIds.has(assetId));
   if (unauthorized.length) {
     throw new Error(`Repair scope lacks a prior provider deadletter or deterministic duplicate-loser finding for: ${unauthorized.join(", ")}.`);
   }
-  const records = [...evidenceById.values()].flatMap((evidence) => evidence.records);
+  const records = [
+    ...evidenceById.values(),
+    ...manualPromptRepairEvidenceById.values(),
+  ].flatMap((evidence) => evidence.records);
   if (duplicateEvidenceById.size) {
     if (!await exists(sourcePath)) throw new Error(`Duplicate repair evidence source is missing: ${sourcePath}.`);
     records.push({ path: sourcePath, sha256: await sha256File(sourcePath) }, ...duplicateRecords);
   }
   const uniqueRecords = [...new Map(records.map((record) => [record.path, record])).values()];
-  const kind = evidenceById.size && duplicateEvidenceById.size
-    ? "provider_deadletters_and_duplicate_output_hashes"
-    : duplicateEvidenceById.size ? "duplicate_output_hashes" : "provider_deadletters";
+  const kinds = [
+    evidenceById.size ? "provider_deadletters" : null,
+    manualPromptRepairEvidenceById.size ? "approved_manual_prompt_repairs" : null,
+    duplicateEvidenceById.size ? "duplicate_output_hashes" : null,
+  ].filter(Boolean);
+  const kind = kinds.join("_and_");
   return {
     schema: "goldflow_hybrid_image_repair_evidence_v1",
     kind,
@@ -805,6 +872,7 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
   expectedPlanLabel = null,
   expectedModelLabel = null,
   requirePreparedWorkerPool = false,
+  expectedConcurrency: expectedConcurrencyOverride = null,
 } = {}) {
   const providerLabel = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
     ? "Google Flow"
@@ -846,9 +914,11 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
       const stateRoot = path.resolve(path.dirname(runtimePath), "..", "..");
       const workerRuntimePath = path.join(stateRoot, `${expectedProvider}-desktop-worker-runtime.json`);
       const workerRuntime = await readJson(workerRuntimePath, null);
-      const expectedConcurrency = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
-        ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
-        : GOOGLE_GEMINI_IMAGE_CONCURRENCY;
+      const expectedConcurrency = expectedConcurrencyOverride == null
+        ? (expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
+            ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
+            : GOOGLE_GEMINI_IMAGE_CONCURRENCY)
+        : Number(expectedConcurrencyOverride);
       const expectedPolicy = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
         ? PERSISTENT_GOOGLE_FLOW_PROJECT_PER_SLOT_POLICY
         : PERSISTENT_BROWSER_TAB_PER_SLOT_POLICY;
@@ -858,14 +928,53 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
         || !processIsLive(workerRuntime?.pid)
         || Number(workerRuntime?.concurrency) !== expectedConcurrency
         || workerRuntime?.worker_pool?.policy !== expectedPolicy
-        || !(workerRuntime?.worker_pool?.prepared_session_policies ?? []).includes(expectedPolicy)
-        || readySlots.length !== expectedConcurrency
-        || workerRuntime?.dispatch_policy?.provider_circuit) {
+        || !(workerRuntime?.worker_pool?.prepared_session_policies ?? []).includes(expectedPolicy)) {
         throw new Error(`${providerLabel} persistent worker pool is not production-ready (${readySlots.length}/${expectedConcurrency} slots). Run goldflow run media-ready before dispatch.`);
+      }
+      if (workerRuntime?.dispatch_policy?.provider_circuit) {
+        throw new Error(`${providerLabel} provider circuit is open. Inspect its exact failed assets before dispatch.`);
+      }
+      if (readySlots.length !== expectedConcurrency) {
+        const error = new Error(`${providerLabel} persistent worker pool is rebuilding a slot (${readySlots.length}/${expectedConcurrency} ready).`);
+        error.code = "persistent_worker_pool_recovering";
+        throw error;
       }
     }
   }
   return runtime;
+}
+
+async function assertMonitoredProviderRuntimes(providerRuntimes, recoveryStartedAt, { graceMs = 90_000 } = {}) {
+  for (const runtime of providerRuntimes) {
+    try {
+      await assertHostRuntime(runtime.path, runtime.provider, {
+        expectedPlanLabel: runtime.planLabel,
+        expectedModelLabel: runtime.modelLabel,
+        requirePreparedWorkerPool: true,
+        expectedConcurrency: runtime.expectedConcurrency,
+      });
+      recoveryStartedAt.delete(runtime.provider);
+    } catch (error) {
+      if (error?.code !== "persistent_worker_pool_recovering") throw error;
+      const startedAt = recoveryStartedAt.get(runtime.provider) ?? Date.now();
+      recoveryStartedAt.set(runtime.provider, startedAt);
+      if (Date.now() - startedAt > graceMs) throw error;
+      if (Date.now() === startedAt) {
+        process.stderr.write(`[browser-pool] ${error.message} Waiting up to ${Math.round(graceMs / 1_000)} seconds for the persistent project replacement.\n`);
+      }
+    }
+  }
+}
+
+export function monitoredProviderRuntimes(runtimes, {
+  federated = false,
+  styleOnly = false,
+  geminiOnly = false,
+  chatgptOnly = false,
+} = {}) {
+  if (!federated || styleOnly || geminiOnly || chatgptOnly) return runtimes;
+  const flowRuntimes = runtimes.filter((runtime) => runtime.provider === GOOGLE_FLOW_BROWSER_PROVIDER);
+  return flowRuntimes.length ? flowRuntimes : runtimes;
 }
 
 export function hybridManifestDispatchOptions({
@@ -1022,6 +1131,7 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
   let lastProgress = "";
   let lastRuntimeCheck = 0;
   let blockedIdleSince = null;
+  const runtimeRecoveryStartedAt = new Map();
   while (true) {
     const status = await getCodexWorkStatus({ manifestPath });
     const progress = JSON.stringify(status.counts);
@@ -1041,13 +1151,7 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
     }
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for hybrid browser manifest ${manifestPath}.`);
     if (Date.now() - lastRuntimeCheck > 15_000) {
-      for (const runtime of providerRuntimes) {
-        await assertHostRuntime(runtime.path, runtime.provider, {
-          expectedPlanLabel: runtime.planLabel,
-          expectedModelLabel: runtime.modelLabel,
-          requirePreparedWorkerPool: true,
-        });
-      }
+      await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
       lastRuntimeCheck = Date.now();
     }
     await delay(2_000);
@@ -1060,6 +1164,7 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
   const started = Date.now();
   let lastProgress = "";
   let lastRuntimeCheck = 0;
+  const runtimeRecoveryStartedAt = new Map();
   while (true) {
     const status = await getCodexWorkStatus({ manifestPath });
     const rows = status.items.filter((row) => wanted.has(row.asset_id));
@@ -1085,13 +1190,7 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
     }
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for streaming browser assets in ${manifestPath}.`);
     if (Date.now() - lastRuntimeCheck > 15_000) {
-      for (const runtime of providerRuntimes) {
-        await assertHostRuntime(runtime.path, runtime.provider, {
-          expectedPlanLabel: runtime.planLabel,
-          expectedModelLabel: runtime.modelLabel,
-          requirePreparedWorkerPool: true,
-        });
-      }
+      await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
       lastRuntimeCheck = Date.now();
     }
     await delay(2_000);
@@ -1306,6 +1405,7 @@ async function createAndRunPhase({
   cutExecutionLedgerPath,
   wavefrontPrefetch = false,
   downloadsRoot,
+  flowModelOverride = null,
 }) {
   if (!assetIds.length) return null;
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("A phase can select only one browser provider.");
@@ -1320,12 +1420,19 @@ async function createAndRunPhase({
   const checkedRuntimes = chatgptElectron
     ? activeRuntimes.filter((runtime) => runtime.provider !== "chatgpt")
     : activeRuntimes;
+  const monitoredRuntimes = monitoredProviderRuntimes(checkedRuntimes, {
+    federated,
+    styleOnly,
+    geminiOnly,
+    chatgptOnly,
+  });
   if (checkHostRuntimes) {
     await Promise.all(checkedRuntimes
       .map((runtime) => assertHostRuntime(runtime.path, runtime.provider, {
         expectedPlanLabel: runtime.planLabel,
         expectedModelLabel: runtime.modelLabel,
         requirePreparedWorkerPool: true,
+        expectedConcurrency: runtime.expectedConcurrency,
       })));
   }
   const dispatch = hybridManifestDispatchOptions({
@@ -1353,7 +1460,7 @@ async function createAndRunPhase({
     leaseSeconds: 1800,
     repairReason,
     repairEvidence,
-    verificationGateBypass: styleOnly || assetIds.length <= 4 ? null : {
+    verificationGateBypass: styleOnly || assetIds.length <= 4 || flowModelOverride ? null : {
       kind: "prior_health_proof",
       path: healthProof.path,
       sha256: healthProof.sha256,
@@ -1388,7 +1495,7 @@ async function createAndRunPhase({
     const terminalStatus = await waitForManifest({
       manifestPath: created.manifest.manifest_path,
       timeoutMs,
-      providerRuntimes: checkHostRuntimes ? checkedRuntimes : [],
+      providerRuntimes: checkHostRuntimes ? monitoredRuntimes : [],
     });
     await electronDispatch;
     const phase = await providerPhaseSummary(created.manifest.manifest_path, terminalStatus);
@@ -1897,6 +2004,7 @@ export async function runHybridBrowserImagePool(flags) {
   const manualProviderAuthEvidencePath = String(flags["manual-provider-auth-evidence"] ?? "").trim();
   const wavefrontPrefetch = boolFlag(flags["wavefront-prefetch"]);
   const reconcileOnly = boolFlag(flags["reconcile-only"]);
+  const heroCandidateBakeoff = boolFlag(flags["hero-candidate-bakeoff"]);
   const flowOnly = flowPrimary || boolFlag(flags["flow-only"]);
   const chatgptOnly = boolFlag(flags["chatgpt-only"]);
   const geminiOnly = boolFlag(flags["gemini-only"]);
@@ -1919,6 +2027,15 @@ export async function runHybridBrowserImagePool(flags) {
     referencesOnly ? null : flags["cut-ids"],
     referencesOnly ? null : flags["cut-id"],
   ));
+  const flowModelOverride = validateFlowModelOverride({
+    model: flags["flow-model-override"],
+    flowOnly,
+    repairReason,
+    requestedIdCount: requestedIds.size,
+    reconcileOnly,
+    wavefrontPrefetch,
+    heroCandidateBakeoff,
+  });
   if (repairReason && !requestedIds.size) throw new Error("--repair-reason requires exact --image-ids/--reference-ids scope.");
   if (federated && chatgptOnly && !federatedWebImageAutomaticChatGptEnabled(identity)
     && (!repairReason || !requestedIds.size)) {
@@ -1947,7 +2064,8 @@ export async function runHybridBrowserImagePool(flags) {
       provider: GOOGLE_FLOW_BROWSER_PROVIDER,
       path: path.join(stateRoot, "providers", GOOGLE_FLOW_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_flow.plan_label,
-      modelLabel: identity.image_provider_options.google_flow.model_label,
+      modelLabel: flowModelOverride || identity.image_provider_options.google_flow.model_label,
+      expectedConcurrency: flowRuntimeConcurrency,
     },
     gemini: {
       provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
@@ -2032,6 +2150,14 @@ export async function runHybridBrowserImagePool(flags) {
       creative_submission_attempts: reconcileOnly ? 0 : 1,
       automatic_retry_policy: "none",
       exact_repair_reason: repairReason || null,
+      provider_model_override: flowModelOverride ? {
+        provider: GOOGLE_FLOW_BROWSER_PROVIDER,
+        identity_locked_model: identity.image_provider_options.google_flow.model_label,
+        repair_model: flowModelOverride,
+        exact_asset_ids: [...requestedIds],
+        reason: repairReason,
+        verification_policy: "fresh_representative_wave",
+      } : null,
       repair_shared_reference_ids: repairSharedReferenceIds,
       repair_evidence: repairEvidence,
       qa_recovery: qaRecovery,
@@ -2305,6 +2431,7 @@ export async function runHybridBrowserImagePool(flags) {
           imagegenReportPath,
           cutExecutionLedgerPath,
           wavefrontPrefetch,
+          flowModelOverride,
         });
         recordPhase("remaining_references_shared_pool", phase);
       }
@@ -2325,7 +2452,7 @@ export async function runHybridBrowserImagePool(flags) {
         accepted.add(row.image_id);
       }
     }
-    if (!repairReason && !wavefrontPrefetch) {
+    if (heroCandidateBakeoff && !repairReason && !wavefrontPrefetch) {
       const heroCanonicalIds = candidates
         .filter((prompt) => !requestedIds.size || requestedIds.has(prompt.image_id))
         .filter((prompt) => !accepted.has(prompt.image_id))
@@ -2393,6 +2520,7 @@ export async function runHybridBrowserImagePool(flags) {
         imagegenReportPath,
         cutExecutionLedgerPath,
         wavefrontPrefetch,
+        flowModelOverride,
       });
       recordPhase("scene_images_shared_pool", phase);
     }

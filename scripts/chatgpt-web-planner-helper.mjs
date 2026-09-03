@@ -150,8 +150,12 @@ export async function runChatGptWebPlanner({
       ? await fs.readFile(artifact.path, "utf8").catch(() => "")
       : "";
     const content = normalizeChatGptWebPlannerText(rawContent);
-    if (processError || receipt?.status !== "completed" || !artifact?.path || !content.trim()) {
+    const receiptModelMismatch = receipt?.status === "completed" && receipt?.model !== model;
+    if (processError || receipt?.status !== "completed" || receiptModelMismatch || !artifact?.path || !content.trim()) {
       const detail = receipt?.error?.message
+        || (receiptModelMismatch
+          ? `model receipt mismatch (requested=${model}, received=${receipt?.model ?? "missing"})`
+          : null)
         || processError?.stderr
         || processError?.stdout
         || processError?.message
@@ -164,7 +168,7 @@ export async function runChatGptWebPlanner({
     return {
       provider: "chatgpt_web",
       transport: "goldflow_authenticated_browser_jobs",
-      model,
+      model: receipt.model,
       reasoning_effort: effort,
       content,
       output_path: outputPath,

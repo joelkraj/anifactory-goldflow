@@ -2,7 +2,26 @@
 
 import assert from "node:assert/strict";
 
-import { runGeneratedMotionPipelineForTests } from "../generated-motion-generate.mjs";
+import {
+  runGeneratedMotionPipelineForTests,
+  selectGeneratedMotionDirections,
+} from "../generated-motion-generate.mjs";
+
+const scopedDirections = [
+  { image_id: "cut_opening_a", start_sec: 0 },
+  { image_id: "cut_opening_b", start_sec: 179.9 },
+  { image_id: "cut_after_boundary", start_sec: 180 },
+];
+assert.deepEqual(
+  selectGeneratedMotionDirections(scopedDirections, { required_through_sec: 180 }).map((row) => row.image_id),
+  ["cut_opening_a", "cut_opening_b"],
+  "unscoped generation should stop at the identity-locked required-motion boundary",
+);
+assert.deepEqual(
+  selectGeneratedMotionDirections(scopedDirections, { required_through_sec: 180 }, new Set(["cut_after_boundary"])).map((row) => row.image_id),
+  ["cut_after_boundary"],
+  "explicit exact-cut recovery may select a cut outside the default required-motion boundary",
+);
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const rows = Array.from({ length: 7 }, (_, index) => ({ image_id: `cut_${index + 1}` }));

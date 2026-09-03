@@ -755,6 +755,25 @@ export class GoogleGeminiBrowser {
       .filter(Boolean));
   }
 
+  async generatedResponseImageUrls(page) {
+    const generatedImages = page.getByRole("img", { name: /AI generated/i });
+    const urls = [];
+    for (let index = 0; index < await generatedImages.count(); index += 1) {
+      const image = generatedImages.nth(index);
+      if (!await image.isVisible().catch(() => false)) continue;
+      const details = await image.evaluate((node) => ({
+        complete: node.complete,
+        width: node.naturalWidth,
+        height: node.naturalHeight,
+        sourceUrl: node.currentSrc || node.src,
+      })).catch(() => null);
+      if (details?.complete && details.width >= 256 && details.height >= 256 && details.sourceUrl) {
+        urls.push(details.sourceUrl);
+      }
+    }
+    return [...new Set(urls)];
+  }
+
   async imageBytes(page, sourceUrl) {
     if (sourceUrl.startsWith("blob:")) {
       const dataUrl = await page.locator("img").evaluateAll((images, url) => {
@@ -780,6 +799,25 @@ export class GoogleGeminiBrowser {
       const body = await page.locator("body").innerText();
       const blockingCode = geminiBlockingCode(body);
       if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
+      // Gemini labels response rasters as "AI generated". That DOM contract is
+      // stronger evidence than pixel dissimilarity: identity-preserving edits
+      // can intentionally resemble their attached character reference closely.
+      for (const sourceUrl of (await this.generatedResponseImageUrls(page)).filter((url) => !baseline.has(url))) {
+        try {
+          return {
+            sourceUrl,
+            bytes: await this.imageBytes(page, sourceUrl),
+            generatedResult: {
+              schema: "goldflow_browser_generated_result_v1",
+              status: "verified",
+              browser_provider: "google-gemini",
+              source_url: sourceUrl,
+            },
+          };
+        } catch (error) {
+          this.log(`Gemini generated response is not downloadable yet: ${error.message}`, "warn");
+        }
+      }
       for (const sourceUrl of (await this.visibleImageUrls(page)).filter((url) => !baseline.has(url))) {
         try {
           const bytes = await this.imageBytes(page, sourceUrl);
@@ -887,6 +925,7 @@ export class GoogleGeminiBrowser {
         uiContract: {
           ...uiContract,
           reference_binding: referenceBinding,
+          generated_result: generated.generatedResult ?? null,
           worker_session_policy: job.worker_session_policy ?? "fresh_session_per_job_v1",
           worker_slot: slot,
         },

@@ -19,6 +19,17 @@ export const FLOW_VIDEO_CONTROL_LABEL_PATTERN = /^Video\s*·\s*(?:\d+p\s*·\s*)?
 const FLOW_COMPOSER_MEDIA_CONTROL_PATTERN = /^(?:(?:🍌\s*)?Nano Banana\b|Veo\b|Video\s*·\s*(?:\d+p\s*·\s*)?\d+s\b)/i;
 const PERSISTENT_FLOW_WORKER_POLICY = "persistent_project_per_worker_slot_v1";
 
+async function dismissFlowChangelog(page) {
+  const getStarted = await waitForVisible(
+    page.getByRole("button", { name: /^get started$/i }),
+    { timeoutMs: 2_000 },
+  );
+  if (!getStarted) return false;
+  await getStarted.click();
+  await getStarted.waitFor({ state: "hidden", timeout: 5_000 }).catch(() => {});
+  return true;
+}
+
 export function redactBrowserDiagnostic(value) {
   return String(value ?? "")
     .replace(/(^|[\r\n])(?:\x1b\[[0-9;]*m|[ \t-])*(?:cookie|set-cookie|authorization|proxy-authorization)\s*:[^\r\n]*/gi, "$1[REDACTED REQUEST HEADER]")
@@ -176,6 +187,14 @@ export function normalizeFlowPromptText(value) {
   return String(value ?? "").replaceAll("\uFEFF", "").replace(/\s+/g, " ").trim();
 }
 
+export function flowPersistentComposerNeedsReplacement({
+  terminalCardText = "",
+  referenceChipCount = 0,
+} = {}) {
+  return Number(referenceChipCount) > 0
+    || /(?:^|\s)Failed(?:\s|$)|unusual activity|generation might violate|failed to generate|something went wrong/i.test(String(terminalCardText ?? ""));
+}
+
 export function flowModelLabelMatches(actual, expected) {
   const normalize = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
   const actualLabel = normalize(actual);
@@ -299,6 +318,7 @@ export class GoogleFlowBrowser {
         'button[aria-label*="User profile"]',
       ].join(", ")));
       if (authenticatedSurface && !signedOut) {
+        await dismissFlowChangelog(this.loginPage);
         await markLoginVerified(this.profileDir, { url: this.loginPage.url() }, "google-flow");
         this.log("Google Flow authentication verified.");
         return;
@@ -381,6 +401,7 @@ export class GoogleFlowBrowser {
       if (await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
         throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
       }
+      await dismissFlowChangelog(page);
       if (!isFlowProjectWorkspaceUrl(page.url())) {
         const newProject = await waitForVisible(
           page.getByRole("button", { name: /new project/i }),
@@ -480,6 +501,7 @@ export class GoogleFlowBrowser {
       if (await visibleLocator(page.locator(SIGNED_OUT_SELECTOR))) {
         throw codedError("account_mismatch", "The dedicated Goldflow Google Flow profile is signed out.");
       }
+      await dismissFlowChangelog(page);
       let composer = await waitForVisible(page.locator(PROMPT_SELECTOR), { timeoutMs: 15_000 });
       if (!composer) {
         const newProject = await visibleLocator(page.getByRole("button", { name: /new project/i }));
@@ -510,6 +532,12 @@ export class GoogleFlowBrowser {
     const policyText = page.getByText(/This generation might violate (?:our )?polic(?:y|ies)/i).first();
     if (await policyText.isVisible().catch(() => false)) {
       values.push(await policyText.innerText({ timeout: 1_000 }).catch(() => "This generation might violate our policies"));
+    }
+    const terminalFailureText = page.getByText(
+      /We noticed some unusual activity|suspicious activity|temporarily locked|failed to generate|something went wrong/i,
+    ).first();
+    if (await terminalFailureText.isVisible().catch(() => false)) {
+      values.push(await terminalFailureText.innerText({ timeout: 1_000 }).catch(() => "We noticed some unusual activity"));
     }
     const text = values.filter(Boolean).join("\n");
     const code = flowBlockingCode(text);
@@ -554,8 +582,13 @@ export class GoogleFlowBrowser {
         modelControl = await waitForVisible(page.getByRole("button", { name: /Nano Banana/i }), { timeoutMs: 10_000 });
       }
       if (!modelControl) throw codedError("ui_contract_mismatch", "Google Flow image settings control is missing.");
-      await modelControl.click();
-      const settingsMenu = await waitForVisible(page.getByRole("menu").filter({ hasText: /16:9/ }), { timeoutMs: 10_000 });
+      await modelControl.click().catch(() => modelControl.click({ force: true }));
+      let settingsMenu = await waitForVisible(page.getByRole("menu").filter({ hasText: /16:9/ }), { timeoutMs: 5_000 });
+      if (!settingsMenu) {
+        await page.keyboard.press("Escape").catch(() => {});
+        await modelControl.click({ force: true });
+        settingsMenu = await waitForVisible(page.getByRole("menu").filter({ hasText: /16:9/ }), { timeoutMs: 10_000 });
+      }
       if (!settingsMenu) throw codedError("ui_contract_mismatch", "Google Flow image settings menu did not open.");
       const imageTab = await visibleLocator(settingsMenu.getByRole("tab", { name: /Image/i }));
       const landscapeTab = await visibleLocator(settingsMenu.getByRole("tab", { name: /16:9/ }));
@@ -1081,17 +1114,26 @@ export class GoogleFlowBrowser {
   }
 
   async ensureCleanImageComposer(page, { slot = 0, persistentWorker = false } = {}) {
-    const clean = await this.waitForComposerChips(page, [], { timeoutMs: 1_500 }).catch(() => null);
-    if (clean) return page;
+    await dismissFlowChangelog(page);
+    await this.composer(page);
+    const dockState = await this.waitForComposerChips(page, [], { timeoutMs: 1_500 }).catch(async () => this.composerDockState(page));
+    const terminalCardText = (await page.getByText(
+      /We noticed some unusual activity|This generation might violate|failed to generate|something went wrong/i,
+    ).allInnerTexts().catch(() => [])).join("\n");
+    const needsReplacement = flowPersistentComposerNeedsReplacement({
+      terminalCardText,
+      referenceChipCount: dockState?.chips?.length ?? 0,
+    });
+    if (!needsReplacement && dockState?.busy === false) return page;
     if (!persistentWorker) {
-      throw codedError("ui_contract_mismatch", "Google Flow fresh image composer started with stale reference chips.");
+      throw codedError("ui_contract_mismatch", "Google Flow fresh image composer started with stale references or failed-generation state.");
     }
     const workerSlot = this.assertWorkerSlot(slot);
     const priorWorker = this.workerPages.get(workerSlot);
     const replacement = await this.replacePersistentWorkerPage(
       workerSlot,
       priorWorker,
-      "the prior completed job left stale reference chips in the composer",
+      "the prior job left stale references or failed-generation state in the composer",
     );
     await this.waitForComposerChips(replacement.page, [], { timeoutMs: 15_000 });
     return replacement.page;
@@ -1194,6 +1236,7 @@ export class GoogleFlowBrowser {
       referenceInputs.push({
         slot: expectedSlot,
         ref_id: reference.ref_id,
+        upload_filename: uploadFilename,
         normalized_pixels: await normalizedImagePixels(downloaded.bytes),
       });
     }
@@ -1324,6 +1367,43 @@ export class GoogleFlowBrowser {
       .filter(Boolean));
   }
 
+  async generatedOutputImageCandidates(page, referenceInputs = []) {
+    const uploadFilenames = referenceInputs.map((row) => row.upload_filename).filter(Boolean);
+    return page.locator("img").evaluateAll((images, filenames) => {
+      const visible = (element) => Boolean(element?.getClientRects().length)
+        && getComputedStyle(element).visibility !== "hidden"
+        && getComputedStyle(element).display !== "none";
+      const rows = [];
+      const seen = new Set();
+      for (const image of images) {
+        if (!(image instanceof HTMLImageElement)
+          || !visible(image)
+          || !image.complete
+          || image.naturalWidth < 512
+          || image.naturalHeight < 288) continue;
+        let card = image.parentElement;
+        let editLink = image.closest('a[href*="/edit/"]');
+        for (let depth = 0; card && depth < 8; depth += 1, card = card.parentElement) {
+          editLink ??= card.querySelector?.('a[href*="/edit/"]');
+          if (!editLink) continue;
+          const caption = String(card.innerText ?? card.textContent ?? "").trim();
+          if (!caption) continue;
+          if (filenames.some((filename) => caption.includes(filename))) break;
+          const sourceUrl = image.currentSrc || image.src;
+          if (!sourceUrl || seen.has(sourceUrl)) break;
+          seen.add(sourceUrl);
+          rows.push({
+            source_url: sourceUrl,
+            media_edit_url: editLink.href,
+            caption: caption.slice(0, 500),
+          });
+          break;
+        }
+      }
+      return rows;
+    }, uploadFilenames);
+  }
+
   async waitForVisibleImagesToSettle(page, { stableMs = 2500, timeoutMs = 30_000 } = {}) {
     const deadline = Date.now() + timeoutMs;
     let lastSignature = null;
@@ -1369,6 +1449,25 @@ export class GoogleFlowBrowser {
     let nextExistingUrlFingerprintAt = 0;
     while (Date.now() < deadline) {
       await this.blockingAlert(page);
+      for (const candidate of await this.generatedOutputImageCandidates(page, referenceInputs)) {
+        if (baseline.has(candidate.source_url)) continue;
+        try {
+          return {
+            sourceUrl: candidate.source_url,
+            bytes: await this.imageBytes(page, candidate.source_url),
+            generatedResult: {
+              schema: "goldflow_browser_generated_result_v1",
+              status: "verified",
+              browser_provider: "google-flow",
+              source_url: candidate.source_url,
+              media_edit_url: candidate.media_edit_url,
+              caption: candidate.caption,
+            },
+          };
+        } catch (error) {
+          this.log(`Google Flow generated-result card was not downloadable yet: ${redactBrowserDiagnostic(error.message)}`, "warn");
+        }
+      }
       const urls = await this.generatedImageUrls(page);
       const fresh = urls.filter((url) => !baseline.has(url));
       for (const sourceUrl of fresh) {
@@ -1683,6 +1782,7 @@ export class GoogleFlowBrowser {
           uiContract: {
             ...verified,
             reference_binding: referenceBinding,
+            generated_result: generated.generatedResult ?? null,
             worker_session_policy: job.worker_session_policy ?? "fresh_project_per_job",
             worker_slot: slot,
           },
@@ -1770,6 +1870,15 @@ export class GoogleFlowBrowser {
           creativeSubmissionStarted,
           attempt,
         })) {
+          if (job.worker_session_policy === PERSISTENT_FLOW_WORKER_POLICY
+            && /clipboard paste did not bind to the visible composer/i.test(String(error.message ?? ""))) {
+            const workerSlot = this.assertWorkerSlot(slot);
+            await this.replacePersistentWorkerPage(
+              workerSlot,
+              this.workerPages.get(workerSlot),
+              "the slot-bound editor did not replace its prior prompt text",
+            );
+          }
           this.log(`Google Flow image transport failed before submission; retrying once in the dedicated worker project: ${redactBrowserDiagnostic(error.message)}`, "warn");
           await sleep(1_000);
           continue;

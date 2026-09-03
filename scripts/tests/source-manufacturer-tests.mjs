@@ -20,6 +20,10 @@ import {
   validateManufacturingTopicPool,
   validateManufacturingTopicShortlist,
 } from "../lib/source-manufacturer-contract.mjs";
+import {
+  assessFastImprovementLength,
+  decideFastImprovement,
+} from "../lib/source-fast-improvement-contract.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const sha = sha256Text("fixture");
@@ -177,5 +181,32 @@ const selection = {
   decision_rationale: "Candidate A has the highest predicted percentage viewed.",
 };
 assert.equal(validateManufacturingSelection(selection, { portfolio }).done, true);
+
+const closeLength = assessFastImprovementLength(10_000, 9_600);
+assert.equal(closeLength.within_requested_range, true);
+assert.equal(closeLength.within_comparable_range, true);
+const acceptedImprovement = decideFastImprovement({
+  incumbentWordCount: 10_000,
+  challengerWordCount: 9_600,
+  panels: [
+    { winner: "challenger", incumbent_predicted_apv: 30, challenger_predicted_apv: 32 },
+    { winner: "incumbent", incumbent_predicted_apv: 32, challenger_predicted_apv: 31 },
+    { winner: "challenger", incumbent_predicted_apv: 29, challenger_predicted_apv: 31 },
+  ],
+});
+assert.equal(acceptedImprovement.accepted, true);
+assert.equal(acceptedImprovement.challenger_panel_wins, 2);
+assert.equal(acceptedImprovement.predicted_apv_delta, 1);
+const rejectedShorterImprovement = decideFastImprovement({
+  incumbentWordCount: 10_000,
+  challengerWordCount: 8_500,
+  panels: [
+    { winner: "challenger", incumbent_predicted_apv: 30, challenger_predicted_apv: 34 },
+    { winner: "challenger", incumbent_predicted_apv: 31, challenger_predicted_apv: 35 },
+    { winner: "challenger", incumbent_predicted_apv: 29, challenger_predicted_apv: 33 },
+  ],
+});
+assert.equal(rejectedShorterImprovement.accepted, false);
+assert.ok(rejectedShorterImprovement.blockers.includes("challenger_length_not_comparable"));
 
 console.log("source manufacturer tests passed");

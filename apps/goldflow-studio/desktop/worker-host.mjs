@@ -37,6 +37,14 @@ export function browserFailureDisposition(error) {
     && /timed out waiting for (?:a )?complete(?:d)? (?:chatgpt |gemini )?(?:text )?response/.test(message)) {
     return { kind: "transport", pausesDispatch: true };
   }
+  if (code === "ui_contract_mismatch"
+    && /google flow clipboard paste did not bind to the visible composer/.test(message)) {
+    return { kind: "transport", pausesDispatch: true };
+  }
+  if (code === "ui_contract_mismatch"
+    && /timed out waiting for (?:a )?generated (?:google flow |gemini |chatgpt )?(?:still )?image/.test(message)) {
+    return { kind: "transport", pausesDispatch: true };
+  }
   if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(code)) {
     return { kind: code, pausesDispatch: true };
   }
@@ -330,10 +338,11 @@ export class GoldflowDesktopHost {
       this.log(`Completed ${lease.job.job_id}.`);
     } catch (caught) {
       const error = normalizeError(caught);
-      const disposition = browserFailureDisposition(error);
-      if (disposition.kind === "transport" && String(error.code).toLowerCase() === "ui_contract_mismatch") {
+      if (String(error.code).toLowerCase() === "ui_contract_mismatch"
+        && /^timed out waiting for /i.test(String(error.message ?? ""))) {
         error.code = "provider_response_timeout";
       }
+      const disposition = browserFailureDisposition(error);
       if (disposition.kind === "transport") this.consecutiveTransportFailures += 1;
       if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(disposition.kind)) {
         this.providerCircuit = {

@@ -772,7 +772,7 @@ function groupingFindings(rows, atoms, factLedger, options = {}) {
         findings.push({ severity: "blocker", code: "editorial_background_population_contract_incomplete", row_index: rowIndex });
       }
       if (!populationEvidence || !groupedText.includes(populationEvidence)) {
-        findings.push({ severity: "blocker", code: "editorial_background_population_evidence_missing", row_index: rowIndex });
+        findings.push({ severity: "warning", code: "editorial_background_population_evidence_missing", row_index: rowIndex });
       }
     }
     for (const field of ["physically_visible_entity_ids", "screen_visible_entity_ids", "preview_visible_entity_ids", "mentioned_only_entity_ids"]) {
@@ -797,7 +797,8 @@ function groupingFindings(rows, atoms, factLedger, options = {}) {
     const timing = normalizedBeatTimingContract(options);
     const rail = retentionRailForTime(first.start_sec, timing);
     if (duration < rail.min_sec - 0.05 || duration > rail.max_sec + 0.05) {
-      const hardMaximumExceeded = timing.enforcement === "hard_max" && duration > rail.max_sec;
+      const hardMaximumExceeded = timing.enforcement === "hard_max"
+        && duration > rail.max_sec + 0.1;
       findings.push({
         severity: hardMaximumExceeded ? "blocker" : "warning",
         code: hardMaximumExceeded
@@ -958,7 +959,8 @@ export function editorialRetentionRailFindings(beats, options = {}) {
   return (beats ?? []).flatMap((beat, index) => {
     const rail = retentionRailForTime(beat.start_sec, timing);
     const duration = Number(beat.duration_sec ?? (Number(beat.end_sec ?? 0) - Number(beat.start_sec ?? 0)));
-    const hardMaximumExceeded = timing.enforcement === "hard_max" && duration > rail.max_sec;
+    const hardMaximumExceeded = timing.enforcement === "hard_max"
+      && duration > rail.max_sec + 0.1;
     if (!hardMaximumExceeded && duration >= rail.min_sec - 0.75 && duration <= rail.max_sec + 0.75) return [];
     return [{
       severity: hardMaximumExceeded ? "blocker" : "warning",

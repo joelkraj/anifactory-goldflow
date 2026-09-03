@@ -312,6 +312,14 @@ Next-run candidates, not yet promoted defaults:
 
 ## End-of-Run Update Checklist
 
+### Queue Drain Fix (September 3, 22:30 UTC)
+
+- The 26-cut reference-capture repair completed 18, failed two with Gemini's generic 1095 error, and left six unsubmitted.
+- Root cause for the six untouched jobs: the controller stopped after 15 seconds with zero leases whenever any deadletter existed. That is shorter than the configured 30-second admission stagger.
+- Removed time-based idle completion. Pending work now continues after isolated failures; the controller still stops for drained work, failed required verification, a real provider circuit, runtime failure, or its overall timeout.
+- Four regression tests cover staggered pending work, terminal draining, failed verification, and verification bypass. No browser restart or provider-rate increase is needed.
+- Eighteen new rasters were visually reviewed on three replacement sheets. Eight exact IDs remain for recovery; no accepted assets will be resubmitted.
+
 Complete this section after the private-ready render exists.
 
 - [ ] Record total wall clock from approved script to private-ready render.

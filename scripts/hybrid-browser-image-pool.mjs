@@ -1126,11 +1126,25 @@ export function hybridManifestDispatchOptions({
       };
 }
 
+export function manifestQueueStopReason(status) {
+  if (status.status === "completed") return "completed";
+  if (status.counts.leased > 0) return null;
+  if (status.status === "blocked_deadletter" && status.counts.pending === 0) return "drained_deadletters";
+  const verification = status.verification_wave;
+  if (verification?.required && !verification.bypassed && verification.status !== "passed") {
+    const ids = new Set(verification.asset_ids ?? []);
+    if (status.items.some((row) => ids.has(row.asset_id) && row.status === "deadlettered")) {
+      return "failed_verification_wave";
+    }
+  }
+  // Pending work can legitimately be idle between provider admission slots.
+  return null;
+}
+
 async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
   const started = Date.now();
   let lastProgress = "";
   let lastRuntimeCheck = 0;
-  let blockedIdleSince = null;
   const runtimeRecoveryStartedAt = new Map();
   while (true) {
     const status = await getCodexWorkStatus({ manifestPath });
@@ -1139,16 +1153,7 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
       process.stderr.write(`[browser-pool] ${path.basename(path.dirname(manifestPath))} ${progress}\n`);
       lastProgress = progress;
     }
-    if (status.status === "completed") return status;
-    if (status.status === "blocked_deadletter") {
-      if (status.counts.pending === 0 && status.counts.leased === 0) return status;
-      if (status.counts.leased === 0) {
-        blockedIdleSince ??= Date.now();
-        if (Date.now() - blockedIdleSince >= 15_000) return status;
-      } else {
-        blockedIdleSince = null;
-      }
-    }
+    if (manifestQueueStopReason(status)) return status;
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for hybrid browser manifest ${manifestPath}.`);
     if (Date.now() - lastRuntimeCheck > 15_000) {
       try {

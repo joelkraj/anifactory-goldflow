@@ -21,8 +21,8 @@ Next-run target: private-ready in under 12 hours, with 6-7 hours as the stretch 
 - All 64 selected character, state, location, prop, and UI references were generated and approved.
 - Visual-prompt planning produced 373 chunks with 12 concurrent Codex Medium workers in approximately 33 minutes. One blocked cut was repaired exactly; no full planner rerun was needed.
 - Main still generation was configured as five persistent Flow projects plus three persistent Gemini image chats, but live testing showed that Flow and Gemini on the same Google account do not behave like eight independent throughput lanes. A Flow unusual-activity circuit coincided with immediate Gemini `1095` failures, so admission control must operate at the Google-account level.
-- At the latest recorded snapshot, the active 793-item browser work manifest contains 588 completed cuts, 131 untouched cuts, two active leases, and 72 exact deadletters. Completed work is split between 383 Flow and 205 Gemini outputs. These are moving counts, not the final run totals.
-- Short submission bursts repeatedly triggered Google's unusual-activity circuit. Continuous 45-second and 30-second dispatch passed bounded soaks; a 20-second tier failed immediately after the preceding traffic. Production now continues at a 30-second global interval, with no further speed escalation during this run.
+- At the 19:00 UTC snapshot, the active 793-item browser work manifest contains 610 completed cuts, 109 untouched cuts, zero active leases, and 74 exact deadletters. Completed queue work is split between 405 Flow and 205 Gemini outputs. Together with five earlier accepted cuts, the official episode report now contains 615 of 798 images; all 615 current files match their recorded hashes and none are byte-identical duplicates. These are moving counts, not the final run totals.
+- Short submission bursts repeatedly triggered Google's unusual-activity circuit. Continuous 45-second and 30-second dispatch passed bounded soaks; a 20-second tier failed immediately after the preceding traffic. Flow later returned a usage-limit message even after a full rest, and Gemini's image surface requires sign-in. Both generation queues are paused rather than repeatedly submitting into these blockers.
 - Generated video is intentionally disabled for this run. Accepted stills will use directed single-plane motion and safe parallax where available.
 
 ## Measured Comparison With Faster Runs
@@ -75,7 +75,7 @@ The current run proves that visible tab concurrency and durable accepted through
 Current-run decision:
 
 - Preserve all 798 planned cuts. Do not recover time by thinning this episode or extending visual holds.
-- Use the provisionally proven 30-second continuous interval after a full 15-minute recovery window; evaluate sustained accepted throughput before promoting it as a next-run default.
+- Use the provisional 30-second continuous interval only after provider access is restored; evaluate sustained accepted throughput before promoting it as a next-run default. A 15-minute local circuit is a recovery policy, not evidence of the provider's quota reset. Stop when a single recovery probe still returns a usage limit.
 - Keep the same persistent projects and chats; do not create a new tab, project, or conversation per cut.
 - Treat Flow and Gemini as two surfaces behind one account-level admission controller until a controlled soak proves independent rate capacity.
 - Count only accepted, downloaded, hash-unique outputs when comparing strategies. Submitted jobs and occupied tabs are not throughput.
@@ -214,11 +214,21 @@ The September 3 production queue was used as a live throughput soak without redu
 - `30 seconds x 5 persistent Flow projects` passed 10 unique completions after full recovery. Only slots one through three were used; slots four and five remained idle. Accepted cadence matched the three-tab baseline, so the extra tabs produced no measured speed gain.
 - Additional tabs cannot raise the 30-second theoretical submission ceiling of 120 per hour. They help only when long-tail generation latency leaves the smaller pool saturated; they are not independent provider rate lanes.
 
-Current provisional production setting: a global 30-second continuous submission interval, a 15-minute usage-limit circuit, and one recovery probe. Three active Flow slots are sufficient at observed latency. The already-running five-tab host is retained to avoid another handoff, but no throughput benefit is attributed to its two unused slots. A full sustained production soak, not the short test alone, determines whether this becomes the next-run default.
+The five-tab soak continued to 32 accepted unique outputs before Flow returned "You've reached your usage limit" at 18:28 UTC. A single one-slot recovery probe at 18:44 UTC, after the full 15-minute rest, returned the same usage-limit message. This differs from the earlier unusual-activity warning. The quota period is unknown; it is not evidence that faster pacing or more tabs will restore access. The host was drained and stopped.
+
+Current provisional setting after access recovery: three active slots and a nominal 30-second continuous interval. The shorter clean tests do not establish sustainable full-production throughput. Gemini's general chat authentication check passed, but its actual images page redirected to sign-in before any work was leased. The dedicated normal-Chrome login window remains open for the operator; verify the actual image composer before a single pending-item health probe. Do not silently migrate failed Flow cuts to Gemini.
 
 Important implementation finding: `submissionStaggerMs` currently spaces **lease admission**, before reference upload and composer preparation, not the final Generate click. Among the first 32 accepted outputs of the five-tab soak, pre-submit reference-binding receipt gaps ranged from 7.721 to 61.962 seconds, with a 29.758-second median; three gaps were under 20 seconds despite the nominal 30-second setting. These receipt timestamps are a close pre-click proxy, not network submission timestamps. Variable preparation time can therefore bunch real submissions and confound the nominal pacing test.
 
 Next durable fix: separate bounded preparation concurrency from one account-level Generate-click admission gate shared by Flow and Gemini. Record lease, references-ready, actual submit, result-ready, and completion timestamps independently. Queued prepared work must honor an open account circuit without another creative click, and a restart must restore the gate state rather than reset its clock. Validate that change in a bounded proof before replacing the currently productive live lane.
+
+Next controlled comparison, only after access recovers: establish the actual-click 30-second/three-tab baseline first, then test 25 seconds with the same three tabs. Add tabs only in a separate test if all three are demonstrably saturated. Compare accepted unique images per wall-clock hour including failures and cooldowns, not occupied tabs or requests sent. Stop on provider limit/protection messages; retain the full cut and reference scope.
+
+### Zero-spend reconciliation recovery
+
+The 18:53 UTC reconciliation materialized passed work but correctly rejected `ep_01-w007336-w007348`: its staged PNG no longer matched the original completion hash. The retained provider download, normalized with the same Sharp PNG conversion as the bridge, reproduced the exact recorded hash. The changed file was preserved under a hash-named quarantine filename, original bytes were restored, and an exact-ID guarded reconciliation imported the cut without another creative submission or any receipt rewrite. The cause of the post-completion file change remains unproven.
+
+Evidence: episode-local `manual_blocker_triage_image_generation_ep_01_20260903_reconcile.json`, original assignment/completion/provider receipt, and immutable reconcile-only stage reports. The episode remains incomplete with 183 missing cuts; a successful import batch is not image-stage completion.
 
 ## Proposed Next-Run Operating Sequence
 

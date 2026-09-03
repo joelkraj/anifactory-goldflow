@@ -66,8 +66,11 @@ function exactSha256(value, label) {
 function parseFlowMedia(value) {
   try {
     const mediaUrl = new URL(String(value));
-    if (!mediaUrl.pathname.includes(FLOW_MEDIA_PATH_FRAGMENT)) return null;
-    const mediaId = mediaUrl.searchParams.get("name") ?? "";
+    const currentMediaId = mediaUrl.hostname === "flow-content.google" && mediaUrl.pathname.startsWith("/image/")
+      ? mediaUrl.pathname.split("/").filter(Boolean).at(-1) ?? ""
+      : "";
+    if (!mediaUrl.pathname.includes(FLOW_MEDIA_PATH_FRAGMENT) && !currentMediaId) return null;
+    const mediaId = mediaUrl.searchParams.get("name") ?? currentMediaId;
     if (!UUID_PATTERN.test(mediaId)) return null;
     return { media_id: mediaId, media_url: mediaUrl.href };
   } catch {
@@ -951,8 +954,11 @@ export class GoogleFlowBrowser {
         for (const value of values(element)) {
           try {
             const url = new URL(value, location.href);
-            if (!url.pathname.includes(fragment)) continue;
-            const mediaId = url.searchParams.get("name") ?? "";
+            const currentMediaId = url.hostname === "flow-content.google" && url.pathname.startsWith("/image/")
+              ? url.pathname.split("/").filter(Boolean).at(-1) ?? ""
+              : "";
+            if (!url.pathname.includes(fragment) && !currentMediaId) continue;
+            const mediaId = url.searchParams.get("name") ?? currentMediaId;
             if (!mediaId || seen.has(mediaId)) continue;
             seen.add(mediaId);
             rows.push({ media_id: mediaId, media_url: url.href });
@@ -1041,8 +1047,11 @@ export class GoogleFlowBrowser {
             for (const value of candidates) {
               try {
                 const url = new URL(value, location.href);
-                if (!url.pathname.includes(fragment)) continue;
-                const mediaId = url.searchParams.get("name") ?? "";
+                const currentMediaId = url.hostname === "flow-content.google" && url.pathname.startsWith("/image/")
+                  ? url.pathname.split("/").filter(Boolean).at(-1) ?? ""
+                  : "";
+                if (!url.pathname.includes(fragment) && !currentMediaId) continue;
+                const mediaId = url.searchParams.get("name") ?? currentMediaId;
                 if (mediaId) rows.push({ media_id: mediaId, media_url: url.href });
               } catch {}
             }
@@ -1206,8 +1215,11 @@ export class GoogleFlowBrowser {
         for (const value of values) {
           try {
             const url = new URL(value, location.href);
-            if (!url.pathname.includes(fragment)) continue;
-            const mediaId = url.searchParams.get("name") ?? "";
+            const currentMediaId = url.hostname === "flow-content.google" && url.pathname.startsWith("/image/")
+              ? url.pathname.split("/").filter(Boolean).at(-1) ?? ""
+              : "";
+            if (!url.pathname.includes(fragment) && !currentMediaId) continue;
+            const mediaId = url.searchParams.get("name") ?? currentMediaId;
             if (!mediaId || seen.has(mediaId)) continue;
             seen.add(mediaId);
             const rect = element.getBoundingClientRect();

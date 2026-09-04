@@ -440,6 +440,18 @@ At 05:03:02 UTC on September 4, Studio confirmed the complete transfer and priva
 
 The saved monetization page confirms manual-only midrolls. After processing, the ad editor switched from its provisional 30fps display to 60fps and shows `0:18:12:12`, `0:35:20:28`, and `0:50:52:36`. These correspond to 1092.20, 2120.4667, and 3052.60 seconds. The middle slot remained one-sixtieth second later than the planned 2120.45 even after a precise edit and reopen. Preserve that small observed UI quantization in analytics rather than silently asserting exact arbitrary-second support. Future planned slots should use the editor's reliably persisted grid and verify after processing; this is not a reason for a new render, extra ad opportunity, or extended retry loop.
 
+### September 4 narrow next-run implementation
+
+The Google desktop hosts now share a durable final image-submit gate under `google-account-submit-gate` in their shared state directory. Preparation can overlap, but the gate holds a cross-process lock through the actual click and spaces the next click at least thirty seconds after that click finishes. A common `--google-submit-gate-dir` is required if Flow and Gemini use different state roots for the same account. `--google-submit-interval-ms` supports thirty to sixty seconds; the existing lease stagger remains preparation admission, not proof of actual submission spacing.
+
+Rate-limit and opened transient-failure circuits persist across both providers and host restart. A shared pause stops new leases and prevents prepared jobs from clicking; those exact jobs are recorded for triage, never automatically regenerated. Authentication and explicit usage-budget holds remain provider-specific because quota independence is unresolved. Crashed submission locks fail closed for manual inspection rather than being assumed safe to click again. No new account, concurrency increase, quota bypass, or creative retry was introduced.
+
+Completion receipts now distinguish lease, refs-ready, submit, result-ready and collection timestamps, with the account-gate receipt attached. The change preserves persistent tabs/projects, selected references, prompt content, cut density, Qwen, and disabled Veo. Flow generated-result evidence is retained when the collector supplies it; this does not claim the gallery fallback is fully causal or that every source reference is semantically correct. Actual raster-to-concept review remains required.
+
+Regression tests cover two independent Node processes sharing pacing, concurrent readiness, slow clicks, durable intervals, shared circuit admission, host drain, ambiguous clicks without retry, and interrupted locks. The Studio suite and source-manufacturer tests passed before this addendum; full syntax/workflow checks passed. This is implementation evidence, not a live throughput result. Before bulk references/cuts, use the first bounded set of required assets to verify stable worker surfaces, correct uploaded concepts and real click spacing. Do not repeat accepted assets as a benchmark or claim a six-hour SLA from unit tests.
+
+The source editor also accepts compact, exact-script-hash-bound director notes. The current prison source keeps its three GPT-5.6 Pro candidates, Medium comparison and Medium/High revision policy. Director review runs between useful rounds, preserving the incumbent instead of accepting simulated numerical gains alone.
+
 ## Evidence Locations
 
 - Episode directory: `/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W36-self-investment-100x-revenge-v1/episodes/ep_01`

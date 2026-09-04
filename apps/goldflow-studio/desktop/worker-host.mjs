@@ -6,6 +6,7 @@ import { GoogleGeminiBrowser } from "./google-gemini-browser.mjs";
 import { assertDesktopConfig } from "./config.mjs";
 import { DesktopRuntimeState } from "./runtime-state.mjs";
 import { GoldflowWorkerClient } from "./worker-client.mjs";
+import { GoogleSubmitGate } from "./google-submit-gate.mjs";
 
 function nowIso() {
   return new Date().toISOString();
@@ -30,6 +31,7 @@ const DEFAULT_PERSISTENT_IMAGE_POLICY_BY_PROVIDER = Object.freeze({
 export function browserFailureDisposition(error) {
   const code = String(error?.code ?? "").toLowerCase();
   const message = String(error?.message ?? error ?? "").toLowerCase();
+  if (code === "google_submit_gate_paused") return { kind: "submission_hold", pausesDispatch: true };
   if (code === "rate_limited" || /rate.?limit|too many requests|requesting generations too quickly|cooldown/.test(message)) {
     return { kind: "rate_limit", pausesDispatch: true };
   }
@@ -67,6 +69,10 @@ export class GoldflowDesktopHost {
         ? new GoogleGeminiBrowser({ ...config, log: (message, level) => this.log(message, level) })
         : new ChatGptBrowser({ ...config, log: (message, level) => this.log(message, level) }));
     this.workerId = null;
+    this.googleSubmitGate = config.browserProvider.startsWith("google-") ? new GoogleSubmitGate({
+      directory: config.googleSubmitGateDir,
+      intervalMs: config.googleSubmitIntervalMs,
+    }) : null;
     this.activeJobs = new Map();
     this.events = [];
     this.persistQueue = Promise.resolve();
@@ -119,10 +125,13 @@ export class GoldflowDesktopHost {
         uiContract: active.uiContract,
         phase: active.phase,
         startedAt: active.startedAt,
+        phase_times: active.phaseTimes,
       })),
       dispatch_policy: {
         mode: "staggered_top_off_v1",
         submission_stagger_ms: this.config.submissionStaggerMs,
+        google_submit_gate_dir: this.googleSubmitGate?.directory ?? null,
+        google_submit_interval_ms: this.googleSubmitGate?.intervalMs ?? null,
         submission_burst_size: this.config.submissionBurstSize,
         submission_burst_count: this.submissionBurstCount,
         submission_burst_cooldown_ms: this.config.submissionBurstCooldownMs,
@@ -254,6 +263,11 @@ export class GoldflowDesktopHost {
     let nextDelayMs = 700;
     try {
       const now = Date.now();
+      const accountDelay = this.googleSubmitGate ? await this.googleSubmitGate.circuitDelayMs() : 0;
+      if (accountDelay > 0) {
+        nextDelayMs = Math.min(5_000, accountDelay);
+        return;
+      }
       if (now < this.dispatchCooldownUntil) {
         nextDelayMs = Math.min(5_000, this.dispatchCooldownUntil - now);
         return;
@@ -331,6 +345,8 @@ export class GoldflowDesktopHost {
     const active = this.activeJobs.get(slot);
     if (!active) return;
     active.phase = phase;
+    active.phaseTimes ??= {};
+    active.phaseTimes[phase] ??= nowIso();
     await this.persistRuntime();
   }
 
@@ -341,6 +357,7 @@ export class GoldflowDesktopHost {
       uiContract: lease.ui_contract,
       phase: "leased",
       startedAt: nowIso(),
+      phaseTimes: { leased: nowIso() },
       recoveryProbe: this.providerRecoveryProbe,
     };
     this.activeJobs.set(slot, active);
@@ -360,7 +377,25 @@ export class GoldflowDesktopHost {
         uiContract: lease.ui_contract,
         client: this.client,
         onPhase: (phase) => this.setPhase(slot, phase),
+        submitGeneration: async (click) => {
+          if (!this.googleSubmitGate) return click();
+          const receipt = await this.googleSubmitGate.submit({
+            provider: this.config.browserProvider,
+            jobId: lease.job.job_id,
+            click,
+            assertReady: async () => {
+              if (this.stopStarted || this.dispatchCooldownUntil > Date.now()) {
+                throw Object.assign(new Error("Submission cancelled before Generate because this host is stopping or paused."), { code: "google_submit_gate_paused" });
+              }
+            },
+            onWait: () => active.phase === "waiting_for_submit_gate" ? undefined : this.setPhase(slot, "waiting_for_submit_gate"),
+          });
+          active.submitReceipt = receipt;
+          return receipt;
+        },
       });
+      result.uiContract ??= {};
+      result.uiContract.submission_timing = { ...active.phaseTimes, collected: nowIso(), account_gate: active.submitReceipt ?? null };
       await this.client.complete(lease.job, slot, result);
       const circuitOpenedAt = Date.parse(this.providerCircuit?.opened_at ?? "");
       const jobStartedAt = Date.parse(active.startedAt ?? "");
@@ -410,6 +445,10 @@ export class GoldflowDesktopHost {
         this.dispatchCooldownUntil = Date.now() + this.config.transportCooldownMs;
       }
       this.providerRecoveryProbe = false;
+      if (this.googleSubmitGate && this.dispatchCooldownUntil > Date.now()
+        && ["rate_limit", "transport"].includes(disposition.kind)) {
+        await this.googleSubmitGate.pause({ provider: this.config.browserProvider, until: this.dispatchCooldownUntil, reason: disposition.kind });
+      }
       await this.client.fail(lease.job, slot, error).catch((reportError) => {
         this.log(`Could not record failure for ${lease.job.job_id}: ${reportError.message}`, "error");
       });

@@ -2048,7 +2048,7 @@ export class GoogleFlowBrowser {
     throw codedError("ui_contract_mismatch", "Google Flow video transport exhausted its pre-submission attempts.");
   }
 
-  async runJob({ slot = 0, job, client, onPhase = async () => {} }) {
+  async runJob({ slot = 0, job, client, onPhase = async () => {}, submitGeneration = async (click) => click() }) {
     if (job.type === "video") return this.runVideoJob({ slot, job, client, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", "Google Flow browser received unsupported work.");
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -2073,10 +2073,13 @@ export class GoogleFlowBrowser {
         const baselineFingerprints = await this.baselineImageFingerprints(page, baseline);
         const manifestFingerprints = await this.manifestPixelFingerprints(job);
         const { create, referenceBinding } = await this.recordReferenceBindingEvidence(page, job, prompt, boundReferences);
-        await onPhase("submitting");
-        creativeSubmissionStarted = true;
-        await create.click();
-        await onPhase("submitted");
+        await onPhase("refs_ready");
+        await submitGeneration(async () => {
+          await onPhase("submitting");
+          creativeSubmissionStarted = true;
+          await create.click();
+          await onPhase("submitted");
+        });
         const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints, manifestFingerprints);
         if (generated.pixelSha256) manifestFingerprints.add(generated.pixelSha256);
         await onPhase("result_ready");
@@ -2088,6 +2091,7 @@ export class GoogleFlowBrowser {
           uiContract: {
             ...verified,
             reference_binding: referenceBinding,
+            generated_result: generated.generatedResult ?? null,
             worker_session_policy: job.worker_session_policy ?? "fresh_project_per_job",
             worker_slot: slot,
           },

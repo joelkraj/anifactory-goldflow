@@ -13,7 +13,7 @@
     "studio:hybrid": "node apps/goldflow-studio/desktop/hybrid-main.mjs",
     "studio:login": "node apps/goldflow-studio/desktop/login.mjs",
     "studio:worker": "node apps/goldflow-studio/desktop/connect.mjs",
-    "test:studio": "node apps/goldflow-studio/tests/run-tests.mjs && node apps/goldflow-studio/tests/chatgpt-long-context-browser.test.mjs && node apps/goldflow-studio/tests/google-gemini-browser.test.mjs && node scripts/tests/codex-cli-runner-local-error-tests.mjs",
+    "test:studio": "node apps/goldflow-studio/tests/run-tests.mjs && node apps/goldflow-studio/tests/chatgpt-long-context-browser.test.mjs && node apps/goldflow-studio/tests/google-gemini-browser.test.mjs && node apps/goldflow-studio/tests/google-submit-gate.test.mjs && node scripts/tests/codex-cli-runner-local-error-tests.mjs",
     "status": "git status --short",
     "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
     "test:planner": "node scripts/tests/planner-tests.mjs",

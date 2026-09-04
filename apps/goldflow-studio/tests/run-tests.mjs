@@ -1075,6 +1075,8 @@ async function testDesktopHostContract() {
   }, {}));
   assert.equal(config.concurrency, PRODUCTION_BROWSER_CONCURRENCY_CEILING);
   assert.equal(config.submissionStaggerMs, 6_000);
+  assert.equal(config.googleSubmitIntervalMs, 30_000);
+  assert.equal(desktopConfig({ "google-submit-interval-ms": "1000" }, {}).googleSubmitIntervalMs, 30_000);
   assert.equal(config.submissionBurstSize, 0);
   assert.equal(config.submissionBurstCooldownMs, 5 * 60_000);
   assert.equal(config.transportCooldownMs, 5 * 60_000);
@@ -1335,7 +1337,13 @@ async function testPersistentFlowWorkerPool() {
     prompt: "A single test landscape.",
     references: [],
   };
-  await browser.runJob({ slot: 2, job: baseJob, client: {} });
+  let gateCalls = 0;
+  await browser.runJob({ slot: 2, job: baseJob, client: {}, submitGeneration: async (click) => {
+    assert.equal(creativeSubmissions, 0, "Flow must prepare references before the final click gate");
+    gateCalls += 1;
+    await click();
+  } });
+  assert.equal(gateCalls, 1);
   assert.equal(creativeSubmissions, 1, "one successful asset must receive exactly one creative submission");
   assert.equal(cleanComposerChecks, 1, "every Flow image lease must verify a clean composer before submission");
   assert.equal(firstSlotTwo.isClosed(), false, "a successful persistent Flow job must leave its slot page open");
@@ -1449,6 +1457,7 @@ async function testDesktopProviderCircuitBreaker() {
   recoveryHost.running = true;
   recoveryHost.providerCircuit = { status: "open", reason: "consecutive_transient_provider_failures", opened_at: new Date().toISOString() };
   recoveryHost.dispatchCooldownUntil = Date.now() - 1;
+  await fs.writeFile(path.join(config.googleSubmitGateDir, "google-flow-circuit.json"), JSON.stringify({ blocked_until: Date.now() - 1 }));
   recoveryHost.consecutiveTransportFailures = 3;
   recoveryHost.persistRuntime = async () => {};
   recoveryHost.schedule = () => {};

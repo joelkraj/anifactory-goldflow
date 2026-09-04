@@ -339,6 +339,7 @@ async function keepsPersistentImageTabOpenAfterSingleSubmission() {
   let currentUrl = "https://gemini.google.com/images";
   let closeCalls = 0;
   let sendClicks = 0;
+  let gateCalls = 0;
   const page = {
     async goto(url) { currentUrl = url; },
     url() { return currentUrl; },
@@ -376,7 +377,13 @@ async function keepsPersistentImageTabOpenAfterSingleSubmission() {
       references: [],
     },
     client: {},
+    submitGeneration: async (click) => {
+      assert.equal(sendClicks, 0, "Gemini must not send before its final submission gate");
+      gateCalls += 1;
+      await click();
+    },
   });
+  assert.equal(gateCalls, 1);
   assert.equal(sendClicks, 1, "one Gemini asset must receive exactly one creative submission");
   assert.equal(cleanComposerChecks, 1, "every Gemini image lease must verify a clean composer before submission");
   assert.equal(closeCalls, 0, "a successful persistent Gemini image job must leave its slot tab open");

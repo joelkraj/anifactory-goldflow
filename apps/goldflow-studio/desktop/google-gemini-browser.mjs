@@ -996,7 +996,7 @@ export class GoogleGeminiBrowser {
     return { ...receipt.reference_binding, evidence: { receipt_path: receiptPath, receipt_sha256: await sha256File(receiptPath), screenshot_path: screenshotPath, screenshot_sha256: receipt.screenshot_sha256 } };
   }
 
-  async runJob({ slot = 0, job, client, onPhase = async () => {} }) {
+  async runJob({ slot = 0, job, client, onPhase = async () => {}, submitGeneration = async (click) => click() }) {
     if (job.type === "llm") return this.runLlmJob({ slot, job, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
     const persistentWorker = job.worker_session_policy === PERSISTENT_GEMINI_WORKER_POLICY;
@@ -1037,10 +1037,19 @@ export class GoogleGeminiBrowser {
       const uploadState = await this.imageUploadState(page, orderedReferences.length);
       if (!uploadState.ready) throw codedError("ui_contract_mismatch", "Gemini attachments changed or are still uploading at the submission checkpoint.");
       const referenceBinding = await this.recordEvidence(page, job, prompt, orderedReferences);
-      await onPhase("submitting");
-      await send.click();
+      await onPhase("refs_ready");
+      await submitGeneration(async () => {
+        const ready = await this.imageUploadState(page, orderedReferences.length);
+        if (!ready.ready) throw codedError("ui_contract_mismatch", "Gemini attachments changed while waiting for the submission gate.");
+        await onPhase("submitting");
+        const currentSend = await waitForVisibleEnabled(sendButtons, 30_000);
+        if (!currentSend) throw codedError("ui_contract_mismatch", "Gemini Send message is no longer enabled after the submission wait.");
+        await currentSend.click();
+        await onPhase("submitted");
+      });
       await onPhase("waiting_for_image");
       const generated = await this.waitForGeneratedImage(page, baseline, referenceInputs, baselineFingerprints, priorResponseIds);
+      await onPhase("result_ready");
       const downloadPath = await this.saveGeneratedImage(job, generated.bytes);
       return {
         downloadPath,

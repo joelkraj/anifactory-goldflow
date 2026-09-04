@@ -342,22 +342,47 @@ The initial render spent 2,033 seconds building motion caches, then failed at ca
 
 Focused collapsed-caption and failed-render-resume regression tests passed, and `npm run check` passed 342 module syntax checks plus generated-workflow validation. The broader media suite reached an unrelated legacy ModelsLab credential lookup and failed with HTTP 403; it did not complete, and no media-test generation succeeded. Do not report the whole media suite as passed.
 
-Complete this section after the private-ready render exists.
+### Final render and technical QA completed
 
-- [ ] Record total wall clock from approved script to private-ready render.
-- [ ] Record active work time, idle/handoff time, and operator-wait time separately.
-- [ ] Record duration and retry cost for every pipeline stage.
+The full 69:28.41 master passed render at September 4, 01:16:13 UTC and final technical QA at 01:26:47 UTC (September 3 Eastern time). The output is 1920x1080, 60 fps, H.264/yuv420p with AAC audio, 1,804,212,530 bytes. Final SHA-256: `9e10b81abd07b0b9bee56f4fb00951060e276d5827d3b4c1cfa553bf03e47718`. All 798 cuts and 138 planned transitions are present. No generated video or parallax is included.
+
+The recovered render took 748.45 seconds, reused all 798 motion clips and all 104 cached crossfade groups, and generated zero replacement motion clips. Including the initial failed render, render work consumed 46.36 active minutes across a 60.25-minute span. The caption fix and failed-render recovery are committed as `52ae81f`; preserving those caches avoided repeating the expensive motion work.
+
+The full decode/black/freeze/silence scan took 429.04 seconds. It found no black intervals and no unexpected silence intervals. Its only advisory is a 2.1-second near-static span at 50:30, inside a 5.06-second gym reaction cut. Direct extracted-frame inspection shows a subtle horizontal move and a normal caption ending, not a missing image or a density breach. The separate final-review addendum records acceptance. The final audio keeps its prior narration QA waiver; no new subjective human listening pass is claimed.
+
+Actual wall clock from exact script approval to the render was **19h31m22s**, and to technical QA completion was **19h41m57s**. This run missed both the 6-7-hour target and the under-12-hour fallback. The stage audit reports 411.44 active-union minutes and 772.01 idle/unattributed minutes from preflight to QA. Do not present that entire remainder as proven wasted time: four orphaned starts, browser activity outside guarded stage intervals, manual review, account recovery, and explicit operator holds limit the classification. The detailed stage table and gap classifications remain under `reports/performance/`. Thumbnail-panel time is separate and continues after technical QA.
+
+The unchanged visual plan has 13 cuts beginning before 30 seconds (maximum 3.52 seconds), 247 from 30 seconds through the first 20 minutes (maximum 6.92 seconds), and 538 later cuts (maximum 8.00 seconds). No image-density reduction was used to finish faster.
+
+All ten original thumbnail rasters are preserved. Upload-ready copies are 1280x720 JPEGs, each below 2 MiB, with source/output hashes in `assets/thumbnails/upload_ready/normalization_receipts.json`. Only geometry and encoding changed; lettering and arrows remain image-model rendered.
+
+The official workflow now stops at `upload_packaging`, pending the operator's title/thumbnail and final-video review. No upload or public release has occurred. The next run still needs a controlled account-level actual-submit pacing test; the productive short soaks do not establish independent Flow/Gemini quotas or a guaranteed end-to-end production SLA.
+
+### Completed package comparison
+
+All twenty accepted evaluator responses validate: one hundred unique synthetic persona IDs, ten shelves per persona, unique complete rankings of nine cards, exact shelf membership, and consistent first-choice/rank-one fields. The reports bind accepted result hashes and the screenshot manifest; all original failures remain inspectable. A package-prefix metadata mismatch in the first local aggregate was corrected without changing any evaluator choices or rerunning a model.
+
+Primary rank-point order is **P04 > P08 > P07 > P10 > P03 > P01 > P02 > P05 > P09 > P06**. P04 scored 166 points with 78 simulated first choices; P08 scored 192 with 79 first choices. The one-vote first-choice edge is effectively a tie. The relationship cohort favored P08 and the system cohort favored P04. These are correlated judgments from one model family, not one hundred independent humans, not predicted CTR, and not proof that all candidates beat real-channel winners.
+
+The panel spanned 67m21s from the first attempted request to the last accepted result, mostly overlapping render and QA. Its corrected-schema phase still took 42m53s. It used twenty schema-rejected requests, seven timed-out corrected requests, and twenty accepted requests. At 600 seconds, completed responses were preserved and only exact failed or never-submitted batches continued at 1200 seconds. Future panels need one schema/latency smoke test before fanout; more synthetic personas must not be sold as more real-world certainty. Do not make this expensive panel an additional mandatory production gate.
+
+The final gallery passed desktop/mobile browser checks: ten loaded images, correct rank/package sorting, working image/shelf/upload-JPEG links, and zero page errors. All twenty original/upload thumbnail hashes match their normalization receipt. Selection and publication remain unapproved. The operator ranking and real 24h/72h/7d outcomes must be appended later, not fabricated from this test.
+
+- [x] Record total wall clock from approved script to technically ready render.
+- [x] Save stage active time and idle/handoff classifications, retaining the attribution limits above.
+- [x] Record guarded-stage duration and repeated-call cost in the performance audit; uninstrumented browser/manual work is not silently counted as zero.
 - [ ] Record Flow and Gemini submissions, completions, p50/p90 latency, stale outputs, transport failures, rate limits, and auth failures.
 - [ ] Identify every deadletter by root cause, including failures induced by provider restart.
-- [ ] Measure effective still throughput before and after persistent-worker fixes.
+- [x] Measure collected still throughput before and after persistent-worker fixes, separately from final semantic acceptance.
 - [ ] Compare burst/rest dispatch with continuous 60-second human-paced dispatch using accepted unique assets per hour and circuit count.
-- [ ] Record whether Flow and Gemini quota and rolling rate limits are actually independent on the same Google account.
+- [x] Record that same-account quota independence remains unproven; account-level rolling throttling appears coupled in the observed probes.
 - [ ] Calculate the number of independently authenticated account pools required to sustain at least 220 accepted unique assets per hour.
 - [ ] Record reference-stage critical-path time and cache-reuse opportunity.
-- [ ] Record image-QA sample results and the number of true critical repairs.
-- [ ] Inspect the opening, three middle windows, climax, and final minute for visual continuity, motion variety, subtitles, and narration joins.
-- [ ] Record render duration, cache hit rate, and any rerender cause.
-- [ ] Save all ten package images, paired titles, simulated shelf results, operator ranking, and final selection.
+- [x] Record image-QA results: 26 confirmed reference/scene captures were replaced, with the final eight using the approved Codex route; 798 final images passed.
+- [x] Spot-check final opening, middle, climax, ending, and caption-recovery frames; record narration's existing listening waiver rather than claiming fresh listening.
+- [x] Record render duration, cache hit rate, and the caption-failure recovery cause.
+- [x] Save all ten package images, paired titles, and complete simulated shelf results.
+- [ ] Record the operator ranking and exact final package selection after review.
 - [ ] Decide which proposed changes become defaults, experiments, or rejected ideas.
 - [ ] After publication, append 24-hour, 72-hour, and 7-day CTR, AVD, APV, traffic-source, and retention-cliff evidence.
 

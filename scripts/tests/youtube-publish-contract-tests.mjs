@@ -312,6 +312,34 @@ export async function runYoutubePublishContractTests() {
   assert.equal(badExperimentValidation.blockers.includes("channel_experiment_automatic_mid_roll_setting_mismatch"), true);
   assert.equal(badExperimentValidation.blockers.includes("channel_experiment_manual_mid_roll_positions_missing"), true);
 
+  const runtimeExceptionSpec = structuredClone(manualExperimentSpec);
+  runtimeExceptionSpec.publish_settings.manual_mid_roll_positions_sec = [1092.2, 2120.45, 3052.6];
+  const runtimeOptions = { experiment: uploadExperiment, spec: runtimeExceptionSpec, durationSec: 4168.41, finalVideoSha256: "a".repeat(64) };
+  assert.equal(validateChannelUploadExperimentSpec(runtimeOptions).blockers.includes("channel_experiment_runtime_below_range"), true);
+  runtimeExceptionSpec.channel_experiment_runtime_exception = {
+    status: "approved", experiment_id: uploadExperiment.experiment_id,
+    duration_sec: 4168.41, final_video_sha256: "a".repeat(64),
+    approved_by: "operator", approved_at: now.toISOString(),
+    reason: "Upload the reviewed master unchanged, recording the shortfall.",
+    operator_instruction: "Upload the unchanged video after the runtime exception was explained.",
+  };
+  assert.deepEqual(validateChannelUploadExperimentSpec(runtimeOptions).blockers, []);
+  for (const patch of [
+    { final_video_sha256: "b".repeat(64) }, { duration_sec: 4168.42 },
+    { experiment_id: "different-experiment" }, { status: "draft" },
+    { approved_by: "" }, { approved_at: "invalid" }, { operator_instruction: "" },
+  ]) {
+    const invalid = structuredClone(runtimeExceptionSpec);
+    Object.assign(invalid.channel_experiment_runtime_exception, patch);
+    const result = validateChannelUploadExperimentSpec({ ...runtimeOptions, spec: invalid });
+    assert.equal(result.blockers.includes("channel_experiment_runtime_exception_invalid_or_stale"), true);
+    assert.equal(result.blockers.includes("channel_experiment_runtime_below_range"), true);
+  }
+  assert.equal(validateChannelUploadExperimentSpec({ ...runtimeOptions, finalVideoSha256: undefined }).blockers.includes("channel_experiment_runtime_exception_invalid_or_stale"), true);
+  const wrongAds = structuredClone(runtimeExceptionSpec);
+  wrongAds.publish_settings.automatic_mid_rolls = true;
+  assert.equal(validateChannelUploadExperimentSpec({ ...runtimeOptions, spec: wrongAds }).blockers.includes("channel_experiment_automatic_mid_roll_setting_mismatch"), true);
+
   const approvedCodexThumbnail = structuredClone(spec);
   approvedCodexThumbnail.thumbnail_candidates[0].provider = "codex_imagegen";
   assert.equal(validateYoutubePackagingSpec(approvedCodexThumbnail, {

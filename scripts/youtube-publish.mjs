@@ -186,6 +186,7 @@ async function channelExperimentContext({ episodeDir, identity, episode, spec })
     experiment: active.document,
     spec,
     durationSec,
+    finalVideoSha256: finalQa?.final_video_sha256,
     usedCount: usage.count,
   });
   return { ...active, identityVerification, usage, durationSec, validation };
@@ -440,6 +441,7 @@ async function prepareManifest() {
       eligible_upload_count: experiment.document.eligible_upload_count,
       final_duration_sec: experiment.durationSec,
       runtime: experiment.document.runtime,
+      runtime_exception: inputs.spec.channel_experiment_runtime_exception ?? null,
       advertising: experiment.document.advertising,
       measurement: experiment.document.measurement,
     } : null,
@@ -574,6 +576,7 @@ async function recordUpload() {
       config_sha256: manifest.channel_experiment.config_sha256,
       ordinal: manifest.channel_experiment.ordinal,
       eligible_upload_count: manifest.channel_experiment.eligible_upload_count,
+      runtime_exception: manifest.channel_experiment.runtime_exception ?? null,
     } : null,
     recorded_by: clean(flags["recorded-by"]),
     recorded_at: new Date().toISOString(),

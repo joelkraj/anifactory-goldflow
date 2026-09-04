@@ -102,7 +102,7 @@ export async function channelUploadExperimentUsage({ dataRoot, channel, experime
   return { count: receipts.length, receipts };
 }
 
-export function validateChannelUploadExperimentSpec({ experiment, spec, durationSec, usedCount = 0 }) {
+export function validateChannelUploadExperimentSpec({ experiment, spec, durationSec, finalVideoSha256, usedCount = 0 }) {
   if (!experiment || clean(experiment.status) !== "active") {
     return { applies: false, complete: false, ordinal: null, blockers: [] };
   }
@@ -121,6 +121,17 @@ export function validateChannelUploadExperimentSpec({ experiment, spec, duration
     ? advertising.target_fractions.map(Number)
     : [];
   const duration = Number(durationSec);
+  const exception = spec?.channel_experiment_runtime_exception;
+  // A recorded operator exception applies only to this exact master, not later uploads.
+  const runtimeExceptionApproved = exception?.status === "approved"
+    && clean(exception.experiment_id) === clean(experiment.experiment_id)
+    && /^[a-f0-9]{64}$/.test(clean(finalVideoSha256))
+    && clean(exception.final_video_sha256) === clean(finalVideoSha256)
+    && Number.isFinite(duration) && duration > 0
+    && Number(exception.duration_sec) === duration
+    && Boolean(clean(exception.approved_by) && clean(exception.reason) && clean(exception.operator_instruction))
+    && Number.isFinite(Date.parse(exception.approved_at));
+  if (exception && !runtimeExceptionApproved) blockers.push("channel_experiment_runtime_exception_invalid_or_stale");
   if (clean(settings.experiment_id) !== clean(experiment.experiment_id)) blockers.push("channel_experiment_id_missing_or_mismatch");
   if (clean(settings.monetization) !== clean(advertising.monetization)) blockers.push("channel_experiment_monetization_mismatch");
   if (clean(settings.mid_roll_mode) !== clean(advertising.mid_roll_mode)) blockers.push("channel_experiment_mid_roll_mode_mismatch");
@@ -128,8 +139,8 @@ export function validateChannelUploadExperimentSpec({ experiment, spec, duration
   if (Number(settings.manual_mid_roll_count) !== Number(advertising.manual_mid_roll_count)) blockers.push("channel_experiment_manual_mid_roll_count_mismatch");
   if (positions.length !== Number(advertising.manual_mid_roll_count)) blockers.push("channel_experiment_manual_mid_roll_positions_missing");
   if (!Number.isFinite(duration)) blockers.push("channel_experiment_final_duration_missing");
-  if (Number.isFinite(duration) && duration < Number(runtime.acceptable_min_minutes) * 60) blockers.push("channel_experiment_runtime_below_range");
-  if (Number.isFinite(duration) && duration > Number(runtime.acceptable_max_minutes) * 60) blockers.push("channel_experiment_runtime_above_range");
+  if (!runtimeExceptionApproved && Number.isFinite(duration) && duration < Number(runtime.acceptable_min_minutes) * 60) blockers.push("channel_experiment_runtime_below_range");
+  if (!runtimeExceptionApproved && Number.isFinite(duration) && duration > Number(runtime.acceptable_max_minutes) * 60) blockers.push("channel_experiment_runtime_above_range");
   if (Number.isFinite(duration) && positions.length === targets.length) {
     const toleranceSec = 90;
     if (positions.some((position, index) => Math.abs(position - duration * targets[index]) > toleranceSec)) {

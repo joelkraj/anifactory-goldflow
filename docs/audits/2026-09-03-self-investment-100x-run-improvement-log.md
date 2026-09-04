@@ -382,9 +382,19 @@ The final gallery passed desktop/mobile browser checks: ten loaded images, corre
 - [x] Spot-check final opening, middle, climax, ending, and caption-recovery frames; record narration's existing listening waiver rather than claiming fresh listening.
 - [x] Record render duration, cache hit rate, and the caption-failure recovery cause.
 - [x] Save all ten package images, paired titles, and complete simulated shelf results.
-- [ ] Record the operator ranking and exact final package selection after review.
+- [x] Record the exact final package selection: operator chose P04 with "Upload with po4"; no complete operator ranking was supplied.
 - [ ] Decide which proposed changes become defaults, experiments, or rejected ideas.
 - [ ] After publication, append 24-hour, 72-hour, and 7-day CTR, AVD, APV, traffic-source, and retention-cliff evidence.
+
+### P04 upload preparation and explicit blockers
+
+The operator selected P04's exact title and reference-free thumbnail for private-first upload. The upload-ready JPEG SHA-256 is `45b780e64abc170706127c4b676c93cfe5a23c6a1978914d07903bb829fe062d`. The package spec records the actual `codex_imagegen` provider instead of relabeling it as the originally requested Flow route. Public release, native A/B testing, and comment posting are not approved by this request.
+
+Two small compatibility fixes passed the YouTube publish contract tests: accepting the explicitly approved Codex full-raster thumbnail provider while retaining the zero-reference/no-local-compositing checks, and reading final runtime from ffprobe's `media_probe.format.duration` as well as the older flattened fields. The default thumbnail route is unchanged.
+
+Official packaging approval stopped only at `channel_experiment_runtime_below_range`: the final 4168.41-second video is 31.59 seconds below the existing 70-minute experiment minimum. No padding, render change, global experiment edit, or unapproved waiver was applied. Proposed ad breaks remain three manual sentence boundaries at 1092.20, 2120.45, and 3052.60 seconds, with automatic midrolls off.
+
+Chrome also reported that JavaScript from Apple Events is disabled. Operator enablement was requested; no browser permission was changed. No upload, channel verification, public release, or comment action has occurred. Exact evidence and the narrow recovery are saved in `manual_blocker_triage_upload_packaging_ep_01.json`. Detect runtime eligibility immediately after the audio-duration stage and publishing browser readiness before the final upload handoff in future runs, rather than discovering them at release time.
 
 ## Evidence Locations
 

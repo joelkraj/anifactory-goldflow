@@ -25,6 +25,7 @@ import {
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubeUploadReceipt,
   youtubeEffectiveThumbnailState,
+  youtubeFinalQaDurationSeconds,
   youtubePinnedCommentReceiptComplete,
   youtubePublishContractInternalsForTests,
   youtubePublishManifestComplete,
@@ -36,6 +37,11 @@ import {
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { format: { duration: "4168.41" } } }), 4168.41);
+assert.equal(youtubeFinalQaDurationSeconds({ media_probe: { duration_sec: 4500 } }), 4500);
+assert.equal(youtubeFinalQaDurationSeconds({ final_duration_sec: 4600 }), 4600);
+assert.equal(Number.isNaN(youtubeFinalQaDurationSeconds({ media_probe: {} })), true);
 
 function validSpec(now = new Date()) {
   const observedAt = now.toISOString();
@@ -305,6 +311,17 @@ export async function runYoutubePublishContractTests() {
   });
   assert.equal(badExperimentValidation.blockers.includes("channel_experiment_automatic_mid_roll_setting_mismatch"), true);
   assert.equal(badExperimentValidation.blockers.includes("channel_experiment_manual_mid_roll_positions_missing"), true);
+
+  const approvedCodexThumbnail = structuredClone(spec);
+  approvedCodexThumbnail.thumbnail_candidates[0].provider = "codex_imagegen";
+  assert.equal(validateYoutubePackagingSpec(approvedCodexThumbnail, {
+    markdown,
+    thumbnailMetadata: { width: 1280, height: 720, format: "jpeg" },
+    thumbnailBytes: 1000,
+    now,
+  }).status, "passed");
+  approvedCodexThumbnail.thumbnail_candidates[0].reference_count = 1;
+  assert.equal(validateYoutubePackagingSpec(approvedCodexThumbnail, { now }).blockers.includes("selected_thumbnail_reference_count_must_be_zero"), true);
 
   const invalidThumbnailGenerationContract = structuredClone(spec);
   Object.assign(invalidThumbnailGenerationContract.thumbnail_candidates[0], {

@@ -21,6 +21,7 @@ export const YOUTUBE_THUMBNAIL_GENERATION_CONTRACT = Object.freeze({
     "google_flow_imagen",
     "google_gemini_imagen",
     "chatgpt_web_gpt_image",
+    "codex_imagegen",
   ]),
   fallback_provider: "chatgpt_web_gpt_image",
   generation_mode: "full_raster_from_scratch",
@@ -83,6 +84,11 @@ function hashText(value) {
 
 export function youtubeTextSha256(value) {
   return hashText(value);
+}
+
+export function youtubeFinalQaDurationSeconds(finalQa) {
+  const values = [finalQa?.media_probe?.duration_sec, finalQa?.media_probe?.format?.duration, finalQa?.final_duration_sec];
+  return values.map(Number).find(value => Number.isFinite(value) && value > 0) ?? NaN;
 }
 
 function uniqueStrings(values) {

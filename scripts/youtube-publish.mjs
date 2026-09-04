@@ -19,6 +19,7 @@ import {
   validateYoutubePinnedCommentReceipt,
   validateYoutubeUploadReceipt,
   youtubeEffectiveThumbnailState,
+  youtubeFinalQaDurationSeconds,
   youtubeTextSha256,
 } from "./lib/youtube-publish-contract.mjs";
 import {
@@ -180,7 +181,7 @@ async function channelExperimentContext({ episodeDir, identity, episode, spec })
     experimentId: active.document.experiment_id,
   });
   const finalQa = await readJson(path.join(episodeDir, `final_qa_${episode}.json`));
-  const durationSec = Number(finalQa?.media_probe?.duration_sec ?? finalQa?.final_duration_sec);
+  const durationSec = youtubeFinalQaDurationSeconds(finalQa);
   const validation = validateChannelUploadExperimentSpec({
     experiment: active.document,
     spec,

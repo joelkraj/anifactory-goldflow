@@ -454,6 +454,8 @@ The source editor also accepts compact, exact-script-hash-bound director notes. 
 
 The prison High edit exposed an additional source-stage transport loss: two 82K-character requests timed out in composer insertion before Send. The external Electron adapter still used a 100K inline threshold, unlike Studio's 24K threshold. Its source now uses 24K and the standalone jobs bundle was rebuilt without restarting Electron. Long inputs use the existing exact UTF-8 attachment route, not a condensed script. A paragraph-heavy regression verifies byte equality; 100 browser/harness/job tests passed under Bun 1.3.14. This is a transport fix, not evidence that the High model generated a better story. Only the failed exact editor scope may resume; passed drafts and comparisons remain preserved. The external bridge already had unrelated uncommitted work, which was not reverted or committed with Goldflow.
 
+Deployment check: the installed Electron browser helper, not just the jobs bundle, must contain the changed threshold. The first bundle-only attempt still used the installed old helper and failed before Send. After backing up and rebuilding that exact helper without an app restart, the next same-prompt High request visibly retained its task attachment, submitted one user message, and began generating at approximately 16:37 UTC. This proves recovery of submission only; output quality and total latency still require the final receipt.
+
 ## Evidence Locations
 
 - Episode directory: `/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W36-self-investment-100x-revenge-v1/episodes/ep_01`

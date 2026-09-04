@@ -424,6 +424,16 @@ P04 packaging approval and publish readiness both passed through the guarded CLI
 
 Chrome's JavaScript-from-Apple-Events permission remained off at the latest check. No upload has started, no video ID has been created, and no permission was changed silently. The next action is browser enablement and visible Manhwa Joey verification, not more image generation or rendering. The upload-stage hold is recorded in `manual_blocker_triage_youtube_studio_upload_ep_01.json`; the older packaging hold remains historical.
 
+### Publishing-browser correction and upload started
+
+The operator correctly reported that the permission had already been enabled. The earlier checks targeted the separate Gemini automation Chrome process (PID 32580), not the normal user Chrome process (PID 705). JavaScript from Apple Events works in the normal Chrome session. The previous blanket browser-blocked conclusion was an agent routing error, not an unresolved operator setup task. No permission was changed.
+
+The recovery targeted the correct running Chrome process, reused its existing Studio tab, and visibly verified Manhwa Joey and channel ID `UCZah1gv3wyUfEIvJdTacWjw` before selecting the exact hash-approved video. Studio created video ID `s50ZgQ_GZwc`; transfer has started. The episode-local `youtube_upload_in_progress_ep_01.json` records this ID so interruption recovery must resume the existing upload rather than create a duplicate. P04, title, description, tags, audience, and comment settings have been checked in the upload UI. Transfer, checks, manual ad configuration, and final private-save verification are still in progress at this entry; this is not a completed-upload receipt.
+
+Future publishing preflight must enumerate running browser instances, bind to the existing verified Studio tab and process, and distinguish permission failure in that process from a failure in an unrelated media worker. Do not ask the operator to repeat a permission change based on an unbound app-name check. Scope controls to the active upload dialog rather than background catalog controls, bring the intended tab forward before native file selection, and preserve all unrelated tabs and workers. Add a two-Chrome-instance regression/proof before calling this a durable fix. Startup/channel readiness should be checked before the render handoff, and transfer/processing time should be reported separately from production and agent configuration time.
+
+Native keyboard entry also needs an immediate foreground check in the same action: one timestamp was sent to Codex instead of the browser after focus changed. The corrected action activates the exact Chrome process and tab, focuses the observed input, enters the value, and rereads that field. The accidental chat text is not an operator change to the plan. Studio now shows three manual slots (`0:18:12:06`, `0:35:20:14`, `0:50:52:18`) and automatic slots off. Its editor exposes frame timecodes; retain these observed values alongside the planned second positions, including the second position's frame-rounding difference, rather than claiming arbitrary subframe precision. Final saved-page verification is still required.
+
 ## Evidence Locations
 
 - Episode directory: `/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W36-self-investment-100x-revenge-v1/episodes/ep_01`

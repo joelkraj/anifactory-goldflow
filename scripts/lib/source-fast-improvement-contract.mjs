@@ -1,6 +1,13 @@
 export const FAST_IMPROVEMENT_PANEL_COUNT = 3;
 export const FAST_IMPROVEMENT_MIN_APV_DELTA = 0.5;
 
+export function validateDirectorNotes(notes, incumbentSha256) {
+  if (!notes || notes.incumbent_sha256 !== incumbentSha256) throw new Error("Director notes do not match the exact incumbent script.");
+  if (typeof notes.instructions !== "string" || !notes.instructions.trim()) throw new Error("Director notes need nonempty editorial instructions.");
+  if (notes.instructions.length > 6000) throw new Error("Keep director instructions compact (at most 6000 characters).");
+  return notes.instructions.trim();
+}
+
 function average(values) {
   const numbers = values.map(Number).filter(Number.isFinite);
   return numbers.length ? numbers.reduce((sum, value) => sum + value, 0) / numbers.length : null;

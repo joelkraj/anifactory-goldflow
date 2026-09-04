@@ -5,6 +5,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { runCodexCli, readCodexCallMetadata } from "./lib/codex-cli-runner.mjs";
+import { sourceWriterPolicy, improvementEfforts } from "./lib/source-writer-policy.mjs";
+import { recoverBrowserDraft } from "./lib/source-browser-draft-recovery.mjs";
 import { parseJsonObjectFromPlannerOutput } from "./lib/json-output-repair.mjs";
 import { DEFAULT_NARRATOR_VOICE_ID, qwenPrimaryLockForVoice } from "./lib/narration-tts-policy.mjs";
 import { extractOpeningAuditionText, sentenceCompleteAuditionUnits } from "./lib/source-opening-audio-audition-contract.mjs";
@@ -27,6 +29,7 @@ import {
   FAST_IMPROVEMENT_MIN_APV_DELTA,
   assessFastImprovementLength,
   decideFastImprovement,
+  validateDirectorNotes,
 } from "./lib/source-fast-improvement-contract.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -39,15 +42,6 @@ const TOPIC_SHORTLIST_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_re
 const FAST_IMPROVEMENT_EDITOR_PROMPT_PATH = path.join(REPO_ROOT, "docs/prompts/manhwa_recap_fast_improvement_editor_v1.md");
 const SOURCE_EVIDENCE_SNAPSHOT_PATH = path.join(REPO_ROOT, "docs/channel_formulas/53rebirth_source_evidence_snapshot_v1.json");
 const DEFAULT_QWEN_PYTHON = "/Users/joel/AniFactoryData/voice_bank/bakeoff/.venv-kokoro-mlx-audio-0.4.6/bin/python";
-
-const CANDIDATES = Object.freeze([
-  { id: "draft_56_1", blind_id: "candidate_a", provider: "chatgpt_web", model: "gpt-5.6-sol" },
-  { id: "draft_55_1", blind_id: "candidate_b", provider: "chatgpt_web", model: "gpt-5.5" },
-  { id: "draft_56_2", blind_id: "candidate_c", provider: "chatgpt_web", model: "gpt-5.6-sol" },
-  { id: "draft_55_2", blind_id: "candidate_d", provider: "chatgpt_web", model: "gpt-5.5" },
-  { id: "draft_56_3", blind_id: "candidate_e", provider: "chatgpt_web", model: "gpt-5.6-sol" },
-  { id: "draft_55_3", blind_id: "candidate_f", provider: "chatgpt_web", model: "gpt-5.5" },
-]);
 
 function flagsFrom(parts) {
   const flags = {};
@@ -286,6 +280,7 @@ async function reusableResponse({ outputPath, prompt, provider, model, effort, s
   if (!await exists(outputPath)) return null;
   const metadata = await readCodexCallMetadata(outputPath);
   const blockers = [];
+  const content = await fs.readFile(outputPath, "utf8");
   if (!metadata) blockers.push("receipt_missing");
   if (metadata?.status !== "passed") blockers.push("receipt_not_passed");
   if (metadata?.prompt_sha256 !== sha256Text(prompt)) blockers.push("prompt_hash_mismatch");
@@ -293,6 +288,7 @@ async function reusableResponse({ outputPath, prompt, provider, model, effort, s
   if (metadata?.model !== model) blockers.push("model_mismatch");
   if (metadata?.reasoning_effort !== effort) blockers.push("effort_mismatch");
   if (metadata?.stage_name !== stageName) blockers.push("stage_mismatch");
+  if (metadata?.output_sha256 !== sha256Text(content)) blockers.push("output_hash_mismatch");
   if (blockers.length) throw new Error(`Cannot reuse ${outputPath}: ${blockers.join(", ")}`);
   return { content: await fs.readFile(outputPath, "utf8"), ...metadata, resumed: true };
 }
@@ -406,30 +402,45 @@ async function writeCandidates(directory, flags) {
   const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
   if (await exists(portfolioPath)) {
     const document = JSON.parse(await fs.readFile(portfolioPath, "utf8"));
-    assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: CANDIDATES }));
+    assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: sourceWriterPolicy(document).candidates }));
     return { prepared, document, portfolioPath };
   }
   const outputDirectory = path.join(directory, "manufactured_drafts");
+  const policy = sourceWriterPolicy();
+  const candidates = policy.candidates;
+  const recovery = flags["recover-browser-jobs"] ? JSON.parse(await fs.readFile(path.resolve(flags["recover-browser-jobs"]), "utf8")) : {};
+  if (Object.keys(recovery).some((id) => !candidates.some((row) => row.id === id))) throw new Error("Recovery map contains a candidate outside the active writer policy.");
   await fs.mkdir(outputDirectory, { recursive: true });
   const repairIds = csvSet(flags["candidate-ids"]);
-  const unknownRepairIds = [...repairIds].filter((id) => !CANDIDATES.some((candidate) => candidate.id === id));
+  const unknownRepairIds = [...repairIds].filter((id) => !candidates.some((candidate) => candidate.id === id));
   if (unknownRepairIds.length) throw new Error(`Unknown candidate repair IDs: ${unknownRepairIds.join(", ")}`);
   const writerConcurrency = Math.max(1, Math.min(3, Number(flags["writer-concurrency"] ?? 3) || 3));
   const writerStaggerMs = Math.max(0, Math.min(60_000, Number(flags["writer-stagger-ms"] ?? 15_000) || 0));
-  const settled = await allSettledWithConcurrency(CANDIDATES, writerConcurrency, async (spec, index) => {
+  const settled = await allSettledWithConcurrency(candidates, writerConcurrency, async (spec, index) => {
     await sleep((index % writerConcurrency) * writerStaggerMs);
     const outputPath = path.join(outputDirectory, `${spec.id}.txt`);
     const stageName = `winner_source_script_v3_${spec.id}`;
     const candidatePrompt = `${prepared.filled}\n\nIndependent candidate run ${spec.id}. Write the best complete script you can from this prompt in a fresh context. Do not compare with or anticipate another candidate. Output only raw narration.`;
     const receiptPath = `${outputPath}.meta.json`;
     const existingReceipt = await readCodexCallMetadata(outputPath);
+    const scopedOut = repairIds.size > 0 && !repairIds.has(spec.id);
+    if (scopedOut && !await exists(outputPath) && !recovery[spec.id]) throw new Error(`Unscoped missing draft ${spec.id}; no new submission allowed.`);
     if (existingReceipt && existingReceipt.status !== "passed" && repairIds.has(spec.id)) {
       const archiveDirectory = path.join(outputDirectory, "failed_receipts");
       await fs.mkdir(archiveDirectory, { recursive: true });
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       await fs.rename(receiptPath, path.join(archiveDirectory, `${spec.id}.${timestamp}.meta.json`));
     }
-    await modelCall({
+    if (recovery[spec.id] && !await exists(outputPath)) {
+      await recoverBrowserDraft({ manifestPath: path.resolve(recovery[spec.id]), outputPath,
+        prompt: candidatePrompt, model: spec.model, effort: "max", stageName,
+        timeoutMs: Number(flags["draft-timeout-ms"] ?? 5_400_000) });
+    }
+    if (scopedOut) {
+      const reusable = await reusableResponse({ outputPath, prompt: candidatePrompt, provider: spec.provider,
+        model: spec.model, effort: "max", stageName });
+      if (!reusable) throw new Error(`Unscoped draft ${spec.id} cannot be reused.`);
+    } else await modelCall({
       outputPath,
       prompt: candidatePrompt,
       provider: spec.provider,
@@ -454,7 +465,7 @@ async function writeCandidates(directory, flags) {
   const completed = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
   const failures = settled
     .map((result, index) => result.status === "rejected" ? {
-      candidate_id: CANDIDATES[index].id,
+      candidate_id: candidates[index].id,
       error: result.reason instanceof Error ? result.reason.message : String(result.reason),
     } : null)
     .filter(Boolean);
@@ -478,12 +489,13 @@ async function writeCandidates(directory, flags) {
     brief_sha256: prepared.brief.sha256,
     filled_prompt_sha256: prepared.manifest.filled_prompt_sha256,
     candidate_count: completed.length,
+    writer_policy: policy.name,
     writer_concurrency: writerConcurrency,
     writer_stagger_ms: writerStaggerMs,
     candidates: completed,
     completed_at: new Date().toISOString(),
   };
-  assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: CANDIDATES }));
+  assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: candidates }));
   await writeJsonExclusive(portfolioPath, document);
   return { prepared, document, portfolioPath };
 }
@@ -662,6 +674,8 @@ async function manufacturingTimingStage(paths, targetMinutes) {
 async function writeManufacturingTimingReport(directory) {
   const responseDirectory = path.join(directory, ".model_responses");
   const draftDirectory = path.join(directory, "manufactured_drafts");
+  const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
+  const policy = sourceWriterPolicy(await exists(portfolioPath) ? JSON.parse(await fs.readFile(portfolioPath, "utf8")) : null);
   const stages = {
     premise_ideation: await manufacturingTimingStage([
       path.join(responseDirectory, "manufacturing_topic_pool.txt.meta.json"),
@@ -670,7 +684,7 @@ async function writeManufacturingTimingReport(directory) {
     prompt_preparation: await manufacturingTimingStage([
       path.join(responseDirectory, "manufacturing_prompt.txt.meta.json"),
     ], 10),
-    six_candidate_writing: await manufacturingTimingStage(CANDIDATES.map(
+    candidate_writing: await manufacturingTimingStage(policy.candidates.map(
       (row) => path.join(draftDirectory, `${row.id}.txt.meta.json`),
     ), 120),
     selection: await manufacturingTimingStage([
@@ -687,6 +701,8 @@ async function writeManufacturingTimingReport(directory) {
     schema: "goldflow_manhwa_manufacturing_timing_v1",
     status: measured.some((row) => row.status === "over_target") ? "target_missed" : "on_target_or_incomplete",
     target_total_minutes: 180,
+    writer_policy: policy.name,
+    candidate_count: policy.candidates.length,
     measured_total_minutes: totalMinutes == null ? null : Number(totalMinutes.toFixed(2)),
     stages,
     generated_at: new Date().toISOString(),
@@ -1182,7 +1198,6 @@ async function resolveImprovementIncumbent(directory, flags) {
 
 function compactWinnerFeedback(report, outputSha256) {
   const row = (report?.decoded_rankings ?? []).find((candidate) => candidate?.output_sha256 === outputSha256)
-    ?? (report?.decoded_rankings ?? [])[0]
     ?? null;
   if (!row) return null;
   const weakestViewers = [...(row.viewer_simulation ?? [])]
@@ -1260,7 +1275,8 @@ async function runFastImprovementJudge({ directory, roundDirectory, roundNumber,
 }
 
 async function improveCandidate(directory, flags) {
-  const maxRounds = Math.max(1, Math.min(3, Number(flags["max-rounds"] ?? 1) || 1));
+  const maxRounds = Math.max(1, Math.min(3, Number(flags["max-rounds"] ?? 2) || 2));
+  const editorEfforts = improvementEfforts(flags["edit-efforts"], maxRounds);
   const minimumApvDelta = Math.max(0, Number(flags["minimum-apv-delta"] ?? FAST_IMPROVEMENT_MIN_APV_DELTA) || 0);
   const loopDirectory = path.join(directory, "improvement_loop");
   const v00Path = path.join(loopDirectory, "v00_incumbent.txt");
@@ -1284,11 +1300,20 @@ async function improveCandidate(directory, flags) {
     }));
   }
   const priorReportPath = path.join(directory, "manufacturing_prompt_ab_report.json");
-  const priorReport = await exists(priorReportPath) ? JSON.parse(await fs.readFile(priorReportPath, "utf8")) : null;
+  let priorReport = await exists(priorReportPath) ? JSON.parse(await fs.readFile(priorReportPath, "utf8")) : null;
+  const selectionPath = path.join(directory, "manufacturing_selection.json");
+  const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
+  if (!priorReport && await exists(selectionPath) && await exists(portfolioPath)) {
+    const selection = JSON.parse(await fs.readFile(selectionPath, "utf8"));
+    const portfolio = JSON.parse(await fs.readFile(portfolioPath, "utf8"));
+    priorReport = { decoded_rankings: selection.rankings.map((row) => ({ ...row,
+      output_sha256: portfolio.candidates.find((candidate) => candidate.blind_id === row.blind_id)?.output_sha256 })) };
+  }
   const editorInstruction = promptBody(await fs.readFile(FAST_IMPROVEMENT_EDITOR_PROMPT_PATH, "utf8"));
   const decisions = [];
 
   for (let roundNumber = 1; roundNumber <= maxRounds; roundNumber += 1) {
+    const editorEffort = editorEfforts[roundNumber - 1];
     const roundDirectory = path.join(loopDirectory, `round_${String(roundNumber).padStart(2, "0")}`);
     const decisionPath = path.join(roundDirectory, "decision.json");
     if (await exists(decisionPath)) {
@@ -1315,27 +1340,33 @@ async function improveCandidate(directory, flags) {
       word_count: words(incumbentText),
     };
     const feedback = compactWinnerFeedback(priorReport, incumbent.sha256);
+    const directorNotesPath = flags["director-notes"] ? path.resolve(flags["director-notes"]) : null;
+    const directorNotes = directorNotesPath ? validateDirectorNotes(
+      JSON.parse(await fs.readFile(directorNotesPath, "utf8")), incumbent.sha256,
+    ) : null;
     const editorBriefPath = path.join(roundDirectory, "editor_brief.json");
     const editorBrief = {
       schema: "goldflow_manhwa_fast_improvement_editor_brief_v1",
       status: "ready",
       round: roundNumber,
       model: "gpt-5.6-sol",
-      reasoning_effort: "medium",
+      reasoning_effort: editorEffort,
       incumbent_path: incumbent.path,
       incumbent_sha256: incumbent.sha256,
       incumbent_word_count: incumbent.word_count,
       approved_title: brief.document.title,
       approved_premise: brief.document.core_premise,
       prior_blind_feedback: feedback,
-      rule: "One Medium call privately diagnoses and writes one complete challenger; no separate critique call or deterministic prose edit.",
+      director_notes: directorNotesPath ? { path: directorNotesPath, sha256: await fileSha256(directorNotesPath), instructions: directorNotes } : null,
+      rule: `One ${editorEffort} call privately diagnoses and writes one complete challenger; no separate critique call or deterministic prose edit.`,
     };
     if (!await exists(editorBriefPath)) await writeJsonExclusive(editorBriefPath, editorBrief);
     else {
       const existingBrief = JSON.parse(await fs.readFile(editorBriefPath, "utf8"));
-      if (existingBrief.incumbent_sha256 !== incumbent.sha256) throw new Error(`Round ${roundNumber} editor brief is stale.`);
+      if (existingBrief.incumbent_sha256 !== incumbent.sha256 || existingBrief.reasoning_effort !== editorEffort
+        || (existingBrief.director_notes?.sha256 ?? null) !== (editorBrief.director_notes?.sha256 ?? null)) throw new Error(`Round ${roundNumber} editor brief is stale or has different effort/director notes.`);
     }
-    const editorPrompt = `${editorInstruction}\n\nAPPROVED TITLE AND PREMISE\n${JSON.stringify({
+    const editorPrompt = `${editorInstruction}${directorNotes ? `\n\nDIRECTOR'S EXACT-SCRIPT REVIEW\n${directorNotes}` : ""}\n\nAPPROVED TITLE AND PREMISE\n${JSON.stringify({
       title: brief.document.title,
       core_premise: brief.document.core_premise,
       opening_target: brief.document.opening_target,
@@ -1347,7 +1378,7 @@ async function improveCandidate(directory, flags) {
       prompt: editorPrompt,
       provider: "chatgpt_web",
       model: "gpt-5.6-sol",
-      effort: "medium",
+      effort: editorEffort,
       stageName: `winner_source_script_improvement_edit_r${String(roundNumber).padStart(2, "0")}`,
       timeoutMs: Number(flags["edit-timeout-ms"] ?? 2_400_000),
     });
@@ -1389,7 +1420,7 @@ async function improveCandidate(directory, flags) {
       status: promoted ? "challenger_promoted" : "incumbent_retained",
       round: roundNumber,
       editor_model: "gpt-5.6-sol",
-      editor_reasoning_effort: "medium",
+      editor_reasoning_effort: editorEffort,
       judge_model: "gpt-5.6-sol",
       judge_reasoning_effort: "medium",
       incumbent: { path: incumbent.path, sha256: incumbent.sha256, word_count: incumbent.word_count },
@@ -1416,7 +1447,9 @@ async function improveCandidate(directory, flags) {
   const report = {
     schema: "goldflow_manhwa_fast_improvement_loop_v1",
     status: "completed",
-    policy: "medium_only_one_editor_plus_three_blind_panels",
+    policy: "bounded_medium_high_editor_with_medium_blind_panels_v2",
+    editor_efforts: editorEfforts,
+    executed_editor_efforts: decisions.map((row) => row.editor_reasoning_effort),
     requested_max_rounds: maxRounds,
     initial_source: initial.source,
     v00_incumbent_path: v00Path,
@@ -1517,6 +1550,17 @@ async function main() {
   if (["select", "run"].includes(action)) {
     const result = await selectCandidate(directory, flags);
     const timing = await writeManufacturingTimingReport(directory);
+    if (action === "run" && sourceWriterPolicy(result.portfolio.document).name === "three_56_pro_v1") {
+      const improved = await improveCandidate(directory, { ...flags, script: result.selectedScriptPath });
+      console.log(JSON.stringify({ status: improved.report.status,
+        selected_script_path: result.selectedScriptPath,
+        final_script_path: improved.report.final_script_path,
+        final_script_sha256: improved.report.final_script_sha256,
+        improvement_report_path: improved.reportPath,
+        timing_report_path: timing.outputPath,
+        next_action: "operator reviews the exact retained winner before production ingest" }, null, 2));
+      return;
+    }
     console.log(JSON.stringify({
       status: "selected",
       selected_blind_id: result.document.selected_blind_id,
@@ -1524,7 +1568,9 @@ async function main() {
       selection_path: result.selectionPath,
       selected_script_path: result.selectedScriptPath,
       timing_report_path: timing.outputPath,
-      next_action: "operator review, then source ingest",
+      next_action: sourceWriterPolicy(result.portfolio.document).name === "three_56_pro_v1"
+        ? "bounded source manufacture improve, then operator exact-script review"
+        : "operator review, then source ingest",
     }, null, 2));
     return;
   }

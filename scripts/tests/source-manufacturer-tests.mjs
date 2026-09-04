@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { sourceWriterPolicy, improvementEfforts } from "../lib/source-writer-policy.mjs";
+import { validateRecoveredDraft } from "../lib/source-browser-draft-recovery.mjs";
 import {
   MANUFACTURING_BRIEF_SCHEMA,
   MANUFACTURING_PORTFOLIO_SCHEMA,
@@ -23,10 +25,15 @@ import {
 import {
   assessFastImprovementLength,
   decideFastImprovement,
+  validateDirectorNotes,
 } from "../lib/source-fast-improvement-contract.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const sha = sha256Text("fixture");
+assert.equal(validateDirectorNotes({ incumbent_sha256: sha, instructions: " Bring the first skill payoff forward. " }, sha), "Bring the first skill payoff forward.");
+assert.throws(() => validateDirectorNotes({ incumbent_sha256: "stale", instructions: "edit" }, sha), /exact incumbent/);
+assert.throws(() => validateDirectorNotes({ incumbent_sha256: sha, instructions: " " }, sha), /nonempty/);
+assert.throws(() => validateDirectorNotes({ incumbent_sha256: sha, instructions: "x".repeat(6001) }, sha), /compact/);
 const candidateSpecs = [
   ["draft_56_1", "candidate_a", "gpt-5.6-sol"],
   ["draft_55_1", "candidate_b", "gpt-5.5"],
@@ -181,6 +188,39 @@ const selection = {
   decision_rationale: "Candidate A has the highest predicted percentage viewed.",
 };
 assert.equal(validateManufacturingSelection(selection, { portfolio }).done, true);
+
+const currentPolicy = sourceWriterPolicy();
+assert.equal(currentPolicy.name, "three_56_pro_v1");
+assert.deepEqual(currentPolicy.candidates.map((row) => row.id), ["draft_56_1", "draft_56_2", "draft_56_3"]);
+assert.ok(currentPolicy.candidates.every((row) => row.model === "gpt-5.6-sol"));
+assert.equal(sourceWriterPolicy(portfolio).candidates.length, 6, "historical six-draft portfolios stay readable");
+const currentPortfolio = { ...portfolio, writer_policy: currentPolicy.name,
+  candidates: portfolio.candidates.filter((row) => row.model === "gpt-5.6-sol") };
+assert.equal(validateManufacturingPortfolio(currentPortfolio, { expectedCandidates: currentPolicy.candidates }).done, true);
+assert.equal(validateManufacturingPortfolio(portfolio, { expectedCandidates: currentPolicy.candidates }).done, false);
+const currentSelection = { ...selection, rankings: selection.rankings
+  .filter((row) => currentPortfolio.candidates.some((candidate) => candidate.blind_id === row.blind_id))
+  .map((row, index) => ({ ...row, rank: index + 1 })) };
+assert.equal(validateManufacturingSelection(currentSelection, { portfolio: currentPortfolio }).done, true);
+assert.deepEqual(improvementEfforts(), ["medium", "high"]);
+assert.deepEqual(improvementEfforts("medium", 3), ["medium", "medium", "medium"]);
+assert.deepEqual(improvementEfforts("high", 1), ["high"]);
+assert.throws(() => improvementEfforts("pro"), /only medium or high/);
+assert.throws(() => improvementEfforts("medium,max"), /only medium or high/);
+
+const recoveredText = "An intact narration returned by the existing writer.";
+const recoveredManifest = { runId: "fixture", jobs: [{ id: "draft_56_1", kind: "llm", prompt: "Exact prompt", model: "gpt-5.6-sol", effort: "max" }] };
+const recoveredReceipt = { schema: "goldflow_chatgpt_job_receipt_v1", runId: "fixture", jobId: "draft_56_1",
+  kind: "llm", status: "completed", promptSha256: sha256Text("Exact prompt"), model: "gpt-5.6-sol", effort: "max",
+  artifacts: [{ kind: "text", path: "/tmp/draft.txt", sha256: sha256Text(recoveredText), bytes: Buffer.byteLength(recoveredText) }] };
+const recovery = { manifest: recoveredManifest, receipt: recoveredReceipt, text: recoveredText,
+  prompt: "Exact prompt", model: "gpt-5.6-sol", effort: "max" };
+assert.equal(validateRecoveredDraft(recovery).sha256, sha256Text(recoveredText));
+assert.throws(() => validateRecoveredDraft({ ...recovery, text: recoveredText + "changed" }), /immutable browser artifact/);
+assert.throws(() => validateRecoveredDraft({ ...recovery, prompt: "Different prompt" }), /manifest/);
+assert.throws(() => validateRecoveredDraft({ ...recovery, receipt: { ...recoveredReceipt, model: "gpt-5.5" } }), /receipt/);
+assert.throws(() => validateRecoveredDraft({ ...recovery, receipt: { ...recoveredReceipt, status: "aborted" } }), /receipt/);
+assert.throws(() => validateRecoveredDraft({ ...recovery, receipt: { ...recoveredReceipt, effort: "medium" } }), /receipt/);
 
 const closeLength = assessFastImprovementLength(10_000, 9_600);
 assert.equal(closeLength.within_requested_range, true);

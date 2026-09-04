@@ -9,6 +9,8 @@ import "./ltx-video-recovery-tests.mjs";
 import "./operator-motion-route-override-tests.mjs";
 import "./operator-image-route-override-tests.mjs";
 import "./render-duration-integrity-tests.mjs";
+import "./render-collapsed-caption-tests.mjs";
+import "./failed-render-resume-tests.mjs";
 import { runFixtureSuite } from "../goldflow-fixture-tests.mjs";
 
 await runFixtureSuite("media");

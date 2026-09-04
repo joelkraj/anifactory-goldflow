@@ -423,6 +423,25 @@ function whisperSubtitleGroups(words) {
   return initialWhisperSubtitleGroups(words);
 }
 
+function anchoredWhisperSubtitleGroups(words) {
+  const groups = whisperSubtitleGroups(words);
+  // Whisper may collapse a punctuated word to one timestamp. Keep its text
+  // with an adjacent anchored group instead of dropping it during rendering.
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    if (Number(group.at(-1).end_sec) > Number(group[0].start_sec)) continue;
+    if (index + 1 < groups.length) {
+      groups[index + 1] = [...group, ...groups[index + 1]];
+      groups.splice(index, 1);
+      index -= 1;
+    } else if (index > 0) {
+      groups[index - 1].push(...group);
+      groups.splice(index, 1);
+    }
+  }
+  return groups;
+}
+
 function subtitleTokenKey(value) {
   return String(value ?? "")
     .normalize("NFKD")
@@ -711,7 +730,7 @@ function subtitleEventsFromVisualBeats(words, visualBeatPlan) {
       if (!word) return null;
       beatWords.push(word);
     }
-    const groups = whisperSubtitleGroups(beatWords);
+    const groups = anchoredWhisperSubtitleGroups(beatWords);
     const tokens = captionTokens(captionText);
     if (!groups.length || !tokens.length) return null;
     expectedCaptionTokens.push(...tokens);
@@ -2594,6 +2613,9 @@ async function main() {
   if (wordTiming?.status !== "passed") throw new Error(`Missing passed Whisper word timing: ${wordTimingPath}`);
   if (v2Run && visualBeatPlan?.status !== "passed") throw new Error(`Missing passed visual beat plan for locked-script captions: ${visualBeatPlanPath}`);
   if (visualBeatPlan?.status === "passed") await assertSourceHashesCurrent(visualBeatPlan, "Visual beat plan");
+  const validatedSubtitleRows = buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan);
+  if (v2Run && validatedSubtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
+  validateSubtitleTimeline(validatedSubtitleRows.events);
   if (v2Run && motionEditPlan?.status !== "passed") throw new Error(`Missing passed directed motion plan: ${motionEditPlanPath}`);
   if (motionEditPlan?.status === "passed") await assertSourceHashesCurrent(motionEditPlan, "Directed motion plan");
   const imageIntegrity = await assertRenderImageIntegrity(promptPlan, imagegenReport, runIdentity, imageOutputQa, cutExecutionLedger);
@@ -2625,8 +2647,7 @@ async function main() {
     usableTransitionPlan,
     proofMotionPlan,
   );
-  const subtitleRows = scopedSubtitleRows(buildSubtitleEvents(wordTiming, audioStitchReport, visualBeatPlan), Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
-  if (v2Run && subtitleRows.source === "whisper_recognized_words_fallback") throw new Error("V2 render refused Whisper-recognized caption text; provide approved visual-beat or stitch caption text timed by Whisper.");
+  const subtitleRows = scopedSubtitleRows(validatedSubtitleRows, Number.isFinite(proofScopeEndSec) ? audioDuration : NaN);
   const ass = await writeAss(path.join(workDir, "subtitles.ass"), subtitleRows.events);
   const engagementOverlay = await writeEngagementOverlayVideo(path.join(workDir, "engagement_overlay.mov"), Number.isFinite(proofScopeEndSec) ? null : engagementOverlayPlan, audioDuration);
   const videoPath = path.join(workDir, "silent_video.mp4");

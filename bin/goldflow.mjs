@@ -16,6 +16,7 @@ import {
 } from "../scripts/lib/execution-provenance.mjs";
 import { creativeStageRerunDecisionForEpisode } from "../scripts/lib/creative-stage-rerun-policy.mjs";
 import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-policy.mjs";
+import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -93,6 +94,12 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
     ? result.allowed_command_stages
     : [currentStage];
   if (allowedStages.includes(expectedStage)) return;
+  const renderRecovery = failedRenderResumeDecision({ command: commandName, subcommand: subcommandName, flags: parsedFlags, status: result, repoRoot });
+  if (renderRecovery.allowed) {
+    console.error(`Resuming failed render from reviewed recovery receipt: ${renderRecovery.triage_path}`);
+    return;
+  }
+  if (parsedFlags["render-recovery-triage"] && renderRecovery.reason) console.error(`Render recovery refused: ${renderRecovery.reason}`);
   console.error(`Workflow guard blocked: ${commandName} ${subcommandName}`);
   console.error(`Current stage is ${currentStage}; this command belongs to ${expectedStage}.`);
   if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);

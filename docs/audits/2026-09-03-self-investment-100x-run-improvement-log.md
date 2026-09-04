@@ -434,6 +434,12 @@ Future publishing preflight must enumerate running browser instances, bind to th
 
 Native keyboard entry also needs an immediate foreground check in the same action: one timestamp was sent to Codex instead of the browser after focus changed. The corrected action activates the exact Chrome process and tab, focuses the observed input, enters the value, and rereads that field. The accidental chat text is not an operator change to the plan. Studio now shows three manual slots (`0:18:12:06`, `0:35:20:14`, `0:50:52:18`) and automatic slots off. Its editor exposes frame timecodes; retain these observed values alongside the planned second positions, including the second position's frame-rounding difference, rather than claiming arbitrary subframe precision. Final saved-page verification is still required.
 
+### Private upload saved; provider checks pending
+
+At 05:03:02 UTC on September 4, Studio confirmed the complete transfer and private save of `s50ZgQ_GZwc`. The exact P04 image, title, description, tags, non-child audience, no age restriction, approved fictional-content disclosure setting, and comments-on state were read back on the saved video. Copyright subsequently reported no claims and no copyrighted content found. Ad suitability still says `Checking`; do not mark the official upload receipt complete until that check resolves. No public release or pinned comment occurred.
+
+The saved monetization page confirms manual-only midrolls. After processing, the ad editor switched from its provisional 30fps display to 60fps and shows `0:18:12:12`, `0:35:20:28`, and `0:50:52:36`. These correspond to 1092.20, 2120.4667, and 3052.60 seconds. The middle slot remained one-sixtieth second later than the planned 2120.45 even after a precise edit and reopen. Preserve that small observed UI quantization in analytics rather than silently asserting exact arbitrary-second support. Future planned slots should use the editor's reliably persisted grid and verify after processing; this is not a reason for a new render, extra ad opportunity, or extended retry loop.
+
 ## Evidence Locations
 
 - Episode directory: `/Users/joel/AniFactoryData/channels/53rebirth/weekly_runs/2026-W36-self-investment-100x-revenge-v1/episodes/ep_01`

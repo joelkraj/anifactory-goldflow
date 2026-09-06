@@ -2,6 +2,8 @@
 
 This opt-in development workflow supports both TorBox and Real-Debrid alongside local MP4/MKV files. It registers exact sources, searches local SRT/VTT dialogue timestamps, and extracts one 3–5 second review clip, silent by default with source audio available as an explicit option. It does **not** change the Goldflow episode stage registry, create episode directories, automatically assemble recaps, or publish anything. Clip approval is library-only; clips remain `production_eligible: false` until a separately designed production integration exists.
 
+Read [the movie/TV editorial design guide](../pipelines/movie_tv.md) when planning recaps or reviews. `movie_tv_commentary_v1` is a reserved editorial ID, not an operational planner profile; `source_footage_v1` is reserved and episode production remains blocked. New episode preflight requires explicit `--content-profile` and `--media-workflow`, but supplying this pending pair does not enable production. Standalone `footage` operations remain independent of episode preflight and never satisfy the generated-visuals chain. Do not select a manhwa profile or call `source manufacture` to work around that boundary.
+
 ## Keys
 
 From the repository root:

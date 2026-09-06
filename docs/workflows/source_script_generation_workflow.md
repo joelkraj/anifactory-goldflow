@@ -1,6 +1,10 @@
-# Source Script Generation Workflow
+# Manhwa Source Script Generation Workflow
 
-This workflow defines the channel-level package and source-development lane before Goldflow run preflight. It is intentionally separate from episode production so weak concepts can be discarded before a run identity or media spend exists.
+This workflow defines the **manhwa-only** channel-level package and source-development lane before Goldflow run preflight. Read [the manhwa guide](../pipelines/manhwa.md) first. It is intentionally separate from episode production so weak concepts can be discarded before a run identity or media spend exists.
+
+All `source manufacture` commands and the fiction templates/rooms below are specific to `manhwa_recap_v1`. They are not factual-documentary research or movie/TV commentary tools. Route Asset Afterlife/lost-luggage work to [the documentary guide](../pipelines/documentary.md); route movie/TV work to [the design-only editorial guide](../pipelines/movie_tv.md). Existing manufacturer commands retain their manhwa default and do not require new profile/workflow flags. The CLI rejects an explicitly conflicting content profile or targeted non-manhwa run identity; this is not a claim that every free-form brief field is automatically audited.
+
+After exact-source review, new episode preflight must explicitly select `--content-profile manhwa_recap_v1 --media-workflow generated_visuals_v1`; both choices are mandatory. Source `direct_manufacturer_v1` and writer policies name source-development methods, not the media workflow. Existing production identities are not rewritten by this requirement.
 
 ## Principle
 

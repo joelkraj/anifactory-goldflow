@@ -406,6 +406,8 @@ export async function runWinnerSourceCliTests() {
     ];
     await runGoldflow([
       "run", "preflight",
+      "--content-profile", "manhwa_recap_v1",
+      "--media-workflow", "generated_visuals_v1",
       ...identityArgs,
       "--intent", "diagnostic",
       "--allow-dirty-worktree", "true",
@@ -461,6 +463,8 @@ export async function runWinnerSourceCliTests() {
     await assert.rejects(
       () => runGoldflow([
         "run", "preflight",
+        "--content-profile", "manhwa_recap_v1",
+        "--media-workflow", "generated_visuals_v1",
         "--channel", channel,
         "--series", series,
         "--week", "winner-cli-tamper-check",

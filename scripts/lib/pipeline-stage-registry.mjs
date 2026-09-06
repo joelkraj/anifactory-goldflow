@@ -1,4 +1,5 @@
 import { productionProfileForIdentity } from "./production-profiles.mjs";
+import { assertAvailableMediaWorkflow, GENERATED_VISUALS_STAGE_REGISTRY_VERSION } from "./media-workflows.mjs";
 import {
   isLegacyQwenIdentity,
   narrationTtsPolicyForIdentity,
@@ -14,7 +15,7 @@ import {
   planningProviderForIdentity,
 } from "./planning-runtime-policy.mjs";
 
-export const PIPELINE_STAGE_REGISTRY_VERSION = "2026-08-22.1";
+export const PIPELINE_STAGE_REGISTRY_VERSION = GENERATED_VISUALS_STAGE_REGISTRY_VERSION;
 
 export const STAGE_STATES = Object.freeze([
   "passed",
@@ -431,7 +432,15 @@ export const PIPELINE_STAGE_REGISTRY = Object.freeze(stages.map((entry, index) =
 
 const stagesById = new Map(PIPELINE_STAGE_REGISTRY.map((entry) => [entry.id, entry]));
 
-export function stageDefinition(stageId) {
+// The legacy export remains byte-for-byte the generated-visual stage chain.
+// Other workflows must supply a real registry and validators before dispatch.
+export function stageRegistryFor(identity = {}) {
+  assertAvailableMediaWorkflow(identity);
+  return PIPELINE_STAGE_REGISTRY;
+}
+
+export function stageDefinition(stageId, identity = {}) {
+  stageRegistryFor(identity);
   return stagesById.get(stageId) ?? null;
 }
 
@@ -444,24 +453,26 @@ export function stageIsSatisfied(state) {
   return state === "passed" || state === "skipped_with_waiver";
 }
 
-export function commandStageFor(commandName, subcommandName, flags = {}) {
+export function commandStageFor(commandName, subcommandName, flags = {}, identity = {}) {
+  const registry = stageRegistryFor(identity);
   const key = `${commandName} ${subcommandName}`.trim();
   if (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex") {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
   }
   if (key === "imagegen promote-derived-refs") return "image_generation";
-  for (const entry of PIPELINE_STAGE_REGISTRY) {
+  for (const entry of registry) {
     if (entry.commands.includes(key)) return entry.id;
   }
   return null;
 }
 
 export function stageChecklistFor(identity = {}) {
+  const registry = stageRegistryFor(identity);
   const narratorOnly = String(identity.audio_target ?? "narrator_only") === "narrator_only";
   const parallaxDisabled = String(identity.parallax_policy ?? "selective_inspected") !== "selective_inspected";
   const ltxDisabled = !generatedMotionEnabled(identity);
-  return PIPELINE_STAGE_REGISTRY.map((entry) => ({
+  return registry.map((entry) => ({
     stage: entry.id,
     status: entry.id === "sfx_score_plan" && narratorOnly
       ? "skipped_with_waiver"
@@ -475,8 +486,8 @@ export function stageChecklistFor(identity = {}) {
   }));
 }
 
-export function workflowStageIds() {
-  return PIPELINE_STAGE_REGISTRY.map((entry) => entry.id);
+export function workflowStageIds(identity = {}) {
+  return stageRegistryFor(identity).map((entry) => entry.id);
 }
 
 export function stageOutputPathMatches(stageId, relativePath) {
@@ -485,9 +496,9 @@ export function stageOutputPathMatches(stageId, relativePath) {
   return definition.output_patterns.some((pattern) => pattern.test(String(relativePath ?? "")));
 }
 
-export function readyStageIds(stageRows = []) {
+export function readyStageIds(stageRows = [], identity = {}) {
   const byId = new Map(stageRows.map((row) => [row.stage, row]));
-  return PIPELINE_STAGE_REGISTRY
+  return stageRegistryFor(identity)
     .filter((definition) => {
       const row = byId.get(definition.id);
       if (!row || stageIsSatisfied(row.state)) return false;
@@ -595,6 +606,7 @@ function codexSceneCuts(identity = {}) {
 }
 
 export function buildStageCommand(stageId, identity = {}, options = {}) {
+  stageRegistryFor(identity);
   const base = identityBase(identity);
   const episode = identity.episode ?? "<episode>";
   const provider = identity.image_provider ?? "modelslab";
@@ -654,7 +666,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
     localWhisperContractForIdentity(identity),
   );
   const commands = {
-    run_identity: `node bin/goldflow.mjs run preflight ${base} --title "<episode-title>" --source <source.md> --planning-provider planning_room --planning-effort-policy planning_room_stage_routed_v1 --image-provider federated_google_web_image_pool --audio-target narrator_only`,
+    run_identity: `node bin/goldflow.mjs run preflight ${base} --content-profile ${identity.content_profile ?? "<content-profile>"} --media-workflow generated_visuals_v1 --title "<episode-title>" --source <source.md> --planning-provider planning_room --planning-effort-policy planning_room_stage_routed_v1 --image-provider federated_google_web_image_pool --audio-target narrator_only`,
     source_ingest: `node bin/goldflow.mjs ingest source ${base} --source <source.md>`,
     script_approval: `node bin/goldflow.mjs script approve ${base} --hash <script_clean_hash>`,
     script_pace_check: `node bin/goldflow.mjs script pace-check ${base} --target-wpm-min ${minWpm} --target-wpm-max ${maxWpm}${paceFlag}${pacePolicy === "diagnostic" ? " --allow-hook-warnings true" : ""}`,

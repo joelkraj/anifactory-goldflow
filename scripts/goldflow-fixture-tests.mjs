@@ -4946,6 +4946,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
   await execFileAsync(process.execPath, [
     "scripts/run-preflight.mjs",
+    "--content-profile", "manhwa_recap_v1",
+    "--media-workflow", "generated_visuals_v1",
     "--channel", "test",
     "--series", "series",
     "--week", "run",
@@ -5202,6 +5204,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.match(buildStageCommand("image_generation", chatGptWebImageIdentity), /--reference-concurrency 3\b/);
   assert.equal(plannerConcurrencyForIdentity(chatGptWebImageIdentity, 15, { visualPromptWavefront: true }), 15);
   const legacyPlanningIdentity = structuredClone(identity);
+  delete legacyPlanningIdentity.media_workflow;
+  delete legacyPlanningIdentity.workflow_contract;
   delete legacyPlanningIdentity.planning_provider;
   delete legacyPlanningIdentity.planning_effort_policy;
   delete legacyPlanningIdentity.provider_locks.planning_provider;
@@ -5212,6 +5216,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   assert.equal(runIdentityPlanningCompleteForTests(legacyPlanningIdentity).done, true);
   assert.match(buildStageCommand("semantic_scene_plan", legacyPlanningIdentity), /--concurrency 12\b/);
   const legacySerialQwenIdentity = structuredClone(identity);
+  delete legacySerialQwenIdentity.media_workflow;
+  delete legacySerialQwenIdentity.workflow_contract;
   legacySerialQwenIdentity.stage_registry_version = "2026-07-27.1";
   delete legacySerialQwenIdentity.voice_provider_options.synthesis_contract;
   for (const field of [
@@ -5253,6 +5259,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
+      "--content-profile", "manhwa_recap_v1",
+      "--media-workflow", "generated_visuals_v1",
       "--channel", "test",
       "--series", "series",
       "--week", "fenrir-production",
@@ -5266,6 +5274,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
+      "--content-profile", "manhwa_recap_v1",
+      "--media-workflow", "generated_visuals_v1",
       "--channel", "test",
       "--series", "series",
       "--week", "qwen-primary-production",
@@ -5281,6 +5291,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
+      "--content-profile", "manhwa_recap_v1",
+      "--media-workflow", "generated_visuals_v1",
       "--channel", "test",
       "--series", "series",
       "--week", "qwen-primary-production-case-bypass",
@@ -5297,6 +5309,8 @@ async function testPreflightLocksNativeTtsSpeedAndSmoothRender() {
   await assert.rejects(
     execFileAsync(process.execPath, [
       "scripts/run-preflight.mjs",
+      "--content-profile", "manhwa_recap_v1",
+      "--media-workflow", "generated_visuals_v1",
       "--channel", "test",
       "--series", "series",
       "--week", "qwen-speed-control-rejected",
@@ -7560,6 +7574,8 @@ async function testPersistentFederatedImageIdentityPolicy() {
   assert.equal((await federatedWebImageIdentityStatus(identity)).done, true, "the current fast-premium identity must require persistent browser workers");
 
   const legacyV2 = structuredClone(identity);
+  delete legacyV2.media_workflow;
+  delete legacyV2.workflow_contract;
   legacyV2.image_provider_options.routing_policy = FEDERATED_WEB_IMAGE_ROUTING_POLICY_V2;
   legacyV2.image_provider_options.google_flow.project_policy = FRESH_GOOGLE_FLOW_PROJECT_PER_JOB_POLICY;
   delete legacyV2.image_provider_options.google_flow.worker_session_policy;
@@ -7576,6 +7592,8 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   await execFileAsync(process.execPath, [
     "scripts/run-preflight.mjs",
+    "--content-profile", "manhwa_recap_v1",
+    "--media-workflow", "generated_visuals_v1",
     "--channel", "test",
     "--series", "series",
     "--week", "run",
@@ -7657,6 +7675,8 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   const combinedEpisodeDir = path.join(combinedDataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   await execFileAsync(process.execPath, [
     "scripts/run-preflight.mjs",
+    "--content-profile", "manhwa_recap_v1",
+    "--media-workflow", "generated_visuals_v1",
     "--channel", "test",
     "--series", "series",
     "--week", "run",
@@ -7687,6 +7707,8 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
   const mixedRefsEpisodeDir = path.join(mixedRefsDataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   await execFileAsync(process.execPath, [
     "scripts/run-preflight.mjs",
+    "--content-profile", "manhwa_recap_v1",
+    "--media-workflow", "generated_visuals_v1",
     "--channel", "test",
     "--series", "series",
     "--week", "run",
@@ -7731,7 +7753,8 @@ async function testHybridOpeningWindowPersistsInRunIdentity() {
 
 async function testVisualPlannerDriftContracts() {
   const files = Object.fromEntries(await Promise.all([
-    "AGENTS.md",
+    "docs/pipelines/generated_visuals.md",
+    "docs/pipelines/manhwa.md",
     "docs/workflows/video_production_workflow.md",
     "bin/goldflow.mjs",
     "scripts/codex-image-manual-import.mjs",
@@ -7762,9 +7785,9 @@ async function testVisualPlannerDriftContracts() {
   assert.match(files["scripts/visual-reference-plan.mjs"], /style refs dropped for this run; use style bible\/text guidance only/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /Keep narrative state separate from visible state/i);
   assert.match(files["scripts/visual-reference-plan.mjs"], /abstract_status_as_physical_anchor_risk/i);
-  assert.match(files["AGENTS.md"], /Narrative states such as financially ruined, betrayed, humiliated, indebted, rejected, or emotionally broken are not physical costume\/body damage by default/i);
+  assert.match(files["docs/pipelines/generated_visuals.md"], /Narrative states such as financially ruined, betrayed, humiliated, indebted, rejected, or emotionally broken are not physical costume\/body damage by default/i);
   assert.match(files["docs/workflows/video_production_workflow.md"], /Separate narrative\/status state from visible character state/i);
-  assert.match(files["AGENTS.md"], /ANIFACTORY_IMAGE_MODEL=gpt-image-2-t2i/i);
+  assert.match(files["docs/pipelines/generated_visuals.md"], /ANIFACTORY_IMAGE_MODEL=gpt-image-2-t2i/i);
   assert.match(files["docs/workflows/video_production_workflow.md"], /GPT Image 2 through ModelsLab is an explicit premium\/spend-forward variant/i);
   const modelslabImageHelper = await fs.readFile("scripts/modelslab-image-helper.mjs", "utf8");
   assert.match(modelslabImageHelper, /gpt-image-2-i2i/i);
@@ -7797,11 +7820,13 @@ async function testVisualPlannerDriftContracts() {
   assert.equal(commandStageFor("visual", "plan", {}), "visual_prompt_plan");
   assert.equal(commandStageFor("visual", "harden", {}), "visual_prompt_harden");
 
-  for (const file of ["AGENTS.md", "docs/workflows/video_production_workflow.md"]) {
+  for (const file of ["docs/pipelines/manhwa.md", "docs/workflows/video_production_workflow.md"]) {
     assert.match(files[file], /Real named public creators, streamers, celebrities, or influencers/i);
     assert.match(files[file], /source-face anchors/i);
     assert.match(files[file], /face-only identity/i);
     assert.match(files[file], /inventing a generic lookalike/i);
+  }
+  for (const file of ["docs/pipelines/generated_visuals.md", "docs/workflows/video_production_workflow.md"]) {
     assert.match(files[file], /--codex-opening-sec <seconds>/);
   }
 }
@@ -12644,6 +12669,8 @@ async function testGlobalStylePromptDoesNotInjectCrowdExtras() {
     "scripts/visual-plan.mjs",
     "scripts/visual-prompt-review.mjs",
     "AGENTS.md",
+    "docs/pipelines/generated_visuals.md",
+    "docs/pipelines/manhwa.md",
     "docs/workflows/video_production_workflow.md",
   ];
   for (const filePath of files) {

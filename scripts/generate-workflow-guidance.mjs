@@ -12,7 +12,7 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const checkOnly = process.argv.includes("--check");
 const targets = [
-  path.join(repoRoot, "AGENTS.md"),
+  path.join(repoRoot, "docs", "pipelines", "generated_visuals.md"),
   path.join(repoRoot, "docs", "workflows", "video_production_workflow.md"),
 ];
 const startMarker = "<!-- GOLDFLOW_STAGE_REGISTRY:START -->";
@@ -43,6 +43,13 @@ function replaceBlock(text, block, filePath) {
 }
 
 async function main() {
+  const rootGuidance = await fs.readFile(path.join(repoRoot, "AGENTS.md"), "utf8");
+  if (rootGuidance.includes(startMarker) || rootGuidance.includes(endMarker)) {
+    throw new Error("Root AGENTS.md must route by content/media workflow, not embed the generated-visuals stage registry.");
+  }
+  if (!rootGuidance.includes("docs/pipelines/generated_visuals.md")) {
+    throw new Error("Root AGENTS.md must link the required generated-visuals operating contract.");
+  }
   const block = generatedBlock();
   const stale = [];
   for (const filePath of targets) {

@@ -5,13 +5,14 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  PIPELINE_STAGE_REGISTRY,
   PIPELINE_STAGE_REGISTRY_VERSION,
+  stageRegistryFor,
   buildStageCommand,
   readyStageIds,
   stageDefinition,
   stageIsSatisfied,
 } from "./lib/pipeline-stage-registry.mjs";
+import { assertCommandWorkflowRoute, assertEpisodeWorkflowFlags, readEpisodeRoutingIdentity } from "./lib/episode-workflow-routing.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
 import {
   parallaxApprovalMatches,
@@ -143,6 +144,8 @@ const MANUAL_BLOCKER_TRIAGE_POLICY = {
 
 export function contentStatusIdentityFields(runIdentity = {}) {
   return {
+    ...(Object.hasOwn(runIdentity, "media_workflow") ? { media_workflow: runIdentity.media_workflow } : {}),
+    ...(Object.hasOwn(runIdentity, "workflow_contract") ? { workflow_contract: runIdentity.workflow_contract } : {}),
     source_path: runIdentity.source_path ?? null,
     proof_source_mode: runIdentity.proof_source_mode ?? null,
     content_profile: runIdentity.content_profile ?? null,
@@ -4183,7 +4186,15 @@ async function main() {
         return path.join(dataRoot, "channels", flags.channel, "weekly_runs", flags.week, "episodes", flags.episode);
       })();
   const runIdentityPath = path.join(episodeDir, "run_identity.json");
-  const runIdentity = await readJson(runIdentityPath, {});
+  const persistedRunIdentity = readEpisodeRoutingIdentity(episodeDir);
+  const runIdentity = persistedRunIdentity ?? {};
+  // Flags on an uninitialized directory are prospective choices, not an override
+  // of a nonexistent manhwa lock. Validate them but do not materialize identity.
+  if (!persistedRunIdentity) {
+    assertCommandWorkflowRoute({ command: "run", subcommand: "status", script: "run-status.mjs", flags, episodeDir });
+  }
+  const mediaWorkflow = assertEpisodeWorkflowFlags(runIdentity, persistedRunIdentity ? flags : {});
+  const stageRegistry = stageRegistryFor(runIdentity);
   const productionManifest = await readJson(path.join(episodeDir, "production_manifest.json"), null);
   const ttsIdentityFields = ttsStatusIdentityFields(runIdentity, flags);
   const identity = {
@@ -4221,7 +4232,7 @@ async function main() {
     production_profile: runIdentity.production_profile ?? runIdentity.provider_locks?.production_profile ?? null,
     production_profile_config: runIdentity.production_profile_config ?? null,
     run_identity_schema: runIdentity.schema ?? "missing",
-    stage_registry_version: runIdentity.stage_registry_version ?? null,
+    stage_registry_version: runIdentity.stage_registry_version ?? runIdentity.workflow_contract?.stage_registry_version ?? null,
   };
   const effectiveImageRoute = await effectiveImageIdentityForEpisode(episodeDir, runIdentityPath, identity);
   Object.assign(identity, effectiveImageRoute.identity);
@@ -4310,7 +4321,7 @@ async function main() {
   const latestPackaging = await latestMatching(episodeDir, /^upload_packaging.*\.md$|^title_thumbnail.*\.json$|^thumbnail.*\.png$/);
   const youtubeContractCurrent = youtubePublishingRequired(identity);
   const youtubeUploadPackaging = youtubeContractCurrent
-    ? await youtubeUploadPackagingComplete(episodeDir, episode)
+    ? await youtubeUploadPackagingComplete(episodeDir, episode, runIdentity)
     : { done: Boolean(latestPackaging), evidence: latestPackaging?.name ?? "upload packaging missing" };
   const youtubePublishManifest = youtubeContractCurrent
     ? await youtubePublishManifestComplete(episodeDir, episode)
@@ -4465,13 +4476,13 @@ async function main() {
       : { state: "skipped_with_waiver", evidence: "run predates pinned-comment receipt contract" },
   };
 
-  const rows = PIPELINE_STAGE_REGISTRY.map((definition) => {
+  const rows = stageRegistry.map((definition) => {
     const validation = validationByStage[definition.id] ?? { state: "missing", evidence: "validator not materialized" };
     return stage(definition.id, validation, identity, validation.next_command_shape);
   });
 
   const next = rows.find((row) => !stageIsSatisfied(row.state)) ?? null;
-  const readyCommandStages = readyStageIds(rows);
+  const readyCommandStages = readyStageIds(rows, identity);
   const repairCommandStages = next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
     : next?.stage === "qwen_tts_stitch"
@@ -4489,6 +4500,8 @@ async function main() {
       : [];
   const result = {
     schema: "goldflow_run_status_v2",
+    media_workflow: mediaWorkflow,
+    workflow_selection_state: !persistedRunIdentity ? "missing" : mediaWorkflow.legacy ? "legacy_adapter" : "locked",
     stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
     episode_dir: episodeDir,
     identity,
@@ -4513,6 +4526,8 @@ async function main() {
   if (flags.format === "markdown" || flags.md === "true") {
     console.log(`# Goldflow Run Status\n`);
     console.log(`Episode dir: ${episodeDir}`);
+    console.log(`Content profile: ${!persistedRunIdentity ? "unselected (preflight required)" : identity.content_profile_config?.id ?? identity.content_profile ?? "manhwa_recap_v1 (legacy default)"}`);
+    console.log(`Media workflow: ${!persistedRunIdentity ? "unselected (generated registry preview only)" : `${mediaWorkflow.id}${mediaWorkflow.legacy ? " (legacy adapter; identity unchanged)" : " (identity-locked)"}`}`);
     console.log(`Current stage: ${result.current_stage}`);
     if (result.next_command_shape) console.log(`Next command shape: \`${result.next_command_shape}\``);
     console.log(`Manual blocker triage: ${MANUAL_BLOCKER_TRIAGE_POLICY.summary}`);

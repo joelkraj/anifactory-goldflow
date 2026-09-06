@@ -17,6 +17,8 @@ import {
 import { creativeStageRerunDecisionForEpisode } from "../scripts/lib/creative-stage-rerun-policy.mjs";
 import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-policy.mjs";
 import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.mjs";
+import { assertCommandWorkflowRoute } from "../scripts/lib/episode-workflow-routing.mjs";
+import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -108,10 +110,39 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
 }
 
 function run(script, scriptArgs = []) {
-  enforceWorkflowGuard(command, subcommand, scriptArgs);
+  // Child scripts generally parse separate flag/value tokens. Normalize once so
+  // dispatch, identity routing, and provenance all see the same final values,
+  // including repeated flags that mix --key=value and --key value syntax.
+  scriptArgs = scriptArgs.flatMap((arg) => {
+    const equalsIndex = arg.startsWith("--") ? arg.indexOf("=", 2) : -1;
+    return equalsIndex === -1 ? [arg] : [arg.slice(0, equalsIndex), arg.slice(equalsIndex + 1)];
+  });
+  if (command !== "footage") {
+    scriptArgs = scriptArgs.map((arg, index) => (
+      index > 0 && scriptArgs[index - 1] === "--episode-dir" && arg && !arg.startsWith("--")
+        ? path.resolve(arg)
+        : arg
+    ));
+  }
   const parsedFlags = parseFlags(scriptArgs);
-  const stage = commandStage(command, subcommand, parsedFlags);
   const episodeDir = episodeDirForFlags(parsedFlags, process.env);
+  try {
+    assertCommandWorkflowRoute({ command, subcommand, script, flags: parsedFlags, episodeDir });
+    if (command !== "footage" && Object.hasOwn(parsedFlags, "content-profile")) {
+      const canonicalProfile = canonicalContentProfileArgument(parsedFlags["content-profile"]);
+      if (canonicalProfile !== parsedFlags["content-profile"]) {
+        // Preserve last-value precedence for repeated flags in both parsers.
+        scriptArgs.push("--content-profile", canonicalProfile);
+        parsedFlags["content-profile"] = canonicalProfile;
+      }
+    }
+  } catch (error) {
+    console.error(`Workflow routing blocked: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  enforceWorkflowGuard(command, subcommand, scriptArgs);
+  const stage = commandStage(command, subcommand, parsedFlags);
   const plannerRerunDecision = plannerRerunDecisionForEpisode({
     stage,
     flags: parsedFlags,
@@ -199,8 +230,12 @@ function help() {
   const registryCommands = helpCommandLines().join("\n");
   console.log(`AniFactory Goldflow
 
-One production path. No legacy fallbacks.
+Profile-routed production with identity-locked media workflows.
 Production commands are guarded by the run-status ledger. Use --workflow-bypass true only for explicit diagnostic/recovery work.
+Episode commands require an explicit target: --episode-dir where supported, otherwise complete --channel, --week, and --episode flags.
+New preflights require --content-profile <manhwa_recap_v1|asset_afterlife_v1|profile.json> --media-workflow generated_visuals_v1.
+Content profile selects editorial rules; media workflow selects the stage chain. Existing identities retain their legacy route.
+source_footage_v1 / movie_tv_commentary_v1 are reserved, not production-ready. Use standalone footage commands for private clip tests.
 Stage registry: ${PIPELINE_STAGE_REGISTRY_VERSION}
 
 Commands:

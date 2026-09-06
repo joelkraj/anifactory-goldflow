@@ -7,6 +7,7 @@
     "goldflow": "./bin/goldflow.mjs"
   },
   "scripts": {
+    "test:workflow-routing": "node scripts/tests/media-workflow-contract-tests.mjs && node scripts/tests/media-workflow-routing-tests.mjs && node scripts/tests/packaging-workflow-routing-tests.mjs && node scripts/tests/pipeline-guidance-tests.mjs",
     "test:footage": "node scripts/tests/footage-provider-tests.mjs && node scripts/tests/footage-subtitle-tests.mjs && node scripts/tests/footage-extract-tests.mjs && node scripts/tests/footage-cli-tests.mjs",
     "check": "node scripts/check-syntax.mjs && node scripts/generate-workflow-guidance.mjs --check",
     "studio:desktop": "node apps/goldflow-studio/desktop/main.mjs",
@@ -34,7 +35,7 @@
     "test:audiovisual-quality": "node scripts/tests/audiovisual-quality-tests.mjs && node scripts/tests/narrative-overlay-tests.mjs",
     "test:quality": "npm run test:source-quality && npm run test:narration-quality && npm run test:visual-prompt && npm run test:motion-quality && npm run test:master-quality && npm run test:scheduler-quality && npm run test:telemetry-quality && npm run test:analytics-quality && npm run test:audiovisual-quality",
     "test:integration": "node scripts/tests/integration-tests.mjs",
-    "test:fixtures": "npm run test:stage-contract && npm run test:planner && npm run test:voice-boundary && npm run test:media && npm run test:production-direction && npm run test:performance && npm run test:narration-quality && npm run test:analytics-quality && npm run test:integration",
+    "test:fixtures": "npm run test:workflow-routing && npm run test:stage-contract && npm run test:planner && npm run test:voice-boundary && npm run test:media && npm run test:production-direction && npm run test:performance && npm run test:narration-quality && npm run test:analytics-quality && npm run test:integration",
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
     "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check"
   },

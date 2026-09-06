@@ -67,6 +67,10 @@ import {
   contentProfileRequiresEvidenceLedger,
 } from "./lib/content-profiles.mjs";
 import {
+  assertAvailableMediaWorkflow,
+  mediaWorkflowForPreflight,
+} from "./lib/media-workflows.mjs";
+import {
   factualEvidenceBinding,
 } from "./lib/factual-evidence-contract.mjs";
 import {
@@ -133,11 +137,42 @@ const dataRoot = process.env.ANIFACTORY_DATA_ROOT || "/Users/joel/AniFactoryData
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_QWEN_NARRATOR_VOICE_ID = "joel_owned_narrator_clone";
 const DEFAULT_QWEN_NARRATOR_VOICE_POLICY = "default_joel_owned_narrator_clone";
+const invokedAsCommand = path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url);
 const flags = parseFlags(process.argv.slice(2));
 const channel = flags.channel;
 const series = flags.series ?? flags.seriesSlug;
 const week = flags.week;
 const episode = flags.episode;
+let mediaWorkflowBinding = null;
+// Imported fixture helpers must remain side-effect free. Actual preflight commands
+// select their route and refuse identity replacement before provider/reference reads.
+if (invokedAsCommand) {
+  try {
+    mediaWorkflowBinding = mediaWorkflowForPreflight({
+      contentProfile: flags["content-profile"],
+      mediaWorkflow: flags["media-workflow"],
+    });
+    requiredFlag("channel", channel);
+    requiredFlag("series", series);
+    requiredFlag("week", week);
+    requiredFlag("episode", episode);
+    await assertNewIdentityPath(path.join(dataRoot, "channels", channel, "weekly_runs", week, "episodes", episode, "run_identity.json"));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+const contentProfileDefinitionValue = contentProfileDefinition(
+  flags["content-profile"] ?? DEFAULT_CONTENT_PROFILE,
+);
+const contentProfile = contentProfileDefinitionValue.config;
+if (invokedAsCommand) {
+  assertAvailableMediaWorkflow({
+    ...mediaWorkflowBinding,
+    content_profile: contentProfile.id,
+    content_profile_config: contentProfile,
+  });
+}
 const title = flags.title ?? flags["episode-title"] ?? "";
 const sourcePath = flags.source ? path.resolve(flags.source) : null;
 const winnerReleasePath = flags["winner-release"] ? path.resolve(flags["winner-release"]) : null;
@@ -192,10 +227,6 @@ if (planningProvider === "chatgpt_web" && planningModel !== CHATGPT_WEB_PLANNING
 if (!["chatgpt_web", PLANNING_ROOM_PROVIDER].includes(planningProvider) && planningDefaultReasoningEffort === "max") {
   throw new Error("Pro/max reasoning is available only through --planning-provider chatgpt_web.");
 }
-const contentProfileDefinitionValue = contentProfileDefinition(
-  flags["content-profile"] ?? DEFAULT_CONTENT_PROFILE,
-);
-const contentProfile = contentProfileDefinitionValue.config;
 const factualEvidenceLedgerPath = flags["evidence-ledger"]
   ? path.resolve(flags["evidence-ledger"])
   : null;
@@ -905,7 +936,24 @@ async function exists(filePath) {
 
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  try {
+    await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error("Run identity already exists. Preflight cannot overwrite or migrate an existing identity; resume its recorded workflow or choose a new explicit run identity.");
+    }
+    throw error;
+  }
+}
+
+async function assertNewIdentityPath(filePath) {
+  try {
+    await fs.lstat(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error("Run identity already exists. Preflight cannot overwrite or migrate an existing identity; resume its recorded workflow or choose a new explicit run identity.");
 }
 
 async function readJsonWithBytes(filePath, label) {
@@ -1248,6 +1296,7 @@ async function main() {
   const manifest = {
     schema: "goldflow_run_identity_v2",
     stage_registry_version: PIPELINE_STAGE_REGISTRY_VERSION,
+    ...mediaWorkflowBinding,
     status: "preflight_passed_pending_ingest",
     channel,
     series_slug: series,
@@ -1548,10 +1597,19 @@ async function main() {
         && productionProfileConfig.advance.authorize_media_spend
         && productionProfileConfig.advance.authorize_render,
     },
-    stage_checklist: stageChecklistFor({ audio_target: audioTarget, parallax_policy: parallaxPolicy, generated_motion_policy: generatedMotionPolicy, generated_motion_provider: generatedMotionProvider }),
+    stage_checklist: stageChecklistFor({
+      ...mediaWorkflowBinding,
+      content_profile: contentProfile.id,
+      content_profile_config: contentProfile,
+      audio_target: audioTarget,
+      parallax_policy: parallaxPolicy,
+      generated_motion_policy: generatedMotionPolicy,
+      generated_motion_provider: generatedMotionProvider,
+    }),
     episode_dir: episodeDir,
     updated_at: now,
   };
+  assertAvailableMediaWorkflow(manifest);
   const localWhisperIdentityValidation =
     validateLocalWhisperIdentityContract(manifest);
   if (!localWhisperIdentityValidation.done) {
@@ -1562,7 +1620,7 @@ async function main() {
   console.log(JSON.stringify({ status: "passed", run_identity_path: manifestPath, episode_dir: episodeDir, next_required_stage: "ingest source" }, null, 2));
 }
 
-if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+if (invokedAsCommand) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

@@ -14,6 +14,7 @@ import {
   YOUTUBE_THUMBNAIL_GENERATION_CONTRACT,
   YOUTUBE_UPLOAD_RECEIPT_SCHEMA,
   listYoutubeThumbnailUpdateReceipts,
+  packagingWorkflowSupport,
   validateYoutubeThumbnailUpdateReceipt,
   validateYoutubePackagingSpec,
   validateYoutubePinnedCommentReceipt,
@@ -124,6 +125,8 @@ async function episodeContext() {
   const identityPath = path.join(episodeDir, "run_identity.json");
   const identity = await readJson(identityPath);
   if (!identity) throw new Error(`Missing or invalid run identity: ${identityPath}`);
+  const workflowSupport = packagingWorkflowSupport(identity);
+  if (!workflowSupport.available) throw new Error(workflowSupport.reason);
   const episode = flags.episode ?? identity.episode ?? path.basename(episodeDir);
   return { episodeDir, identity, identityPath, episode };
 }
@@ -214,6 +217,7 @@ async function approvePackaging() {
     approval_note: clean(flags.note) || "Title, thumbnail, description, and pinned-comment package reviewed.",
   };
   const validation = validateYoutubePackagingSpec(approvedSpec, {
+    runIdentity: identity,
     markdown: inputs.markdown,
     thumbnailMetadata: inputs.thumbnailMetadata,
     thumbnailBytes: inputs.thumbnailBytes,
@@ -243,12 +247,12 @@ async function approvePackaging() {
 }
 
 async function approveNativeAbTest() {
-  const { episodeDir, episode } = await episodeContext();
+  const { episodeDir, identity, episode } = await episodeContext();
   if (!isTrue(flags.approve)) throw new Error("Native A/B approval requires --approve true.");
   requiredFlag("candidate-file", flags["candidate-file"]);
   requiredFlag("approved-by", flags["approved-by"]);
   const inputs = await packagingInputs(episodeDir, episode);
-  const packageValidation = packagingValidation(inputs, { allowLegacyAdapter: true });
+  const packageValidation = packagingValidation(inputs, { allowLegacyAdapter: true, runIdentity: identity });
   if (packageValidation.status !== "passed") {
     throw new Error(`Approved packaging required before A/B approval: ${packageValidation.blockers.join(", ")}`);
   }
@@ -324,7 +328,7 @@ async function approveNativeAbTest() {
 async function prepareManifest() {
   const { episodeDir, identity, identityPath, episode } = await episodeContext();
   const inputs = await packagingInputs(episodeDir, episode);
-  const validation = packagingValidation(inputs, { allowLegacyAdapter: true });
+  const validation = packagingValidation(inputs, { allowLegacyAdapter: true, runIdentity: identity });
   if (validation.status !== "passed") {
     console.log(JSON.stringify({ status: "blocked", blockers: validation.blockers }, null, 2));
     process.exitCode = 2;

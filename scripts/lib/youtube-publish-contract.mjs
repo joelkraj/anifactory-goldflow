@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import { sha256File } from "./file-hash.mjs";
+import { assertAvailableMediaWorkflow } from "./media-workflows.mjs";
 import {
   validateYoutubeNativeAbPlan,
   validateYoutubeNativeAbReceipt,
@@ -117,6 +118,21 @@ export function youtubePublishingRequired(identity = {}) {
     if (difference !== 0) return difference > 0;
   }
   return true;
+}
+
+// A generated-media route does not imply that its editorial packaging contract
+// exists. Keep historical approvals on their original validator without migration.
+export function packagingWorkflowSupport(identity = {}) {
+  const workflow = assertAvailableMediaWorkflow(identity);
+  const profile = identity.content_profile_config?.id ?? identity.content_profile
+    ?? (workflow.legacy ? "manhwa_recap_v1" : null);
+  const available = workflow.legacy || profile === "manhwa_recap_v1";
+  return {
+    available,
+    reason: available ? null : `Packaging workflow unsupported for content profile ${profile ?? "unselected"}: newly workflow-locked non-manhwa runs require an implemented profile-specific packaging contract before YouTube packaging or publishing. Do not add fictional betrayal/revenge metadata to satisfy the manhwa validator.`,
+    content_profile: profile,
+    media_workflow: workflow,
+  };
 }
 
 export function extractMarkdownSection(markdown, heading) {
@@ -347,6 +363,18 @@ function validatePublishSettings(spec, blockers) {
 }
 
 export function validateYoutubePackagingSpec(spec, options = {}) {
+  const workflowSupport = packagingWorkflowSupport(options.runIdentity);
+  if (!workflowSupport.available) {
+    return {
+      status: "blocked",
+      blockers: [workflowSupport.reason],
+      warnings: [],
+      schema_mode: null,
+      legacy_adapter_applied: false,
+      selected_title_candidate: null,
+      selected_thumbnail_candidate: null,
+    };
+  }
   const blockers = [];
   const warnings = [];
   const requireApproval = options.requireApproval !== false;
@@ -449,7 +477,31 @@ async function sourceHashesCurrent(sourceHashes) {
   return { checked, stale };
 }
 
-export async function youtubeUploadPackagingComplete(episodeDir, episode) {
+export async function youtubeUploadPackagingComplete(episodeDir, episode, runIdentity) {
+  let workflowSupport;
+  try {
+    if (runIdentity === undefined) {
+      let identityBytes;
+      try {
+        identityBytes = await fs.readFile(path.join(episodeDir, "run_identity.json"), "utf8");
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw new Error("Cannot read run_identity.json for packaging workflow routing.");
+      }
+      if (identityBytes !== undefined) {
+        try { runIdentity = JSON.parse(identityBytes); } catch {
+          throw new Error("Invalid run_identity.json JSON for packaging workflow routing.");
+        }
+      } else {
+        runIdentity = {};
+      }
+    }
+    workflowSupport = packagingWorkflowSupport(runIdentity);
+  } catch (error) {
+    return { done: false, state: "blocked", evidence: `Packaging workflow routing blocked: ${error.message}` };
+  }
+  if (!workflowSupport.available) {
+    return { done: false, state: "blocked", evidence: workflowSupport.reason };
+  }
   const packagePath = path.join(episodeDir, `upload_packaging_${episode}.md`);
   const specPath = path.join(episodeDir, `youtube_packaging_spec_${episode}.json`);
   if (!(await exists(packagePath)) || !(await exists(specPath))) {
@@ -471,6 +523,7 @@ export async function youtubeUploadPackagingComplete(episodeDir, episode) {
     return { done: false, state: "blocked", evidence: `final thumbnail unreadable: ${thumbnailPath}` };
   }
   const validation = validateYoutubePackagingSpec(spec, {
+    runIdentity,
     markdown,
     thumbnailMetadata: evidence.metadata,
     thumbnailBytes: evidence.bytes,

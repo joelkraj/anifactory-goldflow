@@ -32,6 +32,8 @@ async function runProviderFreeSyntheticE2e() {
   const base = ["--channel", "synthetic", "--series", "provider_free", "--week", "synthetic-e2e", "--episode", "ep_01"];
   await execFileAsync(process.execPath, [
     "scripts/run-preflight.mjs", ...base,
+    "--content-profile", "manhwa_recap_v1",
+    "--media-workflow", "generated_visuals_v1",
     "--title", "Synthetic Provider Free E2E",
     "--source", sourcePath,
     "--image-provider", "modelslab",

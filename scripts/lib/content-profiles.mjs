@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertAvailableMediaWorkflow } from "./media-workflows.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const profileRoot = path.join(repoRoot, "docs", "content_profiles");
@@ -86,7 +87,15 @@ export function contentProfileDefinition(value = DEFAULT_CONTENT_PROFILE) {
   return loadDefinition(value);
 }
 
+// CLI workers run from repoRoot, which may differ from the caller's directory.
+// Preserve built-in names while making custom-file dispatch unambiguous.
+export function canonicalContentProfileArgument(value) {
+  const raw = String(value).trim();
+  return aliases.has(normalizedId(raw)) ? value : resolveProfilePath(value);
+}
+
 export function contentProfileForIdentity(identity = {}) {
+  assertAvailableMediaWorkflow(identity ?? {});
   const embedded = identity?.content_profile_config;
   if (embedded) {
     validateProfile(embedded, "run_identity.json#content_profile_config");

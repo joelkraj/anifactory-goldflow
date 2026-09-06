@@ -108,7 +108,32 @@ assert.throws(() => planningRuntimeFromProcessContext({
   overrideStage: "winner_source_story_architecture_creative",
   argv: [],
   env: {},
-}), /except declared GPT-5\.5 source-draft candidates/);
+}), /except declared GPT-5\.5 or GPT-6 source-draft candidates/);
+const gpt6SourceDraftRuntime = planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web", explicitModel: "gpt-6-astra",
+  overrideStage: "winner_source_script_v3_draft_6_1", argv: [], env: {},
+});
+assert.equal(gpt6SourceDraftRuntime.model, "gpt-6-astra");
+for (const kind of ["edit", "review"]) {
+  const runtime = planningRuntimeFromProcessContext({
+    explicitProvider: "chatgpt_web", explicitModel: "gpt-6-astra",
+    overrideStage: `winner_source_script_v3_directed_${kind}_gpt6_fixture_01`, argv: [], env: {},
+  });
+  assert.equal(runtime.model, "gpt-6-astra");
+  assert.equal(runtime.identity, null);
+}
+assert.throws(() => planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web", explicitModel: "gpt-5.5",
+  overrideStage: "winner_source_script_v3_directed_edit_gpt6_fixture_01", argv: [], env: {},
+}), /except declared/);
+assert.throws(() => planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web", explicitModel: "gpt-6-astra",
+  overrideStage: "winner_source_script_v3_directed_planning_gpt6_fixture_01", argv: [], env: {},
+}), /except declared/);
+assert.throws(() => planningRuntimeFromProcessContext({
+  explicitProvider: "chatgpt_web", explicitModel: "gpt-6-astra",
+  overrideStage: "winner_source_story_architecture_creative", argv: [], env: {},
+}), /except declared/);
 assert.equal(ANTIGRAVITY_CLI_MAX_CONCURRENCY, 3);
 let activeAntigravityFixtureCalls = 0;
 let maximumAntigravityFixtureCalls = 0;

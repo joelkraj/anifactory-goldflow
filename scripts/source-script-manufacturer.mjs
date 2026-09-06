@@ -399,14 +399,19 @@ async function prepare(directory, flags) {
 
 async function writeCandidates(directory, flags) {
   const prepared = await prepare(directory, flags);
+  const briefPolicy = prepared.brief.document.writer_policy;
+  if (briefPolicy && flags["writer-policy"] && briefPolicy !== flags["writer-policy"]) {
+    throw new Error("Writer policy override conflicts with the approved manufacturing brief.");
+  }
+  const requestedPolicy = flags["writer-policy"] ?? briefPolicy ?? null;
   const portfolioPath = path.join(directory, "manufacturing_portfolio.json");
   if (await exists(portfolioPath)) {
     const document = JSON.parse(await fs.readFile(portfolioPath, "utf8"));
-    assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: sourceWriterPolicy(document).candidates }));
+    assertValid("manufacturing portfolio", validateManufacturingPortfolio(document, { promptSha256: prepared.manifest.filled_prompt_sha256, expectedCandidates: sourceWriterPolicy(document, requestedPolicy).candidates }));
     return { prepared, document, portfolioPath };
   }
   const outputDirectory = path.join(directory, "manufactured_drafts");
-  const policy = sourceWriterPolicy();
+  const policy = sourceWriterPolicy(null, requestedPolicy);
   const candidates = policy.candidates;
   const recovery = flags["recover-browser-jobs"] ? JSON.parse(await fs.readFile(path.resolve(flags["recover-browser-jobs"]), "utf8")) : {};
   if (Object.keys(recovery).some((id) => !candidates.some((row) => row.id === id))) throw new Error("Recovery map contains a candidate outside the active writer policy.");
@@ -476,7 +481,8 @@ async function writeCandidates(directory, flags) {
       status: "blocked",
       completed_candidate_ids: completed.map((row) => row.id),
       failures,
-      exact_recovery_command: `goldflow source manufacture write --development-dir ${JSON.stringify(directory)} --candidate-ids ${failures.map((row) => row.candidate_id).join(",")}`,
+      writer_policy: policy.name,
+      exact_recovery_command: `goldflow source manufacture write --development-dir ${JSON.stringify(directory)} --writer-policy ${policy.name} --candidate-ids ${failures.map((row) => row.candidate_id).join(",")}`,
       writer_concurrency: writerConcurrency,
       writer_stagger_ms: writerStaggerMs,
       recorded_at: new Date().toISOString(),

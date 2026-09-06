@@ -193,6 +193,14 @@ const currentPolicy = sourceWriterPolicy();
 assert.equal(currentPolicy.name, "three_56_pro_v1");
 assert.deepEqual(currentPolicy.candidates.map((row) => row.id), ["draft_56_1", "draft_56_2", "draft_56_3"]);
 assert.ok(currentPolicy.candidates.every((row) => row.model === "gpt-5.6-sol"));
+const gpt6Policy = sourceWriterPolicy(null, "six_56_6_pro_v1");
+assert.equal(gpt6Policy.candidates.length, 6);
+assert.equal(gpt6Policy.candidates.filter((row) => row.model === "gpt-6-astra").length, 3);
+assert.equal(gpt6Policy.candidates.filter((row) => row.model === "gpt-5.6-sol").length, 3);
+assert.ok(gpt6Policy.candidates.every((row) => row.model !== "gpt-5.5"));
+assert.equal(new Set(gpt6Policy.candidates.map((row) => row.blind_id)).size, 6);
+assert.throws(() => sourceWriterPolicy({ writer_policy: "six_56_6_pro_v1" }, "three_56_pro_v1"), /does not match/);
+assert.throws(() => sourceWriterPolicy(null, "unknown"), /Unknown writer policy/);
 assert.equal(sourceWriterPolicy(portfolio).candidates.length, 6, "historical six-draft portfolios stay readable");
 const currentPortfolio = { ...portfolio, writer_policy: currentPolicy.name,
   candidates: portfolio.candidates.filter((row) => row.model === "gpt-5.6-sol") };

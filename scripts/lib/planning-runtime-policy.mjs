@@ -16,7 +16,7 @@ export const DEFAULT_UNIFORM_PLANNING_EFFORT_POLICY = "uniform_v1";
 export const DEFAULT_PLANNING_ROOM_EFFORT_POLICY = "planning_room_stage_routed_v1";
 export const DEFAULT_WEB_PLANNING_REASONING_EFFORT = "high";
 export const CHATGPT_WEB_PLANNING_MODEL = "gpt-5.6-sol";
-export const CHATGPT_WEB_SOURCE_DRAFT_MODELS = Object.freeze(["gpt-5.6-sol", "gpt-5.5"]);
+export const CHATGPT_WEB_SOURCE_DRAFT_MODELS = Object.freeze(["gpt-5.6-sol", "gpt-5.5", "gpt-6-astra"]);
 export const CHATGPT_WEB_PLANNER_MAX_CONCURRENCY = 10;
 export const CHATGPT_WEB_WAVEFRONT_PLANNER_CONCURRENCY = 10;
 export const OPERATOR_PLANNING_ROUTE_OVERRIDE_SCHEMA = "goldflow_operator_planning_route_override_v1";
@@ -193,10 +193,15 @@ export function planningRuntimeFromProcessContext({
     : identityModel
       ?? explicitModel
       ?? plannerModelForProvider(provider, context.identity ?? {}, env))).trim();
-  const sourceDraftModelAllowed = /^winner_source_script_v3_draft_55_/.test(String(overrideStage ?? ""))
-    && model === "gpt-5.5";
-  if (provider === "chatgpt_web" && model !== CHATGPT_WEB_PLANNING_MODEL && !sourceDraftModelAllowed) {
-    throw new Error(`Authenticated ChatGPT Web planning is locked to ${CHATGPT_WEB_PLANNING_MODEL} except declared GPT-5.5 source-draft candidates; received ${model}.`);
+  const sourceDraftModelAllowed = (/^winner_source_script_v3_draft_55_/.test(String(overrideStage ?? ""))
+    && model === "gpt-5.5") || (/^winner_source_script_v3_draft_6_/.test(String(overrideStage ?? ""))
+    && model === "gpt-6-astra");
+  // Explicit directed source edits/reviews do not change a production identity's model lock.
+  const directedSourceModelAllowed = !context.identity && explicitModel === "gpt-6-astra"
+    && model === "gpt-6-astra"
+    && /^winner_source_script_v3_directed_(?:edit|review)_gpt6_[a-z0-9_]+$/.test(String(overrideStage ?? ""));
+  if (provider === "chatgpt_web" && model !== CHATGPT_WEB_PLANNING_MODEL && !sourceDraftModelAllowed && !directedSourceModelAllowed) {
+    throw new Error(`Authenticated ChatGPT Web planning is locked to ${CHATGPT_WEB_PLANNING_MODEL} except declared GPT-5.5 or GPT-6 source-draft candidates and explicit pre-production GPT-6 directed edits/reviews; received ${model}.`);
   }
   const effortPolicy = context.identity
     ? planningEffortPolicyForIdentity(context.identity, provider)

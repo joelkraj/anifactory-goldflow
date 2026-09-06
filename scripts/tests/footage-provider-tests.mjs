@@ -330,6 +330,85 @@ test('invalid mutation scope is rejected before creating or selecting remote sou
   assert.equal(calls.length, 0);
 });
 
+test('Real-Debrid HTTP 204 empty inventory normalizes to zero sources with no detail calls', async () => {
+  const { api, calls } = client('real_debrid', [new Response(null, { status: 204 })]);
+  const result = await api.list({ limit: 20, offset: 0 });
+  assert.deepEqual(result, { provider: 'real_debrid', items: [], source_count: 0, pending_source_count: 0,
+    pending_sources: [], offset: 0, limit: 20, has_more: false, next_offset: null });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[0].url.pathname, '/rest/1.0/torrents');
+});
+
+test('empty inventory normalization is restricted to Real-Debrid HTTP 204 list responses', async () => {
+  for (const [provider, response] of [
+    ['real_debrid', new Response(null, { status: 200 })],
+    ['real_debrid', new Response(null, { status: 202 })],
+    ['real_debrid', json([], 201)],
+    ['real_debrid', json([], 206)],
+    ['real_debrid', json({})],
+    ['torbox', new Response(null, { status: 204 })],
+    ['torbox', torbox(null)],
+  ]) {
+    const { api, calls } = client(provider, [response]);
+    await rejectsSafe(() => api.list(), 'INVALID_RESPONSE');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].options.method, 'GET');
+  }
+  const detail = client('real_debrid', [new Response(null, { status: 204 })]);
+  await rejectsSafe(() => detail.api.resolve({ sourceId: 'ABC', fileId: '7' }), 'SOURCE_MISMATCH');
+  assert.equal(detail.calls.length, 1, 'an empty detail response must never generate a download link');
+});
+
+test('TorBox mixed pending-null and ready file metadata preserves pagination without inventing file IDs', async () => {
+  const { api, calls } = client('torbox', [torbox([
+    tbSource({ id: 5, files: null, download_finished: false, download_present: false, name: KEY, magnet: PRIVATE_URL }),
+    tbSource(),
+    tbSource({ id: 6, files: null, download_finished: true, download_present: false }),
+  ])]);
+  const result = await api.list({ limit: 3, offset: 9 });
+  assert.equal(result.source_count, 3);
+  assert.equal(result.pending_source_count, 2);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].source_id, '4');
+  assert.equal(result.items[0].ready, true);
+  assert.deepEqual(result.pending_sources, [
+    { provider: 'torbox', source_id: '5', ready: false, readiness_reason: 'download_not_finished' },
+    { provider: 'torbox', source_id: '6', ready: false, readiness_reason: 'download_not_present' },
+  ]);
+  assert.ok(result.pending_sources.every((source) => !Object.hasOwn(source, 'file_id')));
+  assert.ok(!JSON.stringify(result).includes(KEY));
+  assert.equal(result.has_more, true);
+  assert.equal(result.next_offset, 12);
+  assert.equal(calls.length, 1, 'list must not request details, download links, or mutations for pending entries');
+  assert.equal(calls[0].options.method, 'GET');
+});
+
+test('TorBox pending file metadata cannot resolve a guessed file ID', async () => {
+  const { api, calls } = client('torbox', [torbox(tbSource({ files: null, download_finished: false, download_present: false }))]);
+  await rejectsSafe(() => api.resolve({ sourceId: '4', fileId: '0' }), 'FILE_NOT_READY');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url.pathname, '/v1/api/torrents/mylist');
+  assert.equal(calls[0].options.method, 'GET');
+});
+
+test('TorBox completed missing metadata and other malformed file shapes still fail closed', async () => {
+  const missing = tbSource({ download_finished: false, download_present: false });
+  delete missing.files;
+  for (const source of [
+    tbSource({ files: null }), missing,
+    tbSource({ files: {}, download_finished: false, download_present: false }),
+    tbSource({ files: '', download_finished: false, download_present: false }),
+    tbSource({ files: null, download_finished: undefined, download_present: false }),
+    tbSource({ files: null, download_finished: false, download_present: 'false' }),
+  ]) {
+    const { api, calls } = client('torbox', [torbox([source])]);
+    await rejectsSafe(() => api.list(), 'INVALID_RESPONSE');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].options.method, 'GET');
+  }
+});
+
 for (const [name, fn] of tests) {
   await fn();
   process.stdout.write(`ok - ${name}\n`);

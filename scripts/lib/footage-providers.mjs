@@ -192,9 +192,18 @@ function privateHttpsUrl(value, provider) {
   return url.href;
 }
 
+function pendingTorBoxFileMetadata(info, provider) {
+  // Observed account-list contract: a pending/nonpresent torrent may explicitly
+  // return files:null. Missing fields or other types are not the same evidence.
+  return provider === 'torbox' && info?.files === null
+    && typeof info.download_finished === 'boolean' && typeof info.download_present === 'boolean'
+    && (!info.download_finished || !info.download_present);
+}
+
 function fileRows(info, provider, apiKey) {
   if (!info || typeof info !== 'object' || Array.isArray(info)) fail(provider, 'INVALID_RESPONSE', 'provider returned invalid torrent metadata.');
   const id = sourceId(info.id, provider);
+  if (pendingTorBoxFileMetadata(info, provider)) return [];
   if (!Array.isArray(info.files)) fail(provider, 'INVALID_RESPONSE', 'provider omitted file metadata; no file is assumed ready.');
   const ids = new Set();
   return info.files.map((file) => {
@@ -239,6 +248,18 @@ export function createFootageProvider(name, { apiKey, fetchImpl = globalThis.fet
         fail(provider, `HTTP_${status}`, `API request failed (HTTP ${status}); no automatic retry was made.`);
       }
       const totalCount = byteCount(response.headers.get('x-total-count'));
+      // A real empty RD inventory returns HTTP 204, not an empty JSON array.
+      // This exception is endpoint-specific, never generic empty-body success.
+      const inventoryRequest = method === 'GET'
+        && ((provider === 'real_debrid' && endpoint === 'torrents')
+          || (provider === 'torbox' && endpoint === 'torrents/mylist' && !Object.hasOwn(query, 'id')));
+      if (inventoryRequest && provider === 'real_debrid' && response.status === 204) {
+        return { data: [], totalCount: 0 };
+      }
+      if (inventoryRequest && response.status !== 200) {
+        await response.body?.cancel();
+        fail(provider, 'INVALID_RESPONSE', 'provider returned an unsupported inventory response status.');
+      }
       if (response.status === 204 || response.status === 202) return { data: null, totalCount };
       const contentLength = response.headers.get('content-length');
       if (contentLength && Number(contentLength) > maxResponseBytes) {
@@ -327,15 +348,21 @@ export function createFootageProvider(name, { apiKey, fetchImpl = globalThis.fet
       const { data, totalCount } = await request(provider === 'torbox' ? 'torrents/mylist' : 'torrents', { query: { limit: count, offset: start } });
       if (!Array.isArray(data) || data.length > count) fail(provider, 'INVALID_RESPONSE', 'provider returned an invalid source page.');
       const items = [];
+      const pendingSources = [];
       const seen = new Set();
       for (const source of data) {
         const id = sourceId(source?.id, provider);
         if (seen.has(id)) fail(provider, 'INVALID_RESPONSE', 'provider returned duplicate source IDs.');
         seen.add(id);
         items.push(...fileRows(provider === 'torbox' ? source : await info(id), provider, key));
+        if (pendingTorBoxFileMetadata(source, provider)) {
+          pendingSources.push({ provider, source_id: id, ready: false,
+            readiness_reason: source.download_finished ? 'download_not_present' : 'download_not_finished' });
+        }
       }
       const hasMore = totalCount == null ? data.length === count : start + data.length < totalCount;
-      return { provider, items, source_count: data.length, offset: start, limit: count, has_more: hasMore, next_offset: hasMore ? start + data.length : null };
+      return { provider, items, source_count: data.length, pending_source_count: pendingSources.length, pending_sources: pendingSources,
+        offset: start, limit: count, has_more: hasMore, next_offset: hasMore ? start + data.length : null };
     },
     async cacheCheck({ hash } = {}) {
       if (provider !== 'torbox') fail(provider, 'UNSUPPORTED_OPERATION', 'Real-Debrid has no supported cache-check endpoint in this integration.');
@@ -384,6 +411,7 @@ export function createFootageProvider(name, { apiKey, fetchImpl = globalThis.fet
       const fid = fileId(file, provider);
       const sourceInfo = await info(id);
       const row = fileRows(sourceInfo, provider, key).find((item) => item.file_id === fid);
+      if (pendingTorBoxFileMetadata(sourceInfo, provider)) fail(provider, 'FILE_NOT_READY', 'source file metadata is pending; no file ID or readiness is assumed.');
       if (!row) fail(provider, 'FILE_NOT_FOUND', 'exact file ID was not found in this source.');
       if (!row.ready) fail(provider, 'FILE_NOT_READY', 'exact source file is not ready; no source was added or selected.');
       if (provider === 'torbox') {

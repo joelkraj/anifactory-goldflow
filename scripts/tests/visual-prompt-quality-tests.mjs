@@ -18,6 +18,7 @@ import {
 } from "../lib/codex-image-work-contract.mjs";
 import {
   VISUAL_PROMPT_SAFE_MAX_BYTES,
+  relevantReferenceTargetsForTests,
   sizeBoundVisualPromptChunksForTests,
 } from "../visual-plan.mjs";
 import {
@@ -97,6 +98,44 @@ assert.throws(() => sizeBoundVisualPromptChunksForTests([[{
   promptForRows: (rows) => JSON.stringify(rows),
 }), /exact unit beat_too_large.*bytes/);
 assert.equal(VISUAL_PROMPT_SAFE_MAX_BYTES, 48_000);
+
+const compactLocalReference = relevantReferenceTargetsForTests({
+  scene_id: "scene_1",
+  parent_scene_id: "scene_1",
+  visual_beat_script_excerpt: "Joey stands alone in the operations room.",
+  visible_characters: ["Joey"],
+  physically_visible_entity_ids: ["joey"],
+}, {
+  reference_targets: [{
+    ref_id: "joey_ref",
+    kind: "character_state",
+    subject: "Joey",
+    character: "Joey",
+    canonical_subject_id: "joey",
+    scene_ids: ["scene_1"],
+    generation_mode: "standalone_ref",
+    reference_image_path: "/episode/references/joey.png",
+    conditioning_image_path: "/episode/references/joey.png",
+    resolved_reference_image_path: "/episode/references/joey.png",
+    reference_exists: true,
+    scene_prompt_anchor: "Joey with short black hair and a charcoal work jacket.",
+    prompt_anchor: "Joey with short black hair and a charcoal work jacket.",
+  }],
+}, {
+  status: "approved",
+  character_state_refs: [{
+    character: "Joey",
+    state_ref_id: "joey_ref",
+    scene_ids: ["scene_1"],
+    scene_prompt_anchor: "Joey with short black hair and a charcoal work jacket.",
+    reference_image_path: "/episode/references/joey.png",
+  }],
+})[0];
+assert.equal(compactLocalReference.attachable_reference, true);
+assert.equal(compactLocalReference.reference_image_path, null);
+assert.equal(compactLocalReference.resolved_reference_image_path, null);
+assert.equal(compactLocalReference.scene_prompt_anchor, "Joey with short black hair and a charcoal work jacket.");
+assert.equal(compactLocalReference.prompt_anchor, null);
 
 const transitionBoundaries = Array.from({ length: 12 }, (_, index) => ({
   boundary_id: `boundary_${index + 1}`,

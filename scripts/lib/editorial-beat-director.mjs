@@ -368,13 +368,52 @@ export function buildTranscriptAtoms(script, words, timedScenes = [], factLedger
   const timedWords = whisperRows(words);
   if (!timedWords.length) throw new Error("Editorial atoms require Whisper words.");
   const scriptWords = alignScriptWords(wordsWithOffsets(script), timedWords, Number(options.lookahead ?? 64));
-  const spans = clauseSpans(script, scriptWords, options);
-  const atomStarts = [];
-  for (let index = 0; index < spans.length; index += 1) {
-    const spanWords = scriptWords.slice(spans[index].start_word, spans[index].end_word + 1);
-    const firstMatched = spanWords.find((word) => Number.isInteger(word.whisper_index))?.whisper_index;
-    const minimum = index === 0 ? 0 : atomStarts[index - 1] + 1;
-    atomStarts.push(Math.min(timedWords.length - 1, Math.max(minimum, Number.isInteger(firstMatched) ? firstMatched : minimum)));
+  let spans = clauseSpans(script, scriptWords, options);
+  const atomStartsForSpans = (candidateSpans) => {
+    const starts = [];
+    for (let index = 0; index < candidateSpans.length; index += 1) {
+      const spanWords = scriptWords.slice(
+        candidateSpans[index].start_word,
+        candidateSpans[index].end_word + 1,
+      );
+      const firstMatched = spanWords.find(
+        (word) => Number.isInteger(word.whisper_index),
+      )?.whisper_index;
+      const minimum = index === 0 ? 0 : starts[index - 1] + 1;
+      starts.push(Math.min(
+        timedWords.length - 1,
+        Math.max(minimum, Number.isInteger(firstMatched) ? firstMatched : minimum),
+      ));
+    }
+    return starts;
+  };
+  let atomStarts = atomStartsForSpans(spans);
+  const timing = normalizedBeatTimingContract(options.timingContract ?? {});
+  if (timing.enforcement === "hard_max") {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let index = 0; index < spans.length; index += 1) {
+        const startSec = timedWords[atomStarts[index]].start_sec;
+        const nextStartSec = index + 1 < spans.length
+          ? timedWords[atomStarts[index + 1]].start_sec
+          : timedWords.at(-1).end_sec;
+        const rail = retentionRailForTime(startSec, timing);
+        if (nextStartSec - startSec <= rail.max_sec + 0.05) continue;
+        const span = spans[index];
+        if (span.start_word >= span.end_word) continue;
+        const splitWord = Math.floor((span.start_word + span.end_word + 1) / 2);
+        spans = [
+          ...spans.slice(0, index),
+          { start_word: span.start_word, end_word: splitWord - 1 },
+          { start_word: splitWord, end_word: span.end_word },
+          ...spans.slice(index + 1),
+        ];
+        atomStarts = atomStartsForSpans(spans);
+        changed = true;
+        break;
+      }
+    }
   }
   const atoms = spans.map((span, index) => {
     const first = scriptWords[span.start_word];

@@ -1774,6 +1774,7 @@ async function editorialBeatPlan(timedPlan, scriptText, wordTiming, factLedger, 
   const atoms = buildTranscriptAtoms(scopedScript.script, wordTiming.words, timedPlan.scenes, factLedger, {
     maxWords: hardTimingCap ? 16 : 18,
     maxAtomDurationSec: hardTimingCap ? Number(timingContract.max_beat_sec ?? 8) : 45,
+    timingContract: hardTimingCap ? timingContract : null,
   });
   let directed;
   try {

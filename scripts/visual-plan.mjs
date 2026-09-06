@@ -600,6 +600,14 @@ function compactReferenceTarget(target) {
   const generationMode = String(target.generation_mode ?? "");
   const pendingDerived = /^derive_from_/i.test(generationMode) && !attachable;
   const locationContractReference = String(target.kind ?? "").toLowerCase() === "location" && (attachable || pendingDerived);
+  const scenePromptAnchor = truncateText(
+    target.scene_prompt_anchor ?? "",
+    localPromptPackets ? 360 : (compactEditorialProof ? 260 : 900),
+  );
+  const promptAnchor = truncateText(
+    target.scene_prompt_anchor ?? target.prompt_anchor ?? "",
+    localPromptPackets ? 360 : (compactEditorialProof ? 260 : 900),
+  );
   return {
     ref_id: target.ref_id ?? null,
     kind: target.kind ?? null,
@@ -617,15 +625,25 @@ function compactReferenceTarget(target) {
     priority: target.priority ?? null,
     generation_mode: target.generation_mode ?? null,
     required_before_imagegen: target.required_before_imagegen ?? null,
-    reference_image_path: compactEditorialProof ? null : (target.conditioning_image_path ?? target.reference_image_path ?? null),
-    resolved_reference_image_path: compactEditorialProof ? null : (target.resolved_reference_image_path ?? null),
+    // Local author packets need the approved ref id and attachability, not two
+    // copies of an absolute filesystem path that the model can never open.
+    reference_image_path: localPromptPackets || compactEditorialProof
+      ? null
+      : (target.conditioning_image_path ?? target.reference_image_path ?? null),
+    resolved_reference_image_path: localPromptPackets || compactEditorialProof
+      ? null
+      : (target.resolved_reference_image_path ?? null),
     reference_exists: compactEditorialProof ? null : (target.reference_exists ?? null),
     attachable_reference: attachable,
     pending_derived_reference: pendingDerived,
     location_contract_reference: locationContractReference,
     reference_budget: target.reference_budget ?? null,
-    scene_prompt_anchor: truncateText(target.scene_prompt_anchor ?? "", localPromptPackets ? 360 : (compactEditorialProof ? 260 : 900)),
-    prompt_anchor: truncateText(target.scene_prompt_anchor ?? target.prompt_anchor ?? "", localPromptPackets ? 360 : (compactEditorialProof ? 260 : 900)),
+    scene_prompt_anchor: scenePromptAnchor,
+    // Character refs commonly expose the same anchor under both legacy keys.
+    // Preserve one authoritative copy in local packets instead of paying for it twice.
+    prompt_anchor: localPromptPackets && scenePromptAnchor === promptAnchor
+      ? null
+      : promptAnchor,
     anchor_cut_policy: target.anchor_cut_policy ?? null,
     risk_notes: localPromptPackets || compactEditorialProof ? [] : compactList(target.risk_notes ?? [], 4, 220),
   };

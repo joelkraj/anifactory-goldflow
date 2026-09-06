@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   buildEditorialDirectorPrompt,
+  buildTranscriptAtoms,
   editorialRetentionRailFindings,
   normalizeEditorialGrouping,
 } from "../lib/editorial-beat-director.mjs";
@@ -149,10 +150,38 @@ const hardTimingOptions = {
     ramp_min_beat_sec: 3.2,
   },
 };
+const slowClause = "Quiet footsteps echoed through the empty corridor beneath flickering lights as distant doors slammed shut.";
+for (const [startSec, wordSeconds, maximumHold] of [[0, 0.5, 4.2], [35, 0.5, 7], [1300, 0.6, 8]]) {
+  const timedWords = slowClause.split(" ").map((word, index) => ({
+    word,
+    start_sec: startSec + index * wordSeconds,
+    end_sec: startSec + (index + 1) * wordSeconds,
+  }));
+  const advisoryAtoms = buildTranscriptAtoms(slowClause, timedWords);
+  assert.equal(advisoryAtoms.length, 1, "advisory mode preserves the original clause");
+  const boundedAtoms = buildTranscriptAtoms(slowClause, timedWords, [], {}, {
+    maxWords: 16,
+    maxAtomDurationSec: 8,
+    timingContract: hardTimingOptions.timingContract,
+  });
+  assert.ok(boundedAtoms.length > 1, "slow clauses must remain splittable within the active timing ceiling");
+  assert.equal(boundedAtoms.map((row) => row.text).join(" "), slowClause, "atom splitting preserves approved prose");
+  assert.equal(new Set(boundedAtoms.map((row) => row.atom_id)).size, boundedAtoms.length);
+  assert.equal(boundedAtoms[0].source_word_start_index, 0);
+  assert.equal(boundedAtoms.at(-1).source_word_end_index, timedWords.length - 1);
+  for (const [index, row] of boundedAtoms.entries()) {
+    const next = boundedAtoms[index + 1];
+    const closedEnd = next?.start_sec ?? timedWords.at(-1).end_sec;
+    assert.ok(closedEnd - row.start_sec <= maximumHold + 0.05);
+    if (next) assert.equal(row.source_word_end_index + 1, next.source_word_start_index, "Whisper spans cover each word once");
+  }
+}
 const hardPrompt = buildEditorialDirectorPrompt([atom], ledger, [atom.semantic_scene], hardTimingOptions);
 assert.match(hardPrompt, /structural validity gate/i);
 assert.match(hardPrompt, /NEVER exceed 8s/i);
-const overlongClosedBeat = [{ ...normalized.beats[0], start_sec: 1300, end_sec: 1308.1, duration_sec: 8.1 }];
+const toleranceEdgeBeat = [{ ...normalized.beats[0], start_sec: 1300, end_sec: 1308.1, duration_sec: 8.1 }];
+assert.deepEqual(editorialRetentionRailFindings(toleranceEdgeBeat, hardTimingOptions), [], "the recorded 0.1-second timing tolerance remains inclusive");
+const overlongClosedBeat = [{ ...normalized.beats[0], start_sec: 1300, end_sec: 1308.11, duration_sec: 8.11 }];
 const hardFindings = editorialRetentionRailFindings(overlongClosedBeat, hardTimingOptions);
 assert.equal(hardFindings[0].severity, "blocker");
 assert.equal(hardFindings[0].code, "editorial_applied_hold_hard_max_exceeded");

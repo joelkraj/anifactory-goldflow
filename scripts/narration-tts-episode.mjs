@@ -193,7 +193,7 @@ export function preservedTtsSelectionsForTests({
   const rows = [];
   for (const unit of units) {
     const unitId = String(unit?.unit_id ?? "");
-    if (requested.has(unitId)) continue;
+    const requestedRetryOrigin = requested.has(unitId);
     const result = reportResults.get(unitId);
     const selectedQa = selectedQaRows.get(unitId);
     if (!result && !selectedQa) {
@@ -215,7 +215,7 @@ export function preservedTtsSelectionsForTests({
     const accepted = candidateDisposition(qa, PRIMARY_TTS_PROVIDER).accepted;
     if (!result
       || !selectedQa
-      || !accepted
+      || (!requestedRetryOrigin && !accepted)
       || !result.audio_path
       || !resultAudioSha256
       || result.audio_path !== selectedQa.audio_path
@@ -263,7 +263,12 @@ export function preservedTtsSelectionsForTests({
     status: findings.length ? "blocked" : "passed",
     findings,
     rows,
-    preserved_unit_ids: rows.map((row) => String(row.unit.unit_id)),
+    preserved_unit_ids: rows
+      .map((row) => String(row.unit.unit_id))
+      .filter((unitId) => !requested.has(unitId)),
+    retry_origin_unit_ids: rows
+      .map((row) => String(row.unit.unit_id))
+      .filter((unitId) => requested.has(unitId)),
   };
 }
 
@@ -537,11 +542,6 @@ export function validateConfirmedRetryEvidenceForTests({
   const priorById = new Map(
     (priorReport.results ?? []).map((row) => [String(row?.unit_id ?? ""), row]),
   );
-  const currentById = new Map(
-    (currentCandidates ?? [])
-      .filter((row) => Number(row?.attempt) === 1 && row?.audio_sha256)
-      .map((row) => [String(row.unit_id), row]),
-  );
   const validated = [];
   for (const unitId of requested) {
     const row = evidenceById.get(unitId);
@@ -561,7 +561,15 @@ export function validateConfirmedRetryEvidenceForTests({
         `Pre-retry narration report lacks an exact selected audio/synthesis identity for ${unitId}.`,
       );
     }
-    const current = currentById.get(unitId);
+    const current = (currentCandidates ?? []).find((candidate) => {
+      const candidateIdentitySha256 = candidate
+        ?.selected_report_synthesis_identity_sha256
+        ?? candidate?.synthesis_identity_sha256;
+      return String(candidate?.unit_id ?? "") === unitId
+        && Number(candidate?.attempt) === Number(prior.attempt)
+        && candidate?.audio_sha256 === prior.audio_sha256
+        && candidateIdentitySha256 === prior.synthesis_identity_sha256;
+    });
     const currentSelectedIdentitySha256 = current
       ?.selected_report_synthesis_identity_sha256
       ?? current?.synthesis_identity_sha256;
@@ -578,7 +586,7 @@ export function validateConfirmedRetryEvidenceForTests({
       || current.audio_sha256 !== prior.audio_sha256
       || currentSelectedIdentitySha256 !== prior.synthesis_identity_sha256) {
       throw new Error(
-        `Current cached attempt-one artifact does not match the listened pre-retry artifact for ${unitId}.`,
+        `Current latest cached artifact does not match the reviewed pre-retry artifact for ${unitId}.`,
       );
     }
     validated.push({
@@ -3099,7 +3107,8 @@ async function main() {
       policy,
       canonicalPlanSha256: planSha256,
       planFileSha256,
-      requestedUnitIds: [],
+      requestedUnitIds:
+        requestedRecoveryScope?.requested_unit_ids ?? [],
       requireAllUnrequested: false,
     });
     if (preservationValidation.status !== "passed") {
@@ -3864,11 +3873,19 @@ async function main() {
     if (scopedRecoveryUnits.length) {
       if (policy.synthesis_contract.mode
         === QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode) {
-        const attemptOneById = new Map(
-          candidates
-            .filter((candidate) => Number(candidate.attempt) === 1)
-            .map((candidate) => [String(candidate.unit_id), candidate]),
-        );
+        const retryOriginById = new Map();
+        for (const candidate of candidates) {
+          const unitId = String(candidate?.unit_id ?? "");
+          const confirmed = confirmedEvidenceById.get(unitId);
+          if (!confirmed
+            || Number(candidate?.attempt) !== Number(confirmed.selected_attempt)
+            || candidate?.audio_sha256 !== confirmed.audio_sha256
+            || candidate?.synthesis_identity_sha256
+              !== confirmed.synthesis_identity_sha256) {
+            continue;
+          }
+          retryOriginById.set(unitId, candidate);
+        }
         const bindingByUnit = qwenBatchBindingByUnit(batchPlan);
         const recoveryProvenanceByUnit = new Map();
         for (const unit of scopedRecoveryUnits) {
@@ -3878,7 +3895,7 @@ async function main() {
             unitId,
             exactUnitRecoveryProvenanceForTests({
               unit,
-              candidate: attemptOneById.get(unitId),
+              candidate: retryOriginById.get(unitId),
               cohortBinding: bindingByUnit.get(unitId),
               batchPlanSha256: batchPlan.batch_plan_sha256,
               confirmedDefect: confirmed?.defect_type ?? null,
@@ -3905,7 +3922,13 @@ async function main() {
             ),
           ),
         };
-        await qaSynthesis("qwen", 2, scopedRecoveryUnits, {
+        const recoveryAttempt = Math.max(
+          1,
+          ...candidates
+            .filter((candidate) => requestedRecoveryIds.has(String(candidate.unit_id)))
+            .map((candidate) => Number(candidate.attempt ?? 1)),
+        ) + 1;
+        await qaSynthesis("qwen", recoveryAttempt, scopedRecoveryUnits, {
           synthesisMode: QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
           recoveryProvenanceByUnit,
         });

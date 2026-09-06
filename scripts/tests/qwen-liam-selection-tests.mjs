@@ -15,6 +15,7 @@ import {
 import {
   adjudicateManualReviewQaForTests,
   joinQaFromPcmForTests,
+  preservedTtsSelectionsForTests,
   validateConfirmedRetryEvidenceForTests,
   validateManualReviewEvidenceForTests,
   validateManualStitchRecoveryForTests,
@@ -210,6 +211,45 @@ function testConfirmedRetryEvidenceBindsExactListenedArtifact() {
     synthesis_identity_sha256: "synthesis-sha",
   }]);
 
+  const secondAttemptReport = {
+    results: [{
+      unit_id: "unit_001",
+      attempt: 2,
+      audio_sha256: "audio-sha-2",
+      synthesis_identity_sha256: "synthesis-sha-2",
+    }],
+  };
+  assert.deepEqual(validateConfirmedRetryEvidenceForTests({
+    evidence: {
+      ...evidence,
+      confirmed_units: [{
+        ...evidence.confirmed_units[0],
+        selected_attempt: 2,
+        audio_sha256: "audio-sha-2",
+        synthesis_identity_sha256: "synthesis-sha-2",
+      }],
+    },
+    requestedUnitIds: ["unit_001"],
+    planSha256,
+    priorReport: secondAttemptReport,
+    priorReportSha256: reportSha256,
+    currentCandidates: [
+      currentCandidates[0],
+      {
+        unit_id: "unit_001",
+        attempt: 2,
+        audio_sha256: "audio-sha-2",
+        synthesis_identity_sha256: "synthesis-sha-2",
+      },
+    ],
+  }), [{
+    unit_id: "unit_001",
+    defect_type: "stutter",
+    selected_attempt: 2,
+    audio_sha256: "audio-sha-2",
+    synthesis_identity_sha256: "synthesis-sha-2",
+  }]);
+
   assert.throws(() => validateConfirmedRetryEvidenceForTests({
     evidence: {
       ...evidence,
@@ -235,7 +275,90 @@ function testConfirmedRetryEvidenceBindsExactListenedArtifact() {
       ...currentCandidates[0],
       synthesis_identity_sha256: "changed-synthesis",
     }],
-  }), /does not match the listened pre-retry artifact/i);
+  }), /does not match the reviewed pre-retry artifact/i);
+}
+
+function testConfirmedRetryKeepsBlockedSelectionOnlyAsExactOrigin() {
+  const planSha256 = "plan-sha";
+  const planFileSha256 = "plan-file-sha";
+  const policy = {
+    primary: {
+      provider: "qwen_local",
+      model_id: "qwen-model",
+      voice_id: "liam",
+      voice_sha256: "voice-sha",
+      voice_continuity_contract: "voice-contract",
+    },
+  };
+  const units = [
+    { unit_id: "unit_001", spoken_text_sha256: "text-sha-1" },
+    { unit_id: "unit_002", spoken_text_sha256: "text-sha-2" },
+  ];
+  const selection = (unit, { attempt, audioSha256, qa }) => ({
+    unit_id: unit.unit_id,
+    attempt,
+    provider: policy.primary.provider,
+    model_id: policy.primary.model_id,
+    voice_id: policy.primary.voice_id,
+    voice_sha256: policy.primary.voice_sha256,
+    voice_continuity_contract: policy.primary.voice_continuity_contract,
+    spoken_text_sha256: unit.spoken_text_sha256,
+    synthesis_identity_sha256: `synthesis-${unit.unit_id}-${attempt}`,
+    audio_path: `/fixture/${unit.unit_id}-attempt-${attempt}.wav`,
+    audio_sha256: audioSha256,
+    selected_qa: qa,
+  });
+  const accepted = { status: "passed", findings: [] };
+  const blocked = blockedQa("tts_audio_empty");
+  const results = [
+    selection(units[0], { attempt: 1, audioSha256: "audio-1", qa: accepted }),
+    selection(units[1], { attempt: 2, audioSha256: "audio-2", qa: blocked }),
+  ];
+  const priorReport = {
+    narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    results,
+  };
+  const priorUnitQa = {
+    narration_generation_plan_sha256: planSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    selected_units: results.map((result) => ({
+      ...result,
+      qa: result.selected_qa,
+    })),
+  };
+  const exactRetry = preservedTtsSelectionsForTests({
+    units,
+    priorReport,
+    priorUnitQa,
+    policy,
+    canonicalPlanSha256: planSha256,
+    planFileSha256,
+    requestedUnitIds: ["unit_002"],
+    requireAllUnrequested: true,
+  });
+  assert.equal(exactRetry.status, "passed");
+  assert.deepEqual(exactRetry.preserved_unit_ids, ["unit_001"]);
+  assert.deepEqual(exactRetry.retry_origin_unit_ids, ["unit_002"]);
+  assert.deepEqual(
+    exactRetry.rows.map((row) => row.unit.unit_id),
+    ["unit_001", "unit_002"],
+  );
+
+  const unscopedReuse = preservedTtsSelectionsForTests({
+    units,
+    priorReport,
+    priorUnitQa,
+    policy,
+    canonicalPlanSha256: planSha256,
+    planFileSha256,
+    requireAllUnrequested: true,
+  });
+  assert.equal(unscopedReuse.status, "blocked");
+  assert.ok(unscopedReuse.findings.some((finding) => (
+    finding.code === "preserved_tts_selection_missing_or_stale"
+    && finding.unit_id === "unit_002"
+  )));
 }
 
 function manualReviewFixture(blockerCodes = ["tts_audio_tail_not_settled"]) {
@@ -511,6 +634,7 @@ function testNarrationExplicitGapsAreAlwaysExactEightyMilliseconds() {
 
 testAutomatedQaWarnsWhileStructuralFailuresRemainHard();
 testConfirmedRetryEvidenceBindsExactListenedArtifact();
+testConfirmedRetryKeepsBlockedSelectionOnlyAsExactOrigin();
 testManualAcceptanceIsExactHashBoundAndPreservesFindings();
 testManualAcceptanceCannotWaiveAutomaticRetryCandidates();
 testManualTailRepairAndRenderedAsrSkipAreStrictlyScoped();

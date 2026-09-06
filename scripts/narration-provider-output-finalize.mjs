@@ -103,9 +103,11 @@ function assertOperatorNarrationWaiver({
 const FULL_STREAM_ASR_ONLY_CODES = new Set([
   "narration_contiguous_words_missing",
   "narration_confirmation_alignment_intended_coverage_mismatch",
+  "tts_transcript_isolated_word_deletion",
   "tts_transcript_isolated_insertion",
   "tts_transcript_protected_value_mismatch",
   "tts_transcript_protected_value_missing",
+  "tts_transcript_unexpected_protected_value",
 ]);
 
 function asrOnlyDeliveryFinding(finding) {
@@ -178,6 +180,80 @@ async function atomicWriteJson(filePath, value) {
   const temporary = `${filePath}.${process.pid}.tmp`;
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fs.rename(temporary, filePath);
+}
+
+async function synthesisRunsWithFirstTakeProvenance({
+  episodeDir,
+  expectedUnitIds,
+  batchPlanSha256,
+  synthesisMode,
+  synthesisRuns = [],
+}) {
+  const deduped = [];
+  const seen = new Set();
+  const append = (run) => {
+    const key = String(
+      run?.report_sha256
+        ?? `${run?.attempt ?? ""}:${run?.report_path ?? ""}`,
+    );
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    deduped.push(run);
+  };
+  for (const run of synthesisRuns) append(run);
+  if (deduped.some((run) => (
+    Number(run?.attempt) === 1 && run?.synthesis_mode === synthesisMode
+  ))) {
+    return deduped;
+  }
+
+  // Exact-unit recovery manifests may contain only the repair runs. Recover
+  // immutable first-take provenance from the original resident-run report.
+  const runsDir = path.join(
+    episodeDir,
+    "assets",
+    "audio",
+    "narration_tts",
+    "runs",
+  );
+  const names = await fs.readdir(runsDir).catch(() => []);
+  const candidates = [];
+  for (const name of names.sort()) {
+    if (!/-qwen-attempt-1\.json$/u.test(name)) continue;
+    const reportPath = path.join(runsDir, name);
+    const report = await readJson(reportPath, null);
+    if (!report
+      || report.status !== "passed"
+      || report.synthesis_mode !== synthesisMode
+      || report.batch_plan_sha256 !== batchPlanSha256
+      || !exactOrderedIds(expectedUnitIds, report.original_order_unit_ids)) {
+      continue;
+    }
+    const cohortEventsPath = report.cohort_event_path ?? null;
+    candidates.push({
+      attempt: 1,
+      synthesis_mode: report.synthesis_mode,
+      report_path: reportPath,
+      report_sha256: await sha256File(reportPath),
+      batch_plan_sha256: report.batch_plan_sha256,
+      model_load_count: report.model_load_count,
+      resident_model_count: report.resident_model_count,
+      model_instance_concurrency: report.model_instance_concurrency,
+      results_restored_to_original_order:
+        report.results_restored_to_original_order,
+      cohort_executions: report.cohort_executions ?? [],
+      cohort_events_path: cohortEventsPath,
+      cohort_events_sha256: cohortEventsPath
+        ? await sha256File(cohortEventsPath).catch(() => null)
+        : null,
+      pipelined_cohort_qa: [],
+      pipelined_qa_progress_errors: [],
+    });
+  }
+  if (candidates.length === 1) {
+    deduped.unshift(candidates[0]);
+  }
+  return deduped;
 }
 
 async function fileMatchesSha256(filePath, expectedSha256) {
@@ -1713,6 +1789,62 @@ export async function finalizeNarrationProviderOutput(
     atomicWriteJson(checkpointPath, checkpoint),
   ]);
   if (blockers.length) {
+    // Preserve the exact selected first takes before failing closed so a later
+    // confirmed exact-unit repair can validate and reuse every unaffected WAV.
+    const blockedTtsReportPath = path.join(
+      episodeDir,
+      `narration_tts_report_${episode}.json`,
+    );
+    await atomicWriteJson(blockedTtsReportPath, {
+      schema: "goldflow_narration_tts_report_v1",
+      status: "blocked",
+      generated_at: new Date().toISOString(),
+      source_script_hash: sourceScriptHash(plan),
+      run_identity_path: identityPath,
+      narration_generation_plan_path: planPath,
+      narration_generation_plan_sha256: canonicalPlanSha256,
+      narration_generation_plan_file_sha256: planFileSha256,
+      policy,
+      narration_quality_contract_sha256: qualityContract.contract_sha256,
+      provider_output_manifest_path: manifestPath,
+      provider_output_manifest_sha256: manifestFileSha256,
+      synthesis_contract: policy.synthesis_contract,
+      batch_plan_sha256:
+        manifest.provider_execution?.batch_plan_sha256 ?? null,
+      synthesis_runs:
+        manifest.provider_execution?.synthesis_runs ?? [],
+      effective_concurrency:
+        manifest.provider_execution?.effective_concurrency ?? null,
+      unit_qa_path: unitQaPath,
+      unit_qa_status: unitQaArtifact.status,
+      full_stream_qa_status: "not_run_due_to_unit_blockers",
+      expected_unit_count: rows.length,
+      selected_unit_count: rows.length,
+      retry_scope_policy:
+        "no_automatic_retry; later_hash_bound_exact_unit_repair_only",
+      results: rows.map((row, index) => ({
+        unit_id: row.unit_id,
+        attempt: row.attempt ?? 1,
+        selected_provider: row.provider,
+        provider: row.provider,
+        model_id: row.model_id,
+        model_revision: row.model_revision,
+        voice_id: row.voice_id,
+        voice_sha256: row.voice_sha256,
+        voice_continuity_contract: row.voice_continuity_contract,
+        spoken_text_sha256: row.spoken_text_sha256,
+        audio_path: row.wav,
+        audio_sha256: row.audio_sha256,
+        synthesis_identity: row.synthesis_identity,
+        synthesis_identity_sha256: row.synthesis_identity_sha256,
+        selected_qa: selectedUnits[index].qa,
+        qa_status: selectedUnits[index].qa_status,
+      })),
+      blockers,
+      listen_review_packet_path: listenPacketPath,
+      listen_review_packet_sha256: listenPacket.packet_sha256,
+      listen_review_status: "blocked_before_review",
+    });
     throw new Error(
       `Provider-neutral delivery QA blocked ${new Set(
         blockers.map((finding) => finding.unit_id).filter(Boolean),
@@ -2114,6 +2246,13 @@ export async function finalizeNarrationProviderOutput(
       : fullStream.decision.warnings.length || listenPacket.item_count
         ? "passed_with_warnings"
         : "passed";
+  const synthesisRuns = await synthesisRunsWithFirstTakeProvenance({
+    episodeDir,
+    expectedUnitIds: units.map((unit) => String(unit.unit_id)),
+    batchPlanSha256: manifest.provider_execution?.batch_plan_sha256 ?? null,
+    synthesisMode: policy.synthesis_contract?.mode ?? null,
+    synthesisRuns: manifest.provider_execution?.synthesis_runs ?? [],
+  });
   const stitchReport = {
     schema: "goldflow_provider_neutral_narration_stitch_v2",
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
@@ -2178,8 +2317,7 @@ export async function finalizeNarrationProviderOutput(
     synthesis_contract: policy.synthesis_contract,
     batch_plan_sha256:
       manifest.provider_execution?.batch_plan_sha256 ?? null,
-    synthesis_runs:
-      manifest.provider_execution?.synthesis_runs ?? [],
+    synthesis_runs: synthesisRuns,
     effective_concurrency:
       manifest.provider_execution?.effective_concurrency ?? null,
     qa_policy: policy.qa_policy,

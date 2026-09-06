@@ -7,6 +7,7 @@
     "goldflow": "./bin/goldflow.mjs"
   },
   "scripts": {
+    "test:footage": "node scripts/tests/footage-provider-tests.mjs && node scripts/tests/footage-subtitle-tests.mjs && node scripts/tests/footage-extract-tests.mjs && node scripts/tests/footage-cli-tests.mjs",
     "check": "node scripts/check-syntax.mjs && node scripts/generate-workflow-guidance.mjs --check",
     "studio:desktop": "node apps/goldflow-studio/desktop/main.mjs",
     "studio:flow": "node apps/goldflow-studio/desktop/main.mjs --provider google-flow --types image --concurrency 1",

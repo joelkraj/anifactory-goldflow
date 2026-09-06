@@ -9,3 +9,5 @@ scratch/
 ab-validation/
 generated/
 HANDOFF-*.md
+.env.footage.local
+.env.footage.local.*

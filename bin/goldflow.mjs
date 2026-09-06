@@ -252,6 +252,7 @@ ${registryCommands}
   goldflow source polish           Apply the final narration line-and-flow polish without changing plot
   goldflow source audit            Write an optional non-blocking script/retention review log
   goldflow source release          Operator-release the exact source hash for preflight and ingest
+  goldflow footage --help          Opt-in private source library, subtitle search, and bounded 3-5 second clips
   goldflow run performance-audit   Measure active time, idle gaps, blockers, approvals, and provider failures
   goldflow run reference-roi       Measure generated-reference use, timing, downstream acceptance, and recorded risk evidence
   goldflow source evidence-registry Import the measured evidence registry for Evidence Story Room V2
@@ -348,7 +349,9 @@ Prompt-repair migration guardrails:
 `);
 }
 
-if (command === "help" || command === "--help" || command === "-h" || helpRequested) {
+if (command === "footage") {
+  run("footage.mjs", args.slice(1));
+} else if (command === "help" || command === "--help" || command === "-h" || helpRequested) {
   help();
 } else if (command === "run" && subcommand === "preflight") {
   run("run-preflight.mjs", flags);

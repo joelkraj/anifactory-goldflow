@@ -119,6 +119,8 @@ node bin/goldflow.mjs imagegen codex-work \
 
 Activate the resulting `work_manifest.json` in the dashboard. The worker receives no arbitrary local path. References are served through authenticated localhost URLs and rechecked against their source hashes. New fast-premium bulk runs dispatch each asset once across five Flow projects plus three Gemini tabs; style references use Gemini first, and ChatGPT Image is reserved for an operator-approved exact-ID fallback or deliberate comparison. Downloaded stills are decoded by Sharp, normalized to PNG, validated as 16:9, and completed through `completeWorkItem`. Flow video jobs use the separate durable media ledger, exactly one first-frame reference, output-hash validation, and normalized silent 1920x1080 clips.
 
+Flow and Gemini may work concurrently only when both are leasing from the same federated image manifest. Before activating Google image work, the bridge checks both provider registries under one account-level lock, ignores drained entries, and refuses a different runnable manifest. This prevents provider-specific queues from generating overlapping assets after a wrapper exits while a browser host remains alive.
+
 ## Recovery Policy
 
 - Every LLM request is keyed by its normalized request hash.

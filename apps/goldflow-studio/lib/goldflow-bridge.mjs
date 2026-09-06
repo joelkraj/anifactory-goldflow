@@ -61,6 +61,27 @@ const PERSISTENT_BROWSER_WORKER_SESSION_POLICIES = new Set([
   "persistent_tab_per_worker_slot_v1",
 ]);
 const GENERATED_RESULT_SCHEMA = "goldflow_browser_generated_result_v1";
+const GOOGLE_BROWSER_PROVIDERS = new Set(["google-flow", "google-gemini"]);
+
+export function manifestHasRunnableWork(status = {}) {
+  return status?.streaming_queue?.sealed === false
+    || Number(status?.counts?.pending ?? 0) + Number(status?.counts?.leased ?? 0) > 0;
+}
+
+export function googleManifestActivationConflict({ incomingManifestPath, activeManifestEntries = [] } = {}) {
+  const incoming = path.resolve(String(incomingManifestPath ?? ""));
+  const conflicts = activeManifestEntries.filter((entry) => (
+    entry?.runnable !== false
+    && path.resolve(String(entry?.manifest_path ?? "")) !== incoming
+  ));
+  if (!conflicts.length) return null;
+  const details = conflicts.map((entry) => (
+    `${entry.browser_provider ?? "google"}:${entry.manifest_path}`
+  )).join(", ");
+  return `Google image providers already have a different runnable manifest active (${details}). `
+    + "Flow-only and Gemini-only queues cannot run from separate manifests. Drain or deactivate the existing queue, "
+    + "or activate both providers on one federated manifest.";
+}
 
 function hasVerifiedGeneratedResult(uiContract, browserProvider, sourceUrl) {
   const result = uiContract?.generated_result;
@@ -287,6 +308,66 @@ export class GoldflowBridge {
     }
   }
 
+  async withGoogleManifestActivationLock(callback) {
+    if (!GOOGLE_BROWSER_PROVIDERS.has(this.browserProvider)) return callback();
+    const stateRoot = path.dirname(path.dirname(this.stateDir));
+    const lockPath = path.join(stateRoot, "google-account-submit-gate", ".manifest-activation.lock");
+    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    const deadline = Date.now() + 10_000;
+    while (true) {
+      try {
+        await fs.mkdir(lockPath);
+        break;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const stat = await fs.stat(lockPath).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > 30_000) {
+          await fs.rm(lockPath, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() >= deadline) throw new Error("Timed out waiting for the Google image-manifest activation lock.");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    try {
+      return await callback();
+    } finally {
+      await fs.rm(lockPath, { recursive: true, force: true });
+    }
+  }
+
+  async activeGoogleManifestEntries() {
+    if (!GOOGLE_BROWSER_PROVIDERS.has(this.browserProvider)) return [];
+    const stateRoot = path.dirname(path.dirname(this.stateDir));
+    const entries = [];
+    for (const browserProvider of GOOGLE_BROWSER_PROVIDERS) {
+      const manifestsPath = path.join(stateRoot, "providers", browserProvider, "active-image-manifests.json");
+      const state = await readJson(manifestsPath, { manifests: [] });
+      for (const value of state?.manifests ?? []) {
+        const entry = typeof value === "string"
+          ? { manifest_path: value, browser_provider: browserProvider }
+          : value;
+        if (!entry?.manifest_path || String(entry.browser_provider ?? browserProvider) !== browserProvider) continue;
+        const manifestPath = this.manifestPath(entry.manifest_path);
+        if (!(await pathExists(manifestPath))) continue;
+        try {
+          const status = await getCodexWorkStatus({ manifestPath, reconcile: false });
+          if (!manifestHasRunnableWork(status)) continue;
+          entries.push({ browser_provider: browserProvider, manifest_path: manifestPath, runnable: true });
+        } catch (error) {
+          entries.push({
+            browser_provider: browserProvider,
+            manifest_path: manifestPath,
+            runnable: true,
+            unreadable: true,
+            error: error?.message ?? String(error),
+          });
+        }
+      }
+    }
+    return entries;
+  }
+
   episodePath(value) {
     if (!value) throw new Error("episodeDir is required.");
     return ensureInside(value, this.dataRoot, "episodeDir");
@@ -313,8 +394,19 @@ export class GoldflowBridge {
   }
 
   async activeManifestEntries() {
-    return (await this.allActiveManifestEntries())
-      .filter((entry) => entry.browser_provider === this.browserProvider);
+    const active = [];
+    for (const entry of (await this.allActiveManifestEntries())
+      .filter((candidate) => candidate.browser_provider === this.browserProvider)) {
+      try {
+        const status = await getCodexWorkStatus({ manifestPath: entry.manifest_path, reconcile: false });
+        if (!manifestHasRunnableWork(status)) continue;
+      } catch {
+        // Preserve unreadable registrations so their normal error path remains
+        // visible instead of silently hiding a potentially recoverable queue.
+      }
+      active.push(entry);
+    }
+    return active;
   }
 
   async activeManifestPaths() {
@@ -326,7 +418,7 @@ export class GoldflowBridge {
     for (const manifestPath of await this.activeManifestPaths()) {
       try {
         const summary = await getCodexWorkStatus({ manifestPath, reconcile: false });
-        if (Number(summary.counts?.pending ?? 0) + Number(summary.counts?.leased ?? 0) === 0) continue;
+        if (!manifestHasRunnableWork(summary)) continue;
         const loaded = await loadWorkManifest(manifestPath);
         const policy = String(
           loaded.manifest.policy?.browser_provider_worker_session_policy?.[this.browserProvider]
@@ -344,15 +436,22 @@ export class GoldflowBridge {
   async activateManifest(manifestPath) {
     const resolved = this.manifestPath(manifestPath);
     await loadWorkManifest(resolved);
-    await this.withActiveManifestLock(async () => {
-      const manifests = await this.allActiveManifestEntries();
-      if (!manifests.some((entry) => entry.manifest_path === resolved && entry.browser_provider === this.browserProvider)) {
-        manifests.push({ manifest_path: resolved, browser_provider: this.browserProvider });
-      }
-      await writeJsonAtomic(this.manifestsPath, {
-        schema: "goldflow_studio_active_manifests_v2",
-        manifests,
-        updated_at: nowIso(),
+    await this.withGoogleManifestActivationLock(async () => {
+      const conflict = googleManifestActivationConflict({
+        incomingManifestPath: resolved,
+        activeManifestEntries: await this.activeGoogleManifestEntries(),
+      });
+      if (conflict) throw new Error(conflict);
+      await this.withActiveManifestLock(async () => {
+        const manifests = await this.allActiveManifestEntries();
+        if (!manifests.some((entry) => entry.manifest_path === resolved && entry.browser_provider === this.browserProvider)) {
+          manifests.push({ manifest_path: resolved, browser_provider: this.browserProvider });
+        }
+        await writeJsonAtomic(this.manifestsPath, {
+          schema: "goldflow_studio_active_manifests_v2",
+          manifests,
+          updated_at: nowIso(),
+        });
       });
     });
     return this.imageManifestSummary(resolved);

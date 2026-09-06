@@ -84,6 +84,20 @@ function boolFlag(value) {
   return /^(true|1|yes)$/i.test(String(value ?? ""));
 }
 
+async function activateManifestSetWithGoogleExclusivity({ manifestPath, activeBridges }) {
+  const activatedBridges = [];
+  try {
+    for (const bridge of activeBridges) {
+      await bridge.activateManifest(manifestPath);
+      activatedBridges.push(bridge);
+    }
+  } catch (error) {
+    for (const bridge of activatedBridges) await bridge.deactivateManifest(manifestPath).catch(() => null);
+    throw error;
+  }
+  return activatedBridges;
+}
+
 export function validateFlowRuntimeConcurrency(value = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY) {
   const concurrency = Number(value);
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY) {
@@ -1513,17 +1527,22 @@ async function createAndRunPhase({
         : styleOnly || chatgptOnly ? [bridges.flow, bridges.gemini]
           : federated ? (federatedChatGptEnabled ? [] : [bridges.chatgpt]) : [bridges.gemini];
   for (const bridge of inactiveBridges) await bridge.deactivateManifest(created.manifest.manifest_path);
-  for (const bridge of activeBridges) await bridge.activateManifest(created.manifest.manifest_path);
-  const electronDispatch = chatgptElectron && activeBridges.includes(bridges.chatgpt)
-    ? runElectronChatGptManifest({
-        bridge: bridges.chatgpt,
-        manifestPath: created.manifest.manifest_path,
-        downloadsRoot,
-        projectUrl: identity?.image_provider_options?.chatgpt_project_url ?? null,
-        concurrency: chatgptElectronConcurrency,
-      })
-    : null;
+  let activatedBridges = [];
+  let electronDispatch = null;
   try {
+    activatedBridges = await activateManifestSetWithGoogleExclusivity({
+      manifestPath: created.manifest.manifest_path,
+      activeBridges,
+    });
+    electronDispatch = chatgptElectron && activeBridges.includes(bridges.chatgpt)
+      ? runElectronChatGptManifest({
+          bridge: bridges.chatgpt,
+          manifestPath: created.manifest.manifest_path,
+          downloadsRoot,
+          projectUrl: identity?.image_provider_options?.chatgpt_project_url ?? null,
+          concurrency: chatgptElectronConcurrency,
+        })
+      : null;
     const terminalStatus = await waitForManifest({
       manifestPath: created.manifest.manifest_path,
       timeoutMs,
@@ -1552,7 +1571,7 @@ async function createAndRunPhase({
     return phase;
   } finally {
     await electronDispatch?.catch(() => null);
-    for (const bridge of activeBridges) await bridge.deactivateManifest(created.manifest.manifest_path).catch(() => null);
+    for (const bridge of activatedBridges) await bridge.deactivateManifest(created.manifest.manifest_path).catch(() => null);
   }
 }
 
@@ -1839,7 +1858,10 @@ export async function openWavefrontBrowserImageStream({
 
   const activateOnce = async () => {
     if (activated) return;
-    await Promise.all(activeBridges.map((bridge) => bridge.activateManifest(manifestPath)));
+    await activateManifestSetWithGoogleExclusivity({
+      manifestPath,
+      activeBridges,
+    });
     activated = true;
   };
   const deactivate = async () => {

@@ -80,7 +80,7 @@ assert.equal(providerFailurePausesDispatch("google_gemini_generation_error"), fa
 assert.equal(providerFailurePausesDispatch("chatgpt_generation_error"), false, "one transient ChatGPT failure must preserve its exact ID without stopping healthy unleased work");
 assert.equal(providerFailurePausesDispatch("provider_transient_circuit_open"), false, "the desktop worker's timed circuit must recover without an indefinite controller pause");
 assert.equal(providerFailurePausesDispatch("usage_limited"), false, "provider usage limits must use a timed recovery probe rather than an indefinite controller pause");
-assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [4, 3, 2, 1], "Flow must upload in reverse slot order because its composer prepends newly added chips");
+assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [1, 2, 3, 4], "Flow must upload in canonical slot order because its composer appends newly added chips");
 assert.equal(identifyNewFlowComposerChip([], [{ media_id: "composer-1" }]).media_id, "composer-1");
 assert.equal(identifyNewFlowComposerChip(["composer-2"], [{ media_id: "composer-1" }, { media_id: "composer-2" }]).media_id, "composer-1");
 assert.throws(() => identifyNewFlowComposerChip(["composer-1"], [{ media_id: "composer-1" }]), /added 0 new reference chips/);
@@ -128,6 +128,7 @@ assert.equal((await flowDownloadFallbackBrowser.mediaBytes(flowDownloadFallbackP
 assert.deepEqual(browserFailureDisposition(Object.assign(new Error("requesting generations too quickly"), { code: "rate_limited" })), { kind: "rate_limit", pausesDispatch: true });
 assert.deepEqual(browserFailureDisposition(new Error("Upload files element is not enabled")), { kind: "transport", pausesDispatch: true });
 assert.deepEqual(browserFailureDisposition(Object.assign(new Error("Generation failed"), { code: "google_flow_generation_error" })), { kind: "transport", pausesDispatch: true });
+assert.deepEqual(browserFailureDisposition(Object.assign(new Error("Gemini could not create an image"), { code: "google_gemini_generation_error" })), { kind: "asset", pausesDispatch: false }, "a generic Gemini generation error must preserve only its exact cut");
 assert.deepEqual(
   browserFailureDisposition(Object.assign(new Error("Timed out waiting for a completed ChatGPT response."), { code: "ui_contract_mismatch" })),
   { kind: "transport", pausesDispatch: true },
@@ -1449,6 +1450,33 @@ async function testDesktopProviderCircuitBreaker() {
   assert.equal(host.providerCircuit?.failure_count, 3);
   assert.ok(host.dispatchCooldownUntil > Date.now(), "an open provider circuit must halt new local leases during triage");
 
+  const geminiCodes = [];
+  const geminiPauses = [];
+  const geminiHost = new GoldflowDesktopHost({
+    config: { ...config, browserProvider: "google-gemini" },
+    browser: {
+      async runJob() {
+        throw Object.assign(new Error("Gemini replied\nSomething went wrong (1095)"), { code: "google_gemini_generation_error" });
+      },
+    },
+    log: () => {},
+  });
+  geminiHost.persistRuntime = async () => {};
+  geminiHost.schedule = () => {};
+  geminiHost.googleSubmitGate = { async pause(value) { geminiPauses.push(value); } };
+  geminiHost.client = {
+    async heartbeat() {},
+    async complete() { throw new Error("unexpected completion"); },
+    async fail(_job, _slot, error) { geminiCodes.push(error.code); },
+  };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await geminiHost.runSlot(0, { job: { type: "image", job_id: `gemini-service-cut-${attempt}` } });
+  }
+  assert.deepEqual(geminiCodes, ["google_gemini_generation_error", "google_gemini_generation_error", "provider_transient_circuit_open"]);
+  assert.equal(geminiHost.providerCircuit?.failure_count, 3, "repeated numbered Gemini failures must stop the lane");
+  assert.equal(geminiPauses.length, 1, "the service circuit must also pause the shared Google submission gate");
+  assert.equal(geminiPauses[0].provider, "google-gemini");
+
   const recoveryHost = new GoldflowDesktopHost({
     config: { ...config, concurrency: 3 },
     browser,
@@ -1953,11 +1981,71 @@ async function testProductionRuntimeRegressions() {
   assert.equal(creativeFailure.action, "fail");
 }
 
+async function testFlowPersistentUploadSelection() {
+  const filename = "01-new-character-ref.png";
+  for (const alreadySelected of [false, true]) {
+    let selectionClicks = 0;
+    let selectionChecked = 0;
+    let selectedState = alreadySelected;
+    const browser = Object.create(GoogleFlowBrowser.prototype);
+    browser.addToPromptControl = async () => ({
+      isDisabled: async () => false,
+      evaluate: async () => "<button>Add to prompt</button>",
+    });
+    browser.uploadedAssetControl = async (_page, requestedFilename) => {
+      assert.equal(requestedFilename, filename);
+      selectionChecked += 1;
+      return {
+        getAttribute: async () => selectedState ? "true" : "false",
+        click: async () => {
+          selectionClicks += 1;
+          selectedState = true;
+        },
+      };
+    };
+    const page = { locator: () => ({ innerText: async () => filename }) };
+    const selected = await browser.selectUploadedPreview(page, {}, {
+      filename, priorMediaIds: new Set(["previous-job-asset"]), timeoutMs: 2_000,
+    });
+    assert.equal(selectionChecked, alreadySelected ? 1 : 2, "an enabled stale Add action is not proof that the new upload is selected");
+    assert.equal(selectionClicks, alreadySelected ? 0 : 1, "select only the exact new upload without toggling a selected row off");
+    assert.equal(selected.media_id, null, "opaque selection binds its media identity only after the composer materializes");
+  }
+
+  const browser = Object.create(GoogleFlowBrowser.prototype);
+  browser.addToPromptControl = async () => ({
+    isDisabled: async () => false,
+    evaluate: async () => "<button>Add to prompt</button>",
+  });
+  browser.uploadedAssetControl = async () => ({
+    getAttribute: async () => "false",
+    click: async () => {},
+  });
+  browser.dialogMedia = async () => [];
+  const emptyTextLocator = { count: async () => 0 };
+  const page = {
+    locator: () => ({ innerText: async () => filename }),
+    getByText: () => emptyTextLocator,
+  };
+  const dialog = {
+    evaluate: async () => null,
+    getByText: () => emptyTextLocator,
+  };
+  await assert.rejects(
+    () => browser.selectUploadedPreview(page, dialog, {
+      filename, priorMediaIds: new Set(["previous-job-asset"]), timeoutMs: 350,
+    }),
+    /Timed out waiting for Google Flow to expose an exact selected preview/,
+    "a no-op click must not turn a stale enabled Add action into selection proof",
+  );
+}
+
 const tests = [
   ["durable LLM job policy", testLlmStore],
   ["durable Flow video job policy", testMediaJobStore],
   ["Goldflow image contract bridge", testImageBridge],
   ["Google Flow reference receipt gate", testGoogleFlowReferenceReceiptGate],
+  ["Flow persistent upload selection", testFlowPersistentUploadSelection],
   ["provider-attributed shared image manifest", testProviderAttributedSharedImageManifest],
   ["localhost API and planner adapter", testServerAndRunner],
   ["provider-bound worker isolation", testProviderIsolation],

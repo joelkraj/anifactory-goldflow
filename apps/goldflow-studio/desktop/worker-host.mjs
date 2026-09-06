@@ -50,6 +50,15 @@ export function browserFailureDisposition(error) {
   if (["auth_required", "account_mismatch", "ui_contract_mismatch", "usage_limited"].includes(code)) {
     return { kind: code, pausesDispatch: true };
   }
+  // Numbered service errors (observed: 1095) recur across unrelated assets.
+  // Count them toward the shared circuit instead of draining the queue.
+  if (code === "google_gemini_generation_error" && /something went wrong\s*\(\d+\)/.test(message)) {
+    return { kind: "transport", pausesDispatch: true };
+  }
+  // An unnumbered inability to create one image remains scoped to that asset.
+  if (code === "google_gemini_generation_error") {
+    return { kind: "asset", pausesDispatch: false };
+  }
   if (/(?:google_flow|google_gemini|chatgpt)_generation_error/.test(code)
     || /timeout|timed out|transport|connection|socket|fetch failed|upload files.*not enabled|element is not enabled|failed to generate|generation failed|something went wrong/.test(message)) {
     return { kind: "transport", pausesDispatch: true };

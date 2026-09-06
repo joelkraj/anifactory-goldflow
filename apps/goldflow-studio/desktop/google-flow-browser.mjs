@@ -132,9 +132,8 @@ export function validateFlowReferenceDock({
 }
 
 export function flowReferenceUploadOrder(references = []) {
-  // Flow currently prepends each newly attached chip. Upload the highest slot
-  // first so the settled left-to-right dock still matches canonical slot order.
-  return [...references].sort((left, right) => Number(right.slot) - Number(left.slot));
+  // Flow appends each newly attached chip, so upload in canonical slot order.
+  return [...references].sort((left, right) => Number(left.slot) - Number(right.slot));
 }
 
 export function identifyNewFlowComposerChip(previousMediaIds = [], observedChips = []) {
@@ -1002,6 +1001,27 @@ export class GoogleFlowBrowser {
     const deadline = Date.now() + timeoutMs;
     let lastParsedMedia = null;
     let lastProbe = null;
+    let exactUploadSelected = false;
+    let selectionClickAttempted = false;
+    let addToPromptEnabledBeforeSelection = null;
+    const confirmOrSelectExactUpload = async (uploadedAsset, addToPrompt, addToPromptDisabled) => {
+      if (await uploadedAsset.getAttribute("aria-selected").catch(() => null) === "true") {
+        exactUploadSelected = true;
+        return false;
+      }
+      // When Add was already enabled, it may still belong to the previous
+      // picker selection. A click attempt alone cannot prove that this row won.
+      if (selectionClickAttempted) {
+        if (addToPromptEnabledBeforeSelection === false && addToPrompt && addToPromptDisabled === false) {
+          exactUploadSelected = true;
+        }
+        return false;
+      }
+      addToPromptEnabledBeforeSelection = Boolean(addToPrompt && addToPromptDisabled === false);
+      selectionClickAttempted = true;
+      await uploadedAsset.click({ force: true });
+      return true;
+    };
     while (Date.now() < deadline) {
       const pageVisibleLines = (await page.locator("body").innerText().catch(() => ""))
         .split(/\r?\n/)
@@ -1019,15 +1039,6 @@ export class GoogleFlowBrowser {
           ? await pageAddToPrompt.evaluate((element) => element.outerHTML.slice(0, 800)).catch(() => null)
           : null,
       };
-      if (pageExactNameVisible && pageAddToPrompt) {
-        if (!pageAddToPromptDisabled) return lastParsedMedia ?? { media_id: null, media_url: null };
-        const uploadedAsset = await this.uploadedAssetControl(page, filename);
-        if (uploadedAsset) {
-          await uploadedAsset.click({ force: true });
-          await sleep(300);
-          continue;
-        }
-      }
       if (pageExactNameVisible && !pageAddToPrompt) {
         // Flow can bypass the library-selection step and attach a freshly
         // uploaded file directly to the composer. Accept that path only when
@@ -1036,15 +1047,18 @@ export class GoogleFlowBrowser {
         const composerState = await this.composerDockState(page).catch(() => null);
         const autoAttached = identifyAutoAttachedFlowComposerChip(priorComposerMediaIds, composerState);
         if (autoAttached) return { ...autoAttached, already_attached: true };
-        // The current asset-list picker first exposes the uploaded filename as
-        // an unselected row and does not render Add to Prompt until that exact
-        // row is selected.
+      }
+      // A persistent picker can retain the previous asset's enabled Add action.
+      // Select this upload explicitly before treating that action as evidence.
+      if (pageExactNameVisible && !exactUploadSelected) {
         const uploadedAsset = await this.uploadedAssetControl(page, filename);
-        if (uploadedAsset) {
-          await uploadedAsset.click({ force: true });
+        if (uploadedAsset && await confirmOrSelectExactUpload(uploadedAsset, pageAddToPrompt, pageAddToPromptDisabled)) {
           await sleep(300);
           continue;
         }
+      }
+      if (pageExactNameVisible && pageAddToPrompt) {
+        if (!pageAddToPromptDisabled && exactUploadSelected) return lastParsedMedia ?? { media_id: null, media_url: null };
       }
       const marked = await dialog.evaluate((root, { filename: wanted, fragment }) => {
         root.querySelectorAll('[data-goldflow-upload-preview="true"]').forEach((element) => element.removeAttribute("data-goldflow-upload-preview"));
@@ -1121,9 +1135,11 @@ export class GoogleFlowBrowser {
           await sleep(250);
           continue;
         }
-        const alreadySelected = await this.addToPromptControl(page);
-        if (!alreadySelected) await target.click();
-        return parsed;
+        if (!exactUploadSelected && await confirmOrSelectExactUpload(target, pageAddToPrompt, pageAddToPromptDisabled)) {
+          await sleep(300);
+          continue;
+        }
+        if (exactUploadSelected) return parsed;
       }
       const media = await this.dialogMedia(dialog).catch(() => []);
       const fresh = media.filter((row) => !priorMediaIds.has(row.media_id));
@@ -1146,35 +1162,30 @@ export class GoogleFlowBrowser {
           ? await addToPrompt.evaluate((element) => element.outerHTML.slice(0, 800)).catch(() => null)
           : null,
       };
-      if (exactNameVisible && addToPrompt && addToPromptDisabled) {
+      if (exactNameVisible && !addToPrompt) {
+        const composerState = await this.composerDockState(page).catch(() => null);
+        const autoAttached = identifyAutoAttachedFlowComposerChip(priorComposerMediaIds, composerState);
+        if (autoAttached) return { ...autoAttached, already_attached: true };
+      }
+      if (exactNameVisible && !exactUploadSelected) {
         const uploadedAsset = await this.uploadedAssetControl(page, filename);
-        if (uploadedAsset) {
-          await uploadedAsset.click({ force: true });
+        if (uploadedAsset && await confirmOrSelectExactUpload(uploadedAsset, addToPrompt, addToPromptDisabled)) {
           await sleep(300);
           continue;
         }
       }
-      if (exactNameVisible && addToPrompt && !addToPromptDisabled) {
+      if (exactNameVisible && exactUploadSelected && addToPrompt && !addToPromptDisabled) {
         // The current Frames picker can render a selected preview through an
         // opaque canvas with no stable media URL. The exact filename plus the
         // enabled Add to Prompt action proves selection; the materialized
         // composer chip supplies the durable media identity immediately after.
         return lastParsedMedia ?? { media_id: null, media_url: null };
       }
-      if (exactNameVisible && !addToPrompt) {
-        const uploadedAsset = await this.uploadedAssetControl(page, filename);
-        if (uploadedAsset) {
-          await uploadedAsset.click({ force: true });
-          await sleep(300);
-          continue;
-        }
-      }
       if (exactNameVisible && fresh.length === 1) {
         const parsed = parseFlowMedia(fresh[0].media_url);
         if (!parsed) throw codedError("ui_contract_mismatch", `Google Flow uploaded preview ${filename} has an invalid media URL.`);
-        const alreadySelected = await this.addToPromptControl(page);
-        if (!alreadySelected) await dialog.getByText(filename, { exact: true }).first().click();
-        return parsed;
+        lastParsedMedia = parsed;
+        if (exactUploadSelected) return parsed;
       }
       await sleep(250);
     }
@@ -1331,8 +1342,8 @@ export class GoogleFlowBrowser {
     if (expectedSlots.some((slot, index) => slot !== index + 1)) {
       throw codedError("ui_contract_mismatch", "Google Flow references are not assigned to contiguous ordered slots.");
     }
-    // Flow prepends each newly materialized composer chip, so upload in reverse
-    // slot order to preserve canonical visible dock order.
+    // Flow appends each newly materialized composer chip, so upload in canonical
+    // slot order to preserve the visible dock order.
     for (const reference of flowReferenceUploadOrder(references)) {
       const expectedSlot = Number(reference.slot);
       const sourceSha256 = exactSha256(reference.sha256, `Google Flow reference ${reference.ref_id} assignment hash`);

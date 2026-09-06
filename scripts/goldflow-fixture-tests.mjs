@@ -2328,10 +2328,11 @@ function testPlannerJsonRepairHandlesQuotedProseBeforeComma() {
 }
 
 function testVisualReferencePlannerSplitsOnlyOversizedChunks() {
-  assert.equal(shouldSplitReferenceChunkForTests(48_001, 8), true);
-  assert.equal(shouldSplitReferenceChunkForTests(48_000, 8), false);
+  assert.equal(shouldSplitReferenceChunkForTests(52_001, 8), true);
+  assert.equal(shouldSplitReferenceChunkForTests(52_000, 8), false);
   assert.equal(shouldSplitReferenceChunkForTests(1_200_000, 1), false);
   assert.equal(shouldSplitReferenceChunkForTests(47_000, 8), false);
+  assert.equal(shouldSplitReferenceChunkForTests(48_001, 8, 48_000), true);
 }
 
 async function testCumulativeImagegenHistoryAndEpisodeTruth() {
@@ -12373,6 +12374,28 @@ async function testDerivedReferencePromotionFromSeedCut() {
 
 async function testImagegenReusesImportedCodexOpeningCut() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-fixture-"));
+  const offlineGuardPath = path.join(dataRoot, "offline-network-guard.mjs");
+  await fs.writeFile(offlineGuardPath, [
+    "globalThis.fetch = async (input) => {",
+    "  throw new Error(`fixture network access denied: ${String(input)}`);",
+    "};",
+    "",
+  ].join("\n"));
+  const fixtureEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => (
+      key !== "MODELSLAB_API_KEY"
+      && key !== "API_KEY"
+      && !key.startsWith("ANIFACTORY_MODELSLAB_API_KEY_")
+    )),
+  );
+  fixtureEnv.ANIFACTORY_DATA_ROOT = dataRoot;
+  fixtureEnv.ANIFACTORY_MODELSLAB_PROFILES = "offline_fixture";
+  fixtureEnv.ANIFACTORY_MODELSLAB_API_KEY_OFFLINE_FIXTURE =
+    "goldflow-offline-fixture-not-a-real-key";
+  fixtureEnv.NODE_OPTIONS = [
+    fixtureEnv.NODE_OPTIONS,
+    `--import=${offlineGuardPath}`,
+  ].filter(Boolean).join(" ");
   const episodeDir = path.join(dataRoot, "channels", "test", "weekly_runs", "run", "episodes", "ep_01");
   const imageDir = path.join(episodeDir, "assets", "images");
   const promptPath = path.join(episodeDir, "section_image_prompts_hardened.json");
@@ -12428,9 +12451,10 @@ async function testImagegenReusesImportedCodexOpeningCut() {
     "--week", "run",
     "--episode", "ep_01",
     "--image-provider", "hybrid_modelslab_refs_codex_opening_modelslab_rest",
+    "--modelslab-profiles", "offline_fixture",
     "--codex-opening-sec", "300",
     "--prompts", promptPath,
-  ], { cwd: process.cwd(), env: { ...process.env, ANIFACTORY_DATA_ROOT: dataRoot } });
+  ], { cwd: process.cwd(), env: fixtureEnv });
   const stdout = JSON.parse(result.stdout);
   assert.equal(stdout.status, "passed");
   const report = await readJson(path.join(episodeDir, "imagegen_report_ep_01.json"));

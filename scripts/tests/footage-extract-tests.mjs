@@ -5,7 +5,7 @@ import { mkdtemp, readFile, readdir, stat, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createFootageRangeProxy, isPublicFootageAddress } from '../lib/footage-range-reader.mjs';
-import { extractFootageClip } from '../lib/footage-extract.mjs';
+import { extractFootageClip, validateFootageClipProbe } from '../lib/footage-extract.mjs';
 
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'goldflow-footage-extract-test-'));
 let count = 0;
@@ -17,6 +17,16 @@ function tool(executable, args) {
     child.stderr.on('data', (part) => { stderr += part; });
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`Fixture media tool exited ${code}: ${stderr}`)));
+  });
+}
+function toolOutput(executable, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const parts = [];
+    child.stdout.on('data', (part) => parts.push(part));
+    child.stderr.resume();
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve(Buffer.concat(parts)) : reject(new Error(`Fixture inspection exited ${code}.`)));
   });
 }
 const prefix = Buffer.alloc(4096, 0);
@@ -228,10 +238,36 @@ try {
   await test('bad duration and existing outputs are rejected before media access', async () => {
     for (const durationSec of [2.9, 5.1, NaN, Infinity]) await errorCode(extractFootageClip({ source: { local_path: 'missing' }, outputPath: path.join(temporary, 'bad.mp4'), startSec: 0, durationSec }), 'FOOTAGE_TIMING');
   });
+  await test('original audio must be selected with a strict boolean before source access', async () => {
+    for (const keepAudio of ['true', 'false', 0, 1, null, [], {}]) {
+      await errorCode(extractFootageClip({ source: { local_path: 'missing' }, outputPath: path.join(temporary, 'bad-audio-policy.mp4'),
+        startSec: 0, keepAudio }), 'FOOTAGE_AUDIO_POLICY');
+    }
+  });
+  await test('probe verification refuses missing, extra, malformed or desynchronized retained audio', async () => {
+    const video = { codec_type: 'video', codec_name: 'h264', pix_fmt: 'yuv420p', width: 320, height: 180,
+      duration: '4.000', start_time: '0.000', r_frame_rate: '24/1' };
+    const audio = { codec_type: 'audio', codec_name: 'aac', channels: 2, sample_rate: '48000', duration: '4.000', start_time: '0.000' };
+    const probe = { format: { duration: '4.000', format_name: 'mov,mp4,m4a,3gp,3g2,mj2' }, streams: [video, audio] };
+    assert.equal(validateFootageClipProbe(probe, { durationSec: 4, keepAudio: true }).audio.codec_name, 'aac');
+    for (const streams of [undefined, null, {}, [], [video], [video, audio, audio], [video, video, audio], [video, audio, { codec_type: 'subtitle' }]]) {
+      assert.throws(() => validateFootageClipProbe({ ...probe, streams }, { durationSec: 4, keepAudio: true }), { code: 'FOOTAGE_PROBE' });
+    }
+    for (const patch of [{ codec_name: 'mp3' }, { channels: 1 }, { sample_rate: '44100' }, { duration: null },
+      { duration: 'N/A' }, { duration: 2 }, { duration: 4.2 }, { start_time: undefined }, { start_time: null }, { start_time: '' },
+      { start_time: 0.2 }, { start_time: -0.2 }]) {
+      assert.throws(() => validateFootageClipProbe({ ...probe, streams: [video, { ...audio, ...patch }] },
+        { durationSec: 4, keepAudio: true }), { code: 'FOOTAGE_AUDIO_PROBE' });
+    }
+    assert.throws(() => validateFootageClipProbe({ ...probe, streams: [{ ...video, start_time: 0.3 }, audio] },
+      { durationSec: 4, keepAudio: true }), { code: 'FOOTAGE_AUDIO_PROBE' });
+    assert.throws(() => validateFootageClipProbe(probe, { durationSec: 4 }), { code: 'FOOTAGE_PROBE' }, 'Silent mode rejects an unexpected audio track.');
+  });
 
   const movie = path.join(temporary, 'synthetic-source.mp4');
   await tool('ffmpeg', ['-v', 'error', '-nostdin', '-n', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
-    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '90', '-c:v', 'libx264', '-preset', 'ultrafast',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=44100',
+    '-map', '0:v:0', '-map', '1:a:0', '-map', '2:a:0', '-t', '90', '-c:v', 'libx264', '-preset', 'ultrafast',
     '-crf', '10', '-g', '24', '-c:a', 'aac', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', movie]);
   const movieBuffer = await readFile(movie);
   await test('local late-scene extraction is H264, silent, four seconds, hash-bound and non-overwriting', async () => {
@@ -254,6 +290,47 @@ try {
     const rounding = Math.abs(result.actual_duration_sec - result.requested_duration_sec);
     assert.ok(rounding > 0.12 && rounding <= 0.15, `Expected regression boundary, got ${rounding}.`);
     assert.equal(result.frame_rate, '7/1');
+  });
+  await test('retained audio selects only the first source track and converts it to AAC stereo 48kHz', async () => {
+    const result = await extractFootageClip({ source: { local_path: movie }, outputPath: path.join(temporary, 'local-audio-clip.mp4'),
+      startSec: 70, durationSec: 4, keepAudio: true });
+    assert.equal(result.actual_duration_sec, 4);
+    assert.equal(result.audio_policy, 'retained_aac_stereo');
+    assert.equal(result.audio_codec, 'aac');
+    assert.equal(result.audio_channels, 2);
+    assert.equal(result.audio_sample_rate, 48000);
+    assert.equal(result.source_audio_stream_index, 0);
+    assert.ok(Math.abs(result.audio_start_sec) <= 0.15);
+    assert.ok(Math.abs(result.audio_duration_sec - 4) <= 0.15);
+    // First source audio is 440 Hz; the unselected second track is 880 Hz.
+    const pcm = await toolOutput('ffmpeg', ['-v', 'error', '-nostdin', '-i', result.output_path,
+      '-ss', '1', '-t', '1', '-map', '0:a:0', '-f', 's16le', '-ac', '1', '-ar', '48000', '-']);
+    let upwardCrossings = 0;
+    let peak = 0;
+    for (let offset = 2; offset < pcm.length; offset += 2) {
+      const previous = pcm.readInt16LE(offset - 2), sample = pcm.readInt16LE(offset);
+      if (previous <= 0 && sample > 0) upwardCrossings += 1;
+      peak = Math.max(peak, Math.abs(sample));
+    }
+    assert.ok(peak > 100, 'The retained track must contain actual non-silent samples.');
+    assert.ok(Math.abs(upwardCrossings - 440) < 5, `Expected first-track 440 Hz, got ${upwardCrossings}.`);
+  });
+  await test('requesting original audio from a silent source fails without publishing an output', async () => {
+    const outputPath = path.join(temporary, 'missing-audio.mp4');
+    await errorCode(extractFootageClip({ source: { local_path: path.join(temporary, 'synthetic-7fps.mp4') }, outputPath,
+      startSec: 1, keepAudio: true }), 'FOOTAGE_TOOL');
+    await assert.rejects(stat(outputPath), { code: 'ENOENT' });
+    assert.ok(!(await readdir(temporary)).some((name) => name.startsWith('.footage-extract-')));
+  });
+  await test('retained audio preserves a real source offset instead of independently resetting its timestamps', async () => {
+    const delayed = path.join(temporary, 'delayed-audio-source.mp4');
+    await tool('ffmpeg', ['-v', 'error', '-nostdin', '-n', '-i', movie, '-itsoffset', '0.1', '-i', movie,
+      '-map', '0:v:0', '-map', '1:a:0', '-t', '7', '-c', 'copy', '-movflags', '+faststart', delayed]);
+    const result = await extractFootageClip({ source: { local_path: delayed }, outputPath: path.join(temporary, 'delayed-audio-clip.mp4'),
+      startSec: 0, durationSec: 4, keepAudio: true });
+    assert.ok(result.audio_start_sec > 0.03 && result.audio_start_sec <= 0.15,
+      `A preserved source audio offset must remain visible; got ${result.audio_start_sec}.`);
+    assert.ok(Math.abs(result.audio_start_sec + result.audio_duration_sec - result.actual_duration_sec) <= 0.15);
   });
   await test('native MKV input is supported with no audio or attachment extraction', async () => {
     const mkv = path.join(temporary, 'synthetic-source.mkv');
@@ -285,6 +362,22 @@ try {
       assert.deepEqual(await readFile(result.output_path), await readFile(path.join(temporary, 'local-clip.mp4')),
         'Remote seeking must extract the exact same scene frames as local seeking.');
       process.stdout.write(`  partial-transfer proof: ${result.transferred_bytes}/${movieBuffer.length} bytes, ${result.request_count} requests\n`);
+    });
+  });
+  await test('bounded remote seeking retains the exact same audio/video clip as local extraction', async () => {
+    const requests = [];
+    await withServer(rangedFile(movieBuffer, requests), async (origin) => {
+      const result = await extractFootageClip({ source: { url: `${origin}/fixture-secret.mp4`, bytes: movieBuffer.length },
+        outputPath: path.join(temporary, 'remote-audio-clip.mp4'), startSec: 70, durationSec: 4, keepAudio: true,
+        _testAllowedOrigin: origin, _testChunkBytes: 128 * 1024, maxBytes: movieBuffer.length - 1 });
+      assert.equal(result.audio_policy, 'retained_aac_stereo');
+      assert.equal(result.audio_sample_rate, 48000);
+      assert.equal(result.audio_channels, 2);
+      assert.ok(result.transferred_bytes < movieBuffer.length / 2);
+      assert.ok(requests.some(({ start }) => start > movieBuffer.length / 2));
+      assert.equal(result.transferred_bytes, requests.reduce((sum, range) => sum + range.end - range.start + 1, 0));
+      assert.deepEqual(await readFile(result.output_path), await readFile(path.join(temporary, 'local-audio-clip.mp4')));
+      assert.ok(!JSON.stringify(result).includes('fixture-secret'));
     });
   });
   await test('a small byte cap fails without publishing a partial output', async () => {

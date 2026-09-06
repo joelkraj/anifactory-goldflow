@@ -1,6 +1,6 @@
 # Private footage library and short clips
 
-This opt-in development workflow supports both TorBox and Real-Debrid alongside local MP4/MKV files. It registers exact sources, searches local SRT/VTT dialogue timestamps, and extracts one silent 3–5 second review clip. It does **not** change the Goldflow episode stage registry, create episode directories, automatically assemble recaps, or publish anything. Clip approval is library-only; clips remain `production_eligible: false` until a separately designed production integration exists.
+This opt-in development workflow supports both TorBox and Real-Debrid alongside local MP4/MKV files. It registers exact sources, searches local SRT/VTT dialogue timestamps, and extracts one 3–5 second review clip, silent by default with source audio available as an explicit option. It does **not** change the Goldflow episode stage registry, create episode directories, automatically assemble recaps, or publish anything. Clip approval is library-only; clips remain `production_eligible: false` until a separately designed production integration exists.
 
 ## Keys
 
@@ -71,15 +71,25 @@ Alternatively, supply a known movie timestamp:
 node bin/goldflow.mjs footage extract --source /absolute/path/source.json --start-sec 125.4 --duration-sec 4
 ```
 
-The extractor produces a silent H264/yuv420p MP4 and adjacent `receipt.json`. It re-encodes from the requested position rather than copying an arbitrary keyframe-aligned segment. Container/frame-rate rounding allows up to 0.15 seconds of duration tolerance. Clips do not retain film audio, subtitles, chapters, or input metadata. Your approved narration/audio lane is unchanged.
+The extractor produces a silent H264/yuv420p MP4 and adjacent `receipt.json` by default (`--keep-audio false`, or omit the flag). It re-encodes from the requested position rather than copying an arbitrary keyframe-aligned segment. Container/frame-rate rounding allows up to 0.15 seconds of duration tolerance. Embedded subtitle streams, chapters, and input metadata are omitted; subtitles already burned into the picture remain visible. Your approved narration/audio lane is unchanged.
 
-Preview the clip, verify the scene, edition, start/end timing, image, and intended use, then record approval:
+To include source audio for the same short excerpt:
+
+```sh
+node bin/goldflow.mjs footage extract --source /absolute/path/source.json --start-sec 125.4 --duration-sec 4 --keep-audio true
+```
+
+This explicitly selects the source's first audio track (`0:a:0`) and re-encodes it as AAC at 192 kbps, stereo, 48 kHz; it is not a bit-for-bit copy of the original audio. The first track may be a different language or commentary, especially in multilingual releases. This version has no alternate-track selector. Missing audio fails extraction instead of falling back to a silent clip. The same 3–5 second duration limit and byte/time/request budgets apply, with no whole-file download fallback.
+
+Receipts record `audio_policy: "removed"` for silent clips or `audio_policy: "retained_aac_stereo"` for audio-enabled clips. Retained-audio receipts also record `source_audio_stream_index: 0`, `audio_codec: "aac"`, `audio_channels: 2`, `audio_sample_rate: 48000`, and measured `audio_duration_sec` and `audio_start_sec`.
+
+Preview the clip, verify the scene, edition, start/end timing, image, audio/language when retained, and intended use, then record approval:
 
 ```sh
 node bin/goldflow.mjs footage approve --clip /absolute/path/receipt.json --reviewer "Joel" --note "Previewed exact scene and timing; basis checked"
 ```
 
-This records a hash-bound `approval.json`; it does not approve episode production or release. Repeating an identical extraction reuses verified local clip bytes without resolving another signed URL. Changed source metadata, missing/corrupt cached bytes, stale receipts, and conflicting approvals stop for inspection. A completed clip without a receipt or an interrupted `extract.lock` also needs manual inspection; no automatic overwrite, full-source download fallback, or cross-provider fallback occurs. Failed extractor temporary files are removed, but accepted clips and source files are preserved.
+This records a hash-bound `approval.json`; it does not approve episode production or release. Repeating an identical extraction reuses verified local clip bytes without resolving another signed URL. Audio-enabled clips have a distinct cache identity: requesting audio creates a separate clip requiring its own approval, while all existing silent clips, cache identities, receipts, and approvals remain unchanged. Changed source metadata, missing/corrupt cached bytes, stale receipts, and conflicting approvals stop for inspection. A completed clip without a receipt or an interrupted `extract.lock` also needs manual inspection; no automatic overwrite, full-source download fallback, or cross-provider fallback occurs. Failed extractor temporary files are removed, but accepted clips and source files are preserved.
 
 ## What “partial download” guarantees
 
@@ -119,6 +129,8 @@ Selection is supported only while the source awaits selection; it cannot replace
 npm run test:footage
 ```
 
-The suite uses mocked provider APIs, temporary local files, and a synthetic video served by a local test range server. It checks credential redaction, explicit acquisition gates, empty/pending inventory responses, subtitle synchronization, immutable identities, byte/time/request budgets, unsafe destinations, ignored/truncated ranges, silent MP4 output, and local clip reuse. A real FFmpeg proof extracts a late four-second clip with byte-identical local/remote outputs using substantially less than the full synthetic file. Live authentication succeeded with both configured accounts on September 6, 2026; bounded inventory checks identified the empty/pending response shapes now covered by regression fixtures. No media was downloaded during those checks. One small authorized live clip remains operator-led validation; authentication alone does not prove that provider media hosts support the bounded extraction contract.
+The suite uses mocked provider APIs, temporary local files, and a synthetic video served by a local test range server. It checks credential redaction, explicit acquisition gates, empty/pending inventory responses, subtitle synchronization, immutable identities, byte/time/request budgets, unsafe destinations, ignored/truncated ranges, silent and opt-in audio MP4 output, missing-audio failure, and local clip reuse. A real FFmpeg proof extracts a late four-second clip with byte-identical local/remote outputs using substantially less than the full synthetic file.
+
+Live authentication succeeded with both configured accounts on September 6, 2026; bounded inventory checks identified the empty/pending response shapes now covered by regression fixtures. No media was downloaded during those account checks. Two subsequent bounded live TorBox **silent** clip tests passed, transferring 9,641,588 of 2,512,588,404 source bytes and 13,999,346 of 18,706,959,602 source bytes, both with strong-ETag version checking. These tests establish behavior for those exact sources, not every provider media host. Audio-mode regression coverage is synthetic only; no live source-audio clip has been validated, and this extension does not automatically re-extract any real source.
 
 Official contracts reviewed September 6, 2026: [Real-Debrid API](https://api.real-debrid.com/), [TorBox Main API](https://www.postman.com/torbox/torbox-api/documentation/b6l9hbv/main-api), [TorBox API Developer Terms](https://torbox.app/policies/api-developer-terms), and [FFmpeg input seeking](https://ffmpeg.org/ffmpeg.html#Main-options). TorBox terms permit private/internal own-account media tools but restrict broader integration and service-data use. This implementation is scoped accordingly: local lexical search, private account operations, and no external AI/service-data training or discovery. Reassess provider terms and obtain any required approval before public/commercial distribution or expanding into provider-backed AI indexing. These technical guardrails are not legal advice.

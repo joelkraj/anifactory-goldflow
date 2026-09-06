@@ -5,7 +5,7 @@ import { stat, lstat, mkdir, mkdtemp, link, unlink, rmdir, open } from 'node:fs/
 import path from 'node:path';
 import { createFootageRangeProxy, detectFootageContainer, footageError } from './footage-range-reader.mjs';
 
-function runMediaTool(executable, args, timeoutMs) {
+function runMediaTool(executable, args, timeoutMs, failureMessage = 'The media tool failed; source details were withheld.') {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'],
       // Media tooling does not need provider credentials or proxy configuration.
@@ -24,7 +24,7 @@ function runMediaTool(executable, args, timeoutMs) {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (timedOut) reject(footageError('FOOTAGE_TIMEOUT', 'The bounded clip extraction timed out.'));
-      else if (outputLimit || code !== 0) reject(footageError('FOOTAGE_TOOL', 'The media tool failed; source details were withheld.'));
+      else if (outputLimit || code !== 0) reject(footageError('FOOTAGE_TOOL', failureMessage));
       else resolve(stdout);
     });
   });
@@ -36,10 +36,53 @@ async function hashFile(file) {
   return hash.digest('hex');
 }
 
-/** Extract a single silent, independently decodable 3–5 second review clip. */
-export async function extractFootageClip({ source, outputPath, startSec, durationSec = 4,
+function finiteProbeNumber(value) {
+  return (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+    && Number.isFinite(Number(value));
+}
+
+/** Validate only the freshly encoded local MP4; never probe a provider URL. */
+export function validateFootageClipProbe(probe, { durationSec, keepAudio = false } = {}) {
+  if (typeof keepAudio !== 'boolean') throw footageError('FOOTAGE_AUDIO_POLICY', 'keepAudio must be an explicit boolean.');
+  const streams = Array.isArray(probe?.streams) ? probe.streams : [];
+  const videos = streams.filter((stream) => stream?.codec_type === 'video');
+  const audios = streams.filter((stream) => stream?.codec_type === 'audio');
+  const duration = Number(probe?.format?.duration);
+  const video = videos[0];
+  const audio = audios[0];
+  if (!finiteProbeNumber(probe?.format?.duration) || !Number.isFinite(durationSec) || durationSec < 3 || durationSec > 5
+    || Math.abs(duration - durationSec) > 0.15 || duration < 2.85 || duration > 5.15
+    || videos.length !== 1 || video?.codec_name !== 'h264' || video?.pix_fmt !== 'yuv420p'
+    || !Number.isSafeInteger(video?.width) || video.width <= 0 || !Number.isSafeInteger(video?.height) || video.height <= 0
+    || streams.length !== (keepAudio ? 2 : 1) || audios.length !== (keepAudio ? 1 : 0)
+    || !String(probe?.format?.format_name).split(',').includes('mp4')) {
+    throw footageError('FOOTAGE_PROBE', 'The extracted clip failed duration, video, or MP4 stream verification.');
+  }
+  if (keepAudio) {
+    const audioDuration = Number(audio.duration);
+    const audioStart = Number(audio.start_time);
+    const videoDuration = Number(video.duration);
+    const videoStart = Number(video.start_time);
+    if (audio.codec_name !== 'aac' || audio.channels !== 2 || Number(audio.sample_rate) !== 48000
+      || !finiteProbeNumber(audio.duration) || !finiteProbeNumber(audio.start_time)
+      || !finiteProbeNumber(video.duration) || !finiteProbeNumber(video.start_time)
+      || Math.abs(audioStart) > 0.15 || Math.abs(videoStart) > 0.15 || Math.abs(audioStart - videoStart) > 0.15
+      || Math.abs(audioDuration - durationSec) > 0.15 || Math.abs(videoDuration - durationSec) > 0.15
+      || Math.abs(audioDuration - videoDuration) > 0.15
+      || Math.abs(audioStart + audioDuration - durationSec) > 0.15
+      || Math.abs(audioStart + audioDuration - duration) > 0.15
+      || Math.abs(videoStart + videoDuration - duration) > 0.15) {
+      throw footageError('FOOTAGE_AUDIO_PROBE', 'The requested original audio failed AAC stereo, sample-rate, duration, or synchronization verification.');
+    }
+  }
+  return { duration, video, audio };
+}
+
+/** Extract one independently decodable 3–5 second clip; original audio is opt-in. */
+export async function extractFootageClip({ source, outputPath, startSec, durationSec = 4, keepAudio = false,
   maxBytes = 128 * 1024 * 1024, timeoutMs = 120000,
   ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', _testAllowedOrigin, _testChunkBytes } = {}) {
+  if (typeof keepAudio !== 'boolean') throw footageError('FOOTAGE_AUDIO_POLICY', 'keepAudio must be an explicit boolean.');
   if (!Number.isFinite(startSec) || startSec < 0 || !Number.isFinite(durationSec) || durationSec < 3 || durationSec > 5) {
     throw footageError('FOOTAGE_TIMING', 'Clip start must be nonnegative and duration must be 3–5 seconds.');
   }
@@ -88,25 +131,23 @@ export async function extractFootageClip({ source, outputPath, startSec, duratio
     await runMediaTool(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-threads', '2',
       ...inputSafety, ...(proxy ? ['-rw_timeout', String(Math.min(remaining(), 30000) * 1000)] : []),
       '-ss', String(startSec), '-i', input, '-t', String(durationSec), '-map', '0:v:0',
-      '-an', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
+      // A required mapping prevents a missing audio track from becoming a silent
+      // success. Keep the common input-seek clock; do not normalize/reset audio.
+      ...(keepAudio ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000'] : ['-an']),
+      '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-c:v', 'libx264', '-preset', 'veryfast',
-      '-crf', '18', '-threads', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-f', 'mp4', temporaryFile], remaining());
+      '-crf', '18', '-threads', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-f', 'mp4', temporaryFile], remaining(),
+    keepAudio ? 'The media tool could not extract the requested video and required first source audio stream; no clip was published.' : undefined);
     proxy?.assertHealthy();
     // Stop all upstream traffic before local QA and hashing; a successful FFmpeg
     // exit cannot hide a concurrent range-budget or transport failure.
     if (proxy) { await proxy.close(); if (proxy.failure) throw proxy.failure; }
     const probeText = await runMediaTool(ffprobePath, ['-v', 'error', '-protocol_whitelist', 'file',
-      '-format_whitelist', 'mov', '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate',
+      '-format_whitelist', 'mov', '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate,sample_rate,channels,duration,start_time',
       '-of', 'json', temporaryFile], remaining());
     let probe;
     try { probe = JSON.parse(probeText); } catch { throw footageError('FOOTAGE_PROBE', 'Clip verification returned malformed metadata.'); }
-    const duration = Number(probe.format?.duration);
-    const video = probe.streams?.find((stream) => stream.codec_type === 'video');
-    if (!Number.isFinite(duration) || Math.abs(duration - durationSec) > 0.15 || duration < 2.85 || duration > 5.15
-      || video?.codec_name !== 'h264' || video?.pix_fmt !== 'yuv420p' || !(video.width > 0) || !(video.height > 0)
-      || probe.streams.some((stream) => stream.codec_type !== 'video') || !String(probe.format?.format_name).includes('mp4')) {
-      throw footageError('FOOTAGE_PROBE', 'The extracted clip failed duration, video, or silent-MP4 verification.');
-    }
+    const { duration, video, audio } = validateFootageClipProbe(probe, { durationSec, keepAudio });
     const clipHash = await hashFile(temporaryFile);
     const clipBytes = (await stat(temporaryFile)).size;
     remaining();
@@ -115,7 +156,10 @@ export async function extractFootageClip({ source, outputPath, startSec, duratio
     return { output_path: destination, clip_sha256: clipHash, clip_bytes: clipBytes,
       start_sec: startSec, requested_duration_sec: durationSec, actual_duration_sec: duration,
       width: video.width, height: video.height, codec: video.codec_name, pixel_format: video.pix_fmt,
-      frame_rate: video.r_frame_rate, audio_policy: 'removed', ...sourceStats,
+      frame_rate: video.r_frame_rate, audio_policy: keepAudio ? 'retained_aac_stereo' : 'removed',
+      ...(keepAudio ? { audio_codec: audio.codec_name, audio_channels: audio.channels,
+        audio_sample_rate: Number(audio.sample_rate), audio_duration_sec: Number(audio.duration),
+        audio_start_sec: Number(audio.start_time), source_audio_stream_index: 0 } : {}), ...sourceStats,
       elapsed_ms: Date.now() - started, max_bytes: maxBytes, timeout_ms: timeoutMs };
   } catch (error) {
     if (proxy?.failure) throw proxy.failure;

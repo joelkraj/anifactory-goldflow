@@ -11,6 +11,7 @@ import {
   FOOTAGE_CLIP_SCHEMA, FOOTAGE_SEARCH_SCHEMA, createFootageSource, footageClipIdentity,
   footageHash, footageLibraryRoot, readFootageJson, readFootageSource,
   validateFootageClipReceipt, validateLocalFootageSource, validateResolvedFootageSource,
+  validateFootageAudioContract,
   writeImmutableFootageJson,
 } from "./lib/footage-library.mjs";
 
@@ -26,7 +27,7 @@ export const FOOTAGE_HELP = `Goldflow footage — private, opt-in source clippin
   footage select               Select exact Real-Debrid --file-ids for download
   footage register             Register --file OR --provider/--source-id/--file-id
   footage search               Search local --subtitles for --query, bound to --source
-  footage extract              Make one silent 3–5 second clip from --source
+  footage extract              Make one 3–5 second clip (silent unless opted in)
   footage approve              Record preview approval for --clip receipt.json
 
 Common: --provider torbox|real_debrid|both, --library-dir <directory>
@@ -37,6 +38,8 @@ Search: --source <source.json> --subtitles <file.srt|file.vtt> --query <dialogue
 Extract: --source <source.json> --start-sec <seconds> [--duration-sec 4]
          OR --source <source.json> --search-report <search.json> --candidate-id <id>
          [--max-download-mib 128] [--timeout-sec 120]
+         [--keep-audio true] First source audio track, AAC 192k stereo/48k
+                             Fails if audio is missing; default is silent
 Approve: --clip <receipt.json> --reviewer <name> --note <preview evidence>
 Add/select: require --rights-confirmed true --rights-note <basis>.
             Real-Debrid also requires --allow-uncached true (no cache-only API).
@@ -54,7 +57,7 @@ const ALLOWED = {
   select: ["provider", "source-id", "file-ids", "allow-uncached", "rights-confirmed", "rights-note"],
   register: ["provider", "source-id", "file-id", "file", "title", "edition", "rights-confirmed", "rights-note", "library-dir"],
   search: ["source", "subtitles", "query", "limit", "subtitle-offset-sec", "subtitle-scale", "library-dir"],
-  extract: ["source", "start-sec", "duration-sec", "search-report", "candidate-id", "max-download-mib", "timeout-sec", "library-dir"],
+  extract: ["source", "start-sec", "duration-sec", "search-report", "candidate-id", "max-download-mib", "timeout-sec", "keep-audio", "library-dir"],
   approve: ["clip", "reviewer", "note"],
 };
 
@@ -249,9 +252,10 @@ export async function runFootage(argv, {
       startSec = numeric(flags, "start-sec", 0, 0, 86400);
     }
     const durationSec = numeric(flags, "duration-sec", 4, 3, 5);
+    const keepAudio = boolean(flags, "keep-audio");
     const maxBytes = Math.floor(numeric(flags, "max-download-mib", 128, 1, 512) * 1024 * 1024);
     const timeoutMs = numeric(flags, "timeout-sec", 120, 1, 300) * 1000;
-    const request = footageClipIdentity(source, startSec, durationSec, subtitleEvidence);
+    const request = footageClipIdentity(source, startSec, durationSec, subtitleEvidence, { keepAudio });
     const clipId = `clip_${footageHash(request)}`;
     const clipDir = footageLibraryRoot(path.join(library, "clips", clipId), env);
     const receiptPath = path.join(clipDir, "receipt.json");
@@ -259,7 +263,7 @@ export async function runFootage(argv, {
     if (await exists(receiptPath)) {
       const { receipt, clipPath } = await validateFootageClipReceipt(receiptPath);
       if (JSON.stringify(receipt.request) !== JSON.stringify(request)) throw new Error("Cached clip request does not match.");
-      return { status: "reused_local_clip", clip_path: clipPath, receipt_path: receiptPath, review_status: "check_approval_json", transferred_bytes: 0 };
+      return { status: "reused_local_clip", clip_path: clipPath, receipt_path: receiptPath, audio_policy: receipt.audio_policy ?? "removed", review_status: "check_approval_json", transferred_bytes: 0 };
     }
     if (await exists(outputPath)) throw new Error("An existing clip has no receipt. Inspect the interrupted extraction; it will not be overwritten or reacquired automatically.");
     // Check cache before obtaining a fresh signed URL. Never silently reacquire on cache corruption.
@@ -277,7 +281,8 @@ export async function runFootage(argv, {
     try { lock = await fs.open(lockPath, "wx", 0o600); }
     catch (error) { if (error.code === "EEXIST") throw new Error("This exact clip is already extracting or has an interrupted lock; inspect it before recovery."); throw error; }
     try {
-      const result = await extract({ source: resolved, outputPath, startSec, durationSec, maxBytes, timeoutMs });
+      const result = await extract({ source: resolved, outputPath, startSec, durationSec, maxBytes, timeoutMs, keepAudio });
+      validateFootageAudioContract(result, { keepAudio, durationSec });
       if (source.provider === "local") {
         try { await validateLocalFootageSource(source); }
         catch (error) {
@@ -291,6 +296,12 @@ export async function runFootage(argv, {
         source_manifest_sha256: source.manifest_sha256, source_title: source.title, source_edition: source.edition,
         clip_sha256: result.clip_sha256, actual_duration_sec: result.actual_duration_sec,
         width: result.width, height: result.height,
+        audio_policy: result.audio_policy,
+        ...(keepAudio ? {
+          audio_codec: result.audio_codec, audio_channels: result.audio_channels,
+          audio_sample_rate: result.audio_sample_rate, audio_duration_sec: result.audio_duration_sec,
+          audio_start_sec: result.audio_start_sec, source_audio_stream_index: result.source_audio_stream_index,
+        } : {}),
         transferred_bytes: result.transferred_bytes, request_count: result.request_count,
         range_supported: result.range_supported, max_download_bytes: maxBytes,
         source_probe_sha256: result.source_probe_sha256 ?? null,

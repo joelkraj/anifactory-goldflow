@@ -8,6 +8,7 @@ export const FOOTAGE_SOURCE_SCHEMA = "goldflow_footage_source_v1";
 export const FOOTAGE_CLIP_SCHEMA = "goldflow_footage_clip_v1";
 export const FOOTAGE_SEARCH_SCHEMA = "goldflow_footage_search_v1";
 export const FOOTAGE_ENCODING_CONTRACT = "h264_yuv420p_silent_3_to_5_seconds_v1";
+export const FOOTAGE_AUDIO_ENCODING_CONTRACT = "h264_yuv420p_aac_192k_stereo_48k_first_audio_3_to_5_seconds_v1";
 export const footageHash = (value) => createHash("sha256").update(
   typeof value === "string" || Buffer.isBuffer(value) ? value : JSON.stringify(value),
 ).digest("hex");
@@ -120,17 +121,39 @@ export function validateResolvedFootageSource(source, resolved) {
   }
 }
 
-export function footageClipIdentity(source, startSec, durationSec, subtitleEvidence = null) {
+export function footageClipIdentity(source, startSec, durationSec, subtitleEvidence = null, { keepAudio = false } = {}) {
   if (!Number.isFinite(startSec) || startSec < 0 || !Number.isFinite(durationSec) || durationSec < 3 || durationSec > 5) {
     throw new Error("Clip start must be nonnegative and duration must be between 3 and 5 seconds.");
   }
+  if (typeof keepAudio !== "boolean") throw new Error("keepAudio must be a boolean.");
   return {
     source_manifest_sha256: source.manifest_sha256,
     start_sec: startSec,
     duration_sec: durationSec,
-    encoding_contract: FOOTAGE_ENCODING_CONTRACT,
+    // Preserve the exact legacy silent request shape/hash. Audio gets a separate
+    // content-addressed clip and cannot reuse a silent output or its approval.
+    encoding_contract: keepAudio ? FOOTAGE_AUDIO_ENCODING_CONTRACT : FOOTAGE_ENCODING_CONTRACT,
     subtitle_evidence: subtitleEvidence,
   };
+}
+
+export function validateFootageAudioContract(record, { keepAudio, durationSec, allowLegacySilent = false }) {
+  if (typeof keepAudio !== "boolean" || !record || typeof record !== "object") throw new Error("Clip audio contract is malformed.");
+  if (!keepAudio) {
+    if ((record.audio_policy !== "removed" && !(allowLegacySilent && record.audio_policy === undefined))
+      || ["audio_codec", "audio_channels", "audio_sample_rate", "audio_duration_sec", "audio_start_sec", "source_audio_stream_index"].some((key) => record[key] !== undefined)) {
+      throw new Error("Silent clip audio contract is malformed or mismatched.");
+    }
+    return;
+  }
+  if (record.audio_policy !== "retained_aac_stereo" || record.audio_codec !== "aac"
+    || record.audio_channels !== 2 || record.audio_sample_rate !== 48000 || record.source_audio_stream_index !== 0
+    || !Number.isFinite(durationSec) || !Number.isFinite(record.audio_duration_sec) || record.audio_duration_sec <= 0
+    || !Number.isFinite(record.audio_start_sec) || Math.abs(record.audio_start_sec) > 0.15
+    || Math.abs(record.audio_duration_sec - durationSec) > 0.15
+    || Math.abs(record.audio_start_sec + record.audio_duration_sec - durationSec) > 0.15) {
+    throw new Error("Retained clip audio contract is missing, malformed, or mismatched.");
+  }
 }
 
 export async function validateFootageClipReceipt(receiptPath) {
@@ -140,7 +163,7 @@ export async function validateFootageClipReceipt(receiptPath) {
     || !/^[a-f0-9]{64}$/u.test(receipt.clip_sha256 ?? "")
     || !/^[a-f0-9]{64}$/u.test(receipt.source_manifest_sha256 ?? "")
     || receipt.request?.source_manifest_sha256 !== receipt.source_manifest_sha256
-    || receipt.request?.encoding_contract !== FOOTAGE_ENCODING_CONTRACT
+    || ![FOOTAGE_ENCODING_CONTRACT, FOOTAGE_AUDIO_ENCODING_CONTRACT].includes(receipt.request?.encoding_contract)
     || receipt.id !== `clip_${footageHash(receipt.request)}`
     || !Number.isFinite(receipt.request?.start_sec) || receipt.request.start_sec < 0
     || !Number.isFinite(receipt.request?.duration_sec) || receipt.request.duration_sec < 3 || receipt.request.duration_sec > 5
@@ -151,6 +174,11 @@ export async function validateFootageClipReceipt(receiptPath) {
     || Math.abs(receipt.actual_duration_sec - receipt.request?.duration_sec) > 0.15) {
     throw new Error("Clip receipt is malformed or stale.");
   }
+  const keepAudio = receipt.request.encoding_contract === FOOTAGE_AUDIO_ENCODING_CONTRACT;
+  const expectedRequest = footageClipIdentity({ manifest_sha256: receipt.source_manifest_sha256 },
+    receipt.request.start_sec, receipt.request.duration_sec, receipt.request.subtitle_evidence, { keepAudio });
+  if (JSON.stringify(expectedRequest) !== JSON.stringify(receipt.request)) throw new Error("Clip request contract is malformed or stale.");
+  validateFootageAudioContract(receipt, { keepAudio, durationSec: receipt.request.duration_sec, allowLegacySilent: true });
   // Never follow a receipt-supplied external asset path during review/reuse.
   const clipPath = path.join(path.dirname(receiptPath), "clip.mp4");
   if (await sha256File(clipPath) !== receipt.clip_sha256) throw new Error("Cached clip bytes no longer match their receipt.");

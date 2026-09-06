@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { runFootage } from "../footage.mjs";
 import { extractFootageClip } from "../lib/footage-extract.mjs";
-import { createFootageSource, footageHash, footageLibraryRoot, readFootageSource, validateFootageClipReceipt, writeImmutableFootageJson } from "../lib/footage-library.mjs";
+import { createFootageSource, footageClipIdentity, FOOTAGE_AUDIO_ENCODING_CONTRACT, FOOTAGE_ENCODING_CONTRACT, footageHash, footageLibraryRoot, readFootageSource, validateFootageClipReceipt, writeImmutableFootageJson } from "../lib/footage-library.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-footage-cli-"));
 const library = path.join(root, "library");
@@ -21,11 +21,14 @@ const providerFactory = (provider) => ({
     return { provider, source_id: sourceId, file_id: fileId, filename: "fixture.mp4", bytes: 2000, source_hash: resolvedHash, url: "https://media.example.test/video?token=PRIVATE-SIGNED-URL" };
   },
 });
-const extract = async ({ outputPath, durationSec, source }) => {
+const extract = async ({ outputPath, durationSec, source, keepAudio = false }) => {
   extractions++;
   const data = Buffer.from(`mock-output-${extractions}`);
   await fs.writeFile(outputPath, data, { flag: "wx" });
   return { clip_sha256: footageHash(data), actual_duration_sec: durationSec, width: 320, height: 180,
+    audio_policy: keepAudio ? "retained_aac_stereo" : "removed",
+    ...(keepAudio ? { audio_codec: "aac", audio_channels: 2, audio_sample_rate: 48000,
+      audio_duration_sec: durationSec, audio_start_sec: 0, source_audio_stream_index: 0 } : {}),
     transferred_bytes: source.url ? 1000 : 0, request_count: source.url ? 1 : 0, range_supported: source.url ? true : null };
 };
 const run = (args, overrides = {}) => runFootage(args, { repoRoot: root, env, providerFactory, extract, ...overrides });
@@ -123,6 +126,22 @@ test("invalid duration and ambiguous timing are refused", async () => {
   await assert.rejects(run(["extract", "--source", local.source_path, "--start-sec", "0", "--search-report", search.report_path]), /either/);
   assert.equal(extractions, 0);
 });
+test("audio opt-in is an explicit boolean validated before provider resolution", async () => {
+  const beforeCalls = calls;
+  for (const keep of ["yes", "1", "TRUE", ""]) {
+    await assert.rejects(run(["extract", "--source", remote.source_path, "--start-sec", "0", "--keep-audio", keep, "--library-dir", library]), /keep-audio must be true or false/);
+  }
+  assert.equal(calls, beforeCalls);
+  assert.equal(extractions, 0);
+  assert.throws(() => footageClipIdentity(local.source, 0, 4, null, { keepAudio: "true" }), /boolean/);
+});
+test("silent request hashes stay identical to the existing v1 contract", () => {
+  const legacy = { source_manifest_sha256: local.source.manifest_sha256, start_sec: 13, duration_sec: 4,
+    encoding_contract: "h264_yuv420p_silent_3_to_5_seconds_v1", subtitle_evidence: null };
+  assert.deepEqual(footageClipIdentity(local.source, 13, 4), legacy);
+  assert.deepEqual(footageClipIdentity(local.source, 13, 4, null, { keepAudio: false }), legacy);
+  assert.notEqual(footageHash(footageClipIdentity(local.source, 13, 4, null, { keepAudio: true })), footageHash(legacy));
+});
 test("candidate extraction carries preview-only timing and immutable receipt", async () => {
   clipped = await run(["extract", "--source", local.source_path, "--search-report", search.report_path, "--candidate-id", search.results[0].cue_id, "--library-dir", library]);
   assert.equal(clipped.request.start_sec, 13);
@@ -130,6 +149,7 @@ test("candidate extraction carries preview-only timing and immutable receipt", a
   assert.equal(clipped.request.subtitle_evidence.timing_verified, false);
   assert.equal(clipped.production_eligible, false);
   assert.equal(clipped.review_status, "needs_preview");
+  assert.equal(clipped.audio_policy, "removed");
   assert.equal((await validateFootageClipReceipt(clipped.receipt_path)).clipPath, clipped.clip_path);
 });
 test("exact clip reuse does not extract again or require provider credentials", async () => {
@@ -186,6 +206,84 @@ test("preview approval is hash-bound and never production approval", async () =>
   assert.equal(record.receipt_sha256, clipped.receipt_sha256);
   await assert.rejects(run(["approve", "--clip", clipped.receipt_path, "--reviewer", "Someone else", "--note", "Changed"]), /Refusing to overwrite/);
 });
+test("audio variants have separate receipts, approvals and zero-network cache reuse", async () => {
+  const args = ["extract", "--source", remote.source_path, "--start-sec", "22", "--library-dir", library];
+  const silent = await run(args);
+  const silentBytes = await fs.readFile(silent.clip_path);
+  const silentReceipt = await fs.readFile(silent.receipt_path);
+  const silentApproval = await run(["approve", "--clip", silent.receipt_path, "--reviewer", "Fixture", "--note", "Silent preview"]);
+  const approvalBytes = await fs.readFile(silentApproval.approval_path);
+  const audible = await run([...args, "--keep-audio", "true"]);
+  assert.notEqual(audible.id, silent.id);
+  assert.notEqual(audible.clip_path, silent.clip_path);
+  assert.equal(silent.request.encoding_contract, FOOTAGE_ENCODING_CONTRACT);
+  assert.equal(audible.request.encoding_contract, FOOTAGE_AUDIO_ENCODING_CONTRACT);
+  assert.equal(audible.audio_policy, "retained_aac_stereo");
+  assert.equal(audible.audio_codec, "aac");
+  assert.equal(audible.source_audio_stream_index, 0);
+  assert.equal((await validateFootageClipReceipt(audible.receipt_path)).receipt.audio_channels, 2);
+  const audibleApproval = await run(["approve", "--clip", audible.receipt_path, "--reviewer", "Fixture", "--note", "Audio preview"]);
+  assert.notEqual(audibleApproval.approval_path, silentApproval.approval_path);
+  assert.deepEqual(await fs.readFile(silent.clip_path), silentBytes);
+  assert.deepEqual(await fs.readFile(silent.receipt_path), silentReceipt);
+  assert.deepEqual(await fs.readFile(silentApproval.approval_path), approvalBytes);
+  const beforeCalls = calls, beforeExtractions = extractions;
+  const withoutKey = { env: { ...env, GOLDFLOW_TORBOX_API_KEY: "" } };
+  const audioReused = await run([...args, "--keep-audio", "true"], withoutKey);
+  const silentReused = await run([...args, "--keep-audio", "false"], withoutKey);
+  assert.equal(audioReused.status, "reused_local_clip");
+  assert.equal(audioReused.audio_policy, "retained_aac_stereo");
+  assert.equal(audioReused.transferred_bytes, 0);
+  assert.equal(silentReused.clip_path, silent.clip_path);
+  assert.equal(silentReused.audio_policy, "removed");
+  assert.equal(calls, beforeCalls);
+  assert.equal(extractions, beforeExtractions);
+});
+test("legacy silent receipts without audio fields remain reusable and approvable", async () => {
+  const args = ["extract", "--source", remote.source_path, "--start-sec", "28", "--library-dir", library];
+  const clip = await run(args);
+  const legacy = JSON.parse(await fs.readFile(clip.receipt_path, "utf8"));
+  delete legacy.audio_policy;
+  delete legacy.receipt_sha256;
+  legacy.receipt_sha256 = footageHash(legacy);
+  await fs.writeFile(clip.receipt_path, JSON.stringify(legacy));
+  assert.equal((await validateFootageClipReceipt(clip.receipt_path)).receipt.request.encoding_contract, FOOTAGE_ENCODING_CONTRACT);
+  const beforeCalls = calls, beforeExtractions = extractions;
+  const reused = await run([...args, "--keep-audio", "false"]);
+  assert.equal(reused.status, "reused_local_clip");
+  assert.equal(reused.audio_policy, "removed");
+  assert.equal(calls, beforeCalls);
+  assert.equal(extractions, beforeExtractions);
+  await run(["approve", "--clip", clip.receipt_path, "--reviewer", "Fixture", "--note", "Legacy silent preview"]);
+});
+test("retained-audio receipts reject absent, wrong or mistimed audio even with recomputed hashes", async () => {
+  const clip = await run(["extract", "--source", remote.source_path, "--start-sec", "32", "--keep-audio", "true", "--library-dir", library]);
+  const receipt = JSON.parse(await fs.readFile(clip.receipt_path, "utf8"));
+  const invalidPath = path.join(root, "invalid-audio.json");
+  for (const change of [
+    { audio_policy: undefined }, { audio_policy: "removed" }, { audio_codec: "mp3" },
+    { audio_channels: 6 }, { audio_sample_rate: 44100 }, { audio_duration_sec: 0.1 },
+    { audio_duration_sec: null }, { audio_start_sec: 1 }, { source_audio_stream_index: 1 },
+  ]) {
+    const { receipt_sha256, ...body } = { ...receipt, ...change };
+    // Match the serialized representation when a field is intentionally absent.
+    const serialized = JSON.parse(JSON.stringify(body));
+    await fs.writeFile(invalidPath, JSON.stringify({ ...serialized, receipt_sha256: footageHash(serialized) }));
+    await assert.rejects(validateFootageClipReceipt(invalidPath), /audio contract/);
+  }
+  const { receipt_sha256, ...body } = receipt;
+  body.request = { ...body.request, encoding_contract: FOOTAGE_ENCODING_CONTRACT };
+  body.id = `clip_${footageHash(body.request)}`;
+  await fs.writeFile(invalidPath, JSON.stringify({ ...body, receipt_sha256: footageHash(body) }));
+  await assert.rejects(validateFootageClipReceipt(invalidPath), /Silent clip audio contract/);
+});
+test("an extractor cannot silently satisfy a requested audio variant", async () => {
+  let outputPath;
+  await assert.rejects(run(["extract", "--source", remote.source_path, "--start-sec", "36", "--keep-audio", "true", "--library-dir", library], {
+    extract: async (args) => { outputPath = args.outputPath; return extract({ ...args, keepAudio: false }); },
+  }), /Retained clip audio contract/);
+  await assert.rejects(fs.stat(path.join(path.dirname(outputPath), "receipt.json")), { code: "ENOENT" });
+});
 test("stale manifests, corrupt receipts and clobber attempts fail", async () => {
   const stalePath = path.join(root, "stale.json");
   await fs.writeFile(stalePath, JSON.stringify({ ...local.source, edition: "changed" }));
@@ -213,6 +311,26 @@ test("real FFmpeg passes register -> subtitle search -> extract -> approve -> re
   assert.equal(clip.transferred_bytes, 0);
   await run(["approve", "--clip", clip.receipt_path, "--reviewer", "Synthetic test", "--note", "Automated fixture approval only"]);
   assert.equal((await run(args)).status, "reused_local_clip");
+});
+test("real FFmpeg audio opt-in produces its own hash-bound preview and cache entry", async () => {
+  const film = path.join(root, "real-audio-fixture.mkv");
+  const generated = spawnSync("ffmpeg", ["-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "18", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", film], { encoding: "utf8" });
+  assert.equal(generated.status, 0, "FFmpeg synthetic audiovisual fixture generation must pass");
+  const source = await run(["register", "--file", film, "--title", "Synthetic audiovisual fixture", "--edition", "24fps PCM generated locally", ...rights, "--library-dir", library]);
+  const found = await run(["search", "--source", source.source_path, "--subtitles", subtitleFile, "--query", "open the door", "--library-dir", library]);
+  const args = ["extract", "--source", source.source_path, "--search-report", found.report_path, "--candidate-id", found.results[0].cue_id, "--library-dir", library];
+  const silent = await run(args, { extract: extractFootageClip });
+  const audible = await run([...args, "--keep-audio", "true"], { extract: extractFootageClip });
+  assert.notEqual(audible.id, silent.id);
+  assert.equal(audible.audio_policy, "retained_aac_stereo");
+  assert.equal(audible.audio_sample_rate, 48000);
+  assert.equal(audible.audio_channels, 2);
+  assert.equal(audible.request.subtitle_evidence.cue_id, found.results[0].cue_id);
+  assert.ok(Math.abs(audible.audio_duration_sec - 4) <= 0.15);
+  assert.equal((await validateFootageClipReceipt(audible.receipt_path)).receipt.clip_sha256, audible.clip_sha256);
+  assert.equal((await run([...args, "--keep-audio", "true"])).status, "reused_local_clip");
+  assert.equal((await run(args)).clip_path, silent.clip_path);
 });
 
 try {

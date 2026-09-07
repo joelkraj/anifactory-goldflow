@@ -16,6 +16,8 @@ import { PILOT_NARRATION_ACCEPTANCE_SCHEMA, PILOT_NARRATION_LISTEN_ATTESTATION,
   buildPilotNarrationTiming, validatePilotNarrationAcceptance } from "./avatar-pilot-narration-acceptance.mjs";
 import { pilotAssetPlanRevisionPaths, preparePilotAssetPlanRevision,
   resolvePilotAssetPlanStage } from "./avatar-pilot-asset-plan-revision.mjs";
+import { pilotHostDesignRevisionPaths, preparePilotHostDesignRevision,
+  resolvePilotHostDesignRevision } from "./avatar-pilot-host-design-revision.mjs";
 
 // This capability is separate from the still-unproven generic/full import route.
 // Release only after the opening producer, finalizer and workflow fixtures pass.
@@ -141,12 +143,20 @@ function identityCheck(identity) {
   return identity;
 }
 async function stageOutputPath(episodeDir, stage) {
-  if (stage.id === "pilot_asset_plan") return (await resolvePilotAssetPlanStage({ episodeDir })).path;
+  if (["pilot_asset_plan", "pilot_asset_plan_approval"].includes(stage.id)) {
+    const host = await resolvePilotHostDesignRevision({ episodeDir });
+    if (host) return stage.id === "pilot_asset_plan" ? host.plan.path : host.approval.path;
+    if (stage.id === "pilot_asset_plan") return (await resolvePilotAssetPlanStage({ episodeDir })).path;
+  }
   return path.join(episodeDir, stage.output);
 }
 async function rowAt(episodeDir, stage) {
-  return stage.id === "pilot_asset_plan" ? (await resolvePilotAssetPlanStage({ episodeDir })).row
-    : jsonAt(path.join(episodeDir, stage.output));
+  if (["pilot_asset_plan", "pilot_asset_plan_approval"].includes(stage.id)) {
+    const host = await resolvePilotHostDesignRevision({ episodeDir });
+    if (host) return stage.id === "pilot_asset_plan" ? host.plan.row : host.approval.row;
+    if (stage.id === "pilot_asset_plan") return (await resolvePilotAssetPlanStage({ episodeDir })).row;
+  }
+  return jsonAt(path.join(episodeDir, stage.output));
 }
 async function sourceText(episodeDir) { return (await rowAt(episodeDir, AVATAR_PILOT_STAGES[1])).payload.text; }
 async function narrationPayload(episodeDir) { return (await rowAt(episodeDir, AVATAR_PILOT_STAGES[6])).payload; }
@@ -475,7 +485,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
   need(!Object.hasOwn(flags, "media-workflow") || flags["media-workflow"] === "avatar_footage_pilot_v1", "Pilot commands cannot switch media workflow.");
   need(!Object.hasOwn(flags, "content-profile") || flags["content-profile"] === "mcu_what_if_pilot_v1", "Pilot commands cannot switch content profile.");
   if (action === "preflight") return preflight(flags, episodeDir, repoRoot, openingAdapter);
-  const stageAction = action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
+  const stageAction = action === "revise-host-design" ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
     : ["create-narration", "review-narration", "approve-narration"].includes(action) ? "import-narration" : action;
   const stage = AVATAR_PILOT_STAGES.find((row) => row.action === stageAction);
   need(stage || action === "status", "Unknown pilot action. Use pilot status; publishing and automatic media dispatch are unavailable.");
@@ -502,7 +512,58 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
     const previous = AVATAR_PILOT_STAGES[AVATAR_PILOT_STAGES.indexOf(stage) - 1];
     const inputs = [{ role: "upstream", ...await binding(await stageOutputPath(episodeDir, previous)) }];
     let payload;
-    if (action === "revise-asset-plan") {
+    if (action === "revise-host-design") {
+      need(hasText(flags.input) && flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note),
+        "Host-design revision requires --input, --accept true, reviewer and note.");
+      const prepared = await preparePilotHostDesignRevision({ episodeDir, identity, inputPath: path.resolve(flags.input),
+        reviewer: flags.reviewer, note: flags.note });
+      await fs.mkdir(prepared.paths.directory);
+      const createdAt = new Date().toISOString();
+      const receipt = { schema: "goldflow_avatar_pilot_host_design_revision_v1", status: "approved_host_design_revision",
+        created_at: createdAt, identity_sha256: prepared.identityRef.sha256, request: prepared.requestRef,
+        prior_plan: prepared.priorPlanRef, prior_approval: prepared.priorApprovalRef,
+        affected_asset_ids: prepared.delta.affected_asset_ids,
+        review: { approved: true, reviewer: prepared.reviewer, note: prepared.note },
+        creative_submissions: 0, provider_cost: 0, production_eligible: false, publish_allowed: false };
+      await exclusiveJson(prepared.paths.receipt, receipt);
+      const receiptRef = await binding(prepared.paths.receipt);
+      const planInputs = [{ role: "upstream", ...await binding(await stageOutputPath(episodeDir, AVATAR_PILOT_STAGES[6])) },
+        { role: "prior_plan", ...prepared.priorPlanRef }, { role: "revision_request", ...prepared.requestRef },
+        { role: "revision_receipt", ...receiptRef }];
+      await exclusiveJson(prepared.paths.plan, { schema: "goldflow_avatar_pilot_stage_v1", stage: "pilot_asset_plan",
+        identity_sha256: prepared.identityRef.sha256, inputs: planInputs, payload: prepared.nextPlan, created_at: createdAt });
+      const planRef = await binding(prepared.paths.plan);
+      const approvalInputs = [{ role: "upstream", ...planRef }, { role: "prior_approval", ...prepared.priorApprovalRef },
+        { role: "revision_receipt", ...receiptRef }];
+      await exclusiveJson(prepared.paths.approval, { schema: "goldflow_avatar_pilot_stage_v1", stage: "pilot_asset_plan_approval",
+        identity_sha256: prepared.identityRef.sha256, inputs: approvalInputs,
+        payload: { review: { approved: true, reviewer: prepared.reviewer, note: prepared.note, attestation: null } }, created_at: createdAt });
+      const approvalRef = await binding(prepared.paths.approval);
+      const authorization = { schema: "goldflow_avatar_pilot_host_design_revision_authorization_v1", status: "authorized",
+        created_at: createdAt, identity_sha256: prepared.identityRef.sha256, replacement_asset_id: "host_neutral",
+        replacement_attempt_number: 2, creative_submissions_authorized: 1, lifetime_creative_submission_limit: 2,
+        plan: planRef, approval: approvalRef, revision_receipt: receiptRef,
+        prior_attempt: prepared.request.prior_attempt, replacement_prompt: prepared.request.replacement_prompt,
+        external_inspiration_bindings: prepared.request.external_inspiration_bindings,
+        dependent_pose_generation_authorized: false, automatic_retry: false, automatic_failover: false,
+        production_eligible: false, publish_allowed: false };
+      await exclusiveJson(prepared.paths.authorization, authorization);
+      const authorizationRef = await binding(prepared.paths.authorization);
+      const executionInputs = [...planInputs, ...approvalInputs.slice(1), { role: "effective_plan", ...planRef },
+        { role: "effective_approval", ...approvalRef }, { role: "replacement_authorization", ...authorizationRef }];
+      const executionRef = await audit(episodeDir, { action, status: "passed", elapsed_ms: Date.now() - started,
+        identity_sha256: prepared.identityRef.sha256, inputs: executionInputs, output: authorizationRef,
+        scope: { duration_sec: 90, phase: "host_design_revision_and_single_replacement_authorization",
+          affected_asset_ids: prepared.delta.affected_asset_ids, replacement_asset_id: "host_neutral", replacement_attempt_number: 2 },
+        creative_submissions: 0, provider_cost: 0, synthesis_invoked: false, generation_authorized: true,
+        production_eligible: false, publish_allowed: false });
+      await exclusiveJson(prepared.paths.activation, { schema: "goldflow_avatar_pilot_host_design_revision_activation_v1",
+        identity_sha256: prepared.identityRef.sha256, receipt: receiptRef, plan: planRef, approval: approvalRef,
+        authority: authorizationRef, execution_report: executionRef });
+      await resolvePilotHostDesignRevision({ episodeDir, identity });
+      const revisedStatus = await pilotStatusWithAdapter(episodeDir, openingAdapter);
+      return flags.format === "markdown" ? formatPilotStatus(revisedStatus) : revisedStatus;
+    } else if (action === "revise-asset-plan") {
       need(hasText(flags.input) && hasText(flags["affected-asset-ids"]), "Revision requires --input and exact --affected-asset-ids.");
       need(!Object.hasOwn(flags, "accept"), "Plan revision does not approve the asset plan; use its separate approval action later.");
       const prepared = await preparePilotAssetPlanRevision({ episodeDir, identity, inputPath: path.resolve(flags.input),

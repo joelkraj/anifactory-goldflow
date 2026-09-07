@@ -38,6 +38,7 @@ After every command, inspect `node bin/goldflow.mjs run status --episode-dir <di
 | `approve-narration` | Separate complete-narration listening; `--accept true --reviewer --note --attestation entire_proof_narration_listened_end_to_end`; accepts the exact candidate, subjective decision and canonical Whisper mapping |
 | `import-narration --input <bundle>` | **Blocked**; the scoped producer is not an arbitrary full-audio import route |
 | `plan-assets --input <plan>` | Exact script-bound asset IDs, purpose, kind, provider/model and truth mode |
+| `revise-asset-plan --input <plan>` | One guarded pre-approval revision; exact `--prior-stage-sha256`, `--affected-asset-ids` (comma-separated), `--reviewer` and `--note`; original plan preserved, no generation or approval |
 | `approve-asset-plan` | Exact creative/provider scope approval |
 | `import-media --input <manifest>` | Complete planned local assets, immutable receipts and exact pilot reviews |
 | `timeline --input <timeline>` | Typed frame coverage, source/output mapping, complete narration/captions |
@@ -69,15 +70,37 @@ Narration schemas and provider-free examples are in the opening/remaining execut
 
 ## Reviewed Media and Timeline Contracts
 
+### One Pre-Approval Asset-Plan Revision
+
+While the original plan passes and its approval is missing, `revise-asset-plan` can register one operator-requested visual revision. Every approval/downstream stage artifact and any `pilot_media_work`, `pilot_render_work` or rendered proof must be absent. Use a separate new candidate file; never edit the imported V1 candidate or `pilot_asset_plan.json`. Status exposes the optional revision command with the current original-stage hash.
+
+```sh
+node bin/goldflow.mjs pilot revise-asset-plan --episode-dir <episode-dir> \
+  --input <revised-plan.json> --prior-stage-sha256 <original-stage-sha256> \
+  --affected-asset-ids analysis_room,host_room --reviewer <name> --note <operator-revision-reason>
+```
+
+Affected IDs must exactly identify every changed, added or removed asset row; a rename names both old and new IDs. All other asset rows and their relative order remain unchanged. Only global `intent`, `art_direction`, `generation_order`, `edit_intent` and `revision` presentation metadata may also change. Schema, source/identity bindings, other scope fields and the locked provider/model checks remain enforced.
+
+The command uses the ordinary stage lease and append-only execution audit, with zero generation/spend and no approval. It writes a new `pilot_asset_plan_revision/revision.json`, effective `pilot_asset_plan_revision/pilot_asset_plan.json`, and hash-bound activation record. The original stage, V1 input and old audit reports remain byte-identical. Status, `approve-asset-plan` and `import-media` resolve the same effective plan; approval binds that revised stage's exact path/hash. The 14-stage identity/registry is unchanged.
+
+An incomplete, stale or already-used revision is a triage point, not another attempt. Missing revision evidence never silently falls back to V1. A second revision, a revision after approval/downstream work, `--accept` on the revision command, automatic generation and approval are unavailable. Review the effective plan separately before `approve-asset-plan`.
+
+### Asset and Edit Evidence
+
 Every movie asset retains its source manifest, exact edition/timestamps, extraction receipt, library approval and a separate intended-pilot-use basis/review. Library approval is not pilot approval. Generated assets retain one-submission provider/model/prompt/output hashes, accepted reference bindings, actual provider evidence, and inspected output decisions. This proof permits only Gemini/Flow stills and selected Flow video. Provider audio is stripped from generated video.
 
 The timeline schema is `goldflow_avatar_pilot_timeline_v1`: 1920x1080, 30 fps, 2700 frames; contiguous `shots` with background and independent layers; `narration`, `source_audio`, and `captions` arrays. Movie evidence and generated hypotheses cannot be mislabeled. Hypothetical visuals carry a visible label. Layer `source_in_sec` is an offset within the accepted local clip, **not** its movie timestamp. Both clocks remain recorded separately.
+
+A plain backdrop is native timeline data: use `background_color: "#RRGGBB"` without a `background_asset_id`. It needs no generated image or provider receipt. A recurring illustrated room instead uses its approved background asset; keep the host as a separate transparent pose layer.
 
 Movie layers play 3–5 seconds. An explicit loop uses `loop:true` plus frame-aligned `source_duration_sec` of 3–5 seconds, at most two cycles / ten seconds on screen, and no source audio. Normal cards can retain explicitly gained `under_narration` audio or a `spotlight` only while narration pauses. Video playback is independent of card entrance movement. No silent freeze or stretching.
 
 Captions reproduce the complete approved script and carry contiguous `word_start_index` / `word_end_index_exclusive` values tied to accepted Whisper timing and narration placements. Full speech is consumed in source order; the final fractional video frame contains silence, not clipped or stretched speech. Host poses need actual alpha channels. There is no default extra score/SFX.
 
 ## Verification
+
+`npm run test:avatar-pilot-asset-revision` verifies synthetic pre-approval revisions, exact changed-row scope, locked providers, immutable original inputs, stale/incomplete refusal, effective-plan approval/media binding and zero provider spend. It does not revise a real episode or generate media.
 
 `npm run test:avatar-pilot-review` covers the retained raw-review candidate, exact PCM listening mapping, no-restitch finalization, no-synthesis producer, and workflow continuation. It never records a real listening decision or calls a speech provider.
 

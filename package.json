@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test:workflow-routing": "node scripts/tests/media-workflow-contract-tests.mjs && node scripts/tests/media-workflow-routing-tests.mjs && node scripts/tests/packaging-workflow-routing-tests.mjs && node scripts/tests/pipeline-guidance-tests.mjs",
-    "test:avatar-pilot": "node scripts/tests/avatar-pilot-workflow-tests.mjs && node scripts/tests/avatar-pilot-artifact-tests.mjs && node scripts/tests/avatar-pilot-render-tests.mjs",
+    "test:avatar-pilot": "node scripts/tests/avatar-pilot-narration-contract-tests.mjs && node scripts/tests/avatar-pilot-workflow-tests.mjs && node scripts/tests/avatar-pilot-artifact-tests.mjs && node scripts/tests/avatar-pilot-render-tests.mjs",
     "test:footage": "node scripts/tests/footage-provider-tests.mjs && node scripts/tests/footage-subtitle-tests.mjs && node scripts/tests/footage-extract-tests.mjs && node scripts/tests/footage-cli-tests.mjs",
     "check": "node scripts/check-syntax.mjs && node scripts/generate-workflow-guidance.mjs --check",
     "studio:desktop": "node apps/goldflow-studio/desktop/main.mjs",

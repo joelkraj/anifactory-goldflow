@@ -14,6 +14,10 @@ The route validates an immutable proof identity, ingests exact source text and r
 
 Run `node bin/goldflow.mjs pilot preflight --episode-dir <new-absolute-dir> --identity <proof-config.json>` on clean code. The config explicitly locks channel, series_slug, week, episode, title, run_intent=`proof`, production_eligible=false, publish_allowed=false, audio_target=`commentary_with_optional_source_audio`, source_script `{path,sha256}`, and proof_scope `{start_sec:0,end_sec:90,width:1920,height:1080,fps:30,duration_frames:2700}`. It also locks `pilot_providers.stills` to Google Gemini/Flow provider/model rows, `video` to Flow/model/enabled and `narration` to the exact owned Joel provider/model/revision/voice/reference hashes. Use a private proof namespace if no public channel is selected; never infer a release destination.
 
+New preflights also derive and hash-bind canonical narration identity fields through the existing Joel/Qwen quality and provider-policy builders: the exact dry/deadpan reference, calibrated voice checks, batch-four synthesis policy, immutable delivery-bank file, and local Whisper contract. Conflicting declared settings stop before directory creation. Status validates these fields when present; historical proof identities remain unchanged. This identity contract alone does not release synthesis or import: the scoped producer, phase-preserving finalizer and complete output-lineage adapter remain unfinished.
+
+An operator-approved script revision uses a fresh proof directory while preserving channel, series, run/week and episode IDs, for example `<run-dir>/revisions/script-v3/episodes/ep_01`. Record the superseded identity's path/hash in the new config, rerun preflight/ingest/exact script approval, and review a new script-matched evidence ledger. Never overwrite the previous identity or inherit its script approval.
+
 After every command, inspect `node bin/goldflow.mjs run status --episode-dir <dir> --format markdown`. It supplies the next command and reports the import-only limitations. In order:
 
 | Command (`goldflow pilot …`) | Required input / approval |

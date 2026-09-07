@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { executePilotCommand, pilotStatus } from "../lib/avatar-pilot-workflow.mjs";
 import { resolveMediaWorkflow, mediaWorkflowForPreflight } from "../lib/media-workflows.mjs";
 import { stageRegistryFor } from "../lib/pipeline-stage-registry.mjs";
+import { contentProfileForIdentity } from "../lib/content-profiles.mjs";
 import { QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK as JOEL } from "../lib/narration-tts-policy.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -65,6 +66,9 @@ try {
     ["wrong-model", { pilot_providers: { ...config.pilot_providers, narration: { ...config.pilot_providers.narration, model: "Unapproved model" } } }],
     ["wrong-profile", { content_profile: "manhwa_recap_v1" }],
     ["wrong-workflow", { media_workflow: "generated_visuals_v1" }],
+    ["conflicting-canonical-provider", { tts_provider: "fish_audio" }],
+    ["conflicting-canonical-speed", { tts_native_speed: 1.1 }],
+    ["conflicting-whisper-lock", { provider_locks: { local_whisper_timing: { model: "tiny" } } }],
   ]) {
     const badPath = await writeConfig(name, { ...config, ...change });
     const target = path.join(scratch, "runs", name);
@@ -75,10 +79,69 @@ try {
   assert.equal(initial.current_stage, "pilot_script");
   assert.equal(initial.identity.git.dirty, false);
   assert.equal(initial.identity.git.commit, git("rev-parse", "HEAD"));
+  assert.equal(initial.identity.content_profile_config.version, "2026-09-07.1");
+  assert.equal(initial.identity.voice_provider_options.primary.reference_audio_sha256, JOEL.reference_audio_sha256);
+  assert.equal(initial.identity.voice_provider_options.synthesis_contract.nominal_batch_size, 4);
+  assert.equal(initial.identity.pilot_narration_contract.synthesis_authorized, false);
+  assert.match(initial.identity.content_profile_config.planner_roles.narration_performance, /assured.*decisions and consequences/);
+  assert.ok(initial.identity.content_profile_config.voice.performance_directives.some((directive) => /do not add audience questions/.test(directive)));
+  const historicalProfile = structuredClone(initial.identity.content_profile_config);
+  historicalProfile.version = "2026-09-06.1";
+  historicalProfile.planner_roles.narration_performance = "a conversational on-screen theorist exploring a movie what-if with the audience";
+  assert.deepEqual(contentProfileForIdentity({ ...initial.identity, content_profile_config: historicalProfile }), historicalProfile, "a new pilot direction must not overwrite a historical embedded profile");
   assert.equal(initial.publish_allowed, false);
   assert.equal(stageRegistryFor(initial.identity).length, 14);
   assert.deepEqual(initial.allowed_command_stages, ["pilot_script"]);
   const immutableIdentity = await fs.readFile(path.join(episodeDir, "run_identity.json"));
+  const changedVoiceIdentity = JSON.parse(immutableIdentity);
+  changedVoiceIdentity.voice_provider_options.primary.reference_audio_sha256 = "0".repeat(64);
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), JSON.stringify(changedVoiceIdentity));
+  assert.equal((await pilotStatus(episodeDir)).current_stage, "run_identity", "status must reject changed canonical narration settings before media work");
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), immutableIdentity);
+  const historicalIdentity = JSON.parse(immutableIdentity);
+  for (const key of ["tts_provider", "tts_fallback_provider", "narrator_voice_id", "tts_voice_id", "tts_native_speed", "voice_provider_options", "narration_quality_contract", "narration_delivery_reference_bank", "provider_locks", "production_profile_config", "production_gates", "model_versions", "pilot_narration_contract"]) delete historicalIdentity[key];
+  historicalIdentity.content_profile_config = historicalProfile;
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), JSON.stringify(historicalIdentity));
+  const historicalBytes = await fs.readFile(path.join(episodeDir, "run_identity.json"));
+  assert.equal((await pilotStatus(episodeDir)).current_stage, "pilot_script");
+  assert.deepEqual(await fs.readFile(path.join(episodeDir, "run_identity.json")), historicalBytes, "read-only status must not retrofit canonical fields into historical identities");
+  const partiallyStripped = JSON.parse(immutableIdentity);
+  for (const key of ["pilot_narration_contract", "voice_provider_options", "tts_provider"]) delete partiallyStripped[key];
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), JSON.stringify(partiallyStripped));
+  assert.equal((await pilotStatus(episodeDir)).current_stage, "run_identity", "removing the three former discriminator keys cannot downgrade a canonical identity to historical");
+  for (const field of [
+    "pilot_narration_contract", "voice_provider_options", "tts_provider",
+    "tts_fallback_provider", "narrator_voice_id", "tts_voice_id", "tts_native_speed",
+    "narration_quality_contract", "narration_delivery_reference_bank",
+    "provider_locks.local_whisper_timing",
+    "production_profile_config.audio.local_whisper_timing",
+    "production_gates.local_whisper_contract_required",
+    "model_versions.tts_model", "model_versions.tts_model_revision",
+    "model_versions.local_whisper_model",
+  ]) {
+    const partial = structuredClone(historicalIdentity);
+    const keys = field.split(".");
+    let parent = partial;
+    for (const key of keys.slice(0, -1)) parent = parent[key] ??= {};
+    // Presence, even null/false, must require the complete canonical contract.
+    parent[keys.at(-1)] = null;
+    await fs.writeFile(path.join(episodeDir, "run_identity.json"), JSON.stringify(partial));
+    const report = await pilotStatus(episodeDir);
+    assert.equal(report.current_stage, "run_identity", `partial canonical identity must block: ${field}`);
+    assert.deepEqual(report.allowed_command_stages, []);
+  }
+  const legacyWithSharedMetadata = {
+    ...historicalIdentity,
+    provider_locks: { still_provider: "google_flow" },
+    production_profile_config: { audio: { unrelated_fixture: true } },
+    production_gates: { unrelated_fixture: true },
+    model_versions: { image_model: "Synthetic image model" },
+  };
+  const sharedMetadataBytes = Buffer.from(JSON.stringify(legacyWithSharedMetadata));
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), sharedMetadataBytes);
+  assert.equal((await pilotStatus(episodeDir)).current_stage, "pilot_script", "unrelated shared metadata must not turn a genuine historical identity into a partial canonical one");
+  assert.deepEqual(await fs.readFile(path.join(episodeDir, "run_identity.json")), sharedMetadataBytes);
+  await fs.writeFile(path.join(episodeDir, "run_identity.json"), immutableIdentity);
   await assert.rejects(() => run("preflight", { identity: configPath }), /never overwritten/);
   assert.deepEqual(await fs.readFile(path.join(episodeDir, "run_identity.json")), immutableIdentity);
   await assert.rejects(() => run("render"), /stopped at pilot_script/);

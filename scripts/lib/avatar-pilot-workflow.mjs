@@ -7,6 +7,8 @@ import { contentProfileDefinition } from "./content-profiles.mjs";
 import { mediaWorkflowForPreflight, resolveMediaWorkflow } from "./media-workflows.mjs";
 import { AVATAR_PILOT_STAGES, pilotCommandShape } from "./avatar-pilot-stage-registry.mjs";
 import { QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK as JOEL } from "./narration-tts-policy.mjs";
+import { DEFAULT_NARRATION_DELIVERY_BANK_PATH } from "./narration-delivery-reference-bank.mjs";
+import { buildPilotNarrationIdentityFields, validatePilotNarrationIdentity } from "./avatar-pilot-narration-contract.mjs";
 import { validatePilotScript, validatePilotAssetPlan, validatePilotMedia, validatePilotNarrationBundle, pilotArtifactContainsPrivateData, PILOT_NARRATION_IMPORT_ADAPTER_STATUS } from "./avatar-pilot-artifacts.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -40,6 +42,49 @@ async function checkBinding(ref, base) {
 }
 function accepted(result) {
   need(["passed", "approved"].includes(result?.status), `Pilot validation blocked: ${(result?.findings ?? []).map((row) => typeof row === "string" ? row : row.code ?? "invalid_artifact").join(", ")}`);
+}
+function declaredContractMatches(declared, expected, prefix = "narration") {
+  for (const [key, value] of Object.entries(expected)) {
+    if (!Object.hasOwn(declared, key)) continue;
+    const actual = declared[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      need(actual && typeof actual === "object" && !Array.isArray(actual), `Conflicting declared ${prefix}.${key}.`);
+      declaredContractMatches(actual, value, `${prefix}.${key}`);
+    } else need(JSON.stringify(actual) === JSON.stringify(value), `Conflicting declared ${prefix}.${key}.`);
+  }
+}
+function withNarrationIdentityFields(config, fields) {
+  declaredContractMatches(config, fields);
+  return {
+    ...config, ...fields,
+    provider_locks: { ...config.provider_locks, ...fields.provider_locks },
+    production_profile_config: { ...config.production_profile_config, ...fields.production_profile_config,
+      audio: { ...config.production_profile_config?.audio, ...fields.production_profile_config.audio } },
+    production_gates: { ...config.production_gates, ...fields.production_gates },
+    model_versions: { ...config.model_versions, ...fields.model_versions },
+  };
+}
+async function validateLockedNarrationIdentity(identity, episodeDir) {
+  // Old pilot identities retain their original config and remain synthesis-blocked.
+  // Presence of canonical fields requires the full marker and exact bank binding.
+  const canonicalFields = [
+    "pilot_narration_contract", "voice_provider_options", "tts_provider",
+    "tts_fallback_provider", "narrator_voice_id", "tts_voice_id", "tts_native_speed",
+    "narration_quality_contract", "narration_delivery_reference_bank",
+  ];
+  const sharedLeaves = [
+    [identity.provider_locks, "local_whisper_timing"],
+    [identity.production_profile_config?.audio, "local_whisper_timing"],
+    [identity.production_gates, "local_whisper_contract_required"],
+    [identity.model_versions, "tts_model"],
+    [identity.model_versions, "tts_model_revision"],
+    [identity.model_versions, "local_whisper_model"],
+  ];
+  if (!canonicalFields.some((key) => Object.hasOwn(identity, key))
+    && !sharedLeaves.some(([parent, key]) => parent != null && Object.hasOwn(parent, key))) return;
+  const bank = identity.narration_delivery_reference_bank;
+  const bankPath = await checkBinding(bank, episodeDir);
+  accepted(validatePilotNarrationIdentity(identity, { deliveryBank: { path: bankPath, bytes: await bytesAt(bankPath) } }));
 }
 function identityCheck(identity) {
   need(resolveMediaWorkflow(identity).id === "avatar_footage_pilot_v1", "This command requires the dedicated avatar pilot workflow.");
@@ -169,6 +214,7 @@ export async function pilotStatus(episodeDir) {
       const output = path.join(episodeDir, stage.output);
       exists = Boolean(await fs.stat(output).catch(() => null));
       if (!exists) { state = "missing"; }
+      else if (stage.action === "preflight") await validateLockedNarrationIdentity(identity, episodeDir);
       else if (stage.action !== "preflight") {
         const row = await rowAt(episodeDir, stage);
         need(row.schema === "goldflow_avatar_pilot_stage_v1" && row.stage === stage.id && row.identity_sha256 === identityHash, "Stage identity binding is stale.");
@@ -231,11 +277,15 @@ async function preflight(flags, episodeDir, repoRoot) {
   const untrackedFiles = git("ls-files", "--others", "--exclude-standard", "-z").split("\u0000").filter(Boolean);
   const untracked = [];
   for (const relative of untrackedFiles) untracked.push({ path: relative, sha256: hash(await bytesAt(path.join(repoRoot, relative))) });
-  const identity = { ...config, schema: "goldflow_avatar_pilot_identity_v1", content_profile: definition.id, content_profile_config: definition.config, content_profile_sha256: definition.sha256,
+  const bankPath = DEFAULT_NARRATION_DELIVERY_BANK_PATH;
+  const narrationFields = buildPilotNarrationIdentityFields({ narrationLock: config.pilot_providers?.narration,
+    deliveryBank: { path: bankPath, bytes: await bytesAt(bankPath) } });
+  const identity = { ...withNarrationIdentityFields(config, narrationFields), schema: "goldflow_avatar_pilot_identity_v1", content_profile: definition.id, content_profile_config: definition.config, content_profile_sha256: definition.sha256,
     ...mediaWorkflowForPreflight({ contentProfile: definition.id, mediaWorkflow: "avatar_footage_pilot_v1" }),
     stage_registry_version: "2026-09-06.1", source_script: { path: source, sha256: config.source_script.sha256 },
     git: { commit: git("rev-parse", "HEAD"), branch: git("branch", "--show-current"), dirty: Boolean(dirtyStatus), dirty_diff_sha256: hash(`${dirtyStatus}\n${git("diff", "HEAD", "--binary")}\n${JSON.stringify(untracked)}`), dirty_reason: dirtyStatus ? flags["dirty-reason"] : null }, created_at: new Date().toISOString() };
   identityCheck(identity);
+  await validateLockedNarrationIdentity(identity, episodeDir);
   need(!pilotArtifactContainsPrivateData(identity), "Pilot identity must not contain credentials or signed URLs.");
   await fs.mkdir(path.dirname(episodeDir), { recursive: true });
   await fs.mkdir(episodeDir);

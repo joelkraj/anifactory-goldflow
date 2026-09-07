@@ -10,6 +10,25 @@ import { QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK as JOEL } from "./narration-tts-poli
 import { DEFAULT_NARRATION_DELIVERY_BANK_PATH } from "./narration-delivery-reference-bank.mjs";
 import { buildPilotNarrationIdentityFields, validatePilotNarrationIdentity } from "./avatar-pilot-narration-contract.mjs";
 import { validatePilotScript, validatePilotAssetPlan, validatePilotMedia, validatePilotNarrationBundle, pilotArtifactContainsPrivateData, PILOT_NARRATION_IMPORT_ADAPTER_STATUS } from "./avatar-pilot-artifacts.mjs";
+import { buildNarrationSubjectiveReviewDecision, validateNarrationSubjectiveReviewManifest,
+  validateNarrationSubjectiveReviewDecision, NARRATION_SUBJECTIVE_REVIEW_ATTESTATION } from "./narration-subjective-review.mjs";
+
+// This capability is separate from the still-unproven generic/full import route.
+// Release only after the opening producer, finalizer and workflow fixtures pass.
+export const PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS = "proven";
+const OPENING_SCHEMA = "goldflow_avatar_pilot_opening_producer_result_v1";
+const OPENING_ATTESTATION = "complete_opening_listened_end_to_end";
+const OPENING_ADAPTER = Object.freeze({
+  status: PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS,
+  async produce(options) {
+    const { producePilotOpeningSample } = await import("./avatar-pilot-opening-producer.mjs");
+    return producePilotOpeningSample(options);
+  },
+  async validate(payload, options) {
+    const { validatePilotOpeningSampleResult } = await import("./avatar-pilot-opening-validation.mjs");
+    return validatePilotOpeningSampleResult(payload, options);
+  },
+});
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -109,7 +128,26 @@ async function rowAt(episodeDir, stage) { return jsonAt(path.join(episodeDir, st
 async function sourceText(episodeDir) { return (await rowAt(episodeDir, AVATAR_PILOT_STAGES[1])).payload.text; }
 async function narrationPayload(episodeDir) { return (await rowAt(episodeDir, AVATAR_PILOT_STAGES[6])).payload; }
 
-async function validatePayload(stage, payload, episodeDir, identity) {
+async function openingReviewInputs(episodeDir) {
+  const sample = (await rowAt(episodeDir, AVATAR_PILOT_STAGES[4])).payload;
+  need(sample.schema === OPENING_SCHEMA, "Canonical opening review requires a produced sample.");
+  const manifestRef = sample.finalization_artifacts?.subjective_manifest;
+  const manifest = await jsonAt(await checkBinding(manifestRef, episodeDir));
+  const audioRef = sample.finalization_artifacts?.audio;
+  await checkBinding(audioRef, episodeDir);
+  accepted(validateNarrationSubjectiveReviewManifest(manifest));
+  need(path.resolve(manifest.audio_path) === audioRef.path && manifest.audio_sha256 === audioRef.sha256
+    && manifest.narration_generation_plan_file_sha256 === sample.generation_plan.sha256,
+  "Opening listening manifest is not bound to the exact sample audio and plan.");
+  need(manifest.samples.some((row) => row.coverage_class === "complete_opening"
+    && row.start_sample === 0 && row.end_sample_exclusive === manifest.total_sample_count),
+  "Opening listening must cover the complete sample.");
+  need(manifest.samples.every((row) => row.start_sample >= 0 && row.end_sample_exclusive <= manifest.total_sample_count
+    && row.unit_ids.every((id) => sample.unit_ids.includes(id))),
+  "Opening attestation cannot cover a sample outside the exact opening.");
+  return { sample, manifest, manifestRef, audioRef };
+}
+async function validatePayload(stage, payload, episodeDir, identity, openingAdapter) {
   need(!pilotArtifactContainsPrivateData(payload), "Private data cannot enter a pilot receipt.");
   if (stage.action === "ingest") {
     need(hasText(payload.text) && hash(payload.text) === identity.source_script.sha256 && payload.source_script_sha256 === hash(payload.text), "Script must exactly match the preflight source hash.");
@@ -122,7 +160,11 @@ async function validatePayload(stage, payload, episodeDir, identity) {
   }
   if (["import-voice-sample", "import-narration"].includes(stage.action)) {
     const phase = stage.action === "import-voice-sample" ? "sample" : "full";
-    accepted(await validatePilotNarrationBundle(payload, { episodeDir, identity, phase, sourceScriptSha256: identity.source_script.sha256 }));
+    if (phase === "sample" && payload.schema === OPENING_SCHEMA) {
+      need(openingAdapter.status === "proven" && identity.pilot_narration_contract,
+        "Opening synthesis requires its proven scoped adapter and canonical identity.");
+      accepted(await openingAdapter.validate(payload, { episodeDir, identity }));
+    } else accepted(await validatePilotNarrationBundle(payload, { episodeDir, identity, phase, sourceScriptSha256: identity.source_script.sha256 }));
     if (phase === "full") {
       const prior = await rowAt(episodeDir, AVATAR_PILOT_STAGES[4]);
       const priorInput = prior.inputs.find((ref) => ref.role === "import");
@@ -184,7 +226,26 @@ async function validatePayload(stage, payload, episodeDir, identity) {
   }
   if (stage.approval === "operator") {
     need(payload.review?.approved === true && hasText(payload.review.reviewer) && hasText(payload.review.note), "Explicit reviewer and review note required.");
-    if (stage.action === "approve-voice-sample") need(payload.review.attestation === "complete_opening_listened_end_to_end", "Opening approval requires listening to the entire bound sample.");
+    if (stage.action === "approve-voice-sample") {
+      need(payload.review.attestation === OPENING_ATTESTATION, "Opening approval requires listening to the entire bound sample.");
+      const prior = (await rowAt(episodeDir, AVATAR_PILOT_STAGES[4])).payload;
+      if (prior.schema === OPENING_SCHEMA) {
+        const { manifest, manifestRef, audioRef } = await openingReviewInputs(episodeDir);
+        const decision = await jsonAt(await checkBinding(payload.subjective_decision, episodeDir));
+        accepted(validateNarrationSubjectiveReviewDecision(manifest, decision));
+        need(decision.status === "approved" && decision.reviewer === payload.review.reviewer
+          && decision.decisions.every((row) => row.decision === "accept" && row.note === payload.review.note),
+        "Canonical subjective decision differs from the operator's exact opening approval.");
+        const mapping = payload.listening_attestation_mapping;
+        need(mapping?.schema === "goldflow_pilot_opening_listening_attestation_mapping_v1"
+          && mapping.operator_attestation === OPENING_ATTESTATION
+          && mapping.canonical_attestation === NARRATION_SUBJECTIVE_REVIEW_ATTESTATION
+          && mapping.manifest_sha256 === manifestRef.sha256 && mapping.audio_sha256 === audioRef.sha256
+          && mapping.all_samples_contained_in_opening === true
+          && JSON.stringify(mapping.sample_ids) === JSON.stringify(manifest.samples.map((row) => row.sample_id)),
+        "Opening listening attestation mapping is missing or stale.");
+      }
+    }
     if (stage.action === "final-qa") {
       need(payload.review.attestation === "entire_90_second_program_watched_and_listened", "Final QA requires end-to-end viewing and listening of the exact render.");
       const render = (await rowAt(episodeDir, AVATAR_PILOT_STAGES[12])).payload;
@@ -202,7 +263,7 @@ async function rendererAssets(episodeDir) {
   }));
 }
 
-export async function pilotStatus(episodeDir) {
+async function pilotStatusWithAdapter(episodeDir, openingAdapter) {
   episodeDir = path.resolve(episodeDir);
   const identityPath = path.join(episodeDir, "run_identity.json");
   const identity = identityCheck(await jsonAt(identityPath));
@@ -222,25 +283,63 @@ export async function pilotStatus(episodeDir) {
         const expected = await binding(path.join(episodeDir, dependency.output));
         need(row.inputs.some((ref) => ref.role === "upstream" && ref.sha256 === expected.sha256 && path.resolve(episodeDir, ref.path) === expected.path), "Stage upstream binding missing or stale.");
         for (const ref of row.inputs) await checkBinding(ref, episodeDir);
-        await validatePayload(stage, row.payload, episodeDir, identity);
+        await validatePayload(stage, row.payload, episodeDir, identity, openingAdapter);
       }
     } catch (error) { state = "blocked"; reason = error.message; }
     if (stage.action !== "preflight" && stages.at(-1)?.state !== "passed" && state === "passed") { state = "blocked"; reason = "Upstream artifact is unresolved."; }
-    if (PILOT_NARRATION_IMPORT_ADAPTER_STATUS !== "proven" && ["import-voice-sample", "import-narration"].includes(stage.action)) {
+    const openingAvailable = openingAdapter.status === "proven" && Boolean(identity.pilot_narration_contract);
+    let commandShape = pilotCommandShape(stage, episodeDir);
+    if (stage.action === "import-voice-sample" && openingAvailable) {
+      commandShape = `node bin/goldflow.mjs pilot create-voice-sample --episode-dir ${JSON.stringify(episodeDir)} --input <opening-editorial.json>`;
+      if (!exists && await fs.lstat(path.join(episodeDir, "pilot_narration_work")).catch(() => null)) {
+        state = "blocked";
+        reason = "Opening work already exists without an accepted stage. Inspect its gate, execution and QA artifacts for manual triage; never synthesize the opening again.";
+        commandShape = "Inspect pilot_narration_work and record exact opening blocker triage; automatic resynthesis is unavailable.";
+      }
+    } else if (PILOT_NARRATION_IMPORT_ADAPTER_STATUS !== "proven" && ["import-voice-sample", "import-narration"].includes(stage.action)) {
       state = "blocked";
-      reason = "Canonical narration lineage import is not yet proven; new pilot synthesis is also not implemented. No arbitrary WAV or stub QA imports.";
+      reason = stage.action === "import-voice-sample"
+        ? "Opening synthesis requires a proven scoped adapter and canonical pilot identity. Generic narration import remains blocked; no arbitrary WAV or stub QA imports."
+        : "Full narration lineage import and remaining-unit synthesis are not yet proven. Opening approval does not authorize full narration import or resynthesis.";
+      commandShape = "Implement and fixture-prove the required scoped narration adapter; do not import arbitrary speech.";
     }
-    stages.push({ stage: stage.id, state, artifact: path.join(episodeDir, stage.output), exists, approval_policy: stage.approval, reason, next_command_shape: PILOT_NARRATION_IMPORT_ADAPTER_STATUS !== "proven" && ["import-voice-sample", "import-narration"].includes(stage.action) ? "Implement and fixture-prove the canonical narration lineage adapter before speech import/synthesis." : pilotCommandShape(stage, episodeDir) });
+    stages.push({ stage: stage.id, state, artifact: path.join(episodeDir, stage.output), exists, approval_policy: stage.approval, reason, next_command_shape: commandShape });
   }
   const current = stages.find((row) => row.state !== "passed");
   return { schema: "goldflow_run_status_v2", episode_dir: episodeDir, media_workflow: identity.media_workflow, identity, production_eligible: false, publish_allowed: false, current_stage: current?.stage ?? "complete", next_command_shape: current?.next_command_shape ?? null, allowed_command_stages: current?.state === "missing" ? [current.stage] : [], stages,
-    capabilities: { narration: "blocked_pending_proven_canonical_lineage_import_and_scoped_synthesis_adapter", images_video: "reviewed_local_import_only_no_automatic_provider_dispatch", render: "local_typed_90_second_compositor" } };
+    capabilities: { narration: openingAdapter.status === "proven" && identity.pilot_narration_contract
+      ? "opening_only_scoped_synthesis_and_listening_full_narration_blocked"
+      : "blocked_pending_proven_canonical_lineage_import_and_scoped_synthesis_adapter",
+    opening_synthesis: openingAdapter.status, narration_import: PILOT_NARRATION_IMPORT_ADAPTER_STATUS,
+    images_video: "reviewed_local_import_only_no_automatic_provider_dispatch", render: "local_typed_90_second_compositor" } };
 }
+export async function pilotStatus(episodeDir) { return pilotStatusWithAdapter(episodeDir, OPENING_ADAPTER); }
 export function formatPilotStatus(report) {
-  return `# Private 90-second avatar pilot\n\nCurrent stage: ${report.current_stage}. Publishing disabled.\n\n| Stage | State | Approval | Artifact exists |\n| --- | --- | --- | --- |\n${report.stages.map((row) => `| ${row.stage} | ${row.state} | ${row.approval_policy} | ${row.exists ? "yes" : "no"} |`).join("\n")}\n\nNext: ${report.next_command_shape ?? "Proof complete; no publishing command."}\n\n${report.stages.filter((row) => row.reason).map((row) => `${row.stage}: ${row.reason}`).join("\n")}\nNarration import remains blocked pending a proven canonical text/audio lineage adapter; new pilot synthesis is also not implemented. Gemini/Flow assets are reviewed local imports, not automatic dispatch.`;
+  return `# Private 90-second avatar pilot\n\nCurrent stage: ${report.current_stage}. Publishing disabled.\n\n| Stage | State | Approval | Artifact exists |\n| --- | --- | --- | --- |\n${report.stages.map((row) => `| ${row.stage} | ${row.state} | ${row.approval_policy} | ${row.exists ? "yes" : "no"} |`).join("\n")}\n\nNext: ${report.next_command_shape ?? "Proof complete; no publishing command."}\n\n${report.stages.filter((row) => row.reason).map((row) => `${row.stage}: ${row.reason}`).join("\n")}\nOpening synthesis capability: ${report.capabilities.opening_synthesis}; generic/full narration import: ${report.capabilities.narration_import}. Accepted opening units remain immutable. Gemini/Flow assets are reviewed local imports, not automatic dispatch.`;
 }
 
 async function exclusiveJson(file, value) { await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 }); }
+async function openingAttemptAccounting(episodeDir, payload = null) {
+  const scope = { phase: "opening", target_duration_sec: { min: 15, max: 20 },
+    full_program_duration_sec: 90, unit_ids: payload?.unit_ids ?? [] };
+  const gatePath = path.join(episodeDir, "pilot_narration_work", "inputs", "pre_synthesis_authorized.json");
+  if (!(await fs.lstat(gatePath).catch(() => null))) return { scope, creative_submissions: 0, synthesis_authorized: false };
+  const gate = await jsonAt(gatePath).catch(() => null);
+  if (gate?.synthesis_invoked !== true || gate?.model_load_performed !== true) return {
+    scope, creative_submissions: null, synthesis_authorized: "unknown", submission_accounting: "Authorization receipt is unreadable or inconsistent; inspect retained evidence." };
+  scope.unit_ids = gate.scope?.authorized_synthesis_unit_ids ?? scope.unit_ids;
+  const accounting = { scope, creative_submissions: null, synthesis_authorized: true,
+    authorized_unit_ids: gate.scope?.authorized_synthesis_unit_ids ?? [],
+    submission_accounting: "Authorized execution may have started; inspect retained runner evidence before any recovery." };
+  if (payload?.runner_report) {
+    const runner = await jsonAt(await checkBinding(payload.runner_report, episodeDir));
+    accounting.creative_submissions = (runner.results ?? []).filter((row) => row.status === "generated").length;
+    accounting.model_call_count = (runner.cohort_executions ?? []).filter((row) => row.model_call_performed === true).length;
+    accounting.submission_accounting = "Actual original runner results and cohort calls, retained by hash.";
+    accounting.runner_report = payload.runner_report;
+  }
+  return accounting;
+}
 async function audit(episodeDir, event) {
   const id = `${Date.now()}-${randomUUID()}`;
   const directory = path.join(episodeDir, "reports", "stages");
@@ -252,7 +351,9 @@ async function audit(episodeDir, event) {
   const manifest = {
     schema: "goldflow_avatar_pilot_production_manifest_v1", production_eligible: false, publish_allowed: false,
     episode_dir: episodeDir, event_count: events.length, current_batch_status: report.status,
-    total_creative_submissions_by_controller: events.reduce((sum, row) => sum + row.creative_submissions, 0),
+    total_creative_submissions_by_controller: events.some((row) => row.creative_submissions == null)
+      ? null : events.reduce((sum, row) => sum + row.creative_submissions, 0),
+    creative_submission_accounting_incomplete: events.some((row) => row.creative_submissions == null),
     total_provider_cost_by_controller: events.reduce((sum, row) => sum + row.provider_cost, 0),
     imported_media_provider_cost: "Retained in original provider evidence when available; not incurred by this import controller.",
     accepted_stage_receipts: events.filter((row) => row.status === "passed").map((row) => ({ action: row.action, report_id: row.id, identity_sha256: row.identity_sha256, output: row.output ?? null })),
@@ -262,7 +363,7 @@ async function audit(episodeDir, event) {
   await exclusiveJson(temporary, manifest);
   await fs.rename(temporary, path.join(episodeDir, "production_manifest.json"));
 }
-async function preflight(flags, episodeDir, repoRoot) {
+async function preflight(flags, episodeDir, repoRoot, openingAdapter) {
   need(hasText(flags.identity), "pilot preflight requires --identity <proof-config.json>.");
   need(!(await fs.stat(episodeDir).catch(() => null)), "Pilot preflight requires a new episode path; existing directories and identities are never overwritten.");
   const config = await jsonAt(path.resolve(flags.identity));
@@ -291,27 +392,31 @@ async function preflight(flags, episodeDir, repoRoot) {
   await fs.mkdir(episodeDir);
   await exclusiveJson(path.join(episodeDir, "run_identity.json"), identity);
   await audit(episodeDir, { action: "preflight", status: "passed", identity_sha256: (await binding(path.join(episodeDir, "run_identity.json"))).sha256 });
-  return pilotStatus(episodeDir);
+  return pilotStatusWithAdapter(episodeDir, openingAdapter);
 }
 
-export async function executePilotCommand(action, flags = {}, { repoRoot = ROOT } = {}) {
+async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = ROOT } = {}, openingAdapter) {
   need(hasText(flags["episode-dir"]) && !Object.hasOwn(flags, "episodeDir"), "Pilot commands require explicit --episode-dir; no implicit production folder.");
   need(!Object.hasOwn(flags, "workflow-bypass"), "The dedicated pilot approval/scope gates cannot be bypassed.");
   const episodeDir = path.resolve(flags["episode-dir"]);
   need(!Object.hasOwn(flags, "media-workflow") || flags["media-workflow"] === "avatar_footage_pilot_v1", "Pilot commands cannot switch media workflow.");
   need(!Object.hasOwn(flags, "content-profile") || flags["content-profile"] === "mcu_what_if_pilot_v1", "Pilot commands cannot switch content profile.");
-  if (action === "preflight") return preflight(flags, episodeDir, repoRoot);
-  const stage = AVATAR_PILOT_STAGES.find((row) => row.action === action);
-  need(stage || action === "status", "Unknown pilot action. Use pilot status; no publish or automatic synthesis action exists.");
-  const report = await pilotStatus(episodeDir);
+  if (action === "preflight") return preflight(flags, episodeDir, repoRoot, openingAdapter);
+  const stageAction = action === "create-voice-sample" ? "import-voice-sample" : action;
+  const stage = AVATAR_PILOT_STAGES.find((row) => row.action === stageAction);
+  need(stage || action === "status", "Unknown pilot action. Use pilot status; no publishing or automatic full-narration synthesis action exists.");
+  const report = await pilotStatusWithAdapter(episodeDir, openingAdapter);
   for (const [flag, key] of [["channel", "channel"], ["series", "series_slug"], ["week", "week"], ["episode", "episode"]]) need(!Object.hasOwn(flags, flag) || flags[flag] === report.identity[key], `Pilot ${flag} flag conflicts with its immutable identity.`);
   if (action === "status") return flags.format === "markdown" ? formatPilotStatus(report) : report;
   need(report.current_stage === stage.id && report.allowed_command_stages.includes(stage.id), `Pilot stopped at ${report.current_stage}; run status and inspect its next artifact. Passed/stale stages cannot be rerun unscoped.`);
+  if (["import-voice-sample", "import-narration"].includes(action)) need(PILOT_NARRATION_IMPORT_ADAPTER_STATUS === "proven", "Generic and full narration imports remain blocked pending their proven lineage adapter.");
+  if (action === "create-voice-sample") need(openingAdapter.status === "proven" && report.identity.pilot_narration_contract, "Opening synthesis requires its proven scoped adapter and canonical identity.");
   const lockPath = path.join(episodeDir, ".pilot-stage.lock");
   const lock = await fs.open(lockPath, "wx", 0o600);
   const started = Date.now();
+  let producedPayload = null;
   try {
-    const current = await pilotStatus(episodeDir);
+    const current = await pilotStatusWithAdapter(episodeDir, openingAdapter);
     need(current.current_stage === stage.id && current.allowed_command_stages.includes(stage.id), "Pilot stage changed before lease; inspect status.");
     const identity = current.identity;
     const identityRef = await binding(path.join(episodeDir, "run_identity.json"));
@@ -324,6 +429,17 @@ export async function executePilotCommand(action, flags = {}, { repoRoot = ROOT 
       const text = (await bytesAt(source)).toString("utf8");
       inputs.push({ role: "import", ...await binding(source) });
       payload = { text, source_script_sha256: hash(text) };
+    } else if (action === "create-voice-sample") {
+      need(hasText(flags.input), "create-voice-sample requires --input <opening-editorial.json>.");
+      const editorialPath = path.resolve(flags.input);
+      await jsonAt(editorialPath);
+      inputs.push({ role: "editorial", ...await binding(editorialPath) });
+      payload = await openingAdapter.produce({ episodeDir, editorialPath });
+      producedPayload = payload;
+      need(payload?.schema === OPENING_SCHEMA, "Opening producer did not return its scoped result.");
+      const producerResult = path.join(episodeDir, "pilot_narration_work", "opening_producer_result.json");
+      need(JSON.stringify(await jsonAt(producerResult)) === JSON.stringify(payload), "Opening producer result does not match its persisted receipt.");
+      inputs.push({ role: "produced_opening", ...await binding(producerResult) });
     } else if (["approve-evidence", "import-voice-sample", "import-narration", "plan-assets", "import-media", "timeline"].includes(action)) {
       need(hasText(flags.input), `${action} requires --input <artifact.json>.`);
       const input = path.resolve(flags.input);
@@ -339,20 +455,61 @@ export async function executePilotCommand(action, flags = {}, { repoRoot = ROOT 
       need(flags.accept === "true" || ["approve-evidence", "final-qa"].includes(action), "Approval requires --accept true after reviewing the exact bound input.");
       payload.review = { approved: true, reviewer: flags.reviewer, note: flags.note, attestation: flags.attestation ?? null };
     }
-    await validatePayload(stage, payload, episodeDir, identity);
+    if (action === "approve-voice-sample"
+      && (await rowAt(episodeDir, AVATAR_PILOT_STAGES[4])).payload.schema === OPENING_SCHEMA) {
+      need(payload.review.approved === true && hasText(payload.review.reviewer) && hasText(payload.review.note)
+        && payload.review.attestation === OPENING_ATTESTATION,
+      "Opening approval requires reviewer, note and explicit complete_opening_listened_end_to_end attestation.");
+      payload.review.reviewer = payload.review.reviewer.trim();
+      payload.review.note = payload.review.note.trim();
+      const { manifest, manifestRef, audioRef } = await openingReviewInputs(episodeDir);
+      const decision = buildNarrationSubjectiveReviewDecision({ manifest, reviewer: payload.review.reviewer,
+        attestation: NARRATION_SUBJECTIVE_REVIEW_ATTESTATION,
+        decisions: manifest.samples.map((row) => ({ sample_id: row.sample_id, decision: "accept", note: payload.review.note })) });
+      accepted(validateNarrationSubjectiveReviewDecision(manifest, decision));
+      const decisionPath = path.join(episodeDir, "pilot_narration_work", "opening_finalization", `narration_subjective_review_decision_${identity.episode}.json`);
+      await exclusiveJson(decisionPath, decision);
+      payload.subjective_decision = await binding(decisionPath);
+      payload.listening_attestation_mapping = {
+        schema: "goldflow_pilot_opening_listening_attestation_mapping_v1",
+        operator_attestation: OPENING_ATTESTATION, canonical_attestation: NARRATION_SUBJECTIVE_REVIEW_ATTESTATION,
+        manifest_sha256: manifestRef.sha256, audio_sha256: audioRef.sha256,
+        all_samples_contained_in_opening: true, sample_ids: manifest.samples.map((row) => row.sample_id),
+      };
+      inputs.push({ role: "subjective_manifest", ...manifestRef }, { role: "opening_audio", ...audioRef },
+        { role: "subjective_decision", ...payload.subjective_decision });
+    }
+    await validatePayload(stage, payload, episodeDir, identity, openingAdapter);
     // Recheck imported/upstream bytes immediately before accepting the stage.
     for (const ref of inputs) await checkBinding(ref, episodeDir);
     await checkBinding(identityRef, episodeDir);
     const output = path.join(episodeDir, stage.output);
     await exclusiveJson(output, { schema: "goldflow_avatar_pilot_stage_v1", stage: stage.id, identity_sha256: identityRef.sha256, inputs, payload, created_at: new Date().toISOString() });
-    await audit(episodeDir, { action, status: "passed", elapsed_ms: Date.now() - started, identity_sha256: identityRef.sha256, inputs, output: await binding(output) });
+    await audit(episodeDir, { action, status: "passed", elapsed_ms: Date.now() - started, identity_sha256: identityRef.sha256, inputs, output: await binding(output),
+      ...(action === "create-voice-sample" ? await openingAttemptAccounting(episodeDir, payload) : {}) });
   } catch (error) {
-    await audit(episodeDir, { action, status: "blocked", elapsed_ms: Date.now() - started, reason: "Stage failed; inspect exact inputs and retained artifacts before scoped recovery." });
+    await audit(episodeDir, { action, status: "blocked", elapsed_ms: Date.now() - started, reason: "Stage failed; inspect exact inputs and retained artifacts before scoped recovery.",
+      ...(action === "create-voice-sample" ? await openingAttemptAccounting(episodeDir, producedPayload).catch(() => ({ creative_submissions: null, synthesis_authorized: "unknown" })) : {}) });
     throw error;
   } finally {
     await lock.close();
     await fs.unlink(lockPath);
   }
-  const next = await pilotStatus(episodeDir);
+  const next = await pilotStatusWithAdapter(episodeDir, openingAdapter);
   return flags.format === "markdown" ? formatPilotStatus(next) : next;
+}
+
+export async function executePilotCommand(action, flags = {}, options = {}) {
+  return executePilotCommandWithAdapter(action, flags, options, OPENING_ADAPTER);
+}
+
+// Test-only dependency seam. Never accepted through CLI flags or production
+// options; every public command/status call above uses the release constant.
+export function pilotWorkflowFixtureHarness({ status, produce, validate }) {
+  need(["proven", "unproven"].includes(status) && typeof produce === "function" && typeof validate === "function", "Complete fixture adapters required.");
+  const adapter = Object.freeze({ status, produce, validate });
+  return Object.freeze({
+    pilotStatus: (episodeDir) => pilotStatusWithAdapter(episodeDir, adapter),
+    executePilotCommand: (action, flags = {}, options = {}) => executePilotCommandWithAdapter(action, flags, options, adapter),
+  });
 }

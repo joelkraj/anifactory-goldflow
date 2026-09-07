@@ -11,6 +11,7 @@ import {
   ttsSpokenTextAuditSha256,
 } from "./tts-spoken-text-audit.mjs";
 import { hasTtsTerminalPunctuation } from "./tts-text-boundaries.mjs";
+import { validateQwenLiamBatchPlan } from "./qwen-liam-batch-contract.mjs";
 
 export const NARRATION_PRE_SYNTHESIS_GATE_SCHEMA =
   "goldflow_narration_pre_synthesis_gate_v2";
@@ -531,6 +532,26 @@ export function buildNarrationPreSynthesisGate({
     });
   }
   const preservedArtifactIds = preservedArtifacts.map((row) => String(row?.unit_id ?? ""));
+  let boundBatchPlan = plan?.qwen_liam_batch_plan;
+  // A pilot opening is a fresh, explicit phase of a complete immutable plan.
+  // It must not borrow the full episode's cohorts or authorize the remainder.
+  if (synthesisScope?.mode === "pilot_opening_only") {
+    boundBatchPlan = plan?.pilot_phase_batch_plans?.opening;
+    const prefix = units.slice(0, authorizedIds.length);
+    const batchValidation = validateQwenLiamBatchPlan(
+      boundBatchPlan, prefix, policy?.synthesis_contract,
+    );
+    if (!authorizedIds.length || authorizedIds.length >= allUnitIds.length
+      || authorizedIds.some((id, index) => id !== allUnitIds[index])
+      || preservedIds.length || preservedArtifacts.length
+      || !synthesisScope?.evidence_path
+      || !/^[a-f0-9]{64}$/u.test(String(synthesisScope?.evidence_sha256 ?? ""))
+      || batchValidation.status !== "passed") {
+      addFinding(findings, "pre_synthesis_pilot_opening_scope_invalid", {
+        batch_findings: batchValidation.findings,
+      });
+    }
+  }
   if (preservedArtifactIds.length !== preservedIds.length
     || preservedArtifactIds.some((unitId, index) => unitId !== preservedIds[index])
     || preservedArtifacts.some((row) => (
@@ -573,7 +594,7 @@ export function buildNarrationPreSynthesisGate({
       tts_spoken_overrides_sha256: overridesSha256,
       source_artifact_hashes: sourceArtifactHashes,
       reference_asset_hashes: referenceAssetHashes,
-      batch_plan_sha256: plan?.qwen_liam_batch_plan?.batch_plan_sha256 ?? null,
+      batch_plan_sha256: boundBatchPlan?.batch_plan_sha256 ?? null,
     },
     scope: {
       mode: synthesisScope?.mode ?? "initial_full_synthesis",

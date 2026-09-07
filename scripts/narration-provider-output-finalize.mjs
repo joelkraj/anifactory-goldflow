@@ -25,6 +25,7 @@ import {
 import { masterNarrationTwoPass } from "./lib/narration-mastering.mjs";
 import {
   buildNarrationSubjectiveReviewManifest,
+  narrationSubjectiveReviewManifestSha256,
   narrationUnitTimeline,
   validateNarrationSubjectiveReviewManifest,
 } from "./lib/narration-subjective-review.mjs";
@@ -41,6 +42,7 @@ import {
 } from "./lib/local-whisper-policy.mjs";
 import {
   buildLocalWhisperTimingCandidate,
+  localWhisperTimingCandidateSha256,
 } from "./lib/local-whisper-timing-candidate.mjs";
 import {
   planNarrationConfirmationWindows,
@@ -58,6 +60,7 @@ import {
 } from "./lib/narration-provider-unit-asr-reuse.mjs";
 import { equivalentPhrasesForTests } from "./narration-tts-episode.mjs";
 import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs";
+import { prepareOpeningNarrationFinalization, validateOpeningFinalizationFlags } from "./lib/narration-opening-finalization.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1048,9 +1051,11 @@ async function encodeM4a(inputPath, outputPath) {
 
 export async function finalizeNarrationProviderOutput(
   argv = process.argv.slice(2),
+  { phaseContext = null } = {},
 ) {
   const flags = parseFlags(argv);
   if (!flags["episode-dir"]) throw new Error("--episode-dir is required.");
+  if (phaseContext) validateOpeningFinalizationFlags(flags);
   const workflowBypass = boolFlag(flags["workflow-bypass"]);
   const acceptAsrDeliveryBlockers = boolFlag(
     flags["accept-asr-delivery-blockers"],
@@ -1075,6 +1080,9 @@ export async function finalizeNarrationProviderOutput(
   const episodeDir = path.resolve(flags["episode-dir"]);
   const identityPath = path.join(episodeDir, "run_identity.json");
   const identity = await readJson(identityPath, {});
+  if (identity.media_workflow === "avatar_footage_pilot_v1" && !phaseContext) {
+    throw new Error("Pilot narration requires the guarded opening-phase finalizer context; generic/full finalization is unavailable.");
+  }
   const localWhisperIdentity = validateLocalWhisperIdentityContract(identity);
   if (!localWhisperIdentity.done) {
     throw new Error(localWhisperIdentity.evidence);
@@ -1104,7 +1112,7 @@ export async function finalizeNarrationProviderOutput(
   if (!plan || !manifest) {
     throw new Error("Narration plan and provider output manifest are required.");
   }
-  const units = planUnits(plan);
+  let units = planUnits(plan);
   if (!units.length) throw new Error("Narration plan contains no synthesis units.");
   const policy = validateNarrationTtsPolicy(
     narrationTtsPolicyForIdentity(identity),
@@ -1120,6 +1128,19 @@ export async function finalizeNarrationProviderOutput(
     throw new Error("Narration quality contract differs from the identity-locked TTS policy.");
   }
   const canonicalPlanSha256 = plan.plan_sha256 ?? planFileSha256;
+  // Verify the actual approved source before any output directory, QA helper,
+  // ASR or voice model can be touched. Keep the later recheck for mid-run changes.
+  const scriptPath = path.resolve(flags.script ?? path.join(episodeDir, "script_clean.md"));
+  const actualSourceScriptSha256 = await sha256File(scriptPath);
+  if (sourceScriptHash(plan) && actualSourceScriptSha256 !== sourceScriptHash(plan)) {
+    throw new Error("Narration plan source hash differs from the actual approved script.");
+  }
+  const opening = phaseContext ? await prepareOpeningNarrationFinalization({
+    phaseContext, episodeDir, identityPath, identity, scriptPath, planPath, plan, manifestPath, manifest, policy, flags,
+  }) : null;
+  if (opening) units = opening.units;
+  const artifactDir = opening?.outputNamespace ?? episodeDir;
+  const scopeFields = opening ? { finalization_scope: opening.scope } : {};
   const operatorNarrationWaiver = {
     schema: "goldflow_operator_narration_qa_waiver_v1",
     waiver_id: sha256(JSON.stringify({
@@ -1176,10 +1197,11 @@ export async function finalizeNarrationProviderOutput(
       throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
     }
   }
-  const workDir = path.resolve(
+  const workDir = opening ? path.join(artifactDir, "audio") : path.resolve(
     flags["output-dir"]
       ?? path.join(episodeDir, "assets/audio/narration_provider_neutral"),
   );
+  if (opening) await fs.mkdir(artifactDir, { recursive: false });
   await fs.mkdir(workDir, { recursive: true });
   const checkpointPath = path.resolve(
     flags["checkpoint"]
@@ -1192,6 +1214,7 @@ export async function finalizeNarrationProviderOutput(
       : emptyNarrationFinalizationCheckpoint({});
   checkpoint.status = "in_progress";
   checkpoint.context = {
+    ...scopeFields,
     narration_generation_plan_sha256: canonicalPlanSha256,
     narration_generation_plan_file_sha256: planFileSha256,
     provider_output_manifest_sha256:
@@ -1271,11 +1294,11 @@ export async function finalizeNarrationProviderOutput(
   }
 
   const continuityPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_voice_continuity_qa_${episode}.json`,
   );
   const similarityEvidencePath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_speaker_similarity_${episode}.json`,
   );
   const cachedPrimaryMap = new Map();
@@ -1596,19 +1619,19 @@ export async function finalizeNarrationProviderOutput(
   }
 
   const unitDeliveryPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_unit_delivery_qa_${episode}.json`,
   );
   const unitQaPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_tts_unit_qa_${episode}.json`,
   );
   const listenPacketPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_exact_listen_review_packet_${episode}.json`,
   );
   const repairPacketPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_exact_repair_packet_${episode}.json`,
   );
   const manualReviewEvidencePath = String(
@@ -1792,10 +1815,11 @@ export async function finalizeNarrationProviderOutput(
     // Preserve the exact selected first takes before failing closed so a later
     // confirmed exact-unit repair can validate and reuse every unaffected WAV.
     const blockedTtsReportPath = path.join(
-      episodeDir,
+      artifactDir,
       `narration_tts_report_${episode}.json`,
     );
     await atomicWriteJson(blockedTtsReportPath, {
+      ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
       generated_at: new Date().toISOString(),
@@ -1856,7 +1880,7 @@ export async function finalizeNarrationProviderOutput(
   const listenDecisionPath = flags["listen-decision"]
     ? path.resolve(flags["listen-decision"])
     : path.join(
-      episodeDir,
+      artifactDir,
       `narration_exact_listen_review_decision_${episode}.json`,
     );
   const listenDecision = await readJson(listenDecisionPath, null);
@@ -1959,7 +1983,7 @@ export async function finalizeNarrationProviderOutput(
         inputPath: rawWav,
         outputPath: masteredPath,
         reportPath: path.join(
-          episodeDir,
+          artifactDir,
           `narration_mastering_report_${episode}-provider-neutral.json`,
         ),
         targetLufs: qualityContract.mastering.integrated_lufs_target,
@@ -1983,7 +2007,7 @@ export async function finalizeNarrationProviderOutput(
     await atomicWriteJson(checkpointPath, checkpoint);
   }
   const subjectiveManifestPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_subjective_review_manifest_${episode}.json`,
   );
   let subjectiveManifest = null;
@@ -1992,7 +2016,7 @@ export async function finalizeNarrationProviderOutput(
     && deliveryAccepted
     && !skipSubjectiveReview) {
     subjectiveManifest = buildNarrationSubjectiveReviewManifest({
-      plan,
+      plan: opening ? { ...plan, units } : plan,
       stitch,
       audioPath: canonicalWav,
       audioSha256: canonicalWavSha256,
@@ -2001,6 +2025,10 @@ export async function finalizeNarrationProviderOutput(
       qualityContractSha256: qualityContract.contract_sha256,
       sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
     });
+    if (opening) {
+      subjectiveManifest.finalization_scope = opening.scope;
+      subjectiveManifest.manifest_sha256 = narrationSubjectiveReviewManifestSha256(subjectiveManifest);
+    }
     const subjectiveValidation = validateNarrationSubjectiveReviewManifest(
       subjectiveManifest,
     );
@@ -2120,10 +2148,11 @@ export async function finalizeNarrationProviderOutput(
     payload: { full_stream: rawFullStream },
   };
   const fullStreamPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_full_stream_qa_${episode}.json`,
   );
   const fullStreamArtifact = {
+    ...scopeFields,
     schema: "goldflow_narration_full_stream_qa_v2",
     status: fullStream.decision.status,
     source_script_hash: sourceScriptHash(plan),
@@ -2246,7 +2275,7 @@ export async function finalizeNarrationProviderOutput(
       : fullStream.decision.warnings.length || listenPacket.item_count
         ? "passed_with_warnings"
         : "passed";
-  const synthesisRuns = await synthesisRunsWithFirstTakeProvenance({
+  const synthesisRuns = opening?.synthesisRuns ?? await synthesisRunsWithFirstTakeProvenance({
     episodeDir,
     expectedUnitIds: units.map((unit) => String(unit.unit_id)),
     batchPlanSha256: manifest.provider_execution?.batch_plan_sha256 ?? null,
@@ -2254,6 +2283,7 @@ export async function finalizeNarrationProviderOutput(
     synthesisRuns: manifest.provider_execution?.synthesis_runs ?? [],
   });
   const stitchReport = {
+    ...scopeFields,
     schema: "goldflow_provider_neutral_narration_stitch_v2",
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
     source_script_hash: sourceHash,
@@ -2298,6 +2328,7 @@ export async function finalizeNarrationProviderOutput(
     subjective_review_waiver: subjectiveReviewWaiver,
   };
   const ttsReport = {
+    ...scopeFields,
     schema: "goldflow_provider_neutral_narration_tts_report_v2",
     status: ttsStatus,
     source_script_hash: sourceHash,
@@ -2400,11 +2431,11 @@ export async function finalizeNarrationProviderOutput(
     subjective_review_waiver: subjectiveReviewWaiver,
   };
   const stitchReportPath = path.join(
-    episodeDir,
+    artifactDir,
     `audio_stitch_report_${episode}-narration.json`,
   );
   const ttsReportPath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_tts_report_${episode}.json`,
   );
   await Promise.all([
@@ -2416,11 +2447,7 @@ export async function finalizeNarrationProviderOutput(
       boundaries: stitch.boundaries,
     })),
   ]);
-  const scriptPath = path.resolve(
-    flags.script ?? path.join(episodeDir, "script_clean.md"),
-  );
-  const actualSourceScriptSha256 = await sha256File(scriptPath);
-  if (sourceHash && actualSourceScriptSha256 !== sourceHash) {
+  if (await sha256File(scriptPath) !== actualSourceScriptSha256) {
     throw new Error(
       "Cannot emit official Whisper timing candidate: the narration plan "
       + "source hash differs from script_clean.md.",
@@ -2440,8 +2467,12 @@ export async function finalizeNarrationProviderOutput(
     runIdentitySha256: identityFileSha256,
     narrationQualityContractSha256: qualityContract.contract_sha256,
   });
+  if (opening) {
+    timingCandidate.finalization_scope = opening.scope;
+    timingCandidate.candidate_sha256 = localWhisperTimingCandidateSha256(timingCandidate);
+  }
   const timingCandidatePath = path.join(
-    episodeDir,
+    artifactDir,
     `narration_word_timing_candidate_${episode}.json`,
   );
   await atomicWriteJson(timingCandidatePath, timingCandidate);
@@ -2480,6 +2511,16 @@ export async function finalizeNarrationProviderOutput(
     );
   }
   const result = {
+    ...scopeFields,
+    ...(opening ? {
+      phase_context: structuredClone(phaseContext),
+      subjective_review_status: subjectiveManifest ? "pending" : "not_materialized_due_to_delivery_review",
+      full_stream_qa_path: fullStreamPath,
+      voice_continuity_qa_path: continuityPath,
+      unit_delivery_qa_path: unitDeliveryPath,
+      unit_qa_path: unitQaPath,
+      listen_review_packet_path: listenPacketPath,
+    } : {}),
     status: ttsReport.status,
     provider: manifest.provider,
     unit_count: rows.length,

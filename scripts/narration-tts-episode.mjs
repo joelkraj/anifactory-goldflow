@@ -2214,7 +2214,9 @@ export function joinQaV2FromPcmForTests(
   };
 }
 
-async function runSynthesis({
+// Shared pinned runner component. Workflow callers must validate and persist the
+// exact pre-synthesis authorization before invoking it; the runner rechecks it.
+export async function runSynthesis({
   route,
   attempt,
   units,

@@ -4,7 +4,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { executePilotCommand, pilotStatus } from "../lib/avatar-pilot-workflow.mjs";
+import { executePilotCommand, pilotStatus, pilotWorkflowFixtureHarness, PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS } from "../lib/avatar-pilot-workflow.mjs";
+import { buildNarrationSubjectiveReviewManifest, validateNarrationSubjectiveReviewDecision } from "../lib/narration-subjective-review.mjs";
 import { resolveMediaWorkflow, mediaWorkflowForPreflight } from "../lib/media-workflows.mjs";
 import { stageRegistryFor } from "../lib/pipeline-stage-registry.mjs";
 import { contentProfileForIdentity } from "../lib/content-profiles.mjs";
@@ -176,8 +177,12 @@ try {
   const evidencePath = await writeConfig("evidence", evidence);
   const differentReviewer = await run("approve-evidence", { input: evidencePath, reviewer: "fixture", note: "Recorded synthetic source/rights review" });
   assert.equal(differentReviewer.current_stage, "pilot_voice_sample");
-  assert.equal(differentReviewer.capabilities.narration, "blocked_pending_proven_canonical_lineage_import_and_scoped_synthesis_adapter");
-  assert.deepEqual(differentReviewer.allowed_command_stages, [], "voice import cannot advance while its canonical lineage adapter is unproven");
+  const openingReleased = PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS === "proven";
+  assert.equal(differentReviewer.capabilities.narration, openingReleased
+    ? "opening_only_scoped_synthesis_and_listening_full_narration_blocked"
+    : "blocked_pending_proven_canonical_lineage_import_and_scoped_synthesis_adapter");
+  assert.deepEqual(differentReviewer.allowed_command_stages, openingReleased ? ["pilot_voice_sample"] : [], "only a separately proven opening may advance");
+  await assert.rejects(() => run("import-voice-sample", { input: evidencePath }), /stopped at|imports remain blocked/u);
   const events = (await fs.readFile(path.join(episodeDir, "execution_events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) => event.status === "blocked"));
   assert.equal(events.filter((event) => event.status === "passed").length, 4);
@@ -194,6 +199,116 @@ try {
   await fs.appendFile(scriptPath, "Changed candidate after approval.\n");
   assert.equal((await pilotStatus(episodeDir)).current_stage, "pilot_script");
   await fs.writeFile(scriptPath, script);
+
+  // The fixture dependency seam proves released workflow behavior while the
+  // public capability remains independently release-gated. It never calls TTS.
+  let producedCount = 0, forceInvalid = false;
+  const fixtureAdapter = pilotWorkflowFixtureHarness({ status: "proven",
+    async produce({ episodeDir: target, editorialPath }) {
+      producedCount++;
+      assert(path.isAbsolute(editorialPath));
+      assert(await fs.stat(path.join(target, ".pilot-stage.lock")), "normal stage lease must cover production");
+      const work = path.join(target, "pilot_narration_work"); await fs.mkdir(work);
+      const outputDir = path.join(work, "opening_finalization"); await fs.mkdir(outputDir);
+      const audioPath = path.join(outputDir, "fixture.wav");
+      const sampleCount = 16 * 24000; const audio = Buffer.alloc(44 + sampleCount * 2);
+      audio.write("RIFF"); audio.writeUInt32LE(audio.length - 8, 4); audio.write("WAVEfmt ", 8);
+      audio.writeUInt32LE(16, 16); audio.writeUInt16LE(1, 20); audio.writeUInt16LE(1, 22);
+      audio.writeUInt32LE(24000, 24); audio.writeUInt32LE(48000, 28); audio.writeUInt16LE(2, 32);
+      audio.writeUInt16LE(16, 34); audio.write("data", 36); audio.writeUInt32LE(sampleCount * 2, 40);
+      await fs.writeFile(audioPath, audio);
+      const unitIds = ["synthetic-opening-1", "synthetic-opening-2"];
+      const plan = { units: unitIds.map((unit_id) => ({ unit_id, segment_id: "fixture", spoken_text: "Synthetic fixture sentence." })) };
+      const planPath = path.join(work, "plan.json"); await fs.writeFile(planPath, JSON.stringify(plan));
+      const planHash = hash(await fs.readFile(planPath));
+      const manifest = buildNarrationSubjectiveReviewManifest({ plan,
+        stitch: { prepared_inputs: unitIds.map((unit_id) => ({ unit_id, sample_count: sampleCount / 2 })) },
+        audioPath, audioSha256: hash(audio), generationPlanSha256: planHash, generationPlanFileSha256: planHash,
+        qualityContractSha256: hash("Synthetic fixture quality only") });
+      const manifestPath = path.join(outputDir, "subjective.json");
+      await fs.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+      const payload = { schema: "goldflow_avatar_pilot_opening_producer_result_v1", phase: "opening",
+        production_eligible: false, publish_allowed: false, subjective_approval: null,
+        unit_ids: unitIds, generation_plan: { path: planPath, sha256: planHash },
+        finalization_artifacts: { audio: { path: audioPath, sha256: hash(audio) },
+          subjective_manifest: { path: manifestPath, sha256: hash(await fs.readFile(manifestPath)) } } };
+      await fs.writeFile(path.join(work, "opening_producer_result.json"), `${JSON.stringify(payload)}\n`);
+      return payload;
+    },
+    async validate(payload) {
+      return { status: forceInvalid || payload.schema !== "goldflow_avatar_pilot_opening_producer_result_v1" ? "blocked" : "passed",
+        findings: forceInvalid ? [{ code: "Synthetic invalid opening" }] : [] };
+    },
+  });
+  const fixtureRun = (action, flags = {}, target) => fixtureAdapter.executePilotCommand(action, { "episode-dir": target, ...flags }, { repoRoot: repository });
+  async function readyOpeningTarget(name, legacy = false) {
+    const target = path.join(scratch, "runs", name);
+    await fixtureRun("preflight", { identity: configPath }, target);
+    if (legacy) {
+      const file = path.join(target, "run_identity.json"); const old = JSON.parse(await fs.readFile(file));
+      for (const key of ["tts_provider", "tts_fallback_provider", "narrator_voice_id", "tts_voice_id", "tts_native_speed", "voice_provider_options", "narration_quality_contract", "narration_delivery_reference_bank", "provider_locks", "production_profile_config", "production_gates", "model_versions", "pilot_narration_contract"]) delete old[key];
+      await fs.writeFile(file, JSON.stringify(old));
+    }
+    await fixtureRun("ingest", { script: scriptPath }, target);
+    await fixtureRun("approve-script", { accept: "true", reviewer: "fixture", note: "Synthetic exact script approval" }, target);
+    await fixtureRun("approve-evidence", { input: evidencePath, reviewer: "fixture", note: "Synthetic evidence approval" }, target);
+    return target;
+  }
+  const openingTarget = await readyOpeningTarget("opening-route");
+  const editorialPath = await writeConfig("opening-editorial", { fixture: "provider-free workflow injection only" });
+  const legacyTarget = await readyOpeningTarget("legacy-opening-route", true);
+  const legacyReady = await fixtureAdapter.pilotStatus(legacyTarget);
+  assert.equal(legacyReady.current_stage, "pilot_voice_sample"); assert.deepEqual(legacyReady.allowed_command_stages, []);
+  await assert.rejects(() => fixtureRun("create-voice-sample", { input: editorialPath }, legacyTarget), /stopped at/u);
+  assert.equal(producedCount, 0, "a historical identity cannot enter the new opening producer");
+  const openingReady = await fixtureAdapter.pilotStatus(openingTarget);
+  assert.equal(stageRegistryFor(openingReady.identity).length, 14, "aliases cannot change an existing registry");
+  assert.match(openingReady.next_command_shape, /create-voice-sample.*--input/u);
+  assert.deepEqual(openingReady.allowed_command_stages, ["pilot_voice_sample"]);
+  await assert.rejects(() => fixtureRun("import-voice-sample", { input: editorialPath }, openingTarget), /imports remain blocked/u);
+  await assert.rejects(() => fixtureRun("create-voice-sample", { input: editorialPath, "workflow-bypass": "true" }, openingTarget), /cannot be bypassed/u);
+  assert.equal(producedCount, 0);
+  if (!openingReleased) {
+    await assert.rejects(() => executePilotCommand("create-voice-sample", { "episode-dir": openingTarget, input: editorialPath,
+      "opening-capability": "proven" }, { repoRoot: repository }), /stopped at/u);
+    assert.equal(producedCount, 0, "a CLI-like flag must not release the real adapter");
+  }
+  const created = await fixtureRun("create-voice-sample", { input: editorialPath }, openingTarget);
+  assert.equal(created.current_stage, "pilot_voice_sample_approval"); assert.equal(producedCount, 1);
+  await absent(path.join(openingTarget, ".pilot-stage.lock"));
+  const openingReceiptPath = path.join(openingTarget, "pilot_voice_sample.json");
+  const openingReceiptBytes = await fs.readFile(openingReceiptPath);
+  const openingReceipt = JSON.parse(openingReceiptBytes);
+  assert(openingReceipt.inputs.some((row) => row.role === "produced_opening"));
+  await assert.rejects(() => fixtureRun("create-voice-sample", { input: editorialPath }, openingTarget), /cannot be rerun/u);
+  const decisionPath = path.join(openingTarget, "pilot_narration_work", "opening_finalization", "narration_subjective_review_decision_ep_01.json");
+  await absent(decisionPath);
+  await assert.rejects(() => fixtureRun("approve-voice-sample", { accept: "true", reviewer: "fixture", note: "Missing listening" }, openingTarget), /attestation/u);
+  await absent(decisionPath);
+  const reviewed = await fixtureRun("approve-voice-sample", { accept: "true", reviewer: " fixture ", note: " Synthetic listening attestation for workflow fixture only ",
+    attestation: "complete_opening_listened_end_to_end" }, openingTarget);
+  assert.equal(reviewed.current_stage, "pilot_narration"); assert.deepEqual(reviewed.allowed_command_stages, []);
+  const approval = JSON.parse(await fs.readFile(path.join(openingTarget, "pilot_voice_sample_approval.json")));
+  const decision = JSON.parse(await fs.readFile(decisionPath));
+  const subjective = JSON.parse(await fs.readFile(openingReceipt.payload.finalization_artifacts.subjective_manifest.path));
+  assert.equal(validateNarrationSubjectiveReviewDecision(subjective, decision).status, "approved");
+  assert.equal(approval.payload.listening_attestation_mapping.all_samples_contained_in_opening, true);
+  assert.equal(decision.attestation, "all_hash_bound_narration_samples_listened_end_to_end");
+  assert.deepEqual(await fs.readFile(openingReceiptPath), openingReceiptBytes, "approval preserves the opening receipt byte-for-byte");
+  await assert.rejects(() => fixtureRun("import-narration", { input: editorialPath }, openingTarget), /stopped at pilot_narration/u);
+  await fs.appendFile(decisionPath, " ");
+  assert.equal((await fixtureAdapter.pilotStatus(openingTarget)).current_stage, "pilot_voice_sample_approval", "changed canonical decision invalidates the listening gate");
+  assert.equal(producedCount, 1);
+  const failedTarget = await readyOpeningTarget("failed-opening");
+  forceInvalid = true;
+  await assert.rejects(() => fixtureRun("create-voice-sample", { input: editorialPath }, failedTarget), /Synthetic invalid opening/u);
+  forceInvalid = false;
+  const failedStatus = await fixtureAdapter.pilotStatus(failedTarget);
+  assert.equal(failedStatus.current_stage, "pilot_voice_sample"); assert.deepEqual(failedStatus.allowed_command_stages, []);
+  assert.match(failedStatus.next_command_shape, /manual|triage/u);
+  await assert.rejects(() => fixtureRun("create-voice-sample", { input: editorialPath }, failedTarget), /cannot be rerun/u);
+  assert.equal(producedCount, 2, "failed execution must never call its producer again");
+  await absent(path.join(failedTarget, ".pilot-stage.lock"));
 
   await fs.appendFile(tracked, "Uncommitted fixture change.\n");
   const dirtyTarget = path.join(scratch, "runs", "dirty");

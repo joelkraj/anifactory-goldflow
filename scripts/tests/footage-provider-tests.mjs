@@ -125,6 +125,39 @@ test('Real-Debrid inventory reads exact source details, preserves unselected fil
   assert.equal(calls[1].url.pathname, '/rest/1.0/torrents/info/ABC');
 });
 
+test('TorBox inventory refresh is explicit, read-only and preserves bounded pagination', async () => {
+  const { api, calls } = client('torbox', [torbox([]), torbox([]), torbox([tbSource()])]);
+  await api.list();
+  await api.list({ refresh: false });
+  const fresh = await api.list({ refresh: true, limit: 100, offset: 7 });
+  assert.equal(calls[0].url.searchParams.has('bypass_cache'), false);
+  assert.equal(calls[1].url.searchParams.has('bypass_cache'), false);
+  assert.equal(calls[2].url.pathname, '/v1/api/torrents/mylist');
+  assert.equal(calls[2].url.searchParams.get('bypass_cache'), 'true');
+  assert.equal(calls[2].url.searchParams.get('limit'), '100');
+  assert.equal(calls[2].url.searchParams.get('offset'), '7');
+  assert.ok(calls.every(({ options }) => options.method === 'GET'));
+  assert.equal(fresh.source_count, 1);
+  assert.equal(fresh.items[0].source_id, '4');
+  assert.equal(fresh.items[0].ready, true);
+  assert.equal(calls.length, 3, 'refresh adds no relay update, detail or download request');
+});
+
+test('inventory refresh rejects non-booleans and unsupported Real-Debrid refresh before network', async () => {
+  for (const provider of ['torbox', 'real_debrid']) {
+    const { api, calls } = client(provider, []);
+    for (const refresh of ['true', 'false', null, 1, 0, {}, []]) {
+      await rejectsSafe(() => api.list({ refresh }), 'INVALID_INPUT');
+    }
+    if (provider === 'real_debrid') await rejectsSafe(() => api.list({ refresh: true }), 'UNSUPPORTED_OPERATION');
+    assert.equal(calls.length, 0);
+  }
+  const rd = client('real_debrid', [json([]), json([])]);
+  await rd.api.list();
+  await rd.api.list({ refresh: false });
+  assert.ok(rd.calls.every(({ url, options }) => !url.searchParams.has('bypass_cache') && options.method === 'GET'));
+});
+
 test('inventory is bounded and never dumps metadata URLs/tokens', async () => {
   const { api, calls } = client('torbox', [torbox([tbSource({ files: [{ id: 0, name: `${KEY}.mp4`, size: 20 }] })])]);
   const result = await api.list();

@@ -342,10 +342,14 @@ export function createFootageProvider(name, { apiKey, fetchImpl = globalThis.fet
         expires_at: expires(provider === 'torbox' ? data.premium_expires_at : data.expiration),
       };
     },
-    async list({ limit = 20, offset = 0 } = {}) {
+    async list({ limit = 20, offset = 0, refresh = false } = {}) {
+      if (typeof refresh !== 'boolean') fail(provider, 'INVALID_INPUT', 'refresh must be a boolean.');
+      if (refresh && provider !== 'torbox') fail(provider, 'UNSUPPORTED_OPERATION', 'Fresh inventory requests are supported only for TorBox.');
       const count = integer(limit, { min: 1, max: MAX_PAGE_SOURCES, label: 'page limit', provider });
       const start = integer(offset, { label: 'page offset', provider });
-      const { data, totalCount } = await request(provider === 'torbox' ? 'torrents/mylist' : 'torrents', { query: { limit: count, offset: start } });
+      const { data, totalCount } = await request(provider === 'torbox' ? 'torrents/mylist' : 'torrents', {
+        query: { limit: count, offset: start, ...(refresh ? { bypass_cache: true } : {}) },
+      });
       if (!Array.isArray(data) || data.length > count) fail(provider, 'INVALID_RESPONSE', 'provider returned an invalid source page.');
       const items = [];
       const pendingSources = [];

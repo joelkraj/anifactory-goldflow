@@ -72,6 +72,48 @@ test("account checks use only explicitly configured providers", async () => {
   assert.equal((await run(["accounts"])).results.length, 1);
   assert.equal(calls, 1);
 });
+test("inventory refresh requires a strict boolean before constructing a provider", async () => {
+  let providerCalls = 0;
+  const overrides = { providerFactory: () => { providerCalls++; throw new Error("Unexpected provider construction"); } };
+  for (const value of ["yes", "1", "TRUE", ""]) {
+    await assert.rejects(run(["list", "--provider", "torbox", "--refresh", value], overrides), /refresh must be true or false/);
+  }
+  assert.equal(providerCalls, 0);
+});
+test("fresh inventory requires explicit TorBox selection before constructing a provider", async () => {
+  let providerCalls = 0;
+  const overrides = { providerFactory: () => { providerCalls++; throw new Error("Unexpected provider construction"); } };
+  for (const providerFlags of [[], ["--provider", "both"], ["--provider", "real_debrid"], ["--provider", "local"]]) {
+    await assert.rejects(run(["list", ...providerFlags, "--refresh", "true"], overrides), /refresh.*provider torbox/i);
+  }
+  assert.equal(providerCalls, 0);
+});
+test("inventory listing remains cached by default and when refresh is false", async () => {
+  const requests = [];
+  const overrides = {
+    env: { ...env, GOLDFLOW_REAL_DEBRID_API_KEY: "fixture-rd-token" },
+    providerFactory: (provider) => ({ list: async (options) => { requests.push({ provider, options }); return { items: [] }; } }),
+  };
+  for (const refreshFlags of [[], ["--refresh", "false"]]) {
+    requests.length = 0;
+    await run(["list", ...refreshFlags], overrides);
+    assert.deepEqual(requests.map(({ provider }) => provider), ["torbox", "real_debrid"]);
+    for (const { options } of requests) {
+      assert.equal(options.limit, 20);
+      assert.equal(options.offset, 0);
+      assert.equal(options.refresh ?? false, false);
+    }
+  }
+});
+test("explicit TorBox inventory refresh preserves page arguments", async () => {
+  const requests = [];
+  const result = await run(["list", "--provider", "torbox", "--limit", "37", "--offset", "12", "--refresh", "true"], {
+    providerFactory: (provider) => ({ list: async (options) => { requests.push({ provider, options }); return { items: [] }; } }),
+  });
+  assert.deepEqual(requests, [{ provider: "torbox", options: { limit: 37, offset: 12, refresh: true } }]);
+  assert.equal(result.status, "passed");
+  assert.equal(result.results.length, 1);
+});
 test("registration requires explicit rights and exact edition before network", async () => {
   const before = calls;
   await assert.rejects(run(["register", "--provider", "torbox"]), /rights-confirmed/);

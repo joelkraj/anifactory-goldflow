@@ -31,6 +31,14 @@ node bin/goldflow.mjs footage list --provider both --limit 20 --offset 0
 
 `config` checks key presence and FFmpeg/ffprobe availability locally; it does not authenticate. `accounts` and `list` make real account requests. Account checks report safe subscription/status fields, not full user profiles. Listing reports your account's torrent files, not a searchable catalog of every movie. Pagination counts source torrents, so a page can contain more file rows than `--limit`.
 
+TorBox normally caches list information for 600 seconds. After a known account change, request one fresh page explicitly:
+
+```sh
+node bin/goldflow.mjs footage list --provider torbox --limit 100 --offset 0 --refresh true
+```
+
+This read-only request uses TorBox's documented `bypass_cache` query; it does not request a relay update, acquire a source, or download media. The default (or `--refresh false`) keeps normal cached-list behavior. `--refresh true` requires explicit `--provider torbox`; Real-Debrid, `both`, and an omitted provider are rejected before any account request. Limits remain 1–100 source torrents per page, with no automatic pagination or polling. Use refresh only when needed, as recommended in the [official TorBox torrent-list contract](https://www.postman.com/torbox/torbox-api/documentation/b6l9hbv/main-api?entity=request-29572726-eafc5ec3-e4be-49a4-a351-3a2188fdf1ff).
+
 Empty Real-Debrid lists may return HTTP `204` rather than `[]`; this is a valid empty inventory. TorBox may return an unfinished source with `files: null`; listing reports it separately as pending with zero available file rows. It never invents a file ID or assumes such a source is ready. Missing file metadata on an allegedly completed and present source still fails closed.
 
 ## Register an exact ready source

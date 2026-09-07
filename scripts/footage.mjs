@@ -31,6 +31,7 @@ export const FOOTAGE_HELP = `Goldflow footage — private, opt-in source clippin
   footage approve              Record preview approval for --clip receipt.json
 
 Common: --provider torbox|real_debrid|both, --library-dir <directory>
+List: --limit 20 --offset 0 [--refresh true] (refresh requires --provider torbox)
 Registration: --title <title> --edition <exact release> --rights-confirmed true
               --rights-note <permission/public-domain/license/review-basis note>
 Search: --source <source.json> --subtitles <file.srt|file.vtt> --query <dialogue>
@@ -51,7 +52,7 @@ movie discovery, episode mutation, or publishing. See docs/workflows/footage_cli
 
 const ALLOWED = {
   init: [], config: [], accounts: ["provider"],
-  list: ["provider", "limit", "offset"],
+  list: ["provider", "limit", "offset", "refresh"],
   "cache-check": ["provider", "hash"],
   add: ["provider", "magnet-file", "allow-uncached", "file-ids", "rights-confirmed", "rights-note"],
   select: ["provider", "source-id", "file-ids", "allow-uncached", "rights-confirmed", "rights-note"],
@@ -151,6 +152,8 @@ export async function runFootage(argv, {
   };
   if (command === "accounts" || command === "list") {
     const requested = providerName(flags.provider ?? "both");
+    const refresh = command === "list" ? boolean(flags, "refresh") : false;
+    if (refresh && requested !== "torbox") throw new Error("--refresh true requires --provider torbox; Real-Debrid refresh is unsupported.");
     const providers = requested === "both"
       ? [config.torboxApiKey && "torbox", config.realDebridApiKey && "real_debrid"].filter(Boolean)
       : [requested];
@@ -161,6 +164,7 @@ export async function runFootage(argv, {
       const api = client(provider);
       results.push({ provider, ...(command === "accounts" ? await api.account() : await api.list({
         limit: integer(flags, "limit", 20, 1, 100), offset: integer(flags, "offset", 0, 0, 1_000_000),
+        ...(refresh ? { refresh: true } : {}),
       })) });
     }
     return { status: "passed", results };

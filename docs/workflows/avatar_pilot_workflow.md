@@ -41,6 +41,7 @@ After every command, inspect `node bin/goldflow.mjs run status --episode-dir <di
 | `revise-asset-plan --input <plan>` | One guarded pre-approval revision; exact `--prior-stage-sha256`, `--affected-asset-ids` (comma-separated), `--reviewer` and `--note`; original plan preserved, no generation or approval |
 | `approve-asset-plan` | Exact creative/provider scope approval |
 | `revise-host-design --input <request>` | One guarded post-approval host-only amendment after the first neutral candidate is explicitly rejected; `--accept true --reviewer --note`; preserves the first attempt and authorizes exactly one replacement neutral submission |
+| `approve-host-identity --input <request>` | Accept the exact replacement neutral plus its inspected real-alpha cutout; `--accept true --reviewer --note`; releases only the five already-planned dependent pose IDs, one first submission each |
 | `import-media --input <manifest>` | Complete planned local assets, immutable receipts and exact pilot reviews |
 | `timeline --input <timeline>` | Typed frame coverage, source/output mapping, complete narration/captions |
 | `approve-timeline` | Exact edit/mix approval |
@@ -94,6 +95,8 @@ At `pilot_media`, before a media manifest, timeline or render exists, `revise-ho
 The replacement plan keeps every asset ID, order, kind, provider, model, truth mode, reference relationship and non-host row unchanged. Only the two host art-direction strings, exact six host-pose purpose strings and the declared external inspiration binding may change. The action writes a new effective plan and approval plus an exact replacement authority: only `host_neutral`, attempt two, one new creative submission, lifetime count two. It still does not dispatch Gemini or accept the output. Dependent poses remain blocked until the actual replacement neutral asset is separately reviewed.
 
 The replacement provider receipt must record `creative_submission_count: 2`, `attempt_number: 2`, `creative_submissions_this_attempt: 1`, the exact `replacement_authority`, replacement prompt hash and external inspiration binding. Later host poses remain their own single first submissions and bind the same `host_design_authority` plus their planned accepted-neutral reference. Stale, partial, deleted or repeated amendment evidence blocks rather than falling back. Other assets keep the ordinary one-submission rule.
+
+`approve-host-identity` is the separate post-generation release gate. Its request hash-binds the replacement request, browser submission and provider observations, native output, operator identity acceptance, deterministic alpha-extraction receipt and inspected real-alpha PNG. It writes an immutable approval authority without changing the prior host-design authorization. Each of the five dependent poses must bind that approval and the exact accepted alpha-neutral path/hash, uses attempt one with one creative submission, and cannot inherit the external inspiration image. Missing or stale approval evidence blocks media import and pose authority; the action performs no generation and cannot be replayed.
 
 ### Asset and Edit Evidence
 

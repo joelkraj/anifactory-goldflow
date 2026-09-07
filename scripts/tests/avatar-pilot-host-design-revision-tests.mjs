@@ -134,7 +134,7 @@ async function main() {
     const neutralProof = { creative_submission_count: 2, attempt_number: 2, creative_submissions_this_attempt: 1,
       replacement_authority: resolved.authorization, prompt_sha256: resolved.request.replacement_prompt.sha256,
       external_inspiration_bindings: resolved.request.external_inspiration_bindings, reference_bindings: [] };
-    assert.equal(validatePilotGeneratedAttempt(neutralProof, { row: neutralRow, planned: plannedNeutral, hostRevision: resolved }).status, "passed");
+    assert.equal(validatePilotGeneratedAttempt(neutralProof, { row: neutralRow, planned: plannedNeutral, hostRevision: resolved }).status, "blocked");
     for (const mutate of [
       (p) => { p.creative_submission_count = 1; },
       (p) => { p.attempt_number = 3; },
@@ -145,15 +145,53 @@ async function main() {
       const invalid = structuredClone(neutralProof); mutate(invalid);
       assert.equal(validatePilotGeneratedAttempt(invalid, { row: neutralRow, planned: plannedNeutral, hostRevision: resolved }).status, "blocked");
     }
+    const acceptedDir = path.join(attemptDir, "masked_direction_v2"); await fs.mkdir(acceptedDir);
+    const nativePath = path.join(acceptedDir, "accepted-native.jpeg"); await fs.writeFile(nativePath, "synthetic accepted masked host");
+    const native = await ref(nativePath);
+    const alphaBytes = Buffer.alloc(26); Buffer.from("89504e470d0a1a0a", "hex").copy(alphaBytes); alphaBytes.write("IHDR", 12, "ascii"); alphaBytes[25] = 6;
+    const alphaPath = path.join(acceptedDir, "accepted-alpha.png"); await fs.writeFile(alphaPath, alphaBytes);
+    const alpha = await ref(alphaPath);
+    const replacementRequest = await writeRef(path.join(acceptedDir, "generation_request.json"), {
+      asset_id: "host_neutral", attempt_number: 2, replacement_authority: resolved.authorization });
+    const replacementSubmission = await writeRef(path.join(acceptedDir, "submission.json"), {
+      asset_id: "host_neutral", attempt_number: 2, creative_submission_count: 2 });
+    const providerObservation = await writeRef(path.join(acceptedDir, "provider.json"), {
+      asset_id: "host_neutral", attempt_number: 2, creative_submission_count: 2 });
+    const replacementResult = await writeRef(path.join(acceptedDir, "result.json"), {
+      asset_id: "host_neutral", attempt_number: 2, creative_submission_count: 2, native_output: native });
+    const identityReview = await writeRef(path.join(acceptedDir, "operator_review.json"), {
+      schema: "goldflow_avatar_pilot_host_identity_operator_review_v1", asset_id: "host_neutral",
+      reviewer: "fixture", decision: "accepted", approved: true, reviewed_candidate: native });
+    const alphaReceipt = await writeRef(path.join(acceptedDir, "alpha_receipt.json"), {
+      schema: "goldflow_avatar_pilot_technical_alpha_extraction_v1", asset_id: "host_neutral", creative_submission: false,
+      input: native, output: { ...alpha, has_alpha: true }, inspection_preview: { result: "pass" } });
+    const identityApprovalRequestPath = path.join(fixture.root, "fixture_host_identity_approval.json");
+    await fixture.writeJson(identityApprovalRequestPath, {
+      schema: "goldflow_avatar_pilot_host_identity_approval_request_v1",
+      identity_sha256: (await ref(path.join(fixture.root, "run_identity.json"))).sha256,
+      host_design_authority: resolved.authorization,
+      asset_plan: await ref(resolved.plan.path), asset_plan_approval: await ref(resolved.approval.path),
+      generation_request: replacementRequest, submission_observation: replacementSubmission,
+      provider_observation: providerObservation, generation_result: replacementResult, operator_review: identityReview,
+      native_output: native, alpha_output: alpha, alpha_receipt: alphaReceipt,
+    });
+    await fixture.run("approve-host-identity", { input: identityApprovalRequestPath, accept: "true", reviewer: "fixture",
+      note: "Synthetic accepted masked identity and inspected alpha only" });
+    const hostIdentityApproval = await import("../lib/avatar-pilot-host-identity-approval.mjs")
+      .then(({ resolvePilotHostIdentityApproval }) => resolvePilotHostIdentityApproval({ episodeDir: fixture.root, identity: fixture.identity }));
+    neutralRow.sha256 = alpha.sha256;
+    neutralProof.host_identity_authority = hostIdentityApproval.approval;
+    assert.equal(validatePilotGeneratedAttempt(neutralProof, { row: neutralRow, planned: plannedNeutral,
+      hostRevision: resolved, hostIdentityApproval }).status, "passed");
     const plannedPose = resolved.plan.row.payload.assets.find((row) => row.id === "host_open_palm");
     const poseProof = { creative_submission_count: 1, attempt_number: 1, creative_submissions_this_attempt: 1,
-      host_design_authority: resolved.authorization, prompt_sha256: "c".repeat(64),
-      reference_bindings: [{ id: "host_neutral", path: "/synthetic", sha256: neutralRow.sha256 }] };
+      host_design_authority: resolved.authorization, host_identity_authority: hostIdentityApproval.approval,
+      prompt_sha256: "c".repeat(64), reference_bindings: [{ id: "host_neutral", ...alpha }] };
     assert.equal(validatePilotGeneratedAttempt(poseProof, { row: { ...plannedPose, sha256: "d".repeat(64) },
-      planned: plannedPose, hostRevision: resolved }).status, "passed");
+      planned: plannedPose, hostRevision: resolved, hostIdentityApproval }).status, "passed");
     const selfAuthorized = { ...poseProof, replacement_authority: resolved.authorization };
     assert.equal(validatePilotGeneratedAttempt(selfAuthorized, { row: { ...plannedPose, sha256: "d".repeat(64) },
-      planned: plannedPose, hostRevision: resolved }).status, "blocked");
+      planned: plannedPose, hostRevision: resolved, hostIdentityApproval }).status, "blocked");
     for (const [file, sha] of protectedBefore) assert.equal((await ref(file)).sha256, sha, `mutated protected input: ${file}`);
     await assert.rejects(() => fixture.run("revise-host-design", { input: revisionPath, accept: "true", reviewer: "fixture", note: "repeat" }),
       /stopped at pilot_media|revision/i);

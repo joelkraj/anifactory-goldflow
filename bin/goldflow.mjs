@@ -258,6 +258,7 @@ ${registryCommands}
   goldflow pilot approve-narration Accept the exact full candidate and timing after --attestation entire_proof_narration_listened_end_to_end --accept true --reviewer <name> --note <review>
   goldflow pilot revise-asset-plan One pre-approval revision; --input <plan> --prior-stage-sha256 <hash> --affected-asset-ids <exact-IDs> --reviewer <name> --note <reason>; preserves original, no generation/approval
   goldflow pilot revise-host-design One post-approval host-only amendment after a rejected neutral candidate; --input <request.json> --accept true --reviewer <name> --note <reason>; authorizes exactly one replacement neutral submission
+  goldflow pilot approve-host-identity Accept the exact replacement neutral and reviewed real-alpha cutout; --input <request.json> --accept true --reviewer <name> --note <review>; authorizes only its five planned dependent poses
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof

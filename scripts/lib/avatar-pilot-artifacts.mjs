@@ -259,11 +259,12 @@ export async function validatePilotNarrationBundle(bundle, { episodeDir, identit
 
 /** Pure receipt accounting, with authority resolved from retained artifacts by
  * validatePilotMedia. An imported receipt cannot grant its own replacement. */
-export function validatePilotGeneratedAttempt(proof, { row, planned, hostRevision = null } = {}) {
+export function validatePilotGeneratedAttempt(proof, { row, planned, hostRevision = null, hostIdentityApproval = null } = {}) {
   const findings = [];
   const same = (a, b) => a === undefined || b === undefined ? a === b : canonicalQwenBatchSha256(a) === canonicalQwenBatchSha256(b);
   const revisedHost = Boolean(hostRevision && planned.kind === "host_pose");
   const replacement = revisedHost && row.id === "host_neutral";
+  const dependentPose = revisedHost && !replacement;
   check(findings, proof.creative_submission_count === (replacement ? 2 : 1), "pilot_generated_submission_lifetime_invalid", row.id);
   if (replacement) {
     check(findings, proof.attempt_number === 2 && proof.creative_submissions_this_attempt === 1
@@ -287,10 +288,20 @@ export function validatePilotGeneratedAttempt(proof, { row, planned, hostRevisio
       : proof.host_design_authority === undefined, "pilot_host_design_authorization_invalid", row.id);
   }
   if (revisedHost) {
+    check(findings, hostIdentityApproval && same(proof.host_identity_authority, hostIdentityApproval.approval),
+      "pilot_host_identity_approval_required", row.id);
+    if (replacement) check(findings, row.sha256 === hostIdentityApproval?.row?.accepted_alpha_output?.sha256,
+      "pilot_host_neutral_must_be_accepted_alpha_output", row.id);
+    if (dependentPose) check(findings, hostIdentityApproval?.row?.dependent_pose_asset_ids?.includes(row.id)
+      && hostIdentityApproval.row.creative_submissions_per_pose === 1 && hostIdentityApproval.row.attempt_number_per_pose === 1,
+    "pilot_host_dependent_pose_not_authorized", row.id);
     const expected = planned.reference_asset_ids ?? [];
     const actual = Array.isArray(proof.reference_bindings) ? proof.reference_bindings.map((ref) => ref.id) : null;
     check(findings, actual && new Set(actual).size === actual.length
       && same([...actual].sort(), [...expected].sort()), "pilot_host_exact_identity_references_required", row.id);
+    if (dependentPose) check(findings, proof.reference_bindings?.length === 1
+      && same(proof.reference_bindings[0], hostIdentityApproval?.row?.required_reference_binding),
+    "pilot_host_accepted_neutral_reference_required", row.id);
   }
   return pass(findings);
 }
@@ -304,6 +315,7 @@ export async function validatePilotMedia(manifest, { episodeDir, identity, asset
   check(findings, rows.length === plans.length && new Set(rows.map((row) => row?.id)).size === rows.length && rows.every((row) => plans.some((plan) => plan.id === row?.id)), "pilot_media_exact_complete_asset_scope_required");
   if (findings.length) return pass(findings);
   let hostRevision = null;
+  let hostIdentityApproval = null;
   try {
     // Resolve from the episode, not a caller-asserted receipt or a validator
     // option. A stale/partial/deleted recorded amendment blocks all imports.
@@ -311,6 +323,11 @@ export async function validatePilotMedia(manifest, { episodeDir, identity, asset
     hostRevision = await resolvePilotHostDesignRevision({ episodeDir, identity });
     check(findings, !hostRevision || canonicalQwenBatchSha256(assetPlan) === canonicalQwenBatchSha256(hostRevision.plan.row.payload),
       "pilot_media_current_host_design_plan_required");
+    if (hostRevision) {
+      const { resolvePilotHostIdentityApproval } = await import("./avatar-pilot-host-identity-approval.mjs");
+      hostIdentityApproval = await resolvePilotHostIdentityApproval({ episodeDir, identity });
+      check(findings, Boolean(hostIdentityApproval), "pilot_media_host_identity_approval_required");
+    }
   } catch {
     findings.push({ code: "pilot_media_host_design_revision_invalid" });
   }
@@ -364,7 +381,7 @@ export async function validatePilotMedia(manifest, { episodeDir, identity, asset
       } else {
         const proof = receipt.document;
         check(findings, proof.schema === "goldflow_avatar_pilot_provider_receipt_v1" && proof.status === "passed" && proof.asset_id === row.id && proof.provider === row.provider && proof.model === row.model && proof.output_sha256 === row.sha256 && HASH.test(proof.prompt_sha256 ?? "") && proof.review?.approved === true && text(proof.review?.reviewer) && text(proof.review?.note), "pilot_generated_receipt_invalid", row.id);
-        findings.push(...validatePilotGeneratedAttempt(proof, { row, planned, hostRevision }).findings);
+        findings.push(...validatePilotGeneratedAttempt(proof, { row, planned, hostRevision, hostIdentityApproval }).findings);
         // This is an explicit manual import adapter. Preserve actual provider
         // evidence; a locally written wrapper alone is not provider provenance.
         await boundFile(proof.provider_evidence, episodeDir);

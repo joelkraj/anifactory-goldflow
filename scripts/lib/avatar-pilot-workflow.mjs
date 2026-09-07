@@ -18,6 +18,8 @@ import { pilotAssetPlanRevisionPaths, preparePilotAssetPlanRevision,
   resolvePilotAssetPlanStage } from "./avatar-pilot-asset-plan-revision.mjs";
 import { pilotHostDesignRevisionPaths, preparePilotHostDesignRevision,
   resolvePilotHostDesignRevision } from "./avatar-pilot-host-design-revision.mjs";
+import { preparePilotHostIdentityApproval,
+  resolvePilotHostIdentityApproval } from "./avatar-pilot-host-identity-approval.mjs";
 
 // This capability is separate from the still-unproven generic/full import route.
 // Release only after the opening producer, finalizer and workflow fixtures pass.
@@ -485,7 +487,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
   need(!Object.hasOwn(flags, "media-workflow") || flags["media-workflow"] === "avatar_footage_pilot_v1", "Pilot commands cannot switch media workflow.");
   need(!Object.hasOwn(flags, "content-profile") || flags["content-profile"] === "mcu_what_if_pilot_v1", "Pilot commands cannot switch content profile.");
   if (action === "preflight") return preflight(flags, episodeDir, repoRoot, openingAdapter);
-  const stageAction = action === "revise-host-design" ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
+  const stageAction = ["revise-host-design", "approve-host-identity"].includes(action) ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
     : ["create-narration", "review-narration", "approve-narration"].includes(action) ? "import-narration" : action;
   const stage = AVATAR_PILOT_STAGES.find((row) => row.action === stageAction);
   need(stage || action === "status", "Unknown pilot action. Use pilot status; publishing and automatic media dispatch are unavailable.");
@@ -512,7 +514,44 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
     const previous = AVATAR_PILOT_STAGES[AVATAR_PILOT_STAGES.indexOf(stage) - 1];
     const inputs = [{ role: "upstream", ...await binding(await stageOutputPath(episodeDir, previous)) }];
     let payload;
-    if (action === "revise-host-design") {
+    if (action === "approve-host-identity") {
+      need(hasText(flags.input) && flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note),
+        "Host-identity approval requires --input, --accept true, reviewer and note.");
+      const prepared = await preparePilotHostIdentityApproval({ episodeDir, identity, inputPath: path.resolve(flags.input),
+        reviewer: flags.reviewer, note: flags.note });
+      await fs.mkdir(prepared.paths.directory);
+      const createdAt = new Date().toISOString();
+      const approval = { schema: "goldflow_avatar_pilot_host_identity_approval_v1", status: "authorized",
+        created_at: createdAt, identity_sha256: prepared.identityRef.sha256, request: prepared.requestRef,
+        host_design_authority: prepared.revision.authorization,
+        asset_plan: { path: prepared.revision.plan.path, sha256: (await binding(prepared.revision.plan.path)).sha256 },
+        asset_plan_approval: { path: prepared.revision.approval.path, sha256: (await binding(prepared.revision.approval.path)).sha256 },
+        accepted_neutral_asset_id: "host_neutral", accepted_native_output: prepared.native,
+        accepted_alpha_output: prepared.alpha, operator_review: prepared.request.operator_review,
+        alpha_receipt: prepared.request.alpha_receipt, dependent_pose_asset_ids: prepared.dependentPoseIds,
+        creative_submissions_per_pose: 1, attempt_number_per_pose: 1,
+        required_reference_binding: { id: "host_neutral", ...prepared.alpha },
+        external_inspiration_for_dependent_poses: false, automatic_retry: false, automatic_failover: false,
+        production_eligible: false, publish_allowed: false,
+        review: { approved: true, reviewer: prepared.reviewer, note: prepared.note } };
+      await exclusiveJson(prepared.paths.approval, approval);
+      const approvalRef = await binding(prepared.paths.approval);
+      const executionRef = await audit(episodeDir, { action, status: "passed", elapsed_ms: Date.now() - started,
+        identity_sha256: prepared.identityRef.sha256,
+        inputs: [{ role: "host_identity_approval_request", ...prepared.requestRef },
+          { role: "host_design_authority", ...prepared.revision.authorization },
+          { role: "accepted_native_output", ...prepared.native }, { role: "accepted_alpha_output", ...prepared.alpha },
+          { role: "operator_review", ...prepared.request.operator_review }, { role: "alpha_receipt", ...prepared.request.alpha_receipt }],
+        output: approvalRef, scope: { duration_sec: 90, phase: "accepted_host_identity_and_dependent_pose_release",
+          accepted_asset_id: "host_neutral", dependent_pose_asset_ids: prepared.dependentPoseIds },
+        creative_submissions: 0, provider_cost: 0, synthesis_invoked: false, generation_authorized: true,
+        production_eligible: false, publish_allowed: false });
+      await exclusiveJson(prepared.paths.activation, { schema: "goldflow_avatar_pilot_host_identity_approval_activation_v1",
+        identity_sha256: prepared.identityRef.sha256, approval: approvalRef, execution_report: executionRef });
+      await resolvePilotHostIdentityApproval({ episodeDir, identity });
+      const approvedStatus = await pilotStatusWithAdapter(episodeDir, openingAdapter);
+      return flags.format === "markdown" ? formatPilotStatus(approvedStatus) : approvedStatus;
+    } else if (action === "revise-host-design") {
       need(hasText(flags.input) && flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note),
         "Host-design revision requires --input, --accept true, reviewer and note.");
       const prepared = await preparePilotHostDesignRevision({ episodeDir, identity, inputPath: path.resolve(flags.input),

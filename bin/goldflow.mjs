@@ -254,6 +254,7 @@ ${registryCommands}
   goldflow pilot create-voice-sample Create only two approved opening units via --input <opening-editorial.json>; full-source plan and frozen phase cohorts, no media dispatch
   goldflow pilot approve-voice-sample Accept the exact opening after --attestation complete_opening_listened_end_to_end --accept true --reviewer <name> --note <review>
   goldflow pilot create-narration   Preserve approved opening raw units; synthesize frozen remaining units and run full canonical QA, leaving listening pending
+  goldflow pilot review-narration   Resolve a retained raw take's exact-listen warnings; --attestation entire_raw_proof_narration_listened_end_to_end --accept true --reviewer <name> --note <review>; no synthesis/restitch
   goldflow pilot approve-narration Accept the exact full candidate and timing after --attestation entire_proof_narration_listened_end_to_end --accept true --reviewer <name> --note <review>
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark

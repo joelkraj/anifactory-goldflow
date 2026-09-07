@@ -1209,7 +1209,10 @@ export async function finalizeNarrationProviderOutput(
     flags["checkpoint"]
       ?? path.join(workDir, `narration-finalization-checkpoint-${episode}.json`),
   );
-  const priorCheckpoint = await readJson(checkpointPath, null);
+  const reviewContinuation = pilotFinalization?.reviewContinuation ?? null;
+  const priorCheckpoint = reviewContinuation
+    ? structuredClone(reviewContinuation.checkpoint)
+    : await readJson(checkpointPath, null);
   const checkpoint = priorCheckpoint?.schema
     === "goldflow_narration_finalization_checkpoint_v1"
       ? priorCheckpoint
@@ -1232,6 +1235,13 @@ export async function finalizeNarrationProviderOutput(
   };
   checkpoint.units ??= {};
   checkpoint.stages ??= {};
+  if (reviewContinuation) {
+    // The operator reviewed the old raw stream, not a new master. Only exact
+    // unit QA and the semantic stitch are reusable across this boundary.
+    for (const stage of ["mastering", "full_stream_delivery_qa", "encode_m4a", "local_whisper_timing_candidate"]) {
+      delete checkpoint.stages[stage];
+    }
+  }
   const helpers = await import("./modelslab-qwen-episode-audio.mjs");
   const rows = units.map((unit, orderIndex) => {
     const output = manifestById.get(String(unit.unit_id));
@@ -1696,6 +1706,11 @@ export async function finalizeNarrationProviderOutput(
     generationPlanFileSha256: planFileSha256,
     qualityContractSha256: qualityContract.contract_sha256,
   });
+  if (reviewContinuation && validateNarrationExactListenReviewDecision(
+    listenPacket, reviewContinuation.listenDecision,
+  ).status !== "approved") {
+    throw new Error("Reviewed continuation no longer matches the exact approved listen packet.");
+  }
   const unitDeliveryArtifact = {
     schema: "goldflow_narration_unit_delivery_qa_v2",
     status: blockers.length
@@ -1879,13 +1894,13 @@ export async function finalizeNarrationProviderOutput(
   }
 
   let listenDecisionValidation = null;
-  const listenDecisionPath = flags["listen-decision"]
+  const listenDecisionPath = phaseContext?.reviewContinuation?.listenDecision?.path ?? (flags["listen-decision"]
     ? path.resolve(flags["listen-decision"])
     : path.join(
       artifactDir,
       `narration_exact_listen_review_decision_${episode}.json`,
-    );
-  const listenDecision = await readJson(listenDecisionPath, null);
+    ));
+  const listenDecision = reviewContinuation?.listenDecision ?? await readJson(listenDecisionPath, null);
   if (listenPacket.item_count > 0 && listenDecision) {
     listenDecisionValidation = validateNarrationExactListenReviewDecision(
       listenPacket,
@@ -1895,7 +1910,8 @@ export async function finalizeNarrationProviderOutput(
   const deliveryAccepted = listenPacket.item_count === 0
     || listenDecisionValidation?.status === "approved";
 
-  const rawWav = path.join(workDir, `${episode}-narration-provider-neutral-raw.wav`);
+  const rawWav = reviewContinuation?.rawAudio.path
+    ?? path.join(workDir, `${episode}-narration-provider-neutral-raw.wav`);
   const stitchInputKey = narrationFinalizationStageKey("semantic_stitch", {
     ordered_unit_keys: rows.map((row) => row.finalization_unit_key),
     quality_contract_sha256: qualityContract.contract_sha256,
@@ -1927,6 +1943,9 @@ export async function finalizeNarrationProviderOutput(
     }
   }
   if (!stitch) {
+    if (reviewContinuation) {
+      throw new Error("Reviewed continuation lost its exact cached raw stitch; restitching is forbidden.");
+    }
     stitch = await helpers.stitchWavsForDiagnostics(rows, rawWav, {
       narrationQualityContract: qualityContract,
       workDir,
@@ -1998,6 +2017,10 @@ export async function finalizeNarrationProviderOutput(
     }
     if (mastering.status !== "passed") {
       throw new Error("Final stream-level narration mastering did not pass.");
+    }
+    if (reviewContinuation && (mastering.input_path !== rawWav || mastering.input_sha256 !== rawWavSha256
+      || !(await fileMatchesSha256(rawWav, rawWavSha256)))) {
+      throw new Error("Reviewed continuation mastering input changed from the approved raw stream.");
     }
     canonicalWav = mastering.output_path;
     canonicalWavSha256 = mastering.output_sha256;
@@ -2387,6 +2410,10 @@ export async function finalizeNarrationProviderOutput(
     listen_review_status: listenPacket.item_count === 0
       ? "not_required"
       : listenDecisionValidation?.status ?? "pending",
+    ...(reviewContinuation ? {
+      listen_review_decision_path: phaseContext.reviewContinuation.listenDecision.path,
+      listen_review_decision_sha256: phaseContext.reviewContinuation.listenDecision.sha256,
+    } : {}),
     results: rows.map((row, index) => ({
       unit_id: row.unit_id,
       attempt: row.attempt ?? 1,
@@ -2513,6 +2540,13 @@ export async function finalizeNarrationProviderOutput(
     throw new Error(
       "Official local-Whisper timing candidate failed structural word-timing QA.",
     );
+  }
+  if (reviewContinuation) {
+    for (const ref of Object.values(phaseContext.reviewContinuation)) {
+      if (!(await fileMatchesSha256(ref.path, ref.sha256))) {
+        throw new Error("Reviewed continuation original evidence changed during finalization.");
+      }
+    }
   }
   const result = {
     ...scopeFields,

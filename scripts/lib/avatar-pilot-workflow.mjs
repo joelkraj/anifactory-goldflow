@@ -21,11 +21,14 @@ export const PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS = "proven";
 export const PILOT_REMAINING_SYNTHESIS_ADAPTER_STATUS = "proven";
 const OPENING_SCHEMA = "goldflow_avatar_pilot_opening_producer_result_v1";
 const NARRATION_SCHEMA = "goldflow_avatar_pilot_narration_producer_result_v1";
+const RAW_REVIEW_ATTESTATION = "entire_raw_proof_narration_listened_end_to_end";
 const OPENING_ATTESTATION = "complete_opening_listened_end_to_end";
 const FULL_ADAPTER = Object.freeze({
   status: PILOT_REMAINING_SYNTHESIS_ADAPTER_STATUS,
   async produce(options) { return (await import("./avatar-pilot-narration-producer.mjs")).producePilotNarration(options); },
   async validate(payload, options) { return (await import("./avatar-pilot-narration-validation.mjs")).validatePilotNarrationResult(payload, options); },
+  async validatePending(payload, options) { return (await import("./avatar-pilot-narration-validation.mjs")).validatePilotNarrationPendingReviewResult(payload, options); },
+  async review(options) { return (await import("./avatar-pilot-narration-review-producer.mjs")).reviewPilotNarration(options); },
   validateAcceptance: validatePilotNarrationAcceptance,
 });
 const OPENING_ADAPTER = Object.freeze({
@@ -313,16 +316,31 @@ async function pilotStatusWithAdapter(episodeDir, openingAdapter) {
     } else if (stage.action === "import-narration" && openingAvailable && openingAdapter.full?.status === "proven") {
       commandShape = `node bin/goldflow.mjs pilot create-narration --episode-dir ${JSON.stringify(episodeDir)}`;
       if (!exists) {
-        const resultPath = path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json");
+        const resultPath = await currentNarrationResultPath(episodeDir);
         const hasResult = Boolean(await fs.stat(resultPath).catch(() => null));
         const hasAttempt = Boolean(await fs.lstat(path.join(episodeDir, "pilot_narration_work", "remaining")).catch(() => null));
         if (hasResult) {
           try {
             const candidate = await jsonAt(resultPath);
+            need(resultPath === path.join(episodeDir, "pilot_narration_work", candidate.review_continuation ? "narration_reviewed_result.json" : "narration_producer_result.json"), "Narration candidate phase/path mismatch.");
             accepted(await openingAdapter.full.validate(candidate, { episodeDir, identity }));
             reason = "Full proof narration passed technical checks and is awaiting an actual complete listening review. Do not synthesize again.";
             commandShape = `node bin/goldflow.mjs pilot approve-narration --episode-dir ${JSON.stringify(episodeDir)} --accept true --reviewer <name> --note <review> --attestation ${PILOT_NARRATION_LISTEN_ATTESTATION}`;
-          } catch (error) { state = "blocked"; reason = error.message; commandShape = "Inspect the retained full narration candidate and record exact blocker triage; resynthesis is unavailable."; }
+          } catch (error) {
+            const candidate = await jsonAt(resultPath).catch(() => null);
+            const pending = openingAdapter.full.validatePending && candidate && !candidate.review_continuation
+              && resultPath === path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json")
+              ? await openingAdapter.full.validatePending(candidate, { episodeDir, identity }) : null;
+            if (pending?.status === "pending_delivery_review"
+              && !await fs.lstat(path.join(episodeDir, "pilot_narration_work", "narration_review")).catch(() => null)) {
+              state = "missing";
+              reason = "The complete raw take requires exact delivery listening before no-synthesis mastering. All original audio and reports stay immutable.";
+              commandShape = `node bin/goldflow.mjs pilot review-narration --episode-dir ${JSON.stringify(episodeDir)} --accept true --reviewer <name> --note <review> --attestation ${RAW_REVIEW_ATTESTATION}`;
+            } else {
+              state = "blocked"; reason = error.message;
+              commandShape = "Inspect the retained full narration candidate and review-continuation evidence for exact blocker triage; resynthesis and automatic replay are unavailable.";
+            }
+          }
         } else if (hasAttempt) {
           state = "blocked"; reason = "Remaining narration work exists without a complete technical candidate. Preserve every first take and inspect the exact failure.";
           commandShape = "Inspect pilot_narration_work/remaining for exact blocker triage; never rerun the whole narration.";
@@ -346,6 +364,11 @@ async function pilotStatusWithAdapter(episodeDir, openingAdapter) {
     images_video: "reviewed_local_import_only_no_automatic_provider_dispatch", render: "local_typed_90_second_compositor" } };
 }
 export async function pilotStatus(episodeDir) { return pilotStatusWithAdapter(episodeDir, OPENING_ADAPTER); }
+async function currentNarrationResultPath(episodeDir) {
+  const reviewed = path.join(episodeDir, "pilot_narration_work", "narration_reviewed_result.json");
+  return await fs.lstat(reviewed).catch(() => null) ? reviewed
+    : path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json");
+}
 export function formatPilotStatus(report) {
   return `# Private 90-second avatar pilot\n\nCurrent stage: ${report.current_stage}. Publishing disabled.\n\n| Stage | State | Approval | Artifact exists |\n| --- | --- | --- | --- |\n${report.stages.map((row) => `| ${row.stage} | ${row.state} | ${row.approval_policy} | ${row.exists ? "yes" : "no"} |`).join("\n")}\n\nNext: ${report.next_command_shape ?? "Proof complete; no publishing command."}\n\n${report.stages.filter((row) => row.reason).map((row) => `${row.stage}: ${row.reason}`).join("\n")}\nOpening synthesis: ${report.capabilities.opening_synthesis}; remaining-only synthesis: ${report.capabilities.remaining_synthesis}; arbitrary narration import: ${report.capabilities.narration_import}. Accepted opening units remain immutable. Full narration requires separate listening approval. Gemini/Flow assets are reviewed local imports, not automatic dispatch.`;
 }
@@ -435,7 +458,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
   need(!Object.hasOwn(flags, "content-profile") || flags["content-profile"] === "mcu_what_if_pilot_v1", "Pilot commands cannot switch content profile.");
   if (action === "preflight") return preflight(flags, episodeDir, repoRoot, openingAdapter);
   const stageAction = action === "create-voice-sample" ? "import-voice-sample"
-    : ["create-narration", "approve-narration"].includes(action) ? "import-narration" : action;
+    : ["create-narration", "review-narration", "approve-narration"].includes(action) ? "import-narration" : action;
   const stage = AVATAR_PILOT_STAGES.find((row) => row.action === stageAction);
   need(stage || action === "status", "Unknown pilot action. Use pilot status; publishing and automatic media dispatch are unavailable.");
   const report = await pilotStatusWithAdapter(episodeDir, openingAdapter);
@@ -444,7 +467,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
   need(report.current_stage === stage.id && report.allowed_command_stages.includes(stage.id), `Pilot stopped at ${report.current_stage}; run status and inspect its next artifact. Passed/stale stages cannot be rerun unscoped.`);
   if (["import-voice-sample", "import-narration"].includes(action)) need(PILOT_NARRATION_IMPORT_ADAPTER_STATUS === "proven", "Generic and full narration imports remain blocked pending their proven lineage adapter.");
   if (action === "create-voice-sample") need(openingAdapter.status === "proven" && report.identity.pilot_narration_contract, "Opening synthesis requires its proven scoped adapter and canonical identity.");
-  if (["create-narration", "approve-narration"].includes(action)) {
+  if (["create-narration", "review-narration", "approve-narration"].includes(action)) {
     need(openingAdapter.full?.status === "proven" && report.identity.pilot_narration_contract, "Remaining synthesis requires its proven scoped adapter.");
     need(report.next_command_shape.includes(`pilot ${action} `), "Use the current narration action from run status; no repeated synthesis or premature approval.");
   }
@@ -485,10 +508,21 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
       need(JSON.stringify(await jsonAt(resultPath)) === JSON.stringify(payload), "Narration candidate must match its persisted result.");
       accepted(await openingAdapter.full.validate(payload, { episodeDir, identity }));
       inputs.push({ role: "produced_narration", ...await binding(resultPath) }); candidateOnly = true;
+    } else if (action === "review-narration") {
+      need(flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note)
+        && flags.attestation === RAW_REVIEW_ATTESTATION, "Exact complete raw narration listening approval required.");
+      need(typeof openingAdapter.full.review === "function", "No reviewed delivery continuation is available.");
+      payload = await openingAdapter.full.review({ episodeDir, reviewer: flags.reviewer, note: flags.note, attestation: flags.attestation });
+      producedPayload = payload;
+      const resultPath = path.join(episodeDir, "pilot_narration_work", "narration_reviewed_result.json");
+      need(payload?.schema === NARRATION_SCHEMA && payload.review_continuation
+        && JSON.stringify(await jsonAt(resultPath)) === JSON.stringify(payload), "Reviewed narration must match its persisted result and continuation.");
+      accepted(await openingAdapter.full.validate(payload, { episodeDir, identity }));
+      inputs.push({ role: "produced_narration", ...await binding(resultPath) }); candidateOnly = true;
     } else if (action === "approve-narration") {
       need(flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note)
         && flags.attestation === PILOT_NARRATION_LISTEN_ATTESTATION, "Full proof narration approval requires complete listening, reviewer, note and exact attestation.");
-      const resultRef = await binding(path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json"));
+      const resultRef = await binding(await currentNarrationResultPath(episodeDir));
       const result = await jsonAt(resultRef.path);
       accepted(await openingAdapter.full.validate(result, { episodeDir, identity }));
       const refs = result.finalization_artifacts;
@@ -500,7 +534,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
         attestation: NARRATION_SUBJECTIVE_REVIEW_ATTESTATION,
         decisions: manifest.samples.map((row) => ({ sample_id: row.sample_id, decision: "accept", note })) });
       accepted(validateNarrationSubjectiveReviewDecision(manifest, decision));
-      const outputDir = path.join(episodeDir, "pilot_narration_work", "full_finalization");
+      const outputDir = path.join(episodeDir, "pilot_narration_work", result.review_continuation ? "full_finalization_reviewed" : "full_finalization");
       const decisionPath = path.join(outputDir, `narration_subjective_review_decision_${identity.episode}.json`);
       const timing = buildPilotNarrationTiming({ result, candidate: await jsonAt(await checkBinding(refs.timing_candidate, episodeDir)),
         delivery: await jsonAt(await checkBinding(refs.full_stream_qa, episodeDir)), identity });
@@ -561,10 +595,12 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
     const output = path.join(episodeDir, stage.output);
     if (!candidateOnly) await exclusiveJson(output, { schema: "goldflow_avatar_pilot_stage_v1", stage: stage.id, identity_sha256: identityRef.sha256, inputs, payload, created_at: new Date().toISOString() });
     await audit(episodeDir, { action, status: candidateOnly ? "awaiting_review" : "passed", elapsed_ms: Date.now() - started, identity_sha256: identityRef.sha256, inputs,
-      output: await binding(candidateOnly ? path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json") : output),
+      output: await binding(candidateOnly ? await currentNarrationResultPath(episodeDir) : output),
+      ...(action === "review-narration" ? { creative_submissions: 0, synthesis_invoked: false, scope: { phase: "delivery_review_and_mastering_only" } } : {}),
       ...(["create-voice-sample", "create-narration"].includes(action) ? await openingAttemptAccounting(episodeDir, payload, action === "create-narration" ? "remaining" : "opening") : {}) });
   } catch (error) {
     await audit(episodeDir, { action, status: "blocked", elapsed_ms: Date.now() - started, reason: "Stage failed; inspect exact inputs and retained artifacts before scoped recovery.",
+      ...(action === "review-narration" ? { creative_submissions: 0, synthesis_invoked: false, scope: { phase: "delivery_review_and_mastering_only" } } : {}),
       ...(["create-voice-sample", "create-narration"].includes(action) ? await openingAttemptAccounting(episodeDir, producedPayload, action === "create-narration" ? "remaining" : "opening").catch(() => ({ creative_submissions: null, synthesis_authorized: "unknown" })) : {}) });
     throw error;
   } finally {

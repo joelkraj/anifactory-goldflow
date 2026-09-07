@@ -51,13 +51,16 @@ export async function validatePilotNarrationAcceptance(payload, { episodeDir, id
       && payload.review.attestation === PILOT_NARRATION_LISTEN_ATTESTATION
       && typeof payload.review.reviewer === "string" && payload.review.reviewer.trim()
       && typeof payload.review.note === "string" && payload.review.note.trim(), "Full narration requires a genuine complete listening review.");
-    need(payload.narration_result?.path === path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json"), "Only the original produced narration candidate is accepted.");
+    const workRoot = path.join(episodeDir, "pilot_narration_work");
+    need(["narration_producer_result.json", "narration_reviewed_result.json"].some((name) => payload.narration_result?.path === path.join(workRoot, name)), "Only the original produced or authenticated reviewed narration candidate is accepted.");
     const result = await json(payload.narration_result);
+    need(payload.narration_result.path === path.join(workRoot, result.review_continuation ? "narration_reviewed_result.json" : "narration_producer_result.json"), "Narration result phase/path mismatch.");
+    const outputDir = path.join(workRoot, result.review_continuation ? "full_finalization_reviewed" : "full_finalization");
     const { validatePilotNarrationResult } = await import("./avatar-pilot-narration-validation.mjs");
     const technical = await validatePilotNarrationResult(result, { episodeDir, identity });
     need(technical.status === "passed", `Full narration technical validation blocked: ${JSON.stringify(technical.findings)}`);
     need(same(payload.audio, result.finalization_artifacts.audio), "Accepted narration audio differs from the produced take.");
-    need(payload.subjective_decision?.path === path.join(episodeDir, "pilot_narration_work", "full_finalization", `narration_subjective_review_decision_${identity.episode}.json`), "Full narration listening decision namespace invalid.");
+    need(payload.subjective_decision?.path === path.join(outputDir, `narration_subjective_review_decision_${identity.episode}.json`), "Full narration listening decision namespace invalid.");
     const manifest = await json(result.finalization_artifacts.subjective_manifest), decision = await json(payload.subjective_decision);
     need(validateNarrationSubjectiveReviewDecision(manifest, decision).status === "approved"
       && decision.reviewer === payload.review.reviewer && decision.decisions.every((row) => row.decision === "accept" && row.note === payload.review.note), "Full narration listening decision invalid.");
@@ -67,7 +70,7 @@ export async function validatePilotNarrationAcceptance(payload, { episodeDir, id
       && mapping.audio_sha256 === payload.audio.sha256 && mapping.manifest_sha256 === result.finalization_artifacts.subjective_manifest.sha256
       && mapping.all_samples_contained_in_full_narration === true
       && same(mapping.sample_ids, manifest.samples.map((sample) => sample.sample_id)), "Full narration listening mapping is stale.");
-    need(payload.whisper_timing?.path === path.join(episodeDir, "pilot_narration_work", "full_finalization", "pilot_word_timing.json"), "Pilot timing namespace invalid.");
+    need(payload.whisper_timing?.path === path.join(outputDir, "pilot_word_timing.json"), "Pilot timing namespace invalid.");
     const timing = await json(payload.whisper_timing);
     const expected = buildPilotNarrationTiming({ result, candidate: await json(result.finalization_artifacts.timing_candidate),
       delivery: await json(result.finalization_artifacts.full_stream_qa), identity });

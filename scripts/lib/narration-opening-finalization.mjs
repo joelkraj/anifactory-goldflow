@@ -62,10 +62,15 @@ async function validatePilotNarrationFinalizationInputs({ phaseContext: context,
     ? "only the opening phase is implemented by this helper; use the guarded full-pilot finalizer"
     : "the exact full_pilot phase is required");
   validateOpeningFinalizationFlags(flags);
+  demand(phase === "full_pilot" || context.reviewContinuation == null,
+    "review continuation is unavailable for the initial opening phase");
+  if (context.reviewContinuation != null) demand(flags.master == null
+    || /^(?:1|true|yes|on)$/iu.test(String(flags.master)), "review continuation cannot disable canonical mastering");
   demand(identity?.media_workflow === "avatar_footage_pilot_v1" && identity.run_intent === "proof"
     && identity.production_eligible === false && identity.publish_allowed === false, "a private pilot proof identity is required");
   const outputNamespace = await validateOpeningFinalizationNamespace(episodeDir, context.outputNamespace);
-  if (phase === "full_pilot") demand(outputNamespace === path.join(path.resolve(episodeDir), "pilot_narration_work", "full_finalization"),
+  if (phase === "full_pilot") demand(outputNamespace === path.join(path.resolve(episodeDir), "pilot_narration_work",
+    context.reviewContinuation == null ? "full_finalization" : "full_finalization_reviewed"),
     "full-pilot output must use its separate full_finalization namespace");
   const [actualIdentity, actualPlan, actualManifest, gate, textIr, audit] = await Promise.all([
     boundFile(identityPath, context.identitySha256, "run identity"),

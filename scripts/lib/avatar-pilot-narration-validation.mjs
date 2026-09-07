@@ -24,16 +24,36 @@ async function bound(ref, json = true) {
  * original opening raw units are reused, while the complete mastered stream is
  * new and requires a new genuine listening decision before timing promotion. */
 export async function validatePilotNarrationResult(result, { episodeDir, identity } = {}) {
+  return validatePilotNarrationResultInternal(result, { episodeDir, identity });
+}
+
+/** Reviewable raw first take only; this can never complete narration, promote
+ * timing or claim that mastering/subjective review has already passed. */
+export async function validatePilotNarrationPendingReviewResult(result, { episodeDir, identity } = {}) {
+  return validatePilotNarrationResultInternal(result, { episodeDir, identity, pendingDeliveryReview: true });
+}
+
+async function validatePilotNarrationResultInternal(result, { episodeDir, identity, pendingDeliveryReview = false } = {}) {
   const findings = [];
   try {
     need(result?.schema === "goldflow_avatar_pilot_narration_producer_result_v1" && result.phase === "full_pilot"
       && result.production_eligible === false && result.publish_allowed === false && result.subjective_approval === null,
     "Full pilot narration must remain private and pending full listening.");
+    need(!pendingDeliveryReview || !result.review_continuation, "Only the original raw result can request deferred delivery review.");
     const identityPath = path.join(episodeDir, "run_identity.json");
     const identityHash = hash(await fs.readFile(identityPath));
     const actualIdentity = await bound({ path: identityPath, sha256: identityHash });
     need(same(identity, actualIdentity) && result.identity_sha256 === identityHash
       && result.source_script_sha256 === identity.source_script.sha256, "Full narration identity/source changed.");
+    let reviewAuthorization = null;
+    if (result.review_continuation) {
+      const { validatePilotNarrationReviewAuthorization } = await import("./avatar-pilot-narration-review.mjs");
+      const authorized = reviewAuthorization = await validatePilotNarrationReviewAuthorization({ reviewContinuation: result.review_continuation, episodeDir, identity });
+      for (const key of ["identity_sha256", "source_script_sha256", "unit_ids", "accepted_opening", "generation_plan", "spoken_text_ir",
+        "spoken_text_audit", "pre_synthesis_gate", "provider_output_manifest", "runner_report", "cohort_events"]) {
+        need(same(result[key], authorized.priorResult[key]), `Reviewed narration changed original ${key}.`);
+      }
+    }
     const sourceBytes = await bound(identity.source_script, false);
     const plan = await bound(result.generation_plan), ir = await bound(result.spoken_text_ir), audit = await bound(result.spoken_text_audit);
     const gate = await bound(result.pre_synthesis_gate), manifest = await bound(result.provider_output_manifest), report = await bound(result.runner_report);
@@ -91,15 +111,23 @@ export async function validatePilotNarrationResult(result, { episodeDir, identit
       }
     }
     const tts = await bound(result.finalization_artifacts?.tts_report);
+    if (reviewAuthorization) {
+      const rawAudio = result.review_continuation.rawAudio;
+      const stitch = await bound(result.finalization_artifacts?.stitch_report);
+      need(tts.raw_wav === rawAudio.path && tts.raw_wav_sha256 === rawAudio.sha256
+        && stitch.raw_output_path === rawAudio.path && stitch.raw_output_sha256 === rawAudio.sha256,
+      "Reviewed narration changed the exact operator-approved raw program before mastering.");
+    }
     need(same(tts.synthesis_runs, pe.synthesis_runs) && tts.batch_plan_sha256 === null
       && same(tts.synthesis_contract, policy.synthesis_contract) && tts.effective_concurrency === 1,
     "Full TTS report must retain the original two-phase execution ledger.");
     const technical = await validatePilotNarrationTechnicalReports({ result, episodeDir, identity, identityHash,
-      plan, units: plan.units, policy, unitResults, phase: "full_pilot" });
-    passed(technical, "Complete pilot technical QA invalid");
+      plan, units: plan.units, policy, unitResults, phase: "full_pilot", pendingDeliveryReview });
+    need(technical.status === (pendingDeliveryReview ? "pending_delivery_review" : "passed"),
+      `Complete pilot technical QA invalid: ${JSON.stringify(technical.findings ?? [])}`);
     return { ...technical, accepted_opening: structuredClone(result.accepted_opening),
       preserved_unit_ids: [...plan.pilot_opening_unit_ids], newly_synthesized_unit_ids: remainingUnits.map((unit) => unit.unit_id),
-      production_eligible: false, publish_allowed: false, subjective_review_status: "pending", official_full_narration_timing: false };
+      production_eligible: false, publish_allowed: false, official_full_narration_timing: false };
   } catch (error) { findings.push({ code: error.message }); }
   return { status: "blocked", findings, subjective_review_status: "pending", official_full_narration_timing: false };
 }

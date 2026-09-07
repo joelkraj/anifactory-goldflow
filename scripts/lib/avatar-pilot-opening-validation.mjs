@@ -10,6 +10,7 @@ import { validateNarrationProviderOutputManifest } from "./narration-provider-ad
 import { validateNarrationSubjectiveReviewManifest } from "./narration-subjective-review.mjs";
 import { validateLocalWhisperTimingCandidate } from "./local-whisper-timing-candidate.mjs";
 import { localWhisperContractForIdentity } from "./local-whisper-policy.mjs";
+import { exactNarrationListenReviewPacket, narrationExactListenReviewPacketSha256 } from "./narration-delivery-quality.mjs";
 
 const execute = promisify(execFile);
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -67,24 +68,27 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
 /** Shared report boundary only. Callers must first authenticate actual source,
  * frozen plan and every phase's runner/sidecar/WAV provenance. */
 export async function validatePilotNarrationTechnicalReports({ result, episodeDir, identity, identityHash,
-  plan, units, policy, unitResults, phase } = {}) {
+  plan, units, policy, unitResults, phase, pendingDeliveryReview = false } = {}) {
   const findings = [];
   try {
     need(["opening", "full_pilot"].includes(phase), "Unknown pilot narration finalization scope.");
     const identityPath = path.join(episodeDir, "run_identity.json");
     const ids = units.map((unit) => unit.unit_id);
     const full = phase === "full_pilot";
+    need(!pendingDeliveryReview || (full && !result.review_continuation), "Deferred delivery review is only valid for the original full raw take.");
     const refs = result.finalization_artifacts;
-    const namespace = path.join(episodeDir, "pilot_narration_work", full ? "full_finalization" : "opening_finalization");
+    const namespace = path.join(episodeDir, "pilot_narration_work", full
+      ? result.review_continuation ? "full_finalization_reviewed" : "full_finalization" : "opening_finalization");
     const realNamespace = await fs.realpath(namespace);
-    for (const name of ["audio", "tts_report", "stitch_report", "full_stream_qa", "voice_continuity", "unit_delivery_qa", "unit_qa", "subjective_manifest", "timing_candidate"]) {
+    for (const name of ["audio", "tts_report", "stitch_report", "full_stream_qa", "voice_continuity", "unit_delivery_qa", "unit_qa",
+      ...(!pendingDeliveryReview ? ["subjective_manifest"] : []), "timing_candidate"]) {
       const file = refs?.[name]?.path;
       need(typeof file === "string" && path.resolve(file) === file && file.startsWith(`${namespace}${path.sep}`)
         && (await fs.realpath(file)).startsWith(`${realNamespace}${path.sep}`), `Missing phase-isolated ${name}.`);
       await read(refs[name], name !== "audio");
     }
     const tts = await read(refs.tts_report), stitch = await read(refs.stitch_report), delivery = await read(refs.full_stream_qa);
-    const continuity = await read(refs.voice_continuity), subjective = await read(refs.subjective_manifest), timing = await read(refs.timing_candidate);
+    const continuity = await read(refs.voice_continuity), subjective = pendingDeliveryReview ? null : await read(refs.subjective_manifest), timing = await read(refs.timing_candidate);
     const unitDelivery = await read(refs.unit_delivery_qa), unitQa = await read(refs.unit_qa);
     const whisperContract = localWhisperContractForIdentity(identity);
     const audioHash = refs.audio.sha256;
@@ -111,6 +115,7 @@ export async function validatePilotNarrationTechnicalReports({ result, episodeDi
           && same(scope.phase_batch_plan_sha256, Object.fromEntries(Object.entries(plan.pilot_phase_batch_plans)
             .map(([key, batch]) => [key, batch.batch_plan_sha256])))
           && same(scope.accepted_opening, result.accepted_opening), "Full narration lost its accepted opening/remaining provenance.");
+        need(same(scope.review_continuation ?? null, result.review_continuation ?? null), "Full narration review continuation differs from its authorized scope.");
       }
     }
     need(tts.schema === "goldflow_provider_neutral_narration_tts_report_v2" && tts.primary_provider === policy.primary.provider
@@ -127,9 +132,11 @@ export async function validatePilotNarrationTechnicalReports({ result, episodeDi
       && stitch.sample_accounting?.exact_sample_accounting === true
       && Number.isInteger(stitch.sample_accounting.actual_sample_count) && stitch.sample_accounting.actual_sample_count > 0
       && stitch.sample_accounting.expected_sample_count === stitch.sample_accounting.actual_sample_count
+      && !stitch.subjective_review_waiver, "Opening stitch accounting contract invalid.");
+    if (!pendingDeliveryReview) need(same(tts.mastering, stitch.mastering)
       && stitch.mastering?.status === "passed" && stitch.mastering.policy?.tempo_processing === false
       && stitch.mastering.policy.target_lufs === -16 && stitch.mastering.policy.true_peak_dbtp_max === -1.5
-      && stitch.mastering.output_sha256 === audioHash && !stitch.subjective_review_waiver, "Opening stitch/mastering contract invalid.");
+      && stitch.mastering.output_sha256 === audioHash, "Opening stitch/mastering contract invalid.");
     need(delivery.schema === "goldflow_narration_full_stream_qa_v2" && delivery.audio_sha256 === audioHash
       && accepted(delivery) && accepted(delivery.decision) && accepted(delivery.order_qa) && accepted(delivery.join_qa)
       && delivery.intended_text_sha256 === hash(units.map((unit) => unit.spoken_text).join(" "))
@@ -161,14 +168,16 @@ export async function validatePilotNarrationTechnicalReports({ result, episodeDi
         && row.spoken_text === units[index].spoken_text && row.spoken_text_sha256 === units[index].spoken_text_sha256
         && row.synthesis_identity_sha256 === unitResults[index].synthesis_identity_sha256
         && ["passed", "passed_with_warnings"].includes(row.qa_status) && accepted(row.qa?.delivery)), "Opening selected unit QA invalid.");
-    passed(validateNarrationSubjectiveReviewManifest(subjective), "Opening listening manifest invalid");
-    need(subjective.status === "review_required" && subjective.audio_path === refs.audio.path && subjective.audio_sha256 === audioHash
+    if (!pendingDeliveryReview) {
+      passed(validateNarrationSubjectiveReviewManifest(subjective), "Opening listening manifest invalid");
+      need(subjective.status === "review_required" && subjective.audio_path === refs.audio.path && subjective.audio_sha256 === audioHash
       && subjective.total_sample_count === stitch.sample_accounting.actual_sample_count
       && Math.abs(subjective.duration_sec - duration) <= 0.02
       && subjective.samples.every((row) => row.unit_ids.every((id) => ids.includes(id)))
       && subjective.narration_generation_plan_file_sha256 === result.generation_plan.sha256
       && subjective.samples.some((row) => row.coverage_class === "complete_opening" && row.start_sample === 0
         && row.end_sample_exclusive === subjective.total_sample_count), "Listening review must cover the entire exact opening.");
+    }
     passed(validateLocalWhisperTimingCandidate(timing, { contract: whisperContract, sourceScriptSha256: result.source_script_sha256,
       narrationAudioSha256: audioHash, narrationReportSha256: refs.stitch_report.sha256, runIdentitySha256: identityHash,
       narrationQualityContractSha256: policy.narration_quality_contract.contract_sha256 }), "Opening Whisper candidate invalid");
@@ -177,6 +186,51 @@ export async function validatePilotNarrationTechnicalReports({ result, episodeDi
       && Math.abs(timing.audio_duration_sec - duration) <= 0.02
       && timing.recognized_text === delivery.primary_recognized_text
       && same(timing.words, delivery.primary_recognized_words), "Whisper observation diverges from canonical stream QA.");
+    if (pendingDeliveryReview) {
+      const finalized = result.finalized;
+      need(refs.subjective_manifest == null && tts.status === "passed_with_warnings"
+        && tts.listen_review_status === "pending" && tts.subjective_review_status === "not_required_or_not_materialized"
+        && tts.subjective_review_manifest_path === null && tts.subjective_review_manifest_sha256 === null
+        && !tts.subjective_review_waiver && !tts.manual_review_evidence_path
+        && stitch.subjective_review_manifest_path === null && stitch.subjective_review_manifest_sha256 === null,
+      "Pending raw narration must retain absent subjective/mastering acceptance, not a partial completed bundle.");
+      const deferred = { status: "deferred_until_delivery_acceptance", reason: "Exact listen items must be approved before mastering." };
+      need(same(tts.mastering, deferred) && same(stitch.mastering, deferred)
+        && stitch.raw_output_path === refs.audio.path && stitch.raw_output_sha256 === audioHash
+        && tts.raw_wav === refs.audio.path && tts.raw_wav_sha256 === audioHash
+        && tts.final_wav === refs.audio.path && tts.final_wav_sha256 === audioHash
+        && stitch.sample_accounting.actual_sample_count === Math.round(duration * 24000),
+      "Pending review must bind the unchanged complete raw WAV with mastering explicitly deferred.");
+      need(finalized?.status === "passed_with_warnings" && finalized.delivery_accepted === false
+        && finalized.delivery_blocker_count === 0 && finalized.unit_count === ids.length
+        && finalized.mastering_status === deferred.status && finalized.exact_sample_accounting === true
+        && finalized.subjective_review_status === "not_materialized_due_to_delivery_review"
+        && finalized.subjective_review_manifest_path === null && finalized.subjective_review_sample_count === 0
+        && finalized.raw_wav === refs.audio.path && finalized.raw_wav_sha256 === audioHash
+        && finalized.final_wav === refs.audio.path && finalized.final_wav_sha256 === audioHash,
+      "Finalizer did not return the exact zero-hard-blocker deferred-review shape.");
+      const packetPath = path.join(namespace, `narration_exact_listen_review_packet_${identity.episode}.json`);
+      need(tts.listen_review_packet_path === packetPath && finalized.listen_review_packet_path === packetPath
+        && (await fs.realpath(packetPath)).startsWith(`${realNamespace}${path.sep}`), "Pending exact-listen packet namespace is invalid.");
+      const packetStat = await fs.lstat(packetPath);
+      need(packetStat.isFile() && !packetStat.isSymbolicLink() && packetStat.size <= 32 * 1024 * 1024,
+        "Pending exact-listen packet must be a bounded regular JSON file.");
+      const packetRef = { path: packetPath, sha256: hash(await fs.readFile(packetPath)) };
+      const packet = await read(packetRef);
+      const expectedPacket = exactNarrationListenReviewPacket({ rows: unitDelivery.units,
+        generationPlanSha256: plan.plan_sha256, generationPlanFileSha256: result.generation_plan.sha256,
+        qualityContractSha256: policy.narration_quality_contract.contract_sha256 });
+      need(same(packet, expectedPacket) && packet.packet_sha256 === narrationExactListenReviewPacketSha256(packet)
+        && packet.packet_sha256 === tts.listen_review_packet_sha256 && packet.status === "review_items_present"
+        && packet.item_count > 0 && packet.item_count <= ids.length
+        && packet.item_count === finalized.listen_review_unit_count && packet.item_count === unitDelivery.listen_review_unit_count
+        && unitDelivery.units.every((row, index) => row.audio_path === unitResults[index].output_path),
+      "Exact-listen packet does not preserve every canonical unit warning and immutable raw unit.");
+      return { status: "pending_delivery_review", findings, duration_sec: duration, audio_path: refs.audio.path, audio_sha256: audioHash,
+        raw_audio: refs.audio, unit_ids: ids, listen_review_packet: packetRef, listen_review_packet_sha256: packet.packet_sha256,
+        listen_review_unit_ids: packet.unit_ids, delivery_accepted: false, mastering_status: deferred.status,
+        subjective_review_status: "not_materialized_due_to_delivery_review", official_full_narration_timing: false };
+    }
     return { status: "passed", findings, duration_sec: duration, audio_path: refs.audio.path, audio_sha256: audioHash,
       unit_ids: ids, subjective_review_status: "pending", official_full_narration_timing: false };
   } catch (error) { findings.push({ code: error.message }); }

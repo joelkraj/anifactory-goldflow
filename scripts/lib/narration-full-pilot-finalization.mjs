@@ -5,6 +5,9 @@ import { canonicalQwenBatchSha256 } from "./qwen-liam-batch-contract.mjs";
 import { validateNarrationProviderOutputManifest } from "./narration-provider-adapter.mjs";
 import { validateFullPilotNarrationFinalizationInputs, validatePilotFinalizationRuntimeReferences,
   validatePilotFinalizationManifestRows } from "./narration-opening-finalization.mjs";
+import { sha256File } from "./file-hash.mjs";
+import { narrationFinalizationStageKey, narrationFinalizationUnitKey,
+  reusableNarrationFinalizationStage } from "./narration-finalization-checkpoint.mjs";
 
 export const NARRATION_FULL_PILOT_FINALIZATION_SCHEMA = "goldflow_narration_full_pilot_finalization_v1";
 const same = (left, right) => canonicalQwenBatchSha256(left ?? null) === canonicalQwenBatchSha256(right ?? null);
@@ -16,6 +19,40 @@ async function boundJson(file, expected, label) {
   const bytes = await fs.readFile(file);
   demand(createHash("sha256").update(bytes).digest("hex") === expected, `${label} hash is stale`);
   return JSON.parse(bytes.toString("utf8"));
+}
+
+/** Read-only prerequisite, never a fallback permission to rebuild speech edges
+ * or semantic joins after the operator heard the exact original raw stream. */
+export async function validatePilotReviewCachedStitch({ checkpoint, rawAudio, units, manifest,
+  qualityContractSha256 } = {}) {
+  const unitKeys = units.map((unit, index) => narrationFinalizationUnitKey({
+    unit: { ...manifest.units[index], spoken_text_sha256: unit.spoken_text_sha256 },
+    qualityContractSha256, provider: manifest.provider, modelId: manifest.model_id,
+    modelRevision: manifest.model_revision, voiceId: manifest.voice_id,
+    voiceSha256: manifest.voice_sha256, voiceContinuityContract: manifest.voice_continuity_contract,
+  }));
+  const inputKey = narrationFinalizationStageKey("semantic_stitch", {
+    ordered_unit_keys: unitKeys, quality_contract_sha256: qualityContractSha256,
+    stitch_sample_rate_hz: 24000, alignment_policy: "narration_alignment_safe_semantic_stitch_v2",
+  });
+  const cached = reusableNarrationFinalizationStage(checkpoint, "semantic_stitch", inputKey);
+  const stitch = cached?.payload?.stitch;
+  demand(stitch?.status === "passed" && stitch.sample_accounting?.exact_sample_accounting === true
+    && cached.payload.raw_wav_path === rawAudio?.path && cached.payload.raw_wav_sha256 === rawAudio?.sha256,
+  "review continuation requires the exact passed cached raw stitch; restitching is forbidden");
+  demand(same(stitch.prepared_inputs?.map((row) => row.unit_id), units.map((unit) => unit.unit_id)),
+    "review continuation prepared stitch order differs from the original full plan");
+  for (const ref of [rawAudio, ...stitch.prepared_inputs.map((row) => ({
+    path: row.prepared_wav, sha256: row.prepared_audio_sha256 ?? row.prepared_qa?.audio_sha256,
+  }))]) {
+    demand(path.isAbsolute(ref?.path ?? "") && /^[a-f0-9]{64}$/u.test(ref?.sha256 ?? ""),
+      "review continuation requires exact raw and prepared WAV bindings");
+    const stat = await fs.lstat(ref.path);
+    demand(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 512 * 1024 * 1024
+      && await sha256File(ref.path) === ref.sha256,
+    "review continuation raw or prepared WAV is stale; restitching is forbidden");
+  }
+  return { inputKey, rawAudio: structuredClone(rawAudio), stitch: structuredClone(stitch) };
 }
 
 /** Read-only authentic execution evidence, not QA or listening approval. The
@@ -76,7 +113,27 @@ export async function validateFullPilotFinalizationExecutionEvidence(options = {
   });
   demand(authenticated.status === "passed", "remaining execution evidence did not pass");
   validatePilotFinalizationManifestRows(manifest.units.slice(openingIds.length), report, run);
-  return { ...inputs, phaseBatchPlans: structuredClone(phasePlans), synthesisRuns: structuredClone(runs), scope: {
+  let reviewContinuation = null;
+  if (context.reviewContinuation != null) {
+    const { validatePilotNarrationReviewAuthorization } = await import("./avatar-pilot-narration-review.mjs");
+    reviewContinuation = await validatePilotNarrationReviewAuthorization({
+      reviewContinuation: context.reviewContinuation, episodeDir, identity,
+    });
+    const prior = reviewContinuation.priorResult;
+    for (const [ref, expectedPath, expectedHash, label] of [
+      [prior.generation_plan, planPath, context.generationPlanFileSha256, "full plan"],
+      [prior.provider_output_manifest, options.manifestPath, context.providerManifestFileSha256, "provider manifest"],
+      [prior.pre_synthesis_gate, context.preSynthesisGatePath, context.preSynthesisGateFileSha256, "remaining gate"],
+      [prior.spoken_text_ir, context.textIrPath, context.textIrFileSha256, "text IR"],
+      [prior.spoken_text_audit, context.spokenTextAuditPath, context.spokenTextAuditFileSha256, "spoken audit"],
+    ]) demand(ref?.path === expectedPath && ref?.sha256 === expectedHash,
+      `review continuation changed the original ${label}`);
+    demand(prior.identity_sha256 === context.identitySha256 && prior.source_script_sha256 === context.sourceScriptSha256
+      && same(prior.accepted_opening, context.acceptedOpening), "review continuation changed original source or opening evidence");
+    await validatePilotReviewCachedStitch({ checkpoint: reviewContinuation.checkpoint, rawAudio: reviewContinuation.rawAudio,
+      units: plan.units, manifest, qualityContractSha256: policy.narration_quality_contract.contract_sha256 });
+  }
+  return { ...inputs, reviewContinuation, phaseBatchPlans: structuredClone(phasePlans), synthesisRuns: structuredClone(runs), scope: {
     schema: NARRATION_FULL_PILOT_FINALIZATION_SCHEMA, phase: "full_pilot", complete_episode: true,
     production_eligible: false, unit_ids: plan.units.map((unit) => unit.unit_id), full_plan_unit_count: plan.units.length,
     preserved_unit_ids: [...openingIds], newly_synthesized_unit_ids: remaining.map((unit) => unit.unit_id),
@@ -88,6 +145,7 @@ export async function validateFullPilotFinalizationExecutionEvidence(options = {
     accepted_opening: structuredClone(context.acceptedOpening),
     opening_reuse_contract: "original_raw_unit_wav_and_synthesis_identity_v1",
     subjective_review_status: "pending",
+    ...(reviewContinuation ? { review_continuation: structuredClone(context.reviewContinuation) } : {}),
   } };
 }
 

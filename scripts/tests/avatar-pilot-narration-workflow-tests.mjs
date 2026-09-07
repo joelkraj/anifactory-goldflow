@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { buildPilotRemainingExecutionFixture } from "./avatar-pilot-remaining-execution-tests.mjs";
 import { buildPilotNarrationValidationFixture } from "./avatar-pilot-narration-validation-tests.mjs";
 import { pilotWorkflowFixtureHarness, executePilotCommand, PILOT_REMAINING_SYNTHESIS_ADAPTER_STATUS } from "../lib/avatar-pilot-workflow.mjs";
@@ -45,6 +46,7 @@ async function initialStages({ root, identityPath, identityFileSha256, sourceByt
   ]);
 }
 
+export async function buildPilotNarrationWorkflowFixture() {
 const definition = contentProfileDefinition("mcu_what_if_pilot_v1");
 const remaining = await buildPilotRemainingExecutionFixture({
   identityFields: { schema: "goldflow_avatar_pilot_identity_v1", channel: "fixture", series_slug: "fixture",
@@ -63,7 +65,11 @@ const remaining = await buildPilotRemainingExecutionFixture({
     "The traveler considers the warning before turning back toward the open stone doorway.",
   ],
 });
-const fixture = await buildPilotNarrationValidationFixture({ remainingFixture: remaining });
+return buildPilotNarrationValidationFixture({ remainingFixture: remaining });
+}
+
+export async function runPilotNarrationWorkflowTests() {
+const fixture = await buildPilotNarrationWorkflowFixture();
 const { root, identity, result, writeJson, acceptedOpening } = fixture;
 let produced = 0, forceInvalid = false;
 try {
@@ -173,3 +179,6 @@ try {
   await absent(path.join(root, ".pilot-stage.lock"));
   console.log("Avatar pilot full narration workflow tests passed (real canonical validators and exact listening/timing mapping; synthetic files only, no models or production writes).");
 } finally { await fixture.cleanup(); }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await runPilotNarrationWorkflowTests();

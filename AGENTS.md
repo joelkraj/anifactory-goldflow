@@ -11,6 +11,7 @@ Read this file first. Before operating on an episode, read the complete guide fo
 | `manhwa_recap_v1` + `generated_visuals_v1` | [Manhwa](docs/pipelines/manhwa.md), then [generated visuals](docs/pipelines/generated_visuals.md) | Operational; existing manhwa behavior preserved |
 | `asset_afterlife_v1` + `generated_visuals_v1` | [Factual documentary](docs/pipelines/documentary.md), [Asset Afterlife profile](docs/workflows/asset_afterlife_profile.md), then [generated visuals](docs/pipelines/generated_visuals.md) | Generated production available; new-run packaging blocked pending a documentary adapter; hybrid proofs remain separate |
 | Reserved `movie_tv_commentary_v1` + `source_footage_v1` | [Movie/TV editorial design](docs/pipelines/movie_tv.md) | Design-only; episode preflight/production blocked pending implementation |
+| `mcu_what_if_pilot_v1` + `avatar_footage_pilot_v1` | [Movie/TV guidance](docs/pipelines/movie_tv.md), [pilot design](docs/designs/avatar_what_if_pilot_v1.md), then [pilot workflow](docs/workflows/avatar_pilot_workflow.md) | Exactly 90-second private proof; preflight/script/evidence gates and local compositor; narration entry blocked pending proven lineage adapter; no automatic media dispatch/publishing |
 | Standalone `footage` commands | [Private footage clipping](docs/workflows/footage_clipping_workflow.md) | Library-only; no episode-stage completion or publishing authority |
 | Existing identity without `media_workflow` | Its recorded content profile and [generated visuals](docs/pipelines/generated_visuals.md) | Legacy generated route; no implicit migration |
 
@@ -22,6 +23,7 @@ New `goldflow run preflight` calls require both `--content-profile` and `--media
 
 - Content profile defines editorial intent, source/evidence requirements, style, and packaging. Existing built-ins remain `manhwa_recap_v1` and `asset_afterlife_v1`; `movie_tv_commentary_v1` is a reserved editorial ID, not an operational planner profile.
 - Media workflow defines the artifact chain and supported media. `generated_visuals_v1` is operational; `source_footage_v1` is reserved and production-blocked.
+- The bounded avatar proof uses `goldflow pilot preflight --identity <config.json> --episode-dir <new-dir>` and its own registry. It does not unlock the reserved full movie/TV lane. All stills use explicitly locked Gemini/Flow models; selected optional video uses Flow/Veo. Narration import is not released until canonical source-to-audio lineage is fixture-proven; never claim this path generates a new Joel take.
 - New identities bind `media_workflow` and `workflow_contract: { schema: "goldflow_media_workflow_v1", id, version, stage_registry_version, sha256 }`. The resolved contract is identity-locked. Missing workflow fields on a historical identity retain the legacy generated route; never rewrite that identity or reinterpret it as source-footage production.
 - Unsupported content/workflow combinations stop before episode creation, provider spend, or media work. Footage library approval cannot satisfy generated-image gates or authorize an unsupported production workflow.
 

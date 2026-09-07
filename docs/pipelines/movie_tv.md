@@ -1,4 +1,4 @@
-# Movie and TV Editorial Guidance — Design Only
+# Movie and TV Editorial Guidance — Full Production Reserved
 
 This guide defines the intended editorial boundary for movie/TV recaps and criticism. Read [the private footage clipping workflow](../workflows/footage_clipping_workflow.md) before using its standalone library commands.
 
@@ -16,9 +16,9 @@ All source, search, clip, and approval artifacts remain in the private footage l
 
 ## Bounded Avatar What-If Pilot
 
-The operator has authorized implementation of one exactly 90-second, non-publishing avatar-and-footage pilot. Its creative and implementation requirements are in [the avatar what-if pilot design](../designs/avatar_what_if_pilot_v1.md); the first subject is [MCU Sentry mastering his powers before Doomsday](../briefs/sentry_doomsday_90s.md). Read both before implementing that pilot. These documents capture agreed direction, not a registered workflow, approved script, source-use approval, or provider-spend receipt. Full-length production and publishing remain disabled.
+The operator has authorized one exactly 90-second, non-publishing avatar-and-footage pilot. Its creative requirements are in [the avatar what-if pilot design](../designs/avatar_what_if_pilot_v1.md); the first subject is [MCU Sentry mastering his powers before Doomsday](../briefs/sentry_doomsday_90s.md). Read both and [the pilot workflow](../workflows/avatar_pilot_workflow.md). The separate `mcu_what_if_pilot_v1` / `avatar_footage_pilot_v1` route now supports guarded proof identity and script/evidence approvals, with implemented local asset/timeline/compositor handlers downstream. Narration entry remains explicitly blocked until canonical text/audio lineage import is fixture-proven. New narration synthesis and automatic media generation are not implemented. Full-length production and publishing remain disabled.
 
-This format uses the owned Joel clone as an audience-facing theorist, reviewed 3–5 second movie excerpts, an original reusable host pose/background library, and optional clearly identified AI concept imagery/motion. It does not inherit manhwa cadence, obligatory generated scenes, or a comic-book power set. A typed mixed-media timeline and guarded pilot route must be implemented and validated before pilot media production; do not represent those capabilities as already available.
+This format uses the owned Joel clone as an audience-facing theorist, reviewed 3–5 second movie excerpts primarily in moving cards, an original reusable host pose/background library, and optional clearly identified AI concept imagery/motion. Gemini/Flow are selected for all generated stills; Flow/Veo for selected hypothetical sequences. Explicit silent excerpt loops are supported with the bounded pilot limits; motion/looping is not a rights determination. It does not inherit manhwa cadence, obligatory generated scenes, or a comic-book power set. The synthetic compositor fixture proves layout/audio behavior, not a completed Sentry pilot or narrator quality.
 
 ## Intended Editorial Contract
 
@@ -34,4 +34,4 @@ This format uses the owned Joel clone as an audience-facing theorist, reviewed 3
 
 A future implementation must define and test the source-footage stage registry and versioned workflow contract; exact-source/subtitle/clip lineage; bounded source acquisition and caching; original commentary approval; timeline/cut/audio contracts; clip rights/editorial decisions; render integration; final QA; and profile-appropriate packaging/publishing gates. Approval invalidation and exact-scope repairs must preserve accepted work and historical evidence.
 
-Until that work is implemented and approved, use only the standalone library operations explicitly requested by the operator. Do not run `source manufacture` for movie/TV work or treat a library clip as production footage automatically.
+For full-length movie/TV work, use only the standalone library operations explicitly requested by the operator until that lane is implemented. The separate bounded proof may follow its dedicated commands and approvals. Do not run `source manufacture` for movie/TV work or treat a library clip as production footage automatically.

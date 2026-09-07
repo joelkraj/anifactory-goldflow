@@ -1,0 +1,19 @@
+{
+  "schema": "goldflow_avatar_pilot_evidence_v1",
+  "status": "draft_unapproved",
+  "source_script_sha256": "b3c31dec55683628cef264b9386a07875ec0e0689f9f8c72e18d27fab1ba9e7e",
+  "research_sources": [
+    { "url": "https://www.ilm.com/thunderbolts-marvel-chad-wiebe-interview-ilm/", "title": "Tackling Marvel’s Thunderbolts with ILM Visual Effects Supervisor Chad Wiebe", "published": "2025-06-27", "checked": "2026-09-06", "scope": "Filmmaker discussion corroborates the tower Red Guardian sequence and people becoming shadow silhouettes; it does not provide edition-matched clipping timestamps or reuse authority." }
+  ],
+  "claims": [
+    { "id": "tower_red_guardian", "kind": "film_fact", "text": "Sentry sends Red Guardian through a window and brings him back in the tower fight.", "source": { "title": "Thunderbolts*", "edition": null, "source_in_sec": null, "source_out_sec": null, "locator": "Tower/penthouse confrontation; corroborated by ILM filmmaker interview. Exact local edition and 3–5 second interval await preview.", "reviewed": false, "rights_basis": null } },
+    { "id": "void_shadows", "kind": "film_fact", "text": "The Void turns people into shadow silhouettes.", "source": { "title": "Thunderbolts*", "edition": null, "source_in_sec": null, "source_out_sec": null, "locator": "Void shadow-silhouette sequence; corroborated by ILM filmmaker interview. Exact local edition and 3–5 second interval await preview.", "reviewed": false, "rights_basis": null } },
+    { "id": "mastery_assumption", "kind": "assumption", "text": "For this what-if only, Bob deliberately chooses when and how he uses movie-demonstrated Sentry/Void effects, including selective targeting. Safe selective control is not presented as an established film feat." },
+    { "id": "imagined_fight", "kind": "speculation", "text": "Doom faces Bob in a ruined street; Bob drives him back to create an opening for allies. This is an invented concept sequence, not a Doomsday scene or leak." },
+    { "id": "possible_void_use", "kind": "speculation", "text": "Bob might try his controlled Void effect against Doom. No success or immunity is established." },
+    { "id": "diversion", "kind": "speculation", "text": "An invented second threat forces Bob to choose between pursuing Doom and protecting civilians; this does not make Bob lose mastery." },
+    { "id": "doom_unknown", "kind": "limitation", "text": "The reviewed evidence does not establish Doom's vulnerability to the Void, an automatic winner, or either character's full capabilities in Doomsday." },
+    { "id": "screen_only", "kind": "limitation", "text": "No comic/composite Sentry powers, unlimited power claim, automatic victory, or hypothetical image presented as film footage." }
+  ],
+  "review": { "reviewer": null, "note": "Pending exact-film excerpt preview, source edition, intended-use basis, and script-wide factual review. Earlier Spider-Man/Lanterns permissions are not inherited.", "all_factual_abilities_reviewed": false, "mcu_only": false }
+}

@@ -10,6 +10,7 @@ const profileRoot = path.join(repoRoot, "docs", "content_profiles");
 const builtInProfiles = new Map([
   ["manhwa_recap_v1", path.join(profileRoot, "manhwa_recap_v1.json")],
   ["asset_afterlife_v1", path.join(profileRoot, "asset_afterlife_v1.json")],
+  ["mcu_what_if_pilot_v1", path.join(profileRoot, "mcu_what_if_pilot_v1.json")],
 ]);
 
 const aliases = new Map([
@@ -20,6 +21,7 @@ const aliases = new Map([
   ["asset_afterlife", "asset_afterlife_v1"],
   ["asset-afterlife", "asset_afterlife_v1"],
   ["asset_afterlife_v1", "asset_afterlife_v1"],
+  ["mcu_what_if_pilot_v1", "mcu_what_if_pilot_v1"],
 ]);
 
 function sha256(value) {

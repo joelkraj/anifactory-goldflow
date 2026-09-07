@@ -99,6 +99,7 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
       contentProfile: flags["content-profile"],
       mediaWorkflow: flags["media-workflow"],
     });
+    if (binding.media_workflow === "avatar_footage_pilot_v1") throw new Error("Use pilot preflight for the bounded avatar proof; run preflight is generated-visuals only.");
     // Validate custom profile paths too, before beginStageExecution can write.
     const profile = contentProfileDefinition(flags["content-profile"]);
     assertAvailableMediaWorkflow({ ...binding, content_profile: profile.config.id, content_profile_config: profile.config });
@@ -109,6 +110,9 @@ export function assertCommandWorkflowRoute({ command, subcommand, script, flags 
   let workflow = null;
   if (identity) {
     workflow = assertEpisodeWorkflowFlags(identity, flags);
+    if (workflow.id === "avatar_footage_pilot_v1" && command !== "pilot" && !(command === "run" && subcommand === "status")) {
+      throw new Error("Avatar pilot permits only pilot commands and run status. Generated production, source manufacture, auto-advance and publishing are unavailable, including with workflow bypass.");
+    }
     if (script === "youtube-publish.mjs") {
       const support = packagingWorkflowSupport(identity);
       if (!support.available) throw new Error(support.reason);

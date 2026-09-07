@@ -249,6 +249,8 @@ ${registryCommands}
   goldflow run visual-wavefront    Prefetch hardened provider-bound cuts while prompt chunks are authored
   goldflow run web-archive-cleanup Archive legacy unscoped GPT Image chats through one throttled maintenance lane
   goldflow run cleanup             Audit or prune safe intermediates
+  goldflow pilot preflight         Initialize the distinct private 90-second avatar proof (see docs/workflows/avatar_pilot_workflow.md)
+  goldflow pilot status            Show proof gates; narration entry is blocked pending proven lineage, and new synthesis/automatic media dispatch are not yet implemented
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof
@@ -384,7 +386,16 @@ Prompt-repair migration guardrails:
 `);
 }
 
-if (command === "footage") {
+if (command === "pilot" && !helpRequested) {
+  try {
+    const { executePilotCommand } = await import("../scripts/lib/avatar-pilot-workflow.mjs");
+    const result = await executePilotCommand(subcommand, parseFlags(flags), { repoRoot });
+    console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2));
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+} else if (command === "footage") {
   run("footage.mjs", args.slice(1));
 } else if (command === "help" || command === "--help" || command === "-h" || helpRequested) {
   help();

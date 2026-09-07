@@ -1,0 +1,15 @@
+{
+  "schema": "goldflow_content_profile_v1",
+  "id": "mcu_what_if_pilot_v1",
+  "version": "2026-09-06.1",
+  "content_family": "evidence_led_speculative_commentary",
+  "factuality": { "evidence_ledger_required": true, "screen_canon_only": true },
+  "visual": {
+    "scene_prompt_style_phrase": "clearly labeled hypothetical concept illustration",
+    "required_scene_prompt_phrases_any": ["hypothetical concept", "original host", "original background"],
+    "planner_directives": ["Use reviewed 3–5 second movie excerpts to support commentary, primarily moving cards.", "Original host and set; Gemini/Flow stills; optional explicitly selected Flow/Veo sequences.", "Distinguish film evidence from imagined events throughout. Never present generated scenes as film footage."]
+  },
+  "planner_roles": { "narration_performance": "a conversational on-screen theorist exploring a movie what-if with the audience" },
+  "voice": { "performance_directives": ["Ask meaningful questions, weigh evidence and a counterargument, and reason toward a qualified conclusion.", "Preserve the owned Joel voice. Delivery intent remains metadata; do not pretend Qwen Base supports performance tags or speed controls."] },
+  "publishing": { "available": false }
+}

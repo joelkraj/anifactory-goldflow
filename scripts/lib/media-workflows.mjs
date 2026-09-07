@@ -5,6 +5,9 @@ import { createHash } from "node:crypto";
 export const GENERATED_VISUALS_STAGE_REGISTRY_VERSION = "2026-08-22.1";
 export const MEDIA_WORKFLOW_CONTRACT_SCHEMA = "goldflow_media_workflow_v1";
 export const GENERATED_VISUALS_WORKFLOW_VERSION = "2026-09-06.1";
+export const AVATAR_PILOT_WORKFLOW_ID = "avatar_footage_pilot_v1";
+export const AVATAR_PILOT_PROFILE_ID = "mcu_what_if_pilot_v1";
+export const AVATAR_PILOT_VERSION = "2026-09-06.1";
 
 const GENERATED_WORKFLOW_ID = "generated_visuals_v1";
 const RESERVED_WORKFLOW_ID = "source_footage_v1";
@@ -33,18 +36,18 @@ function assertWorkflowId(id) {
   if (id === RESERVED_WORKFLOW_ID || normalizedReservedId(id) === RESERVED_WORKFLOW_ID) {
     throw new Error(`Media workflow ${RESERVED_WORKFLOW_ID} is reserved and unavailable; it has no executable stage registry. The standalone footage tools do not create a production workflow.`);
   }
-  if (id !== GENERATED_WORKFLOW_ID) {
-    throw new Error(`Unknown media workflow ${String(id)}. The only available workflow is ${GENERATED_WORKFLOW_ID}.`);
+  if (![GENERATED_WORKFLOW_ID, AVATAR_PILOT_WORKFLOW_ID].includes(id)) {
+    throw new Error(`Unknown media workflow ${String(id)}. Available workflows: ${GENERATED_WORKFLOW_ID}, ${AVATAR_PILOT_WORKFLOW_ID} (90-second proof only).`);
   }
 }
 
-function currentContract() {
+function currentContract(id = GENERATED_WORKFLOW_ID) {
   // Fixed key order is the canonical serialization; sha256 is never part of its payload.
   const payload = {
     schema: MEDIA_WORKFLOW_CONTRACT_SCHEMA,
-    id: GENERATED_WORKFLOW_ID,
-    version: GENERATED_VISUALS_WORKFLOW_VERSION,
-    stage_registry_version: GENERATED_VISUALS_STAGE_REGISTRY_VERSION,
+    id,
+    version: id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_WORKFLOW_VERSION,
+    stage_registry_version: id === AVATAR_PILOT_WORKFLOW_ID ? AVATAR_PILOT_VERSION : GENERATED_VISUALS_STAGE_REGISTRY_VERSION,
   };
   return {
     ...payload,
@@ -80,6 +83,9 @@ export function resolveMediaWorkflow(identity = {}) {
   const hasWorkflow = Object.hasOwn(identity, "media_workflow");
   const hasContract = Object.hasOwn(identity, "workflow_contract");
   if (!hasWorkflow && !hasContract) {
+    if ([identity.content_profile, identity.content_profile_config?.id].includes(AVATAR_PILOT_PROFILE_ID)) {
+      throw new Error("Avatar pilot requires its explicit proof workflow; no legacy generated adapter is available.");
+    }
     // Reserved future IDs never described a supported historical profile. Omitting
     // workflow fields must not turn a future movie/footage profile into this adapter.
     assertEditorialProfileId(identity.content_profile);
@@ -101,7 +107,7 @@ export function resolveMediaWorkflow(identity = {}) {
   if (contract.id !== identity.media_workflow) {
     throw new Error("Workflow identity media_workflow conflicts with workflow_contract.id.");
   }
-  const expected = currentContract();
+  const expected = currentContract(identity.media_workflow);
   for (const key of contractKeys.filter((key) => key !== "sha256")) {
     if (contract[key] !== expected[key]) {
       throw new Error(`Unsupported or stale workflow_contract ${key}; expected ${expected[key]}. Existing identities must not be migrated implicitly.`);
@@ -116,6 +122,10 @@ export function resolveMediaWorkflow(identity = {}) {
     throw new Error("Workflow identity stage_registry_version conflicts with its workflow_contract.stage_registry_version.");
   }
   assertExplicitProfileConsistency(identity);
+  const profile = identity.content_profile_config?.id ?? identity.content_profile;
+  if ((identity.media_workflow === AVATAR_PILOT_WORKFLOW_ID) !== (profile === AVATAR_PILOT_PROFILE_ID)) {
+    throw new Error("Avatar pilot workflow and mcu_what_if_pilot_v1 must be selected together.");
+  }
   return { ...expected, legacy: false, available: true };
 }
 
@@ -135,5 +145,8 @@ export function mediaWorkflowForPreflight({ contentProfile, mediaWorkflow } = {}
   }
   assertEditorialProfileId(contentProfile);
   assertWorkflowId(mediaWorkflow);
-  return { media_workflow: GENERATED_WORKFLOW_ID, workflow_contract: currentContract() };
+  if ((mediaWorkflow === AVATAR_PILOT_WORKFLOW_ID) !== (contentProfile === AVATAR_PILOT_PROFILE_ID)) {
+    throw new Error("Avatar pilot preflight requires the exact pilot workflow/profile pair.");
+  }
+  return { media_workflow: mediaWorkflow, workflow_contract: currentContract(mediaWorkflow) };
 }

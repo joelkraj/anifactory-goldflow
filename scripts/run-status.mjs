@@ -4194,6 +4194,12 @@ async function main() {
     assertCommandWorkflowRoute({ command: "run", subcommand: "status", script: "run-status.mjs", flags, episodeDir });
   }
   const mediaWorkflow = assertEpisodeWorkflowFlags(runIdentity, persistedRunIdentity ? flags : {});
+  if (mediaWorkflow.id === "avatar_footage_pilot_v1") {
+    const { pilotStatus, formatPilotStatus } = await import("./lib/avatar-pilot-workflow.mjs");
+    const report = await pilotStatus(episodeDir);
+    console.log(flags.format === "markdown" ? formatPilotStatus(report) : JSON.stringify(report, null, 2));
+    return;
+  }
   const stageRegistry = stageRegistryFor(runIdentity);
   const productionManifest = await readJson(path.join(episodeDir, "production_manifest.json"), null);
   const ttsIdentityFields = ttsStatusIdentityFields(runIdentity, flags);

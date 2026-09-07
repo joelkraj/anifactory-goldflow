@@ -1,6 +1,6 @@
 # Avatar What-If Pilot — Design and Acceptance Contract
 
-Status: implementation authorized; workflow not yet registered or executable. Version: 2026-09-06.1.
+Status: guarded import-based proof workflow and local compositor implemented; narration entry is blocked pending a fixture-proven canonical text/audio lineage adapter. New narration synthesis and automatic media dispatch are not yet implemented. Version: 2026-09-06.1. See [the executable pilot workflow](../workflows/avatar_pilot_workflow.md).
 
 Read [the shared router](../../AGENTS.md), [movie/TV guidance](../pipelines/movie_tv.md), and [private footage workflow](../workflows/footage_clipping_workflow.md). Reuse of narration must preserve [Narration Quality V2](../workflows/narration_quality_v2.md). The [generated-visuals guide](../pipelines/generated_visuals.md) describes existing technical components, not an alternate way to run this pilot.
 
@@ -28,14 +28,16 @@ Borrow broad presentation mechanics from the inspected Specular Animation exampl
 | Element | Editorial job | Treatment |
 | --- | --- | --- |
 | Original host + set | Ask, consider, object, explain, conclude | Reusable transparent pose assets on a consistent background; motivated position/scale changes and pose swaps, without required lip-sync |
-| Movie excerpt | Demonstrate a specific screen-established ability or reaction | Reviewed 3–5 second source interval; full-frame or a readable framed card; preserve the action being cited |
+| Movie excerpt | Demonstrate a specific screen-established ability or reaction | Reviewed 3–5 second source interval, primarily a readable moving card; preserve the action being cited |
 | Evidence card/comparison | Compare Sentry/Void or evidence/assumption | Deliberate side-by-side or overlapping cards, clear short labels, stable reading time |
-| AI concept still | Illustrate our invented scenario | Gemini, Flow, or built-in Codex image generation only through an explicitly selected, approved asset route; visibly identified as concept imagery where it could be confused with footage |
+| AI concept still | Illustrate our invented scenario | Gemini/Flow only, including host/poses/backgrounds and hypothetical Sentry–Doom scenes; visibly identified as concept imagery where it could be confused with footage |
 | Optional Flow video | Show a necessary hypothetical action a still cannot communicate | Exact approved first frame, one bounded reachable action, one creative submission, hash-bound review; retain approved still treatment if the optional clip fails |
 
 For the first pilot, propose one host identity, one main background, and approximately six useful poses: neutral, questioning/open hand, thinking, skeptical, pointing/presenting, and confident conclusion. These are proposed asset IDs/roles, not a mandate to generate every pose or a generation approval. Host expression changes follow meaning, not a rigid per-second quota. Existing accepted poses can be reused deliberately without donor-image substitution.
 
 Movie excerpt duration and card motion are separate contracts. A 4-second clip can enter as a moving card while its own footage plays, then settle for the key action. Author entrance, hold, and exit timing separately from the source in/out interval. Prefer a restrained slide or pan; do not crop away the decisive evidence, obscure captions, imply a different camera event, or stretch/freeze/loop footage silently to fill narration. No generated interpolation or alteration of an evidence clip that invents the claimed ability.
+
+Operator update: deliberate loops are allowed. The excerpt itself stays 3–5 seconds; author `loop: true` and `source_duration_sec` on its card layer. This proof caps a looped card at two cycles / ten output seconds and mutes looped source audio. No implicit looping, freeze, slowdown, or repeated dialogue. Brief movie excerpts support the commentary; they are not a way to display the movie. Framing, movement and short duration do not by themselves establish permission or fair use.
 
 Use host sections between evidence clusters so the video feels presented, not like uninterrupted B-roll. No mandatory clip/host/AI percentage: the reviewed script and beat purpose decide. Prefer the smallest reusable asset set that makes the argument clear. Flow video is optional and exact-ID; ordinary card entrances and pose movement are compositor work, not reasons for AI video spend.
 
@@ -54,7 +56,7 @@ Provider/model selection must be explicit in the pilot identity and asset plan. 
 
 The existing extractor handles bounded clips. Existing generated-visuals motion, provider receipts, voice lineage, Whisper timing, and loudness tools are reusable components. The current generated-video renderer instead fills the canvas, removes video audio, and may hold the final frame; it is not the required multi-layer footage/host compositor and must not be passed library clips as if they were generated-motion approvals.
 
-The following are proposed artifact stages, not available CLI commands:
+The following editorial checkpoints are implemented by the import-based commands in the pilot workflow; synthesis/generation inside checkpoints 3–5 remains an explicit implementation gap, not a reason to call the old generated-visuals stages directly:
 
 1. **Pilot identity:** explicit editorial/media workflow, exact 90-second proof scope, channel/series/run/episode/title, clean-code provenance, provider/voice/model locks, and `production_eligible: false`; publishing unavailable.
 2. **Evidence and script approval:** source/ability ledger, separate fact/assumption/speculation fields, original script, exact-hash operator approval, and targeted speakability. No synthesis before this gate.

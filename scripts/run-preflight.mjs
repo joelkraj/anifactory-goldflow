@@ -152,6 +152,7 @@ if (invokedAsCommand) {
       contentProfile: flags["content-profile"],
       mediaWorkflow: flags["media-workflow"],
     });
+    if (mediaWorkflowBinding.media_workflow !== "generated_visuals_v1") throw new Error("Use pilot preflight for the bounded avatar proof; this preflight is generated-visuals only.");
     requiredFlag("channel", channel);
     requiredFlag("series", series);
     requiredFlag("week", week);

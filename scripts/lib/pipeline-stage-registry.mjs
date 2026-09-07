@@ -1,4 +1,5 @@
 import { productionProfileForIdentity } from "./production-profiles.mjs";
+import { AVATAR_PILOT_STAGES } from "./avatar-pilot-stage-registry.mjs";
 import { assertAvailableMediaWorkflow, GENERATED_VISUALS_STAGE_REGISTRY_VERSION } from "./media-workflows.mjs";
 import {
   isLegacyQwenIdentity,
@@ -435,13 +436,14 @@ const stagesById = new Map(PIPELINE_STAGE_REGISTRY.map((entry) => [entry.id, ent
 // The legacy export remains byte-for-byte the generated-visual stage chain.
 // Other workflows must supply a real registry and validators before dispatch.
 export function stageRegistryFor(identity = {}) {
-  assertAvailableMediaWorkflow(identity);
+  const workflow = assertAvailableMediaWorkflow(identity);
+  if (workflow.id === "avatar_footage_pilot_v1") return AVATAR_PILOT_STAGES;
   return PIPELINE_STAGE_REGISTRY;
 }
 
 export function stageDefinition(stageId, identity = {}) {
-  stageRegistryFor(identity);
-  return stagesById.get(stageId) ?? null;
+  const registry = stageRegistryFor(identity);
+  return registry === PIPELINE_STAGE_REGISTRY ? stagesById.get(stageId) ?? null : registry.find((entry) => entry.id === stageId) ?? null;
 }
 
 export function assertStageState(value) {
@@ -456,11 +458,11 @@ export function stageIsSatisfied(state) {
 export function commandStageFor(commandName, subcommandName, flags = {}, identity = {}) {
   const registry = stageRegistryFor(identity);
   const key = `${commandName} ${subcommandName}`.trim();
-  if (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex") {
+  if (registry === PIPELINE_STAGE_REGISTRY && (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex")) {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
   }
-  if (key === "imagegen promote-derived-refs") return "image_generation";
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen promote-derived-refs") return "image_generation";
   for (const entry of registry) {
     if (entry.commands.includes(key)) return entry.id;
   }

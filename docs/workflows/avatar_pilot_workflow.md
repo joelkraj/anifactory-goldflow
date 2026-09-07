@@ -43,7 +43,7 @@ After every command, inspect `node bin/goldflow.mjs run status --episode-dir <di
 | `revise-host-design --input <request>` | One guarded post-approval host-only amendment after the first neutral candidate is explicitly rejected; `--accept true --reviewer --note`; preserves the first attempt and authorizes exactly one replacement neutral submission |
 | `approve-host-identity --input <request>` | Accept the exact replacement neutral plus its inspected real-alpha cutout; `--accept true --reviewer --note`; releases only the five already-planned dependent pose IDs, one first submission each |
 | `import-media --input <manifest>` | Complete planned local assets, immutable receipts and exact pilot reviews |
-| `timeline --input <timeline>` | Typed frame coverage, source/output mapping, complete narration/captions |
+| `timeline --input <timeline>` | Typed frame coverage, source/output mapping, complete narration, optional separate captions |
 | `approve-timeline` | Exact edit/mix approval |
 | `render` | All current upstream hashes, local inputs only, exactly 2700 frames |
 | `final-qa` | Measured mix (-16 LUFS +/-1; <=-1.5 dBTP), complete viewing/listening; `--reviewer --note --attestation entire_90_second_program_watched_and_listened` |
@@ -108,7 +108,7 @@ A plain backdrop is native timeline data: use `background_color: "#RRGGBB"` with
 
 Movie layers play 3–5 seconds. An explicit loop uses `loop:true` plus frame-aligned `source_duration_sec` of 3–5 seconds, at most two cycles / ten seconds on screen, and no source audio. Normal cards can retain explicitly gained `under_narration` audio or a `spotlight` only while narration pauses. Video playback is independent of card entrance movement. No silent freeze or stretching.
 
-Captions reproduce the complete approved script and carry contiguous `word_start_index` / `word_end_index_exclusive` values tied to accepted Whisper timing and narration placements. Full speech is consumed in source order; the final fractional video frame contains silence, not clipped or stretched speech. Host poses need actual alpha channels. There is no default extra score/SFX.
+The `captions` array may be empty for this format. When captions are selected, they reproduce the complete approved script and carry contiguous `word_start_index` / `word_end_index_exclusive` values tied to accepted Whisper timing and narration placements. Captions remain separate timeline overlays and are never baked into generated backgrounds or other source assets. Full speech is consumed in source order; the final fractional video frame contains silence, not clipped or stretched speech. Host poses need actual alpha channels. There is no default extra score/SFX.
 
 ## Verification
 

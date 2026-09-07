@@ -239,24 +239,27 @@ async function validatePayload(stage, payload, episodeDir, identity, openingAdap
     const media = (await rowAt(episodeDir, AVATAR_PILOT_STAGES[9])).payload;
     const voice = media.assets.find((asset) => asset.kind === "narration");
     need(Number.isFinite(voice.duration_sec) && consumedFrames === Math.ceil(voice.duration_sec * 30), "Timeline must account for the complete accepted narration duration, rounded up to its final frame without dropping speech.");
-    // Captions are authored from the approved script and bound Whisper timing, not movie dialogue.
+    // Captions are optional separate overlays. If selected, they must cover the
+    // approved narration completely and use its bound Whisper timing.
     const normalizeWords = (text) => text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu)?.join(" ").replaceAll("’", "'") ?? "";
-    need(normalizeWords(payload.captions.map((caption) => caption.text).join(" ")) === normalizeWords(await sourceText(episodeDir)), "Pilot captions must reproduce the complete approved narration text in order.");
-    const timing = await jsonAt(await checkBinding(narration.whisper_timing, episodeDir));
-    const words = timing.words;
-    let nextWord = 0;
-    const outputTime = (time, atEnd = false) => {
-      const placement = placements.find((row) => time >= row.source_in_sec - 0.001 && (atEnd ? time <= row.source_in_sec + row.duration_frames / 30 + 0.001 : time < row.source_in_sec + row.duration_frames / 30));
-      need(placement, "Caption word has no narration placement.");
-      return placement.start_frame / 30 + time - placement.source_in_sec;
-    };
-    for (const caption of payload.captions) {
-      need(caption.word_start_index === nextWord && Number.isInteger(caption.word_end_index_exclusive) && caption.word_end_index_exclusive > nextWord && caption.word_end_index_exclusive <= words.length, "Captions require contiguous exact Whisper word-index coverage.");
-      const first = words[nextWord], last = words[caption.word_end_index_exclusive - 1];
-      need(Math.abs(caption.start_frame / 30 - outputTime(first.start)) <= 0.2 && Math.abs(caption.end_frame / 30 - outputTime(last.end, true)) <= 0.3, "Caption placement must match its bound Whisper words on the output clock.");
-      nextWord = caption.word_end_index_exclusive;
+    if (payload.captions.length > 0) {
+      need(normalizeWords(payload.captions.map((caption) => caption.text).join(" ")) === normalizeWords(await sourceText(episodeDir)), "Selected pilot captions must reproduce the complete approved narration text in order.");
+      const timing = await jsonAt(await checkBinding(narration.whisper_timing, episodeDir));
+      const words = timing.words;
+      let nextWord = 0;
+      const outputTime = (time, atEnd = false) => {
+        const placement = placements.find((row) => time >= row.source_in_sec - 0.001 && (atEnd ? time <= row.source_in_sec + row.duration_frames / 30 + 0.001 : time < row.source_in_sec + row.duration_frames / 30));
+        need(placement, "Caption word has no narration placement.");
+        return placement.start_frame / 30 + time - placement.source_in_sec;
+      };
+      for (const caption of payload.captions) {
+        need(caption.word_start_index === nextWord && Number.isInteger(caption.word_end_index_exclusive) && caption.word_end_index_exclusive > nextWord && caption.word_end_index_exclusive <= words.length, "Captions require contiguous exact Whisper word-index coverage.");
+        const first = words[nextWord], last = words[caption.word_end_index_exclusive - 1];
+        need(Math.abs(caption.start_frame / 30 - outputTime(first.start)) <= 0.2 && Math.abs(caption.end_frame / 30 - outputTime(last.end, true)) <= 0.3, "Caption placement must match its bound Whisper words on the output clock.");
+        nextWord = caption.word_end_index_exclusive;
+      }
+      need(nextWord === words.length, "Selected captions must account for every narration word.");
     }
-    need(nextWord === words.length, "Captions must account for every narration word.");
   }
   if (stage.action === "render") {
     need(payload.duration_frames === 2700 && Math.abs(payload.duration_sec - 90) <= 1 / 30, "Pilot render must be exactly 90 seconds / 2700 frames.");

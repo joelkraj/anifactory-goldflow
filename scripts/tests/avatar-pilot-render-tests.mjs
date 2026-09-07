@@ -226,6 +226,9 @@ export async function runAvatarPilotRenderTests() {
     rejects((timeline) => { timeline.narration[0].asset_id = 'movie'; }, /narration|kind|audio|role/i);
     rejects((timeline) => { timeline.captions = [{ start_frame: 2690, end_frame: 2710, text: 'Synthetic caption' }]; }, /caption|frame|bounds|2700|90|end/i);
     rejects((timeline) => { timeline.shots[1].truth_mode = 'hypothesis'; timeline.shots[1].truth_label = ''; }, /label|hypothesis|truth/i);
+    const withoutCaptions = fixtureTimeline();
+    withoutCaptions.captions = [];
+    assert.deepEqual(valid(withoutCaptions), []);
   });
 
   const directory = await mkdtemp(path.join(os.tmpdir(), 'goldflow-avatar-pilot-render-test-'));

@@ -1,0 +1,93 @@
+{
+  "schema": "goldflow_avatar_pilot_evidence_v1",
+  "status": "draft_pending_exact_source_review",
+  "source_script_sha256": "46b5069ee56113f986e623873f5bf3965bad326db866be24b5b8cd9d9bb5236e",
+  "registered_source": {
+    "path": "/Users/joel/AniFactoryData/footage_library/sources/src_59c68173eefe6b9be4892feb.json",
+    "sha256": "218d8273fcd4e9fb9aa0807a937f314eae7005677a03249af442074078ea9319",
+    "provider": "torbox",
+    "source_id": "91955100",
+    "file_id": "0",
+    "edition": "Thunderbolts (2025) BDRemux 1080p Ukr Eng [Hurtom].mkv",
+    "ready": true,
+    "whole_source_locally_downloaded": false
+  },
+  "research_sources": [
+    {
+      "url": "https://www.ilm.com/thunderbolts-marvel-chad-wiebe-interview-ilm/",
+      "title": "Tackling Marvel's Thunderbolts with ILM Visual Effects Supervisor Chad Wiebe",
+      "scope": "Film-specific corroboration of the Red Guardian window push/return and Void shadow silhouettes. Not an edition-matched excerpt review or reuse clearance."
+    }
+  ],
+  "claims": [
+    {
+      "id": "tower_red_guardian",
+      "kind": "film_fact",
+      "text": "In Thunderbolts, Bob sends Red Guardian through a window and brings him back during the tower fight.",
+      "source": {
+        "title": "Thunderbolts*",
+        "edition": "Thunderbolts (2025) BDRemux 1080p Ukr Eng [Hurtom].mkv",
+        "source_in_sec": null,
+        "source_out_sec": null,
+        "locator": "Penthouse/tower confrontation. Exact source and reviewed source interval still required.",
+        "reviewed": false,
+        "rights_basis": "Operator asserts fair use for original criticism/commentary in a private 90-second proof; not a license or legal clearance. Exact excerpt and intended-use review pending."
+      }
+    },
+    {
+      "id": "void_shadows",
+      "kind": "film_fact",
+      "text": "Thunderbolts shows people becoming shadows through the Void's effect.",
+      "source": {
+        "title": "Thunderbolts*",
+        "edition": "Thunderbolts (2025) BDRemux 1080p Ukr Eng [Hurtom].mkv",
+        "source_in_sec": null,
+        "source_out_sec": null,
+        "locator": "Void shadow-silhouette sequence. Exact source and reviewed source interval still required.",
+        "reviewed": false,
+        "rights_basis": "Operator asserts fair use for original criticism/commentary in a private 90-second proof; not a license or legal clearance. Exact excerpt and intended-use review pending."
+      }
+    },
+    {
+      "id": "mastery_assumption",
+      "kind": "assumption",
+      "text": "Bob deliberately controls the timing and use of his movie-demonstrated Sentry and Void abilities. Control is the changed assumption, not an established film feat or a comic power upgrade."
+    },
+    {
+      "id": "invented_objective",
+      "kind": "speculation",
+      "text": "Our invented encounter places a device within Doom's reach; Bob moves him through a wall while the Avengers carry the device out. The device, its importance, Doom's susceptibility to this strike and the success of the intervention are authored scenario choices, not Doomsday facts."
+    },
+    {
+      "id": "invented_counterplay",
+      "kind": "speculation",
+      "text": "Doom detonates the escape corridor and Bob pulls the endangered allies onto the next landing. The explosive setup, spatial layout and multiple-person rescue are invented applications requiring plausible visual staging; they are not claimed additional film demonstrations."
+    },
+    {
+      "id": "void_deterrent",
+      "kind": "speculation",
+      "text": "Bob turns back in the doorway as the Void while retaining control. Our Doom chooses the longer route instead of testing the shadow effect. His caution is an authored decision, not evidence that he is vulnerable or immune."
+    },
+    {
+      "id": "mission_outcome",
+      "kind": "speculation",
+      "text": "Bob holds the route rather than chasing Doom. The delay gives the Avengers time to escape with the device. This mission-level success motivates our opinion that mastery can make Bob decisive without proving him unbeatable."
+    },
+    {
+      "id": "unproven_matchup",
+      "kind": "limitation",
+      "text": "The cited Thunderbolts evidence does not establish whether Doom could resist the Void, every character's upper limit, an automatic matchup winner or an actual Doomsday event."
+    },
+    {
+      "id": "screen_only",
+      "kind": "limitation",
+      "text": "No comics/composite powers, guaranteed immunity or unlimited-power claim. Invented visuals must be labeled hypothetical from the opening and at evidence/concept transitions. Bob never loses mastery to manufacture the conflict."
+    }
+  ],
+  "review": {
+    "reviewer": null,
+    "note": "Exact ready TorBox source registered after the operator supplied its DMM page. Blocked pending exact-source visual review and recorded 3–5 second excerpt selections. ILM's interview corroborates two actions but does not replace direct clip inspection. Registration is not a whole-file checksum, source-acquisition request or factual approval.",
+    "all_factual_abilities_reviewed": false,
+    "mcu_only": false
+  }
+}

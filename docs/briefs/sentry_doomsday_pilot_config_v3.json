@@ -1,0 +1,74 @@
+{
+  "channel": "joel_proofs",
+  "series_slug": "mcu-what-if",
+  "week": "sentry-doomsday-pilot",
+  "episode": "ep_01",
+  "title": "What If Sentry Mastered His Powers Before Avengers: Doomsday?",
+  "content_profile": "mcu_what_if_pilot_v1",
+  "media_workflow": "avatar_footage_pilot_v1",
+  "run_intent": "proof",
+  "production_eligible": false,
+  "publish_allowed": false,
+  "audio_target": "commentary_with_optional_source_audio",
+  "source_script": {
+    "path": "docs/briefs/sentry_doomsday_script_candidate_v3.md",
+    "sha256": "46b5069ee56113f986e623873f5bf3965bad326db866be24b5b8cd9d9bb5236e"
+  },
+  "proof_scope": {
+    "start_sec": 0,
+    "end_sec": 90,
+    "duration_frames": 2700,
+    "fps": 30,
+    "width": 1920,
+    "height": 1080
+  },
+  "pilot_providers": {
+    "stills": [
+      {
+        "provider": "google_gemini_imagen",
+        "model": "Nano Banana 2"
+      },
+      {
+        "provider": "google_flow",
+        "model": "Nano Banana Pro"
+      }
+    ],
+    "video": {
+      "provider": "google_flow",
+      "model": "Veo 3.1 Fast",
+      "enabled": true
+    },
+    "narration": {
+      "provider": "qwen_local",
+      "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+      "model_revision": "e7dd0585652209fa0d7783659aad4e8a324de11c",
+      "voice_id": "joel_owned_narrator_clone",
+      "voice_sha256": "48a7ec7ab4aa2170ae368e3ba1e25964138e4958e7120f8e51f411848def5ecf",
+      "reference_audio_sha256": "e15a1bd90fcca701003f7ac9a0308e8f37e493a28713ad1cca6afbd09ca21c18",
+      "reference_text_sha256": "cf6964e575a83f71a5d2aab2409818a0b435d36791b00318750e7d6ad1669a49"
+    }
+  },
+  "editorial_scope": {
+    "screen_canon": "Thunderbolts* film-demonstrated abilities only; no comics/composite feats",
+    "changed_assumption": "Deliberate mastery of movie Sentry/Void effects",
+    "movie_excerpt_seconds": [
+      3,
+      5
+    ],
+    "movie_layout": "primarily moving evidence cards supporting narration, not displaying the movie",
+    "explicit_loop_limit": "two cycles / ten output seconds; silent source audio",
+    "generated_scenarios": "visibly labeled hypothetical concepts, including optional Sentry–Doom fight",
+    "source_permission": "Operator asserts fair use for intended criticism/commentary; not a license or legal clearance. Exact-source and excerpt review still required.",
+    "destination_note": "Private local proof namespace only; not a selected public YouTube channel",
+    "narration_direction": "Assured causal what-if narrative: action, counterplay and payoff; no required repeated questions or first-person opinion announcements."
+  },
+  "proof_revision": {
+    "id": "script-v3",
+    "reason": "Operator requested revised script then said: alright lets get to the proof",
+    "supersedes_identity": {
+      "path": "/Users/joel/AniFactoryData/channels/joel_proofs/weekly_runs/sentry-doomsday-pilot/episodes/ep_01/run_identity.json",
+      "sha256": "7753737164e34bc80113939d36c1d41bffb83db38fbfc4e43e9affe7a2db200d"
+    },
+    "prior_artifacts_preserved": true
+  }
+}

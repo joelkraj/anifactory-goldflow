@@ -4,7 +4,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { executePilotCommand, pilotStatus, pilotWorkflowFixtureHarness, PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS } from "../lib/avatar-pilot-workflow.mjs";
+import { executePilotCommand, pilotStatus, pilotWorkflowFixtureHarness, PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS,
+  PILOT_REMAINING_SYNTHESIS_ADAPTER_STATUS } from "../lib/avatar-pilot-workflow.mjs";
 import { buildNarrationSubjectiveReviewManifest, validateNarrationSubjectiveReviewDecision } from "../lib/narration-subjective-review.mjs";
 import { resolveMediaWorkflow, mediaWorkflowForPreflight } from "../lib/media-workflows.mjs";
 import { stageRegistryFor } from "../lib/pipeline-stage-registry.mjs";
@@ -179,7 +180,9 @@ try {
   assert.equal(differentReviewer.current_stage, "pilot_voice_sample");
   const openingReleased = PILOT_OPENING_SYNTHESIS_ADAPTER_STATUS === "proven";
   assert.equal(differentReviewer.capabilities.narration, openingReleased
-    ? "opening_only_scoped_synthesis_and_listening_full_narration_blocked"
+    ? PILOT_REMAINING_SYNTHESIS_ADAPTER_STATUS === "proven"
+      ? "scoped_opening_and_remaining_synthesis_with_separate_listening_gates"
+      : "opening_only_scoped_synthesis_and_listening_full_narration_blocked"
     : "blocked_pending_proven_canonical_lineage_import_and_scoped_synthesis_adapter");
   assert.deepEqual(differentReviewer.allowed_command_stages, openingReleased ? ["pilot_voice_sample"] : [], "only a separately proven opening may advance");
   await assert.rejects(() => run("import-voice-sample", { input: evidencePath }), /stopped at|imports remain blocked/u);

@@ -250,8 +250,11 @@ ${registryCommands}
   goldflow run web-archive-cleanup Archive legacy unscoped GPT Image chats through one throttled maintenance lane
   goldflow run cleanup             Audit or prune safe intermediates
   goldflow pilot preflight         Initialize the distinct private 90-second avatar proof (see docs/workflows/avatar_pilot_workflow.md)
-  goldflow pilot status            Show proof gates and separate opening-only synthesis capability; generic/full narration imports remain blocked
-  goldflow pilot create-voice-sample Create only the approved opening via --input <opening-editorial.json>, once its separate scoped adapter is proven; no full narration or media dispatch
+  goldflow pilot status            Show scoped opening/remaining synthesis and separate listening gates; arbitrary narration imports and publishing remain blocked
+  goldflow pilot create-voice-sample Create only two approved opening units via --input <opening-editorial.json>; full-source plan and frozen phase cohorts, no media dispatch
+  goldflow pilot approve-voice-sample Accept the exact opening after --attestation complete_opening_listened_end_to_end --accept true --reviewer <name> --note <review>
+  goldflow pilot create-narration   Preserve approved opening raw units; synthesize frozen remaining units and run full canonical QA, leaving listening pending
+  goldflow pilot approve-narration Accept the exact full candidate and timing after --attestation entire_proof_narration_listened_end_to_end --accept true --reviewer <name> --note <review>
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof

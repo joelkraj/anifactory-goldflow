@@ -552,6 +552,26 @@ export function buildNarrationPreSynthesisGate({
       });
     }
   }
+  // Remaining synthesis is a distinct, already-frozen phase. The accepted
+  // opening is preserved with its original batch identity, never re-cohorted.
+  if (synthesisScope?.mode === "pilot_remaining_only") {
+    boundBatchPlan = plan?.pilot_phase_batch_plans?.remaining;
+    const openingIds = plan?.pilot_opening_unit_ids ?? [];
+    const tail = units.slice(openingIds.length);
+    const batchValidation = validateQwenLiamBatchPlan(boundBatchPlan, tail, policy?.synthesis_contract);
+    if (!openingIds.length || !tail.length
+      || openingIds.some((id, index) => id !== allUnitIds[index])
+      || JSON.stringify(preservedIds) !== JSON.stringify(openingIds)
+      || JSON.stringify(authorizedIds) !== JSON.stringify(tail.map((unit) => String(unit.unit_id)))
+      || preservedArtifacts.length !== openingIds.length
+      || !synthesisScope?.evidence_path
+      || !/^[a-f0-9]{64}$/u.test(String(synthesisScope?.evidence_sha256 ?? ""))
+      || batchValidation.status !== "passed") {
+      addFinding(findings, "pre_synthesis_pilot_remaining_scope_invalid", {
+        batch_findings: batchValidation.findings,
+      });
+    }
+  }
   if (preservedArtifactIds.length !== preservedIds.length
     || preservedArtifactIds.some((unitId, index) => unitId !== preservedIds[index])
     || preservedArtifacts.some((row) => (

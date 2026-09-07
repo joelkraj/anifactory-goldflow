@@ -14,6 +14,7 @@ const documentary = read("docs/pipelines/documentary.md");
 const movie = read("docs/pipelines/movie_tv.md");
 const asset = read("docs/workflows/asset_afterlife_profile.md");
 const pilotDesign = read("docs/designs/avatar_what_if_pilot_v1.md");
+const pilotWorkflow = read("docs/workflows/avatar_pilot_workflow.md");
 const sentryBrief = read("docs/briefs/sentry_doomsday_90s.md");
 
 assert.ok(root.split("\n").length <= 120, "Root guidance should remain a concise shared router.");
@@ -29,7 +30,7 @@ assert.match(root, /exact-ID/);
 assert.match(root, /No deterministic creative rewriting/);
 assert.match(root, /signed media URLs/);
 
-for (const file of ["AGENTS.md", "docs/pipelines/generated_visuals.md", "docs/pipelines/manhwa.md", "docs/pipelines/documentary.md", "docs/pipelines/movie_tv.md", "docs/designs/avatar_what_if_pilot_v1.md", "docs/briefs/sentry_doomsday_90s.md"]) {
+for (const file of ["AGENTS.md", "docs/pipelines/generated_visuals.md", "docs/pipelines/manhwa.md", "docs/pipelines/documentary.md", "docs/pipelines/movie_tv.md", "docs/designs/avatar_what_if_pilot_v1.md", "docs/workflows/avatar_pilot_workflow.md", "docs/briefs/sentry_doomsday_90s.md"]) {
   for (const match of read(file).matchAll(/\]\(([^)]+\.md)(?:#[^)]*)?\)/g)) {
     if (/^https?:/.test(match[1])) continue;
     assert.ok(existsSync(path.resolve(repoRoot, path.dirname(file), match[1])), `${file}: broken guidance link ${match[1]}`);
@@ -66,13 +67,21 @@ assert.match(movie, /blocked/i);
 assert.match(movie, /subtitle/i);
 assert.match(movie, /audio/i);
 assert.match(movie, /avatar_what_if_pilot_v1\.md/);
-assert.match(pilotDesign, /canonical Joel opening-only synthesis implemented/);
-assert.match(pilotDesign, /Remaining narration and arbitrary audio import are blocked/);
+assert.match(pilotDesign, /canonical Joel opening\/remaining synthesis implemented with separate listening gates/);
+assert.match(pilotDesign, /arbitrary audio imports remain blocked/);
 assert.match(pilotDesign, /exactly 90-second proof/);
 assert.match(pilotDesign, /No full episode, publishing/);
 assert.match(pilotDesign, /no effective per-unit instruction or native-speed channel/);
 assert.match(pilotDesign, /15–20 second opening take/);
-assert.match(pilotDesign, /remaining synthesis and automatic media generation.*explicit implementation gaps/);
+assert.match(pilotDesign, /automatic media generation.*remains unavailable/);
+assert.match(pilotDesign, /two exact-hash raw opening units/);
+assert.match(pilotDesign, /already-frozen remaining cohorts/);
+assert.match(pilotDesign, /entire_proof_narration_listened_end_to_end/);
+assert.match(pilotWorkflow, /`pilot_remaining_only`/);
+assert.match(pilotWorkflow, /candidate does not complete a stage|pending candidate, not an accepted stage/);
+assert.match(pilotWorkflow, /do not delete it or rerun synthesis/);
+assert.match(pilotWorkflow, /without a second ASR run/);
+assert.match(pilotWorkflow, /not a claim that real remaining audio has been generated or approved/);
 assert.match(pilotDesign, /deliberate loops are allowed/);
 assert.match(pilotDesign, /Keep source time and finished-video time separate/);
 assert.match(pilotDesign, /No automatic provider|not authorize a three-provider bakeoff/);

@@ -18,7 +18,7 @@ const need = (ok, message) => { if (!ok) throw new Error(message); };
 const passed = (result, label) => need(result?.status === "passed", `${label}: ${JSON.stringify(result?.findings ?? [])}`);
 const execute = promisify(execFile);
 
-async function inspectOpeningRuntime({ runnerPath, policy, bank }) {
+export async function inspectOpeningRuntime({ runnerPath, policy, bank }) {
   const git = async (...args) => (await execute("git", args, { cwd: ROOT, timeout: 30000, maxBuffer: 1024 * 1024 })).stdout.trim();
   need(!(await git("status", "--porcelain")), "Opening synthesis requires the tested adapter to be committed in a clean worktree.");
   const referenceAssetHashes = {};
@@ -36,7 +36,7 @@ async function inspectOpeningRuntime({ runnerPath, policy, bank }) {
     worktree_clean: true, python_path: PYTHON, runner: await binding(runnerPath) } };
 }
 
-async function readBound(ref) {
+export async function readBound(ref) {
   need(path.isAbsolute(ref?.path ?? "") && /^[a-f0-9]{64}$/.test(ref?.sha256 ?? ""), "Exact absolute file binding required.");
   const stat = await fs.lstat(ref.path);
   need(stat.isFile() && !stat.isSymbolicLink(), "Bound input must be a regular local file.");
@@ -44,8 +44,8 @@ async function readBound(ref) {
   need(hash(data) === ref.sha256, "Bound input hash changed.");
   return data;
 }
-async function binding(file) { return { path: file, sha256: hash(await fs.readFile(file)) }; }
-async function writeNew(file, value) {
+export async function binding(file) { return { path: file, sha256: hash(await fs.readFile(file)) }; }
+export async function writeNew(file, value) {
   // The canonical authorization is a hash/date receipt, not an HTTP credential.
   // Permit only its exact shape, while scanning every value and all other keys.
   let scanned = value;

@@ -67,43 +67,69 @@ function validateWavAccounting(bytes, result) {
 }
 
 /** Read-only validation. Call before loading any synthesis/QA model or writing jobs. */
-export async function validatePilotOpeningExecutionInputs({
+export async function validatePilotOpeningExecutionInputs(options = {}) {
+  return validatePilotPhaseExecutionInputs(options, "opening");
+}
+
+// Shared read-only boundary. The remaining branch independently authenticates
+// its accepted opening; callers cannot supply a trusted preservation shortcut.
+export async function validatePilotPhaseExecutionInputs({
   plan, units, policy, planPolicy, batchPlan,
   preSynthesisGate, preSynthesisGatePath, preSynthesisGateFileSha256,
   planPath, planFileSha256, identityPath, identityFileSha256,
   scriptPath, scriptSha256, acceptedUnitIds = [], requireAuthorized = true,
-} = {}) {
-  assert(Array.isArray(units) && units.length > 0, "opening units are missing");
+  acceptedOpening, episodeDir, identity: suppliedIdentity,
+} = {}, phase) {
+  assert(["opening", "remaining"].includes(phase), "unknown execution phase");
+  const remaining = phase === "remaining";
+  const preservedIds = remaining ? plan?.pilot_opening_unit_ids : [];
+  let accepted = null;
+  if (remaining) {
+    const { authenticateAcceptedPilotOpening } = await import("./avatar-pilot-remaining-execution.mjs");
+    accepted = await authenticateAcceptedPilotOpening({ acceptedOpening, episodeDir, identity: suppliedIdentity });
+    assert(identityPath === path.join(episodeDir, "run_identity.json"), "remaining identity namespace differs");
+    assert(accepted.sample.generation_plan.path === planPath
+      && accepted.sample.generation_plan.sha256 === planFileSha256
+      && accepted.sample.source_script_sha256 === scriptSha256
+      && accepted.sample.identity_sha256 === identityFileSha256,
+    "remaining must reuse the exact accepted opening's original plan, identity and source files");
+  }
+  assert(Array.isArray(units) && units.length > 0, "phase units are missing");
   assert(Array.isArray(plan?.units) && plan.units.length > units.length,
-    "opening must be a proper prefix of the complete plan");
-  assert(Array.isArray(acceptedUnitIds) && acceptedUnitIds.length === 0,
-    "initial opening must not regenerate any accepted units");
+    "a phase must be a proper subset of the complete plan");
+  assert(Array.isArray(acceptedUnitIds) && equal(acceptedUnitIds, preservedIds),
+    "phase must preserve exactly the previously accepted units");
   const ids = units.map((unit) => unit.unit_id);
   assert(ids.every((id) => typeof id === "string" && id.length > 0)
-    && new Set(ids).size === ids.length, "opening unit IDs must be unique");
-  assert(units.every((unit, index) => equal(unit, plan.units[index])),
-    "opening units must equal the complete plan's exact ordered prefix");
-  assert(equal(ids, plan.pilot_opening_unit_ids), "opening differs from the plan's locked selection");
+    && new Set(ids).size === ids.length, "phase unit IDs must be unique");
+  const selected = remaining ? plan.units.slice(preservedIds.length) : plan.units.slice(0, units.length);
+  assert(equal(units, selected), "phase units differ from the complete plan's exact ordered selection");
+  assert(remaining ? preservedIds.every((id, index) => id === plan.units[index].unit_id)
+    : equal(ids, plan.pilot_opening_unit_ids), "opening differs from the plan's locked selection");
   assert(plan.status === "passed" && plan.plan_sha256 === canonicalNarrationPlanSha256(plan),
     "complete canonical plan is missing or stale");
   assert(policy?.status === "passed" && planPolicy?.status === "passed",
     "identity and complete-plan policies must pass");
   assert(equal(policy.synthesis_contract, QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT),
     "only pinned batch-four synthesis is supported");
-  assert(equal(batchPlan, plan.pilot_phase_batch_plans?.opening),
-    "execution batch plan is not the immutable opening phase");
+  assert(equal(batchPlan, plan.pilot_phase_batch_plans?.[phase]),
+    "execution batch plan is not the immutable selected phase");
   assert(validateQwenLiamBatchPlan(batchPlan, units, policy.synthesis_contract).status === "passed",
     "opening cohort membership, seed, or scheduler is stale");
 
   const gate = preSynthesisGate;
   assert(gate?.status === "passed" && gate.gate_sha256 === narrationPreSynthesisGateSha256(gate),
     "canonical pre-synthesis gate is blocked or stale");
-  assert(gate.scope?.mode === "pilot_opening_only"
+  assert(gate.scope?.mode === `pilot_${phase}_only`
     && equal(gate.scope.authorized_synthesis_unit_ids, ids)
     && gate.scope.authorized_synthesis_unit_count === ids.length
-    && gate.scope.preserved_unit_count === 0
-    && equal(gate.scope.preserved_unit_ids, [])
-    && equal(gate.scope.preserved_artifacts, []), "gate exceeds the opening-only scope");
+    && gate.scope.preserved_unit_count === preservedIds.length
+    && equal(gate.scope.preserved_unit_ids, preservedIds)
+    && equal(gate.scope.preserved_artifacts, accepted?.preservedArtifacts ?? []), "gate exceeds the exact phase scope");
+  if (remaining) assert(gate.scope.evidence_path === acceptedOpening.approval.path
+    && gate.scope.evidence_sha256 === acceptedOpening.approval.sha256
+    && equal(gate.bindings, { ...accepted.openingGate.bindings, batch_plan_sha256: batchPlan.batch_plan_sha256 }),
+  "remaining authority must bind the genuine opening approval without altering any original input provenance");
   assert(gate.unit_count === plan.units.length && gate.historical_synthesis_authorized === false,
     "gate must validate the whole plan without prior ambiguous synthesis");
   if (requireAuthorized) {
@@ -219,7 +245,11 @@ function validateJobs(jobs, options) {
 
 /** Authenticate actual runner/job/sidecar/WAV bytes; this is provenance, not listening QA. */
 export async function validatePilotOpeningExecutionResults(options = {}) {
-  await validatePilotOpeningExecutionInputs({ ...options, requireAuthorized: true });
+  return validatePilotPhaseExecutionResults(options, "opening");
+}
+
+export async function validatePilotPhaseExecutionResults(options = {}, phase) {
+  await validatePilotPhaseExecutionInputs({ ...options, requireAuthorized: true }, phase);
   const { execution, units, policy, batchPlan, preSynthesisGate: gate } = options;
   assert(execution?.reportPath && execution.reportSha256, "runner receipt binding is missing");
   const report = await boundJson(execution.reportPath, execution.reportSha256, execution.report, "runner report");
@@ -236,7 +266,8 @@ export async function validatePilotOpeningExecutionResults(options = {}) {
     assert(report[field] === 1, `runner must use one resident model: ${field}`);
   assert(report.continuous_batching === false && report.token_limit_acceptance_allowed === false
     && report.accepted_token_limit_result_count === 0 && report.reference_audio_preloaded_once === true
-    && report.preserved_unit_count === 0 && equal(report.preserved_unit_ids, [])
+    && report.preserved_unit_count === gate.scope.preserved_unit_count
+    && equal(report.preserved_unit_ids, gate.scope.preserved_unit_ids)
     && report.batch_plan_sha256 === batchPlan.batch_plan_sha256
     && report.synthesis_mode === policy.synthesis_contract.mode
     && equal(report.synthesis_contract, policy.synthesis_contract)
@@ -340,7 +371,7 @@ export async function validatePilotOpeningExecutionResults(options = {}) {
     });
   }
   return {
-    schema: "goldflow_avatar_pilot_opening_execution_validation_v1", status: "passed",
+    schema: `goldflow_avatar_pilot_${phase}_execution_validation_v1`, status: "passed",
     production_stage_passed: false, listening_qa_performed: false, units: authenticated,
     runner_report_path: execution.reportPath, runner_report_sha256: execution.reportSha256,
     cohort_events_path: execution.cohortEventsPath, cohort_events_sha256: execution.cohortEventsSha256,

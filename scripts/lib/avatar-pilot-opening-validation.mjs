@@ -58,8 +58,24 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
       qualityContractSha256: policy.narration_quality_contract.contract_sha256, provider: policy.primary.provider,
       voiceId: policy.primary.voice_id, voiceSha256: policy.primary.voice_sha256,
     }), "Opening manifest invalid");
+    return validatePilotNarrationTechnicalReports({ result, episodeDir, identity, identityHash, plan, units, policy,
+      unitResults: report.results, phase: "opening" });
+  } catch (error) { findings.push({ code: error.message }); }
+  return { status: "blocked", findings, subjective_review_status: "pending" };
+}
+
+/** Shared report boundary only. Callers must first authenticate actual source,
+ * frozen plan and every phase's runner/sidecar/WAV provenance. */
+export async function validatePilotNarrationTechnicalReports({ result, episodeDir, identity, identityHash,
+  plan, units, policy, unitResults, phase } = {}) {
+  const findings = [];
+  try {
+    need(["opening", "full_pilot"].includes(phase), "Unknown pilot narration finalization scope.");
+    const identityPath = path.join(episodeDir, "run_identity.json");
+    const ids = units.map((unit) => unit.unit_id);
+    const full = phase === "full_pilot";
     const refs = result.finalization_artifacts;
-    const namespace = path.join(episodeDir, "pilot_narration_work", "opening_finalization");
+    const namespace = path.join(episodeDir, "pilot_narration_work", full ? "full_finalization" : "opening_finalization");
     const realNamespace = await fs.realpath(namespace);
     for (const name of ["audio", "tts_report", "stitch_report", "full_stream_qa", "voice_continuity", "unit_delivery_qa", "unit_qa", "subjective_manifest", "timing_candidate"]) {
       const file = refs?.[name]?.path;
@@ -70,20 +86,32 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
     const tts = await read(refs.tts_report), stitch = await read(refs.stitch_report), delivery = await read(refs.full_stream_qa);
     const continuity = await read(refs.voice_continuity), subjective = await read(refs.subjective_manifest), timing = await read(refs.timing_candidate);
     const unitDelivery = await read(refs.unit_delivery_qa), unitQa = await read(refs.unit_qa);
+    const whisperContract = localWhisperContractForIdentity(identity);
     const audioHash = refs.audio.sha256;
     const { stdout } = await execute("ffprobe", ["-v", "error", "-show_entries", "stream=codec_name,codec_type,sample_rate,channels:format=duration", "-of", "json", refs.audio.path], { timeout: 30000, maxBuffer: 1024 * 1024 });
     const probe = JSON.parse(stdout), duration = Number(probe.format?.duration), audio = probe.streams?.[0];
     need(probe.streams?.length === 1 && audio.codec_type === "audio" && audio.codec_name === "pcm_s16le"
-      && Number(audio.sample_rate) === 24000 && audio.channels === 1 && duration >= 14.85 && duration <= 20.15, "Opening must be an uncut 15–20-second canonical mono WAV.");
+      && Number(audio.sample_rate) === 24000 && audio.channels === 1
+      && duration >= (full ? 0.01 : 14.85) && duration <= (full ? 90 : 20.15),
+    full ? "Complete pilot narration must fit 90 seconds without cut or tempo processing." : "Opening must be an uncut 15–20-second canonical mono WAV.");
     for (const row of [tts, stitch, delivery]) {
       need(["passed", "passed_with_warnings"].includes(row.status) && row.source_script_hash === result.source_script_sha256
         && row.narration_generation_plan_file_sha256 === result.generation_plan.sha256, "Opening technical report/source binding invalid.");
       const scope = row.finalization_scope;
-      need(scope?.phase === "opening" && scope.complete_episode === false && scope.production_eligible === false
+      need(scope?.phase === phase && scope.complete_episode === full && scope.production_eligible === false
         && same(scope.unit_ids, ids) && scope.run_identity_sha256 === identityHash
         && scope.generation_plan_file_sha256 === result.generation_plan.sha256
         && scope.provider_manifest_file_sha256 === result.provider_output_manifest.sha256
         && scope.pre_synthesis_gate_file_sha256 === result.pre_synthesis_gate.sha256, "Report lost its exact opening scope.");
+      if (full) {
+        need(scope.schema === "goldflow_narration_full_pilot_finalization_v1"
+          && scope.full_plan_unit_count === plan.units.length
+          && same(scope.preserved_unit_ids, plan.pilot_opening_unit_ids)
+          && same(scope.newly_synthesized_unit_ids, ids.slice(plan.pilot_opening_unit_ids.length))
+          && same(scope.phase_batch_plan_sha256, Object.fromEntries(Object.entries(plan.pilot_phase_batch_plans)
+            .map(([key, batch]) => [key, batch.batch_plan_sha256])))
+          && same(scope.accepted_opening, result.accepted_opening), "Full narration lost its accepted opening/remaining provenance.");
+      }
     }
     need(tts.schema === "goldflow_provider_neutral_narration_tts_report_v2" && tts.primary_provider === policy.primary.provider
       && tts.primary_model_id === policy.primary.model_id && tts.primary_model_revision === policy.primary.model_revision
@@ -91,8 +119,8 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
       && tts.post_tempo_normalized === false && !tts.operator_narration_qa_waiver && !tts.fallback_unit_ids?.length
       && tts.provider_output_manifest_sha256 === result.provider_output_manifest.sha256
       && tts.voice_continuity_report_sha256 === refs.voice_continuity.sha256, "Opening TTS identity/QA contract invalid.");
-    need(same(tts.results?.map((row) => row.unit_id), ids) && tts.results.every((row, i) => row.audio_sha256 === report.results[i].output_sha256
-      && row.spoken_text_sha256 === units[i].spoken_text_sha256 && row.synthesis_identity_sha256 === report.results[i].synthesis_identity_sha256
+    need(same(tts.results?.map((row) => row.unit_id), ids) && tts.results.every((row, i) => row.audio_sha256 === unitResults[i].output_sha256
+      && row.spoken_text_sha256 === units[i].spoken_text_sha256 && row.synthesis_identity_sha256 === unitResults[i].synthesis_identity_sha256
       && row.token_limit_reached === false), "Finalized opening changed original unit audio or execution identity.");
     need(stitch.schema === "goldflow_provider_neutral_narration_stitch_v2" && stitch.final_wav_sha256 === audioHash
       && stitch.output_sha256 === audioHash && Math.abs(stitch.final_duration_sec - duration) <= 0.02
@@ -106,11 +134,13 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
       && accepted(delivery) && accepted(delivery.decision) && accepted(delivery.order_qa) && accepted(delivery.join_qa)
       && delivery.intended_text_sha256 === hash(units.map((unit) => unit.spoken_text).join(" "))
       && !delivery.operator_narration_qa_waiver, "Opening stream delivery blocked.");
+    need(delivery.primary_model === whisperContract.model
+      && same(delivery.primary_alignment_contract, whisperContract), "Stream QA Whisper model/alignment contract differs from the immutable identity.");
     need(continuity.schema === "goldflow_narration_voice_continuity_qa_v2" && ["passed", "passed_with_warnings"].includes(continuity.status)
       && continuity.voice_id === policy.primary.voice_id && continuity.voice_sha256 === policy.primary.voice_sha256
       && !continuity.blockers?.length && continuity.candidate_count === ids.length
       && same(continuity.units?.map((row) => row.unit_id), ids)
-      && continuity.units.every((row, index) => row.status === "passed" && row.audio_sha256 === report.results[index].output_sha256), "Opening voice continuity blocked.");
+      && continuity.units.every((row, index) => row.status === "passed" && row.audio_sha256 === unitResults[index].output_sha256), "Opening voice continuity blocked.");
     for (const row of [unitDelivery, unitQa]) {
       need(["passed", "passed_with_warnings"].includes(row.status) && row.source_script_hash === result.source_script_sha256
         && row.narration_generation_plan_file_sha256 === result.generation_plan.sha256
@@ -121,15 +151,15 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
       && unitDelivery.blocked_unit_count === 0 && accepted(unitDelivery)
       && unitDelivery.voice_continuity_report_sha256 === refs.voice_continuity.sha256
       && same(unitDelivery.units?.map((row) => row.unit_id), ids)
-      && unitDelivery.units.every((row, index) => row.audio_sha256 === report.results[index].output_sha256
+      && unitDelivery.units.every((row, index) => row.audio_sha256 === unitResults[index].output_sha256
         && row.intended_text === units[index].spoken_text && row.intended_text_sha256 === units[index].spoken_text_sha256
         && accepted(row.decision)), "Opening unit delivery blocked.");
     need(unitQa.schema === "goldflow_narration_tts_unit_qa_v2" && unitQa.expected_unit_count === ids.length
       && unitQa.selected_unit_count === ids.length && unitQa.selected_blocker_count === 0 && unitQa.selected_blockers?.length === 0
       && same(unitQa.selected_units?.map((row) => row.unit_id), ids)
-      && unitQa.selected_units.every((row, index) => row.audio_sha256 === report.results[index].output_sha256
+      && unitQa.selected_units.every((row, index) => row.audio_sha256 === unitResults[index].output_sha256
         && row.spoken_text === units[index].spoken_text && row.spoken_text_sha256 === units[index].spoken_text_sha256
-        && row.synthesis_identity_sha256 === report.results[index].synthesis_identity_sha256
+        && row.synthesis_identity_sha256 === unitResults[index].synthesis_identity_sha256
         && ["passed", "passed_with_warnings"].includes(row.qa_status) && accepted(row.qa?.delivery)), "Opening selected unit QA invalid.");
     passed(validateNarrationSubjectiveReviewManifest(subjective), "Opening listening manifest invalid");
     need(subjective.status === "review_required" && subjective.audio_path === refs.audio.path && subjective.audio_sha256 === audioHash
@@ -139,7 +169,7 @@ export async function validatePilotOpeningSampleResult(result, { episodeDir, ide
       && subjective.narration_generation_plan_file_sha256 === result.generation_plan.sha256
       && subjective.samples.some((row) => row.coverage_class === "complete_opening" && row.start_sample === 0
         && row.end_sample_exclusive === subjective.total_sample_count), "Listening review must cover the entire exact opening.");
-    passed(validateLocalWhisperTimingCandidate(timing, { contract: localWhisperContractForIdentity(identity), sourceScriptSha256: result.source_script_sha256,
+    passed(validateLocalWhisperTimingCandidate(timing, { contract: whisperContract, sourceScriptSha256: result.source_script_sha256,
       narrationAudioSha256: audioHash, narrationReportSha256: refs.stitch_report.sha256, runIdentitySha256: identityHash,
       narrationQualityContractSha256: policy.narration_quality_contract.contract_sha256 }), "Opening Whisper candidate invalid");
     need(timing.narration_audio_path === refs.audio.path && timing.narration_report_path === refs.stitch_report.path

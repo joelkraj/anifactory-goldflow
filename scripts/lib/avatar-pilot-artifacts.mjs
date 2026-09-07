@@ -299,9 +299,17 @@ export async function validatePilotMedia(manifest, { episodeDir, identity, asset
           && Math.abs(duration - clip.actual_duration_sec) <= 0.15 && duration >= 2.85 && duration <= 5.15
           && (clip.audio_policy === "retained_aac_stereo" ? audio?.codec_name === "aac" && audio.channels === 2 && Number(audio.sample_rate) === 48000 : !audio), "pilot_movie_probe_contract_invalid", row.id);
       } else if (row.kind === "narration") {
-        const result = await validatePilotNarrationBundle(receipt.document, { episodeDir, identity, phase: "full", sourceScriptSha256: assetPlan.source_script_sha256 });
+        const produced = receipt.document?.schema === "goldflow_avatar_pilot_stage_v1" && receipt.document.stage === "pilot_narration"
+          && receipt.document.payload?.schema === "goldflow_avatar_pilot_narration_accepted_v1";
+        let result;
+        if (produced) {
+          check(findings, receipt.path === path.join(episodeDir, "pilot_narration.json")
+            && receipt.document.identity_sha256 === await sha256File(path.join(episodeDir, "run_identity.json")), "pilot_narration_original_stage_required", row.id);
+          const { validatePilotNarrationAcceptance } = await import("./avatar-pilot-narration-acceptance.mjs");
+          result = await validatePilotNarrationAcceptance(receipt.document.payload, { episodeDir, identity });
+        } else result = await validatePilotNarrationBundle(receipt.document, { episodeDir, identity, phase: "full", sourceScriptSha256: assetPlan.source_script_sha256 });
         findings.push(...result.findings.map((finding) => ({ ...finding, id: row.id })));
-        check(findings, receipt.document.audio?.sha256 === row.sha256, "pilot_narration_media_hash_mismatch", row.id);
+        check(findings, (produced ? receipt.document.payload : receipt.document).audio?.sha256 === row.sha256, "pilot_narration_media_hash_mismatch", row.id);
       } else {
         const proof = receipt.document;
         check(findings, proof.schema === "goldflow_avatar_pilot_provider_receipt_v1" && proof.status === "passed" && proof.asset_id === row.id && proof.provider === row.provider && proof.model === row.model && proof.output_sha256 === row.sha256 && HASH.test(proof.prompt_sha256 ?? "") && proof.creative_submission_count === 1 && proof.review?.approved === true && text(proof.review?.reviewer) && text(proof.review?.note), "pilot_generated_receipt_invalid", row.id);

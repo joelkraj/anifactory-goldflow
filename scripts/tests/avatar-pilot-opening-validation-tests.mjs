@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { buildPilotOpeningExecutionFixture } from "./avatar-pilot-opening-execution-tests.mjs";
 import { validatePilotOpeningSampleResult } from "../lib/avatar-pilot-opening-validation.mjs";
 import { buildNarrationProviderOutputManifest } from "../lib/narration-provider-adapter.mjs";
@@ -12,7 +13,10 @@ import { validateNarrationStitchAccounting } from "../lib/narration-boundary-edi
 import { adjudicateNarrationDeliveryConsensus, strictNarrationDeliveryDecision } from "../lib/narration-delivery-quality.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const fixture = await buildPilotOpeningExecutionFixture({ unitDurationSec: 8 });
+// Importing this module does not create files or run tests. The explicit builder
+// provides only synthetic structural evidence to other provider-free suites.
+export async function buildPilotOpeningValidationFixture({ executionFixture = null } = {}) {
+const fixture = executionFixture ?? await buildPilotOpeningExecutionFixture({ unitDurationSec: 8 });
 const { root, identity, options, execution, built, writeJson, wavFixture } = fixture;
 const { plan, units, policy } = options;
 const ids = units.map((unit) => unit.unit_id);
@@ -168,7 +172,7 @@ try {
   const fullDecision = strictNarrationDeliveryDecision(transcriptQa, { contract: policy.narration_quality_contract, orderQa, joinQa });
   await store("full_stream_qa", { ...common, finalization_scope: scope, schema: "goldflow_narration_full_stream_qa_v2",
     audio_path: audioPath, audio_sha256: audioHash, intended_text_sha256: hash(intended), primary_recognized_text: intended,
-    primary_recognized_words: words, primary_model: "medium", primary_transcript_qa: transcriptQa,
+    primary_recognized_words: words, primary_model: localWhisperContractForIdentity(identity).model, primary_transcript_qa: transcriptQa,
     primary_alignment_contract: localWhisperContractForIdentity(identity), confirmation_required: false,
     decision: fullDecision, order_qa: orderQa, join_qa: joinQa, blockers: [], warnings: [], operator_narration_qa_waiver: null });
   const subjective = buildNarrationSubjectiveReviewManifest({ plan: { ...plan, units },
@@ -196,6 +200,18 @@ try {
       synthesis_identity_sha256: execution.results[index].synthesis_identity_sha256, token_limit_reached: false,
       qa_status: "passed", selected_qa: selectedUnits[index].qa })), mastering });
 
+  return { ...fixture, root, identity, options, execution, built, plan, units, ids, namespace,
+    result, jsonValues, checks, verify, rejectResult, rejectArtifact, audioPath, audioBytes, store };
+} catch (error) {
+  await fixture.cleanup();
+  throw error;
+}
+}
+
+async function main() {
+const fixture = await buildPilotOpeningValidationFixture();
+const { result, plan, options, checks, verify, rejectResult, rejectArtifact, namespace, audioPath, audioBytes } = fixture;
+try {
   const positive = await verify();
   assert.equal(positive.status, "passed", JSON.stringify(positive.findings));
   assert.equal(positive.subjective_review_status, "pending");
@@ -226,6 +242,8 @@ try {
   await rejectArtifact("missing sample accounting", "stitch_report", (row) => { row.sample_accounting = { exact_sample_accounting: true }; });
   await rejectArtifact("stream blocker", "full_stream_qa", (row) => row.blockers.push({ code: "fixture_missing_word" }));
   await rejectArtifact("nested stream blocker", "full_stream_qa", (row) => row.decision.blockers.push({ code: "fixture_missing_word" }));
+  await rejectArtifact("different Whisper primary model", "full_stream_qa", (row) => { row.primary_model = "medium"; });
+  await rejectArtifact("different Whisper alignment contract", "full_stream_qa", (row) => { row.primary_alignment_contract.beam_size += 1; });
   await rejectArtifact("empty unit QA", "unit_qa", (row) => { row.selected_units = []; row.selected_unit_count = 0; });
   await rejectArtifact("wrong unit QA schema", "unit_qa", (row) => { row.schema = "not_canonical_qa"; });
   await rejectArtifact("empty unit delivery", "unit_delivery_qa", (row) => { row.units = []; row.unit_count = 0; });
@@ -247,3 +265,5 @@ try {
 } finally {
   await fixture.cleanup();
 }
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

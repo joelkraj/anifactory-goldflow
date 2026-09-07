@@ -56,13 +56,17 @@ export function validateOpeningFinalizationFlags(flags = {}) {
 }
 
 /** Authenticates only existing local artifacts; never imports a model, writes or synthesizes. */
-export async function validateOpeningNarrationFinalizationInputs({ phaseContext: context, episodeDir, identityPath, identity,
-  scriptPath, planPath, plan, manifestPath, manifest, policy, flags = {} } = {}) {
-  demand(context?.phase === "opening", "only the opening phase is implemented; full narration remains blocked");
+async function validatePilotNarrationFinalizationInputs({ phaseContext: context, episodeDir, identityPath, identity,
+  scriptPath, planPath, plan, manifestPath, manifest, policy, flags = {} } = {}, phase) {
+  demand(context?.phase === phase, phase === "opening"
+    ? "only the opening phase is implemented by this helper; use the guarded full-pilot finalizer"
+    : "the exact full_pilot phase is required");
   validateOpeningFinalizationFlags(flags);
   demand(identity?.media_workflow === "avatar_footage_pilot_v1" && identity.run_intent === "proof"
     && identity.production_eligible === false && identity.publish_allowed === false, "a private pilot proof identity is required");
   const outputNamespace = await validateOpeningFinalizationNamespace(episodeDir, context.outputNamespace);
+  if (phase === "full_pilot") demand(outputNamespace === path.join(path.resolve(episodeDir), "pilot_narration_work", "full_finalization"),
+    "full-pilot output must use its separate full_finalization namespace");
   const [actualIdentity, actualPlan, actualManifest, gate, textIr, audit] = await Promise.all([
     boundFile(identityPath, context.identitySha256, "run identity"),
     boundFile(planPath, context.generationPlanFileSha256, "full generation plan"),
@@ -88,12 +92,16 @@ export async function validateOpeningNarrationFinalizationInputs({ phaseContext:
     && plan.source_hashes?.run_identity_sha256 === context.identitySha256, "full source/plan identity is stale");
   const allUnits = plan.units;
   const ids = context.unitIds;
-  demand(Array.isArray(allUnits) && allUnits.length > 1 && Array.isArray(ids) && ids.length > 0 && ids.length < allUnits.length
-    && new Set(ids).size === ids.length && same(ids, plan.pilot_opening_unit_ids)
-    && same(ids, allUnits.slice(0, ids.length).map((unit) => unit.unit_id)), "scope must be the exact nonempty planned opening prefix");
+  const openingIds = plan.pilot_opening_unit_ids;
+  demand(Array.isArray(allUnits) && allUnits.length > 1 && Array.isArray(openingIds)
+    && openingIds.length > 0 && openingIds.length < allUnits.length
+    && new Set(openingIds).size === openingIds.length
+    && same(openingIds, allUnits.slice(0, openingIds.length).map((unit) => unit.unit_id)), "scope must be the exact nonempty planned opening prefix");
+  demand(Array.isArray(ids) && same(ids, phase === "opening" ? openingIds : allUnits.map((unit) => unit.unit_id)),
+    phase === "opening" ? "scope must be the exact nonempty planned opening prefix" : "full-pilot scope must contain every original unit in source order");
   demand(allUnits.every((unit, index) => unit.order_index === index
-    && unit.execution_phase === (index < ids.length ? "opening" : "remaining")), "source order or immutable execution phase is invalid");
-  const units = allUnits.slice(0, ids.length);
+    && unit.execution_phase === (index < openingIds.length ? "opening" : "remaining")), "source order or immutable execution phase is invalid");
+  const units = phase === "opening" ? allUnits.slice(0, openingIds.length) : allUnits;
   const script = await fs.readFile(scriptPath, "utf8");
   const planPolicy = validatePilotNarrationPlanPolicy(plan, { ...policy, status: "passed", findings: [] }, {
     sourceBytes: Buffer.from(script), identityFileSha256: context.identitySha256, textIr, spokenTextAudit: audit,
@@ -110,8 +118,9 @@ export async function validateOpeningNarrationFinalizationInputs({ phaseContext:
     && gate.model_load_performed === true && gate.synthesis_invoked === true
     && gate.authorization?.schema === "goldflow_narration_synthesis_authorization_v1"
     && validHash(gate.authorization?.validation_gate_sha256)
-    && same(gate.scope?.authorized_synthesis_unit_ids, ids) && gate.scope?.preserved_unit_ids?.length === 0,
-  "an exact authorized opening pre-synthesis gate is required");
+    && same(gate.scope?.authorized_synthesis_unit_ids, phase === "opening" ? openingIds : ids.slice(openingIds.length))
+    && same(gate.scope?.preserved_unit_ids, phase === "opening" ? [] : openingIds),
+  phase === "opening" ? "an exact authorized opening pre-synthesis gate is required" : "an exact authorized remaining-only pre-synthesis gate is required");
   for (const [field, expected] of Object.entries({ run_identity_path: identityPath, run_identity_file_sha256: context.identitySha256,
     script_path: scriptPath, script_sha256: context.sourceScriptSha256,
     narration_generation_plan_path: planPath, narration_generation_plan_sha256: plan.plan_sha256,
@@ -135,10 +144,10 @@ export async function validateOpeningNarrationFinalizationInputs({ phaseContext:
   return { outputNamespace, units, gate, planPolicy };
 }
 
-export async function prepareOpeningNarrationFinalization(options = {}) {
-  const { phaseContext: context, policy, plan, manifest, planPath, identityPath, scriptPath, identity } = options;
-  const { outputNamespace, units, gate, planPolicy } = await validateOpeningNarrationFinalizationInputs(options);
-  const ids = context.unitIds;
+export const validateOpeningNarrationFinalizationInputs = (options = {}) => validatePilotNarrationFinalizationInputs(options, "opening");
+export const validateFullPilotNarrationFinalizationInputs = (options = {}) => validatePilotNarrationFinalizationInputs(options, "full_pilot");
+
+export async function validatePilotFinalizationRuntimeReferences({ policy, identity, gate }) {
   await boundFile(policy.primary.reference_audio_path, policy.primary.reference_audio_sha256, "owned voice reference", false);
   demand(sha256(policy.primary.reference_text) === policy.primary.reference_text_sha256, "owned reference transcript is stale");
   const requiredReferences = {
@@ -158,6 +167,31 @@ export async function prepareOpeningNarrationFinalization(options = {}) {
     && gate.bindings.reference_asset_hashes.reference_text.expected === policy.primary.reference_text_sha256
     && gate.bindings.reference_asset_hashes.reference_text.actual === policy.primary.reference_text_sha256,
   "reference text did not pass the synthesis gate");
+}
+
+export function validatePilotFinalizationManifestRows(outputs, report, run) {
+  demand(Array.isArray(outputs) && Array.isArray(report.results) && outputs.length === report.results.length,
+    "provider manifest differs from the authenticated original runner count");
+  for (let index = 0; index < outputs.length; index += 1) {
+    const output = outputs[index];
+    const result = report.results[index];
+    demand(output.unit_id === result.unit_id && output.audio_path === result.output_path && output.audio_sha256 === result.output_sha256
+      && output.duration_sec === result.duration_sec && same(output.synthesis_identity, result.synthesis_identity)
+      && output.synthesis_identity_sha256 === result.synthesis_identity_sha256
+      && output.runner_report_path === run.report_path && output.runner_report_sha256 === run.report_sha256,
+    "provider manifest differs from the authenticated original runner output");
+    for (const field of ["batch_plan_sha256", "cohort_id", "cohort_sha256", "generated_token_count",
+      "effective_token_limit", "token_limit_reached", "attempt", "synthesis_mode"]) {
+      demand(output[field] === result[field], `manifest ${field} differs from the original execution`);
+    }
+  }
+}
+
+export async function prepareOpeningNarrationFinalization(options = {}) {
+  const { phaseContext: context, policy, plan, manifest, planPath, identityPath, scriptPath, identity } = options;
+  const { outputNamespace, units, gate, planPolicy } = await validateOpeningNarrationFinalizationInputs(options);
+  const ids = context.unitIds;
+  await validatePilotFinalizationRuntimeReferences({ policy, identity, gate });
   const batchPlan = plan.pilot_phase_batch_plans?.opening;
   demand(validateQwenLiamBatchPlan(batchPlan, units, policy.synthesis_contract).status === "passed", "opening batch/cohort plan is stale");
   const bindings = qwenBatchBindingByUnit(batchPlan);
@@ -178,19 +212,7 @@ export async function prepareOpeningNarrationFinalization(options = {}) {
       cohortEventsPath: run.cohort_events_path, cohortEventsSha256: run.cohort_events_sha256 },
   });
   demand(authenticated.status === "passed", "original opening execution evidence did not pass");
-  for (let index = 0; index < units.length; index += 1) {
-    const output = manifest.units[index];
-    const result = report.results[index];
-    demand(output.audio_path === result.output_path && output.audio_sha256 === result.output_sha256
-      && output.duration_sec === result.duration_sec && same(output.synthesis_identity, result.synthesis_identity)
-      && output.synthesis_identity_sha256 === result.synthesis_identity_sha256
-      && output.runner_report_path === run.report_path && output.runner_report_sha256 === run.report_sha256,
-    "provider manifest differs from the authenticated original runner output");
-    for (const field of ["batch_plan_sha256", "cohort_id", "cohort_sha256", "generated_token_count",
-      "effective_token_limit", "token_limit_reached", "attempt", "synthesis_mode"]) {
-      demand(output[field] === result[field], `manifest ${field} differs from the original execution`);
-    }
-  }
+  validatePilotFinalizationManifestRows(manifest.units, report, run);
   return { outputNamespace, units, batchPlan, synthesisRuns: structuredClone(runs), scope: {
     schema: NARRATION_OPENING_FINALIZATION_SCHEMA, phase: "opening", complete_episode: false,
     production_eligible: false, unit_ids: [...ids], full_plan_unit_count: plan.units.length,

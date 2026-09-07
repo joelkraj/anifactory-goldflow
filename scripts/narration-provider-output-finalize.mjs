@@ -61,6 +61,7 @@ import {
 import { equivalentPhrasesForTests } from "./narration-tts-episode.mjs";
 import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs";
 import { prepareOpeningNarrationFinalization, validateOpeningFinalizationFlags } from "./lib/narration-opening-finalization.mjs";
+import { prepareFullPilotNarrationFinalization } from "./lib/narration-full-pilot-finalization.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1135,12 +1136,13 @@ export async function finalizeNarrationProviderOutput(
   if (sourceScriptHash(plan) && actualSourceScriptSha256 !== sourceScriptHash(plan)) {
     throw new Error("Narration plan source hash differs from the actual approved script.");
   }
-  const opening = phaseContext ? await prepareOpeningNarrationFinalization({
+  const preparePilotPhase = phaseContext?.phase === "full_pilot" ? prepareFullPilotNarrationFinalization : prepareOpeningNarrationFinalization;
+  const pilotFinalization = phaseContext ? await preparePilotPhase({
     phaseContext, episodeDir, identityPath, identity, scriptPath, planPath, plan, manifestPath, manifest, policy, flags,
   }) : null;
-  if (opening) units = opening.units;
-  const artifactDir = opening?.outputNamespace ?? episodeDir;
-  const scopeFields = opening ? { finalization_scope: opening.scope } : {};
+  if (pilotFinalization) units = pilotFinalization.units;
+  const artifactDir = pilotFinalization?.outputNamespace ?? episodeDir;
+  const scopeFields = pilotFinalization ? { finalization_scope: pilotFinalization.scope } : {};
   const operatorNarrationWaiver = {
     schema: "goldflow_operator_narration_qa_waiver_v1",
     waiver_id: sha256(JSON.stringify({
@@ -1197,11 +1199,11 @@ export async function finalizeNarrationProviderOutput(
       throw new Error(`Provider audio hash is stale for ${row.unit_id}.`);
     }
   }
-  const workDir = opening ? path.join(artifactDir, "audio") : path.resolve(
+  const workDir = pilotFinalization ? path.join(artifactDir, "audio") : path.resolve(
     flags["output-dir"]
       ?? path.join(episodeDir, "assets/audio/narration_provider_neutral"),
   );
-  if (opening) await fs.mkdir(artifactDir, { recursive: false });
+  if (pilotFinalization) await fs.mkdir(artifactDir, { recursive: false });
   await fs.mkdir(workDir, { recursive: true });
   const checkpointPath = path.resolve(
     flags["checkpoint"]
@@ -2016,7 +2018,7 @@ export async function finalizeNarrationProviderOutput(
     && deliveryAccepted
     && !skipSubjectiveReview) {
     subjectiveManifest = buildNarrationSubjectiveReviewManifest({
-      plan: opening ? { ...plan, units } : plan,
+      plan: pilotFinalization ? { ...plan, units } : plan,
       stitch,
       audioPath: canonicalWav,
       audioSha256: canonicalWavSha256,
@@ -2025,8 +2027,8 @@ export async function finalizeNarrationProviderOutput(
       qualityContractSha256: qualityContract.contract_sha256,
       sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
     });
-    if (opening) {
-      subjectiveManifest.finalization_scope = opening.scope;
+    if (pilotFinalization) {
+      subjectiveManifest.finalization_scope = pilotFinalization.scope;
       subjectiveManifest.manifest_sha256 = narrationSubjectiveReviewManifestSha256(subjectiveManifest);
     }
     const subjectiveValidation = validateNarrationSubjectiveReviewManifest(
@@ -2275,7 +2277,7 @@ export async function finalizeNarrationProviderOutput(
       : fullStream.decision.warnings.length || listenPacket.item_count
         ? "passed_with_warnings"
         : "passed";
-  const synthesisRuns = opening?.synthesisRuns ?? await synthesisRunsWithFirstTakeProvenance({
+  const synthesisRuns = pilotFinalization?.synthesisRuns ?? await synthesisRunsWithFirstTakeProvenance({
     episodeDir,
     expectedUnitIds: units.map((unit) => String(unit.unit_id)),
     batchPlanSha256: manifest.provider_execution?.batch_plan_sha256 ?? null,
@@ -2284,6 +2286,7 @@ export async function finalizeNarrationProviderOutput(
   });
   const stitchReport = {
     ...scopeFields,
+    ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_stitch_v2",
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
     source_script_hash: sourceHash,
@@ -2329,6 +2332,7 @@ export async function finalizeNarrationProviderOutput(
   };
   const ttsReport = {
     ...scopeFields,
+    ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",
     status: ttsStatus,
     source_script_hash: sourceHash,
@@ -2467,8 +2471,8 @@ export async function finalizeNarrationProviderOutput(
     runIdentitySha256: identityFileSha256,
     narrationQualityContractSha256: qualityContract.contract_sha256,
   });
-  if (opening) {
-    timingCandidate.finalization_scope = opening.scope;
+  if (pilotFinalization) {
+    timingCandidate.finalization_scope = pilotFinalization.scope;
     timingCandidate.candidate_sha256 = localWhisperTimingCandidateSha256(timingCandidate);
   }
   const timingCandidatePath = path.join(
@@ -2512,7 +2516,7 @@ export async function finalizeNarrationProviderOutput(
   }
   const result = {
     ...scopeFields,
-    ...(opening ? {
+    ...(pilotFinalization ? {
       phase_context: structuredClone(phaseContext),
       subjective_review_status: subjectiveManifest ? "pending" : "not_materialized_due_to_delivery_review",
       full_stream_qa_path: fullStreamPath,

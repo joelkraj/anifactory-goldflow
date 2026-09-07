@@ -37,24 +37,31 @@ function wavFixture(durationSec = 0.01) {
 
 // Importing this module is side-effect free. Other boundary tests may explicitly
 // build a fresh fixture; the direct CLI invocation additionally runs mutations.
-export async function buildPilotOpeningExecutionFixture({ runTests = false, unitDurationSec = 0.01 } = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-opening-gate-test-"));
+export async function buildPilotOpeningExecutionFixture({ runTests = false, unitDurationSec = 0.01,
+  remainingParagraphs = null, identityFields = {}, evidenceFixture = null } = {}) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-opening-gate-test-")));
   const bankPath = fileURLToPath(new URL("../../config/narration_delivery_reference_bank.json", import.meta.url));
   const deliveryBank = { path: bankPath, bytes: await fs.readFile(bankPath) };
   const cleanup = () => fs.rm(root, { recursive: true, force: true });
   let fixtureReady = false;
   let assertions = 0;
   try {
-  const sourceBytes = Buffer.from("The door opens as our traveler reaches the end of the quiet road.\n\nShe studies the empty hall before stepping carefully past the broken stone arch.\n\nHer companion waits outside until a small lamp appears in the distant window.\n");
+  const sourceBytes = Buffer.from([
+    "The door opens as our traveler reaches the end of the quiet road.",
+    "She studies the empty hall before stepping carefully past the broken stone arch.",
+    ...(remainingParagraphs ?? ["Her companion waits outside until a small lamp appears in the distant window."]),
+  ].join("\n\n") + "\n");
   const scriptSha256 = hash(sourceBytes);
   const scriptPath = path.join(root, "source.md"); await fs.writeFile(scriptPath, sourceBytes);
   const narrationLock = { provider: JOEL.provider, model: JOEL.model_id, model_revision: JOEL.model_revision,
     voice_id: JOEL.voice_id, voice_sha256: JOEL.voice_sha256,
     reference_audio_sha256: JOEL.reference_audio_sha256, reference_text_sha256: JOEL.reference_text_sha256 };
   const identity = {
+    episode: "ep_fixture", proof_scope: { start_sec: 0, end_sec: 90, duration_frames: 2700, fps: 30, width: 1920, height: 1080 },
+    ...identityFields,
     media_workflow: "avatar_footage_pilot_v1", content_profile: "mcu_what_if_pilot_v1",
     run_intent: "proof", production_eligible: false, publish_allowed: false,
-    pilot_providers: { narration: narrationLock }, source_script: { path: scriptPath, sha256: scriptSha256 },
+    pilot_providers: { ...identityFields.pilot_providers, narration: narrationLock }, source_script: { path: scriptPath, sha256: scriptSha256 },
     ...buildPilotNarrationIdentityFields({ narrationLock, deliveryBank }),
   };
   const identityBytes = Buffer.from(`${JSON.stringify(identity, null, 2)}\n`);
@@ -75,7 +82,10 @@ export async function buildPilotOpeningExecutionFixture({ runTests = false, unit
   const textIrPath = path.join(root, "ir.json"); const textIrFileSha256 = await writeJson(textIrPath, textIr);
   const spokenTextAuditPath = path.join(root, "audit.json");
   const spokenTextAuditFileSha256 = await writeJson(spokenTextAuditPath, spokenTextAudit);
-  const evidencePath = path.join(root, "evidence.json"); const evidenceSha256 = await writeJson(evidencePath, { fixture: true });
+  const evidence = evidenceFixture ? await evidenceFixture({ root, identity, identityPath, identityFileSha256,
+    sourceBytes, scriptPath, scriptSha256, writeJson }) : null;
+  const evidencePath = evidence?.path ?? path.join(root, "evidence.json");
+  const evidenceSha256 = evidence?.sha256 ?? await writeJson(evidencePath, { fixture: true });
   // Exercise the complete canonical reference-binding shape without opening
   // actual voice/model assets. Distinct harmless files stand in for file bytes.
   const referenceAssetHashes = {};

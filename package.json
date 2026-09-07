@@ -19,7 +19,7 @@
     "status": "git status --short",
     "test:stage-contract": "node scripts/tests/stage-contract-tests.mjs",
     "test:planner": "node scripts/tests/planner-tests.mjs",
-    "test:voice-boundary": "node scripts/tests/voice-direction-boundary-tests.mjs",
+    "test:voice-boundary": "node scripts/tests/voice-direction-boundary-tests.mjs && node scripts/tests/narration-performance-profile-tests.mjs",
     "test:media": "node scripts/tests/media-tests.mjs",
     "test:reference-parallax": "node scripts/tests/reference-parallax-policy-tests.mjs",
     "test:production-direction": "node scripts/tests/production-direction-tests.mjs",

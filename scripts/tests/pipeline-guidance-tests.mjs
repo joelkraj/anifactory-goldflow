@@ -13,6 +13,8 @@ const manhwa = read("docs/pipelines/manhwa.md");
 const documentary = read("docs/pipelines/documentary.md");
 const movie = read("docs/pipelines/movie_tv.md");
 const asset = read("docs/workflows/asset_afterlife_profile.md");
+const pilotDesign = read("docs/designs/avatar_what_if_pilot_v1.md");
+const sentryBrief = read("docs/briefs/sentry_doomsday_90s.md");
 
 assert.ok(root.split("\n").length <= 120, "Root guidance should remain a concise shared router.");
 assert.match(root, /manhwa_recap_v1/);
@@ -27,7 +29,7 @@ assert.match(root, /exact-ID/);
 assert.match(root, /No deterministic creative rewriting/);
 assert.match(root, /signed media URLs/);
 
-for (const file of ["AGENTS.md", "docs/pipelines/generated_visuals.md", "docs/pipelines/manhwa.md", "docs/pipelines/documentary.md", "docs/pipelines/movie_tv.md"]) {
+for (const file of ["AGENTS.md", "docs/pipelines/generated_visuals.md", "docs/pipelines/manhwa.md", "docs/pipelines/documentary.md", "docs/pipelines/movie_tv.md", "docs/designs/avatar_what_if_pilot_v1.md", "docs/briefs/sentry_doomsday_90s.md"]) {
   for (const match of read(file).matchAll(/\]\(([^)]+\.md)(?:#[^)]*)?\)/g)) {
     if (/^https?:/.test(match[1])) continue;
     assert.ok(existsSync(path.resolve(repoRoot, path.dirname(file), match[1])), `${file}: broken guidance link ${match[1]}`);
@@ -63,6 +65,19 @@ assert.match(movie, /source_footage_v1/);
 assert.match(movie, /blocked/i);
 assert.match(movie, /subtitle/i);
 assert.match(movie, /audio/i);
+assert.match(movie, /avatar_what_if_pilot_v1\.md/);
+assert.match(pilotDesign, /workflow not yet registered or executable/);
+assert.match(pilotDesign, /exactly 90-second proof/);
+assert.match(pilotDesign, /No full episode, publishing/);
+assert.match(pilotDesign, /no effective per-unit instruction or native-speed channel/);
+assert.match(pilotDesign, /15–20 second opening take/);
+assert.match(pilotDesign, /not available CLI commands/);
+assert.match(pilotDesign, /Keep source time and finished-video time separate/);
+assert.match(pilotDesign, /No automatic provider|not authorize a three-provider bakeoff/);
+assert.match(sentryBrief, /Only abilities demonstrated in the movie/);
+assert.match(sentryBrief, /Void/);
+assert.match(sentryBrief, /changed assumption/);
+assert.match(sentryBrief, /Earlier permissions for other titles are not inherited/);
 assert.throws(() => mediaWorkflowForPreflight({ contentProfile: "movie_tv_commentary_v1", mediaWorkflow: "source_footage_v1" }), /reserved|unavailable/);
 
 console.log("Pipeline guidance routing, preservation anchors, links, and stage-table checks passed.");

@@ -13,6 +13,7 @@ import {
   punctuationInsensitiveTokens,
   validateActionableNarrationDirection,
 } from "./narration-performance-contract.mjs";
+import { contentProfilePlannerRole } from "./content-profiles.mjs";
 
 function sha256(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
@@ -68,7 +69,41 @@ function segmentChunks(
   return chunks;
 }
 
-function promptForChunk(units, chunkIndex, chunkCount) {
+function narrationEditorialDirection(contentProfile) {
+  // Preserve the historical prompt bytes and content-addressed packets for
+  // legacy/manhwa runs. Explicit other profiles must not inherit that cadence.
+  if (!contentProfile?.id || contentProfile.id === "manhwa_recap_v1") {
+    return {
+      role: "the provider-neutral narration performance editor for a fast, emotional YouTube manhwa recap",
+      cadence: "Use grouping and punctuation to create energetic recap cadence, clean emotional turns, clear dialogue, and natural breath points without melodramatic pauses after every sentence.",
+      continuity: "Keep tightly connected action sentences flowing. Separate quoted dialogue when it improves clarity.",
+      profileContext: "",
+    };
+  }
+  const role = contentProfilePlannerRole(
+    contentProfile,
+    "narration_performance",
+    "a provider-neutral narration performance editor for the locked content profile",
+  );
+  const directives = Array.isArray(contentProfile?.voice?.performance_directives)
+    ? contentProfile.voice.performance_directives.map(String).map((value) => value.trim()).filter(Boolean)
+    : [];
+  return {
+    role,
+    cadence: "Use grouping and punctuation for natural phrasing and clear thought boundaries appropriate to the locked content profile. Preserve the approved text's questions, qualifications, and emphasis; do not impose a recap cadence or add melodramatic pauses.",
+    continuity: "Keep tightly connected thoughts flowing. Separate quoted dialogue when it improves clarity.",
+    profileContext: `\nLocked narration editorial contract (authoring guidance, not a provider instruction channel; exact-word and capability rules still apply):\n${JSON.stringify({
+      content_profile: contentProfile.id,
+      version: contentProfile.version ?? null,
+      content_family: contentProfile.content_family ?? null,
+      narration_performance_role: role,
+      performance_directives: directives,
+    })}\n`,
+  };
+}
+
+function promptForChunk(units, chunkIndex, chunkCount, contentProfile = null) {
+  const direction = narrationEditorialDirection(contentProfile);
   const atoms = units.map((unit) => {
     const mergeBarrier = unit.source_merge_barrier === true
       || unit.risk_flags?.includes("system_ui_atomic")
@@ -86,7 +121,7 @@ function promptForChunk(units, chunkIndex, chunkCount) {
       ...(mergeBarrier ? { merge_barrier: true } : {}),
     };
   });
-  return `You are the provider-neutral narration performance editor for a fast, emotional YouTube manhwa recap.
+  return `You are ${direction.role}.
 
 The output will be compiled through a capability adapter. Every model receives exact spoken text, punctuation, sentence-complete grouping, semantic boundary timing, and a locked voice. Models with an instruction channel also receive your restrained performance intent. Models without one still benefit from your punctuation, grouping, and boundary classes.
 
@@ -101,13 +136,13 @@ Binding rules:
 - Prefer 20-42 words when adjacent sentences belong to one breath and one dramatic thought. Treat 48 words as a soft ceiling and 60 as the hard ceiling. Never split a source sentence to hit a target.
 - Every output unit must contain at most 60 spoken words and end with terminal punctuation.
 - Preserve all spoken words in exact order. You may change punctuation and capitalization only.
-- Use grouping and punctuation to create energetic recap cadence, clean emotional turns, clear dialogue, and natural breath points without melodramatic pauses after every sentence.
-- Keep tightly connected action sentences flowing. Separate quoted dialogue when it improves clarity.
+- ${direction.cadence}
+- ${direction.continuity}
 - boundary_after must be one of continuation, clause, sentence, emphasized_sentence, paragraph, reveal, episode_end. Use reveal only for a genuine disclosure/turn, paragraph for a scene or idea reset, emphasized_sentence sparingly, and ordinary sentence for most joins. Only the final output unit of the final packet may use episode_end.
 - performance_intent enums: energy=restrained|low|controlled|high|urgent; tension=neutral|warm|cold|social_pressure|high; intimacy=distant|standard|close; pace=measured|steady|steady_forward|precise|fast; pause_strategy=minimal|punctuation_led|short_precise|reveal_weighted.
 - emphasis may contain at most eight short phrases copied exactly from spoken_text. style_tags may contain at most six terse non-spoken descriptors. Do not write dialogue or stage directions into either field.
 - Do not emit stage directions, emotion tags, SSML, instructions, commentary, or unsupported controls.
-- Return exactly one chapters row for every distinct segment_id present in this packet, in first-seen order. Numeric fields are integers 1-5; pace is measured, steady, steady_forward, precise, or fast. Keep all chapter text fields terse. When a long segment spans packets, describe only this packet's local movement while preserving the same segment_id.
+- Return exactly one chapters row for every distinct segment_id present in this packet, in first-seen order. Numeric fields are integers 1-5; pace is measured, steady, steady_forward, precise, or fast. Keep all chapter text fields terse. When a long segment spans packets, describe only this packet's local movement while preserving the same segment_id.${direction.profileContext}
 
 Packet ${chunkIndex + 1} of ${chunkCount}:
 Atomic spoken units:
@@ -236,11 +271,12 @@ async function authoredChunk({
   provider,
   model,
   reasoningEffort,
+  contentProfile = null,
   repairReason = null,
   allowCreativeSubmission = true,
   plannerExecutor = runCodexCli,
 }) {
-  const packetPrompt = promptForChunk(chunk, index, chunkCount);
+  const packetPrompt = promptForChunk(chunk, index, chunkCount, contentProfile);
   const prompt = repairReason
     ? `${packetPrompt}\n\nEXACT-PACKET REPAIR: The operator reviewed the failed packet and requested one replacement submission for this packet only. Review note: ${String(repairReason).trim()} Preserve the exact source-ref and word contract above; return the complete packet once.`
     : packetPrompt;
@@ -336,6 +372,7 @@ export function narrationPerformancePacketPlanForTests(
   {
     maximumAtoms = NARRATION_PERFORMANCE_TARGET_ATOMS,
     maxPromptBytes = NARRATION_PERFORMANCE_SAFE_MAX_BYTES,
+    contentProfile = null,
   } = {},
 ) {
   const ceiling = Math.min(
@@ -349,7 +386,7 @@ export function narrationPerformancePacketPlanForTests(
     const next = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
-      const promptBytes = Buffer.byteLength(promptForChunk(chunk, index, chunkCount), "utf8");
+      const promptBytes = Buffer.byteLength(promptForChunk(chunk, index, chunkCount, contentProfile), "utf8");
       if (promptBytes <= ceiling) {
         next.push(chunk);
         continue;
@@ -366,7 +403,7 @@ export function narrationPerformancePacketPlanForTests(
     if (!changed) break;
   }
   return chunks.map((chunk, index) => {
-    const prompt = promptForChunk(chunk, index, chunks.length);
+    const prompt = promptForChunk(chunk, index, chunks.length, contentProfile);
     return {
       packet_id: `performance_packet_${String(index + 1).padStart(3, "0")}_${sha256(prompt).slice(0, 12)}`,
       packet_index: index,
@@ -387,6 +424,40 @@ function narrationPacketManifestSha256(packets) {
   }))));
 }
 
+async function readOptionalJsonEvidence(filePath) {
+  let bytes;
+  try {
+    bytes = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  const value = JSON.parse(bytes);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Malformed narration performance evidence: ${filePath}`);
+  }
+  return value;
+}
+
+function editorialContract({ mode, contentProfile, sourceScriptSha256, packets }) {
+  return {
+    schema: "goldflow_narration_editorial_contract_v1",
+    version: "2026-09-06.1",
+    mode,
+    source_script_sha256: sourceScriptSha256,
+    direction_sha256: sha256(JSON.stringify(narrationEditorialDirection(contentProfile))),
+    packet_manifest_sha256: narrationPacketManifestSha256(packets),
+  };
+}
+
+function assertEditorialContractMatches(actual, expected) {
+  const keys = Object.keys(expected);
+  if (Object.keys(actual ?? {}).length !== keys.length
+    || keys.some((key) => actual?.[key] !== expected[key])) {
+    throw new Error("Narration editorial contract is malformed or changed; preserve the prior packet contract and stop for reviewed recovery before creative submission.");
+  }
+}
+
 export async function authorNarrationPerformanceDirection({
   atomicUnits,
   sourceScriptSha256,
@@ -396,6 +467,7 @@ export async function authorNarrationPerformanceDirection({
   model = null,
   reasoningEffort = "medium",
   concurrency = 8,
+  contentProfile = null,
   repairPacketIds = [],
   repairReason = null,
   plannerExecutor = runCodexCli,
@@ -403,7 +475,48 @@ export async function authorNarrationPerformanceDirection({
   if (!Array.isArray(atomicUnits) || !atomicUnits.length) {
     throw new Error("Narration performance author requires atomic spoken units.");
   }
-  const packets = narrationPerformancePacketPlanForTests(atomicUnits);
+  const callDir = path.join(episodeDir, "_codex_calls", "narration-performance-author");
+  const artifactPath = path.join(episodeDir, "narration_actionable_direction.json");
+  const contractPath = path.join(episodeDir, "narration_editorial_contract.json");
+  const existing = await readOptionalJsonEvidence(artifactPath);
+  const storedContract = await readOptionalJsonEvidence(contractPath);
+  if (existing && (!new Set(["goldflow_narration_actionable_direction_v1", "goldflow_narration_actionable_direction_v2", "goldflow_narration_actionable_direction_v3"]).has(existing.schema)
+    || !new Set(["approved", "blocked"]).has(existing.status))) {
+    throw new Error("Malformed existing narration performance artifact; stop for reviewed recovery.");
+  }
+  if (existing && existing.source_script_sha256 !== sourceScriptSha256) {
+    throw new Error(`${existing.status === "blocked" ? "Blocked n" : "N"}arration performance artifact belongs to a different script hash.`);
+  }
+  let hasCallHistory = false;
+  try {
+    // Even an empty existing directory may be an interrupted historical attempt.
+    await fs.readdir(callDir);
+    hasCallHistory = true;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (!storedContract && existing?.authoring?.editorial_contract) {
+    throw new Error("Narration editorial contract marker is missing from a contract-bound artifact; stop for reviewed recovery.");
+  }
+  const legacyMode = "legacy_manhwa_prompt_v1";
+  const profileMode = "profile_directed_v1";
+  if (storedContract && ![legacyMode, profileMode].includes(storedContract.mode)) {
+    throw new Error("Narration editorial contract has an unsupported mode; stop before creative submission.");
+  }
+  const mode = storedContract?.mode
+    ?? ((existing || hasCallHistory || !contentProfile?.id || contentProfile.id === "manhwa_recap_v1")
+      ? legacyMode : profileMode);
+  // Historical aggregate artifacts and interrupted packet caches predate profile
+  // direction. Their original prompt, IDs and repair scope must remain intact.
+  const effectiveContentProfile = mode === legacyMode ? null : contentProfile;
+  const packets = narrationPerformancePacketPlanForTests(atomicUnits, { contentProfile: effectiveContentProfile });
+  const boundEditorialContract = editorialContract({
+    mode, contentProfile: effectiveContentProfile, sourceScriptSha256, packets,
+  });
+  if (storedContract) assertEditorialContractMatches(storedContract, boundEditorialContract);
+  if (existing?.authoring?.editorial_contract) {
+    assertEditorialContractMatches(existing.authoring.editorial_contract, boundEditorialContract);
+  }
   const packetIds = new Set(packets.map((packet) => packet.packet_id));
   const requestedRepairs = [...new Set(
     (Array.isArray(repairPacketIds) ? repairPacketIds : [])
@@ -418,22 +531,12 @@ export async function authorNarrationPerformanceDirection({
   if (requestedRepairs.length && !String(repairReason ?? "").trim()) {
     throw new Error("Exact narration performance repair requires repairReason evidence.");
   }
-  const callDir = path.join(episodeDir, "_codex_calls", "narration-performance-author");
-  await fs.mkdir(callDir, { recursive: true });
-  const artifactPath = path.join(episodeDir, "narration_actionable_direction.json");
-  const existing = await fs.readFile(artifactPath, "utf8")
-    .then((content) => JSON.parse(content))
-    .catch(() => null);
   if (existing?.status === "blocked" && !requestedRepairs.length) {
     const failedPacketIds = existing?.repair_scope?.failed_packet_ids ?? [];
     throw new Error(
       `Narration performance author is blocked on exact packets: ${failedPacketIds.join(", ") || "unknown"}. `
       + "Pass exact repairPacketIds with reviewed repairReason; unscoped resubmission is forbidden.",
     );
-  }
-  if (existing?.status === "blocked"
-    && existing?.source_script_sha256 !== sourceScriptSha256) {
-    throw new Error("Blocked narration performance artifact belongs to a different script hash.");
   }
   if (requestedRepairs.length) {
     if (existing?.status !== "blocked") {
@@ -456,6 +559,18 @@ export async function authorNarrationPerformanceDirection({
       );
     }
   }
+  // Persist the contract before the first packet can be submitted. A crash
+  // before the aggregate artifact therefore cannot silently change direction.
+  if (!storedContract) {
+    await fs.mkdir(episodeDir, { recursive: true });
+    try {
+      await fs.writeFile(contractPath, `${JSON.stringify(boundEditorialContract, null, 2)}\n`, { flag: "wx" });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      assertEditorialContractMatches(await readOptionalJsonEvidence(contractPath), boundEditorialContract);
+    }
+  }
+  await fs.mkdir(callDir, { recursive: true });
   const repairSet = new Set(requestedRepairs);
   const calls = await runPool(
     packets,
@@ -469,6 +584,7 @@ export async function authorNarrationPerformanceDirection({
       provider,
       model,
       reasoningEffort: "medium",
+      contentProfile: effectiveContentProfile,
       repairReason: repairSet.has(packet.packet_id) ? repairReason : null,
       allowCreativeSubmission: existing?.status !== "blocked" || repairSet.has(packet.packet_id),
       plannerExecutor,
@@ -492,6 +608,7 @@ export async function authorNarrationPerformanceDirection({
     source_script_sha256: sourceScriptSha256,
     authoring: {
       kind: "llm_authored",
+      editorial_contract: boundEditorialContract,
       provider: providers.join("+") || "planning_room",
       model: models.join("+") || "identity_locked_model",
       controls: [

@@ -4958,6 +4958,7 @@ async function main() {
   const tags = { ...seriesTags, ...universalTags };
   const providerRouting = await loadProviderRouting();
   const runIdentity = dialogueContext.runIdentity ?? {};
+  const contentProfile = contentProfileForIdentity(runIdentity);
   const ttsProvider = requestedTtsProvider(providerRouting, dialogueContext.voiceCastingLock, runIdentity);
   const qwenLocal = isQwenLocalProvider(ttsProvider);
   const kokoroLocal = isKokoroLocalProvider(ttsProvider);
@@ -5040,6 +5041,7 @@ async function main() {
       const authored = await authorNarrationPerformanceDirection({
         atomicUnits,
         sourceScriptSha256: sourceScriptHash,
+        contentProfile,
         episodeDir,
         repoRoot,
         provider: "codex_cli",
@@ -5205,7 +5207,6 @@ async function main() {
     },
     audio_performance_segments: segments,
   };
-  const contentProfile = contentProfileForIdentity(runIdentity);
   const report = qualityReport(segments, { ttsProvider, contentProfile });
   if (narrationTextIntegrityCoverage.status !== "passed") {
     const textIntegrityFailure = {

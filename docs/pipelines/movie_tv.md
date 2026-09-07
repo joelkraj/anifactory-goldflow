@@ -14,6 +14,12 @@ The standalone `goldflow footage` commands can use explicitly supplied local MP4
 
 All source, search, clip, and approval artifacts remain in the private footage library, outside episode directories. `footage approve` is a hash-bound library review and retains `production_eligible: false`. It does not approve a recap, satisfy a Goldflow episode stage, grant reuse rights, or authorize publishing. Neither API key provides a universal movie catalog; no movie discovery or automatic acquisition is implied.
 
+## Bounded Avatar What-If Pilot
+
+The operator has authorized implementation of one exactly 90-second, non-publishing avatar-and-footage pilot. Its creative and implementation requirements are in [the avatar what-if pilot design](../designs/avatar_what_if_pilot_v1.md); the first subject is [MCU Sentry mastering his powers before Doomsday](../briefs/sentry_doomsday_90s.md). Read both before implementing that pilot. These documents capture agreed direction, not a registered workflow, approved script, source-use approval, or provider-spend receipt. Full-length production and publishing remain disabled.
+
+This format uses the owned Joel clone as an audience-facing theorist, reviewed 3–5 second movie excerpts, an original reusable host pose/background library, and optional clearly identified AI concept imagery/motion. It does not inherit manhwa cadence, obligatory generated scenes, or a comic-book power set. A typed mixed-media timeline and guarded pilot route must be implemented and validated before pilot media production; do not represent those capabilities as already available.
+
 ## Intended Editorial Contract
 
 - Identify the exact film edition or series, season, episode, release, language, and source file. Preserve source/file IDs, hashes or declared identity limitations, and source timestamps. Never substitute another edition or provider silently.

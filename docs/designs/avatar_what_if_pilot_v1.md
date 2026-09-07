@@ -1,0 +1,69 @@
+# Avatar What-If Pilot — Design and Acceptance Contract
+
+Status: implementation authorized; workflow not yet registered or executable. Version: 2026-09-06.1.
+
+Read [the shared router](../../AGENTS.md), [movie/TV guidance](../pipelines/movie_tv.md), and [private footage workflow](../workflows/footage_clipping_workflow.md). Reuse of narration must preserve [Narration Quality V2](../workflows/narration_quality_v2.md). The [generated-visuals guide](../pipelines/generated_visuals.md) describes existing technical components, not an alternate way to run this pilot.
+
+## Scope and Editorial Promise
+
+Implement and validate a dedicated workflow for an exactly 90-second proof; obtain each required creative and media approval before its dependent production work. No full episode, publishing, provider migration, or automatic creative retries. The operator's format approval is not exact script-hash approval. No episode directory, synthesis, image/video generation, or render before a matching guarded pilot identity exists.
+
+The viewer is exploring a question with Joel. Use a question, screen evidence, an interpretation, a counterargument, and a proposed consequence. A what-if is not a recap pretending an invented story happened. Distinguish screen-established fact, an explicit changed assumption, speculative consequences, and unresolved limits. Use the narration and visible labels at transitions between evidence and invention; an opening disclaimer alone is not enough when later imagery could be mistaken for a real movie scene.
+
+Borrow broad presentation mechanics from the inspected Specular Animation example: pose swaps, purposeful host entrances, framed evidence clips, comparison cards, and background/clip movement. Create original host art, wardrobe, set, script, voice performance, and branding. Do not use the reference creator's finished video as source footage or duplicate their host/voice identity.
+
+## Conversational Owned-Joel Narration
+
+- Preserve the pinned owned Joel clone, provider/model/revision/reference hashes, and approved spoken-text lineage. Do not clone the reference channel or silently switch narration providers.
+- Author conversational wording before script approval: contractions, varied sentence lengths, direct questions, short reactions, a concrete objection, and a reasoned response. Questions must advance the theory rather than repeat a catchphrase. Avoid recap recitation, generic trailer declarations, constant shouting, and performed artificial hesitations.
+- Use genuine uncertainty where appropriate: distinguish what a shot demonstrates from what we propose Bob could do under our changed assumption. Do not recite every speculation with factual certainty.
+- Punctuation, sentence-complete grouping, and semantic pause boundaries can support delivery. They cannot guarantee curiosity, charisma, or human-sounding performance. No global tempo change, chopped speech edges, or repeated regeneration to reach 90 seconds.
+- Local Qwen3-TTS 1.7B Base has no effective per-unit instruction or native-speed channel. Non-spoken performance intent must remain metadata; never claim a `curious` tag, `qwen_instruct`, or speed request changed its voice. The current delivery bank has only `neutral_forward` active (the owned dry/deadpan baseline). Other references are candidates, not implicitly available styles.
+- First review a bounded approximately 15–20 second opening take, using complete approved units and exact voice/reference identity. Listen for recognizable Joel identity, a believable question, emphasis on the contrast, space for the viewer to consider it, clean word edges, and a smooth handoff to evidence. This is a required pilot acceptance checkpoint, not a claim that a sample-generation command already exists.
+- Once accepted, preserve reusable exact-hash sample units when the final synthesis contract matches; never repeat them automatically in a full-stage rerun. If a different reference or delivery treatment is needed, stop for a specifically authorized comparison under the existing promotion rules. A short pilot sample cannot promote a new global provider/reference.
+- Listen to the complete final 90-second program, not just isolated units. Word accuracy, speaker similarity, WPM, and loudness checks do not prove natural conversation. Repairs name exact units or boundaries and preserve accepted work.
+
+## Visual Vocabulary
+
+| Element | Editorial job | Treatment |
+| --- | --- | --- |
+| Original host + set | Ask, consider, object, explain, conclude | Reusable transparent pose assets on a consistent background; motivated position/scale changes and pose swaps, without required lip-sync |
+| Movie excerpt | Demonstrate a specific screen-established ability or reaction | Reviewed 3–5 second source interval; full-frame or a readable framed card; preserve the action being cited |
+| Evidence card/comparison | Compare Sentry/Void or evidence/assumption | Deliberate side-by-side or overlapping cards, clear short labels, stable reading time |
+| AI concept still | Illustrate our invented scenario | Gemini, Flow, or built-in Codex image generation only through an explicitly selected, approved asset route; visibly identified as concept imagery where it could be confused with footage |
+| Optional Flow video | Show a necessary hypothetical action a still cannot communicate | Exact approved first frame, one bounded reachable action, one creative submission, hash-bound review; retain approved still treatment if the optional clip fails |
+
+For the first pilot, propose one host identity, one main background, and approximately six useful poses: neutral, questioning/open hand, thinking, skeptical, pointing/presenting, and confident conclusion. These are proposed asset IDs/roles, not a mandate to generate every pose or a generation approval. Host expression changes follow meaning, not a rigid per-second quota. Existing accepted poses can be reused deliberately without donor-image substitution.
+
+Movie excerpt duration and card motion are separate contracts. A 4-second clip can enter as a moving card while its own footage plays, then settle for the key action. Author entrance, hold, and exit timing separately from the source in/out interval. Prefer a restrained slide or pan; do not crop away the decisive evidence, obscure captions, imply a different camera event, or stretch/freeze/loop footage silently to fill narration. No generated interpolation or alteration of an evidence clip that invents the claimed ability.
+
+Use host sections between evidence clusters so the video feels presented, not like uninterrupted B-roll. No mandatory clip/host/AI percentage: the reviewed script and beat purpose decide. Prefer the smallest reusable asset set that makes the argument clear. Flow video is optional and exact-ID; ordinary card entrances and pose movement are compositor work, not reasons for AI video spend.
+
+Provider/model selection must be explicit in the pilot identity and asset plan. Mentioning Gemini/Flow/Codex as possibilities does not authorize a three-provider bakeoff or automatic failover. Preserve approved reference identity across any deliberately chosen routes. Generated motion's provider audio is removed; soundtrack decisions use the reviewed source/narration mix instead.
+
+## Source and Audio Contract
+
+- Each excerpt records the exact title/edition/file identity, source in/out timestamps, locator/subtitle evidence when used, file/clip hashes, source limitations, inspected visual claim, rights/access basis, and pilot editorial decision. A subtitle match alone is not scene verification.
+- Keep source time and finished-video time separate. The timeline binds both and records crop/card transforms without overwriting source timestamps. New source acquisition remains separately authorized and bounded; no full-download fallback.
+- A prior library approval does not authorize the pilot. Do not infer permission for a new film from earlier Spider-Man/Lanterns tests. The reviewer records the basis for each actual source/use; the program makes no legal determination.
+- Source audio is per excerpt: muted, retained quietly under Joel, or a deliberate audio spotlight while narration pauses. Speech must not compete with two simultaneous spoken tracks. Inspect the selected language/commentary track and timing. The existing helper supports the first audio stream only when explicitly retained.
+- Bind the narration placement and every source-audio interval/gain to the same reviewed timeline. Source dialogue does not enter Joel's approved spoken script or its narration-only Whisper transcript. Any source-dialogue captions need separate exact-source timing.
+- Music and added SFX are not silently enabled by approval of clip audio or card motion. If selected later, record their exact assets and mix intent. Preserve the canonical narration WAV; create a separate measured mixed program, with one final production AAC encode and hash-bound loudness/true-peak QA.
+
+## Required Implementation Before Media Production
+
+The existing extractor handles bounded clips. Existing generated-visuals motion, provider receipts, voice lineage, Whisper timing, and loudness tools are reusable components. The current generated-video renderer instead fills the canvas, removes video audio, and may hold the final frame; it is not the required multi-layer footage/host compositor and must not be passed library clips as if they were generated-motion approvals.
+
+The following are proposed artifact stages, not available CLI commands:
+
+1. **Pilot identity:** explicit editorial/media workflow, exact 90-second proof scope, channel/series/run/episode/title, clean-code provenance, provider/voice/model locks, and `production_eligible: false`; publishing unavailable.
+2. **Evidence and script approval:** source/ability ledger, separate fact/assumption/speculation fields, original script, exact-hash operator approval, and targeted speakability. No synthesis before this gate.
+3. **Voice direction and opening review:** source-bound performance plan, capability-loss reporting, exact bounded synthesis scope, pre-synthesis gate, technical QA, and operator listening decision before remaining narration.
+4. **Full narration and timing:** accepted-unit reuse, exact-scope remaining synthesis, full-stream delivery/listening QA, immutable canonical WAV, and current Whisper word timing.
+5. **Asset plan approval and materialization:** exact clips, host/ref/pose/background assets, optional concept stills/motion; approve provider/asset scope before spend; acquire/extract/generate once, retain receipts, inspect and approve actual outputs.
+6. **Typed edit and mix plan:** complete frame-based 90-second coverage, evidence/speculation labels, independent source and output clocks, overlapping layers with authored transforms, source-audio decisions, narration placement, and separate caption tracks where needed. Hash-approve the exact timeline and input assets.
+7. **Bounded composite and final review:** local approved inputs only; exactly 90 seconds (for example 2,700 frames at locked 30 fps), complete speech, no hidden duration padding or cut-off ending, measured final mixed audio, readable source labels/captions, and end-to-end viewing/listening approval. The precise fps is selected and locked at preflight, not silently inherited from the generated renderer.
+
+`goldflow run status` must route to this registry when implemented and expose its next valid artifact/command. Unsupported old production commands, media-workflow switches, missing approvals, and publishing must remain blocked even when an ordinary stage-order bypass is supplied. Historical identities remain unchanged. Every attempt/review/repair must append immutable events/reports with hashes, scope, time, provider cost when applicable, and preserved prior decisions.
+
+Provider-free tests must establish: legacy route preservation; unsupported/publishing refusal; exact script and source approval invalidation; no writes/spend before valid identity/gates; stale media refusal; independent source/output clocks; 3–5 second clip scope; deliberate reuse and overlapping host/card composition; retained/muted/source-spotlight audio; captions faithful to each source; and an actual synthetic 90-second FFmpeg render with exact frame count, duration, no unexpected black gaps, and audible non-clipped audio. Those tests establish implementation behavior, not Joel delivery quality or rights clearance.

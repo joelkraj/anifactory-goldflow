@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PROGRAM_REVIEW_SCHEMA, validateProgramReviewShape, validateProgramNarrationPlacements, preparePilotProgramReview } from "../lib/avatar-pilot-program-review.mjs";
+import { PROGRAM_REVIEW_SCHEMA, validateProgramReviewShape, validateProgramNarrationPlacements, validateProgramRepairScope, preparePilotProgramReview } from "../lib/avatar-pilot-program-review.mjs";
 import { SENTRY_PROGRAM_EDITORIAL } from "../lib/sentry-program-editorial.mjs";
 
 const request = {
@@ -63,4 +63,24 @@ const authoredRequest = { ...request, narration_placements: SENTRY_PROGRAM_EDITO
   ...["sentry_illustration", "doom_illustration", "void_illustration"].map((id) => ({ id, kind: "illustration", provenance: {} })),
 ] };
 assert.equal(validateProgramReviewShape(authoredRequest), authoredRequest, "authored edit preserves complete speech and places five-second source audio wholly in pauses");
+const repair = { cause: "ffmpeg_loudnorm_json_trailing_status", repair: "parse_bounded_loudnorm_json_preserve_raw_mix",
+  prior_request: { path: "/fixture/pilot_program_reviews/program-v1/request.json", sha256: "c".repeat(64) },
+  prior_execution: { path: "/fixture/pilot_program_reviews/program-v1/execution_started.json", sha256: "d".repeat(64) },
+  retained_raw_mix: { path: "/fixture/pilot_program_reviews/program-v1/program-mix-unmastered.wav", sha256: "e".repeat(64) },
+};
+const identity = { path: "/fixture/run_identity.json", sha256: request.identity_sha256 };
+const repairRequest = { ...request, candidate_id: "program-v2", exact_scope_repair: repair };
+const execution = { schema: "goldflow_avatar_pilot_program_review_execution_v1", identity, request: repair.prior_request,
+  duration_frames: 2700, provider_calls: 0, production_eligible: false, publish_allowed: false, exact_program_approval_recorded: false };
+assert.equal(validateProgramReviewShape(repairRequest), repairRequest);
+validateProgramRepairScope(repairRequest, request, execution, identity);
+for (const next of [
+  { ...repairRequest, candidate_id: request.candidate_id },
+  { ...repairRequest, narration: { ...request.narration, source_out_sec: 70 } },
+  { ...repairRequest, assets: request.assets.slice(1) },
+  { ...repairRequest, recipe: { ...request.recipe, changed_mix: true } },
+]) assert.throws(() => validateProgramRepairScope(next, request, execution, identity), /Program review blocked/);
+assert.throws(() => validateProgramRepairScope(repairRequest, { ...request, exact_scope_repair: repair }, execution, identity), /chained repairs/);
+assert.throws(() => validateProgramRepairScope(repairRequest, request, { ...execution, request: { ...execution.request, sha256: "f".repeat(64) } }, identity), /matching guarded private execution/);
+assert.throws(() => validateProgramReviewShape({ ...repairRequest, exact_scope_repair: { ...repair, repair: "recreate_mix" } }), /only the retained raw-mix/);
 console.log("Program-review scope tests passed: exact 90-second private review, retained authorization, complete source-ordered speech; no media rendered or approvals created.");

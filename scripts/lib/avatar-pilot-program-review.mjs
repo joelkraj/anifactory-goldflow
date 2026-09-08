@@ -44,6 +44,15 @@ export function validateProgramReviewShape(manifest) {
     "exact successful reviewed style preview required");
   need(!Object.hasOwn(manifest, "timeline_approval") && !Object.hasOwn(manifest, "program_approval"),
     "the new program cannot claim prior exact-edit acceptance");
+  if (manifest.exact_scope_repair) {
+    const repair = manifest.exact_scope_repair;
+    need(equal(Object.keys(repair).sort(), ["cause", "prior_execution", "prior_request", "repair", "retained_raw_mix"].sort())
+      && repair.cause === "ffmpeg_loudnorm_json_trailing_status"
+      && repair.repair === "parse_bounded_loudnorm_json_preserve_raw_mix",
+    "only the retained raw-mix loudnorm parse repair is supported");
+    for (const key of ["prior_execution", "prior_request", "retained_raw_mix"])
+      need(text(repair[key]?.path) && /^[a-f0-9]{64}$/.test(repair[key]?.sha256 ?? ""), "repair must bind exact retained artifacts");
+  }
   need(manifest.recipe.captions?.length === 0 && manifest.recipe.new_synthesis === false
     && manifest.recipe.added_music_or_sfx === false, "no captions, synthesis or new music/SFX in this review scope");
   validateProgramNarrationPlacements(manifest, manifest.narration.source_out_sec);
@@ -119,6 +128,43 @@ export function validateProgramReviewTimeline(manifest) {
   return timeline;
 }
 
+export function validateProgramRepairScope(manifest, priorRequest, execution, identity) {
+  const repair = manifest.exact_scope_repair;
+  need(repair && priorRequest.candidate_id !== manifest.candidate_id && !priorRequest.exact_scope_repair,
+    "repair must retain a different first-attempt candidate; chained repairs are unavailable");
+  const unchanged = { ...manifest, candidate_id: priorRequest.candidate_id };
+  delete unchanged.exact_scope_repair;
+  need(equal(unchanged, priorRequest), "repair cannot change the timeline, media, narration, mix or authorization");
+  need(execution.schema === "goldflow_avatar_pilot_program_review_execution_v1" && same(execution.identity, identity)
+    && execution.request?.sha256 === repair.prior_request.sha256 && execution.duration_frames === 2700
+    && execution.provider_calls === 0 && execution.production_eligible === false && execution.publish_allowed === false
+    && execution.exact_program_approval_recorded === false,
+  "retained raw mix must belong to the matching guarded private execution");
+}
+
+async function prepareProgramRepair(prepared, episodeDir) {
+  const { manifest, refs } = prepared, repair = manifest.exact_scope_repair;
+  if (!repair) return;
+  const priorDirectory = path.dirname(repair.prior_request.path);
+  const priorRequest = await json(repair.prior_request, refs);
+  need(priorDirectory === path.join(episodeDir, "pilot_program_reviews", priorRequest.candidate_id)
+    && repair.prior_request.path === path.join(priorDirectory, "request.json")
+    && repair.prior_execution.path === path.join(priorDirectory, "execution_started.json")
+    && repair.retained_raw_mix.path === path.join(priorDirectory, "program-mix-unmastered.wav"),
+  "repair artifacts must share the exact earlier candidate directory");
+  const execution = await json(repair.prior_execution, refs);
+  validateProgramRepairScope(manifest, priorRequest, execution, prepared.identity);
+  await bound(execution.request, refs);
+  need(equal((await fs.readdir(priorDirectory)).sort(), ["execution_started.json", "program-mix-unmastered.wav", "request.json"]),
+    "repair requires only the retained request, execution and raw mix; no completed or downstream output may exist");
+  await bound(repair.retained_raw_mix, refs);
+  const probe = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-protocol_whitelist", "file", "-show_streams", "-show_format", "-of", "json", repair.retained_raw_mix.path],
+    { encoding: "utf8", timeout: 30000, maxBuffer: 2 * 1024 * 1024, env: { PATH: process.env.PATH, LANG: "C" } }));
+  need(probe.streams.length === 1 && probe.streams[0].codec_name === "pcm_s24le"
+    && probe.streams[0].sample_rate === "48000" && probe.streams[0].channels === 2
+    && Number(probe.format.duration) === 90, "retained raw mix must be the complete lossless 90-second stereo program");
+}
+
 export async function preparePilotProgramReview(args) {
   const prepared = await preparePilotVisualReview({ ...args, validateShape: validateProgramReviewShape,
     outputNamespace: "pilot_program_reviews", allowMovieCutout: true });
@@ -148,6 +194,7 @@ export async function preparePilotProgramReview(args) {
   }
   for (const name of ["avatar-pilot-program-review.mjs", "avatar-pilot-program-renderer.mjs", "avatar-pilot-style-preview.mjs", "avatar-pilot-workflow.mjs"])
     await bound(await binding(path.join(args.repoRoot, "scripts/lib", name)), refs);
+  await prepareProgramRepair(prepared, args.episodeDir);
   return prepared;
 }
 
@@ -160,6 +207,7 @@ export async function producePilotProgramReview(prepared) {
   await write("execution_started.json", { schema: "goldflow_avatar_pilot_program_review_execution_v1", created_at: new Date().toISOString(),
     identity: prepared.identity, request: prepared.request, inputs: refs, runtime: prepared.runtime,
     accepted_style_preview: manifest.accepted_style_preview, style_direction_approval: manifest.style_direction_approval,
+    exact_scope_repair: manifest.exact_scope_repair ?? null,
     duration_frames: 2700, provider_calls: 0, provider_cost: 0, production_eligible: false, publish_allowed: false,
     exact_program_approval_recorded: false });
   const { renderProgramReview } = await import("./avatar-pilot-program-renderer.mjs");
@@ -176,6 +224,7 @@ export async function producePilotProgramReview(prepared) {
   const receipt = { schema: "goldflow_avatar_pilot_program_review_result_v1", status: "awaiting_program_review", created_at: new Date().toISOString(),
     identity: prepared.identity, request: prepared.request, inputs: refs, runtime: prepared.runtime,
     accepted_style_preview: manifest.accepted_style_preview, style_direction_approval: manifest.style_direction_approval,
+    exact_scope_repair: manifest.exact_scope_repair ?? null,
     output: result.output, technical_report: result.technical_report ?? null, duration_frames: 2700, width: 1920, height: 1080, fps: 30,
     narration_duration_sec: prepared.narrationDurationSec, narration_placements: manifest.narration_placements ?? [manifest.narration],
     provider_calls: 0, provider_cost: 0, creative_submissions: 0, official_stage_completed: false,

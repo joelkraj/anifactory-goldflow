@@ -21,6 +21,20 @@ async function sized(file, height) {
   return sharp(file).trim({ background: { r: 0, g: 0, b: 0, alpha: 0 } }).resize({ height }).png().toBuffer();
 }
 
+async function hostMatte(file, height) {
+  const image = await sized(file, height);
+  const { data, info } = await sharp(image).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  // Remove retained white background in the sleeve/body gap below the head.
+  // The accepted source stays immutable; hair, eyes and teeth are outside this mask.
+  for (let y = Math.ceil(info.height * .28); y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      const i = (y * info.width + x) * 4;
+      if (data[i] > 238 && data[i + 1] > 238 && data[i + 2] > 238) data[i + 3] = 0;
+    }
+  }
+  return sharp(data, { raw: info }).png().toBuffer();
+}
+
 async function sticker(file, height) {
   const body = await sized(file, height);
   const { width, height: bh } = await sharp(body).metadata();
@@ -58,8 +72,8 @@ export async function renderStylePreview({ outputDir, manifest, assets }) {
   const clipDir = path.join(outputDir, 'clip_frames'); await fs.mkdir(clipDir);
   await exec('ffmpeg', ['-v', 'error', '-protocol_whitelist', 'file', '-i', assets.film_sentry_window.path, '-map', '0:v:0', '-vf', 'fps=30,scale=1200:676:force_original_aspect_ratio=decrease,pad=1200:676:(ow-iw)/2:(oh-ih)/2', '-frames:v', '150', path.join(clipDir, '%04d.png')], { timeout: 60000, env: mediaEnv });
   const room = await sharp(assets.host_room.path).resize(W, H, { fit: 'cover' }).png().toBuffer();
-  const openHost = await sized(assets.host_open_palm.path, 1700);
-  const presentHost = await sized(assets.host_presenting.path, 1570);
+  const openHost = await hostMatte(assets.host_open_palm.path, 1700);
+  const presentHost = await hostMatte(assets.host_presenting.path, 1570);
   const sentry = await sticker(assets.sentry_illustration.path, 775);
   const doom = await sticker(assets.doom_illustration.path, 780);
   const cream = await raster(`<defs><pattern id="p" width="9" height="9" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r=".65" fill="#c2bbae" opacity=".4"/></pattern></defs><rect width="1920" height="1080" fill="#e8e4db"/><rect width="1920" height="1080" fill="url(#p)"/><path d="M0 1025 1920 878V1080H0Z" fill="#d8d1c6"/>`);
@@ -96,7 +110,7 @@ export async function renderStylePreview({ outputDir, manifest, assets }) {
       } else if (frame < 186) {
         background = cream;
         const ct = t - 1.2, enter = ease(ct / .47), exit = ease((ct - 4.72) / .28);
-        layers.push(await place(presentHost, -255 + 35 * enter - exit * 430, 162));
+        layers.push(await place(presentHost, -15 + 35 * enter - exit * 650, 162));
         const x = mix(1990, 635, enter) - exit * 1900, y = 184 - 9 * clamp(ct / 5);
         layers.push(await place(cardFrame, x - 30, y - 20));
         const clip = await sharp(path.join(clipDir, `${String(frame - 35).padStart(4, '0')}.png`)).ensureAlpha().composite([{ input: clipMask, blend: 'dest-in' }]).png().toBuffer();

@@ -192,7 +192,7 @@ export async function preparePilotProgramReview(args) {
     need(equal(row, priorManifest.assets.find((entry) => entry.id === row.id)),
       "external illustrations must be the exact artwork and provenance from the accepted style preview");
   }
-  for (const name of ["avatar-pilot-program-review.mjs", "avatar-pilot-program-renderer.mjs", "avatar-pilot-style-preview.mjs", "avatar-pilot-workflow.mjs"])
+  for (const name of ["avatar-pilot-program-review.mjs", "avatar-pilot-program-renderer.mjs", "avatar-pilot-style-preview-renderer.mjs", "avatar-pilot-style-preview.mjs", "avatar-pilot-workflow.mjs"])
     await bound(await binding(path.join(args.repoRoot, "scripts/lib", name)), refs);
   await prepareProgramRepair(prepared, args.episodeDir);
   return prepared;

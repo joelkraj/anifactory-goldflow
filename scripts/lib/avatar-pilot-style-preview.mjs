@@ -37,12 +37,12 @@ async function json(ref, refs) {
   return row;
 }
 
-export function validateStylePreviewShape(manifest) {
-  need(manifest?.schema === STYLE_PREVIEW_SCHEMA && manifest.intent === "local_visual_review"
+export function validateLocalVisualReviewShape(manifest, { schema = STYLE_PREVIEW_SCHEMA, intent = "local_visual_review", minFrames = 240, maxFrames = 360 } = {}) {
+  need(manifest?.schema === schema && manifest.intent === intent
     && manifest.production_eligible === false && manifest.publish_allowed === false, "private visual-review request required");
   need(/^[a-z0-9][a-z0-9_-]{0,59}$/.test(manifest.candidate_id ?? ""), "explicit candidate ID required");
-  need(Number.isInteger(manifest.duration_frames) && manifest.duration_frames >= 240 && manifest.duration_frames <= 360,
-    "review duration must be 8–12 seconds at 30 fps");
+  need(Number.isInteger(manifest.duration_frames) && manifest.duration_frames >= minFrames && manifest.duration_frames <= maxFrames,
+    `review duration must be ${minFrames}–${maxFrames} frames at 30 fps`);
   need(HASH.test(manifest.identity_sha256 ?? ""), "current identity hash required");
   need(manifest.recipe && typeof manifest.recipe === "object" && !Array.isArray(manifest.recipe), "local recipe required");
   need(!Object.hasOwn(manifest, "review") && !Object.hasOwn(manifest, "approved"), "a review candidate cannot claim operator acceptance");
@@ -65,11 +65,17 @@ export function validateStylePreviewShape(manifest) {
   "explicit narration source interval required");
   return manifest;
 }
+export function validateStylePreviewShape(manifest) { return validateLocalVisualReviewShape(manifest); }
 
 export async function preparePilotStylePreview({ episodeDir, inputPath, report, repoRoot, flags }) {
+  return preparePilotVisualReview({ episodeDir, inputPath, report, repoRoot, flags });
+}
+
+export async function preparePilotVisualReview({ episodeDir, inputPath, report, repoRoot, flags,
+  validateShape = validateStylePreviewShape, outputNamespace = "pilot_visual_reviews", allowMovieCutout = false }) {
   need(report.current_stage === "pilot_media" && report.allowed_command_stages.includes("pilot_media")
     && report.production_eligible === false && report.publish_allowed === false, "current unresolved pilot_media stage required");
-  const refs = [], request = await binding(inputPath), manifest = validateStylePreviewShape(await json(request, refs));
+  const refs = [], request = await binding(inputPath), manifest = validateShape(await json(request, refs));
   const identity = await binding(path.join(episodeDir, "run_identity.json"));
   await bound(identity, refs);
   need(identity.sha256 === manifest.identity_sha256 && report.identity.media_workflow === "avatar_footage_pilot_v1"
@@ -86,6 +92,7 @@ export async function preparePilotStylePreview({ episodeDir, inputPath, report, 
   need(host, "accepted masked host identity required");
   const hostAuthority = await json(await binding(path.join(episodeDir, "pilot_host_identity_approval/approval.json")), refs);
   const assets = {};
+  let narrationDurationSec;
   for (const row of manifest.assets) {
     await bound(row, refs);
     const planned = plan.assets.find((entry) => entry.id === row.id), provenance = row.provenance;
@@ -94,6 +101,7 @@ export async function preparePilotStylePreview({ episodeDir, inputPath, report, 
       const duration = Number(execFileSync("ffprobe", ["-v", "error", "-protocol_whitelist", "file", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", row.path],
         { encoding: "utf8", timeout: 30000, env: { PATH: process.env.PATH, LANG: "C" } }).trim());
       need(Number.isFinite(duration) && manifest.narration.source_out_sec <= duration, "narration excerpt exceeds accepted master");
+      narrationDurationSec = duration;
     } else if (row.kind === "movie_clip") {
       need(provenance.type === "accepted_movie_clip" && planned?.kind === "movie_clip" && same(row, planned.existing_file), "exact planned movie excerpt required");
       const receiptPath = path.join(path.dirname(row.path), "receipt.json");
@@ -115,6 +123,19 @@ export async function preparePilotStylePreview({ episodeDir, inputPath, report, 
         if (receipt[key]) await bound(receipt[key], refs);
       for (const ref of receipt.reference_bindings ?? []) await bound(ref, refs);
       if (row.kind === "host_pose") need(same(receipt.host_identity_authority, await binding(path.join(episodeDir, "pilot_host_identity_approval/approval.json"))), "pose must retain accepted host identity");
+    } else if (allowMovieCutout && provenance.type === "source_movie_cutout") {
+      const source = plan.assets.find((entry) => entry.id === provenance.source_asset_id);
+      need(row.kind === "illustration" && provenance.truth_mode === "illustration_only"
+        && source?.kind === "movie_clip" && same(source.existing_file, provenance.source), "cutout must bind an exact planned movie excerpt");
+      await bound(provenance.source, refs);
+      const derivation = provenance.derivation;
+      need(derivation?.method === "ffmpeg_frame_then_macos_vision_foreground_mask_then_sharp_sticker_board"
+        && within(derivation.recipe?.path ?? "", path.join(episodeDir, "pilot_media_work")), "existing local cutout recipe required");
+      const recipe = await json(derivation.recipe, refs);
+      need(recipe.schema === "goldflow_avatar_pilot_local_composite_recipe_v1"
+        && recipe.method === derivation.method && recipe.intermediate_hashes?.[derivation.intermediate_key] === row.sha256
+        && recipe.source_frame_offsets_sec?.[source.id] === derivation.frame_time_sec,
+      "cutout hash and source frame must match its retained recipe");
     } else {
       need(provenance.type === "external_illustration" && provenance.truth_mode === "illustration_only"
         && text(provenance.description) && text(provenance.derivation?.method), "external art needs explicit illustrative role and derivation");
@@ -129,9 +150,10 @@ export async function preparePilotStylePreview({ episodeDir, inputPath, report, 
   const dirty = git("status", "--porcelain=v1", "--untracked-files=all");
   need(!dirty || flags["allow-dirty-worktree"] === "true" && text(flags["dirty-reason"]) && flags["dirty-reason"].trim().length >= 12,
     "clean code or explicit proof-only dirty-worktree reason required");
-  const outputDir = path.join(episodeDir, "pilot_visual_reviews", manifest.candidate_id);
+  need(["pilot_visual_reviews", "pilot_program_reviews"].includes(outputNamespace), "unsupported review namespace");
+  const outputDir = path.join(episodeDir, outputNamespace, manifest.candidate_id);
   need(!await fs.lstat(outputDir).catch((error) => { if (error.code === "ENOENT") return null; throw error; }), "candidate already exists; preserve it and use a new reviewed revision ID");
-  return { manifest, assets, refs, request, identity, outputDir,
+  return { manifest, assets, refs, request, identity, outputDir, narrationDurationSec,
     runtime: { commit: git("rev-parse", "HEAD"), dirty: Boolean(dirty), dirty_diff_sha256: hash(`${dirty}\n${git("diff", "HEAD", "--binary")}`),
       dirty_reason: dirty ? flags["dirty-reason"] : null } };
 }

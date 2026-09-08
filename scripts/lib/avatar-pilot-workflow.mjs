@@ -396,6 +396,8 @@ async function pilotStatusWithAdapter(episodeDir, openingAdapter) {
   return { schema: "goldflow_run_status_v2", episode_dir: episodeDir, media_workflow: identity.media_workflow, identity, production_eligible: false, publish_allowed: false, current_stage: current?.stage ?? "complete", next_command_shape: current?.next_command_shape ?? null, allowed_command_stages: current?.state === "missing" ? [current.stage] : [], stages,
     style_preview_command_shape: current?.stage === "pilot_media" && current.state === "missing"
       ? `node bin/goldflow.mjs pilot preview-style --episode-dir ${JSON.stringify(episodeDir)} --input <8-to-12-second-style-review.json>` : null,
+    program_preview_command_shape: current?.stage === "pilot_media" && current.state === "missing"
+      ? `node bin/goldflow.mjs pilot preview-program --episode-dir ${JSON.stringify(episodeDir)} --input <approved-style-full-program-review.json>` : null,
     asset_plan_revision_command_shape: revisionAvailable ? `node bin/goldflow.mjs pilot revise-asset-plan --episode-dir ${JSON.stringify(episodeDir)} --input <revised-plan.json> --prior-stage-sha256 ${(await binding(path.join(episodeDir, "pilot_asset_plan.json"))).sha256} --affected-asset-ids <exact-comma-separated-IDs> --reviewer <name> --note <operator-revision-reason>` : null,
     capabilities: { narration: openingAdapter.status === "proven" && identity.pilot_narration_contract
       ? openingAdapter.full?.status === "proven" ? "scoped_opening_and_remaining_synthesis_with_separate_listening_gates" : "opening_only_scoped_synthesis_and_listening_full_narration_blocked"
@@ -410,7 +412,7 @@ async function currentNarrationResultPath(episodeDir) {
     : path.join(episodeDir, "pilot_narration_work", "narration_producer_result.json");
 }
 export function formatPilotStatus(report) {
-  return `# Private 90-second avatar pilot\n\nCurrent stage: ${report.current_stage}. Publishing disabled.\n\n| Stage | State | Approval | Artifact exists |\n| --- | --- | --- | --- |\n${report.stages.map((row) => `| ${row.stage} | ${row.state} | ${row.approval_policy} | ${row.exists ? "yes" : "no"} |`).join("\n")}\n\nNext: ${report.next_command_shape ?? "Proof complete; no publishing command."}\n${report.asset_plan_revision_command_shape ? `\nOptional pre-approval revision: ${report.asset_plan_revision_command_shape}\n` : ""}${report.style_preview_command_shape ? `\nOptional local visual review (no stage completion): ${report.style_preview_command_shape}\n` : ""}\n${report.stages.filter((row) => row.reason).map((row) => `${row.stage}: ${row.reason}`).join("\n")}\nOpening synthesis: ${report.capabilities.opening_synthesis}; remaining-only synthesis: ${report.capabilities.remaining_synthesis}; arbitrary narration import: ${report.capabilities.narration_import}. Accepted opening units remain immutable. Full narration requires separate listening approval. Gemini/Flow assets are reviewed local imports, not automatic dispatch.`;
+  return `# Private 90-second avatar pilot\n\nCurrent stage: ${report.current_stage}. Publishing disabled.\n\n| Stage | State | Approval | Artifact exists |\n| --- | --- | --- | --- |\n${report.stages.map((row) => `| ${row.stage} | ${row.state} | ${row.approval_policy} | ${row.exists ? "yes" : "no"} |`).join("\n")}\n\nNext: ${report.next_command_shape ?? "Proof complete; no publishing command."}\n${report.asset_plan_revision_command_shape ? `\nOptional pre-approval revision: ${report.asset_plan_revision_command_shape}\n` : ""}${report.style_preview_command_shape ? `\nOptional local visual review (no stage completion): ${report.style_preview_command_shape}\n` : ""}${report.program_preview_command_shape ? `\nAfter accepted style direction, full private edit for review (no stage completion): ${report.program_preview_command_shape}\n` : ""}\n${report.stages.filter((row) => row.reason).map((row) => `${row.stage}: ${row.reason}`).join("\n")}\nOpening synthesis: ${report.capabilities.opening_synthesis}; remaining-only synthesis: ${report.capabilities.remaining_synthesis}; arbitrary narration import: ${report.capabilities.narration_import}. Accepted opening units remain immutable. Full narration requires separate listening approval. Gemini/Flow assets are reviewed local imports, not automatic dispatch.`;
 }
 
 async function exclusiveJson(file, value) { await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 }); }
@@ -498,7 +500,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
   need(!Object.hasOwn(flags, "media-workflow") || flags["media-workflow"] === "avatar_footage_pilot_v1", "Pilot commands cannot switch media workflow.");
   need(!Object.hasOwn(flags, "content-profile") || flags["content-profile"] === "mcu_what_if_pilot_v1", "Pilot commands cannot switch content profile.");
   if (action === "preflight") return preflight(flags, episodeDir, repoRoot, openingAdapter);
-  const stageAction = ["revise-host-design", "approve-host-identity", "use-local-concept-fallback", "preview-style"].includes(action) ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
+  const stageAction = ["revise-host-design", "approve-host-identity", "use-local-concept-fallback", "preview-style", "preview-program"].includes(action) ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
     : ["create-narration", "review-narration", "approve-narration"].includes(action) ? "import-narration" : action;
   const stage = AVATAR_PILOT_STAGES.find((row) => row.action === stageAction);
   need(stage || action === "status", "Unknown pilot action. Use pilot status; publishing and automatic media dispatch are unavailable.");
@@ -525,6 +527,19 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
     const previous = AVATAR_PILOT_STAGES[AVATAR_PILOT_STAGES.indexOf(stage) - 1];
     const inputs = [{ role: "upstream", ...await binding(await stageOutputPath(episodeDir, previous)) }];
     let payload;
+    if (action === "preview-program") {
+      need(hasText(flags.input) && !Object.hasOwn(flags, "accept") && !Object.hasOwn(flags, "reviewer"),
+        "Program review requires --input; existing style authorization belongs in the request, not a new edit approval.");
+      const { preparePilotProgramReview, producePilotProgramReview } = await import("./avatar-pilot-program-review.mjs");
+      const prepared = await preparePilotProgramReview({ episodeDir, inputPath: path.resolve(flags.input), report: current, repoRoot, flags });
+      const preview = await producePilotProgramReview(prepared);
+      await audit(episodeDir, { action, status: "awaiting_program_review", elapsed_ms: Date.now() - started,
+        identity_sha256: identityRef.sha256, inputs: prepared.refs, output: preview.receipt,
+        scope: { duration_frames: 2700, duration_sec: 90, official_stage_completed: false, exact_program_approval_recorded: false },
+        creative_submissions: 0, provider_cost: 0 });
+      const unchanged = await pilotStatusWithAdapter(episodeDir, openingAdapter);
+      return { ...unchanged, program_preview: preview };
+    }
     if (action === "preview-style") {
       need(hasText(flags.input) && !Object.hasOwn(flags, "accept") && !Object.hasOwn(flags, "reviewer"),
         "Style review requires --input and cannot record operator acceptance.");

@@ -164,9 +164,9 @@ export async function renderProgramReview({ outputDir, manifest, assets }) {
         const drop = saving ? 1 - cueProgress(shot, frame, 'escape_route_recovers', 40) : cueProgress(shot, frame, 'escape_route_drops', 22);
         await add(platform, 1125, 728);
         await add(platform, 525, 800 + 168 * drop);
-        await add(route, 600 + (saving ? 560 * (1 - drop) : 0), 710 + 168 * drop);
         await add(small.doom_illustration, saving ? 90 : 1150, saving ? 370 : 290);
         await add(stickers.sentry_illustration, saving ? 290 + 430 * cueProgress(shot, frame, 'sentry_breaks_off', 42) : 75 - 75 * cueProgress(shot, frame, 'doom_counterplay', 25), 186);
+        await add(route, 600 + (saving ? 560 * (1 - drop) : 0), 710 + 168 * drop);
       } else if (shot.type === 'void' || shot.type === 'hold' || shot.type === 'payoff') {
         bg = backgrounds.blue;
         layers.push({ input: doorway, left: 0, top: 0 });
@@ -185,12 +185,13 @@ export async function renderProgramReview({ outputDir, manifest, assets }) {
         if (shot.variant === 'time_won') routeX = 1320 + 110 * p;
         if (shot.variant === 'objective_clear') routeX = 1430 + 660 * cueProgress(shot, frame, 'objective_exits', 25);
         if (shot.variant === 'decisive_sequence') { routeY = 940 - 105 * cueProgress(shot, frame, 'rescue_reprise', 23); routeX = 1130 + 810 * cueProgress(shot, frame, 'objective_lost', 42); }
-        if (shot.type !== 'void') await add(route, routeX, routeY);
         const isSentry = !reveal || shot.variant === 'decisive_sequence';
         const hero = isSentry ? stickers.sentry_illustration : stickers.void_illustration;
         const heroX = isSentry ? (shot.variant === 'decisive_sequence' ? mix(185, 620, cueProgress(shot, frame, 'sentry_returns', 24)) : mix(1100, 650, cueProgress(shot, frame, 'sentry_turns_back', 30))) : 575;
         await add(hero, heroX, isSentry ? 200 : 240 - p * 7);
         if (shot.variant === 'protect_route') await add(hosts.host_presenting, -5, 420, .57);
+        // Tactical route labels stay readable above the cutouts, like the accepted sample.
+        if (shot.type !== 'void') await add(route, routeX, routeY);
       }
       layers.push({ input: labels.get(shot.id), top: 0, left: 0 });
       const png = await sharp(bg).composite(layers).png({ compressionLevel: 1 }).toBuffer();

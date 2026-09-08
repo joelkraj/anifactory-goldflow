@@ -260,6 +260,7 @@ ${registryCommands}
   goldflow pilot revise-host-design One post-approval host-only amendment after a rejected neutral candidate; --input <request.json> --accept true --reviewer <name> --note <reason>; authorizes exactly one replacement neutral submission
   goldflow pilot approve-host-identity Accept the exact replacement neutral and reviewed real-alpha cutout; --input <request.json> --accept true --reviewer <name> --note <review>; authorizes only its five planned dependent poses
   goldflow pilot use-local-concept-fallback Replace all three refused AI concept stills with source-bound local editorial composites; --input <request.json> --accept true --reviewer <name> --note <reason>
+  goldflow pilot preview-style        Render an isolated 8–12-second local visual-review candidate at pilot_media; --input <request.json>; no approvals, provider calls, stage completion or publishing
   goldflow visual planner-ab       Run the diagnostic editorial A/B
   goldflow visual prompt-benchmark Run the locked 25-cut provider prompt benchmark
   goldflow visual parallax-proof-assets Build foreground/background layers for an isolated diagnostic proof

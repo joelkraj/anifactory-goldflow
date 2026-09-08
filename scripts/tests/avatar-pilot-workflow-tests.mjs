@@ -147,6 +147,9 @@ try {
   await assert.rejects(() => run("preflight", { identity: configPath }), /never overwritten/);
   assert.deepEqual(await fs.readFile(path.join(episodeDir, "run_identity.json")), immutableIdentity);
   await assert.rejects(() => run("render"), /stopped at pilot_script/);
+  await assert.rejects(() => run("preview-style", { input: configPath }), /stopped at pilot_script/);
+  await assert.rejects(() => run("preview-style", { input: configPath, "workflow-bypass": "true" }), /cannot be bypassed/);
+  assert.equal((await pilotStatus(episodeDir)).style_preview_command_shape, null);
   await assert.rejects(() => run("publish"), /Unknown pilot action/);
   await assert.rejects(() => run("narrate"), /Unknown pilot action/);
   const priorBypass = process.env.GOLDFLOW_WORKFLOW_BYPASS;

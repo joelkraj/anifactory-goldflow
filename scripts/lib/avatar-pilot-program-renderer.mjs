@@ -15,6 +15,12 @@ const ref = async (file) => ({ path: file, sha256: await hash(file) });
 const clamp = (v) => Math.min(1, Math.max(0, v));
 const ease = (v) => 1 - (1 - clamp(v)) ** 3;
 const mix = (a, b, t) => a + (b - a) * t;
+export function parseLoudnormReport(stderr) {
+  // FFmpeg may print a final progress/status line after the filter's JSON.
+  const start = stderr.lastIndexOf('{'), end = stderr.indexOf('}', start);
+  if (start < 0 || end < start) throw new Error('Missing loudnorm JSON report.');
+  return JSON.parse(stderr.slice(start, end + 1));
+}
 const xml = (s) => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 const type = (s, x, y, size, fill = '#fffdf8', weight = 800) => `<text x="${x}" y="${y}" font-family="Arial, sans-serif" font-size="${size}" font-weight="${weight}" fill="${fill}">${xml(s)}</text>`;
 const raster = (body, width = W, height = H) => sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">${body}</svg>`)).png().toBuffer();
@@ -38,15 +44,18 @@ async function programAudio(outputDir, manifest, assets) {
   for (const [i, row] of rows.entries()) chains.push(`[n${i}]atrim=start=${row.source_in_sec}:end=${row.source_out_sec},asetpts=PTS-STARTPTS,aresample=48000,adelay=${Math.round(row.output_in_sec * 48000)}S:all=1[s${i}]`);
   for (const [i, row] of audioRows.entries()) chains.push(`[${i + 1}:a]atrim=start=${row.source_in_sec}:end=${row.source_out_sec},asetpts=PTS-STARTPTS,aresample=48000,volume=${row.gain_db}dB,afade=t=in:d=0.015,afade=t=out:st=4.985:d=0.015,adelay=${row.start_frame * 1600}S:all=1[c${i}]`);
   chains.push(`${rows.map((_, i) => `[s${i}]`).join('')}${audioRows.map((_, i) => `[c${i}]`).join('')}amix=inputs=${rows.length + audioRows.length}:normalize=0,apad,atrim=duration=90[a]`);
-  const raw = path.join(outputDir, 'program-mix-unmastered.wav');
-  await exec('ffmpeg', ['-v', 'error', ...inputs, '-filter_complex', chains.join(';'), '-map', '[a]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', raw], { env, timeout: 90000 });
+  const retained = manifest.exact_scope_repair?.retained_raw_mix;
+  const raw = retained?.path ?? path.join(outputDir, 'program-mix-unmastered.wav');
+  if (retained) {
+    if (await hash(raw) !== retained.sha256) throw new Error('Retained exact raw mix changed.');
+  } else await exec('ffmpeg', ['-v', 'error', ...inputs, '-filter_complex', chains.join(';'), '-map', '[a]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', raw], { env, timeout: 90000 });
   const first = await exec('ffmpeg', ['-hide_banner', '-i', raw, '-af', 'loudnorm=I=-16:TP=-1.8:LRA=11:print_format=json', '-f', 'null', '-'], { env, timeout: 90000 });
-  const measurement = JSON.parse(first.stderr.slice(first.stderr.lastIndexOf('{')));
+  const measurement = parseLoudnormReport(first.stderr);
   for (const key of ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset']) if (!Number.isFinite(Number(measurement[key]))) throw new Error(`Invalid mix measurement ${key}`);
   const mastered = path.join(outputDir, 'program-mix-mastered.wav');
   const filter = `loudnorm=I=-16:TP=-1.8:LRA=11:measured_I=${measurement.input_i}:measured_TP=${measurement.input_tp}:measured_LRA=${measurement.input_lra}:measured_thresh=${measurement.input_thresh}:offset=${measurement.target_offset}:linear=true:print_format=json`;
   const second = await exec('ffmpeg', ['-hide_banner', '-i', raw, '-af', filter, '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', mastered], { env, timeout: 90000 });
-  const mastering = JSON.parse(second.stderr.slice(second.stderr.lastIndexOf('{')));
+  const mastering = parseLoudnormReport(second.stderr);
   return { path: mastered, source: await ref(assets[manifest.narration.asset_id].path), raw: await ref(raw), master: await ref(mastered), measurement, mastering, narration_tempo: 1, accepted_master_unchanged: true, placements: rows, source_audio: audioRows };
 }
 
@@ -194,7 +203,7 @@ export async function renderProgramReview({ outputDir, manifest, assets }) {
   } catch (error) { child.kill('SIGKILL'); await done.catch(() => {}); throw error; }
   const probe = JSON.parse((await exec('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-show_format', '-of', 'json', videoPath], { env, timeout: 60000 })).stdout);
   const measured = await exec('ffmpeg', ['-hide_banner', '-i', videoPath, '-vn', '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json', '-f', 'null', '-'], { env, timeout: 90000 });
-  const loudness = JSON.parse(measured.stderr.slice(measured.stderr.lastIndexOf('{')));
+  const loudness = parseLoudnormReport(measured.stderr);
   const v = probe.streams.find((s) => s.codec_type === 'video');
   if (Number(v.nb_read_frames) !== 2700 || v.width !== W || v.height !== H || Math.abs(Number(probe.format.duration) - 90) > .08) throw new Error('Program dimensions/duration failed.');
   if (Math.abs(Number(loudness.input_i) + 16) > 1 || Number(loudness.input_tp) > -1.5) throw new Error(`Final encoded mix failed target: ${loudness.input_i} LUFS / ${loudness.input_tp} dBTP`);

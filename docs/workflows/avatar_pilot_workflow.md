@@ -42,6 +42,7 @@ After every command, inspect `node bin/goldflow.mjs run status --episode-dir <di
 | `approve-asset-plan` | Exact creative/provider scope approval |
 | `revise-host-design --input <request>` | One guarded post-approval host-only amendment after the first neutral candidate is explicitly rejected; `--accept true --reviewer --note`; preserves the first attempt and authorizes exactly one replacement neutral submission |
 | `approve-host-identity --input <request>` | Accept the exact replacement neutral plus its inspected real-alpha cutout; `--accept true --reviewer --note`; releases only the five already-planned dependent pose IDs, one first submission each |
+| `use-local-concept-fallback --input <request>` | One post-refusal amendment: bind both retained no-output provider results and replace all three concept stills with source-cutout local editorial composites; `--accept true --reviewer --note`; zero provider submissions |
 | `import-media --input <manifest>` | Complete planned local assets, immutable receipts and exact pilot reviews |
 | `timeline --input <timeline>` | Typed frame coverage, source/output mapping, complete narration, optional separate captions |
 | `approve-timeline` | Exact edit/mix approval |
@@ -101,6 +102,8 @@ The replacement provider receipt must record `creative_submission_count: 2`, `at
 ### Asset and Edit Evidence
 
 Every movie asset retains its source manifest, exact edition/timestamps, extraction receipt, library approval and a separate intended-pilot-use basis/review. Library approval is not pilot approval. Generated assets retain one-submission provider/model/prompt/output hashes, accepted reference bindings, actual provider evidence, and inspected output decisions. This proof permits only Gemini/Flow stills and selected Flow video. Provider audio is stripped from generated video.
+
+The one local concept fallback is available only at `pilot_media`, before a media manifest or timeline exists, and only after the first concept has retained one technical failure and one explicit provider refusal with no output. Its effective plan keeps every non-concept asset byte-for-byte identical and changes the three concept rows together to `editorial_composite` / `local_compositor` / `source_cutout_composite_v1`. Each resulting still binds its exact planned movie-clip sources, deterministic local recipe, output hash and operator review. It authorizes no model call and cannot legitimize an arbitrary or untracked still.
 
 The timeline schema is `goldflow_avatar_pilot_timeline_v1`: 1920x1080, 30 fps, 2700 frames; contiguous `shots` with background and independent layers; `narration`, `source_audio`, and `captions` arrays. Movie evidence and generated hypotheses cannot be mislabeled. Hypothetical visuals carry a visible label. Layer `source_in_sec` is an offset within the accepted local clip, **not** its movie timestamp. Both clocks remain recorded separately.
 

@@ -20,6 +20,8 @@ import { pilotHostDesignRevisionPaths, preparePilotHostDesignRevision,
   resolvePilotHostDesignRevision } from "./avatar-pilot-host-design-revision.mjs";
 import { preparePilotHostIdentityApproval,
   resolvePilotHostIdentityApproval } from "./avatar-pilot-host-identity-approval.mjs";
+import { pilotConceptFallbackPaths, preparePilotConceptFallback,
+  resolvePilotConceptFallback } from "./avatar-pilot-concept-fallback.mjs";
 
 // This capability is separate from the still-unproven generic/full import route.
 // Release only after the opening producer, finalizer and workflow fixtures pass.
@@ -146,6 +148,8 @@ function identityCheck(identity) {
 }
 async function stageOutputPath(episodeDir, stage) {
   if (["pilot_asset_plan", "pilot_asset_plan_approval"].includes(stage.id)) {
+    const fallback = await resolvePilotConceptFallback({ episodeDir });
+    if (fallback) return stage.id === "pilot_asset_plan" ? fallback.plan.path : fallback.approval.path;
     const host = await resolvePilotHostDesignRevision({ episodeDir });
     if (host) return stage.id === "pilot_asset_plan" ? host.plan.path : host.approval.path;
     if (stage.id === "pilot_asset_plan") return (await resolvePilotAssetPlanStage({ episodeDir })).path;
@@ -154,6 +158,8 @@ async function stageOutputPath(episodeDir, stage) {
 }
 async function rowAt(episodeDir, stage) {
   if (["pilot_asset_plan", "pilot_asset_plan_approval"].includes(stage.id)) {
+    const fallback = await resolvePilotConceptFallback({ episodeDir });
+    if (fallback) return stage.id === "pilot_asset_plan" ? fallback.plan.row : fallback.approval.row;
     const host = await resolvePilotHostDesignRevision({ episodeDir });
     if (host) return stage.id === "pilot_asset_plan" ? host.plan.row : host.approval.row;
     if (stage.id === "pilot_asset_plan") return (await resolvePilotAssetPlanStage({ episodeDir })).row;
@@ -226,7 +232,7 @@ async function validatePayload(stage, payload, episodeDir, identity, openingAdap
     const findings = validatePilotTimeline(payload, { assets });
     if (Array.isArray(findings)) need(findings.length === 0, "Typed pilot timeline failed validation.");
     for (const shot of payload.shots) {
-      if (shot.layers.some((layer) => ["concept_still", "concept_video"].includes(assets[layer.asset_id]?.kind))) need(shot.truth_mode === "hypothesis" && hasText(shot.truth_label), "Every generated scenario must carry a visible what-if label, not masquerade as film evidence.");
+      if (shot.layers.some((layer) => ["concept_still", "editorial_composite", "concept_video"].includes(assets[layer.asset_id]?.kind))) need(shot.truth_mode === "hypothesis" && hasText(shot.truth_label), "Every invented scenario must carry a visible what-if label, not masquerade as film evidence.");
     }
     // Canonical narration must play completely, in order, without omitted or duplicated audio.
     const narration = await narrationPayload(episodeDir);
@@ -490,7 +496,7 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
   need(!Object.hasOwn(flags, "media-workflow") || flags["media-workflow"] === "avatar_footage_pilot_v1", "Pilot commands cannot switch media workflow.");
   need(!Object.hasOwn(flags, "content-profile") || flags["content-profile"] === "mcu_what_if_pilot_v1", "Pilot commands cannot switch content profile.");
   if (action === "preflight") return preflight(flags, episodeDir, repoRoot, openingAdapter);
-  const stageAction = ["revise-host-design", "approve-host-identity"].includes(action) ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
+  const stageAction = ["revise-host-design", "approve-host-identity", "use-local-concept-fallback"].includes(action) ? "import-media" : action === "revise-asset-plan" ? "approve-asset-plan" : action === "create-voice-sample" ? "import-voice-sample"
     : ["create-narration", "review-narration", "approve-narration"].includes(action) ? "import-narration" : action;
   const stage = AVATAR_PILOT_STAGES.find((row) => row.action === stageAction);
   need(stage || action === "status", "Unknown pilot action. Use pilot status; publishing and automatic media dispatch are unavailable.");
@@ -517,7 +523,49 @@ async function executePilotCommandWithAdapter(action, flags = {}, { repoRoot = R
     const previous = AVATAR_PILOT_STAGES[AVATAR_PILOT_STAGES.indexOf(stage) - 1];
     const inputs = [{ role: "upstream", ...await binding(await stageOutputPath(episodeDir, previous)) }];
     let payload;
-    if (action === "approve-host-identity") {
+    if (action === "use-local-concept-fallback") {
+      need(hasText(flags.input) && flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note),
+        "Local concept fallback requires --input, --accept true, reviewer and note.");
+      const prepared = await preparePilotConceptFallback({ episodeDir, identity, inputPath: path.resolve(flags.input),
+        reviewer: flags.reviewer, note: flags.note });
+      await fs.mkdir(prepared.paths.directory);
+      const createdAt = new Date().toISOString();
+      const receipt = { schema: "goldflow_avatar_pilot_concept_fallback_v1", status: "approved_local_editorial_fallback",
+        created_at: createdAt, identity_sha256: prepared.identityRef.sha256, request: prepared.requestRef,
+        prior_plan: prepared.priorPlanRef, prior_approval: prepared.priorApprovalRef,
+        affected_asset_ids: prepared.delta.affected_asset_ids,
+        review: { approved: true, reviewer: prepared.reviewer, note: prepared.note }, creative_submissions: 0,
+        provider_cost: 0, production_eligible: false, publish_allowed: false };
+      await exclusiveJson(prepared.paths.receipt, receipt);
+      const receiptRef = await binding(prepared.paths.receipt);
+      const planInputs = [{ role: "upstream", ...await binding(await stageOutputPath(episodeDir, AVATAR_PILOT_STAGES[6])) },
+        { role: "prior_plan", ...prepared.priorPlanRef }, { role: "revision_request", ...prepared.requestRef }, { role: "revision_receipt", ...receiptRef }];
+      await exclusiveJson(prepared.paths.plan, { schema: "goldflow_avatar_pilot_stage_v1", stage: "pilot_asset_plan",
+        identity_sha256: prepared.identityRef.sha256, inputs: planInputs, payload: prepared.nextPlan, created_at: createdAt });
+      const planRef = await binding(prepared.paths.plan);
+      const approvalInputs = [{ role: "upstream", ...planRef }, { role: "prior_approval", ...prepared.priorApprovalRef }, { role: "revision_receipt", ...receiptRef }];
+      await exclusiveJson(prepared.paths.approval, { schema: "goldflow_avatar_pilot_stage_v1", stage: "pilot_asset_plan_approval",
+        identity_sha256: prepared.identityRef.sha256, inputs: approvalInputs,
+        payload: { review: { approved: true, reviewer: prepared.reviewer, note: prepared.note, attestation: null } }, created_at: createdAt });
+      const approvalRef = await binding(prepared.paths.approval);
+      await exclusiveJson(prepared.paths.authorization, { schema: "goldflow_avatar_pilot_concept_fallback_authorization_v1", status: "authorized",
+        created_at: createdAt, identity_sha256: prepared.identityRef.sha256, plan: planRef, approval: approvalRef,
+        revision_receipt: receiptRef, affected_asset_ids: prepared.delta.affected_asset_ids,
+        provider_failures: prepared.request.provider_failures, creative_submissions_authorized: 0,
+        automatic_retry: false, automatic_failover: false, production_eligible: false, publish_allowed: false });
+      const authorizationRef = await binding(prepared.paths.authorization);
+      const executionRef = await audit(episodeDir, { action, status: "passed", elapsed_ms: Date.now() - started,
+        identity_sha256: prepared.identityRef.sha256, inputs: [...planInputs, ...approvalInputs.slice(1), { role: "fallback_authorization", ...authorizationRef }],
+        output: authorizationRef, scope: { duration_sec: 90, phase: "provider_refusal_to_local_editorial_composites",
+          affected_asset_ids: prepared.delta.affected_asset_ids }, creative_submissions: 0, provider_cost: 0,
+        synthesis_invoked: false, generation_authorized: false, production_eligible: false, publish_allowed: false });
+      await exclusiveJson(prepared.paths.activation, { schema: "goldflow_avatar_pilot_concept_fallback_activation_v1",
+        identity_sha256: prepared.identityRef.sha256, receipt: receiptRef, plan: planRef, approval: approvalRef,
+        authority: authorizationRef, execution_report: executionRef });
+      await resolvePilotConceptFallback({ episodeDir, identity });
+      const fallbackStatus = await pilotStatusWithAdapter(episodeDir, openingAdapter);
+      return flags.format === "markdown" ? formatPilotStatus(fallbackStatus) : fallbackStatus;
+    } else if (action === "approve-host-identity") {
       need(hasText(flags.input) && flags.accept === "true" && hasText(flags.reviewer) && hasText(flags.note),
         "Host-identity approval requires --input, --accept true, reviewer and note.");
       const prepared = await preparePilotHostIdentityApproval({ episodeDir, identity, inputPath: path.resolve(flags.input),

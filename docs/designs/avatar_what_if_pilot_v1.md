@@ -32,6 +32,7 @@ Borrow broad presentation mechanics from the inspected Specular Animation exampl
 | Movie excerpt | Demonstrate a specific screen-established ability or reaction | Reviewed 3–5 second source interval, primarily a readable moving card; preserve the action being cited |
 | Evidence card/comparison | Compare Sentry/Void or evidence/assumption | Deliberate side-by-side or overlapping cards, clear short labels, stable reading time |
 | AI concept still | Illustrate our invented scenario | Gemini/Flow only, including host/poses/backgrounds and hypothetical Sentry–Doom scenes; visibly identified as concept imagery where it could be confused with footage |
+| Local editorial composite | Preserve an invented beat after both locked concept providers return no output | Source-bound movie-frame cutouts/cards and locally authored shapes/effects; exact source hashes and recipe retained; always visibly labeled hypothetical |
 | Optional Flow video | Show a necessary hypothetical action a still cannot communicate | Exact approved first frame, one bounded reachable action, one creative submission, hash-bound review; retain approved still treatment if the optional clip fails |
 
 For the first pilot, propose one host identity, one main background, and approximately six useful poses: neutral, questioning/open hand, thinking, skeptical, pointing/presenting, and confident conclusion. These are proposed asset IDs/roles, not a mandate to generate every pose or a generation approval. Host expression changes follow meaning, not a rigid per-second quota. Existing accepted poses can be reused deliberately without donor-image substitution.
@@ -47,6 +48,8 @@ Use host sections between evidence clusters so the video feels presented, not li
 Generated backgrounds use the complete frame and must not reserve a blank lower-third or caption strip. Captions are optional for this format. When selected, author them as separate timeline overlays; never bake captions into a generated room, host asset, concept image or movie excerpt.
 
 Provider/model selection must be explicit in the pilot identity and asset plan. Mentioning Gemini/Flow/Codex as possibilities does not authorize a three-provider bakeoff or automatic failover. Preserve approved reference identity across any deliberately chosen routes. Generated motion's provider audio is removed; soundtrack decisions use the reviewed source/narration mix instead.
+
+If both locked still providers return retained no-output failure/refusal evidence for the first concept, the operator may authorize the single `use-local-concept-fallback` amendment before media import. It replaces all three planned concept stills together with source-bound local editorial composites, preserves the accepted host, room, narration, clips and asset IDs, authorizes no further model submission, and requires new exact composite receipts and reviews. This is not a generic provider bypass or permission to import arbitrary web images.
 
 ## Source and Audio Contract
 

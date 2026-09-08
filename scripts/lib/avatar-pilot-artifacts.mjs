@@ -21,7 +21,7 @@ const isObject = (value) => Boolean(value && typeof value === "object" && !Array
 const text = (value) => typeof value === "string" && Boolean(value.trim());
 const pass = (findings, extra = {}) => ({ status: findings.length ? "blocked" : "passed", findings, ...extra });
 const check = (findings, condition, code, id = null) => { if (!condition) findings.push({ code, ...(id ? { id } : {}) }); };
-const KINDS = Object.freeze({ movie_clip: "film_evidence", host_pose: "original_host", background: "original_background", concept_still: "hypothetical_concept", concept_video: "hypothetical_concept", narration: "original_commentary" });
+const KINDS = Object.freeze({ movie_clip: "film_evidence", host_pose: "original_host", background: "original_background", concept_still: "hypothetical_concept", editorial_composite: "hypothetical_concept", concept_video: "hypothetical_concept", narration: "original_commentary" });
 const sensitiveKey = /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|cookies|bearer|password|signed[_-]?(?:media[_-]?)?url|session[_-]?(?:state|token))$/iu;
 const sensitiveText = /(?:\bBearer\s+[a-z0-9._-]+|https?:\/\/[^\s"<>]*(?:[?&](?:token|sig(?:nature)?|api_key|key|auth|x-amz-[^=]*)=|\/apikey\/)|https?:\/\/[^\s/]+:[^\s/]+@)/iu;
 export const PILOT_NARRATION_IMPORT_ADAPTER_STATUS = "unproven";
@@ -94,6 +94,12 @@ export function validatePilotAssetPlan(plan, identity) {
       const lock = identity?.pilot_providers?.video;
       check(findings, lock?.enabled === true && row.provider === "google_flow" && row.provider === lock.provider && row.model === lock.model, "pilot_flow_video_not_opted_in", row.id);
       check(findings, ID.test(row.first_frame_asset_id ?? "") && assets.some((asset) => asset.id === row.first_frame_asset_id && asset.kind === "concept_still"), "pilot_flow_first_frame_plan_missing", row.id);
+    } else if (row?.kind === "editorial_composite") {
+      check(findings, row.provider === "local_compositor" && row.model === "source_cutout_composite_v1",
+        "pilot_editorial_composite_provider_invalid", row?.id);
+      check(findings, Array.isArray(row.reference_asset_ids) && row.reference_asset_ids.length > 0
+        && row.reference_asset_ids.every((id) => ID.test(id) && assets.some((asset) => asset.id === id && asset.kind === "movie_clip")),
+      "pilot_editorial_composite_source_references_required", row?.id);
     } else {
       const allowed = ["google_gemini_imagen", "google_flow", "codex_imagegen"];
       const locks = Array.isArray(identity?.pilot_providers?.stills) ? identity.pilot_providers.stills : [];
@@ -321,8 +327,12 @@ export async function validatePilotMedia(manifest, { episodeDir, identity, asset
     // option. A stale/partial/deleted recorded amendment blocks all imports.
     const { resolvePilotHostDesignRevision } = await import("./avatar-pilot-host-design-revision.mjs");
     hostRevision = await resolvePilotHostDesignRevision({ episodeDir, identity });
-    check(findings, !hostRevision || canonicalQwenBatchSha256(assetPlan) === canonicalQwenBatchSha256(hostRevision.plan.row.payload),
-      "pilot_media_current_host_design_plan_required");
+    const { resolvePilotConceptFallback } = await import("./avatar-pilot-concept-fallback.mjs");
+    const conceptFallback = await resolvePilotConceptFallback({ episodeDir, identity });
+    check(findings, conceptFallback
+      ? canonicalQwenBatchSha256(assetPlan) === canonicalQwenBatchSha256(conceptFallback.plan.row.payload)
+      : !hostRevision || canonicalQwenBatchSha256(assetPlan) === canonicalQwenBatchSha256(hostRevision.plan.row.payload),
+    "pilot_media_current_effective_plan_required");
     if (hostRevision) {
       const { resolvePilotHostIdentityApproval } = await import("./avatar-pilot-host-identity-approval.mjs");
       hostIdentityApproval = await resolvePilotHostIdentityApproval({ episodeDir, identity });
@@ -378,6 +388,25 @@ export async function validatePilotMedia(manifest, { episodeDir, identity, asset
         } else result = await validatePilotNarrationBundle(receipt.document, { episodeDir, identity, phase: "full", sourceScriptSha256: assetPlan.source_script_sha256 });
         findings.push(...result.findings.map((finding) => ({ ...finding, id: row.id })));
         check(findings, (produced ? receipt.document.payload : receipt.document).audio?.sha256 === row.sha256, "pilot_narration_media_hash_mismatch", row.id);
+      } else if (row.kind === "editorial_composite") {
+        const proof = receipt.document;
+        check(findings, proof.schema === "goldflow_avatar_pilot_local_composite_receipt_v1" && proof.status === "passed"
+          && proof.asset_id === row.id && proof.provider === row.provider && proof.model === row.model
+          && proof.output_sha256 === row.sha256 && proof.review?.approved === true
+          && text(proof.review?.reviewer) && text(proof.review?.note), "pilot_local_composite_receipt_invalid", row.id);
+        const expected = [...(planned.reference_asset_ids ?? [])].sort();
+        const bindings = Array.isArray(proof.source_bindings) ? proof.source_bindings : [];
+        check(findings, bindings.length === expected.length && new Set(bindings.map((ref) => ref.id)).size === bindings.length
+          && bindings.map((ref) => ref.id).sort().every((id, index) => id === expected[index]),
+        "pilot_local_composite_exact_sources_required", row.id);
+        for (const ref of bindings) {
+          await boundFile(ref, episodeDir);
+          check(findings, rows.some((asset) => asset.id === ref.id && asset.sha256 === ref.sha256 && asset.kind === "movie_clip"),
+            "pilot_local_composite_source_not_current_movie_asset", row.id);
+        }
+        await boundFile(proof.recipe, episodeDir);
+        check(findings, video && ["png", "mjpeg", "webp"].includes(video.codec_name) && !audio,
+          "pilot_local_composite_still_raster_required", row.id);
       } else {
         const proof = receipt.document;
         check(findings, proof.schema === "goldflow_avatar_pilot_provider_receipt_v1" && proof.status === "passed" && proof.asset_id === row.id && proof.provider === row.provider && proof.model === row.model && proof.output_sha256 === row.sha256 && HASH.test(proof.prompt_sha256 ?? "") && proof.review?.approved === true && text(proof.review?.reviewer) && text(proof.review?.note), "pilot_generated_receipt_invalid", row.id);

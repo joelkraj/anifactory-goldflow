@@ -20,6 +20,8 @@ The operator has authorized one exactly 90-second, non-publishing avatar-and-foo
 
 This format uses the owned Joel clone as an assured, audience-facing analyst narrating a reasoned alternate encounter, reviewed 3–5 second movie excerpts primarily in moving cards, an original reusable host pose/background library, and optional clearly identified AI concept imagery/motion. The current direction demonstrates opinion through concrete decisions and consequences, without requiring question-heavy conversation. Historical identities retain their embedded direction. Gemini/Flow are selected for all generated stills; Flow/Veo for selected hypothetical sequences. Explicit silent excerpt loops are supported with the bounded pilot limits; motion/looping is not a rights determination. It does not inherit manhwa cadence, obligatory generated scenes, or a comic-book power set. The synthetic compositor fixture proves layout/audio behavior, not a completed Sentry pilot or narrator quality.
 
+For this bounded pilot only, retained no-output failures from both locked concept-still providers can activate one operator-approved local editorial fallback. It uses exact source-bound cutouts/cards and deterministic local compositing for the three already-planned hypothetical concept IDs; it does not add sources, retry generation, change the host/narration, or unlock the reserved full production lane.
+
 ## Intended Editorial Contract
 
 - Identify the exact film edition or series, season, episode, release, language, and source file. Preserve source/file IDs, hashes or declared identity limitations, and source timestamps. Never substitute another edition or provider silently.

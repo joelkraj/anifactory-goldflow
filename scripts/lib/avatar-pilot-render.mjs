@@ -12,9 +12,9 @@ const FPS = 30;
 const FRAMES = 2700;
 const WIDTH = 1920;
 const HEIGHT = 1080;
-const KINDS = new Set(['movie_clip', 'host_pose', 'background', 'concept_still', 'concept_video', 'narration']);
+const KINDS = new Set(['movie_clip', 'host_pose', 'background', 'concept_still', 'editorial_composite', 'concept_video', 'narration']);
 const VIDEO_KINDS = new Set(['movie_clip', 'concept_video']);
-const IMAGE_KINDS = new Set(['host_pose', 'background', 'concept_still']);
+const IMAGE_KINDS = new Set(['host_pose', 'background', 'concept_still', 'editorial_composite']);
 const MAX_ASSET_BYTES = 512 * 1024 * 1024;
 const fail = (message) => { throw new Error(`Avatar pilot: ${message}`); };
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -69,7 +69,7 @@ export function validatePilotTimeline(timeline, { assets } = {}) {
     const duration = (shot.end_frame - shot.start_frame) / FPS;
     for (const layer of shot.layers) {
       if (!object(layer)) fail('Malformed layer.');
-      const asset = assetFor(assets, layer.asset_id, new Set(['movie_clip', 'host_pose', 'concept_still', 'concept_video']));
+      const asset = assetFor(assets, layer.asset_id, new Set(['movie_clip', 'host_pose', 'concept_still', 'editorial_composite', 'concept_video']));
       if (['x', 'y', 'width', 'height', 'z'].some((key) => !finite(layer[key]))) fail('Layer geometry must be finite.');
       if (!integer(layer.width) || !integer(layer.height) || layer.width < 2 || layer.height < 2
         || layer.width > WIDTH * 2 || layer.height > HEIGHT * 2 || !integer(layer.z) || Math.abs(layer.z) > 100

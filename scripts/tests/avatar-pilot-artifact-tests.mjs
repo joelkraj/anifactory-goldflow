@@ -9,6 +9,7 @@ import { validatePilotScript, validatePilotAssetPlan, validatePilotMedia, valida
 import { QWEN_JOEL_DRY_DEADPAN_PRIMARY_LOCK as JOEL } from "../lib/narration-tts-policy.mjs";
 import { buildNarrationSubjectiveReviewManifest, buildNarrationSubjectiveReviewDecision, NARRATION_SUBJECTIVE_REVIEW_ATTESTATION } from "../lib/narration-subjective-review.mjs";
 import { createFootageSource, footageClipIdentity, footageHash } from "../lib/footage-library.mjs";
+import { validatePilotConceptFallbackDelta } from "../lib/avatar-pilot-concept-fallback.mjs";
 const execute = promisify(execFile);
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const script = "Could control change the outcome? We are considering only the film, not the comics.";
@@ -55,6 +56,21 @@ assert.equal(validatePilotAssetPlan(plan, identity).status, "passed");
 assert.equal(validatePilotAssetPlan(plan, { ...identity, run_intent: "production" }).status, "blocked");
 const unknownProvider = structuredClone(plan); unknownProvider.assets[1].provider = "codex_imagegen";
 assert.equal(validatePilotAssetPlan(unknownProvider, identity).status, "blocked");
+const conceptPlan = structuredClone(plan);
+conceptPlan.assets.push(...["concept_intercept", "concept_rescue", "concept_void_doorway"].map((id) => ({
+  id, kind: "concept_still", purpose: `Synthetic ${id}`, provider: "google_gemini_imagen", model: "fixture-still",
+  truth_mode: "hypothetical_concept", reference_asset_ids: [],
+})));
+const compositePlan = structuredClone(conceptPlan);
+compositePlan.scope = { local_editorial_composite_count: 3, generated_concept_still_count: 0 };
+for (const row of compositePlan.assets.filter((asset) => asset.kind === "concept_still")) Object.assign(row, {
+  kind: "editorial_composite", provider: "local_compositor", model: "source_cutout_composite_v1", reference_asset_ids: ["clip"],
+});
+assert.equal(validatePilotAssetPlan(compositePlan, identity).status, "passed");
+assert.deepEqual(validatePilotConceptFallbackDelta({ priorPlan: conceptPlan, nextPlan: compositePlan, identity }).affected_asset_ids,
+  ["concept_intercept", "concept_rescue", "concept_void_doorway"]);
+const badCompositePlan = structuredClone(compositePlan); badCompositePlan.assets.find((row) => row.id === "concept_rescue").reference_asset_ids = [];
+assert.equal(validatePilotAssetPlan(badCompositePlan, identity).status, "blocked");
 const optionalVideo = structuredClone(plan); optionalVideo.assets.push({ id: "motion", kind: "concept_video", purpose: "Hypothesis", provider: "google_flow", model: "fixture-video", truth_mode: "hypothetical_concept", first_frame_asset_id: "host" });
 assert.equal(validatePilotAssetPlan(optionalVideo, identity).status, "blocked");
 assert.equal((await validatePilotMedia({ schema: "goldflow_avatar_pilot_media_v1", source_script_sha256: scriptHash, assets: [] }, { episodeDir: "/tmp", identity, assetPlan: plan })).status, "blocked");

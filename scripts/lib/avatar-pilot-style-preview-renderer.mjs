@@ -21,7 +21,7 @@ async function sized(file, height) {
   return sharp(file).trim({ background: { r: 0, g: 0, b: 0, alpha: 0 } }).resize({ height }).png().toBuffer();
 }
 
-async function hostMatte(file, height) {
+export async function hostMatte(file, height) {
   const image = await sized(file, height);
   const { data, info } = await sharp(image).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   // Remove retained white background in the sleeve/body gap below the head.
@@ -35,7 +35,7 @@ async function hostMatte(file, height) {
   return sharp(data, { raw: info }).png().toBuffer();
 }
 
-async function sticker(file, height) {
+export async function sticker(file, height) {
   const body = await sized(file, height);
   const { width, height: bh } = await sharp(body).metadata();
   const alpha = await sharp(body).extractChannel('alpha').png().toBuffer();
@@ -48,7 +48,7 @@ async function sticker(file, height) {
   return sharp(shadow).composite([{ input: bordered, top: 0, left: 0 }]).png().toBuffer();
 }
 
-async function place(input, x, y, scale = 1) {
+export async function place(input, x, y, scale = 1) {
   let data = input;
   if (Math.abs(scale - 1) > 0.0001) {
     const m = await sharp(data).metadata();

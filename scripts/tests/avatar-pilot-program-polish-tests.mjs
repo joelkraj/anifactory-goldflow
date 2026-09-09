@@ -58,6 +58,10 @@ request.recipe.timeline.soundtrack = [{ id: "motion_accent", asset_id: soundtrac
   source_in_sec: 0, source_out_sec: 1, gain_db: -15, fade_in_sec: 0.01, fade_out_sec: 0.04, loop: false, role: "punctuation" }];
 assert.equal(validateProgramReviewShape(request), request);
 validateProgramPolishScope(request, prior, priorResult, identity);
+const naturalTail = clone(request);
+naturalTail.recipe.timeline.soundtrack[0].source_out_sec = 0.987;
+naturalTail.recipe.timeline.soundtrack[0].end_frame = 78 + 0.987 * 30;
+assert.equal(validateProgramReviewShape(naturalTail), naturalTail, "natural SFX sample tail need not be truncated to a video frame");
 
 const deny = (change, regex = /Program review blocked|Style preview blocked/) => {
   const next = clone(request); change(next);

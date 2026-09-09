@@ -185,7 +185,7 @@ export function validateProgramPolishShape(manifest) {
   for (const cue of soundtrack) {
     const asset = assets.find((row) => row.id === cue.asset_id);
     need(asset && /^[a-z0-9][a-z0-9_-]{0,79}$/.test(cue.id ?? "")
-      && Number.isInteger(cue.start_frame) && Number.isInteger(cue.end_frame)
+      && Number.isInteger(cue.start_frame) && Number.isFinite(cue.end_frame)
       && cue.start_frame >= 0 && cue.end_frame > cue.start_frame && cue.end_frame <= 2700
       && Number.isFinite(cue.source_in_sec) && cue.source_in_sec >= 0
       && Number.isFinite(cue.source_out_sec) && cue.source_out_sec > cue.source_in_sec

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { pilotArtifactContainsPrivateData } from "./avatar-pilot-artifacts.mjs";
 import { preparePilotVisualReview, validateLocalVisualReviewShape } from "./avatar-pilot-style-preview.mjs";
+import { validatePolishFrameRepairShape, preparePolishFrameRepair, verifyPolishFrameRepairOutput, verifyPolishFrameRepairPlayback } from "./avatar-pilot-polish-frame-repair.mjs";
 
 export const PROGRAM_REVIEW_SCHEMA = "goldflow_avatar_pilot_program_review_request_v1";
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -61,10 +62,11 @@ export function validateProgramReviewShape(manifest) {
     "no captions or synthesis in this review scope");
   if (isPolish(manifest)) validateProgramPolishShape(manifest);
   else need(manifest.recipe.added_music_or_sfx === false && !manifest.prior_program && !manifest.polish_budget
-    && !manifest.soundtrack_assets && !manifest.soundtrack_manifest && !manifest.recipe.timeline?.soundtrack,
+    && !manifest.soundtrack_assets && !manifest.soundtrack_manifest && !manifest.recipe.timeline?.soundtrack && !manifest.polish_frame_repair,
   "new music/SFX requires the separately bounded operator-authorized polish scope");
   validateProgramNarrationPlacements(manifest, manifest.narration.source_out_sec);
   validateProgramReviewTimeline(manifest);
+  if (manifest.polish_frame_repair) validatePolishFrameRepairShape(manifest);
   return manifest;
 }
 
@@ -377,6 +379,11 @@ export async function preparePilotProgramReview(args) {
   await prepareProgramRepair(prepared, args.episodeDir);
   await prepareProgramPolish(prepared, args.episodeDir);
   if (isPolish(manifest)) await bound(await binding(path.join(args.repoRoot, "scripts/lib/avatar-pilot-polish-renderer.mjs")), refs);
+  await preparePolishFrameRepair(prepared, args.episodeDir);
+  if (manifest.polish_frame_repair) {
+    for (const name of ["avatar-pilot-polish-frame-repair.mjs", "avatar-pilot-polish-frame-repair-renderer.mjs"])
+      await bound(await binding(path.join(args.repoRoot, "scripts/lib", name)), refs);
+  }
   return prepared;
 }
 
@@ -393,9 +400,12 @@ export async function producePilotProgramReview(prepared) {
     prior_program: manifest.prior_program ?? null, polish_authorization: manifest.polish_authorization ?? null,
     polish_budget: manifest.polish_budget ?? null, soundtrack_manifest: manifest.soundtrack_manifest ?? null,
     preserved_program_mix: manifest.preserved_program_mix ?? null,
+    polish_frame_repair: manifest.polish_frame_repair ?? null,
     duration_frames: 2700, provider_calls: 0, provider_cost: 0, production_eligible: false, publish_allowed: false,
     exact_program_approval_recorded: false });
-  const renderer = isPolish(manifest)
+  const renderer = manifest.polish_frame_repair
+    ? (await import("./avatar-pilot-polish-frame-repair-renderer.mjs")).renderPolishFrameRepair
+    : isPolish(manifest)
     ? (await import("./avatar-pilot-polish-renderer.mjs")).renderPolishReview
     : (await import("./avatar-pilot-program-renderer.mjs")).renderProgramReview;
   const result = await renderer({ outputDir, manifest, assets });
@@ -407,6 +417,20 @@ export async function producePilotProgramReview(prepared) {
   need(video.length === 1 && video[0].width === 1920 && video[0].height === 1080 && video[0].r_frame_rate === "30/1"
     && Number(video[0].nb_read_frames) === 2700 && audio.length === 1 && Math.abs(Number(probe.format.duration) - 90) <= 0.08,
   "review must contain exactly 2700 1080p30 frames and one complete program audio track");
+  let frameRepairIntegrity = null;
+  let reviewPlayback = null;
+  if (manifest.polish_frame_repair) {
+    const integrity = verifyPolishFrameRepairOutput(manifest, result.output);
+    await write("frame-repair-integrity.json", integrity);
+    frameRepairIntegrity = await binding(path.join(outputDir, "frame-repair-integrity.json"));
+    if (result.review_playback) {
+      need(within(result.review_playback.path ?? "", outputDir) && result.review_playback.path !== result.output.path,
+        "playback derivative must remain separate in the fresh exact-repair namespace");
+      await bound(result.review_playback, []);
+      verifyPolishFrameRepairPlayback(manifest, result.review_playback);
+      reviewPlayback = result.review_playback;
+    }
+  }
   for (const ref of refs) await bound(ref, []);
   const receipt = { schema: "goldflow_avatar_pilot_program_review_result_v1", status: "awaiting_program_review", created_at: new Date().toISOString(),
     identity: prepared.identity, request: prepared.request, inputs: refs, runtime: prepared.runtime,
@@ -415,6 +439,8 @@ export async function producePilotProgramReview(prepared) {
     prior_program: manifest.prior_program ?? null, polish_authorization: manifest.polish_authorization ?? null,
     polish_budget: manifest.polish_budget ?? null, soundtrack_manifest: manifest.soundtrack_manifest ?? null,
     preserved_program_mix: manifest.preserved_program_mix ?? null,
+    polish_frame_repair: manifest.polish_frame_repair ?? null, frame_repair_integrity: frameRepairIntegrity,
+    review_playback: reviewPlayback,
     output: result.output, technical_report: result.technical_report ?? null, duration_frames: 2700, width: 1920, height: 1080, fps: 30,
     narration_duration_sec: prepared.narrationDurationSec, narration_placements: manifest.narration_placements ?? [manifest.narration],
     provider_calls: 0, provider_cost: 0, creative_submissions: 0, official_stage_completed: false,

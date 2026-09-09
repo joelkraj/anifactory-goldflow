@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cameraAt, detourPoint, motionEase } from '../lib/avatar-pilot-polish-renderer.mjs';
+import { cameraAt, cueProgress, detourPoint, motionEase } from '../lib/avatar-pilot-polish-renderer.mjs';
 import { SENTRY_POLISH_EDITORIAL as edit } from '../lib/sentry-polish-editorial.mjs';
 
 // Pure renderer-math checks only. No image generation, media render, subjective
@@ -42,16 +42,46 @@ assert.ok(closeTransform.scale >= 1.5, 'Doom is reframed toward output center, n
 const heldVoid = edit.shots.find((shot) => shot.framing.id === 'void_hold_close');
 assert.ok(cameraAt(heldVoid, heldVoid.end_frame - 1).scale > cameraAt(heldVoid, heldVoid.start_frame).scale, 'the authored hold gets a real camera push');
 
+const scenes = new Map();
+for (const shot of edit.shots) {
+  const siblings = scenes.get(shot.scene.id) ?? [];
+  siblings.push(shot);
+  scenes.set(shot.scene.id, siblings);
+}
+for (const siblings of scenes.values()) {
+  for (let i = 1; i < siblings.length; i++) {
+    const previous = siblings[i - 1], current = siblings[i];
+    for (const cue of current.cues) {
+      for (const f of [current.start_frame - 1, current.start_frame, current.start_frame + 1]) {
+        near(cueProgress(current, f, cue.action), cueProgress(previous, f, cue.action));
+      }
+      if (cue.frame + cue.duration_frames <= current.start_frame) {
+        near(cueProgress(current, current.start_frame, cue.action), 1);
+      }
+    }
+  }
+}
+const routeDetail = edit.shots.find((shot) => shot.id === '10_device_escape_detail');
+near(cueProgress(routeDetail, routeDetail.start_frame, 'sentry_blocks'), 1);
+near(cueProgress(routeDetail, routeDetail.start_frame, 'absent_action'), 0);
+
 const start = detourPoint(0), end = detourPoint(1);
 assert.ok(end.x > start.x + 900, 'detour crosses the doorway width');
 near(start.y, end.y);
 const positions = Array.from({ length: 101 }, (_, i) => detourPoint(i / 100));
-assert.ok(Math.min(...positions.map((p) => p.y)) < start.y - 200, 'detour visibly rises before crossing');
-for (const p of positions) assert.ok(p.x >= 0 && p.x <= 1920 && p.y >= 0 && p.y <= 1080);
+assert.ok(Math.min(...positions.map((p) => p.y)) <= start.y - 130, 'detour visibly rises before crossing');
+near(end.x - start.x, 1170);
+for (const [i, p] of positions.entries()) {
+  assert.ok(p.x >= 0 && p.x <= 1920 && p.y >= 0 && p.y <= 1080);
+  // This is the exact scale used by the renderer for the 595-pixel sticker.
+  const scale = 1 - 0.4 * Math.sin(Math.PI * i / 100);
+  assert.ok(p.y - 595 * scale / 2 >= 0, 'Doom’s hood remains inside the frame through the arch');
+  assert.ok(p.y + 595 * scale / 2 <= 1080, 'the whole silhouette remains inside the frame');
+}
 for (const t of [0.28, 0.76]) {
   const a = detourPoint(t - 1e-7), b = detourPoint(t + 1e-7);
   assert.ok(Math.hypot(a.x - b.x, a.y - b.y) < 0.001, 'detour segments join without teleportation');
 }
-assert.ok(Math.abs(detourPoint(0.5).y - start.y) > 200, 'midpoint is not a straight diagonal between endpoints');
+assert.ok(Math.abs(detourPoint(0.5).y - start.y) > 130, 'midpoint is not a straight diagonal between endpoints');
 
-console.log('Sentry motion math checks passed: real anchored camera transforms, identity evidence cameras, distinct authored easing and continuous curved Doom detour.');
+console.log('Sentry motion math checks passed: real anchored cameras, identity evidence frames, split-scene cue continuity, distinct easing and a fully in-frame curved Doom detour.');

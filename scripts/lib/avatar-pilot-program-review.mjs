@@ -236,6 +236,9 @@ export function validateProgramPolishScope(manifest, priorRequest, priorResult, 
       && Number.isFinite(camera.anchor_x) && camera.anchor_x >= 0 && camera.anchor_x <= 1920
       && Number.isFinite(camera.anchor_y) && camera.anchor_y >= 0 && camera.anchor_y <= 1080
       && ["linear", "smoothstep", "ease_out_cubic"].includes(camera.ease), "bounded authored camera framing required");
+    for (const [key, limit] of [["target_x", 1920], ["target_y", 1080]])
+      if (camera && Object.hasOwn(camera, key)) need(Number.isFinite(camera[key]) && camera[key] >= 0 && camera[key] <= limit,
+        "camera reframing target must remain on the composition");
     if (shot.framing?.focus_asset_id) need(manifest.assets.some((row) => row.id === shot.framing.focus_asset_id),
       "camera focus must use a preserved base asset");
     if (shot.transition_in) need(text(shot.transition_in.kind) && Number.isInteger(shot.transition_in.frames)

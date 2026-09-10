@@ -18,6 +18,7 @@ import {
   isSourceSceneLocationBeat,
   normalizeEditorialGrouping,
   projectActiveStateConstraints,
+  retentionRailForTime,
   retimeLockedEditorialBeats,
 } from "./lib/editorial-beat-director.mjs";
 import { ltxVideoEnabled } from "./lib/ltx-video-contract.mjs";
@@ -1044,6 +1045,35 @@ function normalizeGlobalBeatTimeline(beats) {
       duration_sec: Number(Math.max(0.25, end - start).toFixed(3)),
     };
   });
+}
+
+export function closeRetimedSilentGapsForTests(beats, words, timingOptions) {
+  const repaired = beats.map((beat) => ({ ...beat }));
+  for (let index = 0; index < repaired.length - 1; index += 1) {
+    const beat = repaired[index];
+    const next = repaired[index + 1];
+    const cap = retentionRailForTime(beat.start_sec, timingOptions).max_sec;
+    if (next.start_sec - beat.start_sec <= cap + 1e-6) continue;
+    const boundary = Number((beat.start_sec + cap).toFixed(3));
+    const lastWordEnd = Number(words[beat.source_word_end_index]?.end_sec);
+    const nextWordStart = Number(words[next.source_word_start_index]?.start_sec);
+    if (!Number.isFinite(lastWordEnd) || !Number.isFinite(nextWordStart)
+      || boundary < lastWordEnd + 0.05 || boundary > nextWordStart) {
+      throw new Error(`Retiming ${beat.visual_beat_id} cannot meet its density rail inside a measured inter-word pause.`);
+    }
+    next.timing_repair = {
+      ...next.timing_repair,
+      visual_boundary_pause_repair: {
+        prior_start_sec: next.start_sec,
+        repaired_start_sec: boundary,
+        preceding_word_end_sec: lastWordEnd,
+        first_word_start_sec: nextWordStart,
+        narration_unchanged: true,
+      },
+    };
+    next.start_sec = boundary;
+  }
+  return repaired;
 }
 
 export function closeVisualBeatTimelineForTests(beats, timelineEndSec = null) {
@@ -2085,7 +2115,14 @@ async function main() {
       blockedError.preserveBlockedBeatPlan = true;
       throw blockedError;
     }
-    numberedBeatsAll = closeVisualBeatTimelineForTests(editorialResult.beats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
+    let timedBeats = editorialResult.beats;
+    if (flags["retime-close-silent-gaps"] === "true") {
+      if (flags["retime-locked-grouping"] !== "true" || beatTimingEnforcement !== "hard_max") {
+        throw new Error("Silent-gap closure is limited to explicit hard-cap locked retiming.");
+      }
+      timedBeats = closeRetimedSilentGapsForTests(timedBeats, wordTiming.words, beatTimingContract);
+    }
+    numberedBeatsAll = closeVisualBeatTimelineForTests(timedBeats, Number.isFinite(scopeEndSecNumber) ? scopeEndSecNumber : wordTiming.audio_duration_sec);
     appliedRailFindings = editorialRetentionRailFindings(numberedBeatsAll, {
       beatTimingEnforcement,
       timingContract: beatTimingContract,

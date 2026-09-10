@@ -359,6 +359,8 @@ The immutable `narration_source_structure_<episode>.json` sidecar binds the sour
 - Subtitle timing must account for approved TTS-only spoken expansions while preserving script-faithful text. In particular, a caption token such as `0X` remains `0X` on screen but binds to the Whisper span for “zero times”; the expanded speech must not shift that caption onto the following phrase.
 - Complete final QA through `goldflow final qa --approve true --note <evidence>`. `run status` accepts only a passed current `final_qa_<episode>.json` whose render-report hash, final-video hash, and render source hashes still match; a QA-shaped filename is not completion evidence.
 
+- If explicit locked retiming exceeds a hard hold cap only because of an inter-word pause, `visual beats --retime-locked-grouping true --retime-close-silent-gaps true` may move the next visual boundary within that measured pause. Pass the original hard-cap timing settings. This preserves every image, excerpt, word index and audio sample, records each shifted boundary, requires a 50ms margin after the preceding word, and fails if a boundary would cross speech. It never changes narration or relaxes the duration ceiling.
+
 ## Commands
 
 ```bash

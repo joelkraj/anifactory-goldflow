@@ -7,6 +7,7 @@ import {
 } from "../lib/editorial-beat-director.mjs";
 import {
   groupingLockSourceHashMatchesForTests,
+  closeRetimedSilentGapsForTests,
   mergeEditorialRecoveryBeatsForTests,
   retentionResetEvidenceForTests,
   retentionBeatDensityFindingsForTests,
@@ -214,5 +215,21 @@ for (const sourcePath of ["/episode/script_clean.md", "/episode/story_fact_ledge
 assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, currentHash: null, retimeLockedGrouping: true }), false);
 assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, recordedHash: null, retimeLockedGrouping: true }), false);
 assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, currentHash: "old" }), true);
+
+const pauseBeats = [
+  { visual_beat_id: "a", start_sec: 1300, source_word_end_index: 0 },
+  { visual_beat_id: "b", start_sec: 1308.5, source_word_start_index: 1 },
+];
+const pauseWords = [{ end_sec: 1307.8 }, { start_sec: 1308.5 }];
+const pauseTiming = { max_beat_sec: 8 };
+const pauseRepaired = closeRetimedSilentGapsForTests(pauseBeats, pauseWords, pauseTiming);
+assert.equal(pauseRepaired[1].start_sec, 1308);
+assert.equal(pauseBeats[1].start_sec, 1308.5, "accepted input remains immutable");
+assert.equal(pauseRepaired[0].source_word_end_index, 0);
+assert.equal(pauseRepaired[1].source_word_start_index, 1);
+assert.equal(pauseRepaired[1].timing_repair.visual_boundary_pause_repair.narration_unchanged, true);
+assert.throws(() => closeRetimedSilentGapsForTests(pauseBeats, [{ end_sec: 1308.2 }, pauseWords[1]], pauseTiming), /measured inter-word pause/);
+assert.throws(() => closeRetimedSilentGapsForTests(pauseBeats, [], pauseTiming), /measured inter-word pause/);
+assert.deepEqual(closeRetimedSilentGapsForTests(pauseBeats, [], { max_beat_sec: 9 }), pauseBeats);
 
 console.log("visual beat advisory policy tests passed");

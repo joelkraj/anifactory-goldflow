@@ -1822,6 +1822,13 @@ function enrichEditorialBeat(beat, timedScenes) {
   };
 }
 
+export function groupingLockSourceHashMatchesForTests({ sourcePath, recordedHash, currentHash, retimeLockedGrouping = false, timingSourcePaths = [] }) {
+  if (!currentHash || !recordedHash) return false;
+  if (currentHash === recordedHash) return true;
+  // Retiming changes these two artifacts, but never relaxes creative-source locks.
+  return retimeLockedGrouping && timingSourcePaths.some((value) => path.resolve(value) === path.resolve(sourcePath));
+}
+
 async function existingGroupingLock() {
   const approval = await readJson(visualBeatApprovalPath, null);
   const plan = await readJson(outputPath, null);
@@ -1832,7 +1839,11 @@ async function existingGroupingLock() {
   if (!currentScriptHash || plan.source_script_hash !== currentScriptHash) return null;
   for (const [sourcePath, recordedHash] of Object.entries(plan.source_hashes ?? {})) {
     const currentHash = await hashFile(sourcePath);
-    if (!currentHash || currentHash !== recordedHash) return null;
+    if (!groupingLockSourceHashMatchesForTests({
+      sourcePath, recordedHash, currentHash,
+      retimeLockedGrouping: flags["retime-locked-grouping"] === "true",
+      timingSourcePaths: [timedPlanPath, wordTimingPath],
+    })) return null;
   }
   return { approval, plan };
 }

@@ -6,6 +6,7 @@ import {
   normalizeEditorialGrouping,
 } from "../lib/editorial-beat-director.mjs";
 import {
+  groupingLockSourceHashMatchesForTests,
   mergeEditorialRecoveryBeatsForTests,
   retentionResetEvidenceForTests,
   retentionBeatDensityFindingsForTests,
@@ -200,5 +201,18 @@ invalidAnalyticsReset[0].retention_reset = {
 assert.equal(visualBeatQualityContractFindings(invalidAnalyticsReset, {
   analyticsEvidenceIds: analyticsEvidence.map((row) => row.evidence_id),
 }).some((finding) => finding.code === "visual_retention_reset_evidence_invalid"), true);
+
+const retimingSources = ["/episode/timed_scene_plan.json", "/episode/narration_word_timing_ep_01.json"];
+const lockSource = { sourcePath: retimingSources[0], recordedHash: "old", currentHash: "new", timingSourcePaths: retimingSources };
+assert.equal(groupingLockSourceHashMatchesForTests(lockSource), false, "ordinary reuse rejects changed timing");
+for (const sourcePath of retimingSources) {
+  assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, sourcePath, retimeLockedGrouping: true }), true);
+}
+for (const sourcePath of ["/episode/script_clean.md", "/episode/story_fact_ledger.json", "/other/timed_scene_plan.json"]) {
+  assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, sourcePath, retimeLockedGrouping: true }), false, "retiming must preserve exact creative-source provenance");
+}
+assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, currentHash: null, retimeLockedGrouping: true }), false);
+assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, recordedHash: null, retimeLockedGrouping: true }), false);
+assert.equal(groupingLockSourceHashMatchesForTests({ ...lockSource, currentHash: "old" }), true);
 
 console.log("visual beat advisory policy tests passed");

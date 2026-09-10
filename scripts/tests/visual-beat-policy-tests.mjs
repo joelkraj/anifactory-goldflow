@@ -231,5 +231,7 @@ assert.equal(pauseRepaired[1].timing_repair.visual_boundary_pause_repair.narrati
 assert.throws(() => closeRetimedSilentGapsForTests(pauseBeats, [{ end_sec: 1308.2 }, pauseWords[1]], pauseTiming), /measured inter-word pause/);
 assert.throws(() => closeRetimedSilentGapsForTests(pauseBeats, [], pauseTiming), /measured inter-word pause/);
 assert.deepEqual(closeRetimedSilentGapsForTests(pauseBeats, [], { max_beat_sec: 9 }), pauseBeats);
+const toleratedPause = [pauseBeats[0], { ...pauseBeats[1], start_sec: 1308.1 }];
+assert.deepEqual(closeRetimedSilentGapsForTests(toleratedPause, [], pauseTiming), toleratedPause, "honor the existing inclusive 100ms contract tolerance");
 
 console.log("visual beat advisory policy tests passed");

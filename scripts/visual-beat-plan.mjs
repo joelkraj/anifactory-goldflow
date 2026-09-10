@@ -1053,7 +1053,7 @@ export function closeRetimedSilentGapsForTests(beats, words, timingOptions) {
     const beat = repaired[index];
     const next = repaired[index + 1];
     const cap = retentionRailForTime(beat.start_sec, timingOptions).max_sec;
-    if (next.start_sec - beat.start_sec <= cap + 1e-6) continue;
+    if (next.start_sec - beat.start_sec <= cap + 0.1 + 1e-6) continue;
     const boundary = Number((beat.start_sec + cap).toFixed(3));
     const lastWordEnd = Number(words[beat.source_word_end_index]?.end_sec);
     const nextWordStart = Number(words[next.source_word_start_index]?.start_sec);

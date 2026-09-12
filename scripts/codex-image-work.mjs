@@ -2,6 +2,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertOrphanStreamSealFlags, sealReviewedOrphanedImageStream } from "./lib/orphaned-image-stream-seal.mjs";
 
 import {
   completeWorkItem,
@@ -43,6 +44,15 @@ function required(flags, ...keys) {
 
 export async function runCodexImageWork(flags) {
   const action = String(flags.action ?? "status").trim().toLowerCase();
+  if (action === "seal-orphaned") {
+    // The public CLI checks real workflow status; repeat its exact flag contract
+    // here before any queue mutation, including when called as a library.
+    assertOrphanStreamSealFlags(flags);
+    return sealReviewedOrphanedImageStream({
+      episodeDir: required(flags, "episode-dir"), manifestPath: required(flags, "manifest"),
+      recoveryReceiptPath: required(flags, "recovery-receipt"), recoveryReason: required(flags, "recovery-reason"),
+    });
+  }
   if (action === "create") {
     const referencesOnly = boolFlag(flags["references-only"]);
     const mode = referencesOnly || flags.mode === "reference" ? "reference" : "scene";

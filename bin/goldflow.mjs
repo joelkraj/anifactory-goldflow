@@ -23,6 +23,7 @@ import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recov
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
+import { orphanedImageStreamSealAdmission } from "../scripts/lib/orphaned-image-stream-seal.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -99,6 +100,14 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
     : [currentStage];
+  if (commandName === "imagegen" && subcommandName === "codex-work") {
+    const recovery = orphanedImageStreamSealAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked orphan stream seal: ${recovery.reason}.`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
   if (commandName === "semantic" && subcommandName === "plan") {
     const recovery = semanticRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {

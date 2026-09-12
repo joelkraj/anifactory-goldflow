@@ -1076,11 +1076,23 @@ export async function appendCodexWorkManifestStream(options) {
   });
 }
 
-export async function sealCodexWorkManifestStream({ manifestPath, streamId = null } = {}) {
+export async function sealCodexWorkManifestStream({ manifestPath, streamId = null, orphanRecovery = null } = {}) {
   const resolvedManifestPath = await resolveManifestPath(manifestPath);
   const manifestDir = path.dirname(resolvedManifestPath);
   return withLeaseDispatchLock(manifestDir, async () => {
     const current = (await loadWorkManifest(resolvedManifestPath)).manifest;
+    if (orphanRecovery) {
+      if (await sha256File(resolvedManifestPath) !== orphanRecovery.manifest_sha256) throw new Error("Orphan seal manifest changed after review.");
+      for (const binding of orphanRecovery.file_bindings ?? []) {
+        if (await sha256File(binding.path) !== binding.sha256) throw new Error(`Orphan seal evidence changed after review: ${binding.path}.`);
+      }
+      assertOrphanStreamProducerEnded(orphanRecovery.producer_pid);
+      // Reject even expired or malformed lease directories. Sealing is not lease
+      // recovery, and must never retire an assignment that a worker may still own.
+      const leases = await fs.readdir(path.join(manifestDir, "leases"));
+      if (leases.length) throw new Error(`Orphan seal requires zero lease entries; found ${leases.length}.`);
+      if (current.streaming_queue?.sealed === true) throw new Error("Orphan seal requires an unsealed stream.");
+    }
     if (!current.streaming_queue) throw new Error(`Manifest ${current.manifest_id} is not appendable.`);
     if (streamId && current.streaming_queue.stream_id !== cleanText(streamId)) throw new Error("Streaming manifest seal identity mismatch.");
     if (current.streaming_queue.sealed === true) return { manifest: current, sealed: false, reused: true };
@@ -1106,10 +1118,29 @@ export async function sealCodexWorkManifestStream({ manifestPath, streamId = nul
       manifest_id: next.manifest_id,
       revision,
       asset_ids: next.items.map((item) => item.asset_id),
+      ...(orphanRecovery ? { orphan_recovery: {
+        ...orphanRecovery,
+        producer_check: "ESRCH",
+        active_lease_count: 0,
+        provider_calls: 0,
+        new_work_items: 0,
+        manifest_after_sha256: await sha256File(resolvedManifestPath),
+      } } : {}),
       created_at: sealedAt,
     });
     return { manifest: next, sealed: true, reused: false, event_path: eventPath };
   });
+}
+
+export function assertOrphanStreamProducerEnded(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Orphan seal requires a positive producer PID.");
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return;
+    throw new Error(`Cannot verify orphan producer ${pid} ended: ${error?.code ?? error}.`);
+  }
+  throw new Error(`Orphan stream producer ${pid} is still alive.`);
 }
 
 function manifestDirectory(manifestOrPath) {

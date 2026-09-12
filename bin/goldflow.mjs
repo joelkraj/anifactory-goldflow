@@ -20,6 +20,7 @@ import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.
 import { assertCommandWorkflowRoute } from "../scripts/lib/episode-workflow-routing.mjs";
 import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles.mjs";
 import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
+import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -100,6 +101,14 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
     const recovery = semanticRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
       console.error(`Workflow guard blocked semantic recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+  }
+  if (commandName === "visual" && subcommandName === "beats") {
+    const recovery = visualBeatRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked visual beat recovery: ${recovery.reason}.`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }

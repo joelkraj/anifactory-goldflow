@@ -84,6 +84,7 @@ import {
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 import { semanticFailedRecoveryScope } from "./lib/semantic-planner-recovery.mjs";
+import { readVisualBeatRecoveryScope } from "./lib/visual-beat-recovery.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import {
   ttsSpokenTextAuditMatches,
@@ -751,6 +752,13 @@ export function semanticRecoveryCommandForTests(artifact, identity, sourceScript
     .replace(/\s+--semantic-chunk-ids\s+\S+/g, "")
     .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
   return `${base} --semantic-chunk-ids ${failedIds.join(",")}`;
+}
+
+export function visualBeatRecoveryCommandForTests(scope, identity) {
+  if (!scope?.failed_chunk_ids?.length || scope.source_hashes_current !== true) return null;
+  const base = commandFor("visual_beat_plan", identity)
+    .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+  return `${base} --resume-incomplete-chunks true`;
 }
 
 export function transitionRecoveryCommandForTests(artifact, identity) {
@@ -4349,6 +4357,10 @@ async function main() {
   const timedScenePlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");
   let visualBeatPlan = await jsonStatusWithSourceHashesComplete(visualBeatPlanPath, "visual_beat_plan.json");
+  const visualBeatRepairScope = !legacyIdentity
+    ? await readVisualBeatRecoveryScope({ episodeDir, sourceScriptHash: scriptHash, identity }) : null;
+  const visualBeatRecoveryCommand = visualBeatRecoveryCommandForTests(visualBeatRepairScope, identity);
+  if (visualBeatRecoveryCommand) visualBeatPlan = { ...visualBeatPlan, next_command_shape: visualBeatRecoveryCommand };
   if (!legacyIdentity && visualBeatPlan.done) {
     const [beatArtifact, beatApproval, beatPlanHash] = await Promise.all([
       readJson(visualBeatPlanPath, null),
@@ -4581,6 +4593,8 @@ async function main() {
     : [];
   const repairCommandStages = semanticRepairUnitIds.length
     ? ["semantic_scene_plan"]
+    : next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
+    ? ["visual_beat_plan"]
     : next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
     : next?.stage === "qwen_tts_stitch"
@@ -4609,6 +4623,8 @@ async function main() {
     ...(semanticRepairUnitIds.length ? {
       semantic_recovery_scope: { failed_unit_ids: semanticRepairUnitIds, source_script_hash: scriptHash },
     } : {}),
+    ...(next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
+      ? { visual_beat_recovery_scope: visualBeatRepairScope } : {}),
     allowed_command_stages: [...new Set([
       ...readyCommandStages,
       ...repairCommandStages,

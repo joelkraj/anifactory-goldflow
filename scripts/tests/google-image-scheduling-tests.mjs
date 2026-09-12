@@ -11,6 +11,7 @@ import { providerLaneSpecs, inspectProviderLane } from "../lib/provider-readines
 import { productionProfileById } from "../lib/production-profiles.mjs";
 import { desktopConfig } from "../../apps/goldflow-studio/desktop/config.mjs";
 import { GoogleSubmitGate } from "../../apps/goldflow-studio/desktop/google-submit-gate.mjs";
+import { wavefrontProviderHealthBinding } from "../run-visual-wavefront.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-three-lane-test-"));
 const writeJson = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(value)); };
@@ -19,6 +20,7 @@ try {
   const identity = { image_provider: "federated_google_web_image_pool", image_provider_options: options, provider_locks: federatedWebImageProviderLocks(options) };
   const schedule = googleImageSchedulingForIdentity(identity);
   assert.equal(federatedWebImageConcurrencyForIdentity(identity), 3);
+  assert.equal(wavefrontProviderHealthBinding(identity).provider_concurrency, 3, "the emitted wavefront health binding reports the identity's three-lane ceiling");
   assert.equal(options.google_flow.concurrency, 2);
   assert.equal(options.google_gemini.concurrency, 1);
   assert.equal(identity.provider_locks.federated_google_primary_concurrency, 3);
@@ -34,6 +36,7 @@ try {
   const legacy = { image_provider: identity.image_provider, image_provider_options: legacyOptions, provider_locks: federatedWebImageProviderLocks(legacyOptions) };
   assert.equal(googleImageSchedulingForIdentity(legacy), null);
   assert.equal(federatedWebImageConcurrencyForIdentity(legacy), 8);
+  assert.equal(wavefrontProviderHealthBinding(legacy).provider_concurrency, 8, "historical wavefront health bindings retain their default capacity");
   assert.equal(legacyOptions.google_flow.concurrency, 5);
   assert.equal(legacyOptions.google_gemini.concurrency, 3);
   assert.equal(hybridManifestDispatchOptions({ federated: true }).maxConcurrency, 8);

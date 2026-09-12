@@ -11,6 +11,7 @@ import { motionIntentForPrompt, rebalanceEditorialMotionStreaks } from "./lib/mo
 import { productionProfileForIdentity } from "./lib/production-profiles.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import {
+  federatedWebImageAutomaticChatGptEnabled,
   federatedWebImageConcurrencyForIdentity,
   HYBRID_TOTAL_IMAGE_CONCURRENCY,
   HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
@@ -19,7 +20,8 @@ import {
   isGoogleFlowPrimaryProvider,
 } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
-import { openWavefrontBrowserImageStream } from "./hybrid-browser-image-pool.mjs";
+import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
+import { hybridManifestDispatchOptions, openWavefrontBrowserImageStream } from "./hybrid-browser-image-pool.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -43,6 +45,24 @@ function isTrue(value) {
 
 function safeTimestamp(value = new Date()) {
   return value.toISOString().replace(/[:.]/g, "-");
+}
+
+export function wavefrontProviderHealthBinding(identity, now = new Date()) {
+  return {
+    schema: "goldflow_wavefront_provider_health_binding_v1",
+    status: "passed_by_identity_health_proof",
+    image_provider: identity.image_provider,
+    google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
+    google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
+    provider_concurrency: isFederatedWebImageProvider(identity.image_provider)
+      ? hybridManifestDispatchOptions({
+          federated: true,
+          federatedChatGptEnabled: federatedWebImageAutomaticChatGptEnabled(identity),
+          googleScheduling: googleImageSchedulingForIdentity(identity),
+        }).maxConcurrency
+      : HYBRID_TOTAL_IMAGE_CONCURRENCY,
+    updated_at: now.toISOString(),
+  };
 }
 
 function sleep(ms) {
@@ -490,15 +510,7 @@ async function processPrefetchBatch({
   const hybridPoolReportPath = path.join(batchDir, `${batchId}.hybrid-pool.json`);
   let imagegen;
   if (hybridProvider) {
-    await writeJsonAtomic(providerHealthPath, {
-      schema: "goldflow_wavefront_provider_health_binding_v1",
-      status: "passed_by_identity_health_proof",
-      image_provider: identity.image_provider,
-      google_flow_health_proof_path: identity.image_provider_options?.google_flow?.health_proof_path ?? null,
-      google_flow_health_proof_sha256: identity.image_provider_options?.google_flow?.health_proof_sha256 ?? null,
-      provider_concurrency: HYBRID_TOTAL_IMAGE_CONCURRENCY,
-      updated_at: new Date().toISOString(),
-    });
+    await writeJsonAtomic(providerHealthPath, wavefrontProviderHealthBinding(identity));
     if (browserImageStream) {
       const completion = browserImageStream.append({
         promptsPath: hardenedPlanPath,

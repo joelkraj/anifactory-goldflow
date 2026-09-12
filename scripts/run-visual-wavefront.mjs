@@ -380,7 +380,7 @@ function selectPendingBatch(pendingRows, maxCuts) {
   return selected;
 }
 
-async function finalizePrefetchBatch({
+export async function finalizePrefetchBatch({
   batchId,
   batchDir,
   rows,
@@ -398,13 +398,27 @@ async function finalizePrefetchBatch({
   imagegen,
 }) {
   const report = await readJson(imagegenReportPath, null);
-  const completionPartition = wavefrontCompletionPartitionForTests(combined.prompts, report);
+  const reportCurrent = ["passed", "partial"].includes(report?.status)
+    && report.prompt_plan_hash === await sha256File(hardenedPlanPath)
+    && (!report.prompt_plan_path || path.resolve(report.prompt_plan_path) === path.resolve(hardenedPlanPath));
+  const requestedIds = new Set(combined.prompts.map((prompt) => String(prompt.image_id)));
+  const currentResults = [];
+  for (const row of reportCurrent ? report.results ?? [] : []) {
+    if (!requestedIds.has(String(row.image_id)) || !row.image_path) continue;
+    const expectedHash = row.image_sha256 ?? row.generated?.output_sha256;
+    if (hybridProvider && !/^[a-f0-9]{64}$/.test(String(expectedHash ?? ""))) continue;
+    const currentHash = await sha256File(row.image_path).catch(() => null);
+    if (currentHash && (!expectedHash || currentHash === expectedHash)) currentResults.push(row);
+  }
+  const completionPartition = wavefrontCompletionPartitionForTests(combined.prompts, { results: currentResults });
   const completedCutIds = completionPartition.completed_cut_ids;
   const completedCutIdSet = new Set(completedCutIds);
   const deferredCutIds = completionPartition.deferred_cut_ids;
+  const scopeComplete = imagegen.code === 0 && reportCurrent && report.status === "passed"
+    && completedCutIds.length === requestedIds.size && deferredCutIds.length === 0;
   let qaPromptPath = hardenedPlanPath;
   let qaImagegenReportPath = imagegenReportPath;
-  if (imagegen.code !== 0 && completedCutIds.length) {
+  if (!scopeComplete && completedCutIds.length) {
     qaPromptPath = path.join(batchDir, `${batchId}.qa-subset.hardened.json`);
     qaImagegenReportPath = path.join(batchDir, `${batchId}.qa-subset.imagegen.json`);
     const hardened = await readJson(hardenedPlanPath, null);
@@ -418,7 +432,7 @@ async function finalizePrefetchBatch({
     };
     await writeJsonAtomic(qaPromptPath, qaPlan);
     const qaPromptSha256 = await sha256File(qaPromptPath);
-    const qaResults = (report?.results ?? []).filter((row) => completedCutIdSet.has(String(row.image_id)));
+    const qaResults = currentResults;
     await writeJsonAtomic(qaImagegenReportPath, {
       ...report,
       status: "passed",
@@ -435,7 +449,7 @@ async function finalizePrefetchBatch({
   }
   return {
     batch_id: batchId,
-    status: imagegen.code === 0 ? "prefetched" : "prefetch_partial_or_failed",
+    status: scopeComplete ? "prefetched" : "prefetch_partial_or_failed",
     cut_ids: combined.prompts.map((prompt) => prompt.image_id),
     source_chunk_files: rows.map((row) => row.filePath),
     hardened_plan_path: hardenedPlanPath,
@@ -450,7 +464,7 @@ async function finalizePrefetchBatch({
       : report?.current_batch_image_count ?? report?.image_count ?? 0),
     completed_cut_ids: completedCutIds,
     deferred_cut_ids: deferredCutIds,
-    incremental_qa_eligible: imagegen.code === 0 || completedCutIds.length > 0,
+    incremental_qa_eligible: completedCutIds.length > 0,
     incremental_qa_enabled: incrementalQaEnabled,
     focal_analysis_path: focalAnalysisPath,
     semantic_audit_path: semanticAuditPath,

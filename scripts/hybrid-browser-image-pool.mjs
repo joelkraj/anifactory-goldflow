@@ -1334,6 +1334,20 @@ async function providerStreamingScopeSummary(manifestPath, status) {
   };
 }
 
+export function streamingBatchCompletionStatus(phase, exactAssetIds) {
+  const requested = new Set(exactAssetIds);
+  const completed = new Set([...(phase.completed_asset_ids ?? []), ...(phase.reconciled_asset_ids ?? [])]);
+  const passed = requested.size > 0
+    && phase.status === "completed"
+    && !(phase.failed_asset_ids ?? []).length
+    && !(phase.pending_asset_ids ?? []).length
+    && Number(phase.counts?.pending ?? 0) === 0
+    && Number(phase.counts?.leased ?? 0) === 0
+    && completed.size === requested.size
+    && [...requested].every((id) => completed.has(id));
+  return { status: passed ? "passed" : "blocked", code: passed ? 0 : 1 };
+}
+
 async function importManifest({
   identity,
   manifestPath,
@@ -2017,9 +2031,10 @@ export async function openWavefrontBrowserImageStream({
           wavefrontPrefetch: true,
         });
       }
+      const completionStatus = streamingBatchCompletionStatus(phase, exactAssetIds);
       const batchReport = {
         schema: "goldflow_wavefront_stream_batch_v1",
-        status: phase.failed_asset_ids.length ? "blocked" : "passed",
+        status: completionStatus.status,
         stream_id: streamId,
         manifest_id: phase.manifest_id,
         manifest_path: phase.manifest_path,
@@ -2030,7 +2045,7 @@ export async function openWavefrontBrowserImageStream({
         updated_at: new Date().toISOString(),
       };
       if (input.poolReportPath) await writeJson(input.poolReportPath, batchReport);
-      return { code: phase.failed_asset_ids.length ? 1 : 0, phase, batch_report: batchReport };
+      return { code: completionStatus.code, phase, batch_report: batchReport };
     });
   };
 

@@ -473,6 +473,60 @@ export async function finalizePrefetchBatch({
   };
 }
 
+// Attach rejection handling when the batch is scheduled, not after the planner
+// finishes. A failed health read cannot turn a queued batch into an unhandled
+// rejection while other batches and the independent planner are still running.
+export async function settleWavefrontPrefetchBatch(completion, options) {
+  let imagegen;
+  let failure = null;
+  try {
+    imagegen = await completion;
+  } catch (error) {
+    failure = {
+      schema: "goldflow_wavefront_batch_error_v1",
+      status: "blocked",
+      batch_id: options.batchId,
+      cut_ids: options.combined.prompts.map((prompt) => prompt.image_id),
+      error_code: error?.code ?? "wavefront_batch_completion_failed",
+      error: String(error?.message ?? error),
+      automatic_retry: false,
+      recorded_at: new Date().toISOString(),
+    };
+    imagegen = { code: 1 };
+  }
+  let batch;
+  try {
+    batch = await finalizePrefetchBatch({ ...options, imagegen });
+  } catch (error) {
+    failure ??= {
+      schema: "goldflow_wavefront_batch_error_v1", status: "blocked",
+      batch_id: options.batchId,
+      cut_ids: options.combined.prompts.map((prompt) => prompt.image_id),
+      error_code: error?.code ?? "wavefront_batch_finalization_failed",
+      error: String(error?.message ?? error), automatic_retry: false,
+      recorded_at: new Date().toISOString(),
+    };
+    failure.finalization_error = String(error?.message ?? error);
+    batch = {
+      batch_id: options.batchId,
+      cut_ids: failure.cut_ids,
+      completed_cut_ids: [], deferred_cut_ids: failure.cut_ids,
+      hardened_plan_path: options.hardenedPlanPath,
+      imagegen_report_path: options.imagegenReportPath,
+      hybrid_pool_report_path: options.hybridPoolReportPath,
+      incremental_qa_enabled: options.incrementalQaEnabled,
+      incremental_qa_eligible: false,
+    };
+  }
+  if (!failure) return batch;
+  const errorPath = path.join(options.batchDir, `${options.batchId}.stream-error.json`);
+  failure.hardened_plan_path = options.hardenedPlanPath;
+  failure.imagegen_report_path = options.imagegenReportPath;
+  failure.hybrid_pool_report_path = options.hybridPoolReportPath;
+  await writeJsonAtomic(errorPath, failure);
+  return { ...batch, status: "prefetch_blocked", stream_error_path: errorPath };
+}
+
 async function processPrefetchBatch({
   rows,
   batchIndex,
@@ -526,13 +580,13 @@ async function processPrefetchBatch({
   if (hybridProvider) {
     await writeJsonAtomic(providerHealthPath, wavefrontProviderHealthBinding(identity));
     if (browserImageStream) {
-      const completion = browserImageStream.append({
+      const completion = settleWavefrontPrefetchBatch(browserImageStream.append({
         promptsPath: hardenedPlanPath,
         assetIds: combined.prompts.map((prompt) => prompt.image_id),
         imagegenReportPath,
         poolReportPath: hybridPoolReportPath,
         cutExecutionLedgerPath: cutLedgerPath,
-      }).then((result) => finalizePrefetchBatch({
+      }), {
         batchId,
         batchDir,
         rows,
@@ -547,8 +601,7 @@ async function processPrefetchBatch({
         incrementalQaReviewDir,
         incrementalQaEnabled,
         hybridProvider,
-        imagegen: result,
-      }));
+      });
       return { queued: true, batch_id: batchId, completion };
     }
     imagegen = await runNode([

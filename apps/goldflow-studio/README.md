@@ -130,7 +130,7 @@ Flow and Gemini may work concurrently only when both are leasing from the same f
 - A failure is recorded and never placed back on the queue automatically.
 - An expired post-submission lease becomes `needs_triage`.
 - Requeue requires an explicit operator reason from the dashboard API.
-- A rate limit, usage limit, account mismatch, or ChatGPT UI-contract mismatch pauses all dispatch.
+- Usage limits, authentication failures, account mismatches, and UI-contract restrictions hold that provider's server dispatch until an explicit authenticated dashboard resume. An elapsed worker cooldown cannot lease through this hold. Ordinary rate limits and transient transport failures retain their timed worker cooldown policy.
 
 ## Tests
 

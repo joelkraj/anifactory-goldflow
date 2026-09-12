@@ -79,7 +79,7 @@ assert.equal(providerFailurePausesDispatch("ui_contract_mismatch"), true, "a pro
 assert.equal(providerFailurePausesDispatch("google_gemini_generation_error"), false, "one transient Gemini failure must preserve its exact ID without stopping healthy unleased work");
 assert.equal(providerFailurePausesDispatch("chatgpt_generation_error"), false, "one transient ChatGPT failure must preserve its exact ID without stopping healthy unleased work");
 assert.equal(providerFailurePausesDispatch("provider_transient_circuit_open"), false, "the desktop worker's timed circuit must recover without an indefinite controller pause");
-assert.equal(providerFailurePausesDispatch("usage_limited"), false, "provider usage limits must use a timed recovery probe rather than an indefinite controller pause");
+assert.equal(providerFailurePausesDispatch("usage_limited"), true, "provider usage/account restrictions require explicit operator resume, never a timed probe");
 assert.deepEqual(flowReferenceUploadOrder([{ slot: 4 }, { slot: 2 }, { slot: 1 }, { slot: 3 }]).map((row) => row.slot), [1, 2, 3, 4], "Flow must upload in canonical slot order because its composer appends newly added chips");
 assert.equal(identifyNewFlowComposerChip([], [{ media_id: "composer-1" }]).media_id, "composer-1");
 assert.equal(identifyNewFlowComposerChip(["composer-2"], [{ media_id: "composer-1" }, { media_id: "composer-2" }]).media_id, "composer-1");

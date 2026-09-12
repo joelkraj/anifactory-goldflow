@@ -64,6 +64,7 @@ export function providerFailurePausesDispatch(code) {
     "account_mismatch",
     "ui_contract_mismatch",
     "auth_required",
+    "usage_limited",
   ]
     .includes(String(code ?? ""));
 }

@@ -4138,6 +4138,17 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
       next_command_shape: nextCommand,
     };
   }
+  const authoringArtifacts = [
+    visualPlanPath,
+    inventoryLedgerPath,
+    characterRefsPath,
+    partialPath,
+    path.join(episodeDir, "reference_evidence_ledger.json"),
+    path.join(episodeDir, "location_contract_ledger.json"),
+  ];
+  if (!(await Promise.all(authoringArtifacts.map(exists))).some(Boolean)) {
+    return { done: false, state: "missing", evidence: "visual reference authoring artifacts not created" };
+  }
   const visual = await jsonStatusWithSourceHashesComplete(visualPlanPath, "visual_reference_plan.json");
   const visualPlan = await readJson(visualPlanPath, null);
   const inventoryPath = visualPlan?.reference_inventory_ledger_path ?? inventoryLedgerPath;
@@ -4666,6 +4677,8 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  inferredState as inferredStateForTests,
+  visualReferencePlanComplete as visualReferencePlanCompleteForTests,
   hybridDeadletteredAssetIds as hybridDeadletteredAssetIdsForTests,
   runIdentityPlanningComplete as runIdentityPlanningCompleteForTests,
   runIdentityTtsComplete as runIdentityTtsCompleteForTests,

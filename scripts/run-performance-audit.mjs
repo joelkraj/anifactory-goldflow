@@ -260,6 +260,7 @@ async function productionForecastInputs({ episodeDir, identity, events, provider
         ? Number(animationPlan.required_motion_direction_count)
     : motionDirections.filter((row) => row?.eligibility === "animate" || row?.selected_for_generation === true).length;
   return {
+    identity,
     scriptWordCount: wordCount(scriptText),
     narrationDurationMinutes: Number(timing.audio_duration_sec ?? 0) > 0
       ? Number(timing.audio_duration_sec) / 60

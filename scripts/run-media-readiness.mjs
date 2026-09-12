@@ -16,6 +16,7 @@ import {
   providerReadinessDecision,
   sha256,
 } from "./lib/provider-readiness.mjs";
+import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const flags = parseFlags(process.argv.slice(2));
@@ -76,6 +77,12 @@ async function launchProviderHost(spec, logDir) {
     "--prewarm-persistent", "true",
     `--${spec.plan_flag}`, spec.plan_label,
     `--${spec.model_flag}`, spec.model_label,
+    ...(spec.google_submit_gate_dir ? [
+      "--state-dir", spec.state_root,
+      "--google-submit-gate-dir", spec.google_submit_gate_dir,
+      "--google-submit-interval-ms", String(spec.google_submit_interval_ms),
+      "--google-submit-jitter-max-ms", String(spec.google_submit_jitter_max_ms),
+    ] : []),
   ];
   const child = spawn(process.execPath, args, {
     cwd: repoRoot,
@@ -104,6 +111,7 @@ async function main() {
   const identityPath = path.join(episodeDir, "run_identity.json");
   const identityBytes = await fs.readFile(identityPath);
   const identity = JSON.parse(identityBytes.toString("utf8"));
+  const scheduling = googleImageSchedulingForIdentity(identity);
   const profile = productionProfileForIdentity(identity);
   const readinessPolicy = profile.orchestration?.provider_readiness_gate ?? {};
   if (readinessPolicy.required !== true) {
@@ -121,6 +129,9 @@ async function main() {
   if (flowConcurrencyOverride != null
     && (!Number.isInteger(flowConcurrencyOverride) || flowConcurrencyOverride < 1 || flowConcurrencyOverride > 5)) {
     throw new Error("run media-ready --flow-concurrency-override must be an integer from 1 through 5.");
+  }
+  if (scheduling && flowConcurrencyOverride != null && flowConcurrencyOverride > scheduling.google_flow_concurrency) {
+    throw new Error("Flow repair concurrency exceeds the identity-locked Google image scheduling limit.");
   }
   const specs = providerLaneSpecs(identity, profile, { stateRoot }).map((spec) => (
     spec.provider === "google-flow"
@@ -166,6 +177,12 @@ async function main() {
     run_identity_sha256: sha256(identityBytes),
     production_profile: profile.id,
     policy: readinessPolicy,
+    ...(scheduling ? { image_scheduling: scheduling, image_admission_capacity: {
+      combined_submission_ceiling_per_hour: 3_600_000 / scheduling.minimum_submit_interval_ms,
+      combined_submission_rate_at_max_jitter_per_hour: 3_600_000 / (scheduling.minimum_submit_interval_ms + scheduling.submit_jitter_max_ms),
+      combined_submission_rate_at_mean_jitter_per_hour: 3_600_000 / (scheduling.minimum_submit_interval_ms + scheduling.submit_jitter_max_ms / 2),
+      interpretation: "admission_only; actual accepted throughput may be lower due to generation latency and failures; stock wall-clock SLO remains report-only",
+    } } : {}),
     provider_model_override: flowModelOverride || flowConcurrencyOverride != null ? {
       provider: "google-flow",
       identity_locked_model: identity.image_provider_options?.google_flow?.model_label ?? null,

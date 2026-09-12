@@ -56,6 +56,7 @@ import {
   isStyleReferenceTarget,
 } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
+import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
 import { buildImageSemanticAudit } from "./lib/image-semantic-audit.mjs";
 import {
   buildHeroCandidatePromptPlan,
@@ -887,6 +888,7 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
   expectedModelLabel = null,
   requirePreparedWorkerPool = false,
   expectedConcurrency: expectedConcurrencyOverride = null,
+  googleScheduling = null,
 } = {}) {
   const providerLabel = expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
     ? "Google Flow"
@@ -928,6 +930,15 @@ export async function assertHostRuntime(runtimePath, expectedProvider, {
       const stateRoot = path.resolve(path.dirname(runtimePath), "..", "..");
       const workerRuntimePath = path.join(stateRoot, `${expectedProvider}-desktop-worker-runtime.json`);
       const workerRuntime = await readJson(workerRuntimePath, null);
+      if (googleScheduling) {
+        const dispatch = workerRuntime?.dispatch_policy ?? {};
+        if (dispatch.google_submit_gate_dir !== path.join(stateRoot, "google-account-submit-gate")
+          || dispatch.google_submit_interval_ms !== googleScheduling.minimum_submit_interval_ms
+          || dispatch.google_submit_jitter_max_ms !== googleScheduling.submit_jitter_max_ms
+          || JSON.stringify(workerRuntime?.types) !== JSON.stringify(["image"])) {
+          throw new Error(`${providerLabel} host does not match the identity-locked shared Google submission gate and image-only worker policy.`);
+        }
+      }
       const expectedConcurrency = expectedConcurrencyOverride == null
         ? (expectedProvider === GOOGLE_FLOW_BROWSER_PROVIDER
             ? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY
@@ -966,6 +977,7 @@ async function assertMonitoredProviderRuntimes(providerRuntimes, recoveryStarted
         expectedModelLabel: runtime.modelLabel,
         requirePreparedWorkerPool: true,
         expectedConcurrency: runtime.expectedConcurrency,
+        googleScheduling: runtime.googleScheduling,
       });
       recoveryStartedAt.delete(runtime.provider);
     } catch (error) {
@@ -985,8 +997,9 @@ export function monitoredProviderRuntimes(runtimes, {
   styleOnly = false,
   geminiOnly = false,
   chatgptOnly = false,
+  schedulingRequired = false,
 } = {}) {
-  if (!federated || styleOnly || geminiOnly || chatgptOnly) return runtimes;
+  if (schedulingRequired || !federated || styleOnly || geminiOnly || chatgptOnly) return runtimes;
   const flowRuntimes = runtimes.filter((runtime) => runtime.provider === GOOGLE_FLOW_BROWSER_PROVIDER);
   return flowRuntimes.length ? flowRuntimes : runtimes;
 }
@@ -999,13 +1012,19 @@ export function hybridManifestDispatchOptions({
   federated = false,
   federatedChatGptEnabled = false,
   mode = "scene",
-  flowConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
+  flowConcurrency = null,
   persistentWorkerPool = false,
+  googleScheduling = null,
 } = {}) {
-  const effectiveFlowConcurrency = validateFlowRuntimeConcurrency(flowConcurrency);
+  const effectiveFlowConcurrency = validateFlowRuntimeConcurrency(flowConcurrency ?? googleScheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  if (googleScheduling && effectiveFlowConcurrency > googleScheduling.google_flow_concurrency) {
+    throw new Error("Flow runtime concurrency exceeds the identity-locked Google image scheduling limit.");
+  }
+  const geminiConcurrency = googleScheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY;
   const hybridTotalConcurrency = effectiveFlowConcurrency + HYBRID_CHATGPT_IMAGE_CONCURRENCY;
-  const federatedTotalConcurrency = effectiveFlowConcurrency + GOOGLE_GEMINI_IMAGE_CONCURRENCY
-    + (federatedChatGptEnabled ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0);
+  const federatedTotalConcurrency = Math.min(googleScheduling?.total_concurrency ?? Infinity,
+    effectiveFlowConcurrency + geminiConcurrency
+      + (federatedChatGptEnabled ? HYBRID_CHATGPT_IMAGE_CONCURRENCY : 0));
   if (flowOnly && chatgptOnly) throw new Error("A phase cannot be both Flow-only and ChatGPT-only.");
   if (geminiOnly && (flowOnly || chatgptOnly)) throw new Error("A Gemini-only phase cannot select another browser provider.");
   if (styleOnly && geminiOnly) throw new Error("A style-only phase cannot also be Gemini-only.");
@@ -1031,7 +1050,7 @@ export function hybridManifestDispatchOptions({
       workProvider: HYBRID_WEB_FLOW_PROVIDER,
       dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
       allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
-      browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
+      browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: geminiConcurrency },
       browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
       browserProviderWorkerSessionPolicy: {
         [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
@@ -1039,8 +1058,8 @@ export function hybridManifestDispatchOptions({
           : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
       },
       browserProviderReceiptRequired: true,
-      recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
-      maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+      recommendedConcurrency: geminiConcurrency,
+      maxConcurrency: geminiConcurrency,
     };
   }
   if (chatgptOnly) {
@@ -1062,7 +1081,7 @@ export function hybridManifestDispatchOptions({
         workProvider: FEDERATED_WEB_IMAGE_PROVIDER,
         dispatchPolicy: HYBRID_WEB_FLOW_ASSIGNMENT_POLICY,
         allowedBrowserProviders: [GOOGLE_GEMINI_BROWSER_PROVIDER],
-        browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY },
+        browserProviderConcurrency: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: geminiConcurrency },
         browserProviderMaxOrderedReferences: { [GOOGLE_GEMINI_BROWSER_PROVIDER]: 4 },
         browserProviderWorkerSessionPolicy: {
           [GOOGLE_GEMINI_BROWSER_PROVIDER]: persistentWorkerPool
@@ -1070,8 +1089,8 @@ export function hybridManifestDispatchOptions({
             : FRESH_BROWSER_SESSION_PER_JOB_POLICY,
         },
         browserProviderReceiptRequired: true,
-        recommendedConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
-        maxConcurrency: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+        recommendedConcurrency: geminiConcurrency,
+        maxConcurrency: geminiConcurrency,
       };
     }
     return {
@@ -1084,7 +1103,7 @@ export function hybridManifestDispatchOptions({
       ],
       browserProviderConcurrency: {
         [GOOGLE_FLOW_BROWSER_PROVIDER]: effectiveFlowConcurrency,
-        [GOOGLE_GEMINI_BROWSER_PROVIDER]: GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+        [GOOGLE_GEMINI_BROWSER_PROVIDER]: geminiConcurrency,
         ...(federatedChatGptEnabled ? { chatgpt: HYBRID_CHATGPT_IMAGE_CONCURRENCY } : {}),
       },
       browserProviderMaxOrderedReferences: {
@@ -1456,6 +1475,8 @@ async function createAndRunPhase({
   if (!assetIds.length) return null;
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("A phase can select only one browser provider.");
   const federatedChatGptEnabled = federatedWebImageAutomaticChatGptEnabled(identity);
+  const googleScheduling = googleImageSchedulingForIdentity(identity);
+  if (googleScheduling && !checkHostRuntimes) throw new Error("Identity-locked Google image scheduling requires live host checks.");
   const activeRuntimes = flowOnly
     ? [runtimes.flow]
     : geminiOnly ? [runtimes.gemini]
@@ -1471,6 +1492,7 @@ async function createAndRunPhase({
     styleOnly,
     geminiOnly,
     chatgptOnly,
+    schedulingRequired: Boolean(googleScheduling),
   });
   if (checkHostRuntimes) {
     await Promise.all(checkedRuntimes
@@ -1479,6 +1501,7 @@ async function createAndRunPhase({
         expectedModelLabel: runtime.modelLabel,
         requirePreparedWorkerPool: true,
         expectedConcurrency: runtime.expectedConcurrency,
+        googleScheduling: runtime.googleScheduling,
       })));
   }
   const dispatch = hybridManifestDispatchOptions({
@@ -1490,6 +1513,7 @@ async function createAndRunPhase({
     federatedChatGptEnabled,
     mode,
     flowConcurrency: flowRuntimeConcurrency,
+    googleScheduling,
     persistentWorkerPool: federated
       && identity.image_provider_options?.routing_policy === FEDERATED_WEB_IMAGE_ROUTING_POLICY,
   });
@@ -1771,8 +1795,8 @@ export async function openWavefrontBrowserImageStream({
   dataRoot = defaultDataRoot,
   stateRoot = process.env.GOLDFLOW_STUDIO_STATE_DIR ?? path.join(os.homedir(), ".goldflow-studio"),
   downloadsRoot = path.join(os.homedir(), "Downloads", "GoldflowStudio"),
-  flowRuntimeConcurrency = HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-  timeoutMs = 6 * 60 * 60_000,
+  flowRuntimeConcurrency = null,
+  timeoutMs = null,
   checkHostRuntimes = true,
 } = {}) {
   const resolvedEpisodeDir = path.resolve(episodeDir);
@@ -1784,12 +1808,17 @@ export async function openWavefrontBrowserImageStream({
   }
   const identityStatus = await federatedWebImageIdentityStatus(identity);
   if (!identityStatus.done) throw new Error(identityStatus.evidence);
+  const googleScheduling = googleImageSchedulingForIdentity(identity);
+  if (googleScheduling && !checkHostRuntimes) throw new Error("Identity-locked Google image scheduling requires live host checks.");
+  flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flowRuntimeConcurrency ?? googleScheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  timeoutMs ??= (googleScheduling ? 24 : 6) * 60 * 60_000;
   const federatedChatGptEnabled = federatedWebImageAutomaticChatGptEnabled(identity);
   const dispatch = hybridManifestDispatchOptions({
     mode: "scene",
     federated: true,
     federatedChatGptEnabled,
     flowConcurrency: flowRuntimeConcurrency,
+    googleScheduling,
     persistentWorkerPool: true,
   });
   const runtimes = {
@@ -1799,12 +1828,16 @@ export async function openWavefrontBrowserImageStream({
       path: path.join(resolvedStateRoot, "providers", GOOGLE_FLOW_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_flow.plan_label,
       modelLabel: identity.image_provider_options.google_flow.model_label,
+      expectedConcurrency: flowRuntimeConcurrency,
+      googleScheduling,
     },
     gemini: {
       provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
       path: path.join(resolvedStateRoot, "providers", GOOGLE_GEMINI_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_gemini?.plan_label ?? "Ultra",
       modelLabel: identity.image_provider_options.google_gemini?.model_label ?? "Nano Banana 2",
+      expectedConcurrency: googleScheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY,
+      googleScheduling,
     },
   };
   const runtimeByProvider = new Map([
@@ -1818,6 +1851,8 @@ export async function openWavefrontBrowserImageStream({
       expectedPlanLabel: runtime.planLabel,
       expectedModelLabel: runtime.modelLabel,
       requirePreparedWorkerPool: true,
+      expectedConcurrency: runtime.expectedConcurrency,
+      googleScheduling: runtime.googleScheduling,
     })));
   }
   const bridgeByProvider = new Map([
@@ -2067,7 +2102,10 @@ export async function runHybridBrowserImagePool(flags) {
     HYBRID_CHATGPT_IMAGE_CONCURRENCY,
     Number(flags["chatgpt-electron-concurrency"] ?? HYBRID_CHATGPT_IMAGE_CONCURRENCY),
   ));
-  const flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flags["flow-runtime-concurrency"]);
+  const googleScheduling = googleImageSchedulingForIdentity(identity);
+  const geminiRuntimeConcurrency = googleScheduling?.google_gemini_concurrency ?? GOOGLE_GEMINI_IMAGE_CONCURRENCY;
+  const flowRuntimeConcurrency = validateFlowRuntimeConcurrency(flags["flow-runtime-concurrency"] ?? googleScheduling?.google_flow_concurrency ?? HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY);
+  if (googleScheduling && flowRuntimeConcurrency > googleScheduling.google_flow_concurrency) throw new Error("Flow runtime concurrency exceeds the identity-locked Google image scheduling limit.");
   if ([flowOnly, chatgptOnly, geminiOnly].filter(Boolean).length > 1) throw new Error("--flow-only, --chatgpt-only, and --gemini-only are mutually exclusive.");
   const repairReason = String(flags["repair-reason"] ?? "").trim();
   const repairSharedReferenceIds = validateRepairSharedReferenceScope({
@@ -2120,15 +2158,19 @@ export async function runHybridBrowserImagePool(flags) {
       planLabel: identity.image_provider_options.google_flow.plan_label,
       modelLabel: flowModelOverride || identity.image_provider_options.google_flow.model_label,
       expectedConcurrency: flowRuntimeConcurrency,
+      googleScheduling,
     },
     gemini: {
       provider: GOOGLE_GEMINI_BROWSER_PROVIDER,
       path: path.join(stateRoot, "providers", GOOGLE_GEMINI_BROWSER_PROVIDER, "studio-runtime.json"),
       planLabel: identity.image_provider_options.google_gemini?.plan_label ?? "Ultra",
       modelLabel: identity.image_provider_options.google_gemini?.model_label ?? "Nano Banana 2",
+      expectedConcurrency: geminiRuntimeConcurrency,
+      googleScheduling,
     },
   };
   const checkHostRuntimes = !boolFlag(flags["skip-host-health-check"]);
+  if (googleScheduling && !checkHostRuntimes) throw new Error("Identity-locked Google image scheduling requires live host checks.");
   const bridges = {
     chatgpt: await new GoldflowBridge({
       repoRoot,
@@ -2144,7 +2186,7 @@ export async function runHybridBrowserImagePool(flags) {
     path: identity.image_provider_options.google_flow.health_proof_path,
     sha256: identity.image_provider_options.google_flow.health_proof_sha256,
   };
-  const timeoutMs = Math.max(60_000, Number(flags["timeout-ms"] ?? 6 * 60 * 60_000));
+  const timeoutMs = Math.max(60_000, Number(flags["timeout-ms"] ?? (googleScheduling ? 24 : 6) * 60 * 60_000));
   const promptsPath = path.resolve(flags.prompts ?? path.join(episodeDir, "section_image_prompts_hardened.json"));
   const referencePlanPath = path.resolve(flags["reference-plan"] ?? path.join(episodeDir, "visual_reference_plan.json"));
   const characterStateRefsPath = path.resolve(flags["character-state-refs"] ?? path.join(episodeDir, "character_state_refs.json"));
@@ -2181,15 +2223,15 @@ export async function runHybridBrowserImagePool(flags) {
           : chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY,
         google_flow_concurrency: chatgptOnly || geminiOnly ? 0 : flowRuntimeConcurrency,
         google_flow_profile_max_concurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
-        google_gemini_concurrency: federated || geminiOnly ? GOOGLE_GEMINI_IMAGE_CONCURRENCY : 0,
+        google_gemini_concurrency: federated || geminiOnly ? geminiRuntimeConcurrency : 0,
         total_concurrency: flowOnly
           ? flowRuntimeConcurrency
           : chatgptOnly
             ? (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY)
             : geminiOnly
-              ? GOOGLE_GEMINI_IMAGE_CONCURRENCY
+              ? geminiRuntimeConcurrency
               : federated
-                ? flowRuntimeConcurrency + GOOGLE_GEMINI_IMAGE_CONCURRENCY
+                ? flowRuntimeConcurrency + geminiRuntimeConcurrency
                   + (federatedWebImageAutomaticChatGptEnabled(identity)
                     ? (chatgptElectron ? chatgptElectronConcurrency : HYBRID_CHATGPT_IMAGE_CONCURRENCY)
                     : 0)

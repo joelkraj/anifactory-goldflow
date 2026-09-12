@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomInt } from "node:crypto";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const gateError = (message, code = "google_submit_gate_paused") => Object.assign(new Error(message), { code });
@@ -19,9 +19,12 @@ async function atomicJson(file, value) {
 // One shared directory per Google account, independent of provider and worker tab.
 // A crashed lock fails closed for manual inspection; it never authorizes a re-click.
 export class GoogleSubmitGate {
-  constructor({ directory, intervalMs = 30_000, pollMs = 250 } = {}) {
+  constructor({ directory, intervalMs = 30_000, jitterMaxMs = 0, pollMs = 250, sampleJitter = randomInt } = {}) {
+    if (!Number.isInteger(jitterMaxMs) || jitterMaxMs < 0 || jitterMaxMs > 5_000) throw new Error("Google submit jitter must be an integer from zero through 5000 milliseconds.");
     this.directory = directory;
     this.intervalMs = intervalMs;
+    this.jitterMaxMs = jitterMaxMs;
+    this.sampleJitter = sampleJitter;
     this.pollMs = pollMs;
     this.lockPath = path.join(directory, "submit.lock");
     this.statePath = path.join(directory, "submit-state.json");
@@ -82,12 +85,21 @@ export class GoogleSubmitGate {
           const circuit = await readJson(path.join(this.directory, `${name}-circuit.json`), {});
           if (circuit.blocked_until > Date.now()) throw gateError(`Google account submission paused by ${name} until ${new Date(circuit.blocked_until).toISOString()}: ${circuit.reason}`);
         }
-        waitMs = Math.max(0, (state.next_submit_at ?? 0) - Date.now());
+        const previousClickAt = Date.parse(state.click_finished_at ?? state.attempted_at ?? "");
+        const currentMinimumAt = Number.isFinite(previousClickAt)
+          ? previousClickAt + Math.max(this.intervalMs, state.interval_ms ?? 0) + (state.jitter_ms ?? 0)
+          : 0;
+        // A stricter replacement host must honor its minimum on the first click too.
+        waitMs = Math.max(0, Math.max(state.next_submit_at ?? 0, currentMinimumAt) - Date.now());
         if (waitMs === 0) {
           await assertReady();
           const attemptedAt = Date.now();
-          const spacing = Math.max(this.intervalMs, state.interval_ms ?? 0);
-          const receipt = { provider, job_id: jobId, pid: process.pid, interval_ms: spacing, attempted_at: new Date(attemptedAt).toISOString(), status: "attempting" };
+          const interval = Math.max(this.intervalMs, state.interval_ms ?? 0);
+          const jitterMax = Math.max(this.jitterMaxMs, state.jitter_max_ms ?? 0);
+          const jitter = jitterMax > 0 ? this.sampleJitter(0, jitterMax + 1) : 0;
+          if (!Number.isInteger(jitter) || jitter < 0 || jitter > jitterMax) throw new Error("Invalid Google submit jitter sample.");
+          const spacing = interval + jitter;
+          const receipt = { provider, job_id: jobId, pid: process.pid, interval_ms: interval, jitter_max_ms: jitterMax, jitter_ms: jitter, spacing_ms: spacing, attempted_at: new Date(attemptedAt).toISOString(), status: "attempting" };
           await atomicJson(this.statePath, { ...receipt, next_submit_at: attemptedAt + spacing });
           try {
             await click();

@@ -933,7 +933,6 @@ async function main() {
         episodeDir: initial.episode_dir,
         identity,
         streamId: `visual-wavefront:${identity.channel}:${identity.series_slug}:${identity.week}:${identity.episode}:${identity.stage_registry_version ?? "registry"}${streamScopeSuffix}`,
-        flowRuntimeConcurrency: HYBRID_GOOGLE_FLOW_IMAGE_CONCURRENCY,
       })
     : null;
 

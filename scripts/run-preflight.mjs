@@ -244,6 +244,10 @@ const googleFlowPlan = String(flags["google-flow-plan"] ?? process.env.GOLDFLOW_
 const googleFlowModel = String(flags["google-flow-model"] ?? process.env.GOLDFLOW_FLOW_MODEL ?? DEFAULT_GOOGLE_FLOW_MODEL);
 const googleGeminiPlan = String(flags["google-gemini-plan"] ?? process.env.GOLDFLOW_GEMINI_PLAN ?? DEFAULT_GOOGLE_GEMINI_PLAN);
 const googleGeminiModel = String(flags["google-gemini-model"] ?? process.env.GOLDFLOW_GEMINI_MODEL ?? DEFAULT_GOOGLE_GEMINI_MODEL);
+const googleImageScheduling = String(flags["google-image-scheduling"] ?? "").trim();
+if (googleImageScheduling && !isFederatedWebImageProvider(imageProvider)) {
+  throw new Error("--google-image-scheduling requires the federated_google_web_image_pool provider.");
+}
 const googleFlowHealthProofPath = (isHybridWebFlowProvider(imageProvider) || isGoogleFlowPrimaryProvider(imageProvider) || isFederatedWebImageProvider(imageProvider))
   ? path.resolve(flags["google-flow-health-proof"] ?? process.env.GOLDFLOW_FLOW_HEALTH_PROOF ?? DEFAULT_GOOGLE_FLOW_HEALTH_PROOF_PATH)
   : null;
@@ -706,6 +710,7 @@ function imageProviderOptions(provider) {
       geminiPlan: googleGeminiPlan,
       geminiModel: googleGeminiModel,
       healthProof: googleFlowHealthProof,
+      schedulingPolicy: googleImageScheduling,
     });
   }
   if (isGoogleFlowPrimaryProvider(provider)) {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { googleImageSchedulingForIdentity } from "./google-image-scheduling.mjs";
 
 export const PROVIDER_READINESS_SCHEMA = "goldflow_provider_readiness_v1";
 export const PROVIDER_READINESS_VERSION = "2026-08-27.1";
@@ -81,6 +82,7 @@ function identityProviderSettings(identity, provider) {
 export function providerLaneSpecs(identity, profile, { stateRoot = null } = {}) {
   const readiness = profile?.orchestration?.provider_readiness_gate ?? {};
   if (readiness.required !== true) return [];
+  const scheduling = googleImageSchedulingForIdentity(identity);
   return ["google-flow", "google-gemini"].map((provider) => {
     const base = PROVIDER_LANE_DEFAULTS[provider];
     const settings = identityProviderSettings(identity, provider);
@@ -89,6 +91,13 @@ export function providerLaneSpecs(identity, profile, { stateRoot = null } = {}) 
       ...base,
       ...settings,
       ...paths,
+      ...(scheduling ? {
+        concurrency: provider === "google-flow" ? scheduling.google_flow_concurrency : scheduling.google_gemini_concurrency,
+        worker_types: "image",
+        google_submit_gate_dir: path.join(paths.state_root, "google-account-submit-gate"),
+        google_submit_interval_ms: scheduling.minimum_submit_interval_ms,
+        google_submit_jitter_max_ms: scheduling.submit_jitter_max_ms,
+      } : {}),
       endpoint: `http://127.0.0.1:${base.port}`,
       runtime_freshness_max_ms: Math.max(15_000, Number(
         readiness.worker_runtime_freshness_max_ms ?? 60_000,
@@ -153,6 +162,13 @@ export async function inspectProviderLane(spec, {
   require(workerRuntime?.browser_provider === spec.provider, "worker_provider_mismatch", cleanText(workerRuntime?.browser_provider) || "missing");
   require(processLiveImpl(workerRuntime?.pid), "worker_pid_not_live", String(workerRuntime?.pid ?? "missing"));
   require(Number(workerRuntime?.concurrency) === spec.concurrency, "worker_concurrency_mismatch", `${workerRuntime?.concurrency ?? "missing"} != ${spec.concurrency}`);
+  if (spec.google_submit_gate_dir) {
+    const dispatch = workerRuntime?.dispatch_policy ?? {};
+    require(dispatch.google_submit_gate_dir === spec.google_submit_gate_dir, "google_submit_gate_dir_mismatch", "The identity requires the shared Google account gate.");
+    require(dispatch.google_submit_interval_ms === spec.google_submit_interval_ms, "google_submit_interval_mismatch", "The identity requires its exact minimum submit interval.");
+    require(dispatch.google_submit_jitter_max_ms === spec.google_submit_jitter_max_ms, "google_submit_jitter_mismatch", "The identity requires its exact submit jitter bound.");
+    require(JSON.stringify(workerRuntime?.types) === JSON.stringify(["image"]), "google_image_only_worker_required", "Conservative image hosts must not accept ungated text or video submissions.");
+  }
   require(workerRuntime?.worker_pool?.policy === spec.worker_session_policy, "worker_policy_mismatch", cleanText(workerRuntime?.worker_pool?.policy) || "missing");
   require(preparedPolicies.includes(spec.worker_session_policy), "worker_policy_not_prepared", spec.worker_session_policy);
   const observedSlotIds = readySlots

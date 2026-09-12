@@ -1,3 +1,5 @@
+import { googleImageSchedulingForIdentity } from "./google-image-scheduling.mjs";
+
 export const EPISODE_SIZE_AWARE_FORECAST_POLICY = "episode_size_aware_p50_p90_v1";
 
 const STAGE_TASK_CLASS = Object.freeze({
@@ -114,6 +116,7 @@ function workstream(id, p50, p90, basis) {
 }
 
 export function buildEpisodeProductionForecast({
+  identity = {},
   scriptWordCount = 0,
   narrationDurationMinutes = null,
   requiredStillCount = 0,
@@ -136,7 +139,31 @@ export function buildEpisodeProductionForecast({
   const stills = Math.max(0, Math.round(finiteNumber(requiredStillCount)));
   const references = Math.max(0, Math.round(finiteNumber(referenceCount)));
   const motion = Math.max(0, Math.round(finiteNumber(generatedMotionCount)));
-  const baseImageConcurrency = Math.max(1, Math.round(positiveNumber(imageConcurrency, 8)));
+  const scheduling = googleImageSchedulingForIdentity(identity);
+  const baseImageConcurrency = Math.min(
+    scheduling?.total_concurrency ?? Infinity,
+    Math.max(1, Math.round(positiveNumber(imageConcurrency, 8))),
+  );
+  const submissionWindowMinutes = (count, jitterFraction = 0) => scheduling
+    ? Math.max(0, count - 1)
+      * (scheduling.minimum_submit_interval_ms + scheduling.submit_jitter_max_ms * jitterFraction) / 60_000
+    : 0;
+  const submissionCapacity = scheduling ? {
+    policy_id: scheduling.policy_id,
+    scope: "google_flow_and_google_gemini_combined",
+    minimum_submit_interval_ms: scheduling.minimum_submit_interval_ms,
+    submit_jitter_max_ms: scheduling.submit_jitter_max_ms,
+    maximum_submissions_per_hour: round(3_600_000 / scheduling.minimum_submit_interval_ms),
+    submissions_per_hour_at_maximum_jitter: round(3_600_000
+      / (scheduling.minimum_submit_interval_ms + scheduling.submit_jitter_max_ms)),
+    submissions_per_hour_at_mean_jitter: round(3_600_000
+      / (scheduling.minimum_submit_interval_ms + scheduling.submit_jitter_max_ms / 2)),
+    required_image_submission_count: stills + references,
+    minimum_submission_window_minutes: round(submissionWindowMinutes(stills + references)),
+    mean_jitter_submission_window_minutes: round(submissionWindowMinutes(stills + references, 0.5)),
+    maximum_jitter_submission_window_minutes: round(submissionWindowMinutes(stills + references, 1)),
+    basis: "Spacing-only capacity across both providers; excludes click duration, generation, failures, and other work. Accepted-image throughput can be lower. Stock production SLO is unchanged.",
+  } : null;
   const plannerCeiling = Math.max(1, Math.round(positiveNumber(plannerConcurrency, 8)));
   const plannerInitial = Math.min(
     plannerCeiling,
@@ -179,9 +206,9 @@ export function buildEpisodeProductionForecast({
   );
   const referenceGeneration = workstream(
     "reference_generation",
-    Math.ceil(references / baseImageConcurrency) * 3.2,
-    Math.ceil(references / baseImageConcurrency) * 5.5,
-    `${references} references across ${baseImageConcurrency} image workers`,
+    Math.max(Math.ceil(references / baseImageConcurrency) * 3.2, submissionWindowMinutes(references, 0.5)),
+    Math.max(Math.ceil(references / baseImageConcurrency) * 5.5, submissionWindowMinutes(references, 1)),
+    `${references} references across ${baseImageConcurrency} image workers${scheduling ? "; shared submission spacing included (mean/max jitter floor)" : ""}`,
   );
   const promptPlanning = workstream(
     "prompt_planning",
@@ -191,9 +218,9 @@ export function buildEpisodeProductionForecast({
   );
   const stillGeneration = workstream(
     "still_generation",
-    Math.ceil(stills / effectiveImageConcurrency) * 3.4,
-    Math.ceil(stills / effectiveImageConcurrency) * 5.4,
-    `${stills} cuts at ${round(effectiveImageConcurrency, 2)} failure-adjusted concurrent workers`,
+    Math.max(Math.ceil(stills / effectiveImageConcurrency) * 3.4, submissionWindowMinutes(stills, 0.5)),
+    Math.max(Math.ceil(stills / effectiveImageConcurrency) * 5.4, submissionWindowMinutes(stills, 1)),
+    `${stills} cuts at ${round(effectiveImageConcurrency, 2)} failure-adjusted concurrent workers${scheduling ? "; shared submission spacing included (mean/max jitter floor)" : ""}`,
   );
   const promptImageWavefront = workstream(
     "prompt_image_wavefront",
@@ -273,6 +300,7 @@ export function buildEpisodeProductionForecast({
       reference_count: references,
       generated_motion_count: motion,
       image_concurrency: baseImageConcurrency,
+      ...(scheduling ? { google_image_scheduling: scheduling } : {}),
       effective_image_concurrency: round(effectiveImageConcurrency, 2),
       generated_motion_concurrency: videoConcurrency,
       image_failure_rate_percent: round(failureRate * 100, 2),
@@ -292,6 +320,7 @@ export function buildEpisodeProductionForecast({
         ? Number(stretchTargetMinutes)
         : null,
     },
+    ...(submissionCapacity ? { image_submission_capacity: submissionCapacity } : {}),
     workstreams: [...automatedRows, checkpoints],
     observed_stage_latency: stageLatency,
     confidence: stageLatency?.by_stage?.length >= 5 ? "measured_plus_baseline" : "baseline",

@@ -512,6 +512,11 @@ export function renderRunPerformanceAuditMarkdown(report) {
       `- Total p50: ${forecast.forecast.total_p50_minutes} minutes`,
       `- Total p90: ${forecast.forecast.total_p90_minutes} minutes`,
       `- Stretch target: ${forecast.forecast.stretch_target_minutes ?? "none"} minutes`,
+      ...(forecast.image_submission_capacity ? [
+        `- Shared Google submission capacity: at most ${forecast.image_submission_capacity.maximum_submissions_per_hour}/hour; ${forecast.image_submission_capacity.submissions_per_hour_at_maximum_jitter}/hour at maximum jitter, before generation and failures.`,
+        `- Submission spacing alone: at least ${forecast.image_submission_capacity.minimum_submission_window_minutes} minutes for ${forecast.image_submission_capacity.required_image_submission_count} reference and scene submissions.`,
+        `- ${forecast.image_submission_capacity.basis}`,
+      ] : []),
       "",
       "| Workstream | p50 min | p90 min | Basis |",
       "| --- | ---: | ---: | --- |",

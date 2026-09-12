@@ -81,6 +81,7 @@ export class GoldflowDesktopHost {
     this.googleSubmitGate = config.browserProvider.startsWith("google-") ? new GoogleSubmitGate({
       directory: config.googleSubmitGateDir,
       intervalMs: config.googleSubmitIntervalMs,
+      jitterMaxMs: config.googleSubmitJitterMaxMs,
     }) : null;
     this.activeJobs = new Map();
     this.events = [];
@@ -141,6 +142,7 @@ export class GoldflowDesktopHost {
         submission_stagger_ms: this.config.submissionStaggerMs,
         google_submit_gate_dir: this.googleSubmitGate?.directory ?? null,
         google_submit_interval_ms: this.googleSubmitGate?.intervalMs ?? null,
+        google_submit_jitter_max_ms: this.googleSubmitGate?.jitterMaxMs ?? null,
         submission_burst_size: this.config.submissionBurstSize,
         submission_burst_count: this.submissionBurstCount,
         submission_burst_cooldown_ms: this.config.submissionBurstCooldownMs,

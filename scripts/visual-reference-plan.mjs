@@ -1655,6 +1655,78 @@ export function buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlan
   };
 }
 
+function readablePromptLineTable(lines, firstField, fieldOrder) {
+  const rows = lines.map((line) => {
+    const parts = String(line).split(" | ");
+    const row = { [firstField]: parts.shift() };
+    for (const part of parts) {
+      const separator = part.indexOf("=");
+      const field = part.slice(0, separator);
+      if (separator < 1 || !fieldOrder.includes(field) || Object.hasOwn(row, field)) {
+        throw new Error(`Cannot losslessly table reference-director line field ${field}`);
+      }
+      row[field] = part.slice(separator + 1);
+    }
+    const reconstructed = fieldOrder.filter((field) => Object.hasOwn(row, field))
+      .map((field) => field === firstField ? row[field] : `${field}=${row[field]}`).join(" | ");
+    if (reconstructed !== line) throw new Error("Cannot losslessly table reference-director line order");
+    return row;
+  });
+  const allFields = fieldOrder.filter((field) => rows.some((row) => Object.hasOwn(row, field)));
+  return { all_fields: allFields, ...compactPromptTableForTests(rows, allFields) };
+}
+
+// A size-only fallback: values remain readable strings, never numeric dictionary
+// codes. Full local candidate catalogs and the director's selection are untouched.
+export function compactReferenceDirectorMergePayloadsForTests(candidateCards, evidenceLedger) {
+  const targetLines = candidateCards.cards.flatMap((card) => card.target_candidate_lines);
+  const stateLines = [
+    ...candidateCards.cards.flatMap((card) => card.character_state_candidate_lines),
+    ...candidateCards.unlinked_character_state_candidates,
+  ];
+  const targetTable = readablePromptLineTable(targetLines, "candidate_ids", [
+    "candidate_ids", "ref", "scenes", "beats", "uses", "priority", "mode", "required", "states", "bases", "construction",
+  ]);
+  const stateTable = readablePromptLineTable(stateLines, "candidate_ids", [
+    "candidate_ids", "state_ref", "source_targets", "bases", "usage", "scene_overrides", "scenes",
+  ]);
+  const { rows: targetRows, ...targetFormat } = targetTable;
+  const { rows: stateRows, ...stateFormat } = stateTable;
+  let targetOffset = 0;
+  let stateOffset = 0;
+  const cards = candidateCards.cards.map((card) => {
+    const targetCount = card.target_candidate_lines.length;
+    const stateCount = card.character_state_candidate_lines.length;
+    const row = {
+      ...card,
+      target_candidate_lines: targetRows.slice(targetOffset, targetOffset + targetCount),
+      character_state_candidate_lines: stateRows.slice(stateOffset, stateOffset + stateCount),
+    };
+    targetOffset += targetCount;
+    stateOffset += stateCount;
+    return row;
+  });
+  return {
+    candidateCards: {
+      ...candidateCards,
+      schema: "goldflow_reference_director_candidate_card_tables_v2",
+      source_schema: candidateCards.schema,
+      target_candidate_line_format: targetFormat,
+      character_state_candidate_line_format: stateFormat,
+      cards: compactPromptTableForTests(cards, cards.length ? Object.keys(cards[0]) : []),
+      unlinked_character_state_candidates: stateRows.slice(stateOffset),
+    },
+    evidenceLedger: {
+      ...evidenceLedger,
+      schema: "goldflow_reference_director_evidence_rows_v1",
+      source_schema: evidenceLedger.schema,
+      asset_lines: readablePromptLineTable(evidenceLedger.asset_lines, "asset_id", [
+        "asset_id", "kind", "subject", "entity", "scenes", "beats", "span_sec", "canonical",
+      ]),
+    },
+  };
+}
+
 function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
@@ -1766,7 +1838,10 @@ function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedg
     ...buildReferenceDirectorCandidateCardsForTests(normalizedChunkPlans),
     chunk_warning_summary: [...warningSummaryByCode.values()],
   };
-  const prompt = `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
+  const evidencePayload = compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, {
+    maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320),
+  });
+  let prompt = `Merge chunked visual reference strategy outputs into one coherent episode-level visual reference plan.
 
 CONTENT PROFILE: ${contentProfile.id}
 ${plannerDirective || "- Preserve recurring visual identity and physical continuity from the locked narration."}
@@ -1836,7 +1911,7 @@ VISUAL BIBLES AND OPERATOR DIRECTION:
 ${visualMergeGuidanceBlock(guidance)}
 
 REFERENCE EVIDENCE LEDGER:
-${compactPromptJsonForTests(compactReferenceEvidenceLedgerForDirectorCardsForTests(inventoryLedger, { maxAssets: Number(flags["visual-ref-merge-ledger-max-assets"] ?? 320) }))}
+${compactPromptJsonForTests(evidencePayload)}
 
 LOCATION CONTRACT LEDGER:
 ${compactPromptJsonForTests(compactLocationContractLedgerForDirectorCardsForTests(locationContractLedger))}
@@ -1862,6 +1937,16 @@ Return:
   "character_state_overrides": {},
   "warnings": []
 }`;
+  if (Buffer.byteLength(prompt, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
+    const compacted = compactReferenceDirectorMergePayloadsForTests(candidateCardPayload, evidencePayload);
+    prompt = prompt
+      .replace(`REFERENCE EVIDENCE LEDGER:\n${compactPromptJsonForTests(evidencePayload)}`,
+        `REFERENCE EVIDENCE LEDGER:\n${compactPromptJsonForTests(compacted.evidenceLedger)}`)
+      .replace(`CANDIDATE CARDS:\n${compactPromptJsonForTests(candidateCardPayload)}`,
+        `CANDIDATE CARDS:\n${compactPromptJsonForTests(compacted.candidateCards)}`)
+      .replace("- CANDIDATE CARDS are plain-language evidence, not encoded dictionaries.",
+        "- CANDIDATE CARDS and evidence use lossless plain-value tables: fields names each row column; constants apply to every row; null means that optional field is absent. Nested target/state rows use their named line_format. all_fields records original label order. Values are literal text and IDs, never dictionary indexes.");
+  }
   return {
     prompt,
     candidateCatalog: {

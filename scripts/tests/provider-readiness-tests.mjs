@@ -70,6 +70,47 @@ for (const spec of specs) {
   assert.equal(lane.findings.length, 0);
 }
 
+// Ready slots may retain the legacy Flow workspace or use the current domain.
+// A homepage, lookalike host, or missing project id is not a prepared workspace.
+for (const [projectUrl, expectedReady] of [
+  ["https://labs.google/fx/tools/flow/project/worker-1", true],
+  ["https://labs.google/fx/tools/flow/project/worker-1/edit", true],
+  ["https://flow.google.com/project/worker-1", true],
+  ["https://flow.google.com/project/worker-1/edit", true],
+  ["https://flow.google.com/", false],
+  ["https://flow.google.com/project/", false],
+  ["https://labs.google/fx/tools/flow/project/", false],
+  ["https://flow.google.com/unrelated/project/worker-1", false],
+  ["https://flow.google.com.evil.example/project/worker-1", false],
+  ["https://flow.google.com@evil.example/project/worker-1", false],
+  ["http://flow.google.com/project/worker-1", false],
+  ["not a URL", false],
+]) {
+  const spec = specs[0];
+  const lane = await inspectProviderLane(spec, {
+    readJsonImpl: async (filePath) => {
+      const value = passedRuntime(spec, filePath);
+      if (filePath === spec.worker_runtime_path) {
+        value.worker_pool.ready_slots = value.worker_pool.ready_slots.map((row) => ({
+          ...row,
+          project_url: projectUrl,
+        }));
+      }
+      return value;
+    },
+    processLiveImpl: () => true,
+    fetchHealthImpl: async () => ({
+      status: "ok",
+      service: "goldflow-studio",
+      browser_provider: spec.provider,
+      ui_contract: { account_plan: spec.plan_label, model_label: spec.model_label },
+    }),
+    nowMs,
+  });
+  assert.equal(lane.status, expectedReady ? "passed" : "blocked", projectUrl);
+  assert.deepEqual(lane.findings.map((row) => row.code), expectedReady ? [] : ["worker_slot_surface_not_ready"], projectUrl);
+}
+
 const blockedGemini = await inspectProviderLane(specs[1], {
   readJsonImpl: async (filePath) => passedRuntime(specs[1], filePath),
   processLiveImpl: () => true,

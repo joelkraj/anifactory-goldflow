@@ -189,7 +189,8 @@ export async function inspectProviderLane(spec, {
     try {
       const url = new URL(surface);
       return spec.provider === "google-flow"
-        ? url.origin === "https://labs.google" && /\/fx\/tools\/flow\/project\//.test(url.pathname)
+        ? (url.origin === "https://labs.google" && /^\/fx\/tools\/flow\/project\/[^/]+(?:\/|$)/.test(url.pathname))
+          || (url.origin === "https://flow.google.com" && /^\/project\/[^/]+(?:\/|$)/.test(url.pathname))
         : url.origin === "https://gemini.google.com" && /^\/images(?:[/?#]|$)/.test(url.pathname);
     } catch {
       return false;

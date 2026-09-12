@@ -62,6 +62,7 @@ import { equivalentPhrasesForTests } from "./narration-tts-episode.mjs";
 import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs";
 import { prepareOpeningNarrationFinalization, validateOpeningFinalizationFlags } from "./lib/narration-opening-finalization.mjs";
 import { prepareFullPilotNarrationFinalization } from "./lib/narration-full-pilot-finalization.mjs";
+import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1136,6 +1137,12 @@ export async function finalizeNarrationProviderOutput(
   if (sourceScriptHash(plan) && actualSourceScriptSha256 !== sourceScriptHash(plan)) {
     throw new Error("Narration plan source hash differs from the actual approved script.");
   }
+  const sourceStructure = !phaseContext ? await loadNarrationSourceStructure({
+    episodeDir, episode, plan,
+    sourceScriptSha256: actualSourceScriptSha256,
+    generationPlanSha256: canonicalPlanSha256,
+    generationPlanFileSha256: planFileSha256,
+  }) : null;
   const preparePilotPhase = phaseContext?.phase === "full_pilot" ? prepareFullPilotNarrationFinalization : prepareOpeningNarrationFinalization;
   const pilotFinalization = phaseContext ? await preparePilotPhase({
     phaseContext, episodeDir, identityPath, identity, scriptPath, planPath, plan, manifestPath, manifest, policy, flags,
@@ -2049,6 +2056,7 @@ export async function finalizeNarrationProviderOutput(
       generationPlanFileSha256: planFileSha256,
       qualityContractSha256: qualityContract.contract_sha256,
       sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
+      sourceStructure,
     });
     if (pilotFinalization) {
       subjectiveManifest.finalization_scope = pilotFinalization.scope;

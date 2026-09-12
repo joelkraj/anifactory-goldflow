@@ -34,6 +34,7 @@ import {
 } from "./lib/image-provider-policy.mjs";
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
+import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
@@ -3040,6 +3041,22 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         readJson(subjectiveManifestPath, null),
         readJson(subjectiveDecisionPath, null),
       ]);
+      try {
+        await loadNarrationSourceStructure({
+          episodeDir, episode, plan,
+          sourceScriptSha256: currentScriptHash,
+          generationPlanSha256: plan?.plan_sha256 ?? planFileSha256,
+          generationPlanFileSha256: planFileSha256,
+          expectedBinding: subjectiveManifest?.source_structure ?? null,
+        });
+      } catch (error) {
+        return {
+          done: false,
+          state: "blocked",
+          evidence: `Narration source-structure review provenance failed: ${error.message}`,
+          next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}`,
+        };
+      }
       const subjectiveValidation = validateNarrationSubjectiveReviewManifest(
         subjectiveManifest,
       );

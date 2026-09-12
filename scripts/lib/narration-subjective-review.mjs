@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertNarrationSourceStructure, narrationSourceChapterStarts, narrationSourceStructureSha256 } from "./narration-source-structure.mjs";
 
 export const NARRATION_SUBJECTIVE_REVIEW_MANIFEST_SCHEMA =
   "goldflow_narration_subjective_review_manifest_v1";
@@ -215,6 +216,7 @@ export function buildNarrationSubjectiveReviewManifest({
   generationPlanFileSha256,
   qualityContractSha256,
   sampleRateHz = 24000,
+  sourceStructure = null,
 } = {}) {
   const { rows: timeline, total_sample_count: totalSamples, duration_sec: durationSec } =
     narrationUnitTimeline({ plan, stitch, sampleRateHz });
@@ -233,25 +235,49 @@ export function buildNarrationSubjectiveReviewManifest({
     timeline,
   }));
 
+  let explicitChapterStarts = null;
+  if (sourceStructure) {
+    if (!sourceStructure.path || !/^[a-f0-9]{64}$/.test(String(sourceStructure.file_sha256 ?? ""))) {
+      throw new Error("Narration source structure requires its sidecar path and file hash.");
+    }
+    assertNarrationSourceStructure(sourceStructure.map, {
+      plan,
+      sourceScriptSha256: plan.source_script_hash ?? plan.source_hashes?.script_clean_sha256,
+      generationPlanSha256,
+      generationPlanFileSha256,
+    });
+    explicitChapterStarts = new Map(narrationSourceChapterStarts(sourceStructure.map, plan)
+      .slice(1).map((chapter) => [String(chapter.unit_id), chapter]));
+  }
   let chapterIndex = 0;
+  let observedVoiceTransitions = 0;
   for (let index = 1; index < timeline.length; index += 1) {
     const previous = timeline[index - 1];
     const current = timeline[index];
-    if (!previous.segment_id || previous.segment_id === current.segment_id) continue;
+    const voiceTransition = Boolean(previous.segment_id && previous.segment_id !== current.segment_id);
+    if (voiceTransition) observedVoiceTransitions += 1;
+    const declaredChapter = explicitChapterStarts?.get(current.unit_id);
+    if (explicitChapterStarts ? !declaredChapter : !voiceTransition) continue;
     chapterIndex += 1;
     const boundarySample = previous.end_sample_exclusive;
     add(sampleRow({
       id: `subjective_chapter_boundary_${String(chapterIndex).padStart(3, "0")}`,
       coverageClass: "every_chapter_boundary",
-      description: `Chapter transition ${previous.segment_id} to ${current.segment_id}.`,
+      description: declaredChapter
+        ? `Declared narrative chapter ${declaredChapter.chapter_id} begins at ${declaredChapter.first_source_ref_key}.`
+        : `Chapter transition ${previous.segment_id} to ${current.segment_id}.`,
       startSample: boundarySample - seconds(8),
       endSample: boundarySample + seconds(8),
       totalSamples,
       sampleRateHz,
       timeline,
       boundaryIds: [previous.boundary_after_id],
-      evidence: { from_segment_id: previous.segment_id, to_segment_id: current.segment_id },
+      evidence: { from_segment_id: previous.segment_id, to_segment_id: current.segment_id,
+        ...(declaredChapter ? { chapter_id: declaredChapter.chapter_id, first_source_ref_key: declaredChapter.first_source_ref_key } : {}) },
     }));
+  }
+  if (explicitChapterStarts && chapterIndex !== explicitChapterStarts.size) {
+    throw new Error("Declared narrative chapter starts are missing from the canonical narration timeline.");
   }
 
   let riskIndex = 0;
@@ -326,6 +352,11 @@ export function buildNarrationSubjectiveReviewManifest({
     required_coverage: [...NARRATION_SUBJECTIVE_REVIEW_COVERAGE],
     coverage,
     expected_chapter_boundary_count: chapterIndex,
+    ...(sourceStructure ? {
+      chapter_boundary_policy: "explicit_source_structure_v1",
+      source_structure: sourceStructure,
+      observed_voice_segment_transition_count: observedVoiceTransitions,
+    } : {}),
     expected_system_or_pronunciation_risk_count: riskIndex,
     sample_count: samples.length,
     samples,
@@ -342,6 +373,22 @@ export function validateNarrationSubjectiveReviewManifest(manifest, {
   if (manifest?.manifest_sha256 !== narrationSubjectiveReviewManifestSha256(manifest)) findings.push({ code: "narration_subjective_manifest_hash_invalid" });
   if (!manifest?.audio_path || !/^[a-f0-9]{64}$/u.test(String(manifest?.audio_sha256 ?? ""))) findings.push({ code: "narration_subjective_audio_binding_invalid" });
   const samples = Array.isArray(manifest?.samples) ? manifest.samples : [];
+  if (manifest?.source_structure || manifest?.chapter_boundary_policy === "explicit_source_structure_v1") {
+    const binding = manifest.source_structure;
+    const map = binding?.map;
+    const expected = map?.structure_kind === "continuous_narrative" ? [] : (map?.chapters ?? []).slice(1);
+    const actual = samples.filter((row) => row.coverage_class === "every_chapter_boundary");
+    if (!binding?.path || !/^[a-f0-9]{64}$/.test(String(binding?.file_sha256 ?? ""))
+      || map?.structure_sha256 !== narrationSourceStructureSha256(map)
+      || map?.narration_generation_plan_sha256 !== manifest.narration_generation_plan_sha256
+      || map?.narration_generation_plan_file_sha256 !== manifest.narration_generation_plan_file_sha256
+      || manifest.chapter_boundary_policy !== "explicit_source_structure_v1"
+      || Number(manifest.expected_chapter_boundary_count) !== expected.length
+      || JSON.stringify(actual.map((row) => [row.evidence?.chapter_id, row.evidence?.first_source_ref_key]))
+        !== JSON.stringify(expected.map((row) => [row.chapter_id, row.first_source_ref_key]))) {
+      findings.push({ code: "narration_subjective_source_structure_invalid" });
+    }
+  }
   if (!samples.length || Number(manifest?.sample_count ?? -1) !== samples.length) findings.push({ code: "narration_subjective_samples_missing" });
   if (new Set(samples.map((row) => row.sample_id)).size !== samples.length) findings.push({ code: "narration_subjective_sample_ids_duplicated" });
   for (const row of samples) {

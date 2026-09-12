@@ -295,6 +295,16 @@ Current migrated scope is source ingest, script approval, targeted speakability,
 - New runs on supported packaging routes require `upload_packaging_<episode>.md`, an approved `youtube_packaging_spec_<episode>.json`, and the finished thumbnail before `goldflow youtube prepare` may bind the exact final video and package into `youtube_publish_manifest_<episode>.json`. New workflow-locked non-manhwa profiles remain blocked pending their adapter. When two or three strong truthful packages remain, hash-approve native YouTube A/B candidates before prepare and verify the configured native experiment after upload. Use the `youtube-studio-publish` Chrome workflow to verify the channel, upload private first, fill and inspect every field, and record hash-bound upload and A/B receipts. Public/scheduled release and posting/pinning the exact manifest comment each require explicit action-time approval. Never store credentials, cookies, or browser session state in episode artifacts.
 
 
+Narration source-structure review is separate from the per-voice-segment prosody spine. After a passed voice plan, an operator or agent who has inspected the exact approved source may record continuous narration with no declared chapters:
+
+```sh
+node bin/goldflow.mjs tts source-structure --episode-dir <episode-dir> --kind continuous_narrative --reviewer <name> --note "Reviewed the exact source; it is continuous narration without declared chapters." --attestation source_narrative_structure_reviewed
+```
+
+For real chapters, use `--kind explicit_chapters --chapters <json-file>` with an ordered array of `{ "chapter_id": "chapter_1", "first_source_ref_key": "voice_seg_01:u001" }` entries, including the first chapter. Each anchor must identify the first source reference of an existing synthesis unit; an interior or ambiguous anchor is rejected. Do not infer chapters from voice-segment IDs, length, paragraphs, or prosody rows.
+
+The immutable `narration_source_structure_<episode>.json` sidecar binds the source, canonical plan, and plan-file hashes. Finalization discovers it automatically and records declared chapter boundaries separately from observed technical voice transitions. Without a sidecar, historical sampling remains unchanged; an invalid or stale sidecar blocks. Opening, midpoint, climax, final-minute, pronunciation/system-risk samples and exact delivery/join review packets remain required. The command changes no plan, request, or audio. If a sidecar is added after a sample manifest was emitted, `tts finalize-provider` refreshes that manifest using retained finalization checkpoints; the prior listening decision becomes stale. Source-map changes or deletion also invalidate its bound review and require scoped triage.
+
 ## Current Production Models And Methods
 
 - Source: polished narration prose from the operator/chatbot, with exact-hash script approval.

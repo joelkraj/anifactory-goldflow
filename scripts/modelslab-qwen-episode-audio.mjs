@@ -1756,19 +1756,25 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_contraction_v1";
+
 function rawTranscriptTokens(value) {
   return (transcriptInputText(value)
+    .normalize("NFC")
     .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1$2")
     .replace(/\b(\d{1,3}),?\s+(?=\d{3}\b)/g, "$1")
     .replace(/\bI['’]d\s+not\b/gi, "I did not")
+    // Comparison equivalence only: preserve the source and recognized text.
+    // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
+    .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
-    .replace(/([A-Za-z])[-‐‑‒–—]([A-Za-z])/gu, "$1 $2")
-    .match(/[+-]?\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|[A-Za-z]+(?:['’][A-Za-z]+)?\.?|[/%]/g) ?? [])
+    .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
+    .match(/[+-]?\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?\.?|[/%]/gu) ?? [])
     .map((raw) => {
       const lower = raw.toLowerCase();
       if (lower === "st.") return "saint";
       if (/^[+-]?\d/.test(lower) || lower === "/" || lower === "%") return lower.replaceAll(",", "");
-      return lower.replace(/[.'’]/g, "").replace(/[^a-z0-9]+/g, "");
+      return lower.replace(/[.'’]/g, "").replace(/[^\p{L}\p{M}0-9]+/gu, "");
     })
     .filter(Boolean);
 }
@@ -2110,6 +2116,7 @@ function transcriptQa(intendedText, recognizedText, {
     });
   }
   return {
+    comparison_version: TRANSCRIPT_QA_COMPARISON_VERSION,
     intended_word_count: intendedRaw.length,
     recognized_word_count: recognizedRaw.length,
     intended_canonical_token_count: intended.length,

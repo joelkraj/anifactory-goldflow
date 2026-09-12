@@ -821,6 +821,7 @@ export async function runFullStreamDeliveryQa({
   stitch,
   workDir,
   localWhisperContract,
+  retainedEvidence = null,
 }) {
   const intendedText = units.map((unit) => (
     String(unit.spoken_text ?? unit.tts_spoken_text ?? "").trim()
@@ -829,16 +830,21 @@ export async function runFullStreamDeliveryQa({
     ?? "small.en";
   const confirmationModel = qualityContract.delivery_qa.full_stream_confirmation_model
     ?? "medium";
+  const priorConfirmationEvidence = [
+    ...(retainedEvidence?.retained_confirmation_evidence ?? []),
+    ...(retainedEvidence?.confirmation_windows ?? []),
+  ];
   if (primaryModel !== localWhisperContract.model) {
     throw new Error(
       `Full-stream screening model ${primaryModel} does not match the locked `
       + `official timing model ${localWhisperContract.model}.`,
     );
   }
-  const primary = await runFasterWhisperForDiagnostics(
-    audioPath,
-    localWhisperContract,
-  );
+  // The caller admits retained evidence only for the same full-stream input
+  // key and verified window audio hashes. A comparator revision invalidates
+  // derived decisions, not the unchanged recognizer output.
+  const primary = retainedEvidence?.primary_transcription
+    ?? await runFasterWhisperForDiagnostics(audioPath, localWhisperContract);
   const equivalentPhrases = units.flatMap((unit) => equivalentPhrasesForTests(unit));
   const primaryTranscriptQa = primary
     ? helpers.transcriptQaForTests(intendedText, primary.text, {
@@ -907,6 +913,9 @@ export async function runFullStreamDeliveryQa({
     } else {
       const windowDir = path.join(workDir, "full-stream-confirmation-windows");
       const materialized = [];
+      const retainedWindows = new Map(priorConfirmationEvidence
+        .map((window) => [window.binding_sha256, window]));
+      const cachedConfirmations = new Map();
       for (const window of windowPlan.windows) {
         const bindingSha256 = sha256(JSON.stringify({
           source_audio_sha256: audioSha256,
@@ -920,28 +929,41 @@ export async function runFullStreamDeliveryQa({
           windowDir,
           `${window.window_id}-${bindingSha256.slice(0, 12)}.wav`,
         );
-        const audio = await extractConfirmationWindow({
+        const retained = retainedWindows.get(bindingSha256);
+        const audio = retained ?? await extractConfirmationWindow({
           audioPath,
           outputPath,
           startSample: window.start_sample,
           endSampleExclusive: window.end_sample_exclusive,
           sampleRateHz: CANONICAL_SAMPLE_RATE_HZ,
         });
+        if (retained?.confirmation_recognized_text != null
+          && (retained.confirmation_model ?? retainedEvidence.confirmation_model) === confirmationModel) {
+          cachedConfirmations.set(window.window_id, {
+            text: retained.confirmation_recognized_text,
+            words: retained.confirmation_recognized_words ?? [],
+          });
+        }
         materialized.push({
-          ...window,
           ...audio,
+          ...window,
           source_audio_path: audioPath,
           source_audio_sha256: audioSha256,
           binding_sha256: bindingSha256,
         });
       }
-      const confirmationMap = await helpers.runFasterWhisperUnitBatchForDiagnostics(
-        materialized.map((window) => ({
-          unit_id: window.window_id,
-          wav: window.audio_path,
-        })),
-        { model: confirmationModel, device: "cpu", computeType: "int8_float32" },
-      );
+      const needsConfirmation = materialized.filter((window) => (
+        !cachedConfirmations.has(window.window_id)
+      ));
+      const freshConfirmations = needsConfirmation.length
+        ? await helpers.runFasterWhisperUnitBatchForDiagnostics(
+            needsConfirmation.map((window) => ({
+              unit_id: window.window_id,
+              wav: window.audio_path,
+            })),
+            { model: confirmationModel, device: "cpu", computeType: "int8_float32" },
+          ) : new Map();
+      const confirmationMap = new Map([...cachedConfirmations, ...freshConfirmations]);
       confirmationWindows = materialized.map((window) => {
         const startSec = window.start_sample / CANONICAL_SAMPLE_RATE_HZ;
         const endSec = window.end_sample_exclusive / CANONICAL_SAMPLE_RATE_HZ;
@@ -991,6 +1013,7 @@ export async function runFullStreamDeliveryQa({
           primary_transcript_qa: primaryQa,
           confirmation_recognized_text: confirmation?.text ?? null,
           confirmation_recognized_words: confirmation?.words ?? [],
+          confirmation_model: confirmationModel,
           confirmation_transcript_qa: confirmationQa,
           decision: windowDecision,
         };
@@ -1015,6 +1038,7 @@ export async function runFullStreamDeliveryQa({
     });
   }
   return {
+    transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     intended_text: intendedText,
     intended_text_sha256: sha256(intendedText),
     primary_model: primaryModel,
@@ -1038,6 +1062,18 @@ export async function runFullStreamDeliveryQa({
     confirmation_transcript_qa: null,
     confirmation_window_plan: windowPlan,
     confirmation_windows: confirmationWindows,
+    // Retire obsolete comparison scopes without deleting the raw ASR evidence
+    // or letting their old decisions influence current QA.
+    retained_confirmation_evidence: [...new Map(priorConfirmationEvidence
+      .filter((window) => !confirmationWindows.some((current) => (
+        current.binding_sha256 === window.binding_sha256
+      )))
+      .map((window) => {
+        const { primary_transcript_qa: _primaryQa, confirmation_transcript_qa: _confirmationQa,
+          decision: _decision, ...raw } = window;
+        return [window.binding_sha256, { ...raw,
+          confirmation_model: window.confirmation_model ?? retainedEvidence.confirmation_model }];
+      })).values()],
     decision,
   };
 }
@@ -1482,19 +1518,19 @@ export async function finalizeNarrationProviderOutput(
       contract: qualityContract,
     });
     primaryById.set(String(row.unit_id), { recognized, transcriptQa, decision });
+    const cached = reusableNarrationFinalizationUnit(
+      checkpoint,
+      row.unit_id,
+      row.finalization_unit_key,
+    );
+    // Keep the raw confirmation even when a comparison repair removes the
+    // need for it. It remains evidence; only the decision is recomputed.
+    if (cached?.confirmation_recognition) {
+      cachedConfirmationMap.set(String(row.unit_id), cached.confirmation_recognition);
+    }
     if (narrationDeliveryNeedsConfirmation(transcriptQa, decision)) {
       confirmationRequiredIds.add(String(row.unit_id));
-      const cached = reusableNarrationFinalizationUnit(
-        checkpoint,
-        row.unit_id,
-        row.finalization_unit_key,
-      );
-      if (cached?.confirmation_recognition) {
-        cachedConfirmationMap.set(
-          String(row.unit_id),
-          cached.confirmation_recognition,
-        );
-      } else {
+      if (!cached?.confirmation_recognition) {
         confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
       }
     }
@@ -1740,6 +1776,7 @@ export async function finalizeNarrationProviderOutput(
   const unitDeliveryArtifact = {
     ...lowMarginProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
+    transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
     status: blockers.length
       ? "blocked"
       : listenPacket.item_count ? "passed_with_warnings" : "passed",
@@ -2140,14 +2177,17 @@ export async function finalizeNarrationProviderOutput(
   let cachedFullStream = cachedFullStreamStage?.payload?.full_stream ?? null;
   if (cachedFullStream) {
     const confirmationEvidenceValid = (await Promise.all(
-      (cachedFullStream.confirmation_windows ?? []).map((window) => (
+      [...(cachedFullStream.confirmation_windows ?? []),
+        ...(cachedFullStream.retained_confirmation_evidence ?? [])].map((window) => (
         fileMatchesSha256(window.audio_path, window.audio_sha256)
       )),
     )).every(Boolean);
     if (!confirmationEvidenceValid) cachedFullStream = null;
   }
-  const rawFullStream = cachedFullStream
-    ?? await runFullStreamDeliveryQa({
+  const rawFullStream = cachedFullStream?.transcript_comparison_version
+      === helpers.TRANSCRIPT_QA_COMPARISON_VERSION
+    ? cachedFullStream
+    : await runFullStreamDeliveryQa({
       helpers,
       audioPath: canonicalWav,
       audioSha256: canonicalWavSha256,
@@ -2158,6 +2198,7 @@ export async function finalizeNarrationProviderOutput(
       stitch,
       workDir,
       localWhisperContract: officialLocalWhisperContract,
+      retainedEvidence: cachedFullStream,
     });
   checkpoint.stages.full_stream_delivery_qa = {
     input_key: fullStreamInputKey,
@@ -2209,6 +2250,7 @@ export async function finalizeNarrationProviderOutput(
   const fullStreamArtifact = {
     ...scopeFields,
     schema: "goldflow_narration_full_stream_qa_v2",
+    transcript_comparison_version: fullStream.transcript_comparison_version,
     status: fullStream.decision.status,
     source_script_hash: sourceScriptHash(plan),
     narration_generation_plan_path: planPath,
@@ -2232,6 +2274,7 @@ export async function finalizeNarrationProviderOutput(
     confirmation_transcript_qa: fullStream.confirmation_transcript_qa,
     confirmation_window_plan: fullStream.confirmation_window_plan,
     confirmation_windows: fullStream.confirmation_windows,
+    retained_confirmation_evidence: fullStream.retained_confirmation_evidence ?? [],
     primary_alignment_contract: fullStream.primary_alignment_contract,
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,

@@ -35,6 +35,7 @@ import {
 import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-pool.mjs";
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
+import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
@@ -2846,6 +2847,16 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     readJson(ttsReportPath, null),
     readJson(stitchReportPath, null),
   ]);
+  // A new or removed policy receipt invalidates only derived review decisions,
+  // never the retained synthesis. Re-finalization reuses exact QA checkpoints.
+  try {
+    await loadLowMarginDisposition({ episodeDir, episode,
+      expectedBinding: ttsReport?.voice_low_margin_disposition ?? null });
+  } catch (error) {
+    return { done: false, state: "blocked",
+      evidence: `Narration low-margin disposition provenance requires review refresh: ${error.message}`,
+      next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}` };
+  }
   if (!ttsReport) {
     if (EXTERNAL_NARRATION_TTS_PROVIDERS.includes(policy.primary?.provider)) {
       const providerOutputPath = path.join(
@@ -2930,6 +2941,13 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
       },
     );
     const v2Findings = [];
+    try {
+      await loadLowMarginDisposition({ episodeDir, episode,
+        expectedBinding: unitDelivery?.voice_low_margin_disposition ?? null });
+    } catch (error) {
+      return { done: false, state: "blocked", evidence: `Narration low-margin delivery binding is stale: ${error.message}`,
+        next_command_shape: `node bin/goldflow.mjs tts finalize-provider --episode-dir ${episodeDir}` };
+    }
     if (!qaStatusPassed(unitDelivery?.status)
       || unitDelivery?.quality_contract_sha256
         !== narrationQualityContract.contract_sha256
@@ -4515,7 +4533,7 @@ async function main() {
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
-      && /tts (?:approve-listen|narrate)\b/.test(String(next.next_command_shape ?? ""))
+      && /tts (?:approve-listen|narrate|finalize-provider)\b/.test(String(next.next_command_shape ?? ""))
       ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"

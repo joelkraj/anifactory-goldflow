@@ -121,6 +121,7 @@ const stages = [
       /^qwen_tts_unit_qa_.*\.json$/,
       /^audio_stitch_report_.*\.json$/,
       /^narration_source_structure_.*\.json$/,
+      /^narration_low_margin_disposition_.*\.json$/,
     ],
     commands: [
       "tts narrate",
@@ -128,6 +129,7 @@ const stages = [
       "tts finalize-provider",
       "tts approve-listen",
       "tts source-structure",
+      "tts low-margin-disposition",
       "tts qwen",
     ],
   },

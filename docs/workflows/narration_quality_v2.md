@@ -158,6 +158,8 @@ The locked delivery ceiling is 0.05 WER. `small.en` screens units and the full s
 
 Voice continuity is calibrated against at least three owned reference clips with leave-one-out thresholds. Universal cosine thresholds and automatic voice switching are forbidden.
 
+An explicit [exact passing low-margin disposition](narration_low_margin_disposition.md) may make only named, above-minimum low-margin measurements advisory when aggregate identity passes. This documented policy refinement preserves all raw scores, below-floor and other exact-unit reviews, subjective sampling, and the locked contract; the default review requirements remain unchanged.
+
 ## Mandatory Subjective Sampling
 
 Automation verifies words, hashes, continuity, edges, and mastering, but it cannot prove charisma, emotional control, or longform fatigue. Every R4 production finalizer writes `narration_subjective_review_manifest_<episode>.json` bound to the exact canonical WAV and generation plan. The sample set covers the complete opening, every chapter boundary, all system/pronunciation-risk passages, a middle fatigue window, the climax, and the final minute.

@@ -356,6 +356,7 @@ ${registryCommands}
   goldflow tts approve-listen      Record hash-bound decisions for exact narration listen items
   goldflow tts approve-subjective  Approve the mandatory hash-bound whole-episode narration sample manifest
   goldflow tts source-structure    Record reviewed narrative chapters separately from technical voice segments
+  goldflow tts low-margin-disposition Record an exact-unit advisory policy for passing voice measurements
   goldflow tts delivery-bank       Audit or promote the owned same-speaker delivery-reference bank
   goldflow tts provider-bakeoff    Prepare or approve a blind longform Qwen-versus-Fish/ElevenLabs bakeoff
 
@@ -545,6 +546,8 @@ if (command === "pilot" && !helpRequested) {
   run("narration-subjective-review.mjs", flags);
 } else if (command === "tts" && subcommand === "source-structure") {
   run("narration-source-structure.mjs", flags);
+} else if (command === "tts" && subcommand === "low-margin-disposition") {
+  run("narration-low-margin-disposition.mjs", flags);
 } else if (command === "tts" && subcommand === "delivery-bank") {
   run("narration-delivery-bank.mjs", flags);
 } else if (command === "tts" && subcommand === "provider-bakeoff") {

@@ -63,6 +63,7 @@ import { runFasterWhisperForDiagnostics } from "./local-whisper-word-timing.mjs"
 import { prepareOpeningNarrationFinalization, validateOpeningFinalizationFlags } from "./lib/narration-opening-finalization.mjs";
 import { prepareFullPilotNarrationFinalization } from "./lib/narration-full-pilot-finalization.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
+import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1444,6 +1445,23 @@ export async function finalizeNarrationProviderOutput(
     },
   };
   await atomicWriteJson(continuityPath, voiceContinuity);
+  // Read after exact continuity evidence is available. No sidecar preserves the
+  // existing review policy; an explicit receipt changes only named low margins.
+  const lowMarginDisposition = await loadLowMarginDisposition({ episodeDir, episode });
+  if (lowMarginDisposition && phaseContext) {
+    throw new Error("Low-margin policy disposition is not supported for proof-phase finalization.");
+  }
+  assertLowMarginActiveBindings(lowMarginDisposition, {
+    source_script_sha256: actualSourceScriptSha256,
+    run_identity_sha256: identityFileSha256,
+    narration_generation_plan_file_sha256: planFileSha256,
+    provider_output_manifest_file_sha256: manifestFileSha256,
+    speaker_similarity_file_sha256: voiceContinuity.report_sha256,
+    narration_generation_plan_sha256: canonicalPlanSha256,
+    narration_quality_contract_sha256: qualityContract.contract_sha256,
+  });
+  const lowMarginProvenance = lowMarginDisposition
+    ? { voice_low_margin_disposition: lowMarginDisposition } : {};
   const continuityArtifactSha256 = await sha256File(continuityPath);
   const primaryById = new Map();
   const confirmationCandidates = [];
@@ -1558,6 +1576,7 @@ export async function finalizeNarrationProviderOutput(
       ...acousticReviewWarnings,
       ...(continuity?.warnings ?? []),
     ]);
+    decision = applyLowMarginDisposition(decision, row.unit_id, lowMarginDisposition);
     if (acceptAsrDeliveryBlockers) {
       decision = operatorWaiveAsrDecision(
         decision,
@@ -1719,6 +1738,7 @@ export async function finalizeNarrationProviderOutput(
     throw new Error("Reviewed continuation no longer matches the exact approved listen packet.");
   }
   const unitDeliveryArtifact = {
+    ...lowMarginProvenance,
     schema: "goldflow_narration_unit_delivery_qa_v2",
     status: blockers.length
       ? "blocked"
@@ -1790,6 +1810,7 @@ export async function finalizeNarrationProviderOutput(
   });
   const selectedBlockers = blockers.filter((finding) => finding.unit_id);
   const unitQaArtifact = {
+    ...lowMarginProvenance,
     schema: "goldflow_narration_tts_unit_qa_v2",
     status: blockers.length
       ? "blocked"
@@ -1843,6 +1864,7 @@ export async function finalizeNarrationProviderOutput(
       `narration_tts_report_${episode}.json`,
     );
     await atomicWriteJson(blockedTtsReportPath, {
+      ...lowMarginProvenance,
       ...scopeFields,
       schema: "goldflow_narration_tts_report_v1",
       status: "blocked",
@@ -2362,6 +2384,7 @@ export async function finalizeNarrationProviderOutput(
     subjective_review_waiver: subjectiveReviewWaiver,
   };
   const ttsReport = {
+    ...lowMarginProvenance,
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",

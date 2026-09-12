@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 // fields are execution evidence, not part of the creative contract being
 // approved before spend.
 const MUTABLE_REFERENCE_OUTPUT_KEYS = new Set([
+  "browser_provider",
   "candidate_image_ids",
   "conditioning_image_path",
   "derived_from_image_id",
@@ -13,6 +14,8 @@ const MUTABLE_REFERENCE_OUTPUT_KEYS = new Set([
   "derived_reference_status",
   "image_provider",
   "image_provider_route",
+  "provider_receipt_path",
+  "provider_receipt_sha256",
   "reference_generation_updated_at",
   "reference_image_path",
   "updated_at",

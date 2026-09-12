@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { applyLowMarginDisposition, assertLowMarginActiveBindings, assertLowMarginDisposition, assertLowMarginEvidence,
   buildLowMarginDisposition, loadLowMarginDisposition, lowMarginDispositionSha256, LOW_MARGIN_CODE,
+  lowMarginDispositionArchivePath, persistLowMarginDisposition, readLowMarginDispositionRecord,
+  verifyLowMarginAudioEvidence,
 } from "../lib/narration-low-margin-disposition.mjs";
 import { commandStageFor } from "../lib/pipeline-stage-registry.mjs";
 
@@ -109,5 +111,76 @@ try {
   await fs.rm(file);
   await assert.rejects(() => loadLowMarginDisposition({ ...opts, expectedBinding: loaded }), /missing/);
 } finally { await fs.rm(root, { recursive: true, force: true }); }
+
+const renewalRoot = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-low-margin-renewal-"));
+try {
+  const target = { episodeDir: renewalRoot, episode: "ep_01" };
+  const audioContext = structuredClone(context);
+  for (const unit of audioContext.manifest.units) {
+    unit.audio_path = path.join(renewalRoot, `${unit.unit_id}.wav`);
+    const bytes = `synthetic audio evidence for ${unit.unit_id}`;
+    unit.audio_sha256 = hash(bytes);
+    await fs.writeFile(unit.audio_path, bytes);
+  }
+  await verifyLowMarginAudioEvidence(audioContext, options.unitIds, { renewal: true });
+  await fs.appendFile(audioContext.manifest.units[2].audio_path, "changed non-selected take");
+  await assert.rejects(() => verifyLowMarginAudioEvidence(audioContext, options.unitIds, { renewal: true }), /unit_3/,
+    "renewal verifies the repaired non-selected WAV supporting the aggregate");
+  await verifyLowMarginAudioEvidence(audioContext, options.unitIds);
+  await fs.rm(audioContext.manifest.units[2].audio_path);
+  await assert.rejects(() => verifyLowMarginAudioEvidence(audioContext, options.unitIds, { renewal: true }), /ENOENT/);
+  await persistLowMarginDisposition({ ...target, receipt });
+  const previous = await readLowMarginDispositionRecord(target);
+  const initialBytes = await fs.readFile(previous.path);
+  const priorBinding = await loadLowMarginDisposition({ ...target, context });
+  await assert.rejects(() => persistLowMarginDisposition({ ...target, receipt }), /immutable/);
+  const current = structuredClone(context);
+  current.bindings.provider_output_manifest_file_sha256 = hash("repaired non-selected take manifest");
+  current.bindings.speaker_similarity_file_sha256 = hash("fresh complete raw similarity report");
+  current.manifest.units[2].audio_sha256 = hash("repaired non-selected take");
+  Object.assign(current.report.candidates[2], { audio_sha256: current.manifest.units[2].audio_sha256,
+    cosine_similarity: 0.9, status: "passed" });
+  current.report.candidate_aggregate.mean_cosine_similarity = 0.855;
+  const renewalOptions = { ...options, context: current, previous,
+    supersedeDisposition: receipt.disposition_sha256,
+    archivePath: lowMarginDispositionArchivePath(renewalRoot, "ep_01", receipt.disposition_sha256),
+    reason: "Renew the same passing measurement scope after an exact repair outside that scope; preserve all other warnings and listening requirements." };
+  assert.throws(() => buildLowMarginDisposition({ ...renewalOptions, supersedeDisposition: hash("wrong predecessor") }), /exact active/);
+  assert.throws(() => buildLowMarginDisposition({ ...renewalOptions, previous: null }), /exact active/);
+  assert.throws(() => buildLowMarginDisposition({ ...renewalOptions, context }), /requires stale/);
+  assert.throws(() => buildLowMarginDisposition({ ...renewalOptions, unitIds: ["unit_1"] }), /same exact unit scope/);
+  for (const key of ["source_script_sha256", "run_identity_sha256", "narration_generation_plan_sha256",
+    "narration_generation_plan_file_sha256", "narration_quality_contract_sha256"]) {
+    const changed = structuredClone(current); changed.bindings[key] = hash("different locked input");
+    assert.throws(() => buildLowMarginDisposition({ ...renewalOptions, context: changed }), /cannot change/);
+  }
+  for (const mutate of [
+    (c) => { c.report.aggregate_status = "blocked"; },
+    (c) => { c.manifest.units[0].audio_sha256 = hash("changed selected take"); c.report.candidates[0].audio_sha256 = c.manifest.units[0].audio_sha256; },
+    (c) => { c.report.candidates[0].cosine_similarity = 0.81; },
+  ]) {
+    const changed = structuredClone(current); mutate(changed);
+    assert.throws(() => buildLowMarginDisposition({ ...renewalOptions, context: changed }));
+  }
+  await assert.rejects(() => loadLowMarginDisposition({ ...target, context: current }), /stale/,
+    "new raw evidence remains blocked until explicit renewal");
+  const renewed = buildLowMarginDisposition(renewalOptions);
+  assert.deepEqual(renewed.units, receipt.units, "no new or changed selected take gains a disposition");
+  await persistLowMarginDisposition({ ...target, receipt: renewed, previous });
+  assert.deepEqual(await fs.readFile(renewed.supersedes.path), initialBytes, "exact predecessor bytes remain immutable");
+  const renewedBinding = await loadLowMarginDisposition({ ...target, context: current });
+  assert.equal(renewedBinding.receipt.disposition_sha256, renewed.disposition_sha256);
+  await assert.rejects(() => loadLowMarginDisposition({ ...target, context: current, expectedBinding: priorBinding }), /changed/,
+    "renewal invalidates the old derived QA snapshot");
+  await assert.rejects(() => persistLowMarginDisposition({ ...target, receipt: renewed, previous }), /predecessor changed/,
+    "the explicit old SHA cannot supersede a newer active receipt");
+  await fs.appendFile(renewed.supersedes.path, "\n");
+  await assert.rejects(() => loadLowMarginDisposition({ ...target, context: current }), /hash-stale/,
+    "tampered retained history prevents acceptance");
+  await fs.writeFile(renewed.supersedes.path, initialBytes);
+  await fs.rm(renewed.supersedes.path);
+  await assert.rejects(() => loadLowMarginDisposition({ ...target, context: current }), /ENOENT/,
+    "missing retained history prevents acceptance");
+} finally { await fs.rm(renewalRoot, { recursive: true, force: true }); }
 assert.equal(commandStageFor("tts", "low-margin-disposition", {}), "qwen_tts_stitch");
 console.log("narration low-margin disposition tests passed (synthetic evidence; no media or listening approval)");

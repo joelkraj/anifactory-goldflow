@@ -202,3 +202,44 @@ export function semanticFailedUnitIds(artifact) {
     ...(artifact?.planner?.partial_failure?.failed_chunk_ids ?? []),
   ].map(String).filter(Boolean))];
 }
+
+// Repair admission is narrower than stage readiness: only the current source's
+// explicitly failed semantic units may re-enter this blocked stage.
+export function semanticFailedRecoveryScope(artifact, sourceScriptHash) {
+  if (artifact?.schema !== "goldflow_semantic_scene_plan_v2"
+    || artifact.status !== "blocked"
+    || !/^[a-f0-9]{64}$/.test(String(sourceScriptHash ?? ""))
+    || artifact.source_script_hash !== sourceScriptHash) return [];
+  const partial = artifact.planner?.partial_failure;
+  if (!Array.isArray(partial?.expected_ids) || !Array.isArray(partial?.passed_chunk_ids)
+    || !Array.isArray(partial?.failed_expected_ids) || !Array.isArray(partial?.failed_chunk_ids)) return [];
+  const expected = new Set(partial.expected_ids.map(String));
+  const passed = new Set(partial.passed_chunk_ids.map(String));
+  const failed = semanticFailedUnitIds(artifact);
+  if (!failed.length || failed.some((id) => !/^(?:chunk_\d+|global_reconciliation)$/.test(id)
+    || !expected.has(id) || passed.has(id))) return [];
+  return failed;
+}
+
+export function semanticRecoveryAdmission(status = {}, flags = {}) {
+  if (status.current_stage !== "semantic_scene_plan" || status.current_stage_state !== "blocked") {
+    return { applicable: false, allowed: false, reason: "not_a_blocked_semantic_recovery" };
+  }
+  const scope = status.semantic_recovery_scope;
+  const failed = Array.isArray(scope?.failed_unit_ids) ? scope.failed_unit_ids : [];
+  if (!failed.length || !/^[a-f0-9]{64}$/.test(String(scope?.source_script_hash ?? ""))) {
+    return { applicable: true, allowed: false, reason: "semantic_failed_scope_missing_or_stale" };
+  }
+  const requested = semanticRequestedUnitIds(flags);
+  if (!requested.length) {
+    return { applicable: true, allowed: false, reason: "semantic_recovery_requires_exact_failed_unit_ids" };
+  }
+  const rejected = requested.filter((id) => !failed.includes(id));
+  return {
+    applicable: true,
+    allowed: rejected.length === 0,
+    reason: rejected.length ? "semantic_recovery_scope_contains_unknown_or_passed_units" : "exact_failed_semantic_scope",
+    requested_unit_ids: requested,
+    rejected_unit_ids: rejected,
+  };
+}

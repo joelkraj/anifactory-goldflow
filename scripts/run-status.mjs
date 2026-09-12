@@ -80,7 +80,7 @@ import {
 } from "./lib/generated-motion-contract.mjs";
 import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
-import { semanticFailedUnitIds } from "./lib/semantic-planner-recovery.mjs";
+import { semanticFailedRecoveryScope } from "./lib/semantic-planner-recovery.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import {
   ttsSpokenTextAuditMatches,
@@ -741,9 +741,9 @@ function commandFor(stage, identity) {
   return buildStageCommand(stage, identity);
 }
 
-export function semanticRecoveryCommandForTests(artifact, identity) {
-  const failedIds = semanticFailedUnitIds(artifact);
-  if (String(artifact?.status ?? "").toLowerCase() !== "blocked" || !failedIds.length) return null;
+export function semanticRecoveryCommandForTests(artifact, identity, sourceScriptHash = artifact?.source_script_hash) {
+  const failedIds = semanticFailedRecoveryScope(artifact, sourceScriptHash);
+  if (!failedIds.length) return null;
   const base = commandFor("semantic_scene_plan", identity)
     .replace(/\s+--semantic-chunk-ids\s+\S+/g, "")
     .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
@@ -4274,7 +4274,7 @@ async function main() {
   const semanticPlanPath = path.join(episodeDir, "semantic_scene_plan.json");
   const semanticPlan = await jsonStatusWithSourceHashesComplete(semanticPlanPath, "semantic_scene_plan.json");
   const semanticPlanArtifact = await readJson(semanticPlanPath, null);
-  const semanticRecoveryCommand = semanticRecoveryCommandForTests(semanticPlanArtifact, identity);
+  const semanticRecoveryCommand = semanticRecoveryCommandForTests(semanticPlanArtifact, identity, scriptHash);
   const storyFactLedger = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "story_fact_ledger.json"), "story_fact_ledger.json");
   const timedScenePlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "timed_scene_plan.json"), "timed_scene_plan.json");
   const visualBeatPlanPath = path.join(episodeDir, "visual_beat_plan.json");
@@ -4506,7 +4506,12 @@ async function main() {
 
   const next = rows.find((row) => !stageIsSatisfied(row.state)) ?? null;
   const readyCommandStages = readyStageIds(rows, identity);
-  const repairCommandStages = next?.stage === "visual_prompt_harden" && next?.state === "blocked"
+  const semanticRepairUnitIds = next?.stage === "semantic_scene_plan" && next?.state === "blocked"
+    ? semanticFailedRecoveryScope(semanticPlanArtifact, scriptHash)
+    : [];
+  const repairCommandStages = semanticRepairUnitIds.length
+    ? ["semantic_scene_plan"]
+    : next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
     : next?.stage === "qwen_tts_stitch"
       && next?.state === "blocked"
@@ -4531,6 +4536,9 @@ async function main() {
     run_identity_path: await exists(runIdentityPath) ? runIdentityPath : null,
     current_stage: next?.stage ?? "complete",
     current_stage_state: next?.state ?? "passed",
+    ...(semanticRepairUnitIds.length ? {
+      semantic_recovery_scope: { failed_unit_ids: semanticRepairUnitIds, source_script_hash: scriptHash },
+    } : {}),
     allowed_command_stages: [...new Set([
       ...readyCommandStages,
       ...repairCommandStages,

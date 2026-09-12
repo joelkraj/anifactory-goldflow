@@ -19,6 +19,7 @@ import { plannerRerunDecisionForEpisode } from "../scripts/lib/planner-rerun-pol
 import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.mjs";
 import { assertCommandWorkflowRoute } from "../scripts/lib/episode-workflow-routing.mjs";
 import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles.mjs";
+import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -95,6 +96,14 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
   const allowedStages = Array.isArray(result.allowed_command_stages)
     ? result.allowed_command_stages
     : [currentStage];
+  if (commandName === "semantic" && subcommandName === "plan") {
+    const recovery = semanticRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked semantic recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+  }
   if (allowedStages.includes(expectedStage)) return;
   const renderRecovery = failedRenderResumeDecision({ command: commandName, subcommand: subcommandName, flags: parsedFlags, status: result, repoRoot });
   if (renderRecovery.allowed) {

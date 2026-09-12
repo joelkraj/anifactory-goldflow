@@ -2465,6 +2465,7 @@ export async function finalizeNarrationProviderOutput(
     retry_policy: narrationTtsRetryReportPolicy({
       provider: manifest.provider,
       qualityContract,
+      recoveryProvenances: rows.map((row) => row.recovery_provenance),
     }),
     provider_output_manifest_path: manifestPath,
     provider_output_manifest_sha256: await sha256File(manifestPath),

@@ -47,6 +47,7 @@ import {
   narrationUnitContractForQuality,
   narrationStitchContractForQuality,
   narrationTtsPolicyForIdentity,
+  narrationTtsRetryReportPolicy,
   QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT,
   QWEN_LIAM_PRIMARY_LOCK,
   QWEN_LIAM_RETRY_CONTRACT,
@@ -56,6 +57,7 @@ import {
 } from "./lib/narration-tts-policy.mjs";
 import {
   QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE,
+  canonicalQwenBatchSha256,
   qwenBatchBindingByUnit,
   validateQwenLiamBatchPlan,
 } from "./lib/qwen-liam-batch-contract.mjs";
@@ -2827,6 +2829,50 @@ async function wavPcm16SampleCount(filePath) {
   throw new Error(`Could not find WAV data chunk: ${filePath}`);
 }
 
+export async function narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash) {
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: (ttsReport.results ?? []).map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.operator_authorized_asr_consensus_exceptions ?? [];
+  if (!expected.length || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter
+      !== expectedPolicy.retry_only_confirmed_skip_truncation_or_stutter
+    || canonicalQwenBatchSha256(expected) !== canonicalQwenBatchSha256(
+      ttsReport.retry_policy?.operator_authorized_asr_consensus_exceptions ?? [])) return false;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  if (!manifestPath || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256) return false;
+  const manifest = await readJson(manifestPath, null);
+  for (const exception of expected) {
+    const result = ttsReport.results.find((row) => row.unit_id === exception.unit_id);
+    const providerUnit = manifest?.units?.find((row) => row.unit_id === exception.unit_id);
+    const recovery = result?.recovery_provenance;
+    if (!recovery || Number(result.attempt) !== 2 || recovery.human_listening_performed !== false
+      || recovery.unit_id !== result.unit_id || !providerUnit
+      || providerUnit.audio_sha256 !== result.audio_sha256
+      || providerUnit.synthesis_identity_sha256 !== result.synthesis_identity_sha256
+      || canonicalQwenBatchSha256(providerUnit.recovery_provenance ?? null) !== canonicalQwenBatchSha256(recovery)
+      || !recovery.confirmed_evidence_path
+      || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+    const evidence = await readJson(recovery.confirmed_evidence_path, null);
+    const reviewed = evidence?.confirmed_units?.find((row) => row.unit_id === result.unit_id);
+    if (evidence?.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+      || evidence.evidence_basis !== "operator_authorized_asr_consensus"
+      || evidence.human_listening_performed !== false || evidence.attestation != null
+      || evidence.maximum_attempts_per_unit !== 1 || !String(evidence.operator_quote ?? "").trim()
+      || String(evidence.operator_reason ?? "").trim().length < 40
+      || evidence.source_script_sha256 !== currentScriptHash
+      || evidence.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+      || evidence.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+      || !reviewed || reviewed.selected_attempt !== 1
+      || !["truncation", "unexpected_words"].includes(reviewed.defect_type)
+      || canonicalQwenBatchSha256(recovery.trigger_codes) !== canonicalQwenBatchSha256([
+        `operator_authorized_asr_consensus_${reviewed.defect_type}`,
+      ])
+      || reviewed.audio_sha256 !== recovery.origin_audio_sha256
+      || reviewed.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256) return false;
+  }
+  return true;
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -3254,8 +3300,14 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
         && ttsReport.retry_policy?.structural_failure_action
           === "stop_and_emit_exact_unit_repair_scope"
       : true;
+    const hasOperatorAsrRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "operator_authorized_asr_consensus"
+    )) || (ttsReport.retry_policy?.operator_authorized_asr_consensus_exceptions?.length ?? 0) > 0;
+    const exactRetryTypePolicyPassed = hasOperatorAsrRetry
+      ? narrationQualityContract && await narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash)
+      : ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter === true;
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
-      || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter !== true
+      || !exactRetryTypePolicyPassed
       || (explicitSingleSubmissionRepairPolicy
         ? ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== false
         : ttsReport.retry_policy?.automatic_retry_limited_to_failed_empty_or_objectively_truncated_audio !== true)

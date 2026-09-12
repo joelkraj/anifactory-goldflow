@@ -445,6 +445,7 @@ export function exactUnitRecoveryProvenanceForTests({
   cohortBinding,
   batchPlanSha256,
   confirmedDefect = null,
+  confirmedEvidenceBasis = null,
   confirmedEvidencePath = null,
   confirmedEvidenceSha256 = null,
 } = {}) {
@@ -467,7 +468,8 @@ export function exactUnitRecoveryProvenanceForTests({
       ?? [],
   )].map(String).sort();
   const triggerCodes = confirmedDefect
-    ? [`operator_confirmed_${String(confirmedDefect).toLowerCase()}`]
+    ? [`${confirmedEvidenceBasis === "operator_authorized_asr_consensus"
+      ? "operator_authorized_asr_consensus" : "operator_confirmed"}_${String(confirmedDefect).toLowerCase()}`]
     : automaticCodes;
   if (!triggerCodes.length) {
     throw new Error(
@@ -484,6 +486,8 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_codes: triggerCodes,
     candidate_qa: candidate.qa ?? null,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
+    ...(confirmedEvidenceBasis === "operator_authorized_asr_consensus"
+      ? { evidence_basis: confirmedEvidenceBasis, human_listening_performed: false } : {}),
   };
   return {
     schema: "goldflow_qwen_exact_unit_recovery_provenance_v1",
@@ -502,6 +506,8 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_evidence_sha256: canonicalQwenBatchSha256(triggerEvidence),
     confirmed_evidence_path: confirmedEvidencePath,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
+    ...(confirmedEvidenceBasis === "operator_authorized_asr_consensus"
+      ? { evidence_basis: confirmedEvidenceBasis, human_listening_performed: false } : {}),
   };
 }
 
@@ -512,6 +518,8 @@ export function validateConfirmedRetryEvidenceForTests({
   priorReport,
   priorReportSha256,
   currentCandidates,
+  sourceScriptSha256 = null,
+  planFileSha256 = null,
 } = {}) {
   if (!evidence || typeof evidence !== "object") {
     throw new Error("Confirmed retry evidence must be a JSON object.");
@@ -531,11 +539,43 @@ export function validateConfirmedRetryEvidenceForTests({
       "Confirmed retry evidence is not bound to the exact pre-retry narration report hash.",
     );
   }
-  const allowedDefects = new Set(["skip", "truncation", "stutter"]);
+  const operatorAsrBasis = evidence.evidence_basis === "operator_authorized_asr_consensus";
+  if (evidence.evidence_basis != null && !operatorAsrBasis
+    && evidence.evidence_basis !== "human_listening") {
+    throw new Error("Unsupported confirmed retry evidence basis.");
+  }
+  if (operatorAsrBasis && (evidence.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+    || evidence.human_listening_performed !== false
+    || evidence.attestation != null
+    || !String(evidence.operator_quote ?? "").trim()
+    || String(evidence.operator_reason ?? "").trim().length < 40
+    || !String(evidence.authorized_by ?? "").trim()
+    || !Number.isFinite(Date.parse(evidence.authorized_at))
+    || evidence.maximum_attempts_per_unit !== 1
+    || !/^[a-f0-9]{64}$/u.test(String(sourceScriptSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/u.test(String(planFileSha256 ?? ""))
+    || evidence.source_script_sha256 !== sourceScriptSha256
+    || evidence.narration_generation_plan_file_sha256 !== planFileSha256
+    || priorReport.schema !== "goldflow_narration_tts_report_v1"
+    || priorReport.status !== "blocked"
+    || priorReport.source_script_hash !== sourceScriptSha256
+    || priorReport.narration_generation_plan_sha256 !== planSha256
+    || priorReport.narration_generation_plan_file_sha256 !== planFileSha256)) {
+    throw new Error("Operator-authorized ASR retry requires current source/plan/report bindings, explicit authorization and no listening claim.");
+  }
+  const allowedDefects = new Set(operatorAsrBasis
+    ? ["truncation", "unexpected_words"] : ["skip", "truncation", "stutter"]);
   const evidenceRows = Array.isArray(evidence.confirmed_units)
     ? evidence.confirmed_units
     : [];
   const requested = [...new Set((requestedUnitIds ?? []).map(String))];
+  if (operatorAsrBasis && (!requested.length
+    || requested.length !== requestedUnitIds.length
+    || evidenceRows.length !== requested.length
+    || new Set(evidenceRows.map((row) => row?.unit_id)).size !== requested.length
+    || evidenceRows.some((row) => !requested.includes(String(row?.unit_id ?? ""))))) {
+    throw new Error("Operator-authorized ASR retry must name only the exact requested units once.");
+  }
   const evidenceById = new Map(
     evidenceRows.map((row) => [String(row?.unit_id ?? ""), row]),
   );
@@ -549,10 +589,12 @@ export function validateConfirmedRetryEvidenceForTests({
       throw new Error(`Confirmed retry evidence does not cover requested unit: ${unitId}`);
     }
     if (!allowedDefects.has(String(row.defect_type ?? "").toLowerCase())
-      || !String(row.listen_note ?? "").trim()) {
+      || !String(operatorAsrBasis ? row.evidence_note ?? "" : row.listen_note ?? "").trim()) {
       throw new Error(
         `Confirmed retry evidence for ${unitId} must record defect_type `
-        + "(skip, truncation, or stutter) and a non-empty listen_note.",
+        + (operatorAsrBasis
+          ? "(truncation or unexpected_words) and a non-empty evidence_note."
+          : "(skip, truncation, or stutter) and a non-empty listen_note."),
       );
     }
     const prior = priorById.get(unitId);
@@ -560,6 +602,29 @@ export function validateConfirmedRetryEvidenceForTests({
       throw new Error(
         `Pre-retry narration report lacks an exact selected audio/synthesis identity for ${unitId}.`,
       );
+    }
+    if (operatorAsrBasis) {
+      const delivery = prior.selected_qa?.delivery;
+      const blockers = delivery?.blockers ?? [];
+      const codes = blockers.map((finding) => finding.code).sort();
+      const reviewed = [...(row.reviewed_blocker_codes ?? [])].sort();
+      const requiredCode = row.defect_type === "unexpected_words"
+        ? "narration_confirmed_unexpected_word" : "narration_confirmed_final_word_missing";
+      const permittedCodes = new Set(row.defect_type === "unexpected_words"
+        ? ["narration_confirmed_unexpected_word"]
+        : ["narration_confirmed_final_word_missing", "narration_confirmed_word_omission"]);
+      const reportBlockers = (priorReport.blockers ?? []).filter((finding) => finding.unit_id === unitId);
+      if (delivery?.schema !== "goldflow_narration_delivery_consensus_v2"
+        || delivery.status !== "blocked" || delivery.confirmation_required !== true
+        || delivery.primary_model !== "small.en" || delivery.confirmation_model !== "medium"
+        || !codes.includes(requiredCode)
+        || blockers.some((finding) => finding.severity !== "blocker" || !permittedCodes.has(finding.code))
+        || JSON.stringify(codes) !== JSON.stringify(reviewed)
+        || row.selected_delivery_qa_sha256 !== canonicalQwenBatchSha256(delivery)
+        || canonicalQwenBatchSha256(blockers.map((finding) => ({ ...finding, unit_id: unitId })))
+          !== canonicalQwenBatchSha256(reportBlockers)) {
+        throw new Error(`Operator-authorized ASR retry lacks exact independently confirmed current blocker evidence for ${unitId}.`);
+      }
     }
     const current = (currentCandidates ?? []).find((candidate) => {
       const candidateIdentitySha256 = candidate
@@ -574,6 +639,9 @@ export function validateConfirmedRetryEvidenceForTests({
       ?.selected_report_synthesis_identity_sha256
       ?? current?.synthesis_identity_sha256;
     const expectedAttempt = Number(prior.attempt);
+    if (operatorAsrBasis && expectedAttempt !== 1) {
+      throw new Error("Operator-authorized ASR consensus permits only one retake of a first take.");
+    }
     if (!Number.isInteger(expectedAttempt)
       || Number(row.selected_attempt) !== expectedAttempt
       || row.audio_sha256 !== prior.audio_sha256
@@ -595,6 +663,12 @@ export function validateConfirmedRetryEvidenceForTests({
       selected_attempt: expectedAttempt,
       audio_sha256: prior.audio_sha256,
       synthesis_identity_sha256: prior.synthesis_identity_sha256,
+      ...(operatorAsrBasis ? {
+        evidence_basis: "operator_authorized_asr_consensus",
+        human_listening_performed: false,
+        reviewed_blocker_codes: row.reviewed_blocker_codes,
+        selected_delivery_qa_sha256: row.selected_delivery_qa_sha256,
+      } : {}),
     });
   }
   return validated;
@@ -1755,6 +1829,7 @@ function ttsStatusContract({
     retry_policy: narrationTtsRetryReportPolicy({
       provider: policy.primary.provider,
       qualityContract: policy.narration_quality_contract,
+      recoveryProvenances: selectedRows.map((row) => row.recovery_provenance),
     }),
     results,
   };
@@ -3151,6 +3226,8 @@ async function main() {
       priorReport: priorNarrationReport,
       priorReportSha256: priorNarrationReportSha256,
       currentCandidates: preservedCandidates,
+      sourceScriptSha256: scriptHash,
+      planFileSha256,
     });
   }
   const finalSynthesisScope = narrationSynthesisScopeForTests({
@@ -3866,7 +3943,10 @@ async function main() {
     );
     recoveryScope = {
       ...recoveryScope,
-      status: "validated_against_confirmed_listen_evidence",
+      status: validatedConfirmedRetryEvidence.every((row) => (
+        row.evidence_basis === "operator_authorized_asr_consensus"
+      )) ? "validated_against_operator_authorized_asr_consensus"
+        : "validated_against_confirmed_listen_evidence",
       evidence_path: confirmedRetryEvidencePath,
       evidence_sha256: confirmedRetryEvidenceSha256,
       pre_retry_narration_report_sha256: priorNarrationReportSha256,
@@ -3901,6 +3981,7 @@ async function main() {
               cohortBinding: bindingByUnit.get(unitId),
               batchPlanSha256: batchPlan.batch_plan_sha256,
               confirmedDefect: confirmed?.defect_type ?? null,
+              confirmedEvidenceBasis: confirmed?.evidence_basis ?? null,
               confirmedEvidencePath: confirmed
                 ? confirmedRetryEvidencePath
                 : null,

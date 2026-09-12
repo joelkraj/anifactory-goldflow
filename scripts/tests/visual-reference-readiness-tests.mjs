@@ -41,13 +41,19 @@ try {
   await fs.rm(path.join(temp, "character_state_refs.json"));
 
   await write("visual_reference_partial_ep_01.json", {
-    status: "needs_chunk_repair", passed_chunk_count: 1,
+    status: "needs_chunk_repair", passed_chunk_count: 1, source_script_hash: scriptHash,
     failed_chunks: [{ chunk_id: "reference_002", scene_ids: ["scene_002"] }],
   });
   const partial = await read();
   assert.equal(inferredStateForTests(partial), "blocked", "retained failure evidence still requires exact recovery even if final files are absent");
   assert.match(partial.next_command_shape, /--repair-chunk-ids reference_002/);
   assert.equal(ready(partial), false);
+  assert.equal(partial.recovery_scope.source_hash_current, true);
+  assert.match(partial.recovery_scope.partial_sha256, /^[a-f0-9]{64}$/);
+  await write("visual_reference_partial_ep_01.json", { status: "needs_global_repair", source_script_hash: "0".repeat(64) });
+  const stalePartial = await read();
+  assert.equal(inferredStateForTests(stalePartial), "stale");
+  assert.equal(stalePartial.recovery_scope, undefined);
   await write("visual_reference_partial_ep_01.json", { status: "in_progress" });
   assert.equal(inferredStateForTests(await read()), "failed", "unrecognized/incomplete partial evidence is not a brand-new stage");
   await fs.rm(path.join(temp, "visual_reference_partial_ep_01.json"));

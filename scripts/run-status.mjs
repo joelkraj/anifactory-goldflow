@@ -4120,6 +4120,9 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
   const partialPath = path.join(episodeDir, `visual_reference_partial_${identity.episode ?? "ep_01"}.json`);
   const partial = await readJson(partialPath, null);
   if (["needs_chunk_repair", "needs_global_repair", "needs_explicit_repair"].includes(String(partial?.status ?? ""))) {
+    if (!currentScriptHash || partial.source_script_hash !== currentScriptHash) {
+      return { done: false, state: "stale", evidence: `${path.basename(partialPath)} source script hash is missing or stale` };
+    }
     const failedChunks = Array.isArray(partial.failed_chunks) ? partial.failed_chunks : [];
     const failedChunkIds = [...new Set(failedChunks.map((row) => String(row?.chunk_id ?? "")).filter(Boolean))];
     const failedSceneIds = [...new Set(failedChunks.flatMap((row) => row?.scene_ids ?? []).map(String).filter(Boolean))];
@@ -4136,6 +4139,11 @@ async function visualReferencePlanComplete(episodeDir, currentScriptHash, identi
       state: "blocked",
       evidence: `${path.basename(partialPath)} status=${partial.status}; passed_chunks=${partial.passed_chunk_count ?? partial.passed_chunks?.length ?? 0}; failed_chunks=${failedChunks.length}; passed candidates preserved`,
       next_command_shape: nextCommand,
+      recovery_scope: {
+        source_script_hash: currentScriptHash,
+        source_hash_current: true,
+        partial_sha256: await fileSha256(partialPath),
+      },
     };
   }
   const authoringArtifacts = [
@@ -4636,6 +4644,8 @@ async function main() {
     } : {}),
     ...(next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
       ? { visual_beat_recovery_scope: visualBeatRepairScope } : {}),
+    ...(next?.stage === "visual_reference_plan" && next?.state === "blocked" && visualReferencePlan.recovery_scope
+      ? { visual_reference_recovery_scope: visualReferencePlan.recovery_scope } : {}),
     allowed_command_stages: [...new Set([
       ...readyCommandStages,
       ...repairCommandStages,

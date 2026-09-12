@@ -2,6 +2,8 @@
 
 ASR comparison preserves Unicode words in NFC form. An accented word remains one word; accents are not stripped and different spellings remain substitutions. The exact apostrophized contraction `I'm` (including a curly apostrophe) compares as `I am`. Unpunctuated `Im`, ambiguous `'s`/`'d` forms, homophones, source text, provider input and recognized text are unchanged.
 
+The exact numeric phrase `a hundred` supplies the implicit one in `hundred`, including a following scale: `a hundred million` compares as `100 million` or `$100 million`. This changes comparison tokens only; it does not remove articles outside that numeric phrase or equate different numeric values. Currency-symbol handling is unchanged.
+
 `transcript_comparison_version` identifies the derived comparison, separately from the locked ASR/model contract. Provider finalization always rebuilds unit comparisons and delivery decisions from hash-bound raw recognition checkpoints. A comparator revision also rebuilds full-stream comparison and confirmation scope, reusing the exact primary transcription and matching audio/contract/window-bound Medium evidence. Only newly required windows need recognition. Retired confirmation scopes retain their raw evidence separately and cannot contribute old decisions. A comparator update does not authorize new synthesis or satisfy listening requirements.
 
 Before a scoped recovery, preserve the blocked reports and checkpoint in the episode's immutable repair evidence. Use the guarded `tts finalize-provider` command from status to apply the current comparator; do not edit transcripts, source, WAVs or decision JSON to clear a finding. Confirmed omissions, insertions, protected values and endpoints remain subject to the existing delivery and listening gates.

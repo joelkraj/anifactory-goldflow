@@ -40,6 +40,34 @@ assert.ok(consensus("There were five guards.", "There were six guards.").blocker
   .some((finding) => finding.code.includes("protected_value")));
 assert.equal(accent.comparison_version, helpers.TRANSCRIPT_QA_COMPARISON_VERSION);
 
+const hundredIntended = "Five orders, worth a hundred million, before Joey had even prepared a sales sheet.";
+for (const numeric of ["100 million", "$100 million", "one hundred million", "100,000,000"]) {
+  const recognized = hundredIntended.replace("a hundred million", numeric);
+  const result = qa(hundredIntended, recognized);
+  assert.equal(result.deletions + result.insertions + result.substitutions, 0);
+  assert.equal(consensus(hundredIntended, recognized).blockers.length, 0);
+}
+for (const [intended, recognized] of [
+  ["a hundred", "100"], ["a hundred thousand", "100000"],
+  ["a hundred and five", "105"], ["minus a hundred", "-100"],
+]) {
+  const result = qa(intended, recognized);
+  assert.equal(result.deletions + result.insertions + result.substitutions, 0);
+}
+for (const numeric of ["99 million", "$101 million", "two hundred million", "100 thousand"]) {
+  assert.ok(consensus(hundredIntended, hundredIntended.replace("a hundred million", numeric)).blockers
+    .some((finding) => finding.code.includes("protected_value")));
+}
+for (const [intended, recognized] of [
+  ["He prepared a sales sheet.", "He prepared sales sheet."],
+  ["He bought a hundred-dollar bond.", "He bought a hundred-dollar."],
+  ["It was a one hundred page report.", "It was one hundred page report."],
+]) {
+  assert.ok(qa(intended, recognized).deletions > 0);
+  assert.ok(consensus(intended, recognized).blockers.length > 0);
+}
+assert.ok(qa("He prepared a sales sheet worth a hundred million.", "He prepared sales sheet worth 100 million.").deletions > 0);
+
 // A comparator-only refresh must use retained recognizer output. Any attempted
 // new ASR fails the test. This does not create or approve production audio.
 const noAsrHelpers = { ...helpers, runFasterWhisperUnitBatchForDiagnostics() {
@@ -70,6 +98,37 @@ assert.equal(refreshed.retained_confirmation_evidence[0].confirmation_recognized
 assert.equal(refreshed.retained_confirmation_evidence[0].decision, undefined);
 assert.equal(refreshed.retained_confirmation_evidence[0].confirmation_transcript_qa, undefined);
 assert.equal(JSON.stringify(retained), before);
+
+// Refresh the previous comparator's phantom numeric-article blocker without
+// touching audio or rerunning either recognizer; preserve the retired raw window.
+const numericRetained = {
+  transcript_comparison_version: "unicode_words_exact_im_contraction_v1",
+  primary_transcription: { text: hundredIntended.replace("a hundred million", "100 million"), words: [] },
+  confirmation_model: "medium",
+  confirmation_windows: [{ binding_sha256: hash("numeric-window"),
+    confirmation_recognized_text: hundredIntended.replace("a hundred million", "$100 million"),
+    confirmation_recognized_words: [], decision: { status: "blocked" },
+    confirmation_transcript_qa: { deletions: 1 } }],
+  decision: { status: "blocked", blockers: [{ code: "narration_confirmed_word_omission", words: ["a"] }] },
+};
+const numericBefore = JSON.stringify(numericRetained);
+const numericRefreshed = await runFullStreamDeliveryQa({
+  helpers: noAsrHelpers, audioPath: "/must-not-read-audio.wav", audioSha256: hash("numeric-audio"),
+  units: [{ unit_id: "unit_78", spoken_text: hundredIntended }], qualityContract: contract,
+  orderQa: { blockers: [] }, joinQa: { blockers: [], warnings: [] },
+  stitch: {}, workDir: "/must-not-write", localWhisperContract: { model: "small.en" },
+  retainedEvidence: numericRetained,
+});
+assert.equal(numericRefreshed.decision.blockers.length, 0);
+assert.equal(numericRefreshed.primary_transcription, numericRetained.primary_transcription);
+assert.equal(numericRefreshed.transcript_comparison_version, helpers.TRANSCRIPT_QA_COMPARISON_VERSION);
+assert.equal(numericRefreshed.confirmation_windows.length, 0);
+assert.equal(numericRefreshed.retained_confirmation_evidence.length, 1);
+assert.equal(numericRefreshed.retained_confirmation_evidence[0].confirmation_recognized_text,
+  numericRetained.confirmation_windows[0].confirmation_recognized_text);
+assert.equal(numericRefreshed.retained_confirmation_evidence[0].decision, undefined);
+assert.equal(numericRefreshed.retained_confirmation_evidence[0].confirmation_transcript_qa, undefined);
+assert.equal(JSON.stringify(numericRetained), numericBefore);
 
 // Keep a still-required exact Medium window while rebuilding its old decision.
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "goldflow-comparison-test-"));

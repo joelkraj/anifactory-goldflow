@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_contraction_v1";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_a_hundred_v2";
 
 function rawTranscriptTokens(value) {
   return (transcriptInputText(value)
@@ -1817,6 +1817,9 @@ function parseNumberAt(tokens, start) {
     negative = true;
     index += 1;
   }
+  // In this exact number phrase, "a" supplies the implicit one in "hundred".
+  // Preserve articles before ordinary words or other numeral constructions.
+  if (tokens[index] === "a" && tokens[index + 1] === "hundred") index += 1;
   let total = 0;
   let current = 0;
   let sawNumber = false;

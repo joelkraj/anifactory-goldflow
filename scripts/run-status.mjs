@@ -14,6 +14,7 @@ import {
 } from "./lib/pipeline-stage-registry.mjs";
 import { assertCommandWorkflowRoute, assertEpisodeWorkflowFlags, readEpisodeRoutingIdentity } from "./lib/episode-workflow-routing.mjs";
 import { referencePlanApprovalMatches } from "./lib/reference-plan-contract.mjs";
+import { readReferenceImageQaRecoveryScope } from "./lib/reference-image-recovery.mjs";
 import {
   parallaxApprovalMatches,
   parallaxAssetContractSha256,
@@ -1205,7 +1206,7 @@ async function imageReportComplete(episodeDir, episode, identity) {
   };
 }
 
-async function referenceGenerationComplete(episodeDir, identity) {
+async function referenceGenerationComplete(episodeDir, identity, currentScriptHash) {
   const planPath = path.join(episodeDir, "visual_reference_plan.json");
   const plan = await readJson(planPath, null);
   if (!plan) return { done: false, evidence: "visual_reference_plan.json missing" };
@@ -1242,6 +1243,14 @@ async function referenceGenerationComplete(episodeDir, identity) {
   }
   const duplicates = [...byHash.values()].filter((rows) => rows.length > 1);
   const duplicateSummary = duplicates.map((rows) => rows.join("="));
+  if (!missing.length && !duplicates.length && isBrowserPoolImageProvider(normalizeImageProvider(identity?.image_provider))) {
+    const recovery = await readReferenceImageQaRecoveryScope({ episodeDir, episode: identity.episode,
+      plan, currentScriptHash });
+    if (recovery) return { done: false, state: "blocked",
+      evidence: `reference_image_qa_${identity.episode}.json; current reviewed rejected refs=${recovery.rejected_ref_ids.join(",")}`,
+      next_command_shape: browserPoolCommand(identity, recovery.rejected_ref_ids, { references: true, qaRecovery: true, repair: true }),
+      reference_image_qa_recovery_scope: recovery };
+  }
   let fallbackCommand = null;
   let fallbackEvidence = "";
   if (missing.length && isBrowserPoolImageProvider(normalizeImageProvider(identity?.image_provider))) {
@@ -4424,7 +4433,7 @@ async function main() {
   const visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode, identity);
-  const referenceGeneration = await referenceGenerationComplete(episodeDir, identity);
+  const referenceGeneration = await referenceGenerationComplete(episodeDir, identity, scriptHash);
   const referenceImageApproval = await referenceImageApprovalComplete(episodeDir, episode);
   const legacyCharacterRefs = await readJson(path.join(episodeDir, "character_state_refs.json"), null);
   const legacyCharacterRefStatus = String(legacyCharacterRefs?.status ?? "").toLowerCase();
@@ -4622,6 +4631,7 @@ async function main() {
       ? ["qwen_tts_stitch"]
     : ["reference_generation", "image_generation"].includes(next?.stage)
       && next?.state === "blocked"
+      && !(next?.stage === "reference_generation" && referenceGeneration.reference_image_qa_recovery_scope)
       && /imagegen browser-pool\b.*--(?:reference|image)-ids\s+\S+.*--repair-reason\b/.test(String(next.next_command_shape ?? ""))
       ? [next.stage]
     : next?.stage === "image_output_qa"
@@ -4644,6 +4654,8 @@ async function main() {
     } : {}),
     ...(next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
       ? { visual_beat_recovery_scope: visualBeatRepairScope } : {}),
+    ...(next?.stage === "reference_generation" && next?.state === "blocked" && referenceGeneration.reference_image_qa_recovery_scope
+      ? { reference_image_qa_recovery_scope: referenceGeneration.reference_image_qa_recovery_scope } : {}),
     ...(next?.stage === "visual_reference_plan" && next?.state === "blocked" && visualReferencePlan.recovery_scope
       ? { visual_reference_recovery_scope: visualReferencePlan.recovery_scope } : {}),
     allowed_command_stages: [...new Set([
@@ -4687,6 +4699,7 @@ if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  referenceGenerationComplete as referenceGenerationCompleteForTests,
   inferredState as inferredStateForTests,
   visualReferencePlanComplete as visualReferencePlanCompleteForTests,
   hybridDeadletteredAssetIds as hybridDeadletteredAssetIdsForTests,

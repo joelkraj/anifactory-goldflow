@@ -22,6 +22,7 @@ import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles
 import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
+import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -118,6 +119,15 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
     const recovery = visualReferenceRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
       console.error(`Workflow guard blocked visual reference recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
+  }
+  if (commandName === "imagegen" && subcommandName === "browser-pool") {
+    const recovery = referenceImageQaRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked reference image QA recovery: ${recovery.reason}.`);
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }

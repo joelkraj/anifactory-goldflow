@@ -427,6 +427,34 @@ function resolvedReferenceDependencyAssetIds(target, lookup) {
   return resolved;
 }
 
+// Only queued assets participate. Materialized inputs outside this manifest
+// retain their existing path/hash checks and cannot create a queue cycle.
+export function assertCodexWorkDependenciesAcyclic(items) {
+  const byId = new Map(items.map((item) => [item.asset_id, item]));
+  const visited = new Set();
+  const active = new Map();
+  const trail = [];
+  const visit = (assetId) => {
+    if (active.has(assetId)) {
+      const cycle = [...trail.slice(active.get(assetId)), assetId];
+      const error = new Error(`Image-work dependency cycle: ${cycle.join(" -> ")}. Repair the exact dependency fields before creating the queue.`);
+      error.code = "image_work_dependency_cycle";
+      error.cycle_asset_ids = cycle;
+      throw error;
+    }
+    if (visited.has(assetId)) return;
+    active.set(assetId, trail.length);
+    trail.push(assetId);
+    for (const dependencyId of byId.get(assetId).dependency_asset_ids ?? []) {
+      if (byId.has(dependencyId)) visit(dependencyId);
+    }
+    trail.pop();
+    active.delete(assetId);
+    visited.add(assetId);
+  };
+  for (const assetId of byId.keys()) visit(assetId);
+}
+
 async function bindReferenceTargetInputs(target, lookup, sourceDir, sharedReferenceIds = []) {
   const slots = [];
   const dependencyIds = [...new Set([...referenceDependencyIds(target), ...sharedReferenceIds].map(cleanText).filter(Boolean))];
@@ -736,6 +764,7 @@ export async function createCodexWorkManifest(options) {
     }
   }
 
+  assertCodexWorkDependenciesAcyclic(items);
   applyManifestPriorities(items, mode);
   for (const item of items) delete item.source_row;
   const verificationAssetIds = representativeVerificationAssetIds(items);
@@ -999,6 +1028,7 @@ export async function appendCodexWorkManifestStream(options) {
       Number(right.critical_path_priority ?? 0) - Number(left.critical_path_priority ?? 0)
       || left.asset_id.localeCompare(right.asset_id, undefined, { numeric: true })
     ));
+    assertCodexWorkDependenciesAcyclic(items);
     const verificationAssetIds = current.policy?.verification_asset_ids ?? [];
     const appendedAt = nowIso();
     const next = {

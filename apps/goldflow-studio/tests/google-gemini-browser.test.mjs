@@ -2,6 +2,9 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   createGeminiLlmPromptDelivery,
@@ -590,6 +593,89 @@ async function excludesPromptsAndPreviousTurnsFromProviderErrors() {
   assert.equal(geminiBlockingCode("I seem to be encountering an error. Can I try something else for you?"), "google_gemini_generation_error");
 }
 
+async function capturesPresubmitImageFailureWithoutChangingTheFailure() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gemini-image-failure-"));
+  const original = new Error('Uploads did not finish; https://media.example/image?Signature=private-url Bearer private-bearer "token":"private-token"');
+  original.code = "ui_contract_mismatch";
+  const originalMessage = original.message;
+  const logs = [];
+  let submissions = 0;
+  let screenshotFails = false;
+  const node = (text, { visible = true, excluded = false, alt = "", nestedPrompt = null } = {}) => {
+    const element = {
+      closest() { return excluded ? {} : null; },
+      getClientRects() { return visible ? [{}] : []; },
+      getAttribute(name) { assert.equal(name, "alt"); return alt; },
+      ownerDocument: {
+        defaultView: { getComputedStyle() { return { visibility: "visible" }; } },
+        createTreeWalker(root) {
+          let index = 0;
+          return { nextNode() { return root.textNodes[index++] ?? null; } };
+        },
+      },
+    };
+    element.textNodes = [{ textContent: text, parentElement: element }];
+    if (nestedPrompt) element.textNodes.push({ textContent: nestedPrompt, parentElement: node("", { excluded: true }) });
+    return element;
+  };
+  const page = {
+    locator(selector) {
+      let nodes = [];
+      if (selector === "gem-attachment") nodes = [node("01-state-abcdef012345.png"), node("hidden", { visible: false })];
+      else if (selector === 'img[alt="attachment"]') nodes = [node("", { alt: "attachment" }), node("", { alt: "attachment" })];
+      else if (selector === 'gem-attachment[aria-busy="true"]') nodes = [node("Uploading")];
+      else if (selector.startsWith('[role="alert"]')) nodes = [
+        node('Upload failed https://media.example/file?token=private-ui-url Authorization: private-header', { nestedPrompt: "Do not capture nested prompt" }),
+        node('Do not capture prompt', { excluded: true }),
+      ];
+      return { async evaluateAll(callback) { return callback(nodes); } };
+    },
+    getByText(pattern) { assert.ok(pattern instanceof RegExp); return {}; },
+    async screenshot(options) {
+      assert.equal(options.fullPage, false);
+      assert.equal(options.mask.length, 2);
+      if (screenshotFails) throw new Error("Screenshot unavailable");
+      return Buffer.from("private screenshot fixture");
+    },
+  };
+  const browser = new GoogleGeminiBrowser({ downloadsRoot: root, log: (message) => logs.push(message) });
+  browser.persistentJobPage = async () => page;
+  browser.ensureCleanImageComposer = async () => page;
+  browser.verifyUiContract = async () => ({});
+  browser.generatedResponseImageUrls = async () => [];
+  browser.attachReferences = async () => { throw original; };
+  const run = () => browser.runJob({
+    job: { type: "image", worker_session_policy: "persistent_tab_per_worker_slot_v1", manifest_id: "fixture-manifest", asset_id: "fixture-cut", references: [{}] },
+    submitGeneration: async () => { submissions += 1; },
+  });
+  try {
+    for (const failedScreenshot of [false, true]) {
+      screenshotFails = failedScreenshot;
+      await assert.rejects(run, (error) => error === original && error.message === originalMessage && error.code === "ui_contract_mismatch");
+      const receiptPath = logs.at(-1).replace("Gemini image failure diagnostics: ", "");
+      assert.ok(receiptPath.startsWith(path.join(root, "_google-gemini-ui-diagnostics")));
+      const text = await fs.readFile(receiptPath, "utf8");
+      const receipt = JSON.parse(text);
+      assert.equal(receipt.attachments.visible_count, 1);
+      assert.equal(receipt.previews.visible_count, 2, "mixed wrappers and previews must be retained independently");
+      assert.equal(receipt.loading[0].observed.visible_count, 1);
+      assert.equal(receipt.expected_reference_count, 1);
+      assert.match(text, /01-state-abcdef012345\.png/);
+      assert.doesNotMatch(text, /private-url|private-bearer|private-token|private-ui-url|private-header|Do not capture (?:nested )?prompt/);
+      assert.equal(Boolean(receipt.screenshot), !failedScreenshot);
+      assert.equal((await fs.stat(receiptPath)).mode & 0o777, 0o600);
+      if (receipt.screenshot) assert.equal((await fs.stat(receipt.screenshot.path)).mode & 0o777, 0o600);
+    }
+    browser.imageFailureDiagnostics = async () => { throw new Error("Diagnostic storage unavailable"); };
+    await assert.rejects(run, (error) => error === original && error.message === originalMessage && error.code === "ui_contract_mismatch");
+    assert.equal(submissions, 0, "presubmit failure and diagnostics must not submit generation");
+    assert.equal(logs.length, 2, "failed diagnostics must not claim a retained receipt");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+await capturesPresubmitImageFailureWithoutChangingTheFailure();
 await excludesPromptsAndPreviousTurnsFromProviderErrors();
 await acceptsEditorNormalizationWithoutWeakeningContentBinding();
 await acceptsCompleteLongContenteditablePrompt();

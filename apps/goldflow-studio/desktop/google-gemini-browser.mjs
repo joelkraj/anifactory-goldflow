@@ -26,6 +26,16 @@ function safeName(value) {
   return String(value ?? "asset").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
 }
 
+function diagnosticText(value) {
+  return String(value ?? "")
+    .replace(/\b(?:https?:\/\/|blob:|data:)[^\s<>"']+/gi, "[REDACTED URL]")
+    .replace(/\bBearer\s+[^\s,;)"']+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:cookie|set-cookie|authorization|proxy-authorization)\s*:[^\r\n]*/gi, "[REDACTED HEADER]")
+    .replace(/\b[\w-]*(?:token|secret|password|session|auth|cookie|api[_-]?key)[\w-]*["']?\s*[=:]\s*["']?[^\s,;)"']+/gi, "[REDACTED CREDENTIAL]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED EMAIL]")
+    .slice(0, 2_000);
+}
+
 export function observedGeminiImageFilename(body, expectedFilename) {
   const lines = new Set(String(body ?? "").split(/\r?\n/).map((line) => line.trim()));
   if (lines.has(expectedFilename)) return expectedFilename;
@@ -996,6 +1006,65 @@ export class GoogleGeminiBrowser {
     return { ...receipt.reference_binding, evidence: { receipt_path: receiptPath, receipt_sha256: await sha256File(receiptPath), screenshot_path: screenshotPath, screenshot_sha256: receipt.screenshot_sha256 } };
   }
 
+  async imageFailureDiagnostics(page, job, error) {
+    const directory = path.join(this.downloadsRoot, "_google-gemini-ui-diagnostics");
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const screenshotPath = path.join(directory, `${stamp}.png`);
+    const receiptPath = path.join(directory, `${stamp}.json`);
+    const readVisible = async (selector) => {
+      const snapshot = await page.locator(selector).evaluateAll((nodes) => {
+        const isVisible = (node) => {
+          if (node.closest('user-query, [data-message-author-role="user"], [contenteditable="true"], textarea, nav, aside, [role="navigation"], [hidden], [aria-hidden="true"]')) return false;
+          const style = node.ownerDocument.defaultView.getComputedStyle(node);
+          return node.getClientRects().length && style.visibility !== "hidden" && style.visibility !== "collapse";
+        };
+        const visible = nodes.filter(isVisible);
+        return { matched_count: nodes.length, visible_count: visible.length,
+          visible_items: visible.slice(0, 12).map((node) => {
+            // A status/dialog container may contain a prompt or hidden descendant.
+            const walker = node.ownerDocument.createTreeWalker(node, 4);
+            let text = "", child;
+            while (text.length < 2_000 && (child = walker.nextNode())) {
+              if (child.parentElement && isVisible(child.parentElement)) text += `${child.textContent}\n`;
+            }
+            return { text: text.slice(0, 2_000), alt: String(node.getAttribute("alt") ?? "").slice(0, 2_000) };
+          }) };
+      }).catch(() => null);
+      return snapshot && { ...snapshot, visible_items: snapshot.visible_items.map((item) => ({
+        text: diagnosticText(item.text), alt: diagnosticText(item.alt),
+      })) };
+    };
+    // Counts stay independent: mixed attachment UI is evidence, not a new admission rule.
+    const attachments = await readVisible("gem-attachment");
+    const previews = await readVisible('img[alt="attachment"]');
+    const loading = [];
+    for (const selector of GEMINI_UPLOAD_PENDING_SELECTOR.split(", ")) {
+      loading.push({ selector, observed: await readVisible(selector) });
+    }
+    const errors = await readVisible('[role="alert"], [role="status"], [role="dialog"], [class*="error" i]');
+    let screenshot = null;
+    try {
+      const bytes = await page.screenshot({ fullPage: false, timeout: 5_000, mask: [
+        page.locator('user-query, [data-message-author-role="user"], [contenteditable="true"], input, textarea, nav, aside, [role="navigation"]'),
+        page.getByText(/https?:\/\/|blob:|data:|Bearer\s+|(?:cookie|authorization|token|secret|password|session|api[_-]?key)\s*[=:]|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i),
+      ] });
+      await fs.writeFile(screenshotPath, bytes, { flag: "wx", mode: 0o600 });
+      screenshot = { path: screenshotPath, sha256: sha256Bytes(bytes) };
+    } catch { /* Text evidence remains useful when the page cannot be captured. */ }
+    const receipt = {
+      schema: "goldflow_google_gemini_image_failure_diagnostic_v1",
+      captured_at: new Date().toISOString(), browser_provider: "google-gemini",
+      manifest_id: job.manifest_id, asset_id: job.asset_id,
+      expected_reference_count: Array.isArray(job.references) ? job.references.length : 0,
+      failure: { code: diagnosticText(error?.code), message: diagnosticText(error?.message) },
+      attachments, previews, loading, visible_error_containers: errors, screenshot,
+      observation_scope: "Visible UI only; historical errors are not attributed to this submission.",
+    };
+    await fs.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    return receiptPath;
+  }
+
   async runJob({ slot = 0, job, client, onPhase = async () => {}, submitGeneration = async (click) => click() }) {
     if (job.type === "llm") return this.runLlmJob({ slot, job, onPhase });
     if (job.type !== "image") throw codedError("ui_contract_mismatch", `Gemini browser received unsupported ${job.type} work.`);
@@ -1066,6 +1135,10 @@ export class GoogleGeminiBrowser {
       };
     } catch (error) {
       preservePage = ["auth_required", "ui_contract_mismatch"].includes(error?.code);
+      try {
+        const diagnosticPath = await this.imageFailureDiagnostics(page, job, error);
+        this.log(`Gemini image failure diagnostics: ${diagnosticPath}`, "warn");
+      } catch { /* Diagnostics must never replace or modify the original job failure. */ }
       throw error;
     } finally {
       if (!persistentWorker && !preservePage) await page.close().catch(() => {});

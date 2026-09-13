@@ -34,6 +34,8 @@ npm run studio:hybrid
 
 This starts ChatGPT planning plus explicit exact-ID image-fallback capacity on `127.0.0.1:4317`, shared Google Flow image/video work on `127.0.0.1:4318`, and Gemini planning plus still-image capacity on `127.0.0.1:4319`. ChatGPT and Gemini are hard-capped at three active browser workers; Flow is hard-capped at five. New submissions are staggered by six seconds and every freed slot is topped off individually, without waiting for the rest of a wave. New `fast_premium_v1` image manifests keep five slot-bound Flow projects and three slot-bound Gemini Images tabs open across queue items. An unresolved persistent manifest prewarms those slots at host startup; a manifest activated later warms them once on its first lease. Legacy manifests retain their recorded fresh-page policy and never prewarm dormant persistent projects or tabs. Three consecutive transient failures open that provider's circuit, while authentication, eligibility, and UI-contract failures open it immediately; a rate limit pauses it for ten minutes. LLM leases take priority over image leases on ChatGPT and Gemini. The launcher keeps separate persistent profiles, bootstraps missing sign-ins one at a time, publishes the live planning routes to a local process-owned registry, and drains active work before shutdown. Production manifests still control exact eligible assets.
 
+Each new Gemini image job returns a prior conversation to the dedicated Images composer in the same worker tab. A ready Images composer needs no navigation; text jobs and the current image job's response/download handling are unchanged.
+
 For the initial bounded Google Flow proof, start one image slot and sign in once in its separate profile:
 
 ```bash

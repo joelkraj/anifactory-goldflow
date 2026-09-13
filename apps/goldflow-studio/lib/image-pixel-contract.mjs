@@ -1,5 +1,10 @@
 import sharp from "sharp";
 
+export async function imagePixelDimensions(input) {
+  const { width, height } = await sharp(input, { failOn: "error" }).metadata();
+  return { width, height };
+}
+
 export async function normalizedImagePixels(input, { width = 256, height = 144 } = {}) {
   return sharp(input, { failOn: "error" })
     .flatten({ background: "#ffffff" })

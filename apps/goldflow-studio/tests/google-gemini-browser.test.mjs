@@ -14,11 +14,13 @@ import {
   GoogleGeminiBrowser,
   isGeminiConversationUrl,
   isGeminiImageSurfaceUrl,
+  isProportionalReferenceDownscale,
   normalizeGeminiPromptText,
   observedGeminiImageFilename,
   verifyGeminiComposerPrompt,
   verifyGeminiTextAttachmentRetained,
 } from "../desktop/google-gemini-browser.mjs";
+import { findReferenceEcho } from "../lib/image-pixel-contract.mjs";
 
 function composerWithInnerText(value) {
   return {
@@ -666,6 +668,67 @@ async function retainsBoundedEvidenceForALoadedWrongPreview() {
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
+async function acceptsOnlyBoundedProportionalUploadThumbnailDrift() {
+  const width = 1376, height = 768;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) for (let channel = 0; channel < 3; channel += 1) {
+    pixels[(y * width + x) * 3 + channel] = 80 + ((Math.floor(x / 7) + Math.floor(y / 11)) % 2) * 40 + channel * 15;
+  }
+  const source = await sharp(pixels, { raw: { width, height, channels: 3 } }).png().toBuffer();
+  const thumbnail = await sharp(source).resize(1024, 571, { fit: "fill", kernel: "nearest" }).png().toBuffer();
+  const distorted = await sharp(source).resize(1024, 500, { fit: "fill", kernel: "nearest" }).png().toBuffer();
+  const unrelated = await sharp({ create: { width: 1024, height: 571, channels: 3, background: "white" } }).png().toBuffer();
+  const swappedReference = await sharp(source).negate().png().toBuffer();
+  const sameSizeDrift = await sharp(source).linear(1, 2).png().toBuffer();
+  assert.equal(isProportionalReferenceDownscale({ width, height }, { width: 1024, height: 571 }), true);
+  for (const dimensions of [{ width, height }, { width: 2048, height: 1143 }, { width: 1024, height: 500 }, { width: 0, height: 0 }]) {
+    assert.equal(isProportionalReferenceDownscale({ width, height }, dimensions), false);
+  }
+  assert.equal(await findReferenceEcho(thumbnail, [{ input: source }]), null,
+    "Generated-output/default pixel checks must retain strict threshold 1");
+  const verify = async (expected, preview, shouldPass) => {
+    const browser = new GoogleGeminiBrowser();
+    let uploads = 0, clock = 1_000;
+    const originalNow = Date.now;
+    const page = {
+      keyboard: { async press() {} },
+      getByRole() { return visibleMockLocator(); },
+      getByText() { return { locator() { return visibleMockLocator(); } }; },
+      async waitForEvent() { return { async setFiles(files) { assert.deepEqual(files[0].buffer, expected); uploads += 1; } }; },
+      locator() { return { async innerText() { return ""; } }; }, // No filename snackbar.
+    };
+    browser.imageComposerPreviewUrls = async () => uploads ? ["blob:fresh-reference"] : [];
+    browser.imageUploadState = async () => ({ expected_count: 1, observed_count: 1, no_pending_uploads: true, ready: true });
+    browser.imageBytes = async () => { if (!shouldPass) clock += 90_001; return preview; };
+    let result, failure;
+    try {
+      if (!shouldPass) Date.now = () => clock;
+      try {
+        result = await browser.attachReferences(page, { references: [{ slot: 1, ref_id: "fixture",
+          sha256: createHash("sha256").update(expected).digest("hex"), url: "fixture:source" }] }, {
+          async fetchReference() { return { bytes: expected, mimeType: "image/png" }; },
+        }, async () => {});
+      } catch (error) { failure = error; }
+    } finally { Date.now = originalNow; }
+    assert.equal(uploads, 1, "No automatic reattachment or reference swap");
+    if (shouldPass) { assert.equal(failure, undefined); return result.orderedReferences[0]; }
+    assert.equal(failure?.code, "ui_contract_mismatch");
+    assert.equal(failure.reference_upload_verification[0].verified, false);
+    return failure.reference_upload_verification[0];
+  };
+  const accepted = await verify(source, thumbnail, true);
+  assert.equal(accepted.observed_upload_filename, null);
+  assert.equal(accepted.preview_proportional_downscale, true);
+  assert.equal(accepted.preview_pixel_threshold, 3);
+  assert.ok(accepted.preview_mean_absolute_difference > 1 && accepted.preview_mean_absolute_difference <= 3);
+  assert.deepEqual(accepted.source_dimensions, { width, height });
+  assert.deepEqual(accepted.preview_dimensions, { width: 1024, height: 571 });
+  assert.equal((await verify(source, unrelated, false)).pixel_threshold, 3);
+  assert.equal((await verify(swappedReference, thumbnail, false)).pixel_threshold, 3);
+  assert.equal((await verify(source, distorted, false)).pixel_threshold, 1);
+  assert.equal((await verify(source, sameSizeDrift, false)).pixel_threshold, 1);
+}
+
 async function waitsForUploadSpinnerEvenWithVisiblePreview() {
   const browser = new GoogleGeminiBrowser();
   browser.visibleImageComposerAttachmentCount = async () => 1;
@@ -850,6 +913,7 @@ recognizesOnlyTheExactTranscodedReferenceFilename();
 await countsModernAndLegacyImageAttachmentsWithoutDoubleCounting();
 await settlesEachMatchingReferenceBeforeOpeningTheNextChooser();
 await retainsBoundedEvidenceForALoadedWrongPreview();
+await acceptsOnlyBoundedProportionalUploadThumbnailDrift();
 await scopesUploadPixelChecksToLoadedComposerPreviews();
 await waitsForUploadSpinnerEvenWithVisiblePreview();
 

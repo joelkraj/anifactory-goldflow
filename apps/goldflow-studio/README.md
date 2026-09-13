@@ -36,7 +36,7 @@ This starts ChatGPT planning plus explicit exact-ID image-fallback capacity on `
 
 Each new Gemini image job returns a prior conversation to the dedicated Images composer in the same worker tab. A ready Images composer needs no navigation; text jobs and the current image job's response/download handling are unchanged.
 
-Gemini uploads references sequentially: each exact file must have a fresh complete preview matching its pixels and a stable attachment count with no pending upload before the next file chooser opens. A filename notification alone proves selection, not upload completion. The final full-set and pre-Generate checks still apply; this barrier does not retry uploads or change the locked model or submission spacing.
+Gemini uploads references sequentially: each exact file must have a fresh complete preview matching its pixels and a stable attachment count with no pending upload before the next file chooser opens. A filename notification alone proves selection, not upload completion. A proportional downscale verified from the source and preview bytes uses the existing bounded upload-only lossy tolerance, even when the filename notification is absent; receipts record both dimensions and the selected threshold. Other preview comparisons and generated-output checks keep their existing thresholds. The final full-set and pre-Generate checks still apply; this barrier does not retry uploads or change the locked model or submission spacing.
 
 For the initial bounded Google Flow proof, start one image slot and sign in once in its separate profile:
 

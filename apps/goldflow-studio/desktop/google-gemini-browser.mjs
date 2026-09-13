@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { chromium } from "playwright-core";
 
-import { findReferenceEcho, normalizedImagePixels } from "../lib/image-pixel-contract.mjs";
+import { findReferenceEcho, imagePixelDimensions, normalizedImagePixels } from "../lib/image-pixel-contract.mjs";
 import { clearLoginMarker, markLoginVerified } from "./browser-login.mjs";
 
 const GEMINI_IMAGES_URL = "https://gemini.google.com/images";
@@ -43,6 +43,15 @@ export function observedGeminiImageFilename(body, expectedFilename) {
   const stem = expectedFilename.replace(/\.(?:png|jpe?g|webp)$/i, "");
   // Gemini's image composer transcodes uploads while retaining the exact stem.
   return [`${stem}.jpg`, `${stem}.jpeg`].find((name) => lines.has(name)) ?? null;
+}
+
+export function isProportionalReferenceDownscale(source, preview) {
+  const values = [source?.width, source?.height, preview?.width, preview?.height];
+  if (!values.every((value) => Number.isInteger(value) && value > 0)) return false;
+  if (preview.width >= source.width || preview.height >= source.height) return false;
+  // Both proportional dimensions may round by at most one output pixel.
+  return Math.abs(preview.height - source.height * preview.width / source.width) <= 1
+    && Math.abs(preview.width - source.width * preview.height / source.height) <= 1;
 }
 
 function sha256Bytes(value) {
@@ -715,7 +724,8 @@ export class GoogleGeminiBrowser {
       const extension = downloaded.mimeType.includes("png") ? "png" : downloaded.mimeType.includes("webp") ? "webp" : "jpg";
       const filename = `${String(slot).padStart(2, "0")}-${safeName(reference.ref_id)}-${sourceSha256.slice(0, 12)}.${extension}`;
       files.push({ name: filename, mimeType: downloaded.mimeType, buffer: downloaded.bytes });
-      referenceInputs.push({ slot, ref_id: reference.ref_id, normalized_pixels: await normalizedImagePixels(downloaded.bytes) });
+      referenceInputs.push({ slot, ref_id: reference.ref_id, normalized_pixels: await normalizedImagePixels(downloaded.bytes),
+        source_dimensions: await imagePixelDimensions(downloaded.bytes) });
       orderedReferences.push({ slot, ref_id: reference.ref_id, source_sha256: sourceSha256, upload_filename: filename });
     }
     if (!files.length) return { referenceInputs, orderedReferences };
@@ -732,6 +742,7 @@ export class GoogleGeminiBrowser {
         eligible_preview_count: null, fresh_eligible_preview_count: null, expected_count: index + 1,
         observed_count: null, no_pending_uploads: null, upload_ready: null,
         filename_observed: false, filename_transcoded: false, pixel_threshold: null,
+        source_dimensions: referenceInputs[index].source_dimensions, preview_dimensions: null, proportional_downscale: false,
         preview_read_attempted: false, preview_read_succeeded: false, pixel_comparison_succeeded: false,
         latest_pixel_mae: null, minimum_pixel_mae: null, pixel_match: false,
         stability_reached: false, matching_preview_retained: null, verified: false };
@@ -781,6 +792,7 @@ export class GoogleGeminiBrowser {
           observed_count: uploadState.observed_count, no_pending_uploads: uploadState.no_pending_uploads, upload_ready: uploadState.ready,
           filename_observed: Boolean(observedFilename), filename_transcoded: Boolean(observedFilename && observedFilename !== file.name),
           pixel_threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+          preview_dimensions: null, proportional_downscale: false,
           preview_read_attempted: false, preview_read_succeeded: false, pixel_comparison_succeeded: false,
           latest_pixel_mae: null, pixel_match: false, stability_reached: false, matching_preview_retained: null });
         for (const sourceUrl of freshPreviewUrls) {
@@ -791,10 +803,14 @@ export class GoogleGeminiBrowser {
               pixel_comparison_succeeded: false, latest_pixel_mae: null });
             const bytes = await this.imageBytes(page, sourceUrl);
             verification.preview_read_succeeded = true;
+            verification.preview_dimensions = await imagePixelDimensions(bytes);
+            verification.proportional_downscale = isProportionalReferenceDownscale(
+              referenceInputs[index].source_dimensions, verification.preview_dimensions);
+            verification.pixel_threshold = (observedFilename && observedFilename !== file.name) || verification.proportional_downscale ? 3 : 1;
             match = await findReferenceEcho(bytes, [referenceInputs[index]], {
-              // Allow only bounded lossy-preview drift when the hash-bearing
-              // filename stem also matches. Generated-output checks stay strict.
-              threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+              // Existing upload-only lossy tolerance also covers evidenced proportional
+              // thumbnails; filename snackbars may disappear. Generated checks stay strict.
+              threshold: verification.pixel_threshold,
               onComparison: (mae) => {
                 verification.pixel_comparison_succeeded = true;
                 verification.latest_pixel_mae = mae;
@@ -817,6 +833,10 @@ export class GoogleGeminiBrowser {
           orderedReferences[index].observed_upload_filename = observedFilename;
           orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
           orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
+          orderedReferences[index].preview_pixel_threshold = verification.pixel_threshold;
+          orderedReferences[index].preview_proportional_downscale = verification.proportional_downscale;
+          orderedReferences[index].source_dimensions = verification.source_dimensions;
+          orderedReferences[index].preview_dimensions = verification.preview_dimensions;
           break;
         }
         if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) await sleep(250);

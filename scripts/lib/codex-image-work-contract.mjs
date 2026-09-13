@@ -1231,6 +1231,27 @@ async function withLeaseDispatchLock(manifestDir, callback) {
   }
 }
 
+export async function beginCodexWorkManifestDrain({ manifestPath, reason }) {
+  const loaded = await loadWorkManifest(manifestPath);
+  if (!cleanText(reason)) throw new Error("Manifest drain requires an explicit reason.");
+  const receiptPath = path.join(loaded.manifestDir, "dispatch-drain.json");
+  return withLeaseDispatchLock(loaded.manifestDir, async () => {
+    if (await pathExists(receiptPath)) return readJson(receiptPath);
+    const receipt = {
+      schema: "goldflow_codex_image_dispatch_drain_v1",
+      status: "draining",
+      manifest_id: loaded.manifest.manifest_id,
+      manifest_path: loaded.manifestPath,
+      manifest_sha256: await sha256File(loaded.manifestPath),
+      reason: cleanText(reason),
+      started_at: nowIso(),
+      policy: "no_new_leases_existing_completions_retained",
+    };
+    await writeJsonExclusive(receiptPath, receipt);
+    return receipt;
+  });
+}
+
 function itemById(manifest, assetId) {
   const safeId = assertAssetId(assetId);
   const item = manifest.items.find((row) => row.asset_id === safeId);
@@ -1433,6 +1454,11 @@ export async function leaseNextWorkItem(options) {
     };
   }
   return withLeaseDispatchLock(manifestDir, async () => {
+    // The controller must stop admission before taking its final drain snapshot.
+    // Keep active registrations and existing leases available for completion.
+    if (await pathExists(path.join(manifestDir, "dispatch-drain.json"))) {
+      return { status: "no_work", no_work_reason: "manifest_draining" };
+    }
     await reconcileExpiredLeases(manifestPath);
     const liveLeaseEntries = await fs.readdir(path.join(manifestDir, "leases"), { withFileTypes: true });
     const liveLeases = [];
@@ -1992,6 +2018,7 @@ export async function getCodexWorkStatus(options) {
     browser_provider_concurrency: manifest.policy?.browser_provider_concurrency ?? null,
     browser_provider_worker_session_policy: manifest.policy?.browser_provider_worker_session_policy ?? null,
     streaming_queue: manifest.streaming_queue ?? null,
+    dispatch_drain: await readJson(path.join(manifestDir, "dispatch-drain.json")).catch(() => null),
     completed_by_browser_provider: Object.fromEntries(
       (manifest.policy?.allowed_browser_providers ?? []).map((provider) => [
         provider,

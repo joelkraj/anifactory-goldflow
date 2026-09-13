@@ -13,6 +13,7 @@ import {
 } from "../apps/goldflow-studio/lib/goldflow-bridge.mjs";
 import {
   appendCodexWorkManifestStream,
+  beginCodexWorkManifestDrain,
   codexWorkSourceRowSha256,
   createCodexWorkManifest,
   getCodexWorkStatus,
@@ -295,6 +296,7 @@ async function runElectronChatGptManifest({
         browserProvider: "chatgpt",
       });
       if (lease.status !== "leased") {
+        if (lease.no_work_reason === "manifest_draining") return;
         const status = await getCodexWorkStatus({ manifestPath });
         if (status.counts.pending === 0) return;
         await delay(1_000);
@@ -1193,8 +1195,15 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
   let lastProgress = "";
   let lastRuntimeCheck = 0;
   const runtimeRecoveryStartedAt = new Map();
+  let providerCircuitError = null;
   while (true) {
-    const status = await getCodexWorkStatus({ manifestPath });
+    let status = await getCodexWorkStatus({ manifestPath });
+    providerCircuitError ??= status.dispatch_drain?.reason ?? null;
+    if (providerCircuitError && status.counts.leased === 0) {
+      // Completion can land between a row's completion and lease reads. Once
+      // admission is closed and leases have drained, take the stable import set.
+      status = await getCodexWorkStatus({ manifestPath, reconcile: false });
+    }
     const progress = JSON.stringify(status.counts);
     if (progress !== lastProgress) {
       process.stderr.write(`[browser-pool] ${path.basename(path.dirname(manifestPath))} ${progress}\n`);
@@ -1202,19 +1211,19 @@ async function waitForManifest({ manifestPath, timeoutMs, providerRuntimes }) {
     }
     if (manifestQueueStopReason(status)) return status;
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for hybrid browser manifest ${manifestPath}.`);
+    if (providerCircuitError) {
+      if (status.counts.leased === 0) return { ...status, status: "blocked_provider_circuit", provider_runtime_error: providerCircuitError };
+      await delay(2_000);
+      continue;
+    }
     if (Date.now() - lastRuntimeCheck > 15_000) {
       try {
         await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
       } catch (error) {
         if (!/provider circuit is open/i.test(String(error?.message ?? ""))) throw error;
-        if (status.counts.leased === 0) {
-          return {
-            ...status,
-            status: "blocked_provider_circuit",
-            provider_runtime_error: String(error.message),
-          };
-        }
-        process.stderr.write(`[browser-pool] Provider circuit opened; draining ${status.counts.leased} in-flight asset(s) before stopping.\n`);
+        await beginCodexWorkManifestDrain({ manifestPath, reason: String(error.message) });
+        providerCircuitError = String(error.message);
+        process.stderr.write("[browser-pool] Provider circuit opened; new leases stopped. Waiting for a fresh drained snapshot before import.\n");
       }
       lastRuntimeCheck = Date.now();
     }
@@ -1229,8 +1238,13 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
   let lastProgress = "";
   let lastRuntimeCheck = 0;
   const runtimeRecoveryStartedAt = new Map();
+  let providerCircuitError = null;
   while (true) {
-    const status = await getCodexWorkStatus({ manifestPath });
+    let status = await getCodexWorkStatus({ manifestPath });
+    providerCircuitError ??= status.dispatch_drain?.reason ?? null;
+    if (providerCircuitError && status.counts.leased === 0) {
+      status = await getCodexWorkStatus({ manifestPath, reconcile: false });
+    }
     const rows = status.items.filter((row) => wanted.has(row.asset_id));
     const unknown = [...wanted].filter((assetId) => !rows.some((row) => row.asset_id === assetId));
     if (unknown.length) throw new Error(`Streaming manifest does not contain: ${unknown.join(", ")}.`);
@@ -1253,22 +1267,22 @@ async function waitForManifestAssetIds({ manifestPath, assetIds, timeoutMs, prov
       };
     }
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for streaming browser assets in ${manifestPath}.`);
+    if (providerCircuitError) {
+      if (status.counts.leased === 0) return {
+        ...status, status: "blocked_provider_circuit", item_count: rows.length, counts, items: rows,
+        provider_runtime_error: providerCircuitError,
+      };
+      await delay(2_000);
+      continue;
+    }
     if (Date.now() - lastRuntimeCheck > 15_000) {
       try {
         await assertMonitoredProviderRuntimes(providerRuntimes, runtimeRecoveryStartedAt);
       } catch (error) {
         if (!/provider circuit is open/i.test(String(error?.message ?? ""))) throw error;
-        if (counts.leased === 0) {
-          return {
-            ...status,
-            status: "blocked_provider_circuit",
-            item_count: rows.length,
-            counts,
-            items: rows,
-            provider_runtime_error: String(error.message),
-          };
-        }
-        process.stderr.write(`[browser-pool-stream] Provider circuit opened; draining ${counts.leased} in-flight asset(s) before stopping.\n`);
+        await beginCodexWorkManifestDrain({ manifestPath, reason: String(error.message) });
+        providerCircuitError = String(error.message);
+        process.stderr.write("[browser-pool-stream] Provider circuit opened; new leases stopped. Waiting for all existing manifest leases to drain.\n");
       }
       lastRuntimeCheck = Date.now();
     }

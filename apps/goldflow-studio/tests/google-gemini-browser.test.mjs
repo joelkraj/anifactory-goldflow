@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 
 import {
   createGeminiLlmPromptDelivery,
@@ -505,6 +506,7 @@ async function countsModernAndLegacyImageAttachmentsWithoutDoubleCounting() {
   for (const [legacy, modern, expected] of [
     [[], [true, true, false], 2],
     [[true, true], [true, true], 2],
+    [[true], [true, true, true], 1],
     [[false], [], 0],
   ]) {
     const page = { locator(selector) {
@@ -513,6 +515,79 @@ async function countsModernAndLegacyImageAttachmentsWithoutDoubleCounting() {
     } };
     assert.equal(await browser.visibleImageComposerAttachmentCount(page), expected);
   }
+}
+
+async function settlesEachMatchingReferenceBeforeOpeningTheNextChooser() {
+  const browser = new GoogleGeminiBrowser();
+  const buffers = await Promise.all(["#204060", "#e0b080"].map((background) =>
+    sharp({ create: { width: 16, height: 16, channels: 3, background } }).png().toBuffer()));
+  const references = buffers.map((buffer, index) => ({ slot: index + 1, ref_id: `fixture-${index + 1}`,
+    sha256: createHash("sha256").update(buffer).digest("hex"), url: `fixture:${index}` }));
+  const uploaded = [];
+  const phasesObserved = [];
+  const pixelReads = [];
+  let phase = -1;
+  let firstMatchedAt = null;
+  const chooser = { async setFiles(files) {
+    assert.equal(files.length, 1);
+    if (uploaded.length === 1) {
+      assert.equal(phase, 3, "Filename-only, pending and wrong pixels cannot open the next upload");
+      assert.ok(Date.now() - firstMatchedAt >= 750, "The prior matching preview must settle before the next file");
+    }
+    assert.deepEqual(files[0].buffer, buffers[uploaded.length], "Upload the original exact bytes once in order");
+    uploaded.push(files[0]);
+  } };
+  const page = {
+    keyboard: { async press(key) { assert.equal(key, "Escape"); } },
+    getByRole(role, options) {
+      assert.equal(role, "button");
+      assert.equal(options.name, "Upload & tools");
+      return visibleMockLocator();
+    },
+    getByText(text) {
+      assert.equal(text, "Upload files");
+      return { locator() { return visibleMockLocator(); } };
+    },
+    async waitForEvent(event) { assert.equal(event, "filechooser"); return chooser; },
+    locator(selector) {
+      assert.equal(selector, "body");
+      return { async innerText() {
+        if (uploaded.length === 1) {
+          phase += 1;
+          phasesObserved.push(phase);
+        }
+        // The hash-bearing filename is visible even before the upload is ready.
+        return uploaded.at(-1).name;
+      } };
+    },
+  };
+  browser.visibleImageComposerAttachmentCount = async () => uploaded.length;
+  browser.imageUploadState = async (_page, expectedCount) => {
+    const pending = uploaded.length === 1 && phase === 1;
+    return { expected_count: expectedCount, observed_count: uploaded.length, no_pending_uploads: !pending,
+      ready: uploaded.length === expectedCount && !pending };
+  };
+  browser.imageComposerPreviewUrls = async () => {
+    if (!uploaded.length || phase === 0) return [];
+    return uploaded.map((_, index) => `blob:fixture-${index}`);
+  };
+  browser.imageBytes = async (_page, url) => {
+    const index = Number(url.split("-").at(-1));
+    pixelReads.push({ index, phase });
+    assert.notEqual(phase, 1, "A loaded preview with pending upload must not be accepted");
+    if (index === 0 && phase === 2) return buffers[1];
+    if (index === 0) firstMatchedAt ??= Date.now();
+    return buffers[index];
+  };
+  const result = await browser.attachReferences(page, { references }, {
+    async fetchReference(url) { return { bytes: buffers[Number(url.split(":")[1])], mimeType: "image/png" }; },
+  }, async () => {});
+  assert.deepEqual(phasesObserved, [0, 1, 2, 3]);
+  assert.ok(pixelReads.every((read) => read.phase !== 1), "Pending uploads must not enter pixel acceptance even when preview-read errors are caught");
+  assert.ok(pixelReads.some((read) => read.phase === 2), "The mismatched preview was checked and rejected");
+  assert.equal(uploaded.length, 2, "No reference was reattached or retried");
+  assert.deepEqual(result.orderedReferences.map((row) => row.verification_method),
+    ["preview_pixels_and_attachment_count", "preview_pixels_and_attachment_count"]);
 }
 
 async function scopesUploadPixelChecksToLoadedComposerPreviews() {
@@ -712,6 +787,7 @@ await ignoresOldResponseEvenWhenItsImageUrlChanges();
 recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 recognizesOnlyTheExactTranscodedReferenceFilename();
 await countsModernAndLegacyImageAttachmentsWithoutDoubleCounting();
+await settlesEachMatchingReferenceBeforeOpeningTheNextChooser();
 await scopesUploadPixelChecksToLoadedComposerPreviews();
 await waitsForUploadSpinnerEvenWithVisiblePreview();
 

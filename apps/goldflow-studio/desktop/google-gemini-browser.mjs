@@ -763,32 +763,30 @@ export class GoogleGeminiBrowser {
         const body = await page.locator("body").innerText();
         // Upload-name notifications can disappear before preview pixels load.
         observedFilename = observedGeminiImageFilename(body, file.name) ?? observedFilename;
-        const countMatches = await this.visibleImageComposerAttachmentCount(page) === index + 1;
-        if (observedFilename === file.name && countMatches) {
-          verifiedReferenceIds.add(orderedReferences[index].ref_id);
-          orderedReferences[index].observed_upload_filename = observedFilename;
-          orderedReferences[index].verification_method = "exact_filename_and_attachment_count";
-          break;
-        }
+        const uploadState = await this.imageUploadState(page, index + 1);
         for (const sourceUrl of (await this.imageComposerPreviewUrls(page)).filter((url) => !baselineImageUrls.has(url))) {
-          if (!countMatches) break;
+          if (!uploadState.ready) break;
+          let match;
           try {
             const bytes = await this.imageBytes(page, sourceUrl);
-            const match = await findReferenceEcho(bytes, [referenceInputs[index]], {
+            match = await findReferenceEcho(bytes, [referenceInputs[index]], {
               // Allow only bounded lossy-preview drift when the hash-bearing
               // filename stem also matches. Generated-output checks stay strict.
               threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
             });
-            if (match) {
-              verifiedReferenceIds.add(orderedReferences[index].ref_id);
-              orderedReferences[index].observed_upload_filename = observedFilename;
-              orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
-              orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
-              break;
-            }
           } catch {
             // The attachment preview can exist before its rendered pixels are readable.
           }
+          if (!match) continue;
+          // A filename notification proves selection, not a finished upload.
+          // Settle this exact preview before opening the next file chooser.
+          await this.waitForImageUploads(page, index + 1, { timeoutMs: Math.max(0, deadline - Date.now()) });
+          if (!(await this.imageComposerPreviewUrls(page)).includes(sourceUrl)) continue;
+          verifiedReferenceIds.add(orderedReferences[index].ref_id);
+          orderedReferences[index].observed_upload_filename = observedFilename;
+          orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
+          orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
+          break;
         }
         if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) await sleep(250);
       }

@@ -18,7 +18,8 @@ const write = async (name, value) => {
 try {
   const sourceHash = await write("script_clean.md", "The exact approved narration.");
   const identity = { channel: "test", series_slug: "test", week: "test", episode: "ep_01", source_sha256: sourceHash,
-    image_provider: "federated_google_web_image_pool", image_provider_options: { google_gemini: { model_label: "Locked model" } } };
+    image_provider: "federated_google_web_image_pool", image_provider_options: {
+      google_gemini: { model_label: "Locked Gemini model" }, google_flow: { model_label: "Locked Flow model" } } };
   const identityHash = await write("run_identity.json", identity);
   const approval = { ...identity, operator_approved: true, script_clean_hash: sourceHash };
   const approvalHash = await write("operator_script_approval.json", approval);
@@ -43,12 +44,31 @@ try {
     stage_ledger: PIPELINE_STAGE_REGISTRY.map(row => ({ stage: row.id, state: row.id === "image_generation" ? "blocked" : "passed" })) };
   const flags = { "episode-dir": dir, "image-ids": "bad_a,bad_b", "qa-recovery": "true",
     "repair-reason": "Reviewed two confirmed identity failures in the partial batch.", "gemini-only": "true" };
+  const { "gemini-only": _geminiOnly, ...defaultFlags } = flags;
+  const flowFlags = { ...defaultFlags, "flow-only": "true" };
   const admission = (nextFlags = flags, nextStatus = status) => partialSceneImageQaRecoveryAdmission(nextStatus, nextFlags);
   const scope = () => readPartialSceneImageQaRecoveryScope({ episodeDir: dir, episode: "ep_01" });
   const evidence = (ids = ["bad_a"], rows = prompts) => resolveRepairEvidence({ episodeDir: dir, episode: "ep_01", mode: "scene",
     currentRows: rows, requestedIds: new Set(ids), qaRecovery: true });
 
   assert.equal(admission().allowed, true, "Missing unsubmitted images do not prevent exact reviewed repairs");
+  assert.equal(admission(defaultFlags).allowed, true, "Default routing is unchanged");
+  assert.equal(admission(flowFlags).allowed, true, "Locked Flow can perform the same exact reviewed repair");
+  assert.equal(admission({ ...flowFlags, "image-ids": "bad_b" }).allowed, true);
+  for (const value of ["false", "1", true, undefined]) {
+    assert.equal(admission({ ...flowFlags, "flow-only": value }).allowed, false, "Flow selector must be explicit true text");
+  }
+  for (const changedIdentity of [
+    { ...identity, image_provider: "unlocked_provider" },
+    { ...identity, image_provider_options: { google_gemini: identity.image_provider_options.google_gemini } },
+    { ...identity, image_provider_options: { ...identity.image_provider_options, google_flow: { model_label: " " } } },
+  ]) {
+    const changedHash = await write("run_identity.json", changedIdentity);
+    await write("image_output_qa_ep_01.json", { ...report, run_identity_sha256: changedHash });
+    assert.equal(admission(flowFlags).reason, "partial_scene_qa_flow_not_identity_locked");
+  }
+  await write("run_identity.json", identity);
+  await write("image_output_qa_ep_01.json", report);
   assert.equal(admission({ ...flags, "image-ids": "bad_b" }).allowed, true);
   assert.deepEqual((await evidence()).authorized_asset_ids, ["bad_a"]);
   assert.deepEqual((await evidence()).records, [{ path: path.join(dir, "image_output_qa_ep_01.json"), sha256: reportHash }]);
@@ -57,6 +77,7 @@ try {
     for (const value of [undefined, "f".repeat(64)]) {
       await write("image_output_qa_ep_01.json", { ...report, [key]: value });
       assert.equal(admission().allowed, false, `${key} missing/stale must block`);
+      assert.equal(admission(flowFlags).allowed, false, `Flow: ${key} missing/stale must block`);
       await assert.rejects(evidence());
     }
   }
@@ -67,9 +88,14 @@ try {
     { "force-images": "true" }, { "provider-migration": "true" }, { "skip-host-health-check": "true" }, { "flow-only": "true" },
     { prompts: path.join(dir, "different.json") }, { episode: "ep_02" }, { "episode-dir": path.dirname(dir) },
   ]) assert.equal(admission({ ...flags, ...change }).allowed, false, JSON.stringify(change));
+  for (const change of [{ "image-ids": "good" }, { "image-ids": "unsubmitted" }, { "gemini-only": "true" },
+    { "chatgpt-only": "true" }, { "flow-model-override": "Other model" }, { "skip-host-health-check": "true" }]) {
+    assert.equal(admission({ ...flowFlags, ...change }).allowed, false, `Flow: ${JSON.stringify(change)}`);
+  }
   for (const stage of ["script_approval", "reference_image_approval", "visual_prompt_harden"]) {
     const changed = structuredClone(status); changed.stage_ledger.find(row => row.stage === stage).state = "stale";
     assert.equal(admission(flags, changed).allowed, false, `${stage} must remain current`);
+    assert.equal(admission(flowFlags, changed).allowed, false, `Flow: ${stage} must remain current`);
   }
   assert.equal(admission(flags, { ...status, stage_ledger: [] }).allowed, false);
   assert.equal(admission(flags, { ...status, current_stage_state: "passed" }).allowed, false);
@@ -80,12 +106,15 @@ try {
   await assert.rejects(evidence(["bad_a"], changedRows), /corrected prompt rows/);
   const staleRow = structuredClone(report); staleRow.findings[0].source_row_sha256 = hash("stale row");
   await write("image_output_qa_ep_01.json", staleRow); assert.equal(admission().allowed, false);
+  assert.equal(admission(flowFlags).allowed, false, "Flow also requires the exact corrected row hash");
   await write("image_output_qa_ep_01.json", report);
 
   await write("bad_a.png", "accepted replacement first raster");
   assert.deepEqual(scope().rejected_image_ids, ["bad_b"], "Replaced raster retires only its exact finding");
   assert.equal(admission().allowed, false, "Old report cannot authorize a repeat replacement");
+  assert.equal(admission(flowFlags).allowed, false, "Flow cannot repair a replaced raster again");
   assert.equal(admission({ ...flags, "image-ids": "bad_b" }).allowed, true);
+  assert.equal(admission({ ...flowFlags, "image-ids": "bad_b" }).allowed, true);
   await assert.rejects(evidence(["bad_a"]), /still-current rejected rasters/);
   assert.deepEqual((await evidence(["bad_b"])).authorized_asset_ids, ["bad_b"]);
   await write("bad_b.png", "accepted replacement second raster");

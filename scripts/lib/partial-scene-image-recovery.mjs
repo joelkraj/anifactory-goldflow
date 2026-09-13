@@ -12,7 +12,7 @@ const meaningful = value => typeof value === "string" && value.trim().length >= 
 const tuple = ["channel", "series_slug", "week", "episode"];
 const requireCondition = (condition, message) => { if (!condition) throw new Error(message); };
 const ALLOWED_FLAGS = new Set(["episode-dir", "channel", "series", "week", "episode", "image-ids",
-  "qa-recovery", "repair-reason", "gemini-only"]);
+  "qa-recovery", "repair-reason", "gemini-only", "flow-only"]);
 
 // Read-only admission: corrected current prompts and rejected old raster bytes
 // are independent bindings. Replacing one raster retires only that finding.
@@ -100,7 +100,8 @@ export function partialSceneImageQaRecoveryAdmission(status = {}, flags = {}) {
     }), "partial_scene_qa_requires_all_current_earlier_gates");
     requireCondition(flags["qa-recovery"] === "true" && meaningful(flags["repair-reason"])
       && Object.keys(flags).every(key => ALLOWED_FLAGS.has(key))
-      && (!Object.hasOwn(flags, "gemini-only") || flags["gemini-only"] === "true"), "partial_scene_qa_requires_exact_recovery_flags");
+      && ["gemini-only", "flow-only"].every(key => !Object.hasOwn(flags, key) || flags[key] === "true")
+      && !(flags["gemini-only"] && flags["flow-only"]), "partial_scene_qa_requires_exact_recovery_flags");
     const rawIds = flags["image-ids"];
     requireCondition(typeof rawIds === "string" && /^[A-Za-z0-9_.:-]+(?:,[A-Za-z0-9_.:-]+)*$/.test(rawIds), "partial_scene_qa_requires_exact_image_ids");
     const ids = rawIds.split(",");
@@ -115,6 +116,8 @@ export function partialSceneImageQaRecoveryAdmission(status = {}, flags = {}) {
     }
     requireCondition(!flags["gemini-only"] || (scope.identity.image_provider === "federated_google_web_image_pool"
       && text(scope.identity.image_provider_options?.google_gemini?.model_label)), "partial_scene_qa_gemini_not_identity_locked");
+    requireCondition(!flags["flow-only"] || (scope.identity.image_provider === "federated_google_web_image_pool"
+      && text(scope.identity.image_provider_options?.google_flow?.model_label)), "partial_scene_qa_flow_not_identity_locked");
     requireCondition(ids.every(id => scope.rejected_image_ids.includes(id)), "partial_scene_qa_ids_outside_current_blockers");
     return { applicable: true, allowed: true, reason: "exact_current_partial_scene_qa_blockers",
       requested_image_ids: ids, qa_report_sha256: scope.qa_report_sha256 };

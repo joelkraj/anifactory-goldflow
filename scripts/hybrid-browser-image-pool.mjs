@@ -57,6 +57,7 @@ import {
 } from "./lib/image-provider-policy.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
+import { PARTIAL_SCENE_QA_SCHEMA, readPartialSceneImageQaRecoveryScope } from "./lib/partial-scene-image-recovery.mjs";
 import { buildImageSemanticAudit } from "./lib/image-semantic-audit.mjs";
 import {
   buildHeroCandidatePromptPlan,
@@ -712,7 +713,7 @@ export async function findSourceCompatibleHybridCompletions({
   return selectedById;
 }
 
-async function resolveRepairEvidence({
+export async function resolveRepairEvidence({
   episodeDir,
   episode,
   mode,
@@ -764,6 +765,19 @@ async function resolveRepairEvidence({
       ? path.join(episodeDir, `reference_image_qa_${episode}.json`)
       : path.join(episodeDir, `image_output_qa_${episode}.json`);
     const report = await readJson(reportPath, null);
+    if (mode === "scene" && report?.schema === PARTIAL_SCENE_QA_SCHEMA) {
+      const scope = readPartialSceneImageQaRecoveryScope({ episodeDir, episode });
+      const requested = [...requestedIds];
+      const currentById = new Map(currentRows.map(row => [row.image_id, row]));
+      const rejectedById = new Map(scope.rejected_images.map(row => [row.image_id, row]));
+      if (!requested.length || requested.some(id => !rejectedById.has(id)
+        || !currentById.has(id) || codexWorkSourceRowSha256(currentById.get(id)) !== rejectedById.get(id).source_row_sha256)) {
+        throw new Error("Partial scene QA repair scope is not backed by still-current rejected rasters and corrected prompt rows.");
+      }
+      return { schema: "goldflow_hybrid_image_repair_evidence_v1", kind: "image_output_qa_blockers",
+        authorized_asset_ids: requested,
+        records: [{ path: scope.qa_report_path, sha256: scope.qa_report_sha256 }] };
+    }
     const authorizedIds = [...new Set((report?.findings ?? [])
       .filter((finding) => finding?.severity === "blocker" && (finding?.image_id || finding?.ref_id))
       .map((finding) => String(finding.image_id ?? finding.ref_id)))];

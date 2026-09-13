@@ -23,6 +23,7 @@ import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recov
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
+import { partialSceneImageQaRecoveryAdmission } from "../scripts/lib/partial-scene-image-recovery.mjs";
 import { orphanedImageStreamSealAdmission } from "../scripts/lib/orphaned-image-stream-seal.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -134,6 +135,12 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
     if (recovery.applicable && recovery.allowed) return;
   }
   if (commandName === "imagegen" && subcommandName === "browser-pool") {
+    const partialRecovery = partialSceneImageQaRecoveryAdmission(result, parsedFlags);
+    if (partialRecovery.applicable && !partialRecovery.allowed) {
+      console.error(`Workflow guard blocked partial scene image QA recovery: ${partialRecovery.reason}.`);
+      process.exit(1);
+    }
+    if (partialRecovery.applicable && partialRecovery.allowed) return;
     const recovery = referenceImageQaRecoveryAdmission(result, parsedFlags);
     if (recovery.applicable && !recovery.allowed) {
       console.error(`Workflow guard blocked reference image QA recovery: ${recovery.reason}.`);

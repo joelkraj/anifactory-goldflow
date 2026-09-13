@@ -722,9 +722,20 @@ export class GoogleGeminiBrowser {
     const uploadTools = await waitForGeminiUploadTools(page);
     if (!uploadTools) throw codedError("ui_contract_mismatch", "Gemini Upload & tools control is missing.");
     const verifiedReferenceIds = new Set();
+    const uploadVerification = [];
+    try {
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       const baselineImageUrls = new Set(await this.imageComposerPreviewUrls(page));
+      const verification = { slot: index + 1, ref_id: diagnosticText(orderedReferences[index].ref_id),
+        source_sha256: orderedReferences[index].source_sha256, baseline_preview_count: baselineImageUrls.size,
+        eligible_preview_count: null, fresh_eligible_preview_count: null, expected_count: index + 1,
+        observed_count: null, no_pending_uploads: null, upload_ready: null,
+        filename_observed: false, filename_transcoded: false, pixel_threshold: null,
+        preview_read_attempted: false, preview_read_succeeded: false, pixel_comparison_succeeded: false,
+        latest_pixel_mae: null, minimum_pixel_mae: null, pixel_match: false,
+        stability_reached: false, matching_preview_retained: null, verified: false };
+      uploadVerification.push(verification);
       // The /images surface retains stale hidden/disabled menu rows after a
       // previous attachment. Reopen the active tools menu and target its
       // enabled menu item instead of clicking the first matching text node.
@@ -764,25 +775,45 @@ export class GoogleGeminiBrowser {
         // Upload-name notifications can disappear before preview pixels load.
         observedFilename = observedGeminiImageFilename(body, file.name) ?? observedFilename;
         const uploadState = await this.imageUploadState(page, index + 1);
-        for (const sourceUrl of (await this.imageComposerPreviewUrls(page)).filter((url) => !baselineImageUrls.has(url))) {
+        const previewUrls = await this.imageComposerPreviewUrls(page);
+        const freshPreviewUrls = previewUrls.filter((url) => !baselineImageUrls.has(url));
+        Object.assign(verification, { eligible_preview_count: previewUrls.length, fresh_eligible_preview_count: freshPreviewUrls.length,
+          observed_count: uploadState.observed_count, no_pending_uploads: uploadState.no_pending_uploads, upload_ready: uploadState.ready,
+          filename_observed: Boolean(observedFilename), filename_transcoded: Boolean(observedFilename && observedFilename !== file.name),
+          pixel_threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+          preview_read_attempted: false, preview_read_succeeded: false, pixel_comparison_succeeded: false,
+          latest_pixel_mae: null, pixel_match: false, stability_reached: false, matching_preview_retained: null });
+        for (const sourceUrl of freshPreviewUrls) {
           if (!uploadState.ready) break;
           let match;
           try {
+            Object.assign(verification, { preview_read_attempted: true, preview_read_succeeded: false,
+              pixel_comparison_succeeded: false, latest_pixel_mae: null });
             const bytes = await this.imageBytes(page, sourceUrl);
+            verification.preview_read_succeeded = true;
             match = await findReferenceEcho(bytes, [referenceInputs[index]], {
               // Allow only bounded lossy-preview drift when the hash-bearing
               // filename stem also matches. Generated-output checks stay strict.
               threshold: observedFilename && observedFilename !== file.name ? 3 : 1,
+              onComparison: (mae) => {
+                verification.pixel_comparison_succeeded = true;
+                verification.latest_pixel_mae = mae;
+                verification.minimum_pixel_mae = verification.minimum_pixel_mae === null ? mae : Math.min(verification.minimum_pixel_mae, mae);
+              },
             });
           } catch {
             // The attachment preview can exist before its rendered pixels are readable.
           }
+          verification.pixel_match = Boolean(match);
           if (!match) continue;
           // A filename notification proves selection, not a finished upload.
           // Settle this exact preview before opening the next file chooser.
           await this.waitForImageUploads(page, index + 1, { timeoutMs: Math.max(0, deadline - Date.now()) });
-          if (!(await this.imageComposerPreviewUrls(page)).includes(sourceUrl)) continue;
+          verification.stability_reached = true;
+          verification.matching_preview_retained = (await this.imageComposerPreviewUrls(page)).includes(sourceUrl);
+          if (!verification.matching_preview_retained) continue;
           verifiedReferenceIds.add(orderedReferences[index].ref_id);
+          verification.verified = true;
           orderedReferences[index].observed_upload_filename = observedFilename;
           orderedReferences[index].verification_method = "preview_pixels_and_attachment_count";
           orderedReferences[index].preview_mean_absolute_difference = match.mean_absolute_difference;
@@ -800,6 +831,11 @@ export class GoogleGeminiBrowser {
     await this.waitForImageUploads(page, files.length);
     await onPhase("references_attached");
     return { referenceInputs, orderedReferences };
+    } catch (error) {
+      // At most four latest slot records; never retain URLs, image bytes or raw exceptions.
+      error.reference_upload_verification = uploadVerification;
+      throw error;
+    }
   }
 
   async pastePrompt(page, prompt) {
@@ -1032,6 +1068,10 @@ export class GoogleGeminiBrowser {
         const visible = nodes.filter(isVisible);
         return { matched_count: nodes.length, visible_count: visible.length,
           visible_items: visible.slice(0, 12).map((node) => ({ ...label(node),
+            ...(node.tagName === "IMG" ? { rendered_image: {
+              complete: node.complete === true, has_offset_parent: node.offsetParent !== null,
+              natural_width: node.naturalWidth, natural_height: node.naturalHeight,
+            } } : {}),
             visible_error_labels: [...node.querySelectorAll('[role="alert"], [class*="error" i]')]
               .filter(isVisible).slice(0, 8).map(label),
           })) };
@@ -1040,6 +1080,7 @@ export class GoogleGeminiBrowser {
         title: diagnosticText(item.title), aria_label: diagnosticText(item.aria_label) });
       return snapshot && { ...snapshot, visible_items: snapshot.visible_items.map((item) => ({
         ...sanitizedLabel(item), visible_error_labels: item.visible_error_labels.map(sanitizedLabel),
+        ...(item.rendered_image ? { rendered_image: item.rendered_image } : {}),
       })) };
     };
     // Counts stay independent: mixed attachment UI is evidence, not a new admission rule.
@@ -1073,6 +1114,7 @@ export class GoogleGeminiBrowser {
           expected_mime_dependent_upload_names: stem ? ["png", "webp", "jpg"].map((extension) => `${stem}.${extension}`) : [] };
       }),
       failure: { code: diagnosticText(error?.code), message: diagnosticText(error?.message) },
+      reference_upload_verification: error?.reference_upload_verification ?? null,
       attachments, previews, loading, visible_error_containers: errors, screenshot,
       observation_scope: "Visible UI only; historical errors are not attributed to this submission.",
     };

@@ -605,6 +605,67 @@ async function scopesUploadPixelChecksToLoadedComposerPreviews() {
   assert.deepEqual(await browser.imageComposerPreviewUrls(page), ["blob:reference"]);
 }
 
+async function retainsBoundedEvidenceForALoadedWrongPreview() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gemini-preview-verification-"));
+  const browser = new GoogleGeminiBrowser({ downloadsRoot: root });
+  const [expected, wrong] = await Promise.all(["#000000", "#ffffff"].map((background) =>
+    sharp({ create: { width: 16, height: 16, channels: 3, background } }).png().toBuffer()));
+  const sourceSha256 = createHash("sha256").update(expected).digest("hex");
+  const reference = { slot: 1, ref_id: "workshop", sha256: sourceSha256, url: "private-reference-url" };
+  let uploaded = null;
+  let uploadCount = 0;
+  let clock = 1_000;
+  const originalNow = Date.now;
+  const page = {
+    keyboard: { async press() {} },
+    getByRole() { return visibleMockLocator(); },
+    getByText() { return { locator() { return visibleMockLocator(); } }; },
+    async waitForEvent() { return { async setFiles(files) { uploaded = files[0]; uploadCount += 1; } }; },
+    locator() { return { async innerText() { return uploaded.name; } }; },
+  };
+  browser.imageComposerPreviewUrls = async () => uploaded ? ["blob:private-preview-session"] : [];
+  browser.imageUploadState = async () => ({ expected_count: 1, observed_count: 1, no_pending_uploads: true, ready: true });
+  browser.imageBytes = async () => { clock += 90_001; return wrong; };
+  browser.waitForImageUploads = async () => assert.fail("Wrong pixels must not reach stabilization or acceptance");
+  let failure;
+  try {
+    Date.now = () => clock;
+    await assert.rejects(() => browser.attachReferences(page, { references: [reference] }, {
+      async fetchReference() { return { bytes: expected, mimeType: "image/png" }; },
+    }, async () => {}), (error) => { failure = error; return error.code === "ui_contract_mismatch" && /slot 1/.test(error.message); });
+  } finally { Date.now = originalNow; }
+  try {
+    assert.equal(uploadCount, 1, "Diagnostics must not retry or reattach the reference");
+    assert.equal(failure.reference_upload_verification.length, 1, "Keep a single latest slot record, not poll history");
+    const trace = failure.reference_upload_verification[0];
+    assert.deepEqual({ slot: trace.slot, ref_id: trace.ref_id, source_sha256: trace.source_sha256 },
+      { slot: 1, ref_id: "workshop", source_sha256: sourceSha256 });
+    assert.equal(trace.baseline_preview_count, 0);
+    assert.equal(trace.eligible_preview_count, 1);
+    assert.equal(trace.fresh_eligible_preview_count, 1);
+    assert.equal(trace.upload_ready, true);
+    assert.equal(trace.no_pending_uploads, true);
+    assert.equal(trace.observed_count, 1);
+    assert.equal(trace.preview_read_succeeded, true);
+    assert.equal(trace.pixel_comparison_succeeded, true);
+    assert.equal(trace.latest_pixel_mae, 255);
+    assert.equal(trace.minimum_pixel_mae, 255);
+    assert.equal(trace.pixel_threshold, 1);
+    assert.equal(trace.pixel_match, false);
+    assert.equal(trace.stability_reached, false);
+    assert.equal(trace.verified, false);
+    const diagnosticPage = {
+      locator() { return { async evaluateAll() { return { matched_count: 0, visible_count: 0, visible_items: [] }; } }; },
+      getByText() { return {}; }, async screenshot() { throw new Error("No test screenshot"); },
+    };
+    const receiptPath = await browser.imageFailureDiagnostics(diagnosticPage,
+      { manifest_id: "fixture", asset_id: "fixture-cut", references: [reference] }, failure);
+    const text = await fs.readFile(receiptPath, "utf8");
+    assert.deepEqual(JSON.parse(text).reference_upload_verification, [trace]);
+    assert.doesNotMatch(text, /private-preview-session|private-reference-url|blob:|data:|https?:/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
 async function waitsForUploadSpinnerEvenWithVisiblePreview() {
   const browser = new GoogleGeminiBrowser();
   browser.visibleImageComposerAttachmentCount = async () => 1;
@@ -788,6 +849,7 @@ recognizesTheDedicatedImageSurfaceWithoutABrittleChipLabel();
 recognizesOnlyTheExactTranscodedReferenceFilename();
 await countsModernAndLegacyImageAttachmentsWithoutDoubleCounting();
 await settlesEachMatchingReferenceBeforeOpeningTheNextChooser();
+await retainsBoundedEvidenceForALoadedWrongPreview();
 await scopesUploadPixelChecksToLoadedComposerPreviews();
 await waitsForUploadSpinnerEvenWithVisiblePreview();
 

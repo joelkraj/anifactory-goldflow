@@ -56,6 +56,7 @@ import {
   isHybridWebFlowProvider,
   isStyleReferenceTarget,
 } from "./lib/image-provider-policy.mjs";
+import { reviewedOrphanPromptRepairEvidence } from "./lib/reviewed-orphan-prompt-repair.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 import { googleImageSchedulingForIdentity } from "./lib/google-image-scheduling.mjs";
 import { PARTIAL_SCENE_QA_SCHEMA, readPartialSceneImageQaRecoveryScope } from "./lib/partial-scene-image-recovery.mjs";
@@ -563,22 +564,22 @@ export async function findSourceCompatibleHybridDeadletters({
   return compatibleById;
 }
 
-async function findApprovedManualPromptRepairEvidence({ episodeDir, episode, requestedIds }) {
+async function findApprovedManualPromptRepairEvidence({ episodeDir, episode, currentRows, requestedIds }) {
+  const evidenceById = await reviewedOrphanPromptRepairEvidence({ episodeDir, episode, currentRows, requestedIds });
   const triagePath = path.join(episodeDir, `visual_manual_blocker_triage_${episode}.json`);
   const triage = await readJson(triagePath, null);
-  if (triage?.status !== "approved") return new Map();
+  if (triage?.status !== "approved") return evidenceById;
   const approvedIds = new Set((triage.dispositions ?? [])
     .filter((row) => row?.disposition === "manual_exact_cut_prompt_repair")
     .map((row) => String(row?.image_id ?? ""))
     .filter(Boolean));
-  const wanted = [...requestedIds].filter((assetId) => approvedIds.has(assetId));
-  if (!wanted.length) return new Map();
+  const wanted = [...requestedIds].filter((assetId) => approvedIds.has(assetId) && !evidenceById.has(assetId));
+  if (!wanted.length) return evidenceById;
 
   const stagingRoot = path.join(episodeDir, "assets", "images", "codex_worker_staging");
   const entries = (await fs.readdir(stagingRoot, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isDirectory())
     .sort((left, right) => right.name.localeCompare(left.name));
-  const evidenceById = new Map();
   for (const assetId of wanted) {
     for (const entry of entries) {
       const deadletterPath = path.join(stagingRoot, entry.name, "deadletters", `${assetId}.json`);
@@ -805,7 +806,9 @@ export async function resolveRepairEvidence({
     requestedIds,
   });
   const manualPromptRepairEvidenceById = mode === "scene"
-    ? await findApprovedManualPromptRepairEvidence({ episodeDir, episode, requestedIds })
+    ? await findApprovedManualPromptRepairEvidence({ episodeDir, episode, currentRows,
+        requestedIds: new Set([...requestedIds].filter(id => !evidenceById.has(id))),
+      })
     : new Map();
   const duplicateEvidenceById = new Map();
   const duplicateRecords = [];

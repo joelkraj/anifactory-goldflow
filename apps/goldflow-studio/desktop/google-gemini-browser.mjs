@@ -452,7 +452,7 @@ export class GoogleGeminiBrowser {
       } else readySince = null;
       await sleep(250);
     }
-    throw codedError("ui_contract_mismatch", "Gemini reference uploads did not finish processing before submission.");
+    throw codedError("ui_contract_mismatch", "Gemini could not verify the complete ordered reference set before submission; attachment count or upload readiness did not pass.");
   }
 
   async newJobPage(type = "image") {
@@ -793,7 +793,7 @@ export class GoogleGeminiBrowser {
         if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) await sleep(250);
       }
       if (!verifiedReferenceIds.has(orderedReferences[index].ref_id)) {
-        throw codedError("ui_contract_mismatch", `Gemini did not visibly retain ordered reference ${file.name} before submission.`);
+        throw codedError("ui_contract_mismatch", `Gemini could not verify ordered references at slot ${index + 1} (${file.name}) before submission; this does not identify which attachment failed.`);
       }
     }
     if (!orderedReferences.every((row) => verifiedReferenceIds.has(row.ref_id))) {
@@ -1019,20 +1019,29 @@ export class GoogleGeminiBrowser {
           const style = node.ownerDocument.defaultView.getComputedStyle(node);
           return node.getClientRects().length && style.visibility !== "hidden" && style.visibility !== "collapse";
         };
+        const label = (node) => {
+          // A status/dialog container may contain a prompt or hidden descendant.
+          const walker = node.ownerDocument.createTreeWalker(node, 4);
+          let text = "", child;
+          while (text.length < 2_000 && (child = walker.nextNode())) {
+            if (child.parentElement && isVisible(child.parentElement)) text += `${child.textContent}\n`;
+          }
+          return { text: text.slice(0, 2_000),
+            alt: String(node.getAttribute("alt") ?? "").slice(0, 2_000),
+            title: String(node.getAttribute("title") ?? "").slice(0, 2_000),
+            aria_label: String(node.getAttribute("aria-label") ?? "").slice(0, 2_000) };
+        };
         const visible = nodes.filter(isVisible);
         return { matched_count: nodes.length, visible_count: visible.length,
-          visible_items: visible.slice(0, 12).map((node) => {
-            // A status/dialog container may contain a prompt or hidden descendant.
-            const walker = node.ownerDocument.createTreeWalker(node, 4);
-            let text = "", child;
-            while (text.length < 2_000 && (child = walker.nextNode())) {
-              if (child.parentElement && isVisible(child.parentElement)) text += `${child.textContent}\n`;
-            }
-            return { text: text.slice(0, 2_000), alt: String(node.getAttribute("alt") ?? "").slice(0, 2_000) };
-          }) };
+          visible_items: visible.slice(0, 12).map((node) => ({ ...label(node),
+            visible_error_labels: [...node.querySelectorAll('[role="alert"], [class*="error" i]')]
+              .filter(isVisible).slice(0, 8).map(label),
+          })) };
       }).catch(() => null);
+      const sanitizedLabel = (item) => ({ text: diagnosticText(item.text), alt: diagnosticText(item.alt),
+        title: diagnosticText(item.title), aria_label: diagnosticText(item.aria_label) });
       return snapshot && { ...snapshot, visible_items: snapshot.visible_items.map((item) => ({
-        text: diagnosticText(item.text), alt: diagnosticText(item.alt),
+        ...sanitizedLabel(item), visible_error_labels: item.visible_error_labels.map(sanitizedLabel),
       })) };
     };
     // Counts stay independent: mixed attachment UI is evidence, not a new admission rule.
@@ -1057,6 +1066,14 @@ export class GoogleGeminiBrowser {
       captured_at: new Date().toISOString(), browser_provider: "google-gemini",
       manifest_id: job.manifest_id, asset_id: job.asset_id,
       expected_reference_count: Array.isArray(job.references) ? job.references.length : 0,
+      expected_references: (Array.isArray(job.references) ? job.references : []).slice(0, 4).map((reference, index) => {
+        const sourceSha256 = SHA256_PATTERN.test(reference.sha256) ? reference.sha256 : null;
+        const refId = diagnosticText(reference.ref_id);
+        const stem = sourceSha256 ? `${String(index + 1).padStart(2, "0")}-${safeName(refId)}-${sourceSha256.slice(0, 12)}` : null;
+        return { slot: index + 1, ref_id: refId, source_sha256: sourceSha256,
+          expected_upload_name_stem: stem,
+          expected_mime_dependent_upload_names: stem ? ["png", "webp", "jpg"].map((extension) => `${stem}.${extension}`) : [] };
+      }),
       failure: { code: diagnosticText(error?.code), message: diagnosticText(error?.message) },
       attachments, previews, loading, visible_error_containers: errors, screenshot,
       observation_scope: "Visible UI only; historical errors are not attributed to this submission.",

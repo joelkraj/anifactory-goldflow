@@ -541,7 +541,7 @@ async function waitsForUploadSpinnerEvenWithVisiblePreview() {
   assert.deepEqual(await browser.imageUploadState(page, 1), {
     ready: false, expected_count: 1, observed_count: 1, no_pending_uploads: false,
   });
-  await assert.rejects(() => browser.waitForImageUploads(page, 1, {timeoutMs: 1, stableMs: 0}), /did not finish processing/);
+  await assert.rejects(() => browser.waitForImageUploads(page, 1, {timeoutMs: 1, stableMs: 0}), /could not verify the complete ordered reference set/);
   loading = false;
   assert.equal((await browser.waitForImageUploads(page, 1, {timeoutMs: 100, stableMs: 0})).ready, true);
   assert.equal((await browser.imageUploadState(page, 2)).ready, false, "Missing attachments must still block");
@@ -601,11 +601,13 @@ async function capturesPresubmitImageFailureWithoutChangingTheFailure() {
   const logs = [];
   let submissions = 0;
   let screenshotFails = false;
-  const node = (text, { visible = true, excluded = false, alt = "", nestedPrompt = null } = {}) => {
+  const referenceSha256 = `abcdef012345${"0".repeat(52)}`;
+  const node = (text, { visible = true, excluded = false, alt = "", title = "", ariaLabel = "", errorLabels = [], nestedPrompt = null } = {}) => {
     const element = {
       closest() { return excluded ? {} : null; },
       getClientRects() { return visible ? [{}] : []; },
-      getAttribute(name) { assert.equal(name, "alt"); return alt; },
+      getAttribute(name) { assert.ok(["alt", "title", "aria-label"].includes(name)); return { alt, title, "aria-label": ariaLabel }[name]; },
+      querySelectorAll(selector) { assert.equal(selector, '[role="alert"], [class*="error" i]'); return errorLabels; },
       ownerDocument: {
         defaultView: { getComputedStyle() { return { visibility: "visible" }; } },
         createTreeWalker(root) {
@@ -621,7 +623,11 @@ async function capturesPresubmitImageFailureWithoutChangingTheFailure() {
   const page = {
     locator(selector) {
       let nodes = [];
-      if (selector === "gem-attachment") nodes = [node("01-state-abcdef012345.png"), node("hidden", { visible: false })];
+      if (selector === "gem-attachment") nodes = [node("01-state...abcdef012345", {
+        title: "01-state-abcdef012345.png", ariaLabel: "Upload failed token=private-aria-token",
+        errorLabels: [node("Upload error cookie: private-error-cookie", { title: "https://media.example/private-title-url", ariaLabel: "Upload failed" }),
+          node("hidden error detail", { visible: false }), node("excluded error detail", { excluded: true })],
+      }), node("hidden", { visible: false })];
       else if (selector === 'img[alt="attachment"]') nodes = [node("", { alt: "attachment" }), node("", { alt: "attachment" })];
       else if (selector === 'gem-attachment[aria-busy="true"]') nodes = [node("Uploading")];
       else if (selector.startsWith('[role="alert"]')) nodes = [
@@ -645,7 +651,8 @@ async function capturesPresubmitImageFailureWithoutChangingTheFailure() {
   browser.generatedResponseImageUrls = async () => [];
   browser.attachReferences = async () => { throw original; };
   const run = () => browser.runJob({
-    job: { type: "image", worker_session_policy: "persistent_tab_per_worker_slot_v1", manifest_id: "fixture-manifest", asset_id: "fixture-cut", references: [{}] },
+    job: { type: "image", worker_session_policy: "persistent_tab_per_worker_slot_v1", manifest_id: "fixture-manifest", asset_id: "fixture-cut",
+      references: [{ slot: 1, ref_id: "state", sha256: referenceSha256, url: "https://media.example/private-reference-url", purpose: "private-reference-purpose" }] },
     submitGeneration: async () => { submissions += 1; },
   });
   try {
@@ -660,8 +667,15 @@ async function capturesPresubmitImageFailureWithoutChangingTheFailure() {
       assert.equal(receipt.previews.visible_count, 2, "mixed wrappers and previews must be retained independently");
       assert.equal(receipt.loading[0].observed.visible_count, 1);
       assert.equal(receipt.expected_reference_count, 1);
+      assert.deepEqual(receipt.expected_references, [{ slot: 1, ref_id: "state", source_sha256: referenceSha256,
+        expected_upload_name_stem: "01-state-abcdef012345",
+        expected_mime_dependent_upload_names: ["01-state-abcdef012345.png", "01-state-abcdef012345.webp", "01-state-abcdef012345.jpg"] }]);
+      assert.equal(receipt.attachments.visible_items[0].title, "01-state-abcdef012345.png");
+      assert.match(receipt.attachments.visible_items[0].aria_label, /Upload failed/);
+      assert.equal(receipt.attachments.visible_items[0].visible_error_labels.length, 1);
+      assert.equal(receipt.attachments.visible_items[0].visible_error_labels[0].aria_label, "Upload failed");
       assert.match(text, /01-state-abcdef012345\.png/);
-      assert.doesNotMatch(text, /private-url|private-bearer|private-token|private-ui-url|private-header|Do not capture (?:nested )?prompt/);
+      assert.doesNotMatch(text, /private-url|private-bearer|private-token|private-ui-url|private-header|private-aria-token|private-error-cookie|private-title-url|private-reference-url|private-reference-purpose|hidden error detail|excluded error detail|Do not capture (?:nested )?prompt/);
       assert.equal(Boolean(receipt.screenshot), !failedScreenshot);
       assert.equal((await fs.stat(receiptPath)).mode & 0o777, 0o600);
       if (receipt.screenshot) assert.equal((await fs.stat(receipt.screenshot.path)).mode & 0o777, 0o600);

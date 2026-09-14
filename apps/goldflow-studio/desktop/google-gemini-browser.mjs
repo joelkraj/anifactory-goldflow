@@ -985,7 +985,7 @@ export class GoogleGeminiBrowser {
       const body = await this.providerStatusText(page, priorResponseIds);
       const blockingCode = geminiBlockingCode(body);
       if (blockingCode) throw codedError(blockingCode, body.slice(-1600));
-      if (Date.now() - startedAt > 60_000 && /^https:\/\/gemini\.google\.com\/app\/?(?:[?#].*)?$/.test(page.url())
+      if (Date.now() - startedAt > 60_000 && /^https:\/\/gemini\.google\.com\/(?:app|images)\/?(?:[?#].*)?$/.test(page.url())
         && await page.locator("user-query").count() === 0 && await page.locator("model-response").count() === 0) {
         throw codedError("provider_response_timeout", "Gemini returned to an empty home page after submission; no request or response was retained. Do not resubmit automatically.");
       }

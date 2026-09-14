@@ -423,6 +423,60 @@ async function resetsOnlyAContaminatedGeminiComposer() {
   assert.equal(navigations, 1, "a clean Gemini composer must not reload");
 }
 
+async function stopsOnlyEmptyLandingPagesAfterTheExistingGracePeriod() {
+  const cases = [
+    { url: "https://gemini.google.com/app", blocked: true },
+    { url: "https://gemini.google.com/app/?hl=en#home", blocked: true },
+    { url: "https://gemini.google.com/images", blocked: true },
+    { url: "https://gemini.google.com/images/?hl=en#home", blocked: true },
+    { url: "https://gemini.google.com/app/abc123?hl=en", blocked: false },
+    { url: "https://gemini.google.com/images/abc123", blocked: false },
+    { url: "https://gemini.google.com.evil.test/images", blocked: false },
+    { url: "https://gemini.google.com/images", elapsed: 60_000, blocked: false },
+    { url: "https://gemini.google.com/app", elapsed: 59_999, blocked: false },
+    { url: "https://gemini.google.com/app", userCount: 1, blocked: false },
+    { url: "https://gemini.google.com/images", userCount: 1, blocked: false },
+    { url: "https://gemini.google.com/app", responseCount: 1, blocked: false },
+    { url: "https://gemini.google.com/images", responseCount: 1, blocked: false },
+  ];
+  for (const { url, elapsed = 60_001, userCount = 0, responseCount = 0, blocked } of cases) {
+    const browser = new GoogleGeminiBrowser();
+    let clock = 0;
+    let statusPolls = 0;
+    let outputReads = 0;
+    browser.providerStatusText = async () => { statusPolls += 1; clock = elapsed; return ""; };
+    browser.generatedResponseImageUrls = async () => {
+      outputReads += 1;
+      assert.equal(blocked, false, "An empty landing page must stop before the unchanged output path");
+      return ["blob:verified-response-fixture"];
+    };
+    browser.imagePixelFingerprint = async () => ({ bytes: Buffer.from("verified fixture"), sha256: "new-output-pixels" });
+    const page = {
+      url: () => url,
+      locator(selector) {
+        assert.ok(["user-query", "model-response"].includes(selector));
+        return { async count() { return selector === "user-query" ? userCount : responseCount; } };
+      },
+    };
+    const originalNow = Date.now;
+    try {
+      Date.now = () => clock;
+      if (blocked) {
+        await assert.rejects(
+          () => browser.waitForGeneratedImage(page, new Set(), []),
+          (error) => error.code === "provider_response_timeout" && /Do not resubmit automatically/.test(error.message),
+        );
+        assert.equal(outputReads, 0);
+      } else {
+        const result = await browser.waitForGeneratedImage(page, new Set(), []);
+        assert.equal(result.sourceUrl, "blob:verified-response-fixture", "Conversation/present-content/grace cases must reach the unchanged result path");
+        assert.equal(outputReads, 1);
+      }
+      assert.equal(statusPolls, 1, "Fixture advances only the local clock; no real waiting or browser calls");
+    } finally { Date.now = originalNow; }
+  }
+}
+
 async function ignoresStaleGeminiPixelsAfterABlobUrlChange() {
   const browser = new GoogleGeminiBrowser();
   browser.providerStatusText = async () => "Generating";
@@ -905,6 +959,7 @@ await blocksUnauthenticatedImagesSurfaceWithoutFallingBackToApp();
 await reusesThreePersistentImageWorkerTabsBySlot();
 await keepsPersistentImageTabOpenAfterSingleSubmission();
 await resetsOnlyAContaminatedGeminiComposer();
+await stopsOnlyEmptyLandingPagesAfterTheExistingGracePeriod();
 await ignoresStaleGeminiPixelsAfterABlobUrlChange();
 await acceptsOnlyNewModelResponseRasters();
 await ignoresOldResponseEvenWhenItsImageUrlChanges();

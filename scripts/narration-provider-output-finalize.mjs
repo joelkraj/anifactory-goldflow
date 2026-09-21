@@ -71,6 +71,8 @@ const NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA =
   "goldflow_narration_delivery_manual_review_v1";
 const NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION =
   "all_hash_bound_blocked_narration_units_listened_end_to_end";
+const NARRATION_DELIVERY_MIXED_REVIEW_ATTESTATION =
+  "all_hash_bound_blocked_narration_units_listened_and_individually_decided";
 
 function parseFlags(parts) {
   const flags = {};
@@ -343,10 +345,19 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
       `Narration delivery manual review requires ${NARRATION_DELIVERY_MANUAL_REVIEW_SCHEMA} with approved status.`,
     );
   }
+  const acceptedUnits = Array.isArray(evidence.accepted_units)
+    ? evidence.accepted_units
+    : [];
+  const rejectedUnits = Array.isArray(evidence.rejected_units)
+    ? evidence.rejected_units
+    : [];
+  const expectedAttestation = rejectedUnits.length
+    ? NARRATION_DELIVERY_MIXED_REVIEW_ATTESTATION
+    : NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION;
   if (!String(evidence.reviewer ?? "").trim()
     || !String(evidence.reviewed_at ?? "").trim()
     || !String(evidence.note ?? "").trim()
-    || evidence.attestation !== NARRATION_DELIVERY_MANUAL_REVIEW_ATTESTATION) {
+    || evidence.attestation !== expectedAttestation) {
     throw new Error(
       "Narration delivery manual review requires reviewer, reviewed_at, note, and the exact listening attestation.",
     );
@@ -389,12 +400,16 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
   if (!blockedIds.length) {
     throw new Error("Narration delivery manual review has no current blocker scope.");
   }
-  const acceptedUnits = Array.isArray(evidence.accepted_units)
-    ? evidence.accepted_units
-    : [];
   const acceptedIds = acceptedUnits.map((row) => String(row?.unit_id ?? ""));
+  const rejectedIds = rejectedUnits.map((row) => String(row?.unit_id ?? ""));
+  const decidedIds = [...acceptedIds, ...rejectedIds];
   if (Number(evidence.accepted_unit_count) !== acceptedUnits.length
-    || !exactStringSet(acceptedIds, blockedIds)) {
+    || (evidence.rejected_units != null && !Array.isArray(evidence.rejected_units))
+    || (rejectedUnits.length
+      ? Number(evidence.rejected_unit_count) !== rejectedUnits.length
+      : Number(evidence.rejected_unit_count ?? 0) !== 0)
+    || new Set(decidedIds).size !== decidedIds.length
+    || !exactStringSet(decidedIds, blockedIds)) {
     throw new Error(
       "Narration delivery manual review must cover every currently blocked unit exactly once.",
     );
@@ -443,6 +458,32 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
       throw new Error(`Narration delivery manual review audio is stale for ${unitId}.`);
     }
   }
+  for (const rejected of rejectedUnits) {
+    const unitId = String(rejected?.unit_id ?? "");
+    const source = sourceById.get(unitId);
+    const delivery = deliveryById.get(unitId);
+    if (!source || !delivery
+      || rejected.decision !== "repair_required"
+      || rejected.provider !== source.provider
+      || Number(rejected.attempt) !== Number(source.attempt ?? 1)
+      || rejected.audio_path !== source.wav
+      || rejected.audio_sha256 !== source.audio_sha256
+      || rejected.synthesis_identity_sha256 !== source.synthesis_identity_sha256
+      || !String(rejected.listen_note ?? "").trim()
+      || !String(rejected.operator_quote ?? "").trim()) {
+      throw new Error(`Narration delivery manual rejection is stale or incomplete for ${unitId}.`);
+    }
+    const actualCodes = normalizedFindingCodes(delivery.decision?.blockers);
+    if (!actualCodes.length
+      || !exactStringSet(actualCodes, rejected.reviewed_blocker_codes ?? [])) {
+      throw new Error(
+        `Narration delivery manual rejection for ${unitId} does not enumerate the exact blocker codes.`,
+      );
+    }
+    if (!await fileMatchesSha256(source.wav, source.audio_sha256)) {
+      throw new Error(`Narration delivery manual rejection audio is stale for ${unitId}.`);
+    }
+  }
   return {
     status: "approved",
     reviewer: String(evidence.reviewer).trim(),
@@ -450,6 +491,8 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
     note: String(evidence.note).trim(),
     accepted_unit_ids: acceptedIds,
     accepted_unit_count: acceptedIds.length,
+    rejected_unit_ids: rejectedIds,
+    rejected_unit_count: rejectedIds.length,
     accepted_blocker_codes_by_unit: Object.fromEntries(
       acceptedUnits.map((row) => [
         String(row.unit_id),
@@ -460,7 +503,7 @@ export async function validateNarrationDeliveryManualReviewEvidenceForTests({
   };
 }
 
-function applyNarrationDeliveryManualReview({
+export function applyNarrationDeliveryManualReviewForTests({
   deliveryRows,
   blockers,
   review,
@@ -1737,7 +1780,7 @@ export async function finalizeNarrationProviderOutput(
       deliveryRows,
       blockers,
     });
-    blockers = applyNarrationDeliveryManualReview({
+    blockers = applyNarrationDeliveryManualReviewForTests({
       deliveryRows,
       blockers,
       review: manualReview,
@@ -1749,6 +1792,7 @@ export async function finalizeNarrationProviderOutput(
         {
           evidence_sha256: manualReviewEvidenceSha256,
           accepted_unit_ids: manualReview.accepted_unit_ids,
+          rejected_unit_ids: manualReview.rejected_unit_ids,
           provider_output_manifest_sha256: manifestFileSha256,
         },
       ),
@@ -1759,6 +1803,7 @@ export async function finalizeNarrationProviderOutput(
         reviewer: manualReview.reviewer,
         reviewed_at: manualReview.reviewed_at,
         accepted_unit_ids: manualReview.accepted_unit_ids,
+        rejected_unit_ids: manualReview.rejected_unit_ids,
       },
     };
   }
@@ -1799,6 +1844,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -1872,6 +1918,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -1925,6 +1972,10 @@ export async function finalizeNarrationProviderOutput(
       unit_qa_path: unitQaPath,
       unit_qa_status: unitQaArtifact.status,
       full_stream_qa_status: "not_run_due_to_unit_blockers",
+      manual_review_evidence_path: manualReviewEvidencePath,
+      manual_review_evidence_sha256: manualReviewEvidenceSha256,
+      manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+      manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
       expected_unit_count: rows.length,
       selected_unit_count: rows.length,
       retry_scope_policy:
@@ -2279,6 +2330,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -2476,6 +2528,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_path: manualReviewEvidencePath,
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
+    manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings || skipSubjectiveReview
         ? operatorNarrationWaiver

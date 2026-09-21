@@ -213,6 +213,8 @@ The narrator-only longform stage does not master this canonical WAV again when i
 
 There is no automatic second creative submission. A confirmed problem produces an exact unit or boundary scope. Human review uses `goldflow tts approve-listen` and binds the prior report, unit audio, synthesis identity, finding codes, and decision. A pronunciation repair changes only the spoken track and preserves captions.
 
+Provider finalization also accepts a mixed `goldflow_narration_delivery_manual_review_v1` through `tts finalize-provider --manual-review-evidence <json>`. Keep the legacy listening attestation for an all-accepted review. When any listened unit is rejected, use `all_hash_bound_blocked_narration_units_listened_and_individually_decided`, with explicit `accepted_unit_count`/`accepted_units` and `rejected_unit_count`/`rejected_units`. Their disjoint union must cover every current blocked unit exactly once. Each rejected row requires `decision: "repair_required"`, the exact unit/provider/attempt/audio path/audio hash/synthesis identity, exact `reviewed_blocker_codes`, and a nonempty `listen_note` and `operator_quote`; it does not claim audible acceptance. The same plan, provider manifest, prior QA, review reel (when present), and audio hashes remain mandatory. Finalization retains the accepted decisions and unchanged rejected blockers in its canonical reports, then stops before stitching. This records the correction without authorizing synthesis; a later hash-bound exact-unit repair must separately authorize only the rejected unit.
+
 ## Measured Proof
 
 Proof root:

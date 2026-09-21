@@ -68,6 +68,90 @@ for (const [intended, recognized] of [
 }
 assert.ok(qa("He prepared a sales sheet worth a hundred million.", "He prepared sales sheet worth 100 million.").deletions > 0);
 
+// Sentence/list boundaries and independent amounts must survive normalization.
+// The former additive parser turned four + two into six, and repeated millions
+// into a sum; digit whitespace folding also merged "210, 200" into 210200.
+for (const [intended, recognized, expected] of [
+  ["Level four. Two decisions.", "Level 4. Two decisions.", ["level", "num:4", "num:2", "decisions"]],
+  ["Level six. Ninety-day forecasts.", "Level 6. 90-day forecasts.", ["level", "num:6", "num:90", "day", "forecasts"]],
+  ["forty-two million and eighteen million", "42 million and 18 million", ["num:42000000", "and", "num:18000000"]],
+  ["Two hundred and ten. Two hundred.", "210, 200.", ["num:210", "num:200"]],
+  ["Three hundred million. Two hundred and ten against Dad's name.", "300 million. 210 against Dad's name.",
+    ["num:300000000", "num:210", "against", "dads", "name"]],
+  ["one, two, and three", "1, 2, and 3", ["num:1", "num:2", "and", "num:3"]],
+]) {
+  const result = qa(intended, recognized);
+  assert.deepEqual(result.intended_canonical_tokens, expected);
+  assert.deepEqual(result.recognized_canonical_tokens, expected);
+  assert.equal(consensus(intended, recognized).blockers.length, 0);
+}
+for (const [intended, recognized] of [
+  ["one million, two hundred thousand", "1,200,000"],
+  ["one million and two hundred thousand", "1200000"],
+  ["a million six hundred thousand", "1,600,000"],
+  ["two thousand and twenty-one", "2021"],
+  ["one hundred and five", "105"],
+  ["twelve hundred and sixty dollars", "$1,260"],
+  ["twenty-five hundred", "2500"],
+  ["eleven hundred", "1100"],
+  ["nineteen hundred and ninety-nine", "1999"],
+  ["ninety-nine point four percent", "99.4%"],
+  ["two point two million dollars", "$2.2 million"],
+  ["one dollar", "$1"],
+  ["thirty-two thousand five hundred dollars", "$32,500"],
+  ["a hundred-dollar bond", "$100 bond"],
+  ["minus one hundred dollars", "$-100"],
+  ["minus one hundred dollars", "-$100"],
+  ["minus one hundred dollars", "- $ 100"],
+  ["minus one hundred dollars", "$ - 100"],
+  ["minus one hundred dollars", "$−100"],
+  ["minus one hundred dollars", "−$100"],
+  ["one dollar and two dollars", "$1 and $2"],
+  ["I picked one dollar. Dollars mattered.", "I picked $1. Dollars mattered."],
+  ["S. E. C. filed it.", "SEC filed it."],
+]) {
+  for (const [left, right] of [[intended, recognized], [recognized, intended]]) {
+    const result = qa(left, right);
+    assert.equal(result.deletions + result.insertions + result.substitutions, 0, `${left} / ${right}`);
+  }
+}
+for (const [intended, recognized] of [
+  ["one; two", "three"],
+  ["four. Two", "six"],
+  ["six. Ninety", "ninety-six"],
+  ["one hundred and two hundred", "10200"],
+  ["one million and two million", "3000000"],
+  ["forty-two million and eighteen million", "sixty million"],
+  ["forty-two million and eighteen million", "42 million and 19 million"],
+  ["one hundred. Five", "105"],
+  ["one dollar", "$2"],
+  ["minus one hundred dollars", "$100"],
+  ["one hundred dollars", "- $ 100"],
+  ["one hundred dollars", "$ - 100"],
+  ["one hundred dollars", "$−100"],
+  ["two point two million dollars", "$2.3 million"],
+  ["twelve hundred and sixty dollars", "$1,620"],
+  ["twenty-five hundred", "2600"],
+  ["one dollar and two dollars", "$2 and $1"],
+]) {
+  assert.ok(consensus(intended, recognized).blockers.some((finding) => finding.code.includes("protected_value")),
+    `${intended} / ${recognized}`);
+}
+for (const [intended, recognized] of [
+  ["He gave me one dollar.", "He gave me one."],
+  ["One dollar and two dollars remained.", "$1 and 2 remained."],
+  ["He bought a hundred-dollar bond.", "He bought $100."],
+  ["two point two million dollars arrived", "$2.2 million"],
+  ["I picked one. Dollars mattered.", "I picked $1. Mattered."],
+  ["I counted one; dollars disappeared.", "I counted $1; disappeared."],
+]) {
+  assert.ok(qa(intended, recognized).deletions > 0, `${intended} / ${recognized}`);
+  assert.ok(consensus(intended, recognized).blockers.length > 0);
+}
+assert.ok(qa("one dollar", "one pound").substitutions > 0);
+assert.ok(qa("one dollar", "£1").deletions > 0);
+assert.ok(qa("He paid $1.", "He paid one pound.").insertions > 0);
+
 // A comparator-only refresh must use retained recognizer output. Any attempted
 // new ASR fails the test. This does not create or approve production audio.
 const noAsrHelpers = { ...helpers, runFasterWhisperUnitBatchForDiagnostics() {

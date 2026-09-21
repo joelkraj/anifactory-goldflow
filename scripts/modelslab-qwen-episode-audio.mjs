@@ -1756,24 +1756,29 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_a_hundred_v2";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_boundaries_currency_v3";
+
+const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
 function rawTranscriptTokens(value) {
   return (transcriptInputText(value)
     .normalize("NFC")
-    .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1$2")
-    .replace(/\b(\d{1,3}),?\s+(?=\d{3}\b)/g, "$1")
+    .replace(/−/g, "-")
+    .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1,$2")
+    .replace(/([+-])\s*\$\s*(?=\d)/g, (_match, sign) => `$${sign}`)
+    .replace(/\$\s*([+-])\s+(?=\d)/g, (_match, sign) => `$${sign}`)
     .replace(/\bI['’]d\s+not\b/gi, "I did not")
     // Comparison equivalence only: preserve the source and recognized text.
     // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
     .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
     .replace(/\b(thousand|million|billion)fold\b/gi, "$1 fold")
     .replace(/([\p{L}\p{M}])[-‐‑‒–—]([\p{L}\p{M}])/gu, "$1 $2")
-    .match(/[+-]?\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?\.?|[/%]/gu) ?? [])
+    .match(/[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:st|nd|rd|th|%|[xXsS])?|\bSt\.|[\p{L}\p{M}]+(?:['’][\p{L}\p{M}]+)?|[/$%.,;:!?…]/giu) ?? [])
     .map((raw) => {
       const lower = raw.toLowerCase();
       if (lower === "st.") return "saint";
-      if (/^[+-]?\d/.test(lower) || lower === "/" || lower === "%") return lower.replaceAll(",", "");
+      if (TRANSCRIPT_PUNCTUATION.has(lower)) return lower;
+      if (/^[+-]?\d/.test(lower) || ["/", "%", "$"].includes(lower)) return lower.replaceAll(",", "");
       return lower.replace(/[.'’]/g, "").replace(/[^\p{L}\p{M}0-9]+/gu, "");
     })
     .filter(Boolean);
@@ -1783,6 +1788,35 @@ function normalizedNumberString(value) {
   if (!Number.isFinite(value)) return null;
   if (Number.isInteger(value)) return String(value);
   return String(Number(value.toFixed(12)));
+}
+
+function parseBelowHundred(tokens, start) {
+  const token = tokens[start];
+  if (NUMBER_UNITS.has(token)) return { value: NUMBER_UNITS.get(token), end: start + 1 };
+  if (!NUMBER_TENS.has(token)) return null;
+  const unit = NUMBER_UNITS.get(tokens[start + 1]);
+  return unit > 0 && unit < 10
+    ? { value: NUMBER_TENS.get(token) + unit, end: start + 2 }
+    : { value: NUMBER_TENS.get(token), end: start + 1 };
+}
+
+function parseCardinalGroup(tokens, start) {
+  let group = tokens[start] === "a" && tokens[start + 1] === "hundred"
+    ? { value: 1, end: start + 1 }
+    : parseBelowHundred(tokens, start);
+  if (tokens[start] === "hundred") group = { value: 100, end: start + 1 };
+  else if (group?.value > 0 && tokens[group.end] === "hundred") {
+    // Conventional forms include "twelve hundred" and "twenty-five hundred".
+    group = { value: group.value * 100, end: group.end + 1 };
+  }
+  else return group;
+  const remainderStart = group.end + (tokens[group.end] === "and" ? 1 : 0);
+  const remainder = parseBelowHundred(tokens, remainderStart);
+  // "One hundred and two hundred" is two amounts, not 102 * 100.
+  if (remainder && tokens[remainder.end] !== "hundred") {
+    return { value: group.value + remainder.value, end: remainder.end };
+  }
+  return group;
 }
 
 function parseNumberAt(tokens, start) {
@@ -1817,60 +1851,44 @@ function parseNumberAt(tokens, start) {
     negative = true;
     index += 1;
   }
-  // In this exact number phrase, "a" supplies the implicit one in "hundred".
-  // Preserve articles before ordinary words or other numeral constructions.
-  if (tokens[index] === "a" && tokens[index + 1] === "hundred") index += 1;
   let total = 0;
-  let current = 0;
+  let previousScale = Infinity;
   let sawNumber = false;
-  let decimalDigits = "";
   while (index < tokens.length) {
-    const token = tokens[index];
-    if (NUMBER_UNITS.has(token)) {
-      current += NUMBER_UNITS.get(token);
-      sawNumber = true;
-      index += 1;
-      continue;
-    }
-    if (NUMBER_TENS.has(token)) {
-      current += NUMBER_TENS.get(token);
-      sawNumber = true;
-      index += 1;
-      continue;
-    }
-    if (token === "hundred") {
-      current = Math.max(1, current) * 100;
-      sawNumber = true;
-      index += 1;
-      continue;
-    }
-    if (NUMBER_SCALES.has(token) && sawNumber) {
-      total += Math.max(1, current) * NUMBER_SCALES.get(token);
-      current = 0;
-      index += 1;
-      continue;
-    }
-    if (token === "and" && sawNumber && (current >= 100 || total > 0)
-      && (NUMBER_UNITS.has(tokens[index + 1]) || NUMBER_TENS.has(tokens[index + 1]) || tokens[index + 1] === "hundred")) {
-      index += 1;
-      continue;
-    }
-    if (token === "point" && sawNumber) {
-      let cursor = index + 1;
+    let groupStart = index;
+    // A comma/and may connect descending scales, but never independent amounts
+    // with repeated/increasing scales. Other punctuation always ends a number.
+    if (sawNumber && tokens[groupStart] === ",") groupStart += 1;
+    if (sawNumber && tokens[groupStart] === "and") groupStart += 1;
+    const group = tokens[groupStart] === "a" && NUMBER_SCALES.has(tokens[groupStart + 1])
+      ? { value: 1, end: groupStart + 1 }
+      : parseCardinalGroup(tokens, groupStart);
+    if (!group) break;
+    let value = group.value;
+    let end = group.end;
+    if (tokens[end] === "point") {
+      let decimalDigits = "";
+      let cursor = end + 1;
       while (NUMBER_UNITS.has(tokens[cursor]) && NUMBER_UNITS.get(tokens[cursor]) <= 9) {
         decimalDigits += String(NUMBER_UNITS.get(tokens[cursor]));
         cursor += 1;
       }
-      if (decimalDigits) index = cursor;
-      break;
+      if (decimalDigits) {
+        value = Number(`${value}.${decimalDigits}`);
+        end = cursor;
+      }
     }
-    break;
+    const scale = NUMBER_SCALES.get(tokens[end]) ?? 1;
+    if (scale >= previousScale || value * scale >= previousScale) break;
+    total += value * scale;
+    sawNumber = true;
+    index = end + (scale > 1 ? 1 : 0);
+    if (scale === 1) break;
+    previousScale = scale;
   }
   if (!sawNumber) return null;
-  const integer = total + current;
-  const value = decimalDigits ? Number(`${integer}.${decimalDigits}`) : integer;
   return {
-    value: normalizedNumberString(negative ? -value : value),
+    value: normalizedNumberString(negative ? -total : total),
     end: index,
     suffix: null,
   };
@@ -1904,7 +1922,9 @@ function canonicalTranscriptTokensWithoutAliases(value) {
   }
   const output = [];
   for (let index = 0; index < compounds.length;) {
-    const parsed = parseNumberAt(compounds, index);
+    if (TRANSCRIPT_PUNCTUATION.has(compounds[index])) { index += 1; continue; }
+    const dollarSymbol = compounds[index] === "$";
+    const parsed = parseNumberAt(compounds, index + (dollarSymbol ? 1 : 0));
     if (parsed?.value != null) {
       const ratioMarker = compounds[parsed.end] === "/" || (
         compounds[parsed.end] === "out" && compounds[parsed.end + 1] === "of"
@@ -1927,8 +1947,14 @@ function canonicalTranscriptTokensWithoutAliases(value) {
         ? `ord:${parsed.value}`
         : suffix === "decade"
         ? `decade:${parsed.value}`
-        : `num:${parsed.value}`);
+        : `${dollarSymbol ? "usd" : "num"}:${parsed.value}`);
       index = parsed.end + (parsed.suffix ? 0 : suffix ? 1 : 0);
+      // Retain source adjacency before punctuation is discarded. An unrelated
+      // "Dollars" in the following sentence cannot supply this amount's unit.
+      if (!suffix && /^dollars?$/.test(compounds[index] ?? "")) {
+        output.push(`currency_unit:${compounds[index]}`);
+        index += 1;
+      }
       continue;
     }
     if (/^[a-z]$/.test(compounds[index])) {
@@ -1937,6 +1963,7 @@ function canonicalTranscriptTokensWithoutAliases(value) {
       while (end < compounds.length && /^[a-z]$/.test(compounds[end])) {
         letters += compounds[end];
         end += 1;
+        if (compounds[end] === ".") end += 1;
       }
       if (letters.length >= 2) {
         output.push(`abbr:${letters}`);
@@ -1983,6 +2010,40 @@ function transcriptTokens(value, equivalentPhrases = []) {
   }).sort((left, right) => right.pattern.length - left.pattern.length);
   for (const { pattern, alias } of aliases) tokens = replaceTokenSequence(tokens, pattern, alias);
   return tokens;
+}
+
+function alignCurrencyNotation(intendedTokens, recognizedTokens) {
+  const stripSymbol = (token) => token.replace(/^usd:/, "num:").replace(/^currency_unit:/, "");
+  const intended = intendedTokens.map(stripSymbol);
+  const recognized = recognizedTokens.map(stripSymbol);
+  if (![...intendedTokens, ...recognizedTokens].some((token) => token.startsWith("usd:"))) {
+    return { intended, recognized };
+  }
+  const intendedUnits = new Map();
+  const recognizedUnits = new Map();
+  const dollarUnit = (token) => /^currency_unit:dollars?$/.test(token ?? "");
+  let left = 0;
+  let right = 0;
+  // The symbol supplies a spoken currency unit only beside an aligned equal
+  // amount. Without a symbol, an omitted "dollar" remains an omitted word.
+  for (const operation of transcriptAlignment(intended, recognized)) {
+    if (operation.type === "match" && operation.intended.startsWith("num:")) {
+      if (intendedTokens[left].startsWith("usd:")
+        && dollarUnit(recognizedTokens[right + 1]) && !dollarUnit(intendedTokens[left + 1])) {
+        intendedUnits.set(left, recognized[right + 1]);
+      }
+      if (recognizedTokens[right].startsWith("usd:")
+        && dollarUnit(intendedTokens[left + 1]) && !dollarUnit(recognizedTokens[right + 1])) {
+        recognizedUnits.set(right, intended[left + 1]);
+      }
+    }
+    if (operation.type !== "insertion") left += 1;
+    if (operation.type !== "deletion") right += 1;
+  }
+  const withUnits = (tokens, units) => tokens.flatMap((token, index) => (
+    units.has(index) ? [token, units.get(index)] : [token]
+  ));
+  return { intended: withUnits(intended, intendedUnits), recognized: withUnits(recognized, recognizedUnits) };
 }
 
 function transcriptAlignment(intended, recognized) {
@@ -2043,10 +2104,12 @@ function transcriptQa(intendedText, recognizedText, {
   blockAnySubstitution = true,
   blockIsolatedEdits = true,
 } = {}) {
-  const intendedRaw = rawTranscriptTokens(intendedText);
-  const recognizedRaw = rawTranscriptTokens(recognizedText);
-  const intended = transcriptTokens(intendedText, equivalentPhrases);
-  const recognized = transcriptTokens(recognizedText, equivalentPhrases);
+  const wordsOnly = (tokens) => tokens.filter((token) => !TRANSCRIPT_PUNCTUATION.has(token) && token !== "$");
+  const intendedRaw = wordsOnly(rawTranscriptTokens(intendedText));
+  const recognizedRaw = wordsOnly(rawTranscriptTokens(recognizedText));
+  const { intended, recognized } = alignCurrencyNotation(
+    transcriptTokens(intendedText, equivalentPhrases), transcriptTokens(recognizedText, equivalentPhrases),
+  );
   const operations = transcriptAlignment(intended, recognized);
   const deletions = operations.filter((row) => row.type === "deletion").length;
   const insertions = operations.filter((row) => row.type === "insertion").length;

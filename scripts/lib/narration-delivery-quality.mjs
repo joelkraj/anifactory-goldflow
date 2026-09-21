@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const NARRATION_DELIVERY_QA_SCHEMA = "goldflow_narration_delivery_qa_v2";
+export const NARRATION_DELIVERY_CONSENSUS_VERSION = "protected_operations_same_intended_slot_v1";
 export const NARRATION_EXACT_LISTEN_REVIEW_PACKET_SCHEMA =
   "goldflow_narration_exact_listen_review_packet_v2";
 export const NARRATION_EXACT_LISTEN_REVIEW_DECISION_SCHEMA =
@@ -101,6 +102,75 @@ function operationKeys(transcriptQa, type, field) {
 
 function intersection(left, right) {
   return [...left].filter((value) => right.has(value));
+}
+
+const PROTECTED_OPERATION_FAMILIES = new Map([
+  ["tts_transcript_protected_value_mismatch", "substitution"],
+  ["tts_transcript_protected_value_missing", "deletion"],
+  ["tts_transcript_unexpected_protected_value", "insertion"],
+]);
+const isProtectedToken = (value) => /^(?:abbr|num|pct|ratio|times|alias):/.test(String(value ?? ""));
+
+function sharedIntendedSlots(primaryQa, confirmationQa) {
+  const intendedTokens = (qa) => (qa?.operations ?? [])
+    .filter((row) => row.intended != null).map((row) => row.intended);
+  const primary = intendedTokens(primaryQa);
+  const confirmation = intendedTokens(confirmationQa);
+  const maps = [Array(primary.length).fill(null), Array(confirmation.length).fill(null)];
+  // Pair-aware notation can restore a consumed "a" before an amount, or a
+  // symbol's spoken dollar unit after it. Those additions are not stable
+  // source coordinates. Match both intended sequences while allowing only
+  // these known numeric-notation additions to remain unmatched.
+  const notationAddition = (tokens, index) => (
+    (tokens[index] === "a" && /^num:/.test(tokens[index + 1] ?? ""))
+    || (/^dollars?$/.test(tokens[index] ?? "") && /^num:/.test(tokens[index - 1] ?? ""))
+  );
+  let left = 0;
+  let right = 0;
+  let slot = 0;
+  while (left < primary.length || right < confirmation.length) {
+    if (left < primary.length && right < confirmation.length && primary[left] === confirmation[right]) {
+      maps[0][left++] = slot;
+      maps[1][right++] = slot++;
+    } else if (left < primary.length && notationAddition(primary, left)) {
+      left += 1;
+    } else if (right < confirmation.length && notationAddition(confirmation, right)) {
+      right += 1;
+    } else {
+      // Do not invent source alignment if the intended sequences differ for
+      // any reason beyond the comparator's documented notation augmentation.
+      return [null, null];
+    }
+  }
+  return maps;
+}
+
+function protectedOperations(transcriptQa, type, slots) {
+  let intendedIndex = 0;
+  const operations = [];
+  for (const operation of transcriptQa?.operations ?? []) {
+    // Insertions are anchored at the gap before this intended-token cursor.
+    // Repeated amounts at different source positions are different evidence.
+    if (operation.type === type
+      && (isProtectedToken(operation.intended) || isProtectedToken(operation.recognized))) {
+      let intendedSlot = slots?.[intendedIndex] ?? null;
+      if (type === "insertion" && slots) {
+        const before = slots.slice(0, intendedIndex).findLast((value) => value != null) ?? "start";
+        const after = slots.slice(intendedIndex).find((value) => value != null) ?? "end";
+        intendedSlot = `gap:${before}:${after}`;
+      }
+      operations.push({ ...operation, intended_token_index: intendedIndex, intended_slot: intendedSlot });
+    }
+    if (operation.intended != null) intendedIndex += 1;
+  }
+  return operations;
+}
+
+function protectedOperationKey(operation) {
+  return JSON.stringify([
+    operation.type, operation.intended ?? null, operation.recognized ?? null,
+    operation.intended_slot,
+  ]);
 }
 
 function editDistance(leftValue, rightValue) {
@@ -239,6 +309,7 @@ export function adjudicateNarrationDeliveryConsensus({
     return {
       ...primary,
       schema: "goldflow_narration_delivery_consensus_v2",
+      adjudication_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
       primary_model: primaryModel,
       confirmation_model: null,
       confirmation_required: false,
@@ -249,6 +320,7 @@ export function adjudicateNarrationDeliveryConsensus({
     return {
       ...primary,
       schema: "goldflow_narration_delivery_consensus_v2",
+      adjudication_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
       status: "blocked",
       primary_model: primaryModel,
       confirmation_model: confirmationModel,
@@ -282,9 +354,6 @@ export function adjudicateNarrationDeliveryConsensus({
     "contiguous_words_missing",
     "insertion_burst",
     "transcript_missing",
-    "tts_transcript_protected_value_mismatch",
-    "tts_transcript_protected_value_missing",
-    "tts_transcript_unexpected_protected_value",
   ]);
   for (const family of intersection(primaryFamilies, confirmationFamilies)) {
     if (!confirmedHardFamilies.has(family)) continue;
@@ -298,10 +367,49 @@ export function adjudicateNarrationDeliveryConsensus({
     }));
   }
 
+  const sharedProtectedByType = new Map();
+  const unconfirmedProtected = { primary_operations: [], confirmation_operations: [] };
+  const [primarySlots, confirmationSlots] = sharedIntendedSlots(primaryTranscriptQa, confirmationTranscriptQa);
+  for (const [family, type] of PROTECTED_OPERATION_FAMILIES) {
+    const primaryOperations = protectedOperations(primaryTranscriptQa, type, primarySlots);
+    const confirmationOperations = protectedOperations(confirmationTranscriptQa, type, confirmationSlots);
+    const primaryKeys = new Set(primaryOperations.filter((row) => row.intended_slot != null).map(protectedOperationKey));
+    const confirmationKeys = new Set(confirmationOperations.filter((row) => row.intended_slot != null).map(protectedOperationKey));
+    const shared = primaryOperations.filter((row) => confirmationKeys.has(protectedOperationKey(row)));
+    sharedProtectedByType.set(type, shared);
+    if (shared.length) {
+      blockers.push(blocker(`narration_confirmed_${family}`, {
+        operations: shared,
+        primary_model: primaryModel,
+        confirmation_model: confirmationModel,
+      }));
+    }
+    unconfirmedProtected.primary_operations.push(...primaryOperations.filter(
+      (row) => !confirmationKeys.has(protectedOperationKey(row)),
+    ));
+    unconfirmedProtected.confirmation_operations.push(...confirmationOperations.filter(
+      (row) => !primaryKeys.has(protectedOperationKey(row)),
+    ));
+  }
+  if (unconfirmedProtected.primary_operations.length || unconfirmedProtected.confirmation_operations.length) {
+    const finding = {
+      ...unconfirmedProtected,
+      disposition: deliveryPolicy.unconfirmed_primary_asr_requires_exact_listen === false
+        ? "independent_protected_operations_disagree_advisory_no_retry"
+        : "exact_unit_listen_review_no_automatic_regeneration",
+      primary_model: primaryModel,
+      confirmation_model: confirmationModel,
+    };
+    warnings.push(deliveryPolicy.unconfirmed_primary_asr_requires_exact_listen === false
+      ? advisory("narration_protected_value_difference_not_confirmed", finding)
+      : warning("narration_protected_value_difference_not_confirmed", finding));
+  }
+
   const rawConfirmedDeletedTokens = intersection(
     operationKeys(primaryTranscriptQa, "deletion", "intended"),
     operationKeys(confirmationTranscriptQa, "deletion", "intended"),
-  );
+  ).filter((token) => !isProtectedToken(token)
+    || sharedProtectedByType.get("deletion").some((row) => row.intended === token));
   const fusedCompoundTokens = rawConfirmedDeletedTokens.filter((token) => (
     likelyCompoundFusion(primaryTranscriptQa, token)
       && likelyCompoundFusion(confirmationTranscriptQa, token)
@@ -327,7 +435,8 @@ export function adjudicateNarrationDeliveryConsensus({
   const rawConfirmedInsertedTokens = intersection(
     operationKeys(primaryTranscriptQa, "insertion", "recognized"),
     operationKeys(confirmationTranscriptQa, "insertion", "recognized"),
-  );
+  ).filter((token) => !isProtectedToken(token)
+    || sharedProtectedByType.get("insertion").some((row) => row.recognized === token));
   const resegmentedTokens = rawConfirmedInsertedTokens.filter((token) => (
     likelyTokenResegmentation(primaryTranscriptQa, token)
       && likelyTokenResegmentation(confirmationTranscriptQa, token)
@@ -422,6 +531,7 @@ export function adjudicateNarrationDeliveryConsensus({
   }
   return {
     schema: "goldflow_narration_delivery_consensus_v2",
+    adjudication_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
     status: blockers.length ? "blocked" : warnings.length ? "passed_with_warnings" : "passed",
     primary_model: primaryModel,
     confirmation_model: confirmationModel,

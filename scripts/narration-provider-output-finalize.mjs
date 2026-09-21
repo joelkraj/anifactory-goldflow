@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  NARRATION_DELIVERY_CONSENSUS_VERSION,
   adjudicateNarrationDeliveryConsensus,
   exactNarrationListenReviewPacket,
   exactNarrationRepairPacket,
@@ -853,6 +854,11 @@ function localizedConsensusDecision({
   };
 }
 
+export function narrationFullStreamDerivedDecisionsCurrent(fullStream, comparisonVersion) {
+  return fullStream?.transcript_comparison_version === comparisonVersion
+    && fullStream?.delivery_consensus_version === NARRATION_DELIVERY_CONSENSUS_VERSION;
+}
+
 export async function runFullStreamDeliveryQa({
   helpers,
   audioPath,
@@ -1082,6 +1088,7 @@ export async function runFullStreamDeliveryQa({
   }
   return {
     transcript_comparison_version: helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+    delivery_consensus_version: NARRATION_DELIVERY_CONSENSUS_VERSION,
     intended_text: intendedText,
     intended_text_sha256: sha256(intendedText),
     primary_model: primaryModel,
@@ -2235,8 +2242,9 @@ export async function finalizeNarrationProviderOutput(
     )).every(Boolean);
     if (!confirmationEvidenceValid) cachedFullStream = null;
   }
-  const rawFullStream = cachedFullStream?.transcript_comparison_version
-      === helpers.TRANSCRIPT_QA_COMPARISON_VERSION
+  const rawFullStream = narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )
     ? cachedFullStream
     : await runFullStreamDeliveryQa({
       helpers,
@@ -2302,6 +2310,7 @@ export async function finalizeNarrationProviderOutput(
     ...scopeFields,
     schema: "goldflow_narration_full_stream_qa_v2",
     transcript_comparison_version: fullStream.transcript_comparison_version,
+    delivery_consensus_version: fullStream.delivery_consensus_version,
     status: fullStream.decision.status,
     source_script_hash: sourceScriptHash(plan),
     narration_generation_plan_path: planPath,

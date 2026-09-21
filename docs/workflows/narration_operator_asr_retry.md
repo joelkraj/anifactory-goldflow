@@ -1,5 +1,7 @@
 # Explicit operator ASR-consensus retake
 
+For an error actually heard by the operator, use the separate [heard-pronunciation exception](narration_heard_pronunciation_retry.md). Do not describe a listening decision as an ASR-only authorization.
+
 When the operator explicitly waives listening and authorizes a bounded retake, the existing `tts narrate` exact-retry route accepts `evidence_basis: "operator_authorized_asr_consensus"`. This is a per-invocation exception to the identity's usual heard skip/truncation/stutter repair rule, not a changed identity, listening approval, automatic retry or ASR-blocker waiver. Existing heard-evidence behavior remains unchanged.
 
 The evidence JSON uses schema `goldflow_confirmed_tts_retry_evidence_v2` and requires:

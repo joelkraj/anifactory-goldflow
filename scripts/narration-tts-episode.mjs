@@ -486,8 +486,9 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_codes: triggerCodes,
     candidate_qa: candidate.qa ?? null,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
-    ...(confirmedEvidenceBasis === "operator_authorized_asr_consensus"
-      ? { evidence_basis: confirmedEvidenceBasis, human_listening_performed: false } : {}),
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation"].includes(confirmedEvidenceBasis)
+      ? { evidence_basis: confirmedEvidenceBasis,
+        human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
   return {
     schema: "goldflow_qwen_exact_unit_recovery_provenance_v1",
@@ -506,8 +507,9 @@ export function exactUnitRecoveryProvenanceForTests({
     trigger_evidence_sha256: canonicalQwenBatchSha256(triggerEvidence),
     confirmed_evidence_path: confirmedEvidencePath,
     confirmed_evidence_sha256: confirmedEvidenceSha256,
-    ...(confirmedEvidenceBasis === "operator_authorized_asr_consensus"
-      ? { evidence_basis: confirmedEvidenceBasis, human_listening_performed: false } : {}),
+    ...(["operator_authorized_asr_consensus", "operator_confirmed_pronunciation"].includes(confirmedEvidenceBasis)
+      ? { evidence_basis: confirmedEvidenceBasis,
+        human_listening_performed: confirmedEvidenceBasis === "operator_confirmed_pronunciation" } : {}),
   };
 }
 
@@ -520,6 +522,8 @@ export function validateConfirmedRetryEvidenceForTests({
   currentCandidates,
   sourceScriptSha256 = null,
   planFileSha256 = null,
+  currentUnits = [],
+  priorCandidates = [],
 } = {}) {
   if (!evidence || typeof evidence !== "object") {
     throw new Error("Confirmed retry evidence must be a JSON object.");
@@ -540,13 +544,17 @@ export function validateConfirmedRetryEvidenceForTests({
     );
   }
   const operatorAsrBasis = evidence.evidence_basis === "operator_authorized_asr_consensus";
-  if (evidence.evidence_basis != null && !operatorAsrBasis
+  const pronunciationBasis = evidence.evidence_basis === "operator_confirmed_pronunciation";
+  const explicitException = operatorAsrBasis || pronunciationBasis;
+  if (evidence.evidence_basis != null && !explicitException
     && evidence.evidence_basis !== "human_listening") {
     throw new Error("Unsupported confirmed retry evidence basis.");
   }
-  if (operatorAsrBasis && (evidence.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
-    || evidence.human_listening_performed !== false
-    || evidence.attestation != null
+  if (explicitException && (evidence.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+    || evidence.human_listening_performed !== pronunciationBasis
+    || (pronunciationBasis
+      ? evidence.attestation !== "operator_heard_pronunciation_in_exact_selected_audio"
+      : evidence.attestation != null)
     || !String(evidence.operator_quote ?? "").trim()
     || String(evidence.operator_reason ?? "").trim().length < 40
     || !String(evidence.authorized_by ?? "").trim()
@@ -561,20 +569,29 @@ export function validateConfirmedRetryEvidenceForTests({
     || priorReport.source_script_hash !== sourceScriptSha256
     || priorReport.narration_generation_plan_sha256 !== planSha256
     || priorReport.narration_generation_plan_file_sha256 !== planFileSha256)) {
-    throw new Error("Operator-authorized ASR retry requires current source/plan/report bindings, explicit authorization and no listening claim.");
+    throw new Error("Explicit retry exception requires current source/plan/report bindings, authorization and its exact listening evidence basis.");
   }
-  const allowedDefects = new Set(operatorAsrBasis
+  const allowedDefects = new Set(pronunciationBasis ? ["pronunciation"] : operatorAsrBasis
     ? ["truncation", "unexpected_words"] : ["skip", "truncation", "stutter"]);
   const evidenceRows = Array.isArray(evidence.confirmed_units)
     ? evidence.confirmed_units
     : [];
   const requested = [...new Set((requestedUnitIds ?? []).map(String))];
-  if (operatorAsrBasis && (!requested.length
+  if (explicitException && (!requested.length
     || requested.length !== requestedUnitIds.length
     || evidenceRows.length !== requested.length
     || new Set(evidenceRows.map((row) => row?.unit_id)).size !== requested.length
     || evidenceRows.some((row) => !requested.includes(String(row?.unit_id ?? ""))))) {
-    throw new Error("Operator-authorized ASR retry must name only the exact requested units once.");
+    throw new Error("Explicit retry exception must name only the exact requested units once.");
+  }
+  if (pronunciationBasis && requested.length !== 1) {
+    throw new Error("Heard pronunciation repair permits exactly one unit per explicit invocation.");
+  }
+  if (pronunciationBasis && (!/^[a-f0-9]{64}$/u.test(String(planSha256))
+    || !/^[a-f0-9]{64}$/u.test(String(priorReportSha256))
+    || !path.isAbsolute(String(evidence.pre_retry_narration_report_path ?? ""))
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/u.test(String(evidence.authorized_at)))) {
+    throw new Error("Heard pronunciation repair requires an archived report path, exact SHA-256 bindings and an ISO authorization timestamp.");
   }
   const evidenceById = new Map(
     evidenceRows.map((row) => [String(row?.unit_id ?? ""), row]),
@@ -594,7 +611,9 @@ export function validateConfirmedRetryEvidenceForTests({
         `Confirmed retry evidence for ${unitId} must record defect_type `
         + (operatorAsrBasis
           ? "(truncation or unexpected_words) and a non-empty evidence_note."
-          : "(skip, truncation, or stutter) and a non-empty listen_note."),
+          : pronunciationBasis
+            ? "(pronunciation) and a non-empty listen_note."
+            : "(skip, truncation, or stutter) and a non-empty listen_note."),
       );
     }
     const prior = priorById.get(unitId);
@@ -602,6 +621,25 @@ export function validateConfirmedRetryEvidenceForTests({
       throw new Error(
         `Pre-retry narration report lacks an exact selected audio/synthesis identity for ${unitId}.`,
       );
+    }
+    if (pronunciationBasis) {
+      const unit = currentUnits.find((item) => String(item.unit_id) === unitId);
+      const word = String(row.expected_spoken_word ?? "").trim();
+      const heard = String(row.heard_pronunciation ?? "").trim();
+      const spokenHash = createHash("sha256").update(String(unit?.spoken_text ?? "")).digest("hex");
+      if (!unit || row.defect_type !== "pronunciation" || row.selected_attempt !== 1
+        || row.expected_spoken_word !== word || !/^[\p{L}]+(?:['’][\p{L}]+)*$/u.test(word)
+        || !(String(unit.spoken_text).match(/[\p{L}]+(?:['’][\p{L}]+)*/gu) ?? []).includes(word)
+        || !heard || heard.toLocaleLowerCase() === word.toLocaleLowerCase()
+        || unit.spoken_text_sha256 !== spokenHash
+        || row.spoken_text_sha256 !== spokenHash || prior.spoken_text_sha256 !== spokenHash
+        || !/^[a-f0-9]{64}$/u.test(String(prior.audio_sha256))
+        || !/^[a-f0-9]{64}$/u.test(String(prior.synthesis_identity_sha256))
+        || [...(currentCandidates ?? []), ...priorCandidates].some((candidate) => (
+          String(candidate?.unit_id) === unitId && Number(candidate.attempt) !== 1
+        ))) {
+        throw new Error(`Heard pronunciation repair requires an unchanged exact spoken word, a distinct heard pronunciation, and no prior retake for ${unitId}.`);
+      }
     }
     if (operatorAsrBasis) {
       const delivery = prior.selected_qa?.delivery;
@@ -639,8 +677,8 @@ export function validateConfirmedRetryEvidenceForTests({
       ?.selected_report_synthesis_identity_sha256
       ?? current?.synthesis_identity_sha256;
     const expectedAttempt = Number(prior.attempt);
-    if (operatorAsrBasis && expectedAttempt !== 1) {
-      throw new Error("Operator-authorized ASR consensus permits only one retake of a first take.");
+    if (explicitException && expectedAttempt !== 1) {
+      throw new Error("Explicit retry exception permits only one retake of a first take.");
     }
     if (!Number.isInteger(expectedAttempt)
       || Number(row.selected_attempt) !== expectedAttempt
@@ -668,6 +706,13 @@ export function validateConfirmedRetryEvidenceForTests({
         human_listening_performed: false,
         reviewed_blocker_codes: row.reviewed_blocker_codes,
         selected_delivery_qa_sha256: row.selected_delivery_qa_sha256,
+      } : {}),
+      ...(pronunciationBasis ? {
+        evidence_basis: "operator_confirmed_pronunciation",
+        human_listening_performed: true,
+        spoken_text_sha256: row.spoken_text_sha256,
+        expected_spoken_word: row.expected_spoken_word,
+        heard_pronunciation: row.heard_pronunciation,
       } : {}),
     });
   }
@@ -3216,6 +3261,13 @@ async function main() {
     confirmedRetryEvidencePath = path.resolve(flags["confirmed-retry-evidence"]);
     const evidenceBuffer = await fs.readFile(confirmedRetryEvidencePath);
     const evidence = JSON.parse(evidenceBuffer.toString("utf8"));
+    if (evidence.evidence_basis === "operator_confirmed_pronunciation"
+      && (!path.isAbsolute(String(evidence.pre_retry_narration_report_path ?? ""))
+        || path.resolve(evidence.pre_retry_narration_report_path) === path.resolve(reportPath)
+        || await sha256File(evidence.pre_retry_narration_report_path).catch(() => null)
+          !== priorNarrationReportSha256)) {
+      throw new Error("Heard pronunciation retry requires an immutable copy of the exact current pre-retry report.");
+    }
     confirmedRetryEvidenceSha256 = createHash("sha256")
       .update(evidenceBuffer)
       .digest("hex");
@@ -3228,7 +3280,14 @@ async function main() {
       currentCandidates: preservedCandidates,
       sourceScriptSha256: scriptHash,
       planFileSha256,
+      currentUnits: units,
+      priorCandidates: priorUnitQa?.candidates ?? [],
     });
+    if (validatedConfirmedRetryEvidence.some((row) => row.evidence_basis === "operator_confirmed_pronunciation")
+      && (policy.primary.provider !== "qwen_local"
+        || policy.synthesis_contract.mode !== QWEN_LIAM_BATCH4_SYNTHESIS_CONTRACT.mode)) {
+      throw new Error("Heard pronunciation repair requires the Qwen batch-cohort exact-unit provenance route.");
+    }
   }
   const finalSynthesisScope = narrationSynthesisScopeForTests({
     units,
@@ -3946,6 +4005,8 @@ async function main() {
       status: validatedConfirmedRetryEvidence.every((row) => (
         row.evidence_basis === "operator_authorized_asr_consensus"
       )) ? "validated_against_operator_authorized_asr_consensus"
+        : validatedConfirmedRetryEvidence.every((row) => row.evidence_basis === "operator_confirmed_pronunciation")
+          ? "validated_against_operator_confirmed_pronunciation"
         : "validated_against_confirmed_listen_evidence",
       evidence_path: confirmedRetryEvidencePath,
       evidence_sha256: confirmedRetryEvidenceSha256,

@@ -2890,6 +2890,97 @@ export async function narrationOperatorAsrRetryReportValidForTests(ttsReport, cu
   return true;
 }
 
+export async function narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash) {
+  const results = ttsReport?.results ?? [];
+  const expectedPolicy = narrationTtsRetryReportPolicy({
+    recoveryProvenances: results.map((row) => row.recovery_provenance),
+  });
+  const expected = expectedPolicy.operator_confirmed_pronunciation_exceptions ?? [];
+  const hashValid = (value) => /^[a-f0-9]{64}$/u.test(String(value ?? ""));
+  if (expected.length !== 1 || !hashValid(currentScriptHash)
+    || ttsReport.source_script_hash !== currentScriptHash
+    || ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter
+      !== expectedPolicy.retry_only_confirmed_skip_truncation_or_stutter
+    || canonicalQwenBatchSha256(expected) !== canonicalQwenBatchSha256(
+      ttsReport.retry_policy?.operator_confirmed_pronunciation_exceptions ?? [])) return false;
+  const planPath = ttsReport.narration_generation_plan_path;
+  const manifestPath = ttsReport.provider_output_manifest_path;
+  if (!planPath || !manifestPath
+    || !hashValid(ttsReport.narration_generation_plan_sha256)
+    || !hashValid(ttsReport.narration_generation_plan_file_sha256)
+    || await fileSha256(planPath) !== ttsReport.narration_generation_plan_file_sha256
+    || await fileSha256(manifestPath) !== ttsReport.provider_output_manifest_sha256) return false;
+  const [plan, manifest] = await Promise.all([readJson(planPath, null), readJson(manifestPath, null)]);
+  if (plan?.plan_sha256 !== ttsReport.narration_generation_plan_sha256
+    || plan?.source_script_hash !== currentScriptHash) return false;
+  const unitId = expected[0].unit_id;
+  const matching = (rows) => (rows ?? []).filter((row) => row.unit_id === unitId);
+  const resultRows = matching(results);
+  const providerRows = matching(manifest?.units);
+  const planRows = matching(narrationPlanUnitsForStatus(plan));
+  if (resultRows.length !== 1 || providerRows.length !== 1 || planRows.length !== 1) return false;
+  const [result] = resultRows;
+  const [providerUnit] = providerRows;
+  const [unit] = planRows;
+  const recovery = result.recovery_provenance;
+  const spokenHash = sha256(String(unit.spoken_text ?? ""));
+  if (Number(result.attempt) !== 2 || Number(providerUnit.attempt) !== 2
+    || recovery?.schema !== "goldflow_qwen_exact_unit_recovery_provenance_v1"
+    || recovery.recovery_mode !== QWEN_LIAM_EXACT_UNIT_RECOVERY_MODE
+    || recovery.evidence_basis !== "operator_confirmed_pronunciation"
+    || recovery.human_listening_performed !== true || recovery.unit_id !== unitId
+    || unit.spoken_text_sha256 !== spokenHash || result.spoken_text_sha256 !== spokenHash
+    || providerUnit.spoken_text_sha256 !== spokenHash || recovery.spoken_text_sha256 !== spokenHash
+    || canonicalQwenBatchSha256(recovery.trigger_codes) !== canonicalQwenBatchSha256(["operator_confirmed_pronunciation"])
+    || !hashValid(result.audio_sha256) || !hashValid(result.synthesis_identity_sha256)
+    || providerUnit.audio_sha256 !== result.audio_sha256
+    || providerUnit.synthesis_identity_sha256 !== result.synthesis_identity_sha256
+    || !providerUnit.audio_path || await fileSha256(providerUnit.audio_path) !== result.audio_sha256
+    || canonicalQwenBatchSha256(providerUnit.recovery_provenance ?? null) !== canonicalQwenBatchSha256(recovery)
+    || !recovery.confirmed_evidence_path || !hashValid(recovery.confirmed_evidence_sha256)
+    || await fileSha256(recovery.confirmed_evidence_path) !== recovery.confirmed_evidence_sha256) return false;
+  const evidence = await readJson(recovery.confirmed_evidence_path, null);
+  const reviewed = evidence?.confirmed_units?.[0];
+  const word = String(reviewed?.expected_spoken_word ?? "").trim();
+  const heard = String(reviewed?.heard_pronunciation ?? "").trim();
+  if (evidence?.schema !== "goldflow_confirmed_tts_retry_evidence_v2"
+    || evidence.evidence_basis !== "operator_confirmed_pronunciation"
+    || evidence.human_listening_performed !== true
+    || evidence.attestation !== "operator_heard_pronunciation_in_exact_selected_audio"
+    || evidence.maximum_attempts_per_unit !== 1
+    || !String(evidence.operator_quote ?? "").trim()
+    || String(evidence.operator_reason ?? "").trim().length < 40
+    || !String(evidence.authorized_by ?? "").trim() || !Number.isFinite(Date.parse(evidence.authorized_at))
+    || evidence.source_script_sha256 !== currentScriptHash
+    || evidence.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+    || evidence.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+    || evidence.confirmed_units?.length !== 1 || reviewed?.unit_id !== unitId
+    || reviewed.selected_attempt !== 1 || reviewed.defect_type !== "pronunciation"
+    || !String(reviewed.listen_note ?? "").trim()
+    || !/^[\p{L}]+(?:['’][\p{L}]+)*$/u.test(word)
+    || !(String(unit.spoken_text).match(/[\p{L}]+(?:['’][\p{L}]+)*/gu) ?? []).includes(word)
+    || !heard || heard.toLocaleLowerCase() === word.toLocaleLowerCase()
+    || reviewed.spoken_text_sha256 !== spokenHash
+    || reviewed.audio_sha256 !== recovery.origin_audio_sha256
+    || reviewed.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256
+    || !evidence.pre_retry_narration_report_path || !hashValid(evidence.pre_retry_narration_report_sha256)
+    || await fileSha256(evidence.pre_retry_narration_report_path) !== evidence.pre_retry_narration_report_sha256) return false;
+  const prior = await readJson(evidence.pre_retry_narration_report_path, null);
+  const priorRows = matching(prior?.results);
+  const original = priorRows[0];
+  if (prior?.schema !== "goldflow_narration_tts_report_v1" || prior.status !== "blocked"
+    || prior.source_script_hash !== currentScriptHash
+    || prior.narration_generation_plan_sha256 !== ttsReport.narration_generation_plan_sha256
+    || prior.narration_generation_plan_file_sha256 !== ttsReport.narration_generation_plan_file_sha256
+    || priorRows.length !== 1 || Number(original?.attempt) !== 1
+    || original.spoken_text_sha256 !== spokenHash
+    || original.audio_sha256 !== recovery.origin_audio_sha256
+    || original.synthesis_identity_sha256 !== recovery.origin_synthesis_identity_sha256
+    || !hashValid(original.audio_sha256) || !hashValid(original.synthesis_identity_sha256)
+    || !original.audio_path || await fileSha256(original.audio_path) !== original.audio_sha256) return false;
+  return true;
+}
+
 async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash, identity) {
   if (!currentScriptHash) return { done: false, evidence: "script_clean.md missing" };
   const narrationQualityContract = narrationQualityContractForIdentity(identity);
@@ -3320,8 +3411,13 @@ async function narrationTtsStitchComplete(episodeDir, episode, currentScriptHash
     const hasOperatorAsrRetry = (ttsReport.results ?? []).some((row) => (
       row.recovery_provenance?.evidence_basis === "operator_authorized_asr_consensus"
     )) || (ttsReport.retry_policy?.operator_authorized_asr_consensus_exceptions?.length ?? 0) > 0;
-    const exactRetryTypePolicyPassed = hasOperatorAsrRetry
-      ? narrationQualityContract && await narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash)
+    const hasHeardPronunciationRetry = (ttsReport.results ?? []).some((row) => (
+      row.recovery_provenance?.evidence_basis === "operator_confirmed_pronunciation"
+    )) || (ttsReport.retry_policy?.operator_confirmed_pronunciation_exceptions?.length ?? 0) > 0;
+    const exactRetryTypePolicyPassed = hasOperatorAsrRetry || hasHeardPronunciationRetry
+      ? narrationQualityContract
+        && (!hasOperatorAsrRetry || await narrationOperatorAsrRetryReportValidForTests(ttsReport, currentScriptHash))
+        && (!hasHeardPronunciationRetry || await narrationHeardPronunciationRetryReportValidForTests(ttsReport, currentScriptHash))
       : ttsReport.retry_policy?.retry_only_confirmed_skip_truncation_or_stutter === true;
     if (ttsReport.retry_policy?.uncertain_asr_findings_are_warning_only !== true
       || !exactRetryTypePolicyPassed

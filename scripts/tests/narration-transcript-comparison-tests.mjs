@@ -152,6 +152,57 @@ assert.ok(qa("one dollar", "one pound").substitutions > 0);
 assert.ok(qa("one dollar", "£1").deletions > 0);
 assert.ok(qa("He paid $1.", "He paid one pound.").insertions > 0);
 
+// Apostrophized I'd is a lexical contraction, never the protected initialism
+// ID, and neither its had/would sense nor a missing contraction is erased.
+for (const spelling of ["I'd", "I’d", "i'd", "I’D"]) {
+  const result = qa(`He knew ${spelling} left.`, "He knew I left.");
+  assert.deepEqual(result.intended_canonical_tokens, ["he", "knew", "i'd", "left"]);
+  assert.equal(result.substitutions, 1);
+  assert.ok(!result.findings.some((row) => row.code.includes("protected_value")));
+}
+assert.deepEqual(qa("ID", "I D").intended_canonical_tokens, ["abbr:id"]);
+assert.equal(qa("ID", "I D").substitutions, 0);
+for (const [intended, recognized] of [
+  ["I'd not left.", "I did not leave."],
+  ["He knew I'd left.", "He knew I had left."],
+  ["He knew I'd prefer it.", "He knew I would prefer it."],
+]) {
+  const result = qa(intended, recognized);
+  assert.ok(result.deletions + result.insertions + result.substitutions > 0);
+}
+assert.deepEqual(qa("I'd not left.", "I'd not left.").intended_canonical_tokens, ["i'd", "not", "left"]);
+assert.ok(consensus("He knew I'd already left.", "He knew I'd left.").blockers
+  .some((row) => row.code.includes("omission")));
+assert.ok(consensus("He knew I'd left.", "He knew ID left.").blockers
+  .some((row) => row.code.includes("protected_value")));
+
+// Preserve the consumed article's provenance. A/the is still a substitution;
+// a digit spelling never invents an article to make an omission disappear.
+for (const [left, right] of [
+  ["with the thousand still in chips", "with a thousand still in chips"],
+  ["with a thousand still in chips", "with the thousand still in chips"],
+  ["the hundred-dollar bond", "a hundred-dollar bond"],
+]) {
+  const result = qa(left, right);
+  assert.equal(result.deletions, 0);
+  assert.equal(result.insertions, 0);
+  assert.equal(result.substitutions, 1);
+  assert.ok(!result.findings.some((row) => row.code.includes("protected_value")));
+}
+for (const [intended, recognized] of [
+  ["the thousand remained", "1000 remained"],
+  ["the thousand remained", "thousand remained"],
+  ["The. Thousand remained.", "A thousand remained."],
+  ["a one hundred page report", "a hundred page report"],
+]) {
+  assert.ok(qa(intended, recognized).deletions > 0);
+  assert.ok(consensus(intended, recognized).blockers.length > 0);
+}
+assert.ok(consensus("the thousand remained", "a million remained").blockers
+  .some((row) => row.code.includes("protected_value")));
+assert.ok(consensus("the thousand remained", "the two thousand remained").blockers
+  .some((row) => row.code.includes("protected_value")));
+
 // A comparator-only refresh must use retained recognizer output. Any attempted
 // new ASR fails the test. This does not create or approve production audio.
 const noAsrHelpers = { ...helpers, runFasterWhisperUnitBatchForDiagnostics() {
@@ -227,23 +278,26 @@ try {
   const audioPath = path.join(temp, "silence-fixture.wav");
   await fs.writeFile(audioPath, wav);
   const audioSha256 = hash(wav);
-  const intended = "My fiancée left.";
-  const words = [
-    { word: "My", start_sec: 0.1, end_sec: 0.3 },
-    { word: "fiancé", start_sec: 0.3, end_sec: 0.9 },
-    { word: "left.", start_sec: 0.9, end_sec: 1.4 },
-  ];
+  for (const [intended, recognized] of [
+    ["My fiancée left.", "My fiancé left."],
+    ["He knew I'd left.", "He knew I left."],
+    ["The thousand remained.", "A thousand remained."],
+  ]) {
+  const words = recognized.split(/\s+/).map((word, index) => ({
+    word, start_sec: 0.1 + index * 0.2, end_sec: 0.3 + index * 0.2,
+  }));
   const window = {
     unit_ids: ["unit_1"], boundary_ids: [], start_sample: 0, end_sample_exclusive: sampleCount,
     intended_text: intended, intended_text_sha256: hash(intended),
     audio_path: audioPath, audio_sha256: audioSha256, sample_count: sampleCount,
-    confirmation_recognized_text: "My fiancé left.", confirmation_recognized_words: words,
+    confirmation_recognized_text: recognized, confirmation_recognized_words: words,
   };
   window.binding_sha256 = hash(JSON.stringify({
     source_audio_sha256: audioSha256, start_sample: 0, end_sample_exclusive: sampleCount,
     intended_text_sha256: hash(intended), unit_ids: ["unit_1"], boundary_ids: [],
   }));
-  const evidence = { primary_transcription: { text: "My fiancé left.", words },
+  const evidence = { transcript_comparison_version: "unicode_words_exact_im_numeric_boundaries_currency_v3",
+    primary_transcription: { text: recognized, words },
     confirmation_model: "medium", confirmation_windows: [window] };
   const immutable = JSON.stringify(evidence);
   const result = await runFullStreamDeliveryQa({
@@ -257,8 +311,12 @@ try {
   assert.equal(result.confirmation_windows[0].audio_sha256, audioSha256);
   assert.equal(result.confirmation_windows[0].confirmation_recognized_words, words);
   assert.equal(result.confirmation_windows[0].primary_transcript_qa.deletions, 0);
+  assert.equal(result.confirmation_windows[0].primary_transcript_qa.substitutions, 1);
+  assert.equal(result.transcript_comparison_version, helpers.TRANSCRIPT_QA_COMPARISON_VERSION);
+  assert.equal(result.primary_transcription, evidence.primary_transcription);
   assert.equal(result.decision.blockers.length, 0);
   assert.equal(JSON.stringify(evidence), immutable);
+  }
 } finally {
   await fs.rm(temp, { recursive: true, force: true });
 }

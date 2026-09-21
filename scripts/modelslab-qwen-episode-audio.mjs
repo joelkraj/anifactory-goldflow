@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_boundaries_currency_v3";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_v4";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1767,7 +1767,6 @@ function rawTranscriptTokens(value) {
     .replace(/\b(\d{1,3})\s+,(\d{3})\b/g, "$1,$2")
     .replace(/([+-])\s*\$\s*(?=\d)/g, (_match, sign) => `$${sign}`)
     .replace(/\$\s*([+-])\s+(?=\d)/g, (_match, sign) => `$${sign}`)
-    .replace(/\bI['’]d\s+not\b/gi, "I did not")
     // Comparison equivalence only: preserve the source and recognized text.
     // Do not expand ambiguous 's/'d forms or an unpunctuated name such as Im.
     .replace(/(?<![\p{L}\p{M}])I['’]m(?![\p{L}\p{M}])/giu, "I am")
@@ -1777,6 +1776,9 @@ function rawTranscriptTokens(value) {
     .map((raw) => {
       const lower = raw.toLowerCase();
       if (lower === "st.") return "saint";
+      // Preserve the lexical contraction; stripping its apostrophe creates the
+      // unrelated protected initialism ID. Its had/would sense is not inferred.
+      if (/^i['’]d$/.test(lower)) return "i'd";
       if (TRANSCRIPT_PUNCTUATION.has(lower)) return lower;
       if (/^[+-]?\d/.test(lower) || ["/", "%", "$"].includes(lower)) return lower.replaceAll(",", "");
       return lower.replace(/[.'’]/g, "").replace(/[^\p{L}\p{M}0-9]+/gu, "");
@@ -1851,6 +1853,8 @@ function parseNumberAt(tokens, start) {
     negative = true;
     index += 1;
   }
+  const implicitArticle = tokens[index] === "a"
+    && (tokens[index + 1] === "hundred" || NUMBER_SCALES.has(tokens[index + 1]));
   let total = 0;
   let previousScale = Infinity;
   let sawNumber = false;
@@ -1862,6 +1866,8 @@ function parseNumberAt(tokens, start) {
     if (sawNumber && tokens[groupStart] === "and") groupStart += 1;
     const group = tokens[groupStart] === "a" && NUMBER_SCALES.has(tokens[groupStart + 1])
       ? { value: 1, end: groupStart + 1 }
+      : !sawNumber && NUMBER_SCALES.has(tokens[groupStart])
+      ? { value: 1, end: groupStart }
       : parseCardinalGroup(tokens, groupStart);
     if (!group) break;
     let value = group.value;
@@ -1891,6 +1897,7 @@ function parseNumberAt(tokens, start) {
     value: normalizedNumberString(negative ? -total : total),
     end: index,
     suffix: null,
+    implicit_article: implicitArticle,
   };
 }
 
@@ -1926,6 +1933,9 @@ function canonicalTranscriptTokensWithoutAliases(value) {
     const dollarSymbol = compounds[index] === "$";
     const parsed = parseNumberAt(compounds, index + (dollarSymbol ? 1 : 0));
     if (parsed?.value != null) {
+      if (compounds[index - 1] === "the" && output.at(-1) === "the") {
+        output[output.length - 1] = "numeric_article:the";
+      }
       const ratioMarker = compounds[parsed.end] === "/" || (
         compounds[parsed.end] === "out" && compounds[parsed.end + 1] === "of"
       );
@@ -1939,7 +1949,7 @@ function canonicalTranscriptTokensWithoutAliases(value) {
       const suffix = parsed.suffix
         ?? (compounds[parsed.end] === "%" || compounds[parsed.end] === "percent" ? "percent" : null)
         ?? (compounds[parsed.end] === "times" ? "times" : null);
-      output.push(suffix === "%" || suffix === "percent"
+      const numberToken = suffix === "%" || suffix === "percent"
         ? `pct:${parsed.value}`
         : suffix === "x" || suffix === "times"
         ? `times:${parsed.value}`
@@ -1947,7 +1957,8 @@ function canonicalTranscriptTokensWithoutAliases(value) {
         ? `ord:${parsed.value}`
         : suffix === "decade"
         ? `decade:${parsed.value}`
-        : `${dollarSymbol ? "usd" : "num"}:${parsed.value}`);
+        : `${dollarSymbol ? "usd" : "num"}:${parsed.value}`;
+      output.push(parsed.implicit_article ? `implicit_article:${numberToken}` : numberToken);
       index = parsed.end + (parsed.suffix ? 0 : suffix ? 1 : 0);
       // Retain source adjacency before punctuation is discarded. An unrelated
       // "Dollars" in the following sentence cannot supply this amount's unit.
@@ -2012,15 +2023,19 @@ function transcriptTokens(value, equivalentPhrases = []) {
   return tokens;
 }
 
-function alignCurrencyNotation(intendedTokens, recognizedTokens) {
-  const stripSymbol = (token) => token.replace(/^usd:/, "num:").replace(/^currency_unit:/, "");
+function alignTranscriptNotation(intendedTokens, recognizedTokens) {
+  const stripSymbol = (token) => token.replace(/^implicit_article:/, "")
+    .replace(/^usd:/, "num:").replace(/^(?:currency_unit|numeric_article):/, "");
   const intended = intendedTokens.map(stripSymbol);
   const recognized = recognizedTokens.map(stripSymbol);
-  if (![...intendedTokens, ...recognizedTokens].some((token) => token.startsWith("usd:"))) {
+  if (![...intendedTokens, ...recognizedTokens].some((token) => /^(?:implicit_article:)?usd:|^implicit_article:/.test(token))) {
     return { intended, recognized };
   }
   const intendedUnits = new Map();
   const recognizedUnits = new Map();
+  const intendedArticles = new Map();
+  const recognizedArticles = new Map();
+  const dollarSymbol = (token) => /^(?:implicit_article:)?usd:/.test(token);
   const dollarUnit = (token) => /^currency_unit:dollars?$/.test(token ?? "");
   let left = 0;
   let right = 0;
@@ -2028,11 +2043,18 @@ function alignCurrencyNotation(intendedTokens, recognizedTokens) {
   // amount. Without a symbol, an omitted "dollar" remains an omitted word.
   for (const operation of transcriptAlignment(intended, recognized)) {
     if (operation.type === "match" && operation.intended.startsWith("num:")) {
-      if (intendedTokens[left].startsWith("usd:")
+      // Restore only an actual consumed "a", opposite an adjacent literal
+      // "the". "The thousand" / "a thousand" is an article substitution;
+      // plain 1000 cannot invent an article or hide an omitted "the".
+      if (intendedTokens[left].startsWith("implicit_article:")
+        && recognizedTokens[right - 1] === "numeric_article:the") intendedArticles.set(left, "a");
+      if (recognizedTokens[right].startsWith("implicit_article:")
+        && intendedTokens[left - 1] === "numeric_article:the") recognizedArticles.set(right, "a");
+      if (dollarSymbol(intendedTokens[left])
         && dollarUnit(recognizedTokens[right + 1]) && !dollarUnit(intendedTokens[left + 1])) {
         intendedUnits.set(left, recognized[right + 1]);
       }
-      if (recognizedTokens[right].startsWith("usd:")
+      if (dollarSymbol(recognizedTokens[right])
         && dollarUnit(intendedTokens[left + 1]) && !dollarUnit(recognizedTokens[right + 1])) {
         recognizedUnits.set(right, intended[left + 1]);
       }
@@ -2040,10 +2062,13 @@ function alignCurrencyNotation(intendedTokens, recognizedTokens) {
     if (operation.type !== "insertion") left += 1;
     if (operation.type !== "deletion") right += 1;
   }
-  const withUnits = (tokens, units) => tokens.flatMap((token, index) => (
-    units.has(index) ? [token, units.get(index)] : [token]
+  const withNotation = (tokens, articles, units) => tokens.flatMap((token, index) => (
+    [...(articles.has(index) ? [articles.get(index)] : []), token, ...(units.has(index) ? [units.get(index)] : [])]
   ));
-  return { intended: withUnits(intended, intendedUnits), recognized: withUnits(recognized, recognizedUnits) };
+  return {
+    intended: withNotation(intended, intendedArticles, intendedUnits),
+    recognized: withNotation(recognized, recognizedArticles, recognizedUnits),
+  };
 }
 
 function transcriptAlignment(intended, recognized) {
@@ -2107,7 +2132,7 @@ function transcriptQa(intendedText, recognizedText, {
   const wordsOnly = (tokens) => tokens.filter((token) => !TRANSCRIPT_PUNCTUATION.has(token) && token !== "$");
   const intendedRaw = wordsOnly(rawTranscriptTokens(intendedText));
   const recognizedRaw = wordsOnly(rawTranscriptTokens(recognizedText));
-  const { intended, recognized } = alignCurrencyNotation(
+  const { intended, recognized } = alignTranscriptNotation(
     transcriptTokens(intendedText, equivalentPhrases), transcriptTokens(recognizedText, equivalentPhrases),
   );
   const operations = transcriptAlignment(intended, recognized);

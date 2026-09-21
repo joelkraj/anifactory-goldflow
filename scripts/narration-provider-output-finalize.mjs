@@ -65,6 +65,7 @@ import { prepareOpeningNarrationFinalization, validateOpeningFinalizationFlags }
 import { prepareFullPilotNarrationFinalization } from "./lib/narration-full-pilot-finalization.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { applyLowMarginDisposition, assertLowMarginActiveBindings, loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
+import { applyFullStreamManualReview, loadFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 
 const execFile = promisify(execFileCb);
 const CANONICAL_SAMPLE_RATE_HZ = 24000;
@@ -1149,6 +1150,11 @@ export async function finalizeNarrationProviderOutput(
   const acceptAsrDeliveryBlockers = boolFlag(
     flags["accept-asr-delivery-blockers"],
   );
+  const fullStreamReviewEvidencePath = String(flags["full-stream-review-evidence"] ?? "").trim()
+    ? path.resolve(flags["full-stream-review-evidence"]) : null;
+  if (fullStreamReviewEvidencePath && acceptAsrDeliveryBlockers) {
+    throw new Error("Exact full-stream review cannot be combined with --accept-asr-delivery-blockers.");
+  }
   const acceptReviewWarnings = boolFlag(flags["accept-review-warnings"]);
   const skipSubjectiveReview = boolFlag(flags["skip-subjective-review"]);
   const deliveryWaiverReason = String(
@@ -1236,6 +1242,22 @@ export async function finalizeNarrationProviderOutput(
   }) : null;
   if (pilotFinalization) units = pilotFinalization.units;
   const artifactDir = pilotFinalization?.outputNamespace ?? episodeDir;
+  const fullStreamPath = path.join(artifactDir, `narration_full_stream_qa_${episode}.json`);
+  // Validate before checkpoint/report writes. This mode consumes a reviewed
+  // snapshot and retained media; it cannot rebuild media or refresh ASR.
+  const fullStreamManualReview = fullStreamReviewEvidencePath
+    ? await loadFullStreamManualReview({
+      evidencePath: fullStreamReviewEvidencePath, currentReportPath: fullStreamPath,
+      expectedBindings: {
+        source_script_hash: actualSourceScriptSha256,
+        narration_generation_plan_sha256: canonicalPlanSha256,
+        narration_generation_plan_file_sha256: planFileSha256,
+        narration_quality_contract_sha256: qualityContract.contract_sha256,
+      },
+      providerManifestSha256: manifestFileSha256,
+      unitReviewEvidencePath: flags["manual-review-evidence"]
+        ? path.resolve(flags["manual-review-evidence"]) : null,
+    }) : null;
   const scopeFields = pilotFinalization ? { finalization_scope: pilotFinalization.scope } : {};
   const operatorNarrationWaiver = {
     schema: "goldflow_operator_narration_qa_waiver_v1",
@@ -1492,6 +1514,9 @@ export async function finalizeNarrationProviderOutput(
     ?? (embeddedContinuityComplete ? [...embeddedContinuityPaths][0] : null);
   const reuseContinuitySha256 = cachedContinuityStage?.payload?.report_sha256
     ?? (embeddedContinuityComplete ? [...embeddedContinuityHashes][0] : null);
+  if (fullStreamManualReview && primaryNeeds.length) {
+    throw new Error("Exact full-stream review requires retained unit ASR; refresh QA separately.");
+  }
   const [acousticQa, freshPrimaryMap, voiceContinuity] = await Promise.all([
     helpers.runUnitOutputQaForDiagnostics(rows, {
       reuseHashValidQa: true,
@@ -1584,6 +1609,9 @@ export async function finalizeNarrationProviderOutput(
         confirmationCandidates.push({ unit_id: row.unit_id, wav: row.wav });
       }
     }
+  }
+  if (fullStreamManualReview && confirmationCandidates.length) {
+    throw new Error("Exact full-stream review requires retained unit confirmation ASR; refresh QA separately.");
   }
   for (const row of rows) {
     const primary = primaryById.get(String(row.unit_id));
@@ -2067,6 +2095,7 @@ export async function finalizeNarrationProviderOutput(
     }
   }
   if (!stitch) {
+    if (fullStreamManualReview) throw new Error("Exact full-stream review requires the retained stitch; media rebuilding is forbidden.");
     if (reviewContinuation) {
       throw new Error("Reviewed continuation lost its exact cached raw stitch; restitching is forbidden.");
     }
@@ -2124,6 +2153,7 @@ export async function finalizeNarrationProviderOutput(
       )) {
       mastering = cachedMastering;
     } else {
+      if (fullStreamManualReview) throw new Error("Exact full-stream review requires the retained master; media rebuilding is forbidden.");
       mastering = await masterNarrationTwoPass({
         inputPath: rawWav,
         outputPath: masteredPath,
@@ -2242,6 +2272,11 @@ export async function finalizeNarrationProviderOutput(
     )).every(Boolean);
     if (!confirmationEvidenceValid) cachedFullStream = null;
   }
+  if (fullStreamManualReview && !narrationFullStreamDerivedDecisionsCurrent(
+    cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
+  )) {
+    throw new Error("Exact full-stream review requires current retained ASR; refresh QA separately before listening review.");
+  }
   const rawFullStream = narrationFullStreamDerivedDecisionsCurrent(
     cachedFullStream, helpers.TRANSCRIPT_QA_COMPARISON_VERSION,
   )
@@ -2272,6 +2307,22 @@ export async function finalizeNarrationProviderOutput(
         evidenceSha256: manualReviewEvidenceSha256,
       })
     : rawFullStream;
+  if (fullStreamManualReview) {
+    fullStream = applyFullStreamManualReview({ fullStream, review: fullStreamManualReview,
+      bindings: {
+        source_script_hash: actualSourceScriptSha256,
+        narration_generation_plan_sha256: canonicalPlanSha256,
+        narration_generation_plan_file_sha256: planFileSha256,
+        narration_quality_contract_sha256: qualityContract.contract_sha256,
+        audio_path: canonicalWav, audio_sha256: canonicalWavSha256,
+      },
+    });
+    checkpoint.stages.full_stream_manual_review = {
+      input_key: narrationFinalizationStageKey("full_stream_manual_review", fullStream.full_stream_manual_review),
+      status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
+      payload: fullStream.full_stream_manual_review,
+    };
+  }
   const originalFullStreamBlockers = [
     ...(fullStream.decision?.blockers ?? []),
   ];
@@ -2302,10 +2353,6 @@ export async function finalizeNarrationProviderOutput(
     status: fullStream.decision.status === "blocked" ? "blocked" : "passed",
     payload: { full_stream: rawFullStream },
   };
-  const fullStreamPath = path.join(
-    artifactDir,
-    `narration_full_stream_qa_${episode}.json`,
-  );
   const fullStreamArtifact = {
     ...scopeFields,
     schema: "goldflow_narration_full_stream_qa_v2",
@@ -2317,6 +2364,7 @@ export async function finalizeNarrationProviderOutput(
     narration_generation_plan_sha256: canonicalPlanSha256,
     narration_generation_plan_file_sha256: planFileSha256,
     narration_quality_contract_sha256: qualityContract.contract_sha256,
+    provider_output_manifest_file_sha256: manifestFileSha256,
     audio_path: canonicalWav,
     audio_sha256: canonicalWavSha256,
     intended_text_sha256: fullStream.intended_text_sha256,
@@ -2340,6 +2388,7 @@ export async function finalizeNarrationProviderOutput(
     manual_review_evidence_sha256: manualReviewEvidenceSha256,
     manual_review_accepted_unit_ids: manualReview?.accepted_unit_ids ?? [],
     manual_review_rejected_unit_ids: manualReview?.rejected_unit_ids ?? [],
+    full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
     operator_narration_qa_waiver:
       acceptAsrDeliveryBlockers || acceptReviewWarnings
         ? operatorNarrationWaiver
@@ -2372,6 +2421,7 @@ export async function finalizeNarrationProviderOutput(
   );
   let finalM4aSha256 = cachedEncodeStage?.payload?.final_m4a_sha256 ?? null;
   if (!(await fileMatchesSha256(finalM4a, finalM4aSha256))) {
+    if (fullStreamManualReview) throw new Error("Exact full-stream review requires the retained encode; media rebuilding is forbidden.");
     finalM4aSha256 = await encodeM4a(canonicalWav, finalM4a);
   }
   checkpoint.stages.encode_m4a = {
@@ -2462,6 +2512,7 @@ export async function finalizeNarrationProviderOutput(
     stitch_qa_status: stitch.status,
     full_stream_qa_status: fullStreamArtifact.status,
     full_stream_qa_path: fullStreamPath,
+    full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
     boundary_qa: stitch.boundary_qa,
     boundaries: stitch.boundaries,
     join_qa: joinQa,
@@ -2492,6 +2543,7 @@ export async function finalizeNarrationProviderOutput(
     ...scopeFields,
     ...(pilotFinalization?.phaseBatchPlans ? { phase_batch_plans: pilotFinalization.phaseBatchPlans } : {}),
     schema: "goldflow_provider_neutral_narration_tts_report_v2",
+    full_stream_manual_review: fullStream.full_stream_manual_review ?? null,
     status: ttsStatus,
     source_script_hash: sourceHash,
     narration_generation_plan_path: planPath,

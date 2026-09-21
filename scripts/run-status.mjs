@@ -37,6 +37,7 @@ import { findSourceCompatibleHybridDeadletters } from "./hybrid-browser-image-po
 import { sha256File as streamSha256File } from "./lib/file-hash.mjs";
 import { loadNarrationSourceStructure } from "./lib/narration-source-structure.mjs";
 import { loadLowMarginDisposition } from "./lib/narration-low-margin-disposition.mjs";
+import { validateAppliedFullStreamManualReview } from "./lib/narration-full-stream-manual-review.mjs";
 import {
   EXTERNAL_NARRATION_TTS_PROVIDERS,
   hasExplicitLegacyQwenIdentity,
@@ -2176,6 +2177,20 @@ async function synthesizedNarrationArtifactsComplete({
   if (!fullQa || !qaStatusPassed(fullQa.status)) add(`narration_full_stream_qa_${episode}.json missing or status=${fullQa?.status ?? "missing"}`);
   if (unitQa?.source_script_hash !== currentScriptHash) add("unit QA source script hash is stale");
   if (fullQa?.source_script_hash !== currentScriptHash) add("full-stream QA source script hash is stale");
+  try {
+    await validateAppliedFullStreamManualReview(fullQa);
+    if (fullQa?.full_stream_manual_review) {
+      const manifestHash = await fileSha256(path.join(episodeDir, `narration_provider_output_manifest_${episode}.json`));
+      if (fullQa.provider_output_manifest_file_sha256 !== manifestHash) add("full-stream review provider manifest hash is stale");
+      for (const report of [ttsReport, stitchReport]) {
+        if (JSON.stringify(report?.full_stream_manual_review) !== JSON.stringify(fullQa.full_stream_manual_review)) {
+          add("full-stream manual review provenance differs across narration reports");
+        }
+      }
+    }
+  } catch (error) {
+    add(error.message);
+  }
 
   const planBoundArtifacts = [
     ["TTS report", ttsReport],

@@ -1756,7 +1756,7 @@ function transcriptInputText(value) {
     : String(value ?? "");
 }
 
-export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_v4";
+export const TRANSCRIPT_QA_COMPARISON_VERSION = "unicode_words_exact_im_numeric_article_contraction_phonetic_v5";
 
 const TRANSCRIPT_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", "…"]);
 
@@ -1901,7 +1901,7 @@ function parseNumberAt(tokens, start) {
   };
 }
 
-function canonicalTranscriptTokensWithoutAliases(value) {
+function canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries = false) {
   const base = rawTranscriptTokens(value);
   const compounds = [];
   for (let index = 0; index < base.length; index += 1) {
@@ -1929,7 +1929,11 @@ function canonicalTranscriptTokensWithoutAliases(value) {
   }
   const output = [];
   for (let index = 0; index < compounds.length;) {
-    if (TRANSCRIPT_PUNCTUATION.has(compounds[index])) { index += 1; continue; }
+    if (TRANSCRIPT_PUNCTUATION.has(compounds[index])) {
+      if (preserveBoundaries) output.push("transcript_boundary");
+      index += 1;
+      continue;
+    }
     const dollarSymbol = compounds[index] === "$";
     const parsed = parseNumberAt(compounds, index + (dollarSymbol ? 1 : 0));
     if (parsed?.value != null) {
@@ -2010,8 +2014,8 @@ function replaceTokenSequence(tokens, pattern, replacement) {
   return output;
 }
 
-function transcriptTokens(value, equivalentPhrases = []) {
-  let tokens = canonicalTranscriptTokensWithoutAliases(value);
+function transcriptTokens(value, equivalentPhrases = [], preserveBoundaries = false) {
+  let tokens = canonicalTranscriptTokensWithoutAliases(value, preserveBoundaries);
   const aliases = equivalentPhrases.flatMap((row, index) => {
     const from = canonicalTranscriptTokensWithoutAliases(row?.from ?? "");
     const to = canonicalTranscriptTokensWithoutAliases(row?.to ?? "");
@@ -2123,6 +2127,86 @@ function longestRun(operations, type) {
   return longest;
 }
 
+function transcriptBoundaryPositions(text, expectedLength, equivalentPhrases) {
+  const tokens = transcriptTokens(text, equivalentPhrases, true);
+  let wordIndex = 0;
+  const positions = new Set();
+  for (const token of tokens) {
+    if (token === "transcript_boundary") positions.add(wordIndex);
+    else wordIndex += 1;
+  }
+  // Currency/article expansion or an alias spanning punctuation changes the
+  // coordinates. Do not guess an alignment in that case.
+  return wordIndex === expectedLength ? positions : null;
+}
+
+function alignContractionRecognition(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
+  if (!operations.some((row) => row.type !== "match" && [row.intended, row.recognized].includes("gonna"))) return [];
+  const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
+  const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
+  if (!leftBoundaries || !rightBoundaries) return [];
+  const normalized = [];
+  const equivalences = [];
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < operations.length; index += 1) {
+    const pair = operations.slice(index, index + 2);
+    const source = pair.flatMap((row) => row.intended == null ? [] : [row.intended]);
+    const heard = pair.flatMap((row) => row.recognized == null ? [] : [row.recognized]);
+    const expanded = source.join(" ") === "going to" && heard.join(" ") === "gonna"
+      && !leftBoundaries.has(left + 1);
+    const contracted = source.join(" ") === "gonna" && heard.join(" ") === "going to"
+      && !rightBoundaries.has(right + 1);
+    if (pair.length === 2 && (expanded || contracted)
+      && leftBoundaries.has(left) === rightBoundaries.has(right)
+      && leftBoundaries.has(left + source.length) === rightBoundaries.has(right + heard.length)) {
+      // Rewrite only recognition notation at this aligned span. The intended
+      // tokens retain stable source coordinates and omissions retain both words.
+      normalized.push(...source.map((token) => ({ type: "match", intended: token, recognized: token })));
+      equivalences.push({ intended_index: left, recognized_index: right, intended: source.join(" "), recognized: heard.join(" "), rule: "explicit_going_to_gonna" });
+      left += source.length;
+      right += heard.length;
+      index += 1;
+    } else {
+      const operation = operations[index];
+      normalized.push(operation);
+      if (operation.type !== "insertion") left += 1;
+      if (operation.type !== "deletion") right += 1;
+    }
+  }
+  operations.splice(0, operations.length, ...normalized);
+  recognized.splice(0, recognized.length, ...normalized.flatMap((row) => row.recognized == null ? [] : [row.recognized]));
+  return equivalences;
+}
+
+function alignTwoRecognitionSpelling(operations, intended, recognized, intendedText, recognizedText, equivalentPhrases) {
+  if (!operations.some((row) => row.type === "substitution" && row.intended === "num:2" && row.recognized === "too")) return [];
+  const leftBoundaries = transcriptBoundaryPositions(intendedText, intended.length, equivalentPhrases);
+  const rightBoundaries = transcriptBoundaryPositions(recognizedText, recognized.length, equivalentPhrases);
+  if (!leftBoundaries || !rightBoundaries) return [];
+  const equivalences = [];
+  let left = 0;
+  let right = 0;
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    const previous = operations[index - 1];
+    const next = operations[index + 1];
+    if (operation.type === "substitution" && operation.intended === "num:2" && operation.recognized === "too"
+      && (!previous || previous.type === "match") && (!next || next.type === "match")
+      && leftBoundaries.has(left) === rightBoundaries.has(right)
+      && leftBoundaries.has(left + 1) === rightBoundaries.has(right + 1)) {
+      // The approved value supplies meaning; ASR supplies an explicit homophone
+      // at that same position. Never invent a missing token or reinterpret "to".
+      recognized[right] = "num:2";
+      operations[index] = { type: "match", intended: "num:2", recognized: "num:2" };
+      equivalences.push({ intended_index: left, recognized_index: right, intended: "num:2", recognized: "too", rule: "aligned_two_too_spelling" });
+    }
+    if (operation.type !== "insertion") left += 1;
+    if (operation.type !== "deletion") right += 1;
+  }
+  return equivalences;
+}
+
 function transcriptQa(intendedText, recognizedText, {
   maxWer = unitQaMaxWer,
   equivalentPhrases = [],
@@ -2136,6 +2220,12 @@ function transcriptQa(intendedText, recognizedText, {
     transcriptTokens(intendedText, equivalentPhrases), transcriptTokens(recognizedText, equivalentPhrases),
   );
   const operations = transcriptAlignment(intended, recognized);
+  const phoneticSpellingEquivalences = alignContractionRecognition(
+    operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
+  );
+  phoneticSpellingEquivalences.push(...alignTwoRecognitionSpelling(
+    operations, intended, recognized, intendedText, recognizedText, equivalentPhrases,
+  ));
   const deletions = operations.filter((row) => row.type === "deletion").length;
   const insertions = operations.filter((row) => row.type === "insertion").length;
   const substitutions = operations.filter((row) => row.type === "substitution").length;
@@ -2208,6 +2298,7 @@ function transcriptQa(intendedText, recognizedText, {
   }
   return {
     comparison_version: TRANSCRIPT_QA_COMPARISON_VERSION,
+    phonetic_spelling_equivalences: phoneticSpellingEquivalences,
     intended_word_count: intendedRaw.length,
     recognized_word_count: recognizedRaw.length,
     intended_canonical_token_count: intended.length,

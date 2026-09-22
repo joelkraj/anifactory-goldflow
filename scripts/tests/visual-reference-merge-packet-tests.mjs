@@ -5,8 +5,11 @@ import {
   buildMergePromptForTests,
   buildReferenceDirectorCandidateCardsForTests,
   compactReferenceDirectorMergePayloadsForTests,
+  compactOversizedReferenceDirectorPromptForTests,
+  assertVisualReferencePromptBytesForTests,
   VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES,
 } from "../visual-reference-plan.mjs";
+import { expandReferencePromptValue } from "../lib/reference-prompt-format.mjs";
 
 const expandTable = (table) => table.rows.map((values) => ({
   ...table.constants,
@@ -101,5 +104,48 @@ assert.equal(restored.reference_target_proposal_count, targets.length);
 assert.equal(restored.character_state_proposal_count, refs.length);
 assert.deepEqual(restored.cards.flatMap((card) => card.target_candidate_lines.flatMap((line) => line.split(" | ")[0].split(","))), [...large.candidateCatalog.referenceTargetCatalog.keys()]);
 assert.deepEqual(restored.cards.flatMap((card) => card.character_state_candidate_lines.flatMap((line) => line.split(" | ")[0].split(","))), [...large.candidateCatalog.characterStateRefCatalog.keys()]);
+
+const headings = ["VISUAL BIBLES AND OPERATOR DIRECTION:", "REFERENCE EVIDENCE LEDGER:", "LOCATION CONTRACT LEDGER:", "EPISODE SUMMARY:", "CANDIDATE CARDS:", "Return:"];
+const payload = (prompt, index) => {
+  const start = prompt.indexOf(`${headings[index]}\n`) + headings[index].length + 1;
+  const end = index + 1 < headings.length ? prompt.indexOf(`\n\n${headings[index + 1]}\n`, start) : prompt.length;
+  return JSON.parse(prompt.slice(start, end));
+};
+assert.equal(compactOversizedReferenceDirectorPromptForTests(small.prompt), small.prompt, "Under-ceiling prompts stay byte-identical");
+assert.equal(compactOversizedReferenceDirectorPromptForTests(large.prompt), large.prompt, "Already fitting card-table prompts stay byte-identical");
+
+// The existing table fallback can still leave repeated bible/entity metadata
+// over the limit. Pack literal values without changing any candidate card,
+// scope, user direction, reserved-format object or JSON null/false distinction.
+const bible = {
+  rows: Array.from({ length: 600 }, (_, index) => ({
+    identity: `source_identity_${index}`,
+    exact_alias: `source_identity_${index}`,
+    singleton_scope: [`source_identity_${index}`],
+    direction: "Preserve the exact authored appearance, quoted source evidence, object custody and location scope. ".repeat(3),
+    fact: `Verbatim source fact ${index}: café, Joey’s watch, $2.2 million.`,
+    optional: index % 2 ? null : false,
+  })),
+  distinct_values: [{ missing_is_not_null: true }, { missing_is_not_null: true, nullable: null }],
+  authored_reserved_format: { format: "goldflow_literal_rows_v1", fields: ["author_data"], rows: [["literal source object"]] },
+};
+const originalGuidance = payload(large.prompt, 0);
+const expandedGuidance = { ...originalGuidance, visual_style_bible: bible };
+const oversized = large.prompt.replace(JSON.stringify(originalGuidance), JSON.stringify(expandedGuidance));
+assert(Buffer.byteLength(oversized) > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES);
+const packed = compactOversizedReferenceDirectorPromptForTests(oversized);
+assert(Buffer.byteLength(packed) <= VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES, "Observed form of repeated guidance fits through formatting only");
+assertVisualReferencePromptBytesForTests(packed, { label: "visual-reference global director merge", maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES });
+for (let index = 0; index < headings.length; index += 1) {
+  assert.deepEqual(expandReferencePromptValue(payload(packed, index)), payload(oversized, index), `All values in ${headings[index]} must round-trip`);
+}
+assert.equal(compactOversizedReferenceDirectorPromptForTests(packed), packed, "A fitting packed prompt needs no further formatting");
+const integrated = buildMergePromptForTests(semantic, [{ reference_targets: targets, character_state_refs: refs }], { visualStyleBible: bible });
+assert(Buffer.byteLength(integrated.prompt) <= VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES);
+assert.deepEqual(expandReferencePromptValue(payload(integrated.prompt, 0)).visual_style_bible, bible);
+assert.deepEqual([...integrated.candidateCatalog.referenceTargetCatalog.values()], original.targets, "Final fallback preserves complete target objects");
+assert.deepEqual([...integrated.candidateCatalog.characterStateRefCatalog.values()], original.refs, "Final fallback preserves complete state objects");
+const irreducible = small.prompt.replace(JSON.stringify(payload(small.prompt, 0)), JSON.stringify({ exact_operator_text: "z".repeat(VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) }));
+assert.throws(() => assertVisualReferencePromptBytesForTests(compactOversizedReferenceDirectorPromptForTests(irreducible), { label: "visual-reference global director merge", maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES }), /above safe ceiling 229376/, "Irreducible packets remain blocked at the unchanged ceiling");
 
 console.log("PASS visual-reference merge packet lossless compaction");

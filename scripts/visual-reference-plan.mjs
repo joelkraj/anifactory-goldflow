@@ -1768,6 +1768,37 @@ export function compactReferenceDirectorMergePayloadsForTests(candidateCards, ev
   };
 }
 
+// A final presentation-only fallback after the existing candidate/evidence
+// tables. Preserve every payload value and the director's complete catalog.
+export function compactOversizedReferenceDirectorPromptForTests(prompt) {
+  if (Buffer.byteLength(prompt, "utf8") <= VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) return prompt;
+  const headings = [
+    "VISUAL BIBLES AND OPERATOR DIRECTION:",
+    "REFERENCE EVIDENCE LEDGER:",
+    "LOCATION CONTRACT LEDGER:",
+    "EPISODE SUMMARY:",
+    "CANDIDATE CARDS:",
+    "Return:",
+  ];
+  const firstSection = prompt.indexOf(`${headings[0]}\n`);
+  if (firstSection < 0) throw new Error("Reference director prompt is missing its guidance section");
+  let packed = `${prompt.slice(0, firstSection)}${REFERENCE_PROMPT_TABLE_INSTRUCTION}\n\n`;
+  for (const [index, heading] of headings.entries()) {
+    const sectionStart = prompt.indexOf(`${heading}\n`, index ? firstSection : 0);
+    if (sectionStart < 0) throw new Error(`Reference director prompt is missing ${heading}`);
+    const start = sectionStart + heading.length + 1;
+    const end = index + 1 < headings.length
+      ? prompt.indexOf(`\n\n${headings[index + 1]}\n`, start)
+      : prompt.length;
+    if (end < start) throw new Error(`Reference director prompt has invalid section order after ${heading}`);
+    const value = JSON.parse(prompt.slice(start, end));
+    packed += `${heading}\n${JSON.stringify(compactReferencePromptValue(value))}${index + 1 < headings.length ? "\n\n" : ""}`;
+  }
+  // Some valid packets are irreducible. Keep the original rather than enlarge
+  // it; the unchanged caller-side byte guard remains authoritative.
+  return Buffer.byteLength(packed, "utf8") < Buffer.byteLength(prompt, "utf8") ? packed : prompt;
+}
+
 function buildMergePrompt(semanticPlan, chunkPlans, guidance = {}, inventoryLedger = null, locationContractLedger = null) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
@@ -1988,6 +2019,7 @@ Return:
       .replace("- CANDIDATE CARDS are plain-language evidence, not encoded dictionaries.",
         "- CANDIDATE CARDS and evidence use lossless plain-value tables: fields names each row column; constants apply to every row; null means that optional field is absent. Nested target/state rows use their named line_format. all_fields records original label order. Values are literal text and IDs, never dictionary indexes.");
   }
+  prompt = compactOversizedReferenceDirectorPromptForTests(prompt);
   return {
     prompt,
     candidateCatalog: {

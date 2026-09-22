@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import "./google-flow-model-selection.test.mjs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";

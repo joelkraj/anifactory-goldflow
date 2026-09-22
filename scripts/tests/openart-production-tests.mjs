@@ -270,6 +270,30 @@ test('Repair-only model cannot become the first creative attempt for an exact ID
   await assert.rejects(prepareAssignments(context, { scope: 'validation', 'image-ids': 'validation.0', repair }), /prior|initial|first|repair|failed/i);
 });
 
+test('Reviewed exact-ID repair may narrowly correct the failed prompt without changing the catalog', async (t) => {
+  const context = await fixture(t);
+  const first = await prepared(context);
+  await write(path.join(context.root, 'failures', `${first.assignment_id}.json`), {
+    assignment_id: first.assignment_id,
+    reason: 'Synthetic exact output failed its single-concept visual check.',
+    automatic_retry: false,
+  });
+  const correctedPrompt = 'Exactly one vehicle in one three-quarter view. No inset, second angle, contact sheet, turnaround, or collage.';
+  const repairPath = await write(path.join(context.root, 'reviewed-prompt-repair.json'), {
+    asset_id: first.asset_id,
+    prior_assignment_id: first.assignment_id,
+    reviewer: 'synthetic-test',
+    reason: 'The failed exact output repeated a multi-view collage and requires a narrower single-view instruction.',
+    prompt_override: correctedPrompt,
+  });
+  const repaired = (await prepareAssignments(context, { scope: 'canonical', 'asset-ids': first.asset_id, repair: repairPath })).assignments[0];
+  assert.equal(repaired.prompt, correctedPrompt);
+  assert.equal(repaired.prompt_sha256, sha256(correctedPrompt));
+  assert.equal(repaired.previous_assignment_id, first.assignment_id);
+  assert.equal(repaired.repair_evidence.prompt_override, correctedPrompt);
+  assert.equal(context.catalog.assets[0].prompt, 'Canonical Joey.');
+});
+
 test('Assignment mutation cannot introduce an undiscovered repair model before spend', async (t) => {
   const context = await fixture(t); await approvedCanonical(context);
   const assignment = (await prepareAssignments(context, { scope: 'validation', 'image-ids': 'validation.0' })).assignments[0];

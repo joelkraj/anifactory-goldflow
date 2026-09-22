@@ -201,7 +201,8 @@ async function prepareAssignmentsUnlocked(context, flags) {
     const referenceIds = item.reference_asset_ids ?? [];
     const refs = await resolveReferences(context.bankRoot, referenceIds, { maxReferences: context.contract.max_reference_count, extraReferenceReason: item.extra_reference_reason });
     if (scope === 'scene') exact(pinnedRefs(refs), pinnedRefs(item.reference_bindings ?? []), 'Current references differ from the hardened shot bindings. Rebind and review the affected plan.');
-    const prompt = item.provider_prompt ?? item.prompt;
+    if (repair?.prompt_override !== undefined && (typeof repair.prompt_override !== 'string' || !repair.prompt_override.trim())) throw new Error('Exact-ID repair prompt override must be non-empty reviewed text.');
+    const prompt = repair?.prompt_override ?? item.provider_prompt ?? item.prompt;
     requireValue(prompt, 'Authored prompt missing.');
     const assignmentId = `${id}--${randomUUID()}`;
     const assignment = {

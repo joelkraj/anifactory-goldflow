@@ -87,6 +87,7 @@ import { noLtxOverrideStatus } from "./lib/operator-motion-route-override.mjs";
 import { effectiveImageIdentityForEpisode } from "./lib/operator-image-route-override.mjs";
 import { semanticFailedRecoveryScope } from "./lib/semantic-planner-recovery.mjs";
 import { readVisualBeatRecoveryScope } from "./lib/visual-beat-recovery.mjs";
+import { readVisualPromptRecoveryScope, visualPromptRecoveryAdmission } from "./lib/visual-prompt-recovery.mjs";
 import { hasTtsTerminalPunctuation } from "./lib/tts-text-boundaries.mjs";
 import {
   ttsSpokenTextAuditMatches,
@@ -763,6 +764,13 @@ export function visualBeatRecoveryCommandForTests(scope, identity) {
   return `${base} --resume-incomplete-chunks true`;
 }
 
+export function visualPromptRecoveryCommandForTests(scope, identity) {
+  if (!scope?.failed_cut_ids?.length || scope.source_hashes_current !== true) return null;
+  const base = commandFor("visual_prompt_plan", identity)
+    .replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
+  return `${base} --cut-ids ${scope.failed_cut_ids.join(",")}`;
+}
+
 export function transitionRecoveryCommandForTests(artifact, identity) {
   const failedBoundaryIds = String(artifact?.status ?? "").toLowerCase() === "blocked"
     && Array.isArray(artifact?.failed_boundary_ids)
@@ -804,7 +812,7 @@ function stage(stageId, validation, identity, nextCommandOverride = null) {
   };
 }
 
-async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
+async function visualPromptPlanReviewHardenCommand(episodeDir, identity, recoveryScope = null) {
   const channel = identity.channel ?? "<channel>";
   const series = identity.series_slug ?? "<series>";
   const week = identity.week ?? "<week>";
@@ -812,12 +820,9 @@ async function visualPromptPlanReviewHardenCommand(episodeDir, identity) {
   const base = `--channel ${channel} --series ${series} --week ${week} --episode ${episode}`;
   const planCommand = commandFor("visual_prompt_plan", identity);
   const promptPlan = await readJson(path.join(episodeDir, "section_image_prompts.json"), null);
-  const failedPromptCutIds = Array.isArray(promptPlan?.planner?.partial_failure?.failed_cut_ids)
-    ? [...new Set(promptPlan.planner.partial_failure.failed_cut_ids.map(String).filter(Boolean))]
-    : [];
-  if (promptPlan?.status === "blocked" && Array.isArray(promptPlan.prompts) && failedPromptCutIds.length) {
-    const scopedBase = planCommand.replace(/\s+--resume-incomplete-chunks\s+true\b/g, "");
-    return `${scopedBase} --cut-ids ${failedPromptCutIds.join(",")}`;
+  if (promptPlan?.status === "blocked") {
+    return visualPromptRecoveryCommandForTests(recoveryScope, identity)
+      ?? "Manual triage required: blocked visual prompt base is incomplete, stale, or lacks exact unresolved scope.";
   }
   if (promptPlan?.status !== "passed" || !Array.isArray(promptPlan.prompts) || !promptPlan.prompts.length) return planCommand;
   const reviewedPlanPath = path.join(episodeDir, "section_image_prompts_reviewed.json");
@@ -4542,6 +4547,7 @@ async function main() {
   }
   const visualReferencePlan = await visualReferencePlanComplete(episodeDir, scriptHash, identity);
   const visualPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts.json"), "section_image_prompts.json");
+  const visualPromptRepairScope = await readVisualPromptRecoveryScope({ episodeDir, sourceScriptHash: scriptHash, identity });
   const hardenedPromptPlan = await jsonStatusWithSourceHashesComplete(path.join(episodeDir, "section_image_prompts_hardened.json"), "section_image_prompts_hardened.json");
   const longformMix = await longformMixComplete(episodeDir, episode, identity);
   const referenceGeneration = await referenceGenerationComplete(episodeDir, identity, scriptHash);
@@ -4576,7 +4582,7 @@ async function main() {
   const youtubePinnedCommentReceipt = youtubeContractCurrent
     ? await youtubePinnedCommentReceiptComplete(episodeDir, episode)
     : null;
-  const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity);
+  const visualPromptNextCommand = await visualPromptPlanReviewHardenCommand(episodeDir, identity, visualPromptRepairScope);
   const narratorOnly = isNarratorOnlyAudio(identity);
   const sfxScoreDone = narratorOnly
     ? { done: true, evidence: "skipped: audio_target narrator_only" }
@@ -4730,10 +4736,16 @@ async function main() {
   const semanticRepairUnitIds = next?.stage === "semantic_scene_plan" && next?.state === "blocked"
     ? semanticFailedRecoveryScope(semanticPlanArtifact, scriptHash)
     : [];
+  const promptRecoveryStatus = { current_stage: next?.stage, current_stage_state: next?.state,
+    identity, stage_ledger: rows, visual_prompt_recovery_scope: visualPromptRepairScope };
+  const promptRecoveryAllowed = visualPromptRecoveryAdmission(promptRecoveryStatus,
+    { "cut-ids": visualPromptRepairScope?.failed_cut_ids?.join(",") ?? "" }).allowed;
   const repairCommandStages = semanticRepairUnitIds.length
     ? ["semantic_scene_plan"]
     : next?.stage === "visual_beat_plan" && next?.state === "blocked" && visualBeatRepairScope
     ? ["visual_beat_plan"]
+    : promptRecoveryAllowed
+    ? ["visual_prompt_plan"]
     : next?.stage === "visual_prompt_harden" && next?.state === "blocked"
     ? ["visual_prompt_harden", "visual_prompt_blocker_repair"]
     : next?.stage === "qwen_tts_stitch"
@@ -4769,6 +4781,7 @@ async function main() {
       ? { reference_image_qa_recovery_scope: referenceGeneration.reference_image_qa_recovery_scope } : {}),
     ...(next?.stage === "visual_reference_plan" && next?.state === "blocked" && visualReferencePlan.recovery_scope
       ? { visual_reference_recovery_scope: visualReferencePlan.recovery_scope } : {}),
+    ...(promptRecoveryAllowed ? { visual_prompt_recovery_scope: visualPromptRepairScope } : {}),
     allowed_command_stages: [...new Set([
       ...readyCommandStages,
       ...repairCommandStages,

@@ -20,6 +20,7 @@ import { failedRenderResumeDecision } from "../scripts/lib/failed-render-resume.
 import { assertCommandWorkflowRoute } from "../scripts/lib/episode-workflow-routing.mjs";
 import { canonicalContentProfileArgument } from "../scripts/lib/content-profiles.mjs";
 import { semanticRecoveryAdmission } from "../scripts/lib/semantic-planner-recovery.mjs";
+import { visualPromptRecoveryAdmission } from "../scripts/lib/visual-prompt-recovery.mjs";
 import { visualBeatRecoveryAdmission } from "../scripts/lib/visual-beat-recovery.mjs";
 import { visualReferenceRecoveryAdmission } from "../scripts/lib/visual-reference-recovery.mjs";
 import { referenceImageQaRecoveryAdmission } from "../scripts/lib/reference-image-recovery.mjs";
@@ -124,6 +125,15 @@ function enforceWorkflowGuard(commandName, subcommandName, scriptArgs) {
       if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
       process.exit(1);
     }
+  }
+  if (commandName === "visual" && subcommandName === "plan") {
+    const recovery = visualPromptRecoveryAdmission(result, parsedFlags);
+    if (recovery.applicable && !recovery.allowed) {
+      console.error(`Workflow guard blocked visual prompt recovery: ${recovery.reason}.`);
+      if (result.next_command_shape) console.error(`Next valid command shape: ${result.next_command_shape}`);
+      process.exit(1);
+    }
+    if (recovery.applicable && recovery.allowed) return;
   }
   if (commandName === "visual" && subcommandName === "refs") {
     const recovery = visualReferenceRecoveryAdmission(result, parsedFlags);

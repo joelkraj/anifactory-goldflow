@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { visualPromptPartialFailure } from "./lib/visual-prompt-recovery.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -3429,13 +3430,6 @@ async function main() {
         successfulScopedPrompts.push(...normalizedChunkPrompts);
         partialScopedPrompts.push(...normalizedChunkPrompts);
       }
-      const failedSourceRows = failedChunkResults.flatMap((result) => result.failedSourceRows ?? result.sourceRows ?? []);
-      const failedCutIds = failedSourceRows.map((row) => targetImageIdForRow(
-        row,
-        episode,
-        Number(row?.__visual_plan_absolute_index ?? 0),
-      ));
-      const failedBeatIds = failedSourceRows.map((row) => String(row?.visual_beat_id ?? "")).filter(Boolean);
       const partialPrompts = scopedRepair
         ? mergeScopedPromptReplacements(basePromptPlan.prompts, successfulScopedPrompts, {
             image_ids: successfulScopedPrompts.map((prompt) => prompt.image_id),
@@ -3474,13 +3468,9 @@ async function main() {
           adaptive_chunk_telemetry_warnings: adaptiveTelemetryWarnings,
           wavefront_output_dir: wavefrontOutputDir,
           wavefront_chunk_count: wavefrontChunkFiles.length,
-          partial_failure: {
+          partial_failure: visualPromptPartialFailure(partialPrompts, {
             failed_chunk_count: failedChunkResults.length,
-            failed_cut_ids: [...new Set(failedCutIds)],
-            failed_beat_ids: [...new Set(failedBeatIds)],
-            preserved_passed_cut_ids: successfulScopedPrompts.map((prompt) => prompt.image_id),
-            recovery_policy: "exact_failed_cut_scope",
-          },
+          }),
         },
         visual_plan_scope: {
           mode: scopedRepair ? "exact_cut_recovery" : "full_episode_partial",
@@ -3517,7 +3507,7 @@ async function main() {
         });
       }
       throw new Error(
-        `${failedChunkResults.length} visual prompt chunk(s) failed; preserved ${successfulScopedPrompts.length} passed cuts and recorded exact recovery scope for ${failedCutIds.length} cuts.`,
+        `${failedChunkResults.length} visual prompt chunk(s) failed; preserved ${partialReport.planner.partial_failure.preserved_passed_cut_ids.length} passed cuts and recorded exact recovery scope for ${partialReport.planner.partial_failure.failed_cut_ids.length} cuts.`,
       );
     }
     const styleSummaries = [];
@@ -3680,6 +3670,7 @@ async function main() {
       wavefront_output_dir: wavefrontOutputDir,
       wavefront_chunk_count: wavefrontChunkFiles.length,
       manual_recovery_output_files: manualRecoveryOutputFiles,
+      ...(unresolvedRecoveryPrompts.length ? { partial_failure: visualPromptPartialFailure(prompts) } : {}),
     },
     editorial_reuse_policy: editorialReuse.policy,
     narrative_overlay_policy: {

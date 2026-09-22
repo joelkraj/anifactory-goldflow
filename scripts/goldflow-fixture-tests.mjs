@@ -1438,7 +1438,7 @@ function testVisualWavefrontBatchPolicy() {
   }, {
     "workflow-bypass": "true",
     "beat-ids": "beat_1,beat_2",
-  }), true);
+  }), false);
   assert.equal(exactPromptRecoveryAllowedForTests({
     current_stage: "visual_prompt_plan",
     current_stage_state: "blocked",

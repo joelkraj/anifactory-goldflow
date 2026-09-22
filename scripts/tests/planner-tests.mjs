@@ -9,4 +9,6 @@ import "./source-opening-audio-audition-tests.mjs";
 import "./editorial-source-scene-location-tests.mjs";
 import "./visual-reference-chunk-packet-tests.mjs";
 
+await import("./visual-prompt-recovery-tests.mjs");
+
 await runFixtureSuite("planner");

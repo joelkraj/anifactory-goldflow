@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { visualPromptRecoveryAdmission } from "./lib/visual-prompt-recovery.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -142,10 +143,7 @@ export function plannerTokensWithWavefrontOverridesForTests(tokens, inputFlags =
 }
 
 function exactPromptRecoveryAllowed(initial = {}, inputFlags = {}) {
-  return initial.current_stage === "visual_prompt_plan"
-    && initial.current_stage_state === "blocked"
-    && isTrue(inputFlags["workflow-bypass"])
-    && Boolean(String(inputFlags["beat-ids"] ?? inputFlags["cut-ids"] ?? "").trim());
+  return visualPromptRecoveryAdmission(initial, inputFlags).allowed;
 }
 
 export function exactPromptRecoveryAllowedForTests(initial = {}, inputFlags = {}) {
@@ -983,7 +981,11 @@ async function main() {
   if (imageProvider !== "modelslab" && !isBrowserPoolImageProvider(imageProvider)) {
     throw new Error(`Visual wavefront prefetch supports ModelsLab and verified browser-backed Flow lanes; run identity locks ${identity.image_provider}.`);
   }
-  const exactPromptRecovery = exactPromptRecoveryAllowed(initial, flags);
+  const recoveryAdmission = visualPromptRecoveryAdmission(initial, flags);
+  if (recoveryAdmission.applicable && !recoveryAdmission.allowed) {
+    throw new Error(`Visual prompt recovery is not ready: ${recoveryAdmission.reason}.`);
+  }
+  const exactPromptRecovery = recoveryAdmission.allowed;
   if (!(initial.allowed_command_stages ?? []).includes("visual_prompt_plan") && !exactPromptRecovery) {
     throw new Error(`Visual prompt planning is not ready. Current stage: ${initial.current_stage}; allowed: ${(initial.allowed_command_stages ?? []).join(", ")}.`);
   }

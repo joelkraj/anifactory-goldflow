@@ -292,6 +292,7 @@ test('Reviewed exact-ID repair may narrowly correct the failed prompt without ch
   assert.equal(repaired.previous_assignment_id, first.assignment_id);
   assert.equal(repaired.repair_evidence.prompt_override, correctedPrompt);
   assert.equal(context.catalog.assets[0].prompt, 'Canonical Joey.');
+  await submit(context, repaired);
 });
 
 test('Assignment mutation cannot introduce an undiscovered repair model before spend', async (t) => {

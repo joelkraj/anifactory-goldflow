@@ -89,7 +89,14 @@ async function loadAssignment(context, assignmentPath) {
     if (assignment.prompt_plan_sha256 !== await fileHash(planPath)) throw new Error('Assignment shot plan is stale.');
     item = (await readJson(planPath)).prompts.find((row) => row.image_id === assignment.asset_id);
   }
-  if (!item || assignment.prompt !== (item.provider_prompt ?? item.prompt)) throw new Error('Assignment does not equal the approved authored prompt.');
+  const authoredPrompt = item?.provider_prompt ?? item?.prompt;
+  const reviewedPromptOverride = assignment.repair_evidence?.prompt_override;
+  if (!item || (assignment.prompt !== authoredPrompt && assignment.prompt !== reviewedPromptOverride)) throw new Error('Assignment does not equal the approved authored prompt or reviewed exact-ID prompt correction.');
+  if (assignment.prompt === reviewedPromptOverride && assignment.prompt !== authoredPrompt) {
+    const repair = assignment.repair_evidence;
+    const prior = (await listAssignments(context.root)).find((row) => row.assignment_id === assignment.previous_assignment_id);
+    if (!prior || prior.asset_id !== assignment.asset_id || prior.scope !== assignment.scope || repair.prior_assignment_id !== prior.assignment_id || (!prior.failure && (!repair.rejected_output_sha256 || repair.rejected_output_sha256 !== prior.receipt?.sha256))) throw new Error('Reviewed prompt correction is missing its exact prior failure or rejected-output binding.');
+  }
   exact(assignment.reference_bindings.map((row) => row.asset_id), item.reference_asset_ids ?? [], 'Assignment reference order changed.');
   for (const ref of assignment.reference_bindings) if (await fileHash(ref.path) !== ref.sha256) throw new Error(`Assigned reference changed: ${ref.asset_id}`);
   if (assignment.model_id !== PRIMARY_MODEL) {

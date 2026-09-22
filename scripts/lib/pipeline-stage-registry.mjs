@@ -762,7 +762,7 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
   if (identity.image_provider === "fal_ai") {
     Object.assign(commands, {
       reference_image_approval: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
-      image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids <next_exact_image_ids>`,
+      image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids all`,
     });
   }
   return options.override ?? commands[stageId] ?? null;

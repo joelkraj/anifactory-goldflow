@@ -33,11 +33,37 @@ async function prepare(ctx){
   const plan={schema:"goldflow_fal_validation_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,reference_bank_manifest:ctx.contract.reference_bank_manifest,reference_bank_manifest_sha256:ctx.contract.reference_bank_manifest_sha256,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",normal_reference_mode:"one_positional_collage",concurrency:8,assignments};
   await write(path.join(ctx.root,"validation-plan.json"),plan);return {status:"prepared",count:assignments.length};
 }
+async function prepareBulk(ctx,f){
+  const prompts=await read(path.join(ctx.episodeDir,"section_image_prompts_hardened.json"));
+  const requested=String(f["image-ids"]??"all").split(",").filter(Boolean); const wanted=requested[0]==="all"?null:new Set(requested);
+  const rows=prompts.prompts.filter(row=>row.image_generation_required!==false&&(!wanted||wanted.has(row.image_id))); need(rows.length,"No requested Fal bulk images found.");
+  const assignments=[];
+  for(const row of rows){
+    const refs=(row.reference_bindings??[]).slice(0,4).map(ref=>({asset_id:ref.asset_id,asset_class:ref.asset_class,path:ref.portable_file?.path??ref.path,sha256:ref.portable_file?.sha256??ref.sha256}));
+    need(refs.length&&refs.every(ref=>ref.path&&ref.sha256),`Portable reference binding missing for ${row.image_id}.`);
+    const board=await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs});
+    const basePrompt=row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
+    const prompt=`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`;
+    const core={image_id:row.image_id,endpoint:FAL_ENDPOINTS.primary_edit,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:"one_positional_collage",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board.output_path,board_sha256:board.output_sha256,board_manifest_path:board.manifest_path,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec};
+    const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","result-receipts",`${row.image_id}.json`),output_path:path.join(ctx.root,"bulk","outputs",`${row.image_id}.png`),upload_receipt_path:path.join(ctx.root,"bulk","upload-receipts",`${row.image_id}.json`)};
+    const assignmentPath=path.join(ctx.root,"bulk","assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
+  }
+  const projectedBase=Number((assignments.length*0.00441).toFixed(4)); need(projectedBase<=ctx.contract.hard_budget_usd,"Projected Fal base cost exceeds the locked episode hard budget.");
+  const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,pricing_note:"Official endpoint base price at preparation; input-image token charges may increase actual cost.",assignments};
+  await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase};
+}
 async function submitRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}finally{upload.remoteUrl=null;}});}
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);return observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
  if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));
+ if(action==="prepare-bulk") return console.log(JSON.stringify(await prepareBulk(ctx,f),null,2));
+ if(action==="dispatch-bulk"){
+   need(f["confirm-spend"]==="exact_fal_bulk_batch","Paid bulk dispatch requires exact confirmation token.");const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const limit=Math.min(Number(f.limit??100),100);need(Number.isInteger(limit)&&limit>0,"Bulk limit must be 1..100.");const rows=[];for(const row of bulk.assignments)if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false)){rows.push(row);if(rows.length===limit)break;}const result=await submitRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:"submitted",count:result.length,remaining:bulk.assignments.length-(await Promise.all(bulk.assignments.map(row=>fs.access(row.submission_receipt_path).then(()=>1,()=>0)))).reduce((a,b)=>a+b,0)},null,2));
+ }
+ if(action==="observe-bulk"){
+   const bulk=await read(path.join(ctx.root,"bulk-plan.json"));const limit=Math.min(Number(f.limit??100),100);const rows=[];for(const row of bulk.assignments){const submitted=await fs.access(row.submission_receipt_path).then(()=>true,()=>false),done=await fs.access(row.result_receipt_path).then(()=>true,()=>false);if(submitted&&!done){rows.push(row);if(rows.length===limit)break;}}const result=await observeRows(ctx,rows,ctx.contract.production_concurrency);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"observed":"pending",checked:result.length,complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));
+ }
  const plan=await read(path.join(ctx.root,"validation-plan.json"));
  if(action==="billing-submit"){need(f["confirm-spend"]==="exact_fal_validation_probe","Paid probe requires exact confirmation token.");return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,[plan.assignments[0]],1)).length},null,2));}
  if(action==="billing-observe"){const result=await observeRows(ctx,[plan.assignments[0]],1);return console.log(JSON.stringify({status:result[0].complete?"complete":"pending",result},null,2));}

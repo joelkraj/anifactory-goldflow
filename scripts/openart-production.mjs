@@ -46,7 +46,7 @@ async function event(root, value) {
 }
 async function requirePlanApproval(context) {
   const approval = await readJson(path.join(context.root, 'plan-approval.json'));
-  if (!approval?.approved || approval.source_sha256 !== await fileHash(path.join(context.root, 'bank-plan.json'))) throw new Error('Current canonical plan approval is required.');
+  if (!approval?.approved || approval.source_sha256 !== await fileHash(context.planPath ?? path.join(context.root, 'bank-plan.json'))) throw new Error('Current canonical plan approval is required.');
 }
 async function requireRefsApproval(context) {
   if (!await refsApprovalCurrent(context)) throw new Error('Current exact canonical bank approval is required.');
@@ -98,10 +98,50 @@ export async function planBank(context, catalogPath) {
 async function approvePlan(context, flags) {
   requireValue(context.plan, 'Bank plan missing.');
   requireValue(flags.reviewer, 'Reviewer required.'); requireValue(flags.note, 'Concrete creative review note required.');
-  return writeOnce(path.join(context.root, 'plan-approval.json'), {
+  const record = {
     schema: 'goldflow_openart_plan_approval_v1', approved: true, reviewer: flags.reviewer, note: flags.note,
-    source_sha256: await fileHash(path.join(context.root, 'bank-plan.json')), at: new Date().toISOString(),
-  });
+    source_sha256: await fileHash(context.planPath ?? path.join(context.root, 'bank-plan.json')), revision: context.plan.revision ?? 1, at: new Date().toISOString(),
+  };
+  const immutable = path.join(context.root, 'plan-approvals', `${Date.now()}-${randomUUID()}.json`);
+  await writeOnce(immutable, record);
+  return atomicJson(path.join(context.root, 'plan-approval.json'), { ...record, immutable_path: immutable, immutable_sha256: await fileHash(immutable) });
+}
+
+async function revisePlan(context, flags) {
+  requireValue(context.plan, 'Existing bank plan required.');
+  requireValue(flags.catalog, '--catalog required');
+  requireValue(flags.reviewer, '--reviewer required');
+  requireValue(flags.note, '--note required');
+  if (flags.note.trim().length < 20) throw new Error('Catalog revision needs a concrete reason.');
+  const catalogPath = path.resolve(flags.catalog);
+  const catalog = validateCatalog(await readJson(catalogPath));
+  if (catalog.source_script_sha256 !== context.plan.source_script_sha256) throw new Error('Catalog revision cannot change the approved script binding.');
+  const oldJoey = context.catalog.assets.find((row) => row.phase === 'joey');
+  const newJoey = catalog.assets.find((row) => row.phase === 'joey');
+  for (const key of ['asset_id', 'prompt', 'model_id', 'mode']) if (oldJoey?.[key] !== newJoey?.[key]) throw new Error('An approved universal Joey identity cannot change through a catalog taxonomy revision.');
+  const revision = (context.plan.revision ?? 1) + 1;
+  const admittedCatalog = path.join(context.root, 'catalog-revisions', `catalog-r${String(revision).padStart(3, '0')}.json`);
+  await writeOnce(admittedCatalog, catalog);
+  const plan = {
+    ...context.plan,
+    revision,
+    catalog_path: admittedCatalog,
+    catalog_sha256: await fileHash(admittedCatalog),
+    asset_count: catalog.assets.length,
+    validation_count: catalog.validation_shots.length,
+    supersedes_plan_path: context.planPath,
+    supersedes_plan_sha256: await fileHash(context.planPath),
+    revision_reason: flags.note,
+    revised_by: flags.reviewer,
+    created_at: new Date().toISOString(),
+  };
+  const planPath = path.join(context.root, 'bank-plan-revisions', `bank-plan-r${String(revision).padStart(3, '0')}.json`);
+  await writeOnce(planPath, plan);
+  await registerCatalog(context.bankRoot, catalog, admittedCatalog);
+  await atomicJson(path.join(context.root, 'bank-plan-current.json'), { schema: 'goldflow_openart_bank_plan_pointer_v1', revision, plan_path: planPath, plan_sha256: await fileHash(planPath), updated_at: new Date().toISOString() });
+  await atomicJson(path.join(context.root, 'plan-approval.json'), { schema: 'goldflow_openart_plan_approval_v1', approved: false, revision, source_sha256: await fileHash(planPath), reason: 'revised_plan_requires_review' });
+  await event(context.root, { event: 'bank_plan_revised', revision, catalog_sha256: plan.catalog_sha256, supersedes_plan_sha256: plan.supersedes_plan_sha256 });
+  return { status: 'revised_requires_approval', revision, plan_path: planPath, catalog_path: admittedCatalog, catalog_sha256: plan.catalog_sha256 };
 }
 export async function prepareAssignments(context, flags) { return withEpisodeLock(context, () => prepareAssignmentsUnlocked(context, flags)); }
 async function prepareAssignmentsUnlocked(context, flags) {
@@ -116,7 +156,7 @@ async function prepareAssignmentsUnlocked(context, flags) {
   if (scope === 'validation' && phase.phase !== 'validation') throw new Error('Joey and the core bank must pass review and native library registration before validation.');
   if (scope === 'scene') await requireRefsApproval(context);
   const shots = scope === 'scene' ? await readJson(path.join(context.episodeDir, 'section_image_prompts_hardened.json')) : null;
-  const attempts = await listAssignments(context.root); const prepared = [];
+  const attempts = (await listAssignments(context.root)).filter((row) => row.catalog_sha256 === context.plan.catalog_sha256); const prepared = [];
   const repair = flags.repair ? await readJson(flags.repair) : null;
   for (const id of ids) {
     safeId(id);
@@ -286,7 +326,7 @@ async function approveRefs(context) {
   const bank = await loadBank(context.bankRoot);
   const refs = context.catalog.assets.map((item) => currentAsset(bank, item.asset_id));
   return writeOnce(path.join(context.root, 'refs-approval.json'), {
-    schema: 'goldflow_openart_reference_approval_v1', approved: true, source_sha256: await fileHash(path.join(context.root, 'bank-plan.json')),
+    schema: 'goldflow_openart_reference_approval_v1', approved: true, source_sha256: await fileHash(context.planPath ?? path.join(context.root, 'bank-plan.json')),
     references: refs.map((row) => ({ asset_id: row.asset_id, version: row.version, sha256: row.sha256, openart_asset_id: row.openart_asset_id, openart_library_asset_id: row.openart_library_asset_id, review: row.review })),
     validation_review_sha256: await fileHash(path.join(context.root, 'validation-review.json')), at: new Date().toISOString(),
   });
@@ -296,6 +336,7 @@ export async function runOpenArt(flags) {
   const context = await openartContext(flags['episode-dir']); const action = flags.action;
   if (action === 'status') return bankPhase(context);
   if (action === 'plan') return planBank(context, requireValue(flags.catalog, '--catalog required'));
+  if (action === 'revise-plan') return revisePlan(context, flags);
   if (action === 'approve-plan') return approvePlan(context, flags);
   if (action === 'prepare') return prepareAssignments(context, flags);
   if (action === 'mark-submitted') return markSubmitted(context, flags);

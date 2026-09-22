@@ -463,7 +463,7 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
   const registry = stageRegistryFor(identity);
   const key = `${commandName} ${subcommandName}`.trim();
   if (registry === PIPELINE_STAGE_REGISTRY && key === "visual openart-bank") {
-    return ({ plan: "visual_reference_plan", "approve-plan": "reference_plan_approval", "approve-refs": "reference_image_approval", "bind-shots": "visual_prompt_plan", harden: "visual_prompt_harden" })[String(flags.action ?? "")] ?? null;
+    return ({ plan: "visual_reference_plan", "revise-plan": "reference_generation", "approve-plan": "reference_plan_approval", "approve-refs": "reference_image_approval", "bind-shots": "visual_prompt_plan", harden: "visual_prompt_harden" })[String(flags.action ?? "")] ?? null;
   }
   if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen openart") {
     if (!["generate", "review", "prepare", "mark-submitted", "import", "sync-library", "triage", "fail"].includes(String(flags.action ?? ""))) return null;

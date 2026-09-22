@@ -9,7 +9,10 @@ export async function openartContext(episodeDir, suppliedIdentity = null) {
   const contract = identity.image_provider_options?.openart ?? identity.openart_contract;
   if (!contract || contract.primary?.quality !== 'low' || contract.primary?.resolution !== '1k' || contract.primary?.aspect_ratio !== '16:9') throw new Error('OpenArt requires the locked Low/1K/16:9 contract.');
   const root = openartRoot(episodeDir);
-  const plan = await readJson(path.join(root, 'bank-plan.json'));
+  const currentPointer = await readJson(path.join(root, 'bank-plan-current.json'));
+  const planPath = currentPointer?.plan_path ?? path.join(root, 'bank-plan.json');
+  const plan = await readJson(planPath);
+  if (currentPointer && (currentPointer.plan_sha256 !== await fileHash(planPath) || currentPointer.revision !== plan?.revision)) throw new Error('Current OpenArt bank-plan pointer is stale.');
   const catalog = plan ? await readJson(plan.catalog_path) : null;
   if (plan) {
     if (plan.identity_sha256 !== await fileHash(path.join(episodeDir, 'run_identity.json'))) throw new Error('Bank plan identity binding changed.');
@@ -17,7 +20,7 @@ export async function openartContext(episodeDir, suppliedIdentity = null) {
     if (await fileHash(plan.catalog_path) !== plan.catalog_sha256) throw new Error('Bank catalog changed after admission.');
     validateCatalog(catalog);
   }
-  return { episodeDir, identity, contract, root, plan, catalog, bankRoot: contract.reference_bank_path };
+  return { episodeDir, identity, contract, root, plan, planPath, catalog, bankRoot: contract.reference_bank_path };
 }
 export async function listAssignments(root) {
   const files = await fs.readdir(path.join(root, 'assignments')).catch((error) => { if (error.code === 'ENOENT') return []; throw error; });
@@ -128,7 +131,7 @@ export async function validationReviewState(context, assignments) {
 }
 
 export async function refsApprovalCurrent(context) {
-  if (!await validApproval(context.root, 'refs-approval.json', path.join(context.root, 'bank-plan.json'))) return false;
+  if (!await validApproval(context.root, 'refs-approval.json', context.planPath ?? path.join(context.root, 'bank-plan.json'))) return false;
   const approval = await readJson(path.join(context.root, 'refs-approval.json'));
   const validation = await validationReviewState(context, await listAssignments(context.root));
   if (!validation.approved || approval.validation_review_sha256 !== validation.sha256 || !Array.isArray(approval.references) || approval.references.length !== context.catalog.assets.length || new Set(approval.references.map((row) => row.asset_id)).size !== context.catalog.assets.length) return false;
@@ -149,7 +152,7 @@ async function validApproval(root, name, sourceFile) {
 export async function bankPhase(context) {
   const { root, bankRoot, catalog } = context;
   if (!catalog) return { phase: 'plan' };
-  const bank = await loadBank(bankRoot); const assignments = await listAssignments(root);
+  const bank = await loadBank(bankRoot); const assignments = (await listAssignments(root)).filter((row) => !row.catalog_sha256 || row.catalog_sha256 === context.plan.catalog_sha256);
   const canonicalAttempts = latestAssignments(assignments, 'canonical');
   const validationAttempts = latestAssignments(assignments, 'validation');
   const pending = (phase, id, attempt) => ({ phase, action: attempt?.failure ? 'triage' : attempt ? (attempt.submitted ? 'import' : 'mark-submitted') : 'prepare', ids: [id], assignment: attempt, evidence: attempt?.failure });
@@ -198,7 +201,7 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
     const context = await openartContext(episodeDir, identity);
     const { root, plan, catalog } = context;
     const planned = Boolean(plan);
-    const planApproved = planned && await validApproval(root, 'plan-approval.json', path.join(root, 'bank-plan.json'));
+    const planApproved = planned && await validApproval(root, 'plan-approval.json', context.planPath ?? path.join(root, 'bank-plan.json'));
     stageStates = {
       visual_reference_plan: planned ? passed(`Authored global bank catalog; ${catalog.assets.length} canonical assets`) : incomplete('OpenArt global bank plan missing', 'visual openart-bank --action plan --catalog <authored-catalog.json>'),
       reference_plan_approval: planApproved ? passed('Hash-bound authored bank plan approved') : incomplete('Canonical creative plan needs review', 'visual openart-bank --action approve-plan --reviewer Codex --note <review-evidence>'),

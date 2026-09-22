@@ -11,7 +11,7 @@ function need(value, message) { if (!value) throw new Error(message); }
 function flags(argv) { const out={}; for(let i=0;i<argv.length;i+=2){need(argv[i]?.startsWith("--")&&argv[i+1]!==undefined,"Every Fal production flag requires a value.");out[argv[i].slice(2)]=argv[i+1];} return out; }
 async function read(file){return JSON.parse(await fs.readFile(file,"utf8"));}
 async function absent(file){try{await fs.lstat(file);throw new Error(`Refusing to overwrite ${file}`);}catch(error){if(error.code!=="ENOENT")throw error;}}
-async function write(file,value){await absent(file);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,bytes(value),{flag:"wx"});}
+async function write(file,value){const content=bytes(value);const prior=await fs.readFile(file,"utf8").catch(error=>{if(error.code==="ENOENT")return null;throw error;});if(prior!==null){need(prior===content,`Existing Fal artifact differs: ${file}`);return;}await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,content,{flag:"wx"});}
 async function mapLimit(rows, limit, fn){const out=[];let cursor=0;async function worker(){while(cursor<rows.length){const i=cursor++;out[i]=await fn(rows[i],i);}}await Promise.all(Array.from({length:Math.min(limit,rows.length)},worker));return out;}
 
 async function context(f){
@@ -40,11 +40,11 @@ async function prepareBulk(ctx,f){
   const assignments=[];
   for(const row of rows){
     const refs=(row.reference_bindings??[]).slice(0,4).map(ref=>({asset_id:ref.asset_id,asset_class:ref.asset_class,path:ref.portable_file?.path??ref.path,sha256:ref.portable_file?.sha256??ref.sha256}));
-    need(refs.length&&refs.every(ref=>ref.path&&ref.sha256),`Portable reference binding missing for ${row.image_id}.`);
-    const board=await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs});
+    need(refs.every(ref=>ref.path&&ref.sha256),`Portable reference binding missing for ${row.image_id}.`);
+    const board=refs.length?await buildReferenceBoard({root:path.join(ctx.root,"bulk"),imageId:row.image_id,references:refs}):null;
     const basePrompt=row.provider_prompt??row.image_prompt??row.canonical_prompt; need(basePrompt,`Prompt missing for ${row.image_id}.`);
-    const prompt=`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`;
-    const core={image_id:row.image_id,endpoint:FAL_ENDPOINTS.primary_edit,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:"one_positional_collage",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board.output_path,board_sha256:board.output_sha256,board_manifest_path:board.manifest_path,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec};
+    const prompt=board?`${basePrompt}\n\n${referenceBoardPromptGuidance(board)}`:basePrompt;
+    const core={image_id:row.image_id,endpoint:board?FAL_ENDPOINTS.primary_edit:FAL_ENDPOINTS.primary_text,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:board?"one_positional_collage":"text_only",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board?.output_path??null,board_sha256:board?.output_sha256??null,board_manifest_path:board?.manifest_path??null,max_cost_usd:0.05,start_sec:row.start_sec,duration_sec:row.duration_sec};
     const assignment={...core,assignment_sha256:falObjectSha256(JSON.stringify(core)),submission_receipt_path:path.join(ctx.root,"bulk","submission-receipts",`${row.image_id}.json`),result_receipt_path:path.join(ctx.root,"bulk","result-receipts",`${row.image_id}.json`),output_path:path.join(ctx.root,"bulk","outputs",`${row.image_id}.png`),upload_receipt_path:path.join(ctx.root,"bulk","upload-receipts",`${row.image_id}.json`)};
     const assignmentPath=path.join(ctx.root,"bulk","assignments",`${row.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
   }
@@ -52,7 +52,7 @@ async function prepareBulk(ctx,f){
   const plan={schema:"goldflow_fal_bulk_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",reference_mode:"one_positional_collage",concurrency:ctx.contract.production_concurrency,assignment_count:assignments.length,projected_base_cost_usd:projectedBase,pricing_note:"Official endpoint base price at preparation; input-image token charges may increase actual cost.",assignments};
   await write(path.join(ctx.root,"bulk-plan.json"),plan);return {status:"prepared",count:assignments.length,projected_base_cost_usd:projectedBase};
 }
-async function submitRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}finally{upload.remoteUrl=null;}});}
+async function submitRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{if(!row.board_path)return submitFalImage({assignment:row,referenceUrls:[],receiptPath:row.submission_receipt_path});const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}finally{upload.remoteUrl=null;}});}
 async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);return observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});});}
 async function main(){
  const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;

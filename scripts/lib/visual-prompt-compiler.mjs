@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
 export const VISUAL_PROMPT_COMPILER_CONTRACT = "goldflow_visual_prompt_compiler_v1";
+export const VISUAL_PROMPT_COMPILER_VERSION = 2;
+export const VISUAL_PROMPT_TEXT_POLICY = "explicit_visible_text_only_v1";
+const VISIBLE_TEXT_POLICY = "Preserve explicitly authored visible text: speech or thought bubbles, narrative overlays, signs, documents, and screen/UI wording. Do not add unrequested bottom subtitles, narration captions, explanatory labels, or production notes. References to subtitle-safe or clear subtitle space reserve room for captions added later; they are not requests to invent subtitle text. Treat prompt headings, reference IDs and purposes, and staging or continuity descriptions as instructions, not lettering to print. Render only wording explicitly requested as visible text.";
 
 const PROVIDER_PROFILES = Object.freeze({
   "google-flow": Object.freeze({
@@ -149,6 +152,7 @@ function compileBody({ profile, neutralPrompt, manifest, references }) {
   const lines = contractLines(manifest);
   if (lines.length) sections.push(lines.map(([label, value]) => `${label}: ${value}`).join("\n"));
   sections.push(`SCENE DESCRIPTION:\n${neutralPrompt}`);
+  sections.push(`VISIBLE TEXT POLICY:\n${VISIBLE_TEXT_POLICY}`);
   const exclusions = essentialExclusions(manifest);
   if (exclusions.length) sections.push(`ESSENTIAL EXCLUSIONS:\n${exclusions.map(sentence).join("\n")}`);
   return cleanText(sections.join("\n\n"));
@@ -166,7 +170,8 @@ export function compileVisualPrompt({ provider, neutralPrompt, shotManifest = nu
   const receipt = {
     schema: VISUAL_PROMPT_COMPILER_CONTRACT,
     compiler_id: profile.compiler_id,
-    compiler_version: 1,
+    compiler_version: VISUAL_PROMPT_COMPILER_VERSION,
+    text_rendering_policy: VISUAL_PROMPT_TEXT_POLICY,
     provider: normalizedProvider,
     asset_id: cleanText(assetId) || null,
     neutral_prompt_sha256: neutralPromptSha256,
@@ -181,6 +186,7 @@ export function compileVisualPrompt({ provider, neutralPrompt, shotManifest = nu
       ...(orderedReferences.length ? ["reference_binding"] : []),
       ...(lineLabels.length ? ["manifest_contract"] : []),
       "neutral_scene_description",
+      "visible_text_policy",
       ...(essentialExclusions(shotManifest).length ? ["essential_exclusions"] : []),
     ],
     manifest_contract_labels: lineLabels,
@@ -189,16 +195,25 @@ export function compileVisualPrompt({ provider, neutralPrompt, shotManifest = nu
     compiled_word_count: prompt.split(/\s+/).filter(Boolean).length,
     soft_char_budget: profile.soft_char_budget,
     soft_budget_exceeded: prompt.length > profile.soft_char_budget,
-    content_policy: "deterministic_ordering_only_no_story_rewrite_no_creative_truncation",
+    content_policy: "deterministic_contract_formatting_no_story_rewrite_no_creative_truncation",
   };
   return { prompt, prompt_sha256: promptSha256, receipt };
 }
 
-export function validateVisualPromptCompilerReceipt({ prompt, receipt, neutralPrompt, provider, orderedReferences = [] }) {
+export function validateVisualPromptCompilerReceipt({ prompt, receipt, neutralPrompt, provider, orderedReferences = [], expectedCompilerVersion = null }) {
   const findings = [];
   const sourcePrompt = cleanText(neutralPrompt);
   const normalizedProvider = normalizeProvider(provider);
   if (receipt?.schema !== VISUAL_PROMPT_COMPILER_CONTRACT) findings.push("compiler_receipt_schema_invalid");
+  if (![1, VISUAL_PROMPT_COMPILER_VERSION].includes(receipt?.compiler_version)) findings.push("compiler_receipt_version_unsupported");
+  if (expectedCompilerVersion != null && receipt?.compiler_version !== expectedCompilerVersion) {
+    findings.push("compiler_receipt_version_mismatch");
+  }
+  if (receipt?.compiler_version === VISUAL_PROMPT_COMPILER_VERSION
+    && (receipt.text_rendering_policy !== VISUAL_PROMPT_TEXT_POLICY
+      || !cleanText(prompt).includes(`VISIBLE TEXT POLICY:\n${VISIBLE_TEXT_POLICY}`))) {
+    findings.push("compiler_visible_text_policy_missing_or_stale");
+  }
   if (receipt?.provider !== normalizedProvider) findings.push("compiler_receipt_provider_mismatch");
   if (receipt?.neutral_prompt_sha256 !== sha256(sourcePrompt)) findings.push("compiler_neutral_prompt_hash_mismatch");
   if (receipt?.compiled_prompt_sha256 !== sha256(cleanText(prompt))) findings.push("compiler_output_hash_mismatch");

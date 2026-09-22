@@ -7,6 +7,7 @@ import sharp from "sharp";
 import {
   compileVisualPrompt,
   validateVisualPromptCompilerReceipt,
+  VISUAL_PROMPT_COMPILER_VERSION,
 } from "./visual-prompt-compiler.mjs";
 
 export const CODEX_WORK_SCHEMA = "goldflow_codex_image_work_manifest_v1";
@@ -668,6 +669,7 @@ export async function createCodexWorkManifest(options) {
         beat_value: row?.beat_value ?? null,
         source_row: row,
         prompt_compiler_policy: "lease_time_provider_compiler_v1",
+        prompt_compiler_version: VISUAL_PROMPT_COMPILER_VERSION,
         source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: promptsPath,
         source_plan_sha256: promptSource.sha256,
@@ -758,6 +760,7 @@ export async function createCodexWorkManifest(options) {
         shot_manifest: null,
         quality_budget: row?.quality_budget ?? null,
         prompt_compiler_policy: "lease_time_provider_compiler_v1",
+        prompt_compiler_version: VISUAL_PROMPT_COMPILER_VERSION,
         source_row_sha256: codexWorkSourceRowSha256(row),
         source_plan_path: referencePlanPath,
         source_plan_sha256: referenceSource.sha256,
@@ -890,6 +893,7 @@ function sameStreamingItemContract(left, right) {
   return left?.asset_id === right?.asset_id
     && left?.source_row_sha256 === right?.source_row_sha256
     && left?.prompt_sha256 === right?.prompt_sha256
+    && (left?.prompt_compiler_version ?? 1) === (right?.prompt_compiler_version ?? 1)
     && stableStringify((left?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })))
       === stableStringify((right?.ordered_references ?? []).map((row) => ({ ref_id: row.ref_id, sha256: row.sha256 })));
 }
@@ -1543,6 +1547,11 @@ export async function leaseNextWorkItem(options) {
         ? Number(providerReferenceLimits[browserProvider])
         : null;
       if (Number.isInteger(providerReferenceLimit) && combinedReferences.length > providerReferenceLimit) continue;
+      if (browserProvider && item.prompt_compiler_policy === "lease_time_provider_compiler_v1"
+        && item.prompt_compiler_version != null
+        && item.prompt_compiler_version !== VISUAL_PROMPT_COMPILER_VERSION) {
+        throw new Error(`Compiler version does not match the manifest contract for ${item.asset_id}.`);
+      }
       const token = randomUUID();
       const attemptNumber = attempts.length + 1;
       const attemptDir = path.join(attemptAssetDir(manifestDir, item.asset_id), `attempt-${String(attemptNumber).padStart(3, "0")}-${token.slice(0, 12)}`);
@@ -1746,6 +1755,7 @@ export async function completeWorkItem(options) {
       neutralPrompt: item.neutral_prompt ?? item.prompt,
       provider: lease.browser_provider ?? browserProvider,
       orderedReferences: assignedItem.ordered_references ?? [],
+      expectedCompilerVersion: item.prompt_compiler_version ?? null,
     });
     if (compilerFindings.length) {
       throw new Error(`Assignment prompt compiler binding is invalid for ${item.asset_id}: ${compilerFindings.join(", ")}.`);
@@ -2117,6 +2127,7 @@ export async function validateCodexWorkManifest(options) {
         neutralPrompt: item.neutral_prompt ?? item.prompt,
         provider: assignment.browser_provider,
         orderedReferences: assignment.item.ordered_references ?? [],
+        expectedCompilerVersion: item.prompt_compiler_version ?? null,
       });
       for (const code of compilerFindings) findings.push({ code, asset_id: item.asset_id });
       if (JSON.stringify(completion.prompt_compiler_receipt ?? null) !== JSON.stringify(assignment.item.prompt_compiler_receipt)) {

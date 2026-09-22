@@ -10,11 +10,11 @@ import { addCanonicalResult, fileHash, loadBank, requiredVisualChecks, reviewCan
 
 const params = { quality: 'low', resolution: '1k', aspect_ratio: '16:9' };
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, `${JSON.stringify(value)}\n`); return file; };
-async function fixture(t, { budget = 10, concurrency = 8, coreAssets = [] } = {}) {
+async function fixture(t, { budget = 10, concurrency = 8, coreAssets = [], transport = 'openart_studio_browser' } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'goldflow-openart-prod-test-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const episodeDir = path.join(dir, 'episode'); const root = path.join(episodeDir, 'openart'); const bankRoot = path.join(dir, 'bank');
-  const contract = { primary: { model_id: 'gpt-image-2-5-sunburst', ...params }, transport: 'openart_studio_browser', concurrency, max_reference_count: 8, max_credit_cost: 10, total_credit_budget: budget, repair_models: [], reference_bank_path: bankRoot };
+  const contract = { primary: { model_id: 'gpt-image-2-5-sunburst', ...params }, transport, concurrency, max_reference_count: 8, max_credit_cost: 10, total_credit_budget: budget, repair_models: [], reference_bank_path: bankRoot };
   const identity = { episode: 'ep01', image_provider: 'openart_cli', image_provider_options: { openart: contract } };
   await write(path.join(episodeDir, 'run_identity.json'), identity);
   const catalog = {
@@ -138,6 +138,18 @@ test('Reference worker pool cannot exceed immutable identity concurrency', async
   await assert.rejects(prepareReadyReferenceAssignments(context, { 'max-workers': '2' }), /identity-locked concurrency 1/);
   const allowed = await prepareReadyReferenceAssignments(context, {});
   assert.equal(allowed.assignments.length, 1);
+});
+
+test('CLI reference worker pool permits the identity-locked Pro limit of thirty-two', async (t) => {
+  const coreAssets = Array.from({ length: 32 }, (_, index) => ({
+    asset_id: `test.cli.${index}`, asset_class: 'location', canonical_name: `CLI ${index}`,
+    prompt: `Canonical CLI location ${index}.`, phase: 'core', reference_asset_ids: [],
+  }));
+  const context = await fixture(t, { budget: 320, concurrency: 32, coreAssets, transport: 'openart_cli_v1' });
+  await approvedCanonical(context);
+  const pool = await referenceWorkerPool(context, { maxWorkers: 32 });
+  assert.equal(pool.ready_ids.length, 32);
+  await assert.rejects(referenceWorkerPool(context, { maxWorkers: 33 }), /1 through 32/);
 });
 
 test('Concurrent reference workers still serialize credit reservation', async (t) => {

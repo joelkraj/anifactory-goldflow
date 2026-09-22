@@ -198,7 +198,8 @@ function boundedWorkerCount(context, value) {
   const locked = Number(context.contract.concurrency);
   if (!Number.isInteger(locked) || locked < 1) throw new Error('OpenArt identity has no valid locked concurrency.');
   const count = Number(value ?? Math.min(4, locked));
-  if (!Number.isInteger(count) || count < 1 || count > 8) throw new Error('OpenArt reference workers must be an integer from 1 through 8.');
+  const providerLimit = context.contract.transport === 'openart_cli_v1' ? 32 : 8;
+  if (!Number.isInteger(count) || count < 1 || count > providerLimit) throw new Error(`OpenArt reference workers must be an integer from 1 through ${providerLimit}.`);
   if (count > locked) throw new Error(`Requested ${count} OpenArt reference workers exceeds the identity-locked concurrency ${locked}.`);
   return count;
 }

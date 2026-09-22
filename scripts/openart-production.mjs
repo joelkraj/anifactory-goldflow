@@ -156,7 +156,9 @@ async function prepareAssignmentsUnlocked(context, flags) {
   const ids = String(flags['asset-ids'] ?? flags['image-ids'] ?? '').split(',').filter(Boolean);
   if (!ids.length) throw new Error('Explicit asset/image IDs required; unscoped whole-stage generation is forbidden.');
   if (new Set(ids).size !== ids.length) throw new Error('Duplicate IDs cannot prepare multiple attempts.');
-  if (ids.length > 8) throw new Error('Prepare at most eight exact browser assignments for inspected execution.');
+  const providerLimit = context.contract.transport === 'openart_cli_v1' ? 32 : 8;
+  const assignmentLimit = Math.min(providerLimit, Number(context.contract.concurrency));
+  if (ids.length > assignmentLimit) throw new Error(`Prepare at most ${assignmentLimit} exact assignments for this identity-locked transport.`);
   const phase = await bankPhase(context);
   if (scope !== 'scene' && !['joey', 'core', 'validation', 'remaining'].includes(phase.phase)) throw new Error('No pending canonical phase.');
   if (scope === 'validation' && phase.phase !== 'validation') throw new Error('Joey and the core bank must pass review and native library registration before validation.');

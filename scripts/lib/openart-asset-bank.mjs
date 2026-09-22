@@ -4,6 +4,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 
 export const BANK_SCHEMA = 'goldflow_openart_asset_bank_v1';
+export const PORTABLE_BANK_SCHEMA = 'goldflow_global_reference_manifest_v2';
 export const CATALOG_SCHEMA = 'goldflow_openart_bank_catalog_v1';
 export const PRIMARY_MODEL = 'gpt-image-2-5-sunburst';
 export const PROVIDER_RECEIPT_SCHEMA = 'goldflow_openart_provider_receipt_v1';
@@ -28,6 +29,71 @@ export async function atomicJson(file, value) {
 export function safeId(id) {
   if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9_.-]{1,149}$/.test(id)) throw new Error(`Invalid stable asset ID: ${id}`);
   return id;
+}
+
+const SEMANTIC_ROLES = Object.freeze({
+  'gf.global.character.joey_manhwa': 'protagonist/joey',
+  'gf.gamblers_eye.character.adrian': 'brother',
+  'gf.gamblers_eye.character.victor': 'father',
+  'gf.gamblers_eye.character.celeste': 'romantic_partner',
+  'gf.gamblers_eye.character.evelyn_shaw': 'adviser_operations_lead',
+  'gf.gamblers_eye.character.ben': 'friend_mechanic',
+  'gf.gamblers_eye.character.nadia_cole': 'lawyer',
+  'gf.gamblers_eye.character.june_park': 'independent_director',
+  'gf.gamblers_eye.character.malcolm_rook': 'financier',
+  'gf.gamblers_eye.character.cass_mercer': 'professional_poker_player',
+  'gf.gamblers_eye.character.mara_sloane': 'shareholder',
+  'gf.gamblers_eye.character.elias': 'hotel_steward',
+  'gf.gamblers_eye.character.nora': 'hotel_manager',
+  'gf.gamblers_eye.character.luis': 'construction_manager',
+  'gf.gamblers_eye.character.derek_vane': 'poker_rival',
+});
+function semanticRole(record) {
+  if (SEMANTIC_ROLES[record.asset_id]) return SEMANTIC_ROLES[record.asset_id];
+  if (record.asset_class === 'wardrobe') return `wardrobe_state/${record.state_id}`;
+  return `${record.asset_class}/${record.asset_id.split('.').at(-1)}`;
+}
+function negativeConstraints(prompt = '') {
+  return prompt.split(/(?<=[.!?])\s+/).map((row) => row.trim())
+    .filter((row) => /^(?:no\b|omit\b|avoid\b|do not\b|without\b)/i.test(row));
+}
+function portableFormat(file = '') {
+  return path.extname(file).slice(1).toLowerCase() || null;
+}
+function portableRecord(record) {
+  const ordered = (record.reference_bindings ?? []).map((row, index) => ({
+    asset_id: row.asset_id, sha256: row.sha256, order: index + 1,
+    intended_function: row.slot_purpose ?? (index === 0 ? 'primary_character_or_wardrobe' : index === 1 ? 'environment' : 'secondary_character_or_crucial_prop'),
+  }));
+  const openart = {
+    asset_id: record.openart_asset_id ?? null, creation_id: record.openart_creation_id ?? null,
+    project_id: record.openart_project_id ?? null, library_asset_id: record.openart_library_asset_id ?? null,
+    library_kind: record.openart_library_kind ?? null, registration_surface: record.openart_registration_surface ?? null,
+    model: record.model ?? null, mode: record.mode ?? null, quality: record.quality ?? null,
+    resolution: record.resolution ?? null, aspect_ratio: record.aspect_ratio ?? null,
+    seed: record.seed ?? null, created_at: record.creation_timestamp ?? null,
+    cost: record.credit_cost ?? null, cost_unit: 'credits',
+  };
+  return {
+    ...record,
+    semantic_role: record.semantic_role ?? semanticRole(record),
+    role_tags: record.role_tags ?? [...new Set([semanticRole(record), ...(record.tags ?? [])])],
+    canonical_prompt: record.canonical_prompt ?? record.prompt,
+    negative_constraints: record.negative_constraints ?? negativeConstraints(record.prompt),
+    portable_file: record.portable_file ?? {
+      path: record.local_absolute_path, sha256: record.sha256, width: record.width, height: record.height,
+      aspect_ratio: record.aspect_ratio, color_mode: record.color_mode ?? 'sRGB', format: portableFormat(record.local_absolute_path),
+    },
+    generation_recipe: record.generation_recipe ?? {
+      canonical_prompt: record.prompt, negative_constraints: negativeConstraints(record.prompt),
+      ordered_references: ordered,
+    },
+    relationships: record.relationships ?? {
+      parent_asset_id: record.parent_asset_id ?? null, state_id: record.state_id ?? null,
+      ordered_reference_assets: ordered,
+    },
+    providers: { ...(record.providers ?? {}), openart: { ...(record.providers?.openart ?? {}), ...openart } },
+  };
 }
 export function validateCatalog(catalog) {
   if (catalog?.schema !== CATALOG_SCHEMA || !Array.isArray(catalog.assets) || !catalog.assets.length) throw new Error('Missing authored OpenArt bank catalog.');
@@ -88,7 +154,13 @@ export async function withBankLock(root, fn) {
 export async function loadBank(root) {
   const bank = await readJson(path.join(root, 'manifest.json'));
   if (bank && bank.schema !== BANK_SCHEMA) throw new Error('Unsupported reference-bank schema.');
-  return bank ?? { schema: BANK_SCHEMA, revision: 0, assets: [], catalogs: [], library_projects: [], events_path: path.join(root, 'events.jsonl') };
+  const loaded = bank ?? { schema: BANK_SCHEMA, revision: 0, assets: [], catalogs: [], library_projects: [], events_path: path.join(root, 'events.jsonl') };
+  loaded.identity_schema = PORTABLE_BANK_SCHEMA;
+  loaded.provider_neutral = true;
+  loaded.local_manifest_is_source_of_truth = true;
+  loaded.provider_namespaces = [...new Set([...(loaded.provider_namespaces ?? []), 'openart'])];
+  loaded.assets = loaded.assets.map(portableRecord);
+  return loaded;
 }
 export async function commitBank(root, bank, event) {
   bank.revision += 1;
@@ -156,6 +228,9 @@ export async function verifyAsset(record, { requireLibrary = false } = {}) {
   const raster = await sharp(record.local_absolute_path).metadata();
   if (raster.width !== record.width || raster.height !== record.height) throw new Error('Canonical raster dimensions disagree with generation metadata.');
   if (!Number.isFinite(record.credit_cost) || record.credit_cost < 0 || !Number.isFinite(record.credits_quoted) || record.credits_quoted < 0 || (record.credits_charged !== null && (!Number.isFinite(record.credits_charged) || record.credits_charged < 0))) throw new Error('Canonical credit quote/charge evidence missing.');
+  if (!record.semantic_role?.trim() || !Array.isArray(record.role_tags) || !record.canonical_prompt?.trim() || !Array.isArray(record.negative_constraints)) throw new Error('Provider-neutral semantic and prompt metadata missing.');
+  if (record.portable_file?.path !== record.local_absolute_path || record.portable_file?.sha256 !== record.sha256 || record.portable_file?.width !== record.width || record.portable_file?.height !== record.height || !record.portable_file?.color_mode) throw new Error('Portable local-raster metadata is not bound to the canonical file.');
+  if (record.generation_recipe?.canonical_prompt !== record.prompt || !Array.isArray(record.generation_recipe?.ordered_references) || !record.providers?.openart || record.providers.openart.asset_id !== record.openart_asset_id) throw new Error('Provider-neutral recipe or namespaced provider mapping missing.');
   if (!Array.isArray(record.reference_bindings) || !Array.isArray(record.reference_ids) || record.reference_bindings.some((row) => !row.asset_id || !/^[a-f0-9]{64}$/.test(row.sha256 ?? '') || !row.openart_asset_id)) throw new Error('Canonical exact reference bindings missing.');
   if (JSON.stringify(record.reference_ids) !== JSON.stringify(record.reference_bindings.map((row) => row.asset_id)) || new Set(record.reference_ids).size !== record.reference_ids.length) throw new Error('Canonical ordered reference IDs mismatch.');
   if ((record.mode === 'image2image') !== (record.reference_ids.length > 0)) throw new Error('Canonical generation mode does not match its references.');
@@ -163,7 +238,7 @@ export async function verifyAsset(record, { requireLibrary = false } = {}) {
   if (record.record_path) {
     if (!record.record_sha256 || await fileHash(record.record_path) !== record.record_sha256) throw new Error('Immutable canonical record changed.');
     const original = await readJson(record.record_path);
-    const mutable = new Set(['approval_state', 'review', 'library_sync', 'openart_library_asset_id', 'openart_registration_surface', 'record_sha256']);
+    const mutable = new Set(['approval_state', 'review', 'library_sync', 'openart_library_asset_id', 'openart_registration_surface', 'providers', 'record_sha256']);
     for (const key of Object.keys(original).filter((key) => !mutable.has(key))) {
       if (JSON.stringify(record[key]) !== JSON.stringify(original[key])) throw new Error(`Immutable canonical metadata changed: ${key}`);
     }
@@ -219,7 +294,7 @@ export async function addCanonicalResult(root, { item, catalog, result, referenc
       await verifyAsset(reference, { requireLibrary: true });
     }
     if (item.asset_class === 'wardrobe' && !bank.assets.some((row) => row.asset_id === item.parent_asset_id && row.asset_class === 'character' && row.approval_state === 'approved')) throw new Error('Canonical wardrobe must belong to an approved character identity.');
-    const record = {
+    const record = portableRecord({
       schema: 'goldflow_openart_asset_record_v1', asset_id: item.asset_id, openart_asset_id: result.openart_asset_id,
       assignment_id: result.assignment_id,
       openart_creation_id: result.creation_id, openart_project_id: projectId, asset_class: item.asset_class,
@@ -239,9 +314,10 @@ export async function addCanonicalResult(root, { item, catalog, result, referenc
       creation_source: result.transport ?? 'openart_cli', scene_prompt_anchor: item.scene_prompt_anchor ?? '',
       openart_library_kind: item.openart_library_kind ?? ({ character: 'character', wardrobe: 'character', location: 'background', object: 'object', style: 'style' })[item.asset_class],
       openart_library_asset_id: null,
-    };
+    });
     // Validate the downloaded candidate before claiming an immutable version path.
-    await verifyAsset({ ...record, local_absolute_path: result.output_path });
+    await verifyAsset({ ...record, local_absolute_path: result.output_path,
+      portable_file: { ...record.portable_file, path: result.output_path } });
     await fs.mkdir(path.dirname(local), { recursive: true });
     await fs.copyFile(result.output_path, local, 1);
     record.record_path = path.join(root, 'records', item.asset_id, `v${String(version).padStart(4, '0')}.json`);
@@ -283,6 +359,8 @@ export async function synchronizeLibraryRecord(root, sync) {
     }
     asset.openart_library_asset_id = sync.openart_library_asset_id;
     asset.openart_registration_surface = sync.registration_surface ?? 'native_library';
+    asset.providers.openart.library_asset_id = sync.openart_library_asset_id;
+    asset.providers.openart.registration_surface = sync.registration_surface ?? 'native_library';
     asset.library_sync = receipt;
     await commitBank(root, bank, { event: correctingLibraryId ? 'native_library_id_corrected' : 'native_library_synced', asset_id: sync.asset_id, version: sync.version, prior_openart_library_asset_id: priorLibraryId ?? null, ...receipt });
     return receipt;

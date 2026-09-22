@@ -181,6 +181,10 @@ function bindReference(record, slot = {}) {
     approval_lineage: { review: record.review, library_sync: record.library_sync,
       canonical_record_path: record.record_path, canonical_record_sha256: record.record_sha256 },
     source_provider: 'openart_cli', model_id: record.model,
+    semantic_role: record.semantic_role,
+    portable_file: record.portable_file,
+    intended_function: slot.slot_purpose ?? roleFor(record),
+    providers: record.providers,
   };
 }
 function promptRow(shot, source, records) {
@@ -189,13 +193,15 @@ function promptRow(shot, source, records) {
   const requirements = bindings.map(({ ref_id, kind, conditioning_asset_role, slot_order, slot_purpose, reference_priority, reason }) =>
     ({ ref_id, kind, conditioning_asset_role, slot_order, slot_purpose, reference_priority, reason }));
   return {
-    ...editorial, provider_prompt: shot.prompt, image_prompt: shot.prompt, prompt_hash: sha256(shot.prompt),
+    ...editorial, canonical_prompt: shot.prompt, provider_prompt: shot.prompt, image_prompt: shot.prompt, prompt_hash: sha256(shot.prompt),
+    provider_requests: { openart: { prompt: shot.prompt, model_id: PRIMARY_MODEL, settings: { quality: 'low', resolution: '1k', aspect_ratio: '16:9' } } },
     image_provider_route: 'openart_cli', image_model_route: PRIMARY_MODEL,
     image_generation_required: true, image_strategy: 'fresh_openart_restart',
     reuse_source_image_id: null, editorial_reuse_approved: false,
     model_id: PRIMARY_MODEL, settings: { quality: 'low', resolution: '1k', aspect_ratio: '16:9' },
     reference_asset_ids: [...shot.reference_asset_ids], reference_bindings: bindings,
     reference_slots: bindings, reference_requirements: requirements,
+    portable_reference_order: bindings.map((row) => ({ asset_id: row.asset_id, sha256: row.sha256, slot_order: row.slot_order, intended_function: row.intended_function, local_path: row.path })),
     required_reference_paths: bindings.map((row) => row.path),
     shot_manifest: { ...structuredClone(shot.shot_manifest), reference_slots: requirements },
     character_state_refs_used: shot.shot_manifest.character_state_ref_ids ?? [],

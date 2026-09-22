@@ -72,6 +72,16 @@ try {
   const firstCandidate = await candidate();
   const first = await addCanonicalResult(bankRoot, firstCandidate);
   assert.equal(first.version, 1);
+  assert.equal(first.semantic_role, 'character/joey');
+  assert.equal(first.portable_file.path, first.local_absolute_path);
+  assert.equal(first.portable_file.sha256, first.sha256);
+  assert.equal(first.providers.openart.asset_id, first.openart_asset_id);
+  assert.equal(first.generation_recipe.canonical_prompt, first.prompt);
+  assert.deepEqual(first.generation_recipe.ordered_references, []);
+  const portableBank = await loadBank(bankRoot);
+  assert.equal(portableBank.identity_schema, 'goldflow_global_reference_manifest_v2');
+  assert.equal(portableBank.provider_neutral, true);
+  assert.equal(portableBank.local_manifest_is_source_of_truth, true);
   await verifyAsset(first);
   await assert.rejects(resolveReferences(bankRoot, ['test.joey']), /Approved canonical/);
   await assert.rejects(synchronizeLibraryRecord(bankRoot, sync(first)), /pass visual review/);
@@ -88,6 +98,7 @@ try {
   const references = await resolveReferences(bankRoot, ['test.joey']);
   assert.equal(references[0].openart_asset_id, first.openart_asset_id);
   assert.equal(references[0].openart_library_asset_id, 'library-test.joey-1');
+  assert.equal((await latest()).providers.openart.library_asset_id, 'library-test.joey-1');
   assert.equal(references[0].openart_library_kind, 'character');
   assert.equal(await fileHash(references[0].library_sync.path), references[0].library_sync.sha256);
   const media = await addCanonicalResult(bankRoot, await candidate('test.media'));

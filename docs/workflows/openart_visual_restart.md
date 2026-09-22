@@ -46,6 +46,17 @@ provider receipt, generation prompt/settings/references, cost, timestamp,
 relationships, tags, and supersession history. Approval changes are appended as
 review receipts and manifest snapshots. Prior versions are never removed.
 
+The manifest is provider-neutral even when the active run is locked to OpenArt.
+Its compatibility `schema` remains readable by historical OpenArt runs, while
+`identity_schema: goldflow_global_reference_manifest_v2` identifies the portable
+record shape. Each asset carries a local portable raster and SHA-256, semantic
+role and aliases, canonical prompt and negative constraints, dimensions and
+color mode, named relationships, and ordered reference functions. Provider data
+lives under a namespace such as `providers.openart`; provider IDs are mirrors,
+never canonical identity. Shot bindings retain ordered Goldflow asset IDs, local
+paths, hashes, and intended functions so a later, separately locked Fal adapter
+can upload the same source files without changing this run's provider identity.
+
 Characters and their named wardrobe/age states share a parent identity. The
 universal protagonist is a reusable identity independent of episode clothing.
 Character refs are one empty-handed person, one neutral pose, plain background,

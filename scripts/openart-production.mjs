@@ -15,6 +15,7 @@ import {
   buildExactOpenArtImageRequest, downloadOpenArtCreation, quoteExactOpenArtImageBatch,
   runOpenArtCli, submitExactOpenArtImageBatch,
 } from './lib/openart-cli-provider.mjs';
+import { buildReferenceBoard, referenceBoardPromptGuidance, LEGACY_REFERENCE_BOARD_PROMPT_GUIDANCE } from './lib/openart-reference-board.mjs';
 
 function requireValue(value, message) { if (!value) throw new Error(message); return value; }
 function exact(actual, expected, message) { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(message); }
@@ -61,6 +62,10 @@ async function validateDispatch(context, assignment) {
   if (attempts.at(-1)?.assignment_id !== assignment.assignment_id || attempts.at(-1)?.failure || attempts.at(-1)?.receipt || attempts.at(-1)?.submitted) throw new Error('Assignment has been superseded, failed, submitted or already completed.');
   const fresh = await resolveReferences(context.bankRoot, assignment.reference_bindings.map((row) => row.asset_id), { maxReferences: context.contract.max_reference_count, extraReferenceReason: assignment.extra_reference_reason });
   exact(pinnedRefs(fresh), pinnedRefs(assignment.reference_bindings), 'Assigned reference approval/version/native library identity has changed.');
+  if (assignment.reference_board) {
+    const currentProviderPrompt = `${assignment.prompt}\n\n${referenceBoardPromptGuidance(assignment.reference_board)}`;
+    if (assignment.provider_request_prompt !== currentProviderPrompt || assignment.provider_request_prompt_sha256 !== sha256(currentProviderPrompt)) throw new Error('Reference board assignment lacks the current explicit positional prompt mapping.');
+  }
 }
 async function event(root, value) {
   await fs.mkdir(root, { recursive: true });
@@ -81,6 +86,9 @@ async function loadAssignment(context, assignmentPath) {
   if (assignment.catalog_sha256 !== context.plan.catalog_sha256) throw new Error('Assignment catalog binding is stale.');
   exact(assignment.params, { quality: 'low', resolution: '1k', aspect_ratio: '16:9' }, 'Assignment changed the locked Low/1K/16:9 parameters.');
   if (assignment.transport !== context.contract.transport || sha256(assignment.prompt) !== assignment.prompt_sha256) throw new Error('Assignment prompt or transport binding changed.');
+  const expectedProviderPrompt = assignment.reference_board ? `${assignment.prompt}\n\n${referenceBoardPromptGuidance(assignment.reference_board)}` : assignment.prompt;
+  const legacyProviderPrompt = assignment.reference_board ? `${assignment.prompt}\n\n${LEGACY_REFERENCE_BOARD_PROMPT_GUIDANCE}` : assignment.prompt;
+  if (![expectedProviderPrompt, legacyProviderPrompt].includes(assignment.provider_request_prompt) || assignment.provider_request_prompt_sha256 !== sha256(assignment.provider_request_prompt)) throw new Error('Assignment provider request prompt or board guidance changed.');
   let item;
   if (assignment.scope === 'canonical') item = context.catalog.assets.find((row) => row.asset_id === assignment.asset_id);
   else if (assignment.scope === 'validation') item = context.catalog.validation_shots.find((row) => row.image_id === assignment.asset_id);
@@ -99,6 +107,10 @@ async function loadAssignment(context, assignmentPath) {
   }
   exact(assignment.reference_bindings.map((row) => row.asset_id), item.reference_asset_ids ?? [], 'Assignment reference order changed.');
   for (const ref of assignment.reference_bindings) if (await fileHash(ref.path) !== ref.sha256) throw new Error(`Assigned reference changed: ${ref.asset_id}`);
+  if (assignment.reference_board) {
+    exact(assignment.reference_board.source_reference_order, assignment.reference_bindings.map((ref) => ({ asset_id: ref.asset_id, sha256: ref.sha256 })), 'Reference board source order differs from the canonical shot bindings.');
+    if (await fileHash(assignment.reference_board.output_path) !== assignment.reference_board.output_sha256 || await fileHash(assignment.reference_board.manifest_path) !== sha256(`${JSON.stringify(await readJson(assignment.reference_board.manifest_path), null, 2)}\n`)) throw new Error('Reference board bytes or manifest changed.');
+  }
   if (assignment.model_id !== PRIMARY_MODEL) {
     const repair = assignment.repair_evidence;
     const prior = (await listAssignments(context.root)).find((row) => row.assignment_id === assignment.previous_assignment_id);
@@ -212,6 +224,8 @@ async function prepareAssignmentsUnlocked(context, flags) {
     const prompt = repair?.prompt_override ?? item.provider_prompt ?? item.prompt;
     requireValue(prompt, 'Authored prompt missing.');
     const assignmentId = `${id}--${randomUUID()}`;
+    const referenceBoard = scope === 'scene' && refs.length ? await buildReferenceBoard({ root: context.root, imageId: id, references: refs }) : null;
+    const providerRequestPrompt = referenceBoard ? `${prompt}\n\n${referenceBoardPromptGuidance(referenceBoard)}` : prompt;
     const assignment = {
       schema: 'goldflow_openart_assignment_v1', assignment_id: assignmentId, asset_id: id, scope,
       identity_sha256: await fileHash(path.join(context.episodeDir, 'run_identity.json')),
@@ -219,6 +233,9 @@ async function prepareAssignmentsUnlocked(context, flags) {
       model_id: model, mode: refs.length ? 'image2image' : 'text2image',
       params: { quality: 'low', resolution: '1k', aspect_ratio: '16:9' },
       reference_bindings: refs, extra_reference_reason: item.extra_reference_reason ?? null,
+      reference_board: referenceBoard,
+      provider_request_prompt: providerRequestPrompt,
+      provider_request_prompt_sha256: sha256(providerRequestPrompt),
       prompt_plan_sha256: shots ? await fileHash(path.join(context.episodeDir, 'section_image_prompts_hardened.json')) : null,
       intended_native_library_kind: item.openart_library_kind ?? null,
       transport: context.contract.transport, max_credit_cost: context.contract.max_credit_cost,
@@ -371,6 +388,48 @@ export async function dispatchCliBatch(context, flags, dependencies = {}) {
     }
   });
 
+  async function boardReference(assignment) {
+    const board = assignment.reference_board;
+    if (!board) return null;
+    if (await fileHash(board.output_path) !== board.output_sha256 || await fileHash(board.manifest_path).catch(() => null) == null) throw new Error(`Reference board bytes or manifest are missing: ${assignment.asset_id}`);
+    if (!execute) return {
+      id: board.board_id, label: board.board_id, sha256: board.output_sha256,
+      url: 'https://cdn.openart.ai/goldflow-reference-board-dry-run-placeholder.png',
+    };
+    const uploadDir = path.join(context.root, 'reference-board-uploads');
+    const uploadPath = path.join(uploadDir, `${board.cache_key}.json`);
+    const uploadedRows = async () => {
+      const listed = await runCli(['upload', 'list', '--type', 'image', '--project', projectId, '--limit', '100']);
+      return listed.data ?? listed.assets ?? listed.items ?? listed.uploads ?? [];
+    };
+    const prior = await readJson(uploadPath);
+    if (prior) {
+      if (prior.board_sha256 !== board.output_sha256 || prior.project_id !== projectId || !prior.openart_asset_id) throw new Error(`Reference board upload receipt is stale: ${assignment.asset_id}`);
+      const rows = await uploadedRows();
+      const found = rows.find((row) => (row.id ?? row.assetId) === prior.openart_asset_id);
+      const url = found?.url ?? found?.mediaUrl;
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:' || parsed.hostname !== 'cdn.openart.ai') throw new Error(`Reference board upload URL is unavailable: ${assignment.asset_id}`);
+      return { id: prior.openart_asset_id, label: board.board_id, sha256: board.output_sha256, url };
+    }
+    const existing = (await uploadedRows()).find((row) => row.upload?.originalFilename === path.basename(board.output_path) && row.resourceType === 'image' && row.status === 'completed');
+    const response = existing ?? await runCli(['upload', 'add', board.output_path, '--project', projectId]);
+    const payload = response.data ?? response;
+    const openartAssetId = payload.uploadId ?? payload.id ?? payload.asset?.id ?? payload.visualReference?.id ?? payload.resource?.id;
+    const url = payload.url ?? payload.asset?.url ?? payload.visualReference?.url ?? payload.resource?.url;
+    let parsed;
+    try { parsed = new URL(url); } catch { throw new Error(`OpenArt board upload returned no usable URL: ${assignment.asset_id}`); }
+    if (!openartAssetId || parsed.protocol !== 'https:' || parsed.hostname !== 'cdn.openart.ai') throw new Error(`OpenArt board upload returned an invalid media identity: ${assignment.asset_id}`);
+    await fs.mkdir(uploadDir, { recursive: true });
+    await writeOnce(uploadPath, {
+      schema: 'goldflow_openart_reference_board_upload_v1', board_id: board.board_id,
+      board_sha256: board.output_sha256, board_manifest_path: board.manifest_path,
+      board_manifest_sha256: await fileHash(board.manifest_path), project_id: projectId,
+      openart_asset_id: openartAssetId, source_url_sha256: sha256(url), recovered_existing_upload: Boolean(existing), uploaded_at: new Date().toISOString(),
+    });
+    return { id: openartAssetId, label: board.board_id, sha256: board.output_sha256, url };
+  }
+
   const bank = await loadBank(context.bankRoot);
   const referenceCache = new Map();
   async function referenceUrl(ref) {
@@ -386,12 +445,12 @@ export async function dispatchCliBatch(context, flags, dependencies = {}) {
     return resource.url;
   }
   const initialJobs = await Promise.all(assignments.map(async (assignment) => ({
-    assignmentId: assignment.assignment_id, prompt: assignment.prompt, projectId,
+    assignmentId: assignment.assignment_id, prompt: assignment.provider_request_prompt ?? assignment.prompt, projectId,
     receiptPath: path.join(context.root, execute ? 'cli-submission-receipts' : 'cli-dry-run-receipts', `${assignment.assignment_id}--${batchId}.json`),
     creditsQuoted: 0,
-    references: await Promise.all(assignment.reference_bindings.map(async (ref) => ({
-      id: ref.openart_asset_id, label: ref.asset_id, sha256: ref.sha256, url: await referenceUrl(ref),
-    }))),
+    references: assignment.reference_board
+      ? [await boardReference(assignment)]
+      : await Promise.all(assignment.reference_bindings.map(async (ref) => ({ id: ref.openart_asset_id, label: ref.asset_id, sha256: ref.sha256, url: await referenceUrl(ref) }))),
   })));
   const quote = await quoteBatch({ jobs: initialJobs, runCli });
   if (!Number.isFinite(quote.account_credits_available)) throw new Error('Current OpenArt account balance is unavailable.');
@@ -418,7 +477,9 @@ export async function dispatchCliBatch(context, flags, dependencies = {}) {
     assignments: await Promise.all(assignments.map(async (assignment, index) => ({
       assignment_id: assignment.assignment_id, assignment_sha256: await fileHash(assignment.assignment_path),
       model_id: assignment.model_id, mode: assignment.mode, prompt_sha256: assignment.prompt_sha256,
+      provider_request_prompt_sha256: assignment.provider_request_prompt_sha256 ?? assignment.prompt_sha256,
       params: assignment.params, references: coreReferenceRows(assignment.reference_bindings),
+      reference_board: assignment.reference_board ? { board_id: assignment.reference_board.board_id, output_sha256: assignment.reference_board.output_sha256, manifest_path: assignment.reference_board.manifest_path, manifest_sha256: await fileHash(assignment.reference_board.manifest_path) } : null,
       credits_quoted: quote.quotes[index].credits, exact_request_sha256: quote.quotes[index].request_sha256,
     }))),
     reference_urls_persisted: false, automatic_retry: false, automatic_failover: false,
@@ -441,6 +502,7 @@ export async function dispatchCliBatch(context, flags, dependencies = {}) {
         ui: {
           attestation: 'exact_cli_request_quote_and_references_verified', reviewer: 'Goldflow exact OpenArt CLI bridge',
           params: assignment.params, model_id: assignment.model_id, prompt_sha256: assignment.prompt_sha256,
+          provider_request_prompt_sha256: assignment.provider_request_prompt_sha256 ?? assignment.prompt_sha256,
           references: coreReferenceRows(assignment.reference_bindings), image_count: 1,
           credits_quoted: quote.quotes[index].credits, account_credits_available: quote.account_credits_available,
           observed_at: quote.observed_at, discount_fraction: context.contract.discount_fraction,

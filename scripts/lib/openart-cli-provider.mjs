@@ -361,7 +361,7 @@ export async function uploadOpenArtAsset({ localPath, path: inputPath, sha256, p
   await assertAbsent(receiptPath);
   await writeReceipt(`${receiptPath}.request.json`, { schema: 'goldflow_openart_upload_request_v1', created_at: now(), local_path: file, sha256, project_id: projectId, submission_count: 1 });
   const response = await runCli(['upload', 'add', file, '--project', projectId]);
-  const id = response.id || response.asset?.id || response.visualReference?.id || response.resource?.id;
+  const id = response.uploadId || response.id || response.asset?.id || response.visualReference?.id || response.resource?.id;
   if (!id) fail('openart_upload_id_missing', 'Upload returned no stable asset ID; inspect the project before any retry.', { response });
   const record = { schema: 'goldflow_openart_upload_receipt_v1', created_at: now(), local_path: file, sha256, project_id: projectId, openart_asset_id: id, response };
   return { openart_asset_id: id, local_path: file, sha256, ...await writeReceipt(receiptPath, record) };

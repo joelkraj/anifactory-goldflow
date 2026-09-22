@@ -75,7 +75,9 @@ export async function verifyCompletedAssignment(context, attempt, { prompt = nul
   requireState(assignment.model_id === context.contract.primary.model_id || (assignment.scope !== 'canonical' && assignment.repair_evidence?.primary_failure_unresolved === true && context.contract.repair_models.some((row) => row.model_id === assignment.model_id)), 'Unapproved OpenArt model substitution.');
   requireState(Array.isArray(assignment.reference_bindings) && assignment.mode === (assignment.reference_bindings.length ? 'image2image' : 'text2image'), 'OpenArt reference mode mismatch.');
   if (prompt) {
-    requireState(assignment.asset_id === prompt.image_id && assignment.scope === 'scene' && assignment.prompt === (prompt.provider_prompt ?? prompt.prompt), 'Scene assignment does not match its exact prompt.');
+    const authoredPrompt = prompt.provider_prompt ?? prompt.prompt;
+    const reviewedOverride = assignment.repair_evidence?.prompt_override;
+    requireState(assignment.asset_id === prompt.image_id && assignment.scope === 'scene' && (assignment.prompt === authoredPrompt || assignment.prompt === reviewedOverride), 'Scene assignment does not match its exact authored or reviewed repair prompt.');
     requireState(assignment.prompt_plan_sha256 === await fileHash(path.join(context.episodeDir, 'section_image_prompts_hardened.json')), 'Scene assignment prompt-plan binding is stale.');
     requireState(same(assignment.reference_bindings.map((row) => row.asset_id), prompt.reference_asset_ids), 'Scene assignment reference IDs differ from the bound shot.');
   }
@@ -320,6 +322,10 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
         const prompt = expected.find((item) => item.image_id === row.image_id);
         requireState(prompt, `Unexpected frame in OpenArt production report: ${row.image_id}`);
         const attempt = sceneAttempts.get(row.image_id);
+        // A visually rejected completed raster remains in the append-only report,
+        // but it no longer satisfies current production coverage. Preserve it as
+        // repair ancestry and expose the exact-ID triage command below.
+        if (!attempt?.receipt || attempt.failure) continue;
         const receipt = await verifyCompletedAssignment(context, attempt, { prompt });
         requireState(row.status === 'generated' && row.image_path === receipt.output_path && row.generated?.provider === 'openart_cli' && row.generated.assignment_id === attempt.assignment_id && row.generated.output_sha256 === receipt.sha256 && row.generated.provider_receipt_sha256 === receipt.provider_receipt_sha256 && row.generated.openart_asset_id === receipt.openart_asset_id && same(row.reference_inputs, attempt.reference_bindings), 'OpenArt production report lacks its exact new generated result.');
         requireState(!rasterHashes.has(receipt.sha256) && !creationIds.has(receipt.creation_id), 'Different production frames cannot reuse a raster or OpenArt creation.');
@@ -327,6 +333,8 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
       }
     }
     const missing = expected.filter((row) => !results.has(row.image_id)).map((row) => row.image_id);
+    const boardResultCount = [...sceneAttempts.values()].filter((row) => row?.receipt && !row.failure && row.reference_board).length;
+    const prepareBatchSize = boardResultCount < 12 ? 8 : boardResultCount < 28 ? 16 : Math.min(32, context.contract.concurrency);
     const pending = expected.map((row) => sceneAttempts.get(row.image_id)).find((row) => row && (!row.receipt || row.failure));
     const next = pending?.failure
       ? 'imagegen openart --scope scene --action triage --repair <exact-id-repair.json>'
@@ -336,7 +344,7 @@ export async function openartProductionStageStates({ episodeDir, identity }) {
           : context.contract.transport === 'openart_cli_v1'
             ? `imagegen openart --action dispatch-cli --batch-id <stable-batch-id> --assignments ${pending.assignment_path} --project-id <openart-project-id>`
             : `imagegen openart --action mark-submitted --assignment ${pending.assignment_path} --ui-receipt <exact-receipt.json>`
-        : `imagegen openart --action prepare --image-ids ${missing.slice(0, 4).join(',') || '<first-frame-ids>'}`;
+        : `imagegen openart --action prepare --image-ids ${missing.slice(0, prepareBatchSize).join(',') || '<first-frame-ids>'}`;
     stageStates.image_generation = expected.length && !missing.length && !pending ? passed(`All ${expected.length} new OpenArt frames and exact provider receipts verified`) : incomplete(`OpenArt frames ${results.size}/${expected.length || 'unbound'}`, next, pending?.failure ? 'blocked' : 'missing');
     return { applicable: true, stageStates, phase };
   } catch (error) {

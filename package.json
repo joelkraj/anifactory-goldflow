@@ -43,7 +43,7 @@
     "test:fixtures": "npm run test:workflow-routing && npm run test:stage-contract && npm run test:planner && npm run test:voice-boundary && npm run test:media && npm run test:production-direction && npm run test:performance && npm run test:narration-quality && npm run test:analytics-quality && npm run test:integration",
     "docs:workflow": "node scripts/generate-workflow-guidance.mjs",
     "docs:workflow:check": "node scripts/generate-workflow-guidance.mjs --check",
-    "test:openart": "node scripts/tests/openart-cli-provider-tests.mjs && node scripts/tests/openart-asset-bank-tests.mjs && node scripts/tests/openart-visual-restart-tests.mjs && node --test scripts/tests/openart-production-tests.mjs scripts/tests/openart-shot-binding-tests.mjs"
+    "test:openart": "node scripts/tests/openart-cli-provider-tests.mjs && node scripts/tests/openart-asset-bank-tests.mjs && node scripts/tests/openart-visual-restart-tests.mjs && node scripts/tests/openart-reference-board-tests.mjs && node --test scripts/tests/openart-production-tests.mjs scripts/tests/openart-shot-binding-tests.mjs"
   },
   "engines": {
     "node": ">=20"

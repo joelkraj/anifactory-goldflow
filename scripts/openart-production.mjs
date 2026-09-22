@@ -374,6 +374,64 @@ async function importCliBatch(context, flags) {
   });
 }
 
+async function recoverPartialCliBatch(context, flags, dependencies = {}) {
+  const batchId = cliBatchId(flags['batch-id']);
+  const planPath = path.join(context.root, 'cli-batches', `${batchId}-execution.json`);
+  const plan = await readJson(planPath);
+  if (plan?.schema !== 'goldflow_openart_cli_batch_plan_v1' || !plan.execute || plan.batch_id !== batchId || !Array.isArray(plan.assignments) || !plan.assignments.length || plan.assignments.length > 32) throw new Error('Exact partial CLI execution plan required.');
+  const runCli = dependencies.runCli ?? runOpenArtCli;
+  const downloadCreation = dependencies.downloadCreation ?? downloadOpenArtCreation;
+  const successes = []; const failed = [];
+  for (const planned of plan.assignments) {
+    const exactPath = path.join(context.root, 'cli-submission-receipts', `${planned.assignment_id}--${batchId}.json`);
+    const exact = await readJson(exactPath);
+    if (!exact) { failed.push(planned.assignment_id); continue; }
+    if (exact.schema !== 'goldflow_openart_exact_cli_submission_v1' || exact.assignment_id !== planned.assignment_id || exact.request_sha256 !== planned.exact_request_sha256 || !exact.history_id) throw new Error(`Partial CLI submission evidence is invalid for ${planned.assignment_id}.`);
+    const observation = await runCli(['creation', 'wait', exact.history_id, '--timeout', '5m']);
+    if (observation.history?.id !== exact.history_id || observation.history?.status !== 'completed') throw new Error(`OpenArt partial creation did not complete: ${planned.assignment_id}.`);
+    const resources = observation.resources?.filter((row) => row.resourceType === 'image' && row.status === 'completed' && row.generation?.historyId === exact.history_id) ?? [];
+    if (resources.length !== 1) throw new Error(`OpenArt partial creation has ambiguous output: ${planned.assignment_id}.`);
+    const resource = resources[0];
+    const outputPath = path.join(context.root, 'cli-downloads', `${planned.assignment_id}.png`);
+    const downloadReceiptPath = path.join(context.root, 'cli-download-receipts', `${planned.assignment_id}.json`);
+    const download = await downloadCreation({ creationId: exact.history_id, openartAssetId: resource.id, outputPath, receiptPath: downloadReceiptPath, runCli });
+    const assignmentPath = path.join(context.root, 'assignments', `${planned.assignment_id}.json`);
+    const submissionPath = path.join(context.root, 'submissions', `${planned.assignment_id}.json`);
+    const resultPath = path.join(context.root, 'import-receipts', `${planned.assignment_id}.json`);
+    const result = {
+      schema: 'goldflow_openart_cli_import_ready_v1', attestation: 'openart_cli_result_identity_and_download_verified',
+      reviewer: 'Goldflow exact OpenArt CLI partial-batch recovery', assignment_id: planned.assignment_id,
+      submission_sha256: await fileHash(submissionPath), creation_id: exact.history_id,
+      openart_asset_id: resource.id, output_path: outputPath, sha256: download.sha256,
+      width: download.width, height: download.height, format: download.format,
+      created_at: Number.isFinite(resource.createdAt) ? new Date(resource.createdAt).toISOString() : new Date().toISOString(),
+      project_id: plan.project_id, credits_quoted: planned.credits_quoted, credits_charged: null,
+      exact_submission_receipt_path: exactPath, exact_submission_receipt_sha256: await fileHash(exactPath),
+      download_receipt_path: downloadReceiptPath, download_receipt_sha256: await fileHash(downloadReceiptPath), batch_id: batchId,
+    };
+    await writeOnce(resultPath, result);
+    successes.push({ assignment_id: planned.assignment_id, history_id: exact.history_id, openart_asset_id: resource.id, import_receipt_path: resultPath, import_receipt_sha256: await fileHash(resultPath) });
+  }
+  await withEpisodeLock(context, async () => {
+    for (const assignmentId of failed) await writeOnce(path.join(context.root, 'failures', `${assignmentId}.json`), {
+      assignment_id: assignmentId, reason: `OpenArt rejected this exact request during partial batch ${batchId}; no provider history ID and no charge were recorded.`,
+      at: new Date().toISOString(), automatic_retry: false, batch_id: batchId, credits_charged: 0,
+    });
+  });
+  const accountAfter = await runCli(['account']);
+  const completion = {
+    schema: 'goldflow_openart_cli_batch_completion_v1', batch_id: batchId, partial: true,
+    plan_path: planPath, plan_sha256: await fileHash(planPath), total_credits_quoted: plan.total_credits_quoted,
+    account_credits_before: plan.account_credits_available, account_credits_after: accountAfter.credits,
+    total_credits_charged: Number.isFinite(accountAfter.credits) ? plan.account_credits_available - accountAfter.credits : null,
+    results: successes, failed_assignment_ids: failed, automatic_retry: false, automatic_failover: false, completed_at: new Date().toISOString(),
+  };
+  const completionPath = path.join(context.root, 'cli-batches', `${batchId}-completion.json`);
+  await writeOnce(completionPath, completion);
+  await event(context.root, { event: 'cli_partial_batch_recovered', batch_id: batchId, successful_assignment_ids: successes.map((row) => row.assignment_id), failed_assignment_ids: failed });
+  return { status: 'partial_batch_recovered', batch_id: batchId, batch_receipt_path: completionPath, successful_count: successes.length, failed_assignment_ids: failed };
+}
+
 function cliBatchId(value) {
   if (!/^[a-z0-9][a-z0-9_.-]{2,99}$/.test(value ?? '')) throw new Error('CLI batch needs a stable lowercase --batch-id.');
   return value;
@@ -668,6 +726,7 @@ export async function runOpenArt(flags) {
   if (action === 'mark-submitted') return markSubmitted(context, flags);
   if (action === 'import') return importResult(context, flags);
   if (action === 'import-batch') return importCliBatch(context, flags);
+  if (action === 'recover-partial-cli-batch') return recoverPartialCliBatch(context, flags);
   if (action === 'review') {
     const review = await readJson(requireValue(flags.review, '--review required'));
     return flags.scope === 'validation' ? reviewValidation(context, review) : reviewCanonicalAssets(context.bankRoot, review);

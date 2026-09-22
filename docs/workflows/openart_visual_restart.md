@@ -97,6 +97,13 @@ raster, OpenArt creation/media IDs, timestamp, cost evidence, and native geometr
 to that submission. `--action review` and `--action sync-library` add visual and
 native-library receipts. Every command retains append-only events.
 
+If later inspection proves that a native-library receipt captured an account or
+URL path identifier instead of the asset's native record ID, correct the same
+hash-bound canonical version with `supersedes_openart_library_asset_id` and a
+concrete `correction_reason`. Goldflow preserves the prior receipt and ID in
+`library_sync_history`; ordinary replacement IDs still require a new canonical
+version.
+
 Failures require `--action fail` with evidence followed by a separately reviewed
 exact-ID triage. Nano Banana 2 and Seedream 5 Pro may be used only for an explicitly
 identified noncanonical failure that the primary model could not resolve. No

@@ -256,11 +256,23 @@ export async function synchronizeLibraryRecord(root, sync) {
     if (asset.approval_state !== 'approved') throw new Error('Canonical raster must pass visual review before native library registration.');
     await verifyAsset(asset);
     if (asset.openart_library_kind !== sync.openart_library_kind) throw new Error('Native library class mismatch.');
-    if (asset.openart_library_asset_id && asset.openart_library_asset_id !== sync.openart_library_asset_id) throw new Error('Use a new canonical version for replacement library IDs.');
+    const priorLibraryId = asset.openart_library_asset_id;
+    const correctingLibraryId = priorLibraryId && priorLibraryId !== sync.openart_library_asset_id;
+    if (correctingLibraryId && (sync.supersedes_openart_library_asset_id !== priorLibraryId || !sync.correction_reason?.trim())) {
+      throw new Error('Use a new canonical version for replacement library IDs, or provide an explicit hash-bound native ID correction.');
+    }
     const receipt = await writeOnce(path.join(root, 'library-sync', `${Date.now()}-${randomUUID()}.json`), sync);
+    if (correctingLibraryId) {
+      asset.library_sync_history = [...(asset.library_sync_history ?? []), {
+        openart_library_asset_id: priorLibraryId,
+        library_sync: asset.library_sync,
+        superseded_by: sync.openart_library_asset_id,
+        correction_reason: sync.correction_reason,
+      }];
+    }
     asset.openart_library_asset_id = sync.openart_library_asset_id;
     asset.library_sync = receipt;
-    await commitBank(root, bank, { event: 'native_library_synced', asset_id: sync.asset_id, version: sync.version, ...receipt });
+    await commitBank(root, bank, { event: correctingLibraryId ? 'native_library_id_corrected' : 'native_library_synced', asset_id: sync.asset_id, version: sync.version, prior_openart_library_asset_id: priorLibraryId ?? null, ...receipt });
     return receipt;
   });
 }

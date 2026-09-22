@@ -84,6 +84,14 @@ try {
   await assert.rejects(resolveReferences(bankRoot, ['test.joey', 'test.joey']), /Duplicate/);
   await assert.rejects(resolveReferences(bankRoot, ['a', 'b', 'c', 'd']), /composition reason/);
   await assert.rejects(synchronizeLibraryRecord(bankRoot, sync(first, 'different-native-id')), /new canonical version/);
+  const correction = sync(first, 'corrected-native-id');
+  correction.supersedes_openart_library_asset_id = 'library-test.joey-1';
+  correction.correction_reason = 'The earlier receipt captured an account path segment instead of the native library record ID.';
+  await synchronizeLibraryRecord(bankRoot, correction);
+  const correctedReferences = await resolveReferences(bankRoot, ['test.joey']);
+  assert.equal(correctedReferences[0].openart_library_asset_id, 'corrected-native-id');
+  assert.equal((await latest()).library_sync_history[0].openart_library_asset_id, 'library-test.joey-1');
+  assert.equal((await latest()).library_sync_history[0].superseded_by, 'corrected-native-id');
 
   const original = await latest();
   await assert.rejects(verifyAsset({ ...original, canonical_name: 'changed without a new version' }), /Immutable canonical metadata/);

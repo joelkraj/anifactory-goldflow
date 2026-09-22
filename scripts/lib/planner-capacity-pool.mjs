@@ -62,8 +62,13 @@ function scopedProviderHealth(row) {
 }
 
 function fatalProviderFailure(error) {
-  return /authentication required|authentication timed out|eligibility check failed|oauth|unauthorized|forbidden|credentials? (?:expired|missing|invalid)/i
-    .test(String(error instanceof Error ? error.message : error ?? ""));
+  const message = String(error instanceof Error ? error.message : error ?? "");
+  // CLI stderr can echo the entire creative prompt before its actual errors.
+  // Prefer explicit diagnostics so schema keys and story text are not auth evidence.
+  const diagnostics = message.split(/\r?\n/)
+    .filter((line) => /^\s*(?:ERROR|FATAL)\s*:/i.test(line));
+  return /\b(?:authentication required|authentication timed out|eligibility check failed|oauth|unauthorized|forbidden|credentials? (?:expired|missing|invalid))\b/i
+    .test(diagnostics.length ? diagnostics.join("\n") : message);
 }
 
 function recordProviderSuccess(row) {
@@ -186,6 +191,9 @@ export async function acquireFederatedPlannerSlot({
   const resolvedIdentity = identity ?? planningIdentityFromProcessContext({ argv, env }).identity;
   const rows = poolRows(resolvedIdentity, stageName, env);
   if (!rows.length) return null;
+  if (rows.every((row) => scopedProviderHealth(row).open === true)) {
+    throw new Error(`All federated planner providers opened their circuit for ${stageName}.`);
+  }
   const selected = claim(rows) ?? await new Promise((resolve, reject) => waiters.push({ rows, resolve, reject, stageName }));
   const provider = selected.provider;
   let released = false;

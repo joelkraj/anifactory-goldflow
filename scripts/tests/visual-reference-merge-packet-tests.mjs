@@ -6,6 +6,8 @@ import {
   buildReferenceDirectorCandidateCardsForTests,
   compactReferenceDirectorMergePayloadsForTests,
   compactOversizedReferenceDirectorPromptForTests,
+  compactReferenceDirectorCardDefaultsForTests,
+  expandReferenceDirectorCardDefaultsForTests,
   assertVisualReferencePromptBytesForTests,
   VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES,
 } from "../visual-reference-plan.mjs";
@@ -111,6 +113,10 @@ const payload = (prompt, index) => {
   const end = index + 1 < headings.length ? prompt.indexOf(`\n\n${headings[index + 1]}\n`, start) : prompt.length;
   return JSON.parse(prompt.slice(start, end));
 };
+const expandedPayload = (prompt, index) => {
+  const value = expandReferencePromptValue(payload(prompt, index));
+  return index === 4 ? expandReferenceDirectorCardDefaultsForTests(value) : value;
+};
 assert.equal(compactOversizedReferenceDirectorPromptForTests(small.prompt), small.prompt, "Under-ceiling prompts stay byte-identical");
 assert.equal(compactOversizedReferenceDirectorPromptForTests(large.prompt), large.prompt, "Already fitting card-table prompts stay byte-identical");
 
@@ -137,7 +143,7 @@ const packed = compactOversizedReferenceDirectorPromptForTests(oversized);
 assert(Buffer.byteLength(packed) <= VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES, "Observed form of repeated guidance fits through formatting only");
 assertVisualReferencePromptBytesForTests(packed, { label: "visual-reference global director merge", maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES });
 for (let index = 0; index < headings.length; index += 1) {
-  assert.deepEqual(expandReferencePromptValue(payload(packed, index)), payload(oversized, index), `All values in ${headings[index]} must round-trip`);
+  assert.deepEqual(expandedPayload(packed, index), payload(oversized, index), `All values in ${headings[index]} must round-trip`);
 }
 assert.equal(compactOversizedReferenceDirectorPromptForTests(packed), packed, "A fitting packed prompt needs no further formatting");
 const integrated = buildMergePromptForTests(semantic, [{ reference_targets: targets, character_state_refs: refs }], { visualStyleBible: bible });
@@ -147,5 +153,44 @@ assert.deepEqual([...integrated.candidateCatalog.referenceTargetCatalog.values()
 assert.deepEqual([...integrated.candidateCatalog.characterStateRefCatalog.values()], original.refs, "Final fallback preserves complete state objects");
 const irreducible = small.prompt.replace(JSON.stringify(payload(small.prompt, 0)), JSON.stringify({ exact_operator_text: "z".repeat(VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) }));
 assert.throws(() => assertVisualReferencePromptBytesForTests(compactOversizedReferenceDirectorPromptForTests(irreducible), { label: "visual-reference global director merge", maxBytes: VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES }), /above safe ceiling 229376/, "Irreducible packets remain blocked at the unchanged ceiling");
+
+// Make formerly constant fields vary, including literal null/false/empty
+// exceptions, and retain mismatched or unlinked state names as explicit data.
+const mixedCards = expandCards(promptCards);
+mixedCards.cards[0].target_candidate_lines[0] = mixedCards.cards[0].target_candidate_lines[0].replace("mode=standalone_ref", "mode=manual_review").replace("required=1", "required=0");
+mixedCards.cards[0].character_state_candidate_lines[0] = mixedCards.cards[0].character_state_candidate_lines[0].replace("usage=full_identity", "usage=face_only").replace("state_ref=authored_identity_0000", "state_ref=different_state_name");
+mixedCards.unlinked_character_state_candidates = ["cs_unlinked | state_ref=unlinked_state | source_targets=unlinked"];
+const mixed = compactReferenceDirectorMergePayloadsForTests(mixedCards, evidence).candidateCards;
+const targetColumn = mixed.cards.fields.indexOf("target_candidate_lines");
+const modeColumn = mixed.target_candidate_line_format.fields.indexOf("mode");
+for (const [index, value] of [null, false, ""].entries()) mixed.cards.rows[index + 1][targetColumn][0][modeColumn] = value;
+const untouched = structuredClone(mixed);
+const defaultCards = compactReferenceDirectorCardDefaultsForTests(mixed);
+assert.equal(defaultCards.schema, "goldflow_reference_director_candidate_card_defaults_v3");
+assert(Buffer.byteLength(JSON.stringify(defaultCards)) < Buffer.byteLength(JSON.stringify(mixed)));
+assert.deepEqual(expandReferenceDirectorCardDefaultsForTests(defaultCards), mixed, "Every literal, candidate ID, scope, differing name and unlinked state must survive defaults and source aliases");
+assert.deepEqual(mixed, untouched, "Card inputs remain untouched");
+assert.deepEqual(compactReferenceDirectorCardDefaultsForTests(defaultCards), defaultCards, "Already packed schemas are not reinterpreted");
+assert(defaultCards.character_state_candidate_line_format.field_aliases?.state_ref, "Matching state names use the explicit source-target ref alias");
+const brokenAlias = structuredClone(defaultCards);
+const stateColumn = brokenAlias.cards.fields.indexOf("character_state_candidate_lines");
+const stateFormat = brokenAlias.character_state_candidate_line_format;
+const sourcesColumn = stateFormat.fields.indexOf("source_targets");
+brokenAlias.cards.rows[5][stateColumn][0][sourcesColumn] = "rt_absent";
+assert.throws(() => expandReferenceDirectorCardDefaultsForTests(brokenAlias), /Unresolved/, "A missing alias source cannot invent a value");
+const dependencyInput = structuredClone(mixed);
+const sourceIndex = dependencyInput.character_state_candidate_line_format.fields.indexOf("source_targets");
+const stateIndex = dependencyInput.character_state_candidate_line_format.fields.indexOf("state_ref");
+const dependencyStateColumn = dependencyInput.cards.fields.indexOf("character_state_candidate_lines");
+for (let index = 0; index < 300; index += 1) {
+  dependencyInput.cards.rows[index][dependencyStateColumn][0][sourceIndex] = "rt_0002";
+  dependencyInput.cards.rows[index][dependencyStateColumn][0][stateIndex] = "authored_identity_0001";
+}
+const dependencyPacked = compactReferenceDirectorCardDefaultsForTests(dependencyInput);
+assert.equal(dependencyPacked.character_state_candidate_line_format.defaults.source_targets, "rt_0002", "Fixture must select a shared source-target default");
+assert(dependencyPacked.character_state_candidate_line_format.field_aliases.state_ref);
+assert.deepEqual(expandReferenceDirectorCardDefaultsForTests(dependencyPacked), dependencyInput, "Alias lookup must use overridden source_targets, while explicit state_ref overrides retain priority");
+const emptyCards = { ...mixed, cards: { ...mixed.cards, rows: [] }, unlinked_character_state_candidates: [] };
+assert.deepEqual(compactReferenceDirectorCardDefaultsForTests(emptyCards), emptyCards);
 
 console.log("PASS visual-reference merge packet lossless compaction");

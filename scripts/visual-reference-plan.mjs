@@ -1768,6 +1768,151 @@ export function compactReferenceDirectorMergePayloadsForTests(candidateCards, ev
   };
 }
 
+export function compactReferenceDirectorCardDefaultsForTests(candidateCards) {
+  if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_tables_v2") return candidateCards;
+  if (Object.hasOwn(candidateCards, "card_table_source_schema")) throw new Error("Reference director card schema field collision");
+  const size = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const targetColumn = candidateCards.cards.fields.indexOf("target_candidate_lines");
+  const targetRows = targetColumn >= 0
+    ? candidateCards.cards.rows.flatMap((row) => row[targetColumn])
+    : candidateCards.cards.constants.target_candidate_lines ?? [];
+  const targetRefByCandidateId = new Map();
+  for (const row of targetRows) {
+    const format = candidateCards.target_candidate_line_format;
+    const values = { ...format.constants, ...Object.fromEntries(format.fields.map((field, index) => [field, row[index]])) };
+    for (const id of String(values.candidate_ids ?? "").split(",")) targetRefByCandidateId.set(id, values.ref);
+  }
+  let packed = candidateCards;
+  for (const kind of ["target", "character_state"]) {
+    const formatKey = `${kind}_candidate_line_format`;
+    const lineKey = `${kind}_candidate_lines`;
+    const format = candidateCards[formatKey];
+    const fields = format?.fields;
+    if (!Array.isArray(fields) || !fields.length) continue;
+    const column = candidateCards.cards.fields.indexOf(lineKey);
+    const constantLines = column < 0 && Object.hasOwn(candidateCards.cards.constants, lineKey);
+    const groups = column >= 0
+      ? candidateCards.cards.rows.map((row) => row[column])
+      : constantLines ? [candidateCards.cards.constants[lineKey]] : [];
+    const unlinked = kind === "character_state" ? candidateCards.unlinked_character_state_candidates : null;
+    const rows = [...groups.flat(), ...(unlinked ?? [])];
+    if (!rows.length) continue;
+    if (rows.some((row) => !Array.isArray(row) || row.length !== fields.length)) {
+      throw new Error("Reference director literal-default row width changed");
+    }
+    const overrideField = "literal_field_overrides_or_null";
+    if (fields.includes(overrideField) || Object.hasOwn(format, "defaults") || Object.hasOwn(format, "source_fields") || Object.hasOwn(format, "field_aliases")) {
+      throw new Error("Reference director literal-default format field collision");
+    }
+    const encode = (defaults, aliases = {}) => {
+      const derivedFields = [...Object.keys(defaults), ...Object.keys(aliases)];
+      const valueFields = fields.filter((field) => !derivedFields.includes(field));
+      const encodeRow = (row) => {
+        const values = { ...format.constants, ...Object.fromEntries(fields.map((field, index) => [field, row[index]])) };
+        const firstSource = String(values.source_targets ?? "").split(",")[0];
+        const overrides = Object.fromEntries(derivedFields
+          .filter((field) => aliases[field]
+            ? !targetRefByCandidateId.has(firstSource) || JSON.stringify(values[field]) !== JSON.stringify(targetRefByCandidateId.get(firstSource))
+            : JSON.stringify(values[field]) !== JSON.stringify(defaults[field]))
+          .map((field) => [field, values[field]]));
+        return [...valueFields.map((field) => values[field]), Object.keys(overrides).length ? overrides : null];
+      };
+      const result = structuredClone(packed);
+      result.schema = "goldflow_reference_director_candidate_card_defaults_v3";
+      result.card_table_source_schema = candidateCards.schema;
+      result[formatKey] = { ...format, source_fields: fields, fields: [...valueFields, overrideField], defaults, ...(Object.keys(aliases).length ? { field_aliases: aliases } : {}), override_field: overrideField };
+      if (column >= 0) result.cards.rows.forEach((row, index) => { row[column] = groups[index].map(encodeRow); });
+      else if (constantLines) result.cards.constants[lineKey] = groups[0].map(encodeRow);
+      if (unlinked) result.unlinked_character_state_candidates = unlinked.map(encodeRow);
+      return result;
+    };
+    let defaults = {};
+    // Choose only format defaults that reduce actual bytes. All exceptions
+    // remain explicit literal values; no candidate or field is discarded.
+    for (const [index, field] of fields.entries()) {
+      const counts = new Map();
+      for (const row of rows) {
+        const key = JSON.stringify(row[index]);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      const mostFrequent = [...counts].sort((a, b) => b[1] - a[1])[0];
+      if (mostFrequent[1] < 2) continue;
+      const proposedDefaults = { ...defaults, [field]: JSON.parse(mostFrequent[0]) };
+      const proposal = encode(proposedDefaults);
+      if (size(proposal) < size(packed)) {
+        defaults = proposedDefaults;
+        packed = proposal;
+      }
+    }
+    if (kind === "character_state" && fields.includes("state_ref")) {
+      const aliasDefaults = { ...defaults };
+      delete aliasDefaults.state_ref;
+      const proposal = encode(aliasDefaults, {
+        state_ref: { source: "target_candidate", via: "source_targets", key: "first_candidate_id", field: "ref" },
+      });
+      if (size(proposal) < size(packed)) packed = proposal;
+    }
+  }
+  return packed;
+}
+
+export function expandReferenceDirectorCardDefaultsForTests(candidateCards) {
+  if (candidateCards?.schema !== "goldflow_reference_director_candidate_card_defaults_v3") return candidateCards;
+  if (candidateCards.card_table_source_schema !== "goldflow_reference_director_candidate_card_tables_v2") throw new Error("Unknown source card-table schema");
+  const result = structuredClone(candidateCards);
+  const targetRefByCandidateId = new Map();
+  for (const kind of ["target", "character_state"]) {
+    const key = `${kind}_candidate_line_format`;
+    const format = result[key];
+    const lineKey = `${kind}_candidate_lines`;
+    const column = result.cards.fields.indexOf(lineKey);
+    const decodeRow = (row) => {
+      if (!format.override_field) return row;
+      if (row.length !== format.fields.length) throw new Error("Reference director literal-default row width changed");
+      const values = { ...format.constants, ...format.defaults };
+      let overrides = null;
+      format.fields.forEach((field, index) => {
+        if (field === format.override_field) overrides = row[index];
+        else values[field] = row[index];
+      });
+      if (overrides !== null && (!overrides || typeof overrides !== "object" || Array.isArray(overrides))) throw new Error("Invalid literal field overrides");
+      if (Object.keys(overrides ?? {}).some((field) => !format.source_fields.includes(field))) throw new Error("Unknown literal override field");
+      // Alias dependencies must see a row's explicit source-target exception,
+      // not the shared default. Explicit aliased-field overrides still win.
+      Object.assign(values, overrides ?? {});
+      for (const [field, alias] of Object.entries(format.field_aliases ?? {})) {
+        if (Object.hasOwn(overrides ?? {}, field)) continue;
+        if (alias.source !== "target_candidate" || alias.via !== "source_targets" || alias.key !== "first_candidate_id" || alias.field !== "ref") throw new Error("Unknown reference director field alias");
+        const source = String(values.source_targets ?? "").split(",")[0];
+        if (!targetRefByCandidateId.has(source)) throw new Error("Unresolved reference director field alias");
+        values[field] = targetRefByCandidateId.get(source);
+      }
+      return format.source_fields.map((field) => {
+        if (!Object.hasOwn(values, field)) throw new Error("Missing reference director literal value");
+        return values[field];
+      });
+    };
+    if (column >= 0) result.cards.rows.forEach((row) => { row[column] = row[column].map(decodeRow); });
+    else if (Object.hasOwn(result.cards.constants, lineKey)) result.cards.constants[lineKey] = result.cards.constants[lineKey].map(decodeRow);
+    if (kind === "character_state") result.unlinked_character_state_candidates = result.unlinked_character_state_candidates.map(decodeRow);
+    if (format.override_field) {
+      const { source_fields, defaults, override_field, field_aliases, ...original } = format;
+      result[key] = { ...original, fields: source_fields };
+    }
+    if (kind === "target") {
+      const original = result[key];
+      const rows = column >= 0 ? result.cards.rows.flatMap((row) => row[column]) : result.cards.constants[lineKey] ?? [];
+      for (const row of rows) {
+        const values = { ...original.constants, ...Object.fromEntries(original.fields.map((field, index) => [field, row[index]])) };
+        for (const id of String(values.candidate_ids ?? "").split(",")) targetRefByCandidateId.set(id, values.ref);
+      }
+    }
+  }
+  result.schema = result.card_table_source_schema;
+  delete result.card_table_source_schema;
+  return result;
+}
+
 // A final presentation-only fallback after the existing candidate/evidence
 // tables. Preserve every payload value and the director's complete catalog.
 export function compactOversizedReferenceDirectorPromptForTests(prompt) {
@@ -1783,6 +1928,7 @@ export function compactOversizedReferenceDirectorPromptForTests(prompt) {
   const firstSection = prompt.indexOf(`${headings[0]}\n`);
   if (firstSection < 0) throw new Error("Reference director prompt is missing its guidance section");
   let packed = `${prompt.slice(0, firstSection)}${REFERENCE_PROMPT_TABLE_INSTRUCTION}\n\n`;
+  let candidateCards;
   for (const [index, heading] of headings.entries()) {
     const sectionStart = prompt.indexOf(`${heading}\n`, index ? firstSection : 0);
     if (sectionStart < 0) throw new Error(`Reference director prompt is missing ${heading}`);
@@ -1792,7 +1938,17 @@ export function compactOversizedReferenceDirectorPromptForTests(prompt) {
       : prompt.length;
     if (end < start) throw new Error(`Reference director prompt has invalid section order after ${heading}`);
     const value = JSON.parse(prompt.slice(start, end));
+    if (heading === "CANDIDATE CARDS:") candidateCards = value;
     packed += `${heading}\n${JSON.stringify(compactReferencePromptValue(value))}${index + 1 < headings.length ? "\n\n" : ""}`;
+  }
+  // Preserve already-fitting output bytes from the earlier literal-table
+  // fallback before considering the additional card representation.
+  if (Buffer.byteLength(packed, "utf8") > VISUAL_REFERENCE_DIRECTOR_SAFE_MAX_BYTES) {
+    const compactedCards = compactReferenceDirectorCardDefaultsForTests(candidateCards);
+    if (compactedCards !== candidateCards) {
+      packed = packed.replace(`CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(candidateCards))}`, `CANDIDATE CARDS:\n${JSON.stringify(compactReferencePromptValue(compactedCards))}`);
+      packed = packed.replace(REFERENCE_PROMPT_TABLE_INSTRUCTION, `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\nCandidate-card line formats use named literal defaults: apply constants/defaults and row fields, then the override_field cell (null for none, otherwise exact named replacements including explicit null), then field_aliases only for fields without overrides. A target_candidate alias copies ref from the target row containing the first literal candidate ID in the resolved source_targets; absent/unlinked targets require an explicit override. source_fields preserves original columns; all_fields preserves labeled-line order. card_table_source_schema records the original card schema. These aliases never merge or select candidates.`);
+    }
   }
   // Some valid packets are irreducible. Keep the original rather than enlarge
   // it; the unchanged caller-side byte guard remains authoritative.

@@ -715,11 +715,21 @@ export async function createCodexWorkManifest(options) {
     };
     if (runIdentity) sources.run_identity = await sourceRecord(runIdentityPath);
     const lookup = buildReferenceLookup(referencePlan, characterStateRefs);
-    const stateMetadataByRefId = new Map(
-      (characterStateRefs?.character_state_refs ?? [])
-        .map((state) => [cleanText(state?.state_ref_id ?? state?.ref_id), state])
-        .filter(([id]) => Boolean(id)),
-    );
+    const stateMetadataByRefId = new Map();
+    for (const state of characterStateRefs?.character_state_refs ?? []) {
+      // State IDs and generated target IDs need not match. The source target
+      // must inherit the same explicit identity parent as its state record.
+      for (const id of new Set([state?.state_ref_id, state?.ref_id, state?.source_ref_id].map(cleanText).filter(Boolean))) {
+        const existing = stateMetadataByRefId.get(id);
+        const dependencies = (value) => resolvedReferenceDependencyAssetIds({ ...value, ref_id: id }, lookup).sort();
+        if (existing && JSON.stringify(dependencies(existing)) !== JSON.stringify(dependencies(state))) {
+          const error = new Error(`Reference state alias ${id} has conflicting identity dependencies.`);
+          error.code = "reference_state_dependency_ambiguous";
+          throw error;
+        }
+        if (!existing) stateMetadataByRefId.set(id, state);
+      }
+    }
     for (const sharedReferenceId of sharedReferenceIds) {
       const shared = lookup.get(sharedReferenceId);
       if (!shared) throw new Error(`Shared reference ${sharedReferenceId} is not present in the approved reference artifacts.`);

@@ -16,7 +16,9 @@ export async function openartContext(episodeDir, suppliedIdentity = null) {
   const catalog = plan ? await readJson(plan.catalog_path) : null;
   if (plan) {
     if (plan.identity_sha256 !== await fileHash(path.join(episodeDir, 'run_identity.json'))) throw new Error('Bank plan identity binding changed.');
-    if (plan.catalog_path !== path.join(root, 'catalog.json')) throw new Error('Bank catalog must be the immutable episode-admitted copy.');
+    const initialCatalog = path.join(root, 'catalog.json');
+    const revisionDir = path.join(root, 'catalog-revisions');
+    if (plan.catalog_path !== initialCatalog && path.dirname(plan.catalog_path) !== revisionDir) throw new Error('Bank catalog must be an immutable episode-admitted copy.');
     if (await fileHash(plan.catalog_path) !== plan.catalog_sha256) throw new Error('Bank catalog changed after admission.');
     validateCatalog(catalog);
   }

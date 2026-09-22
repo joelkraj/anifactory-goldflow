@@ -8,6 +8,7 @@ import { getLLMModel, isLocalLLMRoute, localLLMAuthHeaders, localLLMChatCompleti
 import { configuredCodexModel, isCodexCacheCompatible, readCodexCallMetadata, runCodexCli } from "./lib/codex-cli-runner.mjs";
 import { recordPlannerChunkCheckpoint } from "./lib/planner-chunk-ledger.mjs";
 import { isSourceSceneLocationBeat } from "./lib/editorial-beat-director.mjs";
+import { compactReferencePromptValue, REFERENCE_PROMPT_TABLE_INSTRUCTION } from "./lib/reference-prompt-format.mjs";
 import {
   buildReferenceDirectorSelectionReceipt,
   referenceDirectorSelectionFidelityFindings,
@@ -1226,7 +1227,7 @@ export function compactLocationContractLedgerForDirectorCardsForTests(locationCo
   };
 }
 
-function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventoryLedger = null, locationContractLedger = null } = {}) {
+function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventoryLedger = null, locationContractLedger = null, compactOversized = true } = {}) {
   const contentProfile = guidance.contentProfile ?? activeContentProfile;
   const plannerDirective = contentProfilePlannerDirective(contentProfile);
   const compact = {
@@ -1236,7 +1237,19 @@ function buildPrompt(semanticPlan, { chunkLabel = null, guidance = {}, inventory
     scene_count: semanticPlan.scenes?.length ?? 0,
     scenes: (semanticPlan.scenes ?? []).map(compactScene),
   };
-  return `Propose canonical visual-reference candidates from this evidence-backed story chunk.
+  const guidancePayload = visualGuidanceBlock(guidance, compact);
+  const evidencePayload = compactPromptJsonForTests(compactSceneReferenceEvidenceForTests(
+    inventoryLedger,
+    (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
+    { maxAssets: 36, sceneIdLimit: 4 },
+  ));
+  const locationPayload = compactPromptJsonForTests({
+    contracts: (locationContractLedger?.contracts ?? []).filter((contract) =>
+      (contract.scene_ids ?? []).some((sceneId) => (semanticPlan.scenes ?? []).some((scene) => scene.scene_id === sceneId))
+    ),
+  });
+  const semanticPayload = compactPromptJsonForTests(compact);
+  let prompt = `Propose canonical visual-reference candidates from this evidence-backed story chunk.
 ${chunkLabel ? `\nThis is ${chunkLabel}. Propose only assets with plausible episode-level continuity value. A later global director call makes every final generation decision.\n` : ""}
 
 CONTENT PROFILE: ${contentProfile.id}
@@ -1303,24 +1316,16 @@ Rules:
 - Return only valid JSON.
 
 VISUAL BIBLES AND OPERATOR DIRECTION:
-${visualGuidanceBlock(guidance, compact)}
+${guidancePayload}
 
 REFERENCE EVIDENCE LEDGER (scene-local; the global director receives the episode catalog later):
-${compactPromptJsonForTests(compactSceneReferenceEvidenceForTests(
-  inventoryLedger,
-  (semanticPlan.scenes ?? []).map((scene) => scene.scene_id),
-  { maxAssets: 36, sceneIdLimit: 4 },
-))}
+${evidencePayload}
 
 LOCATION CONTRACT LEDGER:
-${compactPromptJsonForTests({
-  contracts: (locationContractLedger?.contracts ?? []).filter((contract) =>
-    (contract.scene_ids ?? []).some((sceneId) => (semanticPlan.scenes ?? []).some((scene) => scene.scene_id === sceneId))
-  ),
-})}
+${locationPayload}
 
 SEMANTIC PLAN:
-${compactPromptJsonForTests(compact)}
+${semanticPayload}
 
 Return:
 {
@@ -1387,6 +1392,23 @@ Return:
   ],
   "warnings": []
 	}`;
+  if (compactOversized && Buffer.byteLength(prompt, "utf8") > VISUAL_REFERENCE_CHUNK_SAFE_MAX_BYTES) {
+    // Leave compatible historical packets byte-identical. Oversized packets get
+    // reversible formatting only; splitting and the hard byte guard still apply.
+    for (const [heading, payload] of [
+      ["VISUAL BIBLES AND OPERATOR DIRECTION:", guidancePayload],
+      ["REFERENCE EVIDENCE LEDGER (scene-local; the global director receives the episode catalog later):", evidencePayload],
+      ["LOCATION CONTRACT LEDGER:", locationPayload],
+      ["SEMANTIC PLAN:", semanticPayload],
+    ]) {
+      prompt = prompt.replace(`${heading}\n${payload}`, `${heading}\n${JSON.stringify(compactReferencePromptValue(JSON.parse(payload)))}`);
+    }
+    const returnMarker = "\nReturn:\n";
+    const returnStart = prompt.lastIndexOf(returnMarker) + returnMarker.length;
+    prompt = prompt.slice(0, returnStart) + JSON.stringify(JSON.parse(prompt.slice(returnStart)));
+    prompt = prompt.replace("VISUAL BIBLES AND OPERATOR DIRECTION:", `${REFERENCE_PROMPT_TABLE_INSTRUCTION}\n\nVISUAL BIBLES AND OPERATOR DIRECTION:`);
+  }
+  return prompt;
 }
 
 export function buildReferenceChunkPromptForTests(semanticPlan, options = {}) {

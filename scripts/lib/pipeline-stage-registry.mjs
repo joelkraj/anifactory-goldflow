@@ -469,6 +469,10 @@ export function commandStageFor(commandName, subcommandName, flags = {}, identit
     if (!["generate", "review", "prepare", "mark-submitted", "import", "sync-library", "triage", "fail"].includes(String(flags.action ?? ""))) return null;
     return /^(true|1|yes)$/i.test(String(flags["references-only"] ?? "")) ? "reference_generation" : "image_generation";
   }
+  if (registry === PIPELINE_STAGE_REGISTRY && key === "imagegen fal") {
+    return ["prepare-validation", "billing-submit", "billing-observe", "dispatch-validation", "observe-validation", "review-validation"].includes(String(flags.action ?? ""))
+      ? "reference_image_approval" : "image_generation";
+  }
   if (registry === PIPELINE_STAGE_REGISTRY && (key === "imagegen start" || key === "imagegen codex-work" || key === "imagegen browser-pool" || key === "imagegen import-codex" || key === "imagegen import-staged-codex")) {
     if (/^(true|1|yes)$/i.test(String(flags["references-only"] ?? ""))) return "reference_generation";
     if (/^(true|1|yes)$/i.test(String(flags["qa-recovery"] ?? ""))) return "image_output_qa";
@@ -753,6 +757,12 @@ export function buildStageCommand(stageId, identity = {}, options = {}) {
       visual_prompt_plan: `node bin/goldflow.mjs visual openart-bank ${base} --action bind-shots --shot-plan <shot-plan.json>`,
       visual_prompt_harden: `node bin/goldflow.mjs visual openart-bank ${base} --action harden`,
       image_generation: `node bin/goldflow.mjs imagegen openart ${base} --action prepare --image-ids <next_exact_image_ids>`,
+    });
+  }
+  if (identity.image_provider === "fal_ai") {
+    Object.assign(commands, {
+      reference_image_approval: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-validation`,
+      image_generation: `node bin/goldflow.mjs imagegen fal ${base} --action prepare-bulk --image-ids <next_exact_image_ids>`,
     });
   }
   return options.override ?? commands[stageId] ?? null;

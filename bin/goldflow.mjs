@@ -489,6 +489,8 @@ if (command === "pilot" && !helpRequested) {
   run("run-preflight.mjs", flags);
 } else if (command === "run" && subcommand === "restart-visuals") {
   run("run-restart-visuals.mjs", flags);
+} else if (command === "run" && subcommand === "restart-visuals-fal") {
+  run("run-restart-visuals-fal.mjs", flags);
 } else if (command === "run" && subcommand === "relock-tts") {
   run("run-relock-tts.mjs", flags);
 } else if (command === "run" && subcommand === "codex-doctor") {
@@ -636,6 +638,8 @@ if (command === "pilot" && !helpRequested) {
   run("openart-production.mjs", flags);
 } else if (command === "imagegen" && subcommand === "openart") {
   run("openart-production.mjs", flags);
+} else if (command === "imagegen" && subcommand === "fal") {
+  run("fal-production.mjs", flags);
 } else if (command === "visual" && subcommand === "beats") {
   run("visual-beat-plan.mjs", flags);
 } else if (command === "visual" && subcommand === "planner-ab") {

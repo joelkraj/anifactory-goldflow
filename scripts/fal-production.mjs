@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { buildReferenceBoard, referenceBoardPromptGuidance } from "./lib/openart-reference-board.mjs";
+import { falFileSha256, falObjectSha256, uploadFalReference, submitFalImage, observeFalImage, FAL_ENDPOINTS } from "./lib/fal-provider.mjs";
+
+const digest = value => createHash("sha256").update(value).digest("hex");
+const bytes = value => `${JSON.stringify(value, null, 2)}\n`;
+function need(value, message) { if (!value) throw new Error(message); }
+function flags(argv) { const out={}; for(let i=0;i<argv.length;i+=2){need(argv[i]?.startsWith("--")&&argv[i+1]!==undefined,"Every Fal production flag requires a value.");out[argv[i].slice(2)]=argv[i+1];} return out; }
+async function read(file){return JSON.parse(await fs.readFile(file,"utf8"));}
+async function absent(file){try{await fs.lstat(file);throw new Error(`Refusing to overwrite ${file}`);}catch(error){if(error.code!=="ENOENT")throw error;}}
+async function write(file,value){await absent(file);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,bytes(value),{flag:"wx"});}
+async function mapLimit(rows, limit, fn){const out=[];let cursor=0;async function worker(){while(cursor<rows.length){const i=cursor++;out[i]=await fn(rows[i],i);}}await Promise.all(Array.from({length:Math.min(limit,rows.length)},worker));return out;}
+
+async function context(f){
+  const episodeDir=await fs.realpath(path.resolve(f["episode-dir"])); const identity=await read(path.join(episodeDir,"run_identity.json"));
+  need(identity.image_provider==="fal_ai","Fal production requires a Fal-locked identity.");
+  const root=path.join(episodeDir,"fal"); return {episodeDir,identity,root,identityHash:await falFileSha256(path.join(episodeDir,"run_identity.json")),contract:identity.image_provider_options.fal};
+}
+async function prepare(ctx){
+  const catalog=await read(path.join(ctx.root,"catalog.json")); const bank=await read(ctx.contract.reference_bank_manifest);
+  const approved=new Map(bank.assets.filter(row=>row.approval_state==="approved").map(row=>[row.asset_id,row])); const assignments=[];
+  for(const shot of catalog.validation_shots){
+    let ids=[...shot.reference_asset_ids]; if(ids.length>4) ids=ids.filter(id=>!id.includes("location.")).slice(0,4);
+    const refs=ids.map(id=>{const row=approved.get(id);need(row?.local_absolute_path&&row?.sha256,`Approved canonical asset missing: ${id}`);return {asset_id:id,asset_class:row.asset_class,path:row.local_absolute_path,sha256:row.sha256};});
+    const board=await buildReferenceBoard({root:ctx.root,imageId:shot.image_id,references:refs});
+    const prompt=`${shot.prompt}\n\n${referenceBoardPromptGuidance(board)}`; const core={image_id:shot.image_id,endpoint:FAL_ENDPOINTS.primary_edit,prompt,prompt_sha256:digest(prompt),run_identity_sha256:ctx.identityHash,reference_mode:"one_positional_collage",reference_asset_ids:refs.map(r=>r.asset_id),reference_hashes:refs.map(r=>r.sha256),board_path:board.output_path,board_sha256:board.output_sha256,board_manifest_path:board.manifest_path,max_cost_usd:1.0};
+    const assignment={...core,assignment_sha256:falObjectSha256(core),submission_receipt_path:path.join(ctx.root,"submission-receipts",`${shot.image_id}.json`),result_receipt_path:path.join(ctx.root,"result-receipts",`${shot.image_id}.json`),output_path:path.join(ctx.root,"validation-results",`${shot.image_id}.png`),upload_receipt_path:path.join(ctx.root,"upload-receipts",`${shot.image_id}.json`),checks:shot.checks};
+    const assignmentPath=path.join(ctx.root,"validation-assignments",`${shot.image_id}.json`);await write(assignmentPath,assignment);assignments.push({...assignment,assignment_path:assignmentPath});
+  }
+  const plan={schema:"goldflow_fal_validation_plan_v1",created_at:new Date().toISOString(),run_identity_sha256:ctx.identityHash,reference_bank_manifest:ctx.contract.reference_bank_manifest,reference_bank_manifest_sha256:ctx.contract.reference_bank_manifest_sha256,model:FAL_ENDPOINTS.primary_edit,quality:"low",width:1920,height:1080,format:"png",normal_reference_mode:"one_positional_collage",concurrency:8,assignments};
+  await write(path.join(ctx.root,"validation-plan.json"),plan);return {status:"prepared",count:assignments.length};
+}
+async function submitRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const upload=await uploadFalReference({localPath:row.board_path,expectedSha256:row.board_sha256,receiptPath:row.upload_receipt_path});try{return await submitFalImage({assignment:row,referenceUrls:[upload.remoteUrl],receiptPath:row.submission_receipt_path});}finally{upload.remoteUrl=null;}});}
+async function observeRows(ctx,rows,limit){return mapLimit(rows,limit,async row=>{const receipt=await read(row.submission_receipt_path);return observeFalImage({endpoint:receipt.endpoint,requestId:receipt.request_id,outputPath:row.output_path,receiptPath:row.result_receipt_path});});}
+async function main(){
+ const f=flags(process.argv.slice(2)); const ctx=await context(f); const action=f.action;
+ if(action==="prepare-validation") return console.log(JSON.stringify(await prepare(ctx),null,2));
+ const plan=await read(path.join(ctx.root,"validation-plan.json"));
+ if(action==="billing-submit"){need(f["confirm-spend"]==="exact_fal_validation_probe","Paid probe requires exact confirmation token.");return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,[plan.assignments[0]],1)).length},null,2));}
+ if(action==="billing-observe"){const result=await observeRows(ctx,[plan.assignments[0]],1);return console.log(JSON.stringify({status:result[0].complete?"complete":"pending",result},null,2));}
+ if(action==="dispatch-validation"){need(f["confirm-spend"]==="exact_fal_validation_set","Paid validation requires exact confirmation token.");const rows=[];for(const row of plan.assignments.slice(1))if(!await fs.access(row.submission_receipt_path).then(()=>true,()=>false))rows.push(row);return console.log(JSON.stringify({status:"submitted",count:(await submitRows(ctx,rows,8)).length},null,2));}
+ if(action==="observe-validation"){const rows=[];for(const row of plan.assignments)if(!await fs.access(row.result_receipt_path).then(()=>true,()=>false))rows.push(row);const result=await observeRows(ctx,rows,8);return console.log(JSON.stringify({status:result.every(r=>r.complete)?"complete":"pending",complete:result.filter(r=>r.complete).length,pending:result.filter(r=>!r.complete).length},null,2));}
+ if(action==="review-validation"){const approved=String(f["approve-ids"]??"").split(",").filter(Boolean),rejected=String(f["reject-ids"]??"").split(",").filter(Boolean);need(f.reviewer&&f.note,"Review requires reviewer and note.");need(approved.length+rejected.length===8&&new Set([...approved,...rejected]).size===8,"Review must disposition all eight exact IDs.");const critical=[plan.assignments[0].image_id,"openart-validation-four-person-roulette-v1","openart-validation-wide-grand-salon-v1"];const status=approved.length>=7&&critical.every(id=>approved.includes(id))?"passed":"failed";const review={schema:"goldflow_fal_validation_review_v1",created_at:new Date().toISOString(),reviewer:f.reviewer,note:f.note,status,approved_ids:approved,rejected_ids:rejected,criteria:["identity consistency","hands","prop fidelity","casino detail","composition","unwanted text"],minor_cosmetic_differences_accepted:true};await write(path.join(ctx.root,"validation-review.json"),review);return console.log(JSON.stringify(review,null,2));}
+ throw new Error(`Unsupported Fal action: ${action}`);
+}
+main().catch(error=>{console.error(error.message);process.exitCode=1;});

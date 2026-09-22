@@ -26,6 +26,7 @@ import {
 } from "./lib/image-fallback-policy.mjs";
 import { normalizeImageProvider } from "./lib/image-provider-routing.mjs";
 import { openartRestartBaselineState } from "./lib/openart-visual-restart.mjs";
+import { falRestartBaselineState } from "./lib/fal-visual-restart.mjs";
 import {
   federatedWebImageIdentityStatus,
   googleFlowPrimaryIdentityStatus,
@@ -4636,8 +4637,11 @@ async function main() {
   const runIdentityPlanning = runIdentityPlanningComplete(runIdentity);
   const openartBaseline = runIdentity.image_provider === "openart_cli"
     ? await openartRestartBaselineState({ episodeDir, identity: runIdentity }) : null;
-  const runIdentityImage = openartBaseline
-    ? openartBaseline
+  const falBaseline = runIdentity.image_provider === "fal_ai"
+    ? await falRestartBaselineState({ episodeDir, identity: runIdentity }) : null;
+  const visualRestartBaseline = openartBaseline ?? falBaseline;
+  const runIdentityImage = visualRestartBaseline
+    ? visualRestartBaseline
     : isFederatedWebImageProvider(identity.image_provider)
     ? await federatedWebImageIdentityStatus(identity)
     : isGoogleFlowPrimaryProvider(identity.image_provider)
@@ -4741,6 +4745,21 @@ async function main() {
       const ownedStages = new Set(["visual_reference_plan", "reference_plan_approval", "reference_generation", "reference_image_approval", "visual_prompt_plan", "visual_prompt_harden", "visual_prompt_blocker_repair", "image_generation"]);
       for (const [stageId, state] of Object.entries(openart.stageStates ?? {})) {
         if (!ownedStages.has(stageId)) throw new Error(`OpenArt adapter cannot replace native ${stageId} gate.`);
+        validationByStage[stageId] = state;
+      }
+    }
+  }
+
+  if (falBaseline) {
+    if (!falBaseline.done) {
+      validationByStage.run_identity = { done: false, state: "blocked", evidence: falBaseline.evidence };
+    } else {
+      Object.assign(validationByStage, falBaseline.stageStates);
+      const { falProductionStageStates } = await import("./lib/fal-production-state.mjs");
+      const fal = await falProductionStageStates({ episodeDir, identity: runIdentity });
+      const ownedStages = new Set(["reference_image_approval", "image_generation"]);
+      for (const [stageId, state] of Object.entries(fal.stageStates ?? {})) {
+        if (!ownedStages.has(stageId)) throw new Error(`Fal adapter cannot replace native ${stageId} gate.`);
         validationByStage[stageId] = state;
       }
     }
